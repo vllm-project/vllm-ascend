@@ -1,4 +1,4 @@
-test_name: "Minimax_m2.7_in3_5_tpot50"
+test_name: "Minimax_m2.7_in64k_tpot50"
 model: "vllm-ascend/MiniMax-M2.7-w8a8-QuaRot"
 num_nodes: 2
 npu_per_node: 16
@@ -39,7 +39,6 @@ env_common: &env_common
   LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
   TASK_QUEUE_ENABLE: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   PYTHONHASHSEED: "0"
 
 
@@ -51,7 +50,6 @@ env_prefill: &env_prefill
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "2048"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
 
 templates:
   - node_index: 0
@@ -73,8 +71,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "70000"
       - --max-num-batched-tokens
@@ -90,7 +86,7 @@ templates:
       - '{"method": "eagle3","model":"Eco-Tech/MiniMax-M2.7-eagle-model-short","num_speculative_tokens":3}'
       - --enforce-eager
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true}'
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -126,8 +122,6 @@ templates:
       - --tensor-parallel-size
       - ${TP_SIZE}
       - --enable-expert-parallel
-      - --served-model-name
-      - "minimax"
       - --max-model-len
       - "70000"
       - --max-num-batched-tokens
@@ -145,7 +139,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false}}'
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding": true, "ascend_compilation_config":{"enable_npugraph_ex": true, "enable_static_kernel": false},"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",

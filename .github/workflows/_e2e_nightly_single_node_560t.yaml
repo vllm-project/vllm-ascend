@@ -161,6 +161,7 @@ jobs:
       UV_SYSTEM_PYTHON: 1
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+      VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
     steps:
       - name: Check npu and CANN info
         run: |

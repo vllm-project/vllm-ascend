@@ -38,9 +38,6 @@ COVERAGE_DENSITY_THRESHOLD = 0.0
 MIN_AFFECTED_LINES = 1
 
 
-# ==================== Configuration ====================
-
-
 def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
     """
     Extract new/modified test files from PR diff.
@@ -62,10 +59,13 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
         return test_files_found
 
     # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
-    # In diff output: +++ b/tests/ut/core/test_xxx.py
+    # In diff output:
+    #   - +++ b/tests/ut/core/test_xxx.py (new/modified test file)
+    #   - rename to tests/ut/attention/test_xxx.py (renamed test file)
     # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
     test_file_pattern = re.compile(
-        r"^\+\+\+ [ab]/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py)", re.MULTILINE
+        r"^(?:\+\+\+ [ab]/|rename to )((?:tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py))",
+        re.MULTILINE,
     )
 
     changed_test_files = set()
@@ -164,6 +164,7 @@ class CoverageSelector:
         self.coverage_data_dir = Path(coverage_data_dir) if coverage_data_dir else None
         self.source_dir = Path(source_dir) if source_dir else None
         self.test_case_map = {}  # test_case_name -> {files: {filepath: {lines}}}
+        self._noise_lines_cache = {}  # filepath -> set of noise lines (import + def)
 
     def scan_test_cases(self) -> list[str]:
         """Scan all test case directories"""
@@ -240,6 +241,68 @@ class CoverageSelector:
             print(f"  Warning: Error reading {cov_file}: {e}")
         return files
 
+    def _get_function_def_lines(self, filepath: str) -> set[int]:
+        """
+        Get function definition line numbers (def line only, not function body).
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers where function definitions occur
+        """
+        def_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=filepath)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    def_lines.add(node.lineno)
+        except Exception:
+            pass
+        return def_lines
+
+    def _filter_noise_lines(self, filepath: str, lines: set[int]) -> set[int]:
+        """
+        Filter out invalid noise lines from coverage data:
+        1. import/from...import statement lines
+        2. Function definition lines (def line only)
+
+        Args:
+            filepath: Source file path
+            lines: Original set of covered line numbers
+
+        Returns:
+            Filtered set with noise lines removed
+        """
+        if not lines:
+            return lines
+
+        # Use cache to avoid re-parsing the same file multiple times
+        if filepath not in self._noise_lines_cache:
+            import_lines = FunctionParser._get_import_lines(filepath)
+            # Get function definition lines
+            def_lines = self._get_function_def_lines(filepath)
+            self._noise_lines_cache[filepath] = import_lines | def_lines
+
+        return lines - self._noise_lines_cache[filepath]
+
+    def _resolve_source_file(self, filename: str) -> Path | None:
+        """
+        Resolve source file path from relative filename.
+
+        Args:
+            filename: Relative file path (e.g., 'vllm_ascend/core/worker.py')
+
+        Returns:
+            Path object if found, None otherwise
+        """
+        if not self.source_dir:
+            return None
+
+        source_path = self.source_dir / REPO_NAME / filename
+        return source_path if source_path.exists() else None
+
     def build_test_case_map(self) -> dict:
         """Build test case -> covered files mapping (with line numbers)"""
         print("Scanning test cases...")
@@ -258,6 +321,11 @@ class CoverageSelector:
                 for filename in covered_files:
                     lines = self.get_covered_lines_from_file(str(cov_file), filename)
                     if lines:
+                        # Filter noise lines if source_dir is available
+                        if self.source_dir:
+                            source_file = self._resolve_source_file(filename)
+                            if source_file and source_file.exists():
+                                lines = self._filter_noise_lines(str(source_file), lines)
                         file_lines_map[filename].update(lines)
 
             normalized_name = self.normalize_test_name(test_case)
@@ -435,20 +503,62 @@ class CodeChangeDetector:
 
         return changed_files
 
-    def parse_pr_diff_file(self, diff_file_path: str) -> dict[str, set[int]]:
+    def detect_renames(self, diff_output: str) -> dict[str, str]:
         """
-        Parse changed line numbers from PR diff file
+        Detect file renames in git diff output (product code only, vllm_ascend/).
+
+        Args:
+            diff_output: diff content
+
+        Returns:
+            {old_path: new_path} - mapping from old file path to new file path
+        """
+        renames = {}
+        current_old_path = None
+        current_new_path = None
+
+        for raw_line in diff_output.split("\n"):
+            line = raw_line.rstrip("\r")
+
+            # Detect rename marker
+            if line.startswith("rename from "):
+                current_old_path = line[12:].strip()
+            elif line.startswith("rename to "):
+                current_new_path = line[10:].strip()
+                # When we have both old and new path, record the rename
+                if current_old_path and current_new_path:
+                    # Remove a/ or b/ prefix if present
+                    old_path = current_old_path[2:] if current_old_path.startswith("a/") else current_old_path
+                    new_path = current_new_path[2:] if current_new_path.startswith("b/") else current_new_path
+                    # Only record product code renames (vllm_ascend/)
+                    if old_path.startswith(f"{REPO_NAME}/"):
+                        renames[old_path] = new_path
+                    current_old_path = None
+                    current_new_path = None
+
+        return renames
+
+    def parse_pr_diff_file(self, diff_file_path: str) -> tuple[dict[str, set[int]], dict[str, str]]:
+        """
+        Parse changed line numbers and detect renames from PR diff file.
 
         Args:
             diff_file_path: diff file path
+
+        Returns:
+            Tuple of (changed_files_with_lines, rename_mapping)
+            - changed_files_with_lines: {filepath: {lineno, ...}}
+            - rename_mapping: {old_path: new_path}
         """
         try:
             with open(diff_file_path, encoding="utf-8") as f:
                 diff_content = f.read()
-            return self.parse_git_diff(diff_content)
+            changed_files = self.parse_git_diff(diff_content)
+            renames = self.detect_renames(diff_content)
+            return changed_files, renames
         except Exception as e:
             print(f"Warning: Failed to read diff file: {e}")
-            return {}
+            return {}, {}
 
 
 class FunctionParser:
@@ -1109,6 +1219,14 @@ def main():
 
         print(f"Fetching changes from GitHub PR: {repo}#{pr_num}")
 
+        github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+
+        def _github_request(url: str) -> urllib.request.Request:
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            if github_token:
+                headers["Authorization"] = f"Bearer {github_token}"
+            return urllib.request.Request(url, headers=headers)
+
         # Create context that does not verify SSL certificates
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
@@ -1122,7 +1240,7 @@ def main():
             print(f"  Attempt {attempt}/{max_retries} to get PR diff via GitHub API...")
             try:
                 pr_url = f"https://api.github.com/repos/{repo}/pulls/{pr_num}"
-                req = urllib.request.Request(pr_url, headers={"Accept": "application/vnd.github.v3+json"})
+                req = _github_request(pr_url)
                 with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
                     pr_data = json.loads(response.read().decode())
                     diff_url = pr_data.get("diff_url")
@@ -1131,7 +1249,7 @@ def main():
                     raise Exception("Cannot get diff URL")
 
                 # Download diff (use binary mode to avoid line ending conversion)
-                req = urllib.request.Request(diff_url)
+                req = _github_request(diff_url)
                 with urllib.request.urlopen(req, timeout=60, context=ssl_context) as response:
                     diff_bytes = response.read()
                     with open(diff_file, "wb") as f:
@@ -1170,24 +1288,76 @@ def main():
     if has_csrc_changes:
         print("\n=== CSRC Directory Changes Detected - Running Full Test Suite ===")
     else:
+        renames: dict[str, str] = {}
         if args.github_pr and diff_file:
-            changed_files_with_lines = change_detector.parse_pr_diff_file(diff_file)
-            print(f"Parsed {len(changed_files_with_lines)} changed files")
+            changed_files_with_lines, renames = change_detector.parse_pr_diff_file(diff_file)
+            print(f"Parsed {len(changed_files_with_lines)} changed files:")
+            for file_path, line_set in changed_files_with_lines.items():
+                print(f"  {file_path}")
+
+            # detect_renames already filters to vllm_ascend/ prefix only (product code renames)
+            if renames:
+                print(f"\n=== Detected {len(renames)} Product Code Renamed File(s) - Using File-Level Matching ===")
+                for old_path, new_path in renames.items():
+                    print(f"  {old_path} -> {new_path}")
 
         if changed_files_with_lines:
             # Select test cases by precision matching
             print("\n=== Selecting Affected Test Cases ===")
             test_selector = TestSelector(selector.test_case_map)
-            selected, expand_reason = test_selector.select_tests(
-                changed_files_with_lines,
-                min_affected_lines=args.min_affected,
-                source_dir=args.source_dir,
-                enable_line_match=args.enable_line_match,
-                enable_function_match=args.enable_function_match,
-                enable_file_match=args.enable_file_match,
-                enable_skip_imports=args.skip_imports,
-                enable_dedup=args.dedup,
-            )
+
+            # For renamed files, we need file-level matching to cover both old and new paths
+            # Filter out renamed new paths from changed files
+            if renames:
+                renamed_new_paths = set(renames.values())
+                normal_files = {k: v for k, v in changed_files_with_lines.items() if k not in renamed_new_paths}
+            else:
+                normal_files = changed_files_with_lines
+
+            # Process normal files with precision matching
+            selected: list[tuple[str, dict, int]] = []
+            expand_reason = ""
+            if normal_files:
+                selected, expand_reason = test_selector.select_tests(
+                    normal_files,
+                    min_affected_lines=args.min_affected,
+                    source_dir=args.source_dir,
+                    enable_line_match=args.enable_line_match,
+                    enable_function_match=args.enable_function_match,
+                    enable_file_match=args.enable_file_match,
+                    enable_skip_imports=args.skip_imports,
+                    enable_dedup=args.dedup,
+                )
+
+            # Process renamed files: use OLD path for file-level matching
+            for old_path, new_path in renames.items():
+                rename_files = {old_path: set()}
+                rename_selected, rename_expand = test_selector.select_tests(
+                    rename_files,
+                    min_affected_lines=args.min_affected,
+                    source_dir=args.source_dir,
+                    enable_line_match=False,  # Disable line match for renames
+                    enable_function_match=False,  # Disable function match for renames
+                    enable_file_match=True,  # Enable file match for renames
+                    enable_skip_imports=args.skip_imports,
+                    enable_dedup=args.dedup,
+                )
+                selected.extend(rename_selected)
+                expand_reason += rename_expand
+                # Print file-level matched test cases for this rename
+                if rename_selected:
+                    print(f"\n=== File-Level Matched Tests for Renamed File: {old_path} -> {new_path} ===")
+                    for test_name, _, _ in rename_selected:
+                        print(f"  {test_name}")
+
+            # Deduplicate
+            seen = set()
+            deduped = []
+            for item in selected:
+                if item[0] not in seen:
+                    seen.add(item[0])
+                    deduped.append(item)
+            selected = deduped
             test_selector.print_selection(
                 selected, changed_files_with_lines, min_affected_lines=args.min_affected, expand_reason=expand_reason
             )

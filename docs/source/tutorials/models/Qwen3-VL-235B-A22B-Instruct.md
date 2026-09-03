@@ -10,7 +10,7 @@ The `Qwen3-VL-235B-A22B-Instruct` tutorial was introduced in the vLLM-Ascend val
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix.
 
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
@@ -20,18 +20,56 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 - `Qwen3-VL-235B-A22B-Instruct` (BF16 version): requires 1 Atlas 800 A3 (64G x 16) node or 2 Atlas 800 A2 (64G x 8) nodes. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-235B-A22B-Instruct/).
 - `Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot` (quantized version used by single-node validation): requires 1 Atlas 800 A3 (64G x 16) node. [Model Weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot).
+- `Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8` (quantized version): requires 1 Ascend 950DT (96G x 8) node. [Model Weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8)
 
 It is recommended to download the model weight to a shared directory across multiple nodes.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy the model in a multi-node environment, verify the communication environment according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
+
+=== "Ascend 950DT series"
+
+    Start the docker image on your each node.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950DT
+    export NAME=vllm-ascend
+
+    docker run --rm \
+      --name $NAME \
+      --net=host \
+      --shm-size=1g \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/hisi_hdc \
+      --device /dev/ummu \
+      --device /dev/uburma \
+      -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccl_rootinfo.json:/etc/hccl_rootinfo.json \
+      -v /etc/hixlep/:/etc/hixlep/ \
+      -v /root/.cache:/root/.cache \
+      -v /usr/local/sbin:/usr/local/sbin \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi \
+      -v /usr/lib64:/usr/lib64 \
+      -itd $IMAGE bash
+    ```
 
 === "A3 series"
 
@@ -155,56 +193,94 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment runs both Prefill and Decode on the same node. The following W8A8 example is suitable for functional validation and image-only online serving on 1 Atlas 800 A3 (64G x 16) node. The W8A8 version needs `--quantization ascend`.
+Single-node deployment runs both Prefill and Decode on the same node. The W8A8 version needs `--quantization ascend`.
 
-Run the following script to start online serving on one A3 node:
+=== "Ascend 950DT series"
 
-```shell
-#!/bin/sh
+    Run the following script to execute online inference on 1 Ascend 950DT (96G x 8). The quantized version (`Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8`) can be deployed on a single Ascend 950DT node.
 
-# Load model from ModelScope to speed up download.
-export VLLM_USE_MODELSCOPE=True
+    ```shell
+    #!/bin/sh
 
-# Reduce memory fragmentation and avoid out-of-memory errors.
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Load model from ModelScope to speed up download.
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=400
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1536
-export OMP_NUM_THREADS=1
-export OMP_PROC_BIND=false
-export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
 
-vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --served-model-name qwen3-vl-235b \
-  --quantization ascend \
-  --data-parallel-size 4 \
-  --tensor-parallel-size 4 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --max-num-seqs 32 \
-  --max-model-len 32768 \
-  --max-num-batched-tokens 16384 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.92 \
-  --no-enable-prefix-caching \
-  --mm-processor-cache-gb 0 \
-  --limit-mm-per-prompt.image 1 \
-  --limit-mm-per-prompt.video 0 \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}'
-```
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+    vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-mxfp8 \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --distributed-executor-backend mp \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name qwen3-vl-235b \
+      --max-num-seqs 32 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 8192 \
+      --trust-remote-code \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --limit-mm-per-prompt.image 1 \
+      --limit-mm-per-prompt.video 0 \
+      --gpu-memory-utilization 0.9 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    ```
+
+=== "A3 series"
+
+    Run the following script to start online serving on 1 Atlas 800 A3 (64G x 16) node. The W8A8 example is suitable for functional validation and image-only online serving.
+
+    ```shell
+    #!/bin/sh
+
+    # Load model from ModelScope to speed up download.
+    export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=1536
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
+    vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
+      --host 0.0.0.0 \
+      --port 8000 \
+      --served-model-name qwen3-vl-235b \
+      --quantization ascend \
+      --data-parallel-size 4 \
+      --tensor-parallel-size 4 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --max-num-seqs 32 \
+      --max-model-len 32768 \
+      --max-num-batched-tokens 16384 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.92 \
+      --no-enable-prefix-caching \
+      --mm-processor-cache-gb 0 \
+      --limit-mm-per-prompt.image 1 \
+      --limit-mm-per-prompt.video 0 \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,24,32]}' \
+      --additional-config '{"enable_fused_mc2": 1, "scheduler_config": {"enable_balance_scheduling": true}}'
+    ```
+
+=== "A2 series"
+
+    For W8A8 deployment on A2, 2 Atlas 800 A2 (64G x 8) nodes are required. Refer to [Section 5.2](#52-multi-node-deployment-with-mp-recommended-for-bf16) for multi-node MP deployment.
+
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 **Key parameters:**
 
@@ -230,23 +306,19 @@ Run the following script on node 0.
 ```shell
 #!/bin/sh
 
-export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export VLLM_USE_MODELSCOPE=True
 export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
@@ -271,36 +343,32 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --limit-mm-per-prompt.image 1 \
   --limit-mm-per-prompt.video 0 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+  --additional-config '{"enable_cpu_binding":true}'
 ```
 
-Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
+Common Issues Tip: If node 1 cannot join the service or HCCL initialization times out, refer to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect) and [Public FAQs](../../faqs.md). Make sure the network interface names, IP addresses, and RPC ports are consistent across nodes.
 
 Run the following script on node 1.
 
 ```shell
 #!/bin/sh
 
-export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
+export VLLM_USE_MODELSCOPE=True
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 # The value of node0_ip must be consistent with local_ip on node 0.
 node0_ip="xxxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
@@ -326,7 +394,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --limit-mm-per-prompt.image 1 \
   --limit-mm-per-prompt.video 0 \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-  --additional-config '{"enable_cpu_binding":true,"enable_flashcomm1":true}'
+  --additional-config '{"enable_cpu_binding":true}'
 ```
 
 If the service starts successfully, the following information is displayed on node 0:
@@ -350,7 +418,7 @@ INFO:     Application startup complete.
 - `--api-server-count` controls how many API server processes are started on the master node.
 - `--headless` starts a worker node without exposing an API server. Use it on non-master nodes.
 - `--tensor-parallel-size 8` maps one TP group to the 8 NPUs on each A2 node.
-- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL, Gloo, and TP communication to the selected network.
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL and Gloo communication to the selected network.
 
 ### 5.3 Multi-Node PD Separation Deployment
 
@@ -371,12 +439,9 @@ Create `run_p.sh` on the prefill node.
 #!/bin/bash
 
 export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export TASK_QUEUE_ENABLE=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
@@ -415,12 +480,9 @@ Create `run_d.sh` on the decode node.
 #!/bin/bash
 
 export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 export HCCL_OP_EXPANSION_MODE="AIV"
-export TASK_QUEUE_ENABLE=1
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
   --host 0.0.0.0 \
@@ -460,7 +522,7 @@ vllm serve Eco-Tech/Qwen3-VL-235B-A22B-Instruct-w8a8-QuaRot \
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, first validate the service without prefix caching before enabling additional cache features.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` is recommended on decode nodes to reduce decode dispatch overhead.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -568,14 +630,14 @@ After several minutes, you can get the performance evaluation result. This rando
 | Long context | Multi-node MP | 16 A3 NPUs | W8A8 | Use TP across each node and DP across nodes. Lower image count or context length if OOM occurs. |
 | Low latency | 1P1D PD disaggregation | 32 A3 NPUs | W8A8 | Separate prefill and decode resources and enable full decode ACLGraph on decode nodes. |
 
-> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64G × 16 NPUs).
+> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 node = 1 Atlas 800 A3 server (64GB × 16 NPUs).
 
 #### Table 2: Detailed Node Configuration
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
-| Functional validation | Single node | 16 | 4 | 4 | 32 | 32768 | 16384 | Off | W8A8, FullGraph, FlashComm1, Fused MC2 |
-| Long context | MP node | 8 per node | 8 | 1 per node, 2 global | 16 per DP | 262144 | 4096 | Off | FullGraph, FlashComm1, CPU binding |
+| Functional validation | Single node | 16 | 4 | 4 | 32 | 32768 | 16384 | Off | W8A8, FullGraph, sequence parallelism, Fused MC2 |
+| Long context | MP node | 8 per node | 8 | 1 per node, 2 global | 16 per DP | 262144 | 4096 | Off | FullGraph, sequence parallelism, CPU binding |
 | Low latency | Prefill node | 16 | 8 | 2 | 32 | 8192 | 8192 | Off | Mooncake KV producer, EP |
 | Low latency | Decode node | 16 | 4 | 4 | 32 | 8192 | 8192 | Off | Mooncake KV consumer, FullGraph, EP |
 
@@ -587,7 +649,7 @@ After several minutes, you can get the performance evaluation result. This rando
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Recommended tuning order
 
@@ -606,8 +668,7 @@ Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matr
 | Multimodal prompt limits | `--limit-mm-per-prompt.image`, `--limit-mm-per-prompt.video` | Avoids reserving memory for unused media types. | Disable video for image-only serving. |
 | Multimodal processor cache | `--mm-processor-cache-gb` | Caches processed media features when repeated media appears. | Set to 0 for memory-constrained validation. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| FlashComm1 | `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` or `--additional-config '{"enable_flashcomm1":true}'` | Reduces communication overhead in large TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
-| Fused MC2 | `VLLM_ASCEND_ENABLE_FUSED_MC2=1` | Enables MoE fused operators to improve MoE efficiency. | Compare with disabled state if accuracy or performance regresses. |
+| Fused MC2 | `--additional-config '{"enable_fused_mc2": 1}'` | Enables MoE fused operators to improve MoE efficiency. | Compare with disabled state if accuracy or performance regresses. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Validate HBM usage first. For PD, start with prefix caching disabled. |
 | PD disaggregation | `--kv-transfer-config` | Separates prefill and decode resources. | Ensure producer/consumer DP and TP sizes match the actual topology. |
 
@@ -629,7 +690,7 @@ For common environment, installation, and general parameter issues, refer to [Pu
 
 **Cause:** Network interface names, IP addresses, DP ranks, or RPC ports are inconsistent across nodes.
 
-**Solution:** Verify multi-node communication first. Ensure `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` match the selected NIC. Ensure all nodes use the same `--data-parallel-rpc-port`, non-master nodes use `--headless`, and `--data-parallel-start-rank` does not overlap.
+**Solution:** Verify multi-node communication first. Ensure `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` match the selected NIC. Ensure all nodes use the same `--data-parallel-rpc-port`, non-master nodes use `--headless`, and `--data-parallel-start-rank` does not overlap.
 
 ### Q3: Why is video disabled in the image-only examples?
 

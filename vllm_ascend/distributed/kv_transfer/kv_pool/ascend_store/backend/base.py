@@ -5,12 +5,17 @@ from typing import Any
 
 from vllm.config import ParallelConfig
 
+# QoS range supported by the pooled KV store backends. A larger value
+# means a higher transfer priority.
+QOS_VALUE_MIN = 0
+QOS_VALUE_MAX = 4
+
 
 class Backend(ABC):
     store: Any | None = None
 
     @abstractmethod
-    def __init__(self, parallel_config: ParallelConfig):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):
         pass
 
     @classmethod

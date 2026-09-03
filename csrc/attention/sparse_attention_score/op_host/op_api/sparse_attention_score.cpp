@@ -36,6 +36,7 @@ const std::array<const aclTensor *, 2> SparseAttentionScore(
     int64_t blockSize,
     int64_t topK,
     int64_t innerPrecise,
+    const aclTensor *attentionOut,
     aclOpExecutor *executor)
 {
     L0_DFX(SparseAttentionScore, query, key, value, selectIdx, blockTable,
@@ -43,9 +44,13 @@ const std::array<const aclTensor *, 2> SparseAttentionScore(
            qDequantScaleOptional, kDequantScaleOptional, vDequantScaleOptional,
            numKeyValueHeads, scaleValue, blockSize, topK, innerPrecise);
 
-    DataType attentionOutDtype = query->GetDataType() == DataType::DT_FLOAT8_E4M3FN ?
-        DataType::DT_FLOAT16 : query->GetDataType();
-    auto attentionOutTensor = executor->AllocTensor(attentionOutDtype, Format::FORMAT_ND, Format::FORMAT_ND);
+    // Non-FP8: output dtype follows query (same as input).
+    // FP8: output dtype is derived from user-provided attentionOut tensor,
+    // which may be DT_FLOAT16 or DT_BFLOAT16 per user choice.
+    DataType outDtype = (query->GetDataType() == DataType::DT_FLOAT8_E4M3FN)
+                            ? attentionOut->GetDataType()
+                            : query->GetDataType();
+    auto attentionOutTensor = executor->AllocTensor(outDtype, Format::FORMAT_ND, Format::FORMAT_ND);
     auto softmaxLseTensor = executor->AllocTensor(DataType::DT_FLOAT, Format::FORMAT_ND, Format::FORMAT_ND);
 
     auto ret = INFER_SHAPE(SparseAttentionScore,

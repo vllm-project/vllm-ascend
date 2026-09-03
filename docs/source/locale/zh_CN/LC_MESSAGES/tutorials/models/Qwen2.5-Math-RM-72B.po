@@ -38,18 +38,6 @@ msgstr "`Qwen2.5-Math-RM-72B` 模型自 `vllm-ascend:v0.9.0` 版本起得到支�
 msgid "## Supported Features"
 msgstr "## 支持的特性"
 
-msgid ""
-"Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the "
-"model's supported feature matrix."
-msgstr ""
-"请参考[支持的特性](../../user_guide/support_matrix/supported_models.md)获取该模型的支持特性矩阵。"
-
-msgid ""
-"Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the"
-" feature's configuration."
-msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
-
 msgid "## Environment Preparation"
 msgstr "## 环境准备"
 
@@ -156,3 +144,15 @@ msgstr ""
 "    - 使用CPU卸载：至少需要1张Atlas 910B4（32GB × 1）或更高配置的卡\n"
 "    - 不使用CPU卸载：至少需要4张Atlas 910B4（32GB × 4）或更高配置的卡\n"
 "  [下载模型权重](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅[支持特性列表](../../user_guide/support_matrix/supported_models.md)以获取模型的支持特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取该特性的配置。"

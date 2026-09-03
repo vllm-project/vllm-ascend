@@ -9,7 +9,6 @@ _envs: &envs
   HCCL_BUFFSIZE: "1024"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "1800"
   SERVER_PORT: "DEFAULT_PORT"
 
@@ -33,7 +32,7 @@ _server_cmd: &server_cmd
   - "16384"
   - "--gpu-memory-utilization"
   - "0.9"
-  - "--enable-expert-parallel "
+  - "--enable-expert-parallel"
   - "--port"
   - "$SERVER_PORT"
   - "--no-enable-prefix-caching"
@@ -48,7 +47,7 @@ _server_cmd: &server_cmd
 _benchmarks: &benchmarks
   acc:
     case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k_lite
+    dataset_path: vllm-ascend/gsm8k-lite
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 38912
@@ -73,7 +72,7 @@ test_cases:
       - "--hf-overrides"
       - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.3,"original_max_position_embeddings":32768}}'
       - "--additional-config"
-      - '{"ascend_scheduler_config":{"enabled":false},"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
+      - '{"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
     benchmarks:
       <<: *benchmarks
 
@@ -88,7 +87,7 @@ test_cases:
       - "--hf-overrides"
       - '{"rope_parameters": {"rope_type":"yarn","rope_theta": 1000000.0,"factor":4.3,"original_max_position_embeddings":32768}}'
       - "--additional-config"
-      - '{"ascend_scheduler_config":{"enabled":false},"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
+      - '{"pa_shape_list": [4,8,16,32,48,64,96,128,160,192]}'
     benchmarks:
       <<: *benchmarks
   - name: "Qwen3_235B_Accuracy_EPLB_gsm8k_lite"

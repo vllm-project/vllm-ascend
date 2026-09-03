@@ -21,7 +21,9 @@ import os
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tp_group
 from vllm.forward_context import is_forward_context_available
+from vllm.logger import logger
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding,
     MRotaryEmbedding,
@@ -33,7 +35,7 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import has_rope, is_vl_model
+from vllm_ascend.utils import enable_sp, has_rope, is_vl_model
 
 if HAS_TRITON:
     from vllm.model_executor.layers.rotary_embedding.mrope import triton_mrope
@@ -90,13 +92,31 @@ def set_cos_and_sin(vllm_config, max_num_reqs, decode_token_per_req, dtype, devi
 def get_cos_and_sin_mla(positions, use_cache=False):
     global _cos_cache
     global _sin_cache
+    global _cos_mla
+    global _sin_mla
+    num_tokens = positions.size(0)
+    # MLA-NoPE skip rope cache (e.g. GLM-5.3-Flash qk_rope_head_dim=0).
+    # Do not copy indexer RoPE (last dim 32) into a 0-width MLA buffer.
+    if _cos_mla is not None and _cos_mla.shape[-1] == 0:
+        return _cos_mla[:num_tokens], _sin_mla[:num_tokens]
     cos = _cos_cache[positions].unsqueeze(1).unsqueeze(2)
     sin = _sin_cache[positions].unsqueeze(1).unsqueeze(2)
     if not use_cache:
         return cos, sin
-    global _cos_mla
-    global _sin_mla
-    num_tokens = positions.size(0)
+    if _cos_mla is None or _cos_mla.shape[-1] != cos.shape[-1]:
+        # use_cache=True callers expect a fixed-address slice of the persistent
+        # buffer, because ACL graph replay reuses the captured cos/sin pointers.
+        # This path cannot honour that, so it is only safe on the eager path:
+        # reaching it inside a capture region would leave the replay reading
+        # stale addresses. Upstream crashed here instead, so warn loudly.
+        logger.warning_once(
+            "MLA rope cache is unusable (buffer rope_dim=%s, requested rope_dim=%d);"
+            " returning a temporary cos/sin pair instead of the persistent buffer."
+            " This is unsafe inside ACL graph capture.",
+            "unset" if _cos_mla is None else _cos_mla.shape[-1],
+            cos.shape[-1],
+        )
+        return cos, sin
     _cos_mla[:num_tokens, ...] = cos
     _sin_mla[:num_tokens, ...] = sin
     return _cos_mla[:num_tokens, ...], _sin_mla[:num_tokens, ...]
@@ -221,9 +241,9 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override
         is_draft_model = _EXTRA_CTX.is_draft_model if is_forward_context_available() else False
-        flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled if is_forward_context_available() else False
-        if is_draft_model and self.use_mtp and flash_comm_v1_enabled:
-            positions = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(positions.contiguous(), True)
+        if is_draft_model and self.use_mtp and enable_sp():
+            tp_group = get_tp_group()
+            positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
         return torch.ops.vllm.npu_rotary_embedding(
             positions, query, key, self.cos_sin_cache, self.head_size, self.rotary_dim, is_neox_style
         )

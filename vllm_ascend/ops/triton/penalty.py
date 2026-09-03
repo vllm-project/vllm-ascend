@@ -27,7 +27,11 @@ from vllm_ascend.ops.triton.bincount import get_token_bin_counts_and_mask_triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "num_seqs",
+    ]
+)
 def apply_all_penalties_kernel(
     logits_ptr,
     prompt_mask_ptr,

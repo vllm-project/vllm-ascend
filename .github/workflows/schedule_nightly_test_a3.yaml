@@ -61,10 +61,11 @@ on:
         options:
           - release
           - daily
-      cann_version:
-        description: 'CANN version for base image tag'
+      base_image_tag:
+        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
         required: false
-        default: '2026.08.03'
+        default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
+        type: string
       bisect_good_commit:
         description: 'explicit good commit for bisect (overrides good_table lookup)'
       bisect_args_json:
@@ -99,7 +100,7 @@ jobs:
     name: Parse trigger and determine test scope
     if: >-
       github.event_name == 'workflow_dispatch'
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a3-800t-0
     outputs:
       run: ${{ steps.parse.outputs.run }}
       filter: ${{ steps.parse.outputs.filter }}
@@ -163,7 +164,7 @@ jobs:
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -190,7 +191,8 @@ jobs:
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       build_type: ${{ inputs.build_type }}
       quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
-      cann_version: ${{ inputs.cann_version }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
@@ -215,7 +217,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
-      runner: linux-aarch64-a3-0
+      runner: linux-aarch64-a3-800t-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
@@ -265,7 +267,7 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
     with:
       soc_version: a3
-      runner: linux-aarch64-a3-0
+      runner: linux-aarch64-a3-800t-0
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       ascend_log_prefix: ${{ needs.setup-vars.outputs.ascend_log_prefix }}/${{ matrix.vllm_ascend_branch }}
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
@@ -319,6 +321,7 @@ jobs:
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-a3'
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -361,6 +364,8 @@ jobs:
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      testcase_timeout: ${{ matrix.test_config.testcase_timeout || 120 }}
       should_run: >-
         ${{
           needs.parse-trigger.outputs.run == 'true' && (
@@ -386,7 +391,7 @@ jobs:
       OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   clear-pre-logs:
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a3-800t-0
     needs: [multi-node-tests, double-node-tests]
     if: (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
     steps:
@@ -420,7 +425,7 @@ jobs:
       always() &&
       inputs.request_id == '' &&
       (needs.multi-node-tests.result != 'skipped' || needs.double-node-tests.result != 'skipped')
-    runs-on: linux-aarch64-a3-0
+    runs-on: linux-aarch64-a3-800t-0
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-cpu
       env:

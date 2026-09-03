@@ -10,7 +10,11 @@ from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    QOS_VALUE_MAX,
+    QOS_VALUE_MIN,
+    Backend,
+)
 
 
 def _is_device_sdma() -> bool:
@@ -31,11 +35,106 @@ def _is_device_sdma() -> bool:
 MEMCACHE_THREAD_START_WAIT_S = 0.1
 
 
+def _validate_device_ub_qos() -> None:
+    """Validate MF_DEVICE_UB_QOS used by the MemCache store transfers.
+
+    Only integers in [QOS_VALUE_MIN, QOS_VALUE_MAX] are supported; MemCache
+    silently falls back to its default QoS on invalid values, so fail fast
+    with a clear error instead.
+    """
+    qos_str = os.getenv("MF_DEVICE_UB_QOS")
+    if qos_str is None or not qos_str.strip():
+        return
+    try:
+        qos = int(qos_str)
+    except ValueError as e:
+        raise ValueError(
+            f"Invalid MF_DEVICE_UB_QOS value {qos_str!r}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        ) from e
+    if not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
+        raise ValueError(
+            f"Invalid MF_DEVICE_UB_QOS value {qos}: QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
+
+
 class MmcDirect(Enum):
     COPY_L2G = 0
     COPY_G2L = 1
     COPY_G2H = 2
     COPY_H2G = 3
+
+
+# =========================================================================
+# Layerwise transfer protocol
+# =========================================================================
+# The generic layers (worker / scheduler / layout) resolve these functions
+# through backend/__init__.py:get_layerwise_protocol -- a module-convention
+# lookup, they never import this module by name. The key strings are wire
+# formats shared with deployed clusters: a single character of drift turns
+# hits into misses after an upgrade.
+# tests/ut/distributed/ascend_store/test_backend.py locks the key formats
+# with snapshot assertions.
+
+
+def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the connector's extra config when it opts into the layerwise
+    transfer, None otherwise.
+
+    Called by the generic layout layer through the backend registry; the
+    protocol itself owns the opt-in check so the layout layer never spells
+    out the gate.
+    """
+    if extra_config.get("use_layerwise", False):
+        return extra_config
+    return None
+
+
+def make_full_key(
+    model_name: str,
+    group_id: int,
+    block_hash_hex: str,
+    head_or_tp_rank: int,
+    num_groups: int,
+) -> str:
+    """Full-block key for the layerwise transfer.
+
+    Single-group models use the PR #11585 format (model@hash@rank) for
+    backward compatibility. Multi-group models include group_id
+    (model@group_id@hash@rank) to distinguish groups.
+    """
+    if num_groups > 1:
+        return f"{model_name}@{group_id}@{block_hash_hex}@{head_or_tp_rank}"
+    else:
+        return f"{model_name}@{block_hash_hex}@{head_or_tp_rank}"
+
+
+def make_partial_key(
+    model_name: str,
+    req_id: str,
+    group_id: int,
+    block_index: int,
+    end_token: int,
+    head_or_tp_rank: int,
+) -> str:
+    return f"{model_name}@partial@{req_id}@{group_id}@{block_index}@{end_token}@{head_or_tp_rank}"
+
+
+def make_hit_check_keys(
+    model_name: str,
+    group_id: int,
+    block_hash_hex: str,
+    num_ranks: int,
+    num_groups: int,
+) -> list[str]:
+    """All-rank keys for scheduler-side hit check.
+
+    Returns one key per head_or_tp_rank (ranks in the same put_step
+    group share one key for MLA).
+    """
+    if num_groups > 1:
+        return [f"{model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(num_ranks)]
+    else:
+        return [f"{model_name}@{block_hash_hex}@{h}" for h in range(num_ranks)]
 
 
 class MemcacheBackend(Backend):
@@ -46,6 +145,7 @@ class MemcacheBackend(Backend):
         init_bm: bool = True,
         lazy_init: bool = False,
     ):
+        _validate_device_ub_qos()
         self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()

@@ -19,8 +19,14 @@ import os
 from unittest.mock import patch
 
 import pytest
+from vllm import SamplingParams
+from vllm.v1.metrics.reader import Counter, Vector
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
+from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
+
+os.environ["HCCL_BUFFSIZE"] = "2048"
+DSPARK_MAIN_MODEL = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 
 MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
@@ -33,7 +39,7 @@ MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
     deploy="pd_mix",
     hardware="A3",
     quantization="W4A8",
-    graph_mode="eager",
+    graph_mode="full_decode_only",
 )
 @patch.dict(
     os.environ,
@@ -44,12 +50,18 @@ MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
     },
 )
 @wait_until_npu_memory_free()
-def test_deepseek_v4_mtp_eager():
-    """Verify DeepSeek V4 MTP decoding with ModelRunner V2."""
+def test_deepseek_v4_mtp_full_decode_only():
+    """Verify DeepSeek V4 MTP acceptance with ModelRunner V2."""
     prompts = [
         "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
         "What is the meaning of life?",
     ]
+    max_tokens = 1024
+    num_speculative_tokens = 3
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0, seed=0)
 
     with VllmRunner(
         MODEL,
@@ -63,17 +75,71 @@ def test_deepseek_v4_mtp_eager():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
-        enforce_eager=True,
-        speculative_config={"num_speculative_tokens": 3, "method": "mtp"},
+        enforce_eager=False,
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
+        disable_log_stats=False,
+        async_scheduling=True,
+        speculative_config={
+            "num_speculative_tokens": num_speculative_tokens,
+            "method": "mtp",
+        },
         additional_config={"enable_dsa_cp": False},
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, max_tokens=5)
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
 
-    expected_token_ids = [
-        [19923, 14, 1026, 2329, 344, 680, 2852, 95, 305, 342],
-        [3085, 344, 270, 5281, 294, 1988, 33, 3955, 361, 582, 3085, 344],
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.85, 0.65, 0.35]
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
+
+
+@pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
+@pytest.mark.parametrize("max_tokens", [1024])
+@pytest.mark.parametrize("enforce_eager", [True])
+@patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dspark_spec_decoding(
+    model: str,
+    max_tokens: int,
+    enforce_eager: bool,
+) -> None:
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
     ]
-    assert len(outputs) == len(prompts)
-    for (output_ids, output_str), expected_ids in zip(outputs, expected_token_ids):
-        assert output_str
-        assert output_ids == expected_ids
+
+    num_speculative_tokens = 5
+    sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
+    with VllmRunner(
+        model,
+        max_model_len=4096,
+        tensor_parallel_size=4,
+        enable_expert_parallel=True,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+        async_scheduling=True,
+        speculative_config={
+            "method": "dspark",
+            "num_speculative_tokens": num_speculative_tokens,
+        },
+    ) as runner:
+        runner.model.generate(prompts, sampling_params)
+        metrics = runner.model.get_metrics()
+
+    acceptance_per_pos = calculate_acceptance_per_pos(
+        metrics,
+        num_speculative_tokens,
+        Counter,
+        Vector,
+    )
+    golden = [0.73, 0.64, 0.55, 0.49, 0.42]
+    match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"

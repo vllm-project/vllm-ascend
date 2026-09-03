@@ -17,6 +17,7 @@ vllm_ascend.egg-info/
 # Linting
 actionlint
 shellcheck*/
+gitleaks
 
 
 # Python gitignore
@@ -223,9 +224,16 @@ fusion_result.json
 csrc/output/
 csrc/third_party/
 
-# claude code skills
-.claude/skills/*
-
+# AI agent local working files
+# (note: .agents/ holds shared, versioned skills and is intentionally tracked)
+.claude/
 .codegraph/
+.zcode/
+.gemini/
+.opencode/
+.cursor/
+.aider*
+.windsurf/
 
+# local build cache
 .vllm_ascend/

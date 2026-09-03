@@ -775,7 +775,7 @@ We provide two different proxy implementations with distinct request routing beh
         192.0.0.4  \
       --decoder-ports  \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115
     ```
 
 === "Non-layerwise"
@@ -826,7 +826,7 @@ We provide two different proxy implementations with distinct request routing beh
         192.0.0.4  \
       --decoder-ports  \
         7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
-        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115\
+        7100 7101 7102 7103 7104 7105 7106 7107 7108 7109 7110 7111 7112 7113 7114 7115
     ```
 
 Both proxies share the following backend options.
