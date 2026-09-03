@@ -615,6 +615,7 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         with (
             patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
             stream_patch,
+            patch(f"{MOE_MLP}.envs.VLLM_ASCEND_ENABLE_GMSQ_SITU", False),
             patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True) as mock_gmm1,
             patch(
                 "torch.ops._C_ascend.dequant_situ_quant",
@@ -650,6 +651,106 @@ class TestQuantApplyMlpSituEplb(_GeluPathBase):
         self.assertIs(mock_gmm2.call_args.kwargs["weight"], w2)
         self.assertIs(mock_gmm2.call_args.kwargs["weight_scale"], w2_scale)
         self.assertIs(mock_gmm2.call_args.kwargs["bias"], w2_scale_bias)
+
+    def test_a3_w4a8_situ_uses_gmsq_fusion(self):
+        from vllm_ascend.ops.fused_moe import moe_mlp as moe_mlp_module
+        from vllm_ascend.utils import AscendDeviceType
+
+        hidden_states = torch.ones(2, 4, dtype=torch.int8)
+        w1 = torch.ones(2, 4, 1, dtype=torch.int32)
+        w2 = [torch.randn(4, 4), torch.randn(4, 4)]
+        w1_scale = torch.ones(2, 4, dtype=torch.int64)
+        w2_scale = [torch.randn(4), torch.randn(4)]
+        w1_scale_bias = [torch.randn(4), torch.randn(4)]
+        w2_scale_bias = [torch.randn(4), torch.randn(4)]
+        quantized_situ_out = torch.ones(2, 4, dtype=torch.int8)
+        situ_out_scale = torch.ones(2, dtype=torch.float32)
+        expected = torch.randn(2, 4, dtype=torch.bfloat16)
+        mock_gmsq = MagicMock(return_value=(quantized_situ_out, situ_out_scale))
+        stream_patch, evt = _patch_npu_stream()
+
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
+            stream_patch,
+            patch.object(moe_mlp_module, "ASCEND_DEVICE_TYPE", AscendDeviceType.A3),
+            patch.object(moe_mlp_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", True),
+            patch.object(moe_mlp_module, "_GMSQ_SITU_OP", mock_gmsq),
+            patch.object(moe_mlp_module, "_GMSQ_SITU_OP_RESOLVED", True),
+            patch("torch_npu.npu_grouped_matmul", create=True) as mock_gmm1,
+            patch(
+                "torch.ops._C_ascend.dequant_situ_quant",
+                create=True,
+            ) as mock_dequant_situ,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=expected) as mock_gmm2,
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            output, before_gmm2_evt = quant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=[w1],
+                w1_scale=[w1_scale],
+                w2=w2,
+                w2_scale=w2_scale,
+                group_list=torch.tensor([2], dtype=torch.int64),
+                dynamic_scale=torch.ones(2, 1),
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
+                act_quant_type=torch.int8,
+                activation=MoEActivation.SITU,
+                activation_situ_beta=4.0,
+                activation_situ_linear_beta=25.0,
+                use_w4a8_per_channel_gmm_swiglu=True,
+            )
+
+        self.assertIs(output, expected)
+        self.assertIs(before_gmm2_evt, evt)
+        mock_gmm1.assert_not_called()
+        mock_dequant_situ.assert_not_called()
+        mock_gmsq.assert_called_once()
+        gmsq_kwargs = mock_gmsq.call_args.kwargs
+        self.assertEqual(len(gmsq_kwargs["weight"]), 2)
+        self.assertEqual(len(gmsq_kwargs["weight_scale"]), 2)
+        self.assertEqual(gmsq_kwargs["weight_scale"][0].shape, torch.Size([4]))
+        self.assertEqual(gmsq_kwargs["beta"], 4.0)
+        self.assertEqual(gmsq_kwargs["linear_beta"], 25.0)
+        self.assertEqual(gmsq_kwargs["x_scale"].shape, torch.Size([2]))
+        self.assertIs(mock_gmm2.call_args.kwargs["hidden_states"], quantized_situ_out)
+        self.assertEqual(mock_gmm2.call_args.kwargs["per_token_scale"].shape, torch.Size([2, 1]))
+        self.assertIs(mock_gmm2.call_args.kwargs["bias"], w2_scale_bias)
+
+    def test_a3_w8a8_situ_stays_in_legacy_flow(self):
+        from vllm_ascend.ops.fused_moe import moe_mlp as moe_mlp_module
+        from vllm_ascend.utils import AscendDeviceType
+
+        gate_up_out = torch.randn(1, 8, dtype=torch.bfloat16)
+        quantized_situ_out = torch.ones(1, 4, dtype=torch.int8)
+        situ_out_scale = torch.ones(1, 1)
+        expected = torch.randn(1, 4, dtype=torch.bfloat16)
+        mock_gmsq = MagicMock(return_value=(quantized_situ_out, situ_out_scale))
+        stream_patch, evt = _patch_npu_stream()
+
+        with (
+            patch(f"{MOE_MLP}._EXTRA_CTX", MagicMock(moe_comm_type=-1)),
+            stream_patch,
+            patch.object(moe_mlp_module, "ASCEND_DEVICE_TYPE", AscendDeviceType.A3),
+            patch.object(moe_mlp_module.envs, "VLLM_ASCEND_ENABLE_GMSQ_SITU", True),
+            patch.object(moe_mlp_module, "_GMSQ_SITU_OP", mock_gmsq),
+            patch.object(moe_mlp_module, "_GMSQ_SITU_OP_RESOLVED", True),
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True) as mock_gmm1,
+            patch(
+                "torch.ops._C_ascend.dequant_situ_quant",
+                return_value=(quantized_situ_out, situ_out_scale),
+                create=True,
+            ) as mock_dequant_situ,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=expected),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            output, before_gmm2_evt = quant_apply_mlp(**self._common_w8a8_kwargs(activation=MoEActivation.SITU))
+
+        self.assertIs(output, expected)
+        self.assertIs(before_gmm2_evt, evt)
+        mock_gmsq.assert_not_called()
+        mock_gmm1.assert_called_once()
+        mock_dequant_situ.assert_called_once()
 
     def test_w4a8_mxfp_situ_stays_in_common_grouped_matmul_flow(self):
         gate_up_out = torch.randn(2, 8, dtype=torch.bfloat16)
