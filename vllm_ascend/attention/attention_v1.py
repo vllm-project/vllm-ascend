@@ -2575,7 +2575,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             # reads it -- a minimal 5D E8M0 placeholder suffices. batch_size
             # must NOT be passed with a TND layout_q (the checker rejects
             # it); the op infers it from cu_seqlens_q.
-            _, metadata_op = _get_qfa_ops()
+            _, metadata_op, _ = _get_qfa_ops()
             # NOTE: torch_npu.float8_e8m0fnu is the integer dtype ID (293) on
             # this torch_npu build, not a torch.dtype; tensor.view() would
             # parse it as a target shape. Bitcast with the stock torch dtype
