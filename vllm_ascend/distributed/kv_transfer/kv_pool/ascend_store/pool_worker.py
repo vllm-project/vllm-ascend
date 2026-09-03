@@ -94,9 +94,7 @@ LAYERWISE_READ_LEASE_TTL_MS = 5 * 60 * 1000
 # saving it has published its final layer.
 MEMCACHE_UNMATCHED_STATE = -3101
 
-VLLM_MOONCAKE_CONNECTOR_MODULE = (
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
-)
+VLLM_MOONCAKE_CONNECTOR_MODULE = "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector"
 PARTIAL_LEASE_RETRY_COUNT = 10
 PARTIAL_LEASE_RETRY_INTERVAL_S = 0.001
 
@@ -685,13 +683,10 @@ class KVPoolWorker:
         # has already been loaded while constructing the KV transfer group.
         mooncake_module = sys.modules.get(VLLM_MOONCAKE_CONNECTOR_MODULE)
         mooncake_connector_type = (
-            getattr(mooncake_module, "MooncakeConnector", None)
-            if mooncake_module is not None
-            else None
+            getattr(mooncake_module, "MooncakeConnector", None) if mooncake_module is not None else None
         )
         return isinstance(mooncake_connector_type, type) and any(
-            isinstance(connector, mooncake_connector_type)
-            for connector in child_connectors
+            isinstance(connector, mooncake_connector_type) for connector in child_connectors
         )
 
     def _extract_physical_layer_index(self, layer_name: str) -> int:
@@ -797,11 +792,7 @@ class KVPoolWorker:
                 self.kv_caches_base_addr.append(base_addr)
                 storage_key = self._get_storage_key(cache)
                 start = base_addr
-                end = (
-                    storage_key + cache.untyped_storage().nbytes()
-                    if use_storage_extent
-                    else base_addr + region_len
-                )
+                end = storage_key + cache.untyped_storage().nbytes() if use_storage_extent else base_addr + region_len
                 if storage_key in registered_regions:
                     old_start, old_end = registered_regions[storage_key]
                     registered_regions[storage_key] = (min(old_start, start), max(old_end, end))
