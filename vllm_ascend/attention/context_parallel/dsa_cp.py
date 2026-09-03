@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_pcp_group, get_tp_group
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionCGSupport, AttentionImplBase, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -395,11 +396,49 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         assert self.compressor_ratio <= 1, "vLLM-Ascend only support SWA-layer for Deepseek-V4 now."
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
-            common_attn_metadata,
-            decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=False,
+        # Cross-kv-cache-group metadata cache. The spec-decode proposer passes
+        # one dict shared by all attn groups of the same decode step. Everything
+        # cached below only depends on group-invariant fields of
+        # common_attn_metadata (positions / seq_lens / query_start_loc), never
+        # on the per-group block_table / slot_mapping, so it is safe to reuse
+        # across groups. When no shared dict is provided (e.g. the per-step
+        # update path in attn_update_stack_num_spec_norm, where each group call
+        # receives an already-updated common_attn_metadata) the metadata cache
+        # stays empty and the behavior is unchanged.
+        shared_metadata_cache = kwargs.get("common_ratio_to_sas_metadata")
+        metadata_cache = (
+            shared_metadata_cache.setdefault(("draft_for_drafting", draft_index), {})
+            if shared_metadata_cache is not None
+            else None
         )
+
+        if metadata_cache is not None and "num_decodes" in metadata_cache:
+            logger.debug("[dsa_cp] Cross-group drafting metadata cache hit for draft step %d.", draft_index)
+            num_decodes = metadata_cache["num_decodes"]
+            num_prefills = metadata_cache["num_prefills"]
+            num_decode_tokens = metadata_cache["num_decode_tokens"]
+            input_positions = metadata_cache["input_positions"]
+            cos = metadata_cache["cos"]
+            sin = metadata_cache["sin"]
+        else:
+            num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
+                treat_short_extends_as_decodes=False,
+            )
+            input_positions = common_attn_metadata.positions[:num_input_tokens].long()
+            # Draft steps update positions independently. Reusing the global RoPE
+            # cache can let later draft steps overwrite step-0 metadata.
+            cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
+            if metadata_cache is not None:
+                metadata_cache.update(
+                    num_decodes=num_decodes,
+                    num_prefills=num_prefills,
+                    num_decode_tokens=num_decode_tokens,
+                    input_positions=input_positions,
+                    cos=cos,
+                    sin=sin,
+                )
 
         self.num_decodes = num_decodes
         self.num_prefills = num_prefills
@@ -410,12 +449,14 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
             self.seq_lens_cpu = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        elif metadata_cache is not None and "seq_lens_cpu" in metadata_cache:
+            # Reuse the device->host copy built by a sibling kv-cache group
+            # instead of synchronizing again.
+            self.seq_lens_cpu = metadata_cache["seq_lens_cpu"]
         else:
             self.seq_lens_cpu = self.seq_lens.cpu()
-        input_positions = common_attn_metadata.positions[:num_input_tokens].long()
-        # Draft steps update positions independently. Reusing the global RoPE
-        # cache can let later draft steps overwrite step-0 metadata.
-        cos, sin = get_cos_and_sin_dsa(input_positions, use_cache=False)
+            if metadata_cache is not None:
+                metadata_cache["seq_lens_cpu"] = self.seq_lens_cpu
 
         slot_mapping = common_attn_metadata.slot_mapping[:num_input_tokens]
 
@@ -432,6 +473,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_input_tokens=num_input_tokens,
             cos=cos,
             sin=sin,
+            metadata_cache=metadata_cache,
         )
 
         return self.metadata_cls(  # type: ignore
@@ -460,6 +502,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_input_tokens: int,
         cos: RopeDataProxy,
         sin: RopeDataProxy,
+        metadata_cache: dict | None = None,
     ) -> AscendDSAReqMetadata:
         """Build DSA-CP metadata for one draft step."""
         num_reqs = common_attn_metadata.num_reqs
@@ -469,39 +512,70 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         is_noncausal = not common_attn_metadata.causal
         has_prefill = self.num_prefills > 0
 
-        (
-            local_start,
-            local_end_with_pad,
-            tokens_per_rank,
-            num_tokens_pad,
-            local_query_start_loc,
-            local_seq_lens,
-        ) = self._build_local_token_metadata(
-            num_reqs=num_reqs,
-            num_input_tokens=num_input_tokens,
-            query_start_loc=query_start_loc,
-            seq_lens=self.seq_lens[:num_reqs],
-            local_query_start_loc=self.spec_local_query_start_loc[draft_index - 1],
-            local_seq_lens=self.spec_local_seq_lens[draft_index - 1],
-            is_noncausal=is_noncausal,
-        )
-        local_query_start_loc = local_query_start_loc.clone()
-        local_seq_lens = local_seq_lens.clone()
-        local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
-        local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
+        if metadata_cache is not None and "local_query_start_loc" in metadata_cache:
+            # Hit: local token metadata computed by a sibling kv-cache group
+            # of the same draft step. Values are identical across groups, so
+            # the cached (cloned) tensors are reused directly.
+            local_start = metadata_cache["local_start"]
+            local_end_with_pad = metadata_cache["local_end_with_pad"]
+            tokens_per_rank = metadata_cache["tokens_per_rank"]
+            num_tokens_pad = metadata_cache["num_tokens_pad"]
+            local_query_start_loc = metadata_cache["local_query_start_loc"]
+            local_seq_lens = metadata_cache["local_seq_lens"]
+            max_local_query_len = metadata_cache["max_local_query_len"]
+            max_local_seq_lens = metadata_cache["max_local_seq_lens"]
+            local_cos = metadata_cache["local_cos"]
+            local_sin = metadata_cache["local_sin"]
+            start_pos = metadata_cache["start_pos"]
+        else:
+            (
+                local_start,
+                local_end_with_pad,
+                tokens_per_rank,
+                num_tokens_pad,
+                local_query_start_loc,
+                local_seq_lens,
+            ) = self._build_local_token_metadata(
+                num_reqs=num_reqs,
+                num_input_tokens=num_input_tokens,
+                query_start_loc=query_start_loc,
+                seq_lens=self.seq_lens[:num_reqs],
+                local_query_start_loc=self.spec_local_query_start_loc[draft_index - 1],
+                local_seq_lens=self.spec_local_seq_lens[draft_index - 1],
+                is_noncausal=is_noncausal,
+            )
+            local_query_start_loc = local_query_start_loc.clone()
+            local_seq_lens = local_seq_lens.clone()
+            local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
+            local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
 
-        _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu = self._build_local_token_metadata(
-            num_reqs=num_reqs,
-            num_input_tokens=num_input_tokens,
-            query_start_loc=query_start_loc_cpu,
-            seq_lens=self.seq_lens_cpu[:num_reqs],
-            is_noncausal=is_noncausal,
-        )
-        local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
-        max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
-        max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
+            _, _, _, _, local_query_start_loc_cpu, local_seq_lens_cpu = self._build_local_token_metadata(
+                num_reqs=num_reqs,
+                num_input_tokens=num_input_tokens,
+                query_start_loc=query_start_loc_cpu,
+                seq_lens=self.seq_lens_cpu[:num_reqs],
+                is_noncausal=is_noncausal,
+            )
+            local_seq_lens_q_cpu = local_query_start_loc_cpu[1 : num_reqs + 1] - local_query_start_loc_cpu[:num_reqs]
+            max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
+            max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
 
-        start_pos = self.seq_lens[:num_reqs] - seq_lens_q
+            start_pos = self.seq_lens[:num_reqs] - seq_lens_q
+
+            if metadata_cache is not None:
+                metadata_cache.update(
+                    local_start=local_start,
+                    local_end_with_pad=local_end_with_pad,
+                    tokens_per_rank=tokens_per_rank,
+                    num_tokens_pad=num_tokens_pad,
+                    local_query_start_loc=local_query_start_loc,
+                    local_seq_lens=local_seq_lens,
+                    max_local_query_len=max_local_query_len,
+                    max_local_seq_lens=max_local_seq_lens,
+                    local_cos=local_cos,
+                    local_sin=local_sin,
+                    start_pos=start_pos,
+                )
 
         dspark_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
@@ -531,6 +605,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
 
         num_heads = self.model_config.hf_config.num_attention_heads
+        head_dim = self.model_config.get_head_size()
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
@@ -538,7 +613,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_query_start_loc
             if has_prefill
             else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
-                None,
+                metadata_cache,
                 "draft_cu_seqlens_ori_kv",
                 local_seq_lens,
                 num_reqs,
@@ -549,28 +624,46 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_cmp_kv = (
             None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
         )
-        sas_metadata = metadata_op(
-            **metadata_kwargs,
-            num_heads_q=num_heads,
-            num_heads_kv=1,
-            head_dim=self.model_config.get_head_size(),
-            cu_seqlens_q=local_query_start_loc,
-            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            seqused_q=self.seqused_q,
-            seqused_kv=local_seq_lens,
-            max_seqlen_q=max_local_query_len,
-            max_seqlen_kv=max_local_seq_lens,
-            batch_size=num_reqs,
-            cmp_ratio=1,
-            ori_mask_mode=4,
-            ori_win_left=ori_win_left,
-            ori_win_right=ori_win_right,
-            layout_q="TND",
-            layout_kv=_dsa_layout_kv(self.vllm_config),
-            has_ori_kv=True,
-            has_cmp_kv=False,
-        )
+        if (
+            metadata_cache is not None
+            and metadata_cache.get("sas_num_heads") == num_heads
+            and metadata_cache.get("sas_head_dim") == head_dim
+            and "sas_metadata" in metadata_cache
+        ):
+            # The SAS metadata op only consumes group-invariant inputs
+            # (local cu_seqlens / seq_lens / window config), so the tensor
+            # built by a sibling kv-cache group of the same draft step is
+            # reused instead of re-running the device metadata kernel.
+            sas_metadata = metadata_cache["sas_metadata"]
+        else:
+            sas_metadata = metadata_op(
+                **metadata_kwargs,
+                num_heads_q=num_heads,
+                num_heads_kv=1,
+                head_dim=head_dim,
+                cu_seqlens_q=local_query_start_loc,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
+                seqused_kv=local_seq_lens,
+                max_seqlen_q=max_local_query_len,
+                max_seqlen_kv=max_local_seq_lens,
+                batch_size=num_reqs,
+                cmp_ratio=1,
+                ori_mask_mode=4,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                layout_q="TND",
+                layout_kv=_dsa_layout_kv(self.vllm_config),
+                has_ori_kv=True,
+                has_cmp_kv=False,
+            )
+            if metadata_cache is not None:
+                metadata_cache.update(
+                    sas_num_heads=num_heads,
+                    sas_head_dim=head_dim,
+                    sas_metadata=sas_metadata,
+                )
 
         cp_metadata = DSACPMetadata(
             local_query_start_loc=local_query_start_loc,
@@ -1983,6 +2076,11 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._hidden_restore_idx_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int64,
+            device=device,
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -1990,7 +2088,94 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        return AttentionCGSupport.NEVER
+        return AttentionCGSupport.UNIFORM_BATCH
+
+    def _prepare_graph_pcp_context(
+        self,
+        pcp_context: "AscendPCPAttentionContext",
+    ) -> "AscendPCPAttentionContext":
+        """Prepare graph-stable DSA tensors without changing the PCP batch layout."""
+        global_batch = pcp_context.global_batch
+        num_actual_tokens = global_batch.num_tokens
+
+        # Use the preallocated buffer to keep the address fixed for graph replay.
+        hidden_restore_idx = self._hidden_restore_idx_buffer[: global_batch.num_tokens_after_padding]
+        hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
+        hidden_restore_idx[num_actual_tokens:].zero_()
+
+        # The upstream dummy path only invalidates gathered slot mappings.
+        # DSA also consumes the scheduler-global mapping, so clear it here.
+        if global_batch.is_dummy:
+            pcp_context.global_slot_mappings.fill_(-1)
+
+        return replace(
+            pcp_context,
+            hidden_restore_idx=hidden_restore_idx,
+        )
+
+    @staticmethod
+    def _build_graph_common_attn_metadata(
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        num_actual_reqs: int | None,
+    ) -> AscendCommonAttentionMetadata:
+        """Restore DSA graph request metadata after PCP partitioning.
+
+        PCP preserves the fixed graph token shape, but represents the padded
+        local rows as zero-token requests. DSA requires the query offsets to
+        cover every decode graph token, so expand the padded query offsets in
+        both the NPU and CPU metadata views. Padded slot mappings are
+        invalidated separately.
+
+        Example: 2 actual requests in a graph batch padded to 4::
+
+            After PCP partition:
+                query_start_loc = [0, 1, 2, 2, 2]
+
+            After DSA restoration:
+                query_start_loc = [0, 1, 2, 3, 4]
+
+        ``num_actual_reqs`` remains 2, and the two padded slot mappings remain
+        invalid.
+        """
+        if num_actual_reqs is None:
+            return common_attn_metadata
+        num_reqs = common_attn_metadata.num_reqs
+        if num_reqs <= num_actual_reqs:
+            return common_attn_metadata
+
+        is_prefilling = common_attn_metadata.is_prefilling
+        if is_prefilling is not None and bool(is_prefilling.any()):
+            return common_attn_metadata
+        if common_attn_metadata.num_input_tokens != num_reqs:
+            raise RuntimeError("DSA PCP full-decode graph requires one input token per request.")
+
+        # Expand NPU and CPU query offsets to cover padded graph tokens.
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+        torch.arange(
+            common_attn_metadata.num_actual_tokens + 1,
+            common_attn_metadata.num_input_tokens + 1,
+            dtype=query_start_loc.dtype,
+            device=query_start_loc.device,
+            out=query_start_loc[num_actual_reqs + 1 : num_reqs + 1],
+        )
+        query_start_loc_cpu = torch.empty(
+            num_reqs + 1,
+            dtype=common_attn_metadata.query_start_loc_cpu.dtype,
+        )
+        query_start_loc_cpu[: num_actual_reqs + 1].copy_(
+            common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1]
+        )
+        torch.arange(
+            common_attn_metadata.num_actual_tokens + 1,
+            common_attn_metadata.num_input_tokens + 1,
+            dtype=query_start_loc_cpu.dtype,
+            out=query_start_loc_cpu[num_actual_reqs + 1 : num_reqs + 1],
+        )
+
+        return common_attn_metadata.replace(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+        )
 
     @staticmethod
     def _build_global_common_attn_metadata(
@@ -1999,7 +2184,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         local_common_attn_metadata: AscendCommonAttentionMetadata,
     ) -> AscendCommonAttentionMetadata:
         global_batch = pcp_context.global_batch
-        num_reqs = global_batch.num_reqs
+        num_reqs = global_batch.num_reqs_after_padding
         return AscendCommonAttentionMetadata(
             query_start_loc=global_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(global_batch.query_start_loc_np),
@@ -2017,7 +2202,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             dcp_local_seq_lens=global_batch.dcp_local_seq_lens,
             positions=global_batch.positions,
             attn_state=global_batch.attn_state,
-            num_input_tokens=global_batch.num_tokens,
+            num_input_tokens=global_batch.num_tokens_after_padding,
             is_prefilling=torch.from_numpy(global_batch.is_prefilling_np),
         )
 
@@ -2026,15 +2211,16 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         pcp_context: "AscendPCPAttentionContext",
         common_attn_metadata: AscendCommonAttentionMetadata,
     ) -> AscendCommonAttentionMetadata:
-        num_local_padded_tokens = pcp_context.local_num_tokens_after_padding
+        num_local_padded_tokens = common_attn_metadata.num_input_tokens
         gathered_slot_mapping = common_attn_metadata.slot_mapping
+        if pcp_context.global_batch.is_dummy:
+            gathered_slot_mapping.fill_(-1)
         local_slot_mapping = gathered_slot_mapping.view(
             self._pcp_world_size,
             num_local_padded_tokens,
         )[self._pcp_rank]
         return common_attn_metadata.replace(
             slot_mapping=local_slot_mapping,
-            num_input_tokens=num_local_padded_tokens,
         )
 
     def _build_local_dsa_metadata(
@@ -2042,20 +2228,20 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         common_prefix_len: int,
         local_common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool,
-        **kwargs,
+        num_actual_reqs: int | None,
+        common_ratio_to_sas_metadata: dict[Any, Any],
     ) -> dsa_v1.AscendDSAMetadata:
         if local_common_attn_metadata.num_actual_tokens > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
                 fast_build,
-                **kwargs,
+                num_actual_reqs=num_actual_reqs,
+                common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
             )
 
         # Empty ranks still participate in the global cache update collectives.
-        self.common_ratio_to_sas_metadata = kwargs.get(
-            "common_ratio_to_sas_metadata",
-        )
+        self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
         return self.metadata_cls(  # type: ignore[call-arg]
             num_actual_tokens=0,
             head_dim=self.model_config.get_head_size(),
@@ -2067,25 +2253,6 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
         )
 
-    def _build_global_dsa_metadata(
-        self,
-        common_prefix_len: int,
-        global_common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool,
-        **kwargs,
-    ) -> dsa_v1.AscendDSAMetadata:
-        global_build_kwargs = {
-            **kwargs,
-            "common_ratio_to_sas_metadata": {},
-            "num_actual_reqs": global_common_attn_metadata.num_reqs,
-        }
-        return self._global_metadata_builder.build(
-            common_prefix_len,
-            global_common_attn_metadata,
-            fast_build,
-            **global_build_kwargs,
-        )
-
     def build(
         self,
         common_prefix_len: int,
@@ -2093,34 +2260,48 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         fast_build: bool = False,
         pcp_context: "AscendPCPAttentionContext | None" = None,
         pcp_cache_group_idx: int | None = None,
-        **kwargs,
+        num_actual_reqs: int | None = None,
+        common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
+        **kwargs: Any,
     ) -> AscendDSAPCPMetadata:
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
+        assert common_ratio_to_sas_metadata is not None
+        pcp_context = self._prepare_graph_pcp_context(pcp_context)
         global_common_attn_metadata = self._build_global_common_attn_metadata(
             pcp_context,
             pcp_cache_group_idx,
             common_attn_metadata,
         )
-        global_dsa_metadata = self._build_global_dsa_metadata(
+        global_common_attn_metadata = self._build_graph_common_attn_metadata(
+            global_common_attn_metadata,
+            pcp_context.global_batch.num_reqs,
+        )
+        global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,
             fast_build,
-            **kwargs,
+            num_actual_reqs=pcp_context.global_batch.num_reqs,
+            common_ratio_to_sas_metadata={},
         )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
         )
+        local_common_attn_metadata = self._build_graph_common_attn_metadata(
+            local_common_attn_metadata,
+            num_actual_reqs,
+        )
         local_dsa_metadata = self._build_local_dsa_metadata(
             common_prefix_len,
             local_common_attn_metadata,
             fast_build,
-            **kwargs,
+            num_actual_reqs=num_actual_reqs,
+            common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
         )
         return AscendDSAPCPMetadata.from_local_metadata(
             local_dsa_metadata,
-            pcp_context.local_num_tokens_after_padding,
+            local_common_attn_metadata.num_input_tokens,
             pcp_context.hidden_restore_idx,
             global_dsa_metadata,
         )

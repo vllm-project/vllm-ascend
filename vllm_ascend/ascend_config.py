@@ -257,6 +257,7 @@ class AscendConfig:
             "enable_mc2_hierarchy_comm": false,
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
+            "enable_force_eplb": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -391,6 +392,7 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    enable_force_eplb: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
@@ -479,6 +481,13 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if (
+            self.enable_force_eplb
+            and self.eplb_config.dynamic_eplb
+            and vc.model_config is not None
+            and vc.model_config.is_moe
+        ):
+            raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
@@ -759,6 +768,8 @@ class AscendConfig:
             return False
 
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
+        if moe_intermediate_size is None:
+            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
         if moe_intermediate_size is None:
             return False
         if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:

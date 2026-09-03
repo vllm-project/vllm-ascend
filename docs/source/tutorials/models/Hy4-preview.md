@@ -142,12 +142,7 @@ A3 single-node TP=16 full-card inference is suitable for validation and low-conc
 ```bash
 export HCCL_BUFFSIZE=128
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export ASCEND_LAUNCH_BLOCKING=0
 export VLLM_LOGGING_LEVEL=INFO
-export VLLM_USE_V1=1
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
 vllm serve /path/to/Hy4-preview-w8a8 \
   --host 127.0.0.1 --port 8000 \
@@ -163,7 +158,7 @@ vllm serve /path/to/Hy4-preview-w8a8 \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
-  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+  --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
 ### 5.2 Multi-Node Co-Located Deployment
@@ -193,19 +188,12 @@ MODEL="/path/to/Hy4-preview-w8a8"  # Change to the actual weight path
 PORT=8000
 
 # === Environment variables ===
-export HCCL_OP_EXPANSION_MODE=AIV
-export HCCL_IF_IP=${NODE1_IP}
-export GLOO_SOCKET_IFNAME=${NIC}
-export TP_SOCKET_IFNAME=${NIC}
-export HCCL_SOCKET_IFNAME=${NIC}
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=128
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export HCCL_IF_IP=${NODE1_IP}
+export HCCL_OP_EXPANSION_MODE=AIV
+export HCCL_SOCKET_IFNAME=${NIC}
+export GLOO_SOCKET_IFNAME=${NIC}
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
 vllm serve ${MODEL} \
   --host 0.0.0.0 \
@@ -227,7 +215,7 @@ vllm serve ${MODEL} \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
-  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+  --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
 **Node 2 script:**
@@ -246,19 +234,12 @@ DP_RPC_PORT=12890
 MODEL="/path/to/Hy4-preview-w8a8"  # Change to the actual weight path
 
 # === Environment variables (consistent with Node 1) ===
-export HCCL_OP_EXPANSION_MODE=AIV
-export HCCL_IF_IP=${NODE2_IP}
-export GLOO_SOCKET_IFNAME=${NIC}
-export TP_SOCKET_IFNAME=${NIC}
-export HCCL_SOCKET_IFNAME=${NIC}
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=128
-export VLLM_ASCEND_ENABLE_MLAPO=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
+export HCCL_IF_IP=${NODE2_IP}
+export HCCL_OP_EXPANSION_MODE=AIV
+export HCCL_SOCKET_IFNAME=${NIC}
+export GLOO_SOCKET_IFNAME=${NIC}
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
 vllm serve ${MODEL} \
   --headless \
@@ -279,7 +260,7 @@ vllm serve ${MODEL} \
   --seed 1024 \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
   --speculative-config '{"method": "mtp","num_speculative_tokens": 3}' \
-  --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
+  --additional-config '{"enable_mlapo": true, "enable_fused_mc2": 1, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
 ```
 
 > Note: `--data-parallel-address` is set to the local IP (i.e., the coordinator) on Node 1, and to the head node IP on Node 2; `--data-parallel-start-rank` is only set on the headless node.

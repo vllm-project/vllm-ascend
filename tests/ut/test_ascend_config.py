@@ -19,9 +19,11 @@ import subprocess
 import sys
 from importlib.util import find_spec as real_find_spec
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import KVTransferConfig
+from vllm.config import VllmConfig as _VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
@@ -46,6 +48,24 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
+
+
+def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
+    """Build a test config with the model metadata required by AscendConfig."""
+    config = _VllmConfig(*args, **kwargs)
+    if config.model_config is None:
+        config.model_config = SimpleNamespace(
+            is_moe=False,
+            is_deepseek_mla=False,
+            use_mla=False,
+            enforce_eager=True,
+            architectures=[],
+            hf_text_config=SimpleNamespace(),
+            get_total_num_kv_heads=lambda: 0,
+            get_num_experts=lambda: 0,
+            get_hidden_size=lambda: 0,
+        )
+    return config
 
 
 def test_config_modules_do_not_load_vllm_config():
@@ -108,6 +128,7 @@ class TestAscendConfig(TestBase):
         is_deepseek_mla: bool = False,
     ):
         return SimpleNamespace(
+            is_moe=False,
             is_deepseek_mla=is_deepseek_mla,
             use_mla=is_deepseek_mla,
             enforce_eager=True,
@@ -232,6 +253,7 @@ class TestAscendConfig(TestBase):
                 "fusion_ops_gmmswigluquant": False,
             },
             "multistream_overlap_shared_expert": True,
+            "enable_force_eplb": True,
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
@@ -242,6 +264,7 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        self.assertTrue(ascend_config.enable_force_eplb)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 32768)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
@@ -1057,6 +1080,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         supported_vc = VllmConfig()
         supported_vc.model_config = SimpleNamespace(
+            is_moe=False,
             hf_text_config=SimpleNamespace(index_topk=2048),
             hf_config=SimpleNamespace(),
             enforce_eager=True,
@@ -1154,7 +1178,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_kv_nz_uses_vllm_config_preconditions(self, mock_fix, mock_sparse):
         vc = VllmConfig()
-        vc.model_config = SimpleNamespace(is_deepseek_mla=True, architectures=[], enforce_eager=True)
+        vc.model_config = SimpleNamespace(
+            is_moe=False,
+            is_deepseek_mla=True,
+            architectures=[],
+            enforce_eager=True,
+        )
         vc.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
         vc.additional_config = {"enable_kv_nz": "true"}
 

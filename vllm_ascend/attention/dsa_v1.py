@@ -519,13 +519,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_tokens = self.num_actual_tokens
         return min(num_tokens, num_tokens // self.compressor_ratio + num_reqs)
 
-    def build_for_cudagraph_capture(self, common_attn_metadata: AscendCommonAttentionMetadata) -> AscendDSAMetadata:
-        """Delegate to build() because DSA needs shared request metadata."""
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs,
+    ) -> AscendDSAMetadata:
         return self.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
-            num_actual_reqs=common_attn_metadata.num_reqs,
-            common_ratio_to_sas_metadata={},
+            **kwargs,
         )
 
     def build(
