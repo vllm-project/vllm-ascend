@@ -245,6 +245,7 @@ class NPUModelRunner(GPUModelRunner):
             dynamic_spec = getattr(self.speculator, "dynamic_spec", None)
             input_batch = getattr(self.speculator, "input_batch", None)
             if dynamic_spec is not None and input_batch is not None:
+                self.speculator.update_dynamic_spec_for_v2(input_batch)
                 lengths = dynamic_spec.proposal_lengths_for_v2(
                     input_batch.req_ids[: input_batch.num_reqs],
                     max_k=self.num_speculative_steps,

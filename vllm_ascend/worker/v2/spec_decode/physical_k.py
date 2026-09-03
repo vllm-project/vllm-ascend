@@ -154,6 +154,7 @@ def physical_k_scope(
     if not v2_varlen_physical_k_enabled(
         getattr(speculator, "vllm_config", None)
     ):
+        speculator._vllm_ascend_last_runtime_k = max_k
         yield max_k
         return
     sample_from_anchor = bool(getattr(speculator, "sample_from_anchor", False))
@@ -161,6 +162,7 @@ def physical_k_scope(
     if active_k is None and input_batch is not None:
         active_k = _uniform_runtime_k(input_batch, max_k)
     if active_k is None or active_k >= max_k:
+        speculator._vllm_ascend_last_runtime_k = max_k
         yield max_k
         return
 
@@ -191,6 +193,7 @@ def physical_k_scope(
                 speculator._vllm_ascend_physical_k_anchor_indices[active_k]
             )
         speculator._vllm_ascend_active_speculative_steps = active_k
+        speculator._vllm_ascend_last_runtime_k = active_k
         yield active_k
     finally:
         speculator.num_speculative_steps = old_steps

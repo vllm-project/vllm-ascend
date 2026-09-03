@@ -147,6 +147,25 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             )
             self._dynamic_update_log_count += 1
 
+    def update_dynamic_spec_for_v2(self, input_batch: InputBatch) -> None:
+        """Update hardware-aware K after a runtime graph replay.
+
+        During V2 FULL graph capture, ``_sample_sequential`` executes as part
+        of graph construction.  Its Python-side policy update is therefore
+        not a runtime feedback point.  The model runner calls this method
+        after ``propose()`` returns, when the captured confidence buffer has
+        been populated for the current request batch.
+        """
+
+        active_k = int(
+            getattr(
+                self,
+                "_vllm_ascend_last_runtime_k",
+                self._vllm_ascend_max_speculative_steps,
+            )
+        )
+        self._update_dynamic_spec(input_batch.num_reqs, active_k)
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and
@@ -206,7 +225,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             # Keep the fixed-K path unchanged; the row-wise adapter is only
             # needed by a smaller physical-K graph.
             super()._sample_sequential(num_reqs, head_hidden)
-            self._update_dynamic_spec(num_reqs, active_k)
             return
 
         confidence_probs = getattr(self, "draft_token_confidence_probs", None)
@@ -222,7 +240,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             self.draft_tokens = old_draft_tokens
             if confidence_probs is not None and confidence_probs.ndim >= 2:
                 self.draft_token_confidence_probs = confidence_probs
-        self._update_dynamic_spec(num_reqs, active_k)
 
     def build_draft_attn_metadatas(
         self,
