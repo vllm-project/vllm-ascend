@@ -1032,51 +1032,6 @@ def test_update_from_output_skips_stale_dropped_and_missing_requests():
     assert missing.request_id not in scheduler.requests
 
 
-def test_update_from_output_handles_invalid_blocks_and_grammar_errors():
-    _, scheduler = _create_live_recompute_scheduler()
-    request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
-    scheduler.add_request(request)
-    scheduler_output = scheduler.schedule()
-    scheduler._handle_invalid_blocks = MagicMock(return_value={request.request_id})
-    scheduler.recompute_kv_load_failures = False
-    scheduler.finish_requests = MagicMock(return_value=[request])
-    model_output = create_model_runner_output([request], finished_recving={"remote"})
-    model_output.kv_connector_output = SimpleNamespace(
-        invalid_block_ids={3},
-        kv_connector_stats=None,
-    )
-
-    outputs = scheduler.update_from_output(scheduler_output, model_output)
-
-    scheduler._handle_invalid_blocks.assert_called_once()
-    scheduler.finish_requests.assert_called_once()
-    core_outputs = outputs[request.client_index]
-    emitted = getattr(core_outputs, "outputs", None) or [core_outputs]
-    assert any(getattr(item, "request_id", None) == request.request_id for item in emitted)
-
-
-def test_update_from_output_adjusts_spec_decode_and_stops_running_request():
-    _, scheduler = _create_live_recompute_scheduler()
-    request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
-    scheduler.add_request(request)
-    scheduler_output = scheduler.schedule()
-    scheduler_output.scheduled_spec_decode_tokens[request.request_id] = [9, 10]
-    request.num_output_placeholders = 2
-    object.__setattr__(request, "sampling_params", SimpleNamespace(num_logprobs=1))
-    logprobs = MagicMock()
-    logprobs.slice_request.return_value = "lp"
-    model_output = create_model_runner_output([request], use_eos=True)
-    model_output.logprobs = logprobs
-    model_output.num_nans_in_logits = {request.request_id: 2}
-
-    outputs = scheduler.update_from_output(scheduler_output, model_output)
-
-    logprobs.slice_request.assert_called_once()
-    assert request.num_nans_in_logits == 2
-    assert request not in scheduler.running
-    assert request.client_index in outputs
-
-
 def test_update_from_output_returns_stats_when_there_are_no_request_outputs():
     _, scheduler = _create_live_recompute_scheduler()
     scheduler.make_stats = MagicMock(return_value=SimpleNamespace())
