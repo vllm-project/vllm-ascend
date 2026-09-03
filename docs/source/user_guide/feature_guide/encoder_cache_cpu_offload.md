@@ -6,7 +6,7 @@ memory instead of running the encoder again.
 
 ## Support scope
 
-- vLLM V1 model runner
+- vLLM V1 and V2 model runners
 - An Ascend device with a CANN build that provides both `aclrtMemcpyBatchAsync` and
   `aclrtHostRegisterV2(..., ACL_HOST_REG_PINNED)`
 - Linux kernel newer than 5.10, as required by CANN when converting an mmap
@@ -14,8 +14,8 @@ memory instead of running the encoder again.
 - A single host using `/dev/shm`
 - `ec_both` role
 
-Cross-node encoder-cache transfer, NIXL/P2P transfer, and V2 model runner are
-not supported by this connector.
+Cross-node encoder-cache transfer and NIXL/P2P transfer are not supported by
+this connector.
 
 The Ascend worker registers its shared mmap as real page-locked Host memory.
 If pinned mmap registration or batch memcpy is unavailable, initialization
