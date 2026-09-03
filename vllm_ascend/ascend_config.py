@@ -261,6 +261,7 @@ class AscendConfig:
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
+            "mega_moe_threshold_ratio": 1.0,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "c8_enable_reshape_optim": false,
             "enable_fused_mc2": 0,
@@ -402,6 +403,18 @@ class AscendConfig:
     # degradation. Do not set it too large because workspace memory scales
     # linearly with this value. Default 65536.
     mega_moe_max_tokens: int = 65536
+    # Safety-margin ratio for the mega_moe symm-buffer overflow guard. Only
+    # the mega_moe path (enable_fused_mc2 == 2) sizes its symm buffer from
+    # mega_moe_max_tokens on non-decode-only nodes; when the worst-case
+    # per-rank received token count multiplied by this ratio exceeds
+    # mega_moe_max_tokens, moe_comm_method falls back to all2all to avoid
+    # silent precision degradation. Decode-only nodes size the buffer to the
+    # absolute safe bound and are unaffected. Default 1.0 (fall back as soon
+    # as the worst case exceeds the buffer); set < 1 to allow mega_moe even
+    # when the buffer is undersized (accepts truncation risk); set > 1 to
+    # require extra headroom. The dispatch_ffn_combine path is guarded by the
+    # HCCL_BUFFSIZE framework check instead (no ratio).
+    mega_moe_threshold_ratio: float = 1.0
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -649,6 +662,10 @@ class AscendConfig:
         # mega_moe_max_tokens range
         if self.mega_moe_max_tokens <= 0:
             raise ValueError(f"mega_moe_max_tokens must be a positive integer, got {self.mega_moe_max_tokens}")
+
+        # mega_moe_threshold_ratio range
+        if self.mega_moe_threshold_ratio <= 0:
+            raise ValueError(f"mega_moe_threshold_ratio must be a positive float, got {self.mega_moe_threshold_ratio}")
 
         # Enable optimized reduce sampling scheme. Preserve the safeguards
         # added on main while consuming the already-validated typed field.

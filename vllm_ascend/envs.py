@@ -59,6 +59,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # The path for HCCL library, it's used by pyhccl communicator backend. If
     # not set, the default value is libhccl.so.
     "HCCL_SO_PATH": lambda: os.getenv("HCCL_SO_PATH", None),
+    # HCCL communication buffer size in MB for the MC2 operator group. The
+    # dispatch_ffn_combine C++ tiling reads this to size the all-to-all comm
+    # buffer (default 200). The framework-side guard
+    # (ascend_forward_context._hccl_buffsize_would_overflow) mirrors that
+    # check so moe_comm_method can fall back to all2all before the op errors.
+    # Not sensitive.
+    "HCCL_BUFFSIZE": lambda: int(os.getenv("HCCL_BUFFSIZE", "200")),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
