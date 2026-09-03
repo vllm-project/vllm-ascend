@@ -146,8 +146,11 @@ class AscendPCPManager(PCPManager):
         graph_num_tokens = input_batch.num_tokens_after_padding
         is_decode_only = not bool(input_batch.is_prefilling_np.any())
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
-        # Keep the request-shaped metadata at that same fixed graph extent.
-        graph_num_reqs = graph_num_tokens if is_decode_only else input_batch.num_reqs_after_padding
+        # Other graph modes may pad tokens without padding request metadata.
+        is_full_decode_graph = (
+            is_decode_only and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        )
+        graph_num_reqs = graph_num_tokens if is_full_decode_graph else input_batch.num_reqs_after_padding
         # On newer vLLM, the base PCP manager may already honor
         # ``padded_num_tokens`` while leaving request-shaped metadata at the
         # actual request count. Pad when either extent is still short so the
@@ -173,7 +176,7 @@ class AscendPCPManager(PCPManager):
             input_buffers.positions[actual_tokens:graph_num_tokens].zero_()
             input_buffers.is_padding[actual_tokens:graph_num_tokens].fill_(True)
             input_buffers.seq_lens[actual_reqs:graph_num_reqs].zero_()
-            input_buffers.query_start_loc[actual_reqs + 1 : graph_num_reqs + 1].fill_(actual_tokens)
+            input_buffers.query_start_loc[: graph_num_reqs + 1].copy_(input_batch.query_start_loc[: graph_num_reqs + 1])
             seq_lens_cpu_upper_bound = torch.zeros(
                 graph_num_reqs,
                 dtype=local_batch.seq_lens_cpu_upper_bound.dtype,
@@ -184,6 +187,7 @@ class AscendPCPManager(PCPManager):
                 num_reqs_after_padding=graph_num_reqs,
                 num_tokens_after_padding=graph_num_tokens,
                 query_start_loc=input_buffers.query_start_loc[: graph_num_reqs + 1],
+                query_start_loc_np=input_batch.query_start_loc_np[: graph_num_reqs + 1],
                 seq_lens=input_buffers.seq_lens[:graph_num_reqs],
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 input_ids=input_buffers.input_ids[:graph_num_tokens],
@@ -191,13 +195,21 @@ class AscendPCPManager(PCPManager):
                 is_padding=input_buffers.is_padding[:graph_num_tokens],
             )
 
-        local_batch.seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        actual_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        if local_batch.num_reqs_after_padding > local_batch.num_reqs:
+            assert self._input_buffers is not None
+            seq_lens_np = self._input_buffers.seq_lens_np
+            seq_lens_np[: local_batch.num_reqs] = actual_seq_lens_np
+            seq_lens_np[local_batch.num_reqs : local_batch.num_reqs_after_padding] = 0
+            local_batch.seq_lens_np = seq_lens_np[: local_batch.num_reqs_after_padding]
+        else:
+            local_batch.seq_lens_np = actual_seq_lens_np
         num_valid_tokens = local_batch.num_scheduled_tokens
         if local_batch.num_draft_tokens_per_req is not None:
             num_valid_tokens = num_valid_tokens - local_batch.num_draft_tokens_per_req
         local_batch.attn_state = build_attn_state(
             self.vllm_config,
-            local_batch.seq_lens_np,
+            actual_seq_lens_np,
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,
             num_valid_tokens,
