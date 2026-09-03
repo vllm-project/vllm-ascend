@@ -1255,7 +1255,9 @@ class KVPoolWorker:
                         block_gvas.append(0)
 
                 if new_keys:
-                    new_gvas = self.m_store.batch_alloc(new_keys, [alloc_size] * len(new_keys))
+                    new_gvas = self.m_store.batch_alloc(
+                        new_keys, [alloc_size] * len(new_keys), LAYERWISE_READ_LEASE_TTL_MS
+                    )
                     if any(gva <= 0 for gva in new_gvas):
                         logger.error(
                             "alloc_gvas FAIL: req=%s group=%d alloc_size=%d new_keys=%d gvas_sample=%s zero_count=%d",
@@ -1290,6 +1292,7 @@ class KVPoolWorker:
                         allocated = self.m_store.batch_alloc(
                             [partial_key],
                             [alloc_size],
+                            LAYERWISE_READ_LEASE_TTL_MS,
                         )
                         partial_gva = allocated[0] if allocated else 0
                         if partial_gva > 0:
