@@ -17,11 +17,9 @@
 # This file is a part of the vllm-ascend project.
 #
 from dataclasses import dataclass, fields
-from zlib import adler32
 
 import numpy as np
 import torch
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -120,7 +118,13 @@ class AscendInputBatch(InputBatch):
                 attn_state=AscendAttentionState.DecodeOnly,
                 is_dummy=True,
             )
-            return prepare_sparse_kv_offload_metadata(batch, input_buffers)
+            if input_buffers.offload_req_ids is not None:
+                from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+                    prepare_sparse_kv_offload_metadata,
+                )
+
+                batch = prepare_sparse_kv_offload_metadata(batch, input_buffers)
+            return batch
 
     else:
 
@@ -153,34 +157,10 @@ class AscendInputBatch(InputBatch):
                 attn_state=AscendAttentionState.DecodeOnly,
                 is_dummy=True,
             )
-            return prepare_sparse_kv_offload_metadata(batch, input_buffers)
+            if input_buffers.offload_req_ids is not None:
+                from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+                    prepare_sparse_kv_offload_metadata,
+                )
 
-
-def prepare_sparse_kv_offload_metadata(
-    input_batch: AscendInputBatch,
-    input_buffers: AscendInputBuffers,
-) -> AscendInputBatch:
-    """Stage sparse-offload request metadata into MRV2 input buffers."""
-    req_ids_buffer = input_buffers.offload_req_ids
-    if req_ids_buffer is None:
-        input_batch.offload_req_ids = None
-        return input_batch
-
-    num_reqs = input_batch.num_reqs
-    num_reqs_padded = input_batch.num_reqs_after_padding
-    if len(input_batch.req_ids) < num_reqs:
-        raise RuntimeError(
-            "KV offload request metadata is shorter than the scheduled batch: "
-            f"metadata={len(input_batch.req_ids)}, requests={num_reqs}"
-        )
-
-    req_ids_np = np.zeros(num_reqs_padded, dtype=np.int64)
-    req_ids_np[:num_reqs] = np.fromiter(
-        (adler32(req_id.encode("utf-8")) for req_id in input_batch.req_ids[:num_reqs]),
-        dtype=np.int64,
-        count=num_reqs,
-    )
-
-    async_copy_to_gpu(req_ids_np, out=req_ids_buffer[:num_reqs_padded])
-    input_batch.offload_req_ids = req_ids_buffer[:num_reqs_padded]
-    return input_batch
+                batch = prepare_sparse_kv_offload_metadata(batch, input_buffers)
+            return batch

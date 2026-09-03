@@ -4,7 +4,9 @@ from zlib import adler32
 import numpy as np
 import torch
 
-from vllm_ascend.worker.v2.input_batch import prepare_sparse_kv_offload_metadata
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    prepare_sparse_kv_offload_metadata,
+)
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
@@ -26,7 +28,7 @@ def test_stages_sparse_kv_offload_request_metadata_in_input_buffers(monkeypatch)
         return out.copy_(value)
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.input_batch.async_copy_to_gpu",
+        "vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager.async_copy_to_gpu",
         copy_to_cpu,
     )
     input_buffers = SimpleNamespace(

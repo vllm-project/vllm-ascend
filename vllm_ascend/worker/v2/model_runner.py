@@ -63,6 +63,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     allocate_kv_offload_topk_profile_buffers,
     init_sparse_kv_offload_manager,
+    prepare_sparse_kv_offload_metadata,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
@@ -73,11 +74,7 @@ if not vllm_version_is("0.27.1"):
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
-from vllm_ascend.worker.v2.input_batch import (
-    AscendInputBatch,
-    AscendInputBuffers,
-    prepare_sparse_kv_offload_metadata,
-)
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
@@ -552,7 +549,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
-            input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
+            if self.input_buffers.offload_req_ids is not None:
+                input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
@@ -774,7 +772,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
-            input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
+            if self.input_buffers.offload_req_ids is not None:
+                input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
