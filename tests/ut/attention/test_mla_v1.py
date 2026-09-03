@@ -83,7 +83,6 @@ class TestAscendMLABackend(TestBase):
         self.assertIsNotNone(impl_cls)
 
 
-
 def _make_pcp_metadata(
     *,
     num_actual_tokens: int,
