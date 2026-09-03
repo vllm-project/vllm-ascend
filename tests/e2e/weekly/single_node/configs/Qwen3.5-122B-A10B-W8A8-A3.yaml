@@ -287,4 +287,3 @@ test_cases:
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5}'
     benchmarks:
       perf: *_benchmark_TPOT20_64K_1K
-
