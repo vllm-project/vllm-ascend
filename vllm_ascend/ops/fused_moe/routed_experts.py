@@ -476,10 +476,18 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
             topk_ids = torch.cat([topk_ids, shared_expert_ids], dim=1)
             topk_weights = torch.cat([topk_weights, shared_expert_weights], dim=1)
-        # MXFP4 packs activations as uint8; skip the cast so topk_weights stays
-        # fp32, which is what npu_moe_token_unpermute expects for its `probs` arg.
-        if hidden_states.dtype not in [torch.uint8, torch.float8_e4m3fn]:
+        # Routing weights must stay in a floating compute dtype: the MoE
+        # sequence-parallel prepare (`_prepare_with_ep_group`) quantizes
+        # hidden_states for dynamic-quant schemes before routing (W8A8 ->
+        # int8, W8A8MXFP/W4A8MXFP -> float8_e4m3fn, W4A4MXFP -> uint8 fp4
+        # packs). Propagating that dtype to topk_weights breaks downstream
+        # ops (e.g. `topk_weights * mask` in the token dispatcher: fp8 x bool
+        # promotion is unsupported), and npu_moe_token_unpermute expects fp32
+        # `probs`.
+        if hidden_states.dtype in (torch.float32, torch.float16, torch.bfloat16):
             topk_weights = topk_weights.to(hidden_states.dtype)
+        else:
+            topk_weights = topk_weights.to(torch.float32)
         if get_ascend_config().enable_force_eplb:
             topk_ids = get_force_eplb_topk(topk_ids, num_logical_experts)
         elif enable_force_load_balance:
