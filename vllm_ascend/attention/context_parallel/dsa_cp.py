@@ -1617,25 +1617,34 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             assert compressor_attn_metadata.req_metadata is not None
             assert compressor_kv_state_metadata.req_metadata is not None
             if self.compress_ratio == 4:
-                assert layer_metadata.indexer_cache is not None
-                assert layer_metadata.indexer_state is not None
-                self._update_indexer_cache(
-                    x=hidden_states_cache,
-                    kv_cache=kv_cache,
-                    metadata=layer_metadata,
-                    actual_seq_lengths_query=actual_seq_lengths_query,
-                )
-                compress_topk_idxs = self._indexer_select_topk(
-                    x=hidden_states_local,
-                    qr=qr_local,
-                    kv_cache=kv_cache,
-                    metadata=layer_metadata,
-                    cos=local_cos,
-                    sin=local_sin,
-                    actual_seq_lengths_query=local_seq_lengths_query,
-                    actual_seq_lengths_key=local_seq_lengths_key,
-                    qr_pertoken_scale=qr_pertoken_scale_local,
-                )
+                assert self.indexer is not None
+                if self.indexer.skip_topk:
+                    compress_topk_idxs = self.indexer._get_cached_topk_indices(
+                        num_tokens=hidden_states_local.shape[0],
+                    )
+                else:
+                    assert layer_metadata.indexer_cache is not None
+                    assert layer_metadata.indexer_state is not None
+                    self._update_indexer_cache(
+                        x=hidden_states_cache,
+                        kv_cache=kv_cache,
+                        metadata=layer_metadata,
+                        actual_seq_lengths_query=actual_seq_lengths_query,
+                    )
+                    compress_topk_idxs = self._indexer_select_topk(
+                        x=hidden_states_local,
+                        qr=qr_local,
+                        kv_cache=kv_cache,
+                        metadata=layer_metadata,
+                        cos=local_cos,
+                        sin=local_sin,
+                        actual_seq_lengths_query=local_seq_lengths_query,
+                        actual_seq_lengths_key=local_seq_lengths_key,
+                        qr_pertoken_scale=qr_pertoken_scale_local,
+                    )
+
+                    if self.indexer.use_index_cache:
+                        self.indexer._update_cached_topk_indices(compress_topk_idxs)
 
             coff = 2 if self.compressor_overlap else 1
             compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(

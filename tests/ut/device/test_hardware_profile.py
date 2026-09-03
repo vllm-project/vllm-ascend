@@ -15,6 +15,7 @@ from vllm_ascend.device.hardware_profile import (
     DeviceAdaptorFamily,
     DeviceAddressingMode,
     HardwareCapability,
+    MoECommPolicy,
     QuantizationBackendFamily,
     WeightLayoutPolicy,
     get_current_hardware_profile,
@@ -27,6 +28,9 @@ _STANDARD_CAPABILITIES = frozenset(
         HardwareCapability.ATB_EXTENSIONS,
         HardwareCapability.ATB_WARMUP,
         HardwareCapability.BGMV_SGMV_META_REGISTRATION,
+        HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
+        HardwareCapability.GRAPH_MULS_ADD_FUSION,
+        HardwareCapability.GRAPH_NORM_QUANT_FUSION,
         HardwareCapability.IRQ_CPU_RESERVATION,
         HardwareCapability.LORA_CUSTOM_OPS,
         HardwareCapability.MC2_HIERARCHY_COMM,
@@ -41,12 +45,20 @@ _STANDARD_CAPABILITIES = frozenset(
 )
 
 _EXPECTED_CAPABILITIES = {
-    AscendDeviceType.A2: _STANDARD_CAPABILITIES,
-    AscendDeviceType.A3: _STANDARD_CAPABILITIES | {HardwareCapability.MC2_FULLMESH_V2_COMM},
+    AscendDeviceType.A2: _STANDARD_CAPABILITIES | {HardwareCapability.NPU_TOP_K_TOP_P},
+    AscendDeviceType.A3: _STANDARD_CAPABILITIES
+    | {
+        HardwareCapability.CANN_MEGAMOE,
+        HardwareCapability.MC2_FULLMESH_V2_COMM,
+        HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+        HardwareCapability.NPU_TOP_K_TOP_P,
+    },
     AscendDeviceType._310P: frozenset(
         {
             HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
             HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
+            HardwareCapability.FUSED_MOE_COMPATIBILITY,
+            HardwareCapability.FUSED_SWIGLU_TUNING_ARGS,
             HardwareCapability.GDN_COMPATIBILITY,
             HardwareCapability.IRQ_CPU_RESERVATION,
             HardwareCapability.RC_DEVICE_DISCOVERY,
@@ -65,14 +77,19 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,
             HardwareCapability.FP8_ATTENTION,
+            HardwareCapability.GRAPH_MULS_ADD_FUSION,
+            HardwareCapability.GRAPH_NORM_QUANT_FUSION,
             HardwareCapability.LOCAL_KV_COMM_RESOURCE,
             HardwareCapability.LORA_CUSTOM_OPS,
             HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE,
             HardwareCapability.MLAPO_NATIVE_WEIGHTS,
+            HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
+            HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS,
             HardwareCapability.NPUGRAPH_EX,
             HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES,
             HardwareCapability.STANDARD_MAMBA_PATCH,
             HardwareCapability.STANDARD_WORKER_PATCHES,
+            HardwareCapability.SWIGLU_OAI_MX_QUANT,
             HardwareCapability.TRITON_BATCH_MEMCPY,
             HardwareCapability.UNRESTRICTED_MLAPO,
         }
@@ -89,6 +106,7 @@ _EXPECTED_CAPABILITIES = {
         "device_adaptor_family",
         "device_addressing_mode",
         "weight_layout_policy",
+        "moe_comm_policy",
         "quantization_backend_family",
     ),
     [
@@ -100,6 +118,7 @@ _EXPECTED_CAPABILITIES = {
             DeviceAdaptorFamily.STANDARD,
             DeviceAddressingMode.DIRECT,
             WeightLayoutPolicy.CONFIGURABLE,
+            MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY,
             QuantizationBackendFamily.STANDARD,
         ),
         (
@@ -110,6 +129,7 @@ _EXPECTED_CAPABILITIES = {
             DeviceAdaptorFamily.STANDARD,
             DeviceAddressingMode.DUAL_CHIP_CARD,
             WeightLayoutPolicy.CONFIGURABLE,
+            MoECommPolicy.FUSED_OR_CAPACITY,
             QuantizationBackendFamily.STANDARD,
         ),
         (
@@ -120,6 +140,7 @@ _EXPECTED_CAPABILITIES = {
             DeviceAdaptorFamily.COMPATIBILITY,
             DeviceAddressingMode.DIRECT,
             WeightLayoutPolicy.FORCE_NZ,
+            MoECommPolicy.ALLGATHER,
             QuantizationBackendFamily.COMPATIBILITY,
         ),
         (
@@ -130,6 +151,7 @@ _EXPECTED_CAPABILITIES = {
             DeviceAdaptorFamily.FP8_OPTIMIZED,
             DeviceAddressingMode.DIRECT,
             WeightLayoutPolicy.CONFIGURABLE,
+            MoECommPolicy.CAPACITY_AND_WORLD_SIZE,
             QuantizationBackendFamily.STANDARD,
         ),
     ],
@@ -142,6 +164,7 @@ def test_hardware_profile_implementation_matrix(
     device_adaptor_family: DeviceAdaptorFamily,
     device_addressing_mode: DeviceAddressingMode,
     weight_layout_policy: WeightLayoutPolicy,
+    moe_comm_policy: MoECommPolicy,
     quantization_backend_family: QuantizationBackendFamily,
 ) -> None:
     profile = get_hardware_profile(device_type)
@@ -153,6 +176,7 @@ def test_hardware_profile_implementation_matrix(
     assert profile.device_adaptor_family is device_adaptor_family
     assert profile.device_addressing_mode is device_addressing_mode
     assert profile.weight_layout_policy is weight_layout_policy
+    assert profile.moe_comm_policy is moe_comm_policy
     assert profile.quantization_backend_family is quantization_backend_family
 
 

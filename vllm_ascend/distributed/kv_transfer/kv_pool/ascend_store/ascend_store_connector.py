@@ -27,6 +27,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.serial_utils import MsgpackDecoder
+from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendStoreKVConnectorWorkerMetadata
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
@@ -88,8 +89,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         self.use_layerwise = extra_config.get("use_layerwise", False)
-        backend_name = str(extra_config.get("backend", "mooncake")).lower()
-        self.use_gva_layerwise = self.use_layerwise and backend_name == "memcache"
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
 
         connector_name = vllm_config.kv_transfer_config.kv_connector
@@ -102,6 +101,8 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache_events: AscendStoreKVEvents | None = None
 
         self._current_step_has_real_forward = False
+        self._mamba_copy_bufs = None
+        self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -198,10 +199,18 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # Worker Side Methods
     ############################################################
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
-        if not self.use_gva_layerwise or getattr(self, "connector_worker", None) is None:
+        """Pure forwarder: the layerwise transfer gate is evaluated by the worker.
+
+        The connector must not derive the gate itself — the copy here was
+        dropped by #14465 while this method still read it (crashing
+        MultiConnector init), and restored by #15291. Gating at the
+        data-plane consumer, where the flag is already derived, makes that
+        class of regression structurally impossible and supersedes the
+        connector-side flag entirely.
+        """
+        if getattr(self, "connector_worker", None) is None:
             return False
-        self.connector_worker.set_external_slot_release_waiter(waiter)
-        return True
+        return self.connector_worker.set_external_slot_release_waiter(waiter)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
@@ -209,6 +218,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
+        self._mamba_copy_bufs = None
         metadata = self._get_connector_metadata()
         self._current_step_has_real_forward = forward_context is not None
         logger.debug(
@@ -230,6 +240,26 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if not self.use_layerwise:
             return
         self.connector_worker.wait_for_layer_load()
+        if self._mamba_copy_bufs is not None:
+            mamba_utils.do_mamba_copy_block_for_layer(
+                self._mamba_copy_bufs,
+                layer_name,
+            )
+
+    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+        if not self.requires_mamba_state_copy_after_layer_load:
+            return False
+        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
+        self._mamba_copy_bufs = copy_bufs
+        return True
+
+    def finish_mamba_state_copy(self) -> None:
+        if self._mamba_copy_bufs is None:
+            return
+        try:
+            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+        finally:
+            self._mamba_copy_bufs = None
 
     def save_kv_layer(
         self, layer_name: str, kv_layer: torch.Tensor, attn_metadata: "AttentionMetadata", **kwargs

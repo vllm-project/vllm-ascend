@@ -21,13 +21,9 @@ NPU vs CPU routing is determined by directory convention, not decorators.
 See ``.github/workflows/scripts/select_tests.py`` and
 ``.github/workflows/scripts/test_config.yaml`` for the routing rules.
 
-Conventions for UT directories:
-    tests/ut/<module>/            -> CPU runner (default)
-    tests/ut/<module>/a2/         -> A2 NPU x1
-    tests/ut/<module>/a2_2/       -> A2 NPU x2
-    tests/ut/<module>/a3_2/       -> A3 NPU x2
-    tests/ut/<module>/a3_4/       -> A3 NPU x4
-    tests/ut/<module>/310p/       -> 310P NPU x1
+All UTs run on CPU: mock ``torch_npu``/``torch.npu`` are installed when no
+NPU is available. 310P-specific tests live in ``tests/ut/_310p/`` but also
+run on CPU via mocks.
 """
 
 import importlib.util

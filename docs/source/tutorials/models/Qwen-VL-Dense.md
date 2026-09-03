@@ -209,11 +209,8 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
       --host 0.0.0.0 \
@@ -237,11 +234,8 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --host 0.0.0.0 \
@@ -266,11 +260,8 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \
