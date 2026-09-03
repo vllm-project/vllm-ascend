@@ -30,12 +30,12 @@ Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/K
 | Platform                     | Deployment                                 | Topology                  |
 | ---------------------------- | ------------------------------------------ | ------------------------- |
 | 4 × Atlas 800 A3 (64G × 16)  | Mixed Prefill/Decode deployment            | DP4/TP16/EP64             |
-| 16 × Atlas 800 A3 (64G × 16) | Eight Prefill nodes and eight Decode nodes | DP8/TP16/PP1 on each side |
+| 8 × Atlas 800 A3 (64G × 16)  | Four Prefill nodes and four Decode nodes   | DP4/TP16/PP1 on each side |
 | 8 × Atlas 800 A2 (64G × 8)   | Mixed Prefill/Decode deployment            | DP8/TP8/EP64              |
 
 The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
 
-For PD separation with DSpark speculative decoding, download the [RadixArk/Kimi-K3-DSpark](https://huggingface.co/RadixArk/Kimi-K3-DSpark) MLA draft-model checkpoint in addition to the target-model checkpoint.
+For DSpark speculative decoding in mixed or PD separation deployments, download the [Inferact/Kimi-K3-DSpark](https://huggingface.co/Inferact/Kimi-K3-DSpark) MLA draft-model checkpoint in addition to the target-model checkpoint.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -209,11 +209,18 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
 
 ## 5 Online Service Deployment
 
+!!! warning "DSpark long-context limitation"
+    For the current `Inferact/Kimi-K3-DSpark` draft weights, DSpark acceptance is low for approximately 20K–40K-token inputs and remains low for longer contexts. Consequently, 128K inputs may receive no effective speculative-decoding benefit. This is a limitation of the current draft weights, not of the DSpark framework; validate acceptance and end-to-end performance for the target workload before enabling the draft model.
+
+The A2 capabilities have not changed in this release and remain consistent with **vLLM-Ascend 0.23.0**; no iterative updates have been made.
+
 ### 5.1 Mixed Prefill/Decode Deployment
 
 === "Atlas 800 A3 (four-node)"
 
     The validated mixed deployment uses four Atlas 800 A3 (64G × 16) nodes. vLLM data parallelism spans the four nodes, each node runs one DP rank, and tensor parallelism uses all 16 NPUs in the node. The resulting topology is DP4/TP16/EP64.
+
+    On Atlas 800 A3, a mixed Prefill/Decode deployment follows the Prefill execution mode. HCCL therefore uses AICPU by default; leave `HCCL_OP_EXPANSION_MODE` unset.
 
     Before starting the service:
 
@@ -231,7 +238,6 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
         export NIC_NAME=<NODE0_NIC_NAME>
         export PORT=<SERVICE_PORT>
         export RPC_PORT=<DP_RPC_PORT>
-        export VLLM_VERSION=0.26.0
         export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
 
         export HCCL_BUFFSIZE=800
@@ -266,7 +272,7 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
             --speculative-config "$SPECULATIVE_CONFIG" \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --mm-processor-cache-gb 0 \
-            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert":true}' \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
@@ -288,7 +294,6 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
         export PORT=<SERVICE_PORT>
         export RPC_PORT=<DP_RPC_PORT>
         export DP_START_RANK=<1_OR_2_OR_3>
-        export VLLM_VERSION=0.26.0
         export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
 
         export HCCL_BUFFSIZE=800
@@ -325,7 +330,7 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
             --speculative-config "$SPECULATIVE_CONFIG" \
             --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
             --mm-processor-cache-gb 0 \
-            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert":true}' \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
             --mm-encoder-tp-mode data \
             --limit-mm-per-prompt '{"vision_chunk": 2}' \
             --enable-auto-tool-choice \
@@ -360,7 +365,7 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
     | `--enable-prefix-caching`                   | Enables automatic prefix caching.                                |
     | `--compilation-config`                      | Uses `FULL_DECODE_ONLY` ACL Graph replay.                        |
     | `--tokenizer-mode kimi_k3`                  | Uses the Kimi K3 tokenizer mode.                                 |
-    | `--additional-config`                       | Enables Ascend CPU binding and FlashComm1.                       |
+    | `--additional-config`                       | Enables Ascend CPU binding and FlashComm1.                         |
     | `HCCL_IF_IP` and socket interface variables | Bind HCCL and Gloo communication to the selected interface.      |
 
     !!! note
@@ -543,26 +548,18 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
 
     Do not set `HCCL_OP_EXPANSION_MODE=AIV` for this baseline. Start Node 0 first, then start Nodes 1 through 7 as soon as possible. If a worker exits immediately, verify that Node 0 is running, all nodes use the same RPC port, `--data-parallel-address` resolves to Node 0, and every worker has a unique DP start rank.
 
-### 5.2 Sixteen-Node PD Separation Deployment
+### 5.2 Eight-Node PD Separation Deployment
 
-The validated PD separation topology uses 16 Atlas 800 A3 (64G × 16) nodes: eight Prefill nodes and eight Decode nodes. Both sides use DP8/TP16/PP1. Prefill nodes additionally use a memcache-backed KV pool.
+The validated PD separation topology uses eight Atlas 800 A3 (64G × 16) nodes: four Prefill nodes and four Decode nodes. Both sides use DP4/TP16/PP1.
 
-Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow and [KV Pool](../../user_guide/feature_guide/kv_pool.md) for memcache pool concepts.
+Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
-This deployment supports DSpark speculative decoding. Configure the same draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses a Kimi K3 MLA draft model, TP16, greedy drafting, and seven speculative tokens.
+!!! note
+    On Atlas 800 A3, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command. Decode uses AIV; explicitly set `HCCL_OP_EXPANSION_MODE=AIV` in the Decode command.
 
-#### 5.2.1 Start the memcache MetaService
+This deployment supports DSpark speculative decoding. Configure the same `Inferact/Kimi-K3-DSpark` draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses TP16, greedy drafting, and seven speculative tokens.
 
-Start one MetaService instance before the Prefill engines:
-
-```shell
-export MMC_META_CONFIG_PATH=<PATH_TO_MMC_META_CONF>
-python -c "from memcache_hybrid import MetaService; MetaService.main()"
-```
-
-`mmc-meta.conf` configures MetaService and `mmc-local.conf` is loaded by every Prefill inference process. Run `pip show memcache_hybrid` to locate the installed package, copy the example files from `memcache_hybrid/config/`, and adapt them to the target environment.
-
-#### 5.2.2 Create the engine templates
+#### 5.2.1 Create the engine templates
 
 === "Prefill"
 
@@ -576,7 +573,6 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
     nic_name=<PREFILL_NIC_NAME>
     local_ip=<PREFILL_LOCAL_IP>
 
-    export VLLM_VERSION=0.26.0
     export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_BUFFSIZE=1024
@@ -586,7 +582,6 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
-    export MMC_LOCAL_CONFIG_PATH=<PATH_TO_MMC_LOCAL_CONF>
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export PYTHONHASHSEED=0
 
@@ -624,29 +619,27 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
         --safetensors_load_strategy prefetch \
         --mamba-cache-mode align \
         --enable-prefix-caching \
-        --additional-config '{"recompute_scheduler_enable":false,"enable_flashcomm1":true,"enable_mlapo":true,"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"recompute_scheduler_enable":false,"enable_flashcomm1":true,"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk": 2}' \
         --kv-transfer-config \
         '{
-          "kv_connector": "MultiConnector",
-          "kv_role": "kv_producer",
-          "kv_connector_extra_config": {
+         "kv_connector": "MultiConnector",
+         "kv_role": "kv_producer",
+         "kv_connector_extra_config": {
             "connectors": [
               {
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "'"$KV_PORT"'",
                 "kv_connector_extra_config": {
-                  "prefill": {"dp_size": 8, "tp_size": 16},
-                  "decode": {"dp_size": 8, "tp_size": 16}
-                }
-              },
-              {
-                "kv_connector": "AscendStoreConnector",
-                "kv_role": "kv_producer",
-                "kv_connector_extra_config": {
-                  "backend": "memcache",
-                  "lookup_rpc_port": "0"
+                    "prefill": {
+                        "dp_size": 4,
+                        "tp_size": 16
+                    },
+                    "decode": {
+                        "dp_size": 4,
+                        "tp_size": 16
+                   }
                 }
               }
             ]
@@ -666,7 +659,6 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
     nic_name=<DECODE_NIC_NAME>
     local_ip=<DECODE_LOCAL_IP>
 
-    export VLLM_VERSION=0.26.0
     export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
     export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
     export HCCL_BUFFSIZE=1024
@@ -713,7 +705,7 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
         --safetensors_load_strategy prefetch \
         --mamba-cache-mode align \
         --enable-prefix-caching \
-        --additional-config '{"recompute_scheduler_enable":false,"enable_flashcomm1":true,"enable_mlapo":true,"multistream_overlap_shared_expert":true}' \
+        --additional-config '{"recompute_scheduler_enable":false,"multistream_overlap_shared_expert":true}' \
         --limit-mm-per-prompt '{"vision_chunk":2}' \
         --kv-transfer-config \
         '{
@@ -721,19 +713,25 @@ python -c "from memcache_hybrid import MetaService; MetaService.main()"
           "kv_role": "kv_consumer",
           "kv_port": "'"$KV_PORT"'",
           "kv_connector_extra_config": {
-            "prefill": {"dp_size": 8, "tp_size": 16},
-            "decode": {"dp_size": 8, "tp_size": 16}
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": 16
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": 16
+            }
           }
         }'
     ```
 
-#### 5.2.3 Start the engines
+#### 5.2.2 Start the engines
 
-Deploy `launch_online_dp.py` and the corresponding engine template on every node. The following example starts one local DP rank in a DP8/TP16/PP1 group:
+Deploy `launch_online_dp.py` and the corresponding engine template on every node. The following example starts one local DP rank in a DP4/TP16/PP1 group:
 
 ```shell
 python launch_online_dp.py \
-    --dp-size 8 \
+    --dp-size 4 \
     --tp-size 16 \
     --pp-size 1 \
     --dp-size-local 1 \
@@ -743,7 +741,7 @@ python launch_online_dp.py \
     --vllm-start-port <VLLM_START_PORT>
 ```
 
-Use ranks `0` through `7` for each eight-node side. Configure independent master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode groups.
+Use ranks `0` through `3` for each four-node side. Configure independent master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode groups.
 
 After the engines start, configure and start the load-balancing proxy as described in [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md#start-the-service).
 
@@ -751,13 +749,12 @@ Key PD settings:
 
 | Setting                      | Value                        | Description                                             |
 | ---------------------------- | ---------------------------- | ------------------------------------------------------- |
-| Topology                     | 8P8D                         | Eight Prefill and eight Decode nodes.                   |
-| `--dp-size`                  | `8`                          | Eight DP ranks on each side.                            |
+| Topology                     | 4P4D                         | Four Prefill and four Decode nodes.                     |
+| `--dp-size`                  | `4`                          | Four DP ranks on each side.                             |
 | `--tp-size`                  | `16`                         | Uses all 16 NPUs in a node.                             |
 | `--pp-size`                  | `1`                          | One pipeline stage per engine.                          |
 | `--dp-size-local`            | `1`                          | One DP rank per node.                                   |
 | `KV_PORT`                    | `36000` for P, `36200` for D | Separates producer and consumer KV traffic.             |
-| `MMC_LOCAL_CONFIG_PATH`      | Prefill only                 | Connects the producer to the memcache KV pool.          |
 | `recompute_scheduler_enable` | `false`                      | Matches the validated Prefill and Decode configuration. |
 
 ## 6 Functional Verification
@@ -821,195 +818,61 @@ Key PD settings:
 
     Production traffic should normally omit this header so that requests remain balanced across all DP ranks. The request is always sent to the Node 0 API endpoint, even when a worker rank is selected.
 
-## 7 AISBench Evaluation
+## 7 Accuracy Evaluation
 
-The following GPQA accuracy and performance evaluation procedures use AISBench with the four-node DP4/TP16/EP64 service.
+Here is one accuracy evaluation method for Kimi K3.
 
-### 7.1 Install AISBench
+### Using AISBench
 
-Run AISBench in a separate environment or container on the master node so the load generator does not affect the serving processes:
+1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for the environment setup and evaluation procedure.
 
-```shell
-git clone https://github.com/AISBench/benchmark
-cd benchmark
-pip3 install -e ./ --use-pep517
-pip3 install -r requirements/api.txt
-pip3 install -r requirements/extra.txt
-pip3 install -r requirements/hf_vl_dependency.txt
-```
+2. Run AISBench against the Kimi K3 service and collect the generated result files. Keep the model and tokenizer revisions, chat template, sampling settings, dataset, and evaluator revision fixed when comparing results.
 
-### 7.2 GPQA Accuracy Evaluation
+## 8 Performance Evaluation
 
-GPQA Diamond is a four-option scientific question-answering benchmark. Use the standard four-node mixed deployment in [Section 5.1.1](#511-four-node-mixed-deployment) for this test; do not apply the performance-specific service settings in the next section.
+### Using AISBench
 
-#### 7.2.1 Download the GPQA Dataset
+Refer to [Using AISBench for performance evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation) for the environment setup and evaluation procedure.
 
-Download and extract the dataset in the AISBench dataset directory:
+### Using vLLM Benchmark
+
+Use `vllm bench serve` to measure the online serving performance of the Kimi K3 service. The following is a minimal example for eight 128K-input, 1K-output requests. Replace the service address, model path, dataset path, and result directory for the target environment.
+
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ```shell
-cd <AISBENCH_BENCHMARK_DIRECTORY>/ais_bench/datasets
-wget http://opencompass.oss-cn-shanghai.aliyuncs.com/datasets/data/gpqa.zip
-unzip gpqa.zip
+export DATA_NUM=8
+export CONCURRENCY=8
+
+vllm bench serve \
+  --base-url http://<SERVICE_HOST>:<SERVICE_PORT> \
+  --endpoint /v1/completions \
+  --model kimi-k3 \
+  --tokenizer <KIMI_K3_MODEL_PATH> \
+  --tokenizer-mode kimi_k3 \
+  --trust-remote-code \
+  --dataset-name custom \
+  --dataset-path <DATASET_PATH> \
+  --custom-output-len 1024 \
+  --skip-chat-template \
+  --num-prompts ${DATA_NUM} \
+  --request-rate inf \
+  --max-concurrency ${CONCURRENCY} \
+  --ignore-eos \
+  --temperature 0 \
+  --seed 0 \
+  --disable-shuffle \
+  --save-result \
+  --result-dir <RESULT_DIR>
 ```
 
-This creates the `gpqa/` directory containing `gpqa_diamond.csv`, which is the subset used by the configured benchmark.
-
-#### 7.2.2 Configure AISBench
-
-Configure the following files in the AISBench source tree:
-
-- `<AISBENCH_BENCHMARK_DIRECTORY>/ais_bench/benchmark/configs/models/vllm_api/vllm_api_stream_chat.py`
-    - Set `path` to `<KIMI_K3_MODEL_PATH>`.
-    - Set `model` to `kimi-k3`.
-    - Set `host_ip` and `host_port` to the Node 0 service endpoint.
-    - Set `max_out_len` to `65536` and `batch_size` to `32`.
-    - Configure `generation_kwargs` with the Kimi K3 settings used for the evaluation.
-- `<AISBENCH_BENCHMARK_DIRECTORY>/ais_bench/benchmark/configs/datasets/gpqa/gpqa_gen_0_shot_cot_chat_prompt.py`
-    - Set `path` to the directory that contains `gpqa_diamond.csv`. The default is `ais_bench/datasets/gpqa/`.
-
-The command below uses `gpqa_gen_0_shot_cot_chat_prompt`; do not configure `gpqa_gen_0_shot_str` for this run. The CoT prompt requires the response to end with `Answer: <A|B|C|D>`.
-
-#### 7.2.3 Run GPQA
-
-After the service is ready, run:
-
-```shell
-ais_bench --models vllm_api_stream_chat --datasets gpqa_gen_0_shot_cot_chat_prompt --debug --dump-eval-details
-```
-
-#### 7.2.4 View Results
-
-AISBench writes output to `outputs/default/<timestamp>/` by default. Read the `accuracy` field from `results/vllm-api-stream-chat/GPQA_diamond.json`. The corresponding `predictions/` output and evaluation details from `--dump-eval-details` can be used to inspect individual answers.
-
-### 7.3 Performance Service Configuration
-
-Change these values from the standard Section 5.1.1 deployment on all four nodes:
-
-| Parameter                  | Standard deployment | Performance test |
-| -------------------------- | ------------------- | ---------------- |
-| `--max-model-len`          | 131072              | 250000           |
-| `--max-num-batched-tokens` | 24576               | 8192             |
-| `--gpu-memory-utilization` | 0.9                 | 0.95             |
-
-The master-node `vllm serve` command is:
-
-```shell
-vllm serve <KIMI_K3_MODEL_PATH> \
-    --served-model-name kimi-k3 \
-    --port <SERVICE_PORT> \
-    --allowed-local-media-path / \
-    --trust-remote-code \
-    --tensor-parallel-size 16 \
-    --data-parallel-size 4 \
-    --data-parallel-size-local 1 \
-    --data-parallel-address <NODE0_LOCAL_IP> \
-    --data-parallel-rpc-port <DP_RPC_PORT> \
-    --enable-prefix-caching \
-    --enable-expert-parallel \
-    --max-num-seqs 16 \
-    --max-model-len 250000 \
-    --max-num-batched-tokens 8192 \
-    --gpu-memory-utilization 0.95 \
-    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-    --mm-processor-cache-gb 0 \
-    --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
-    --mm-encoder-tp-mode data \
-    --limit-mm-per-prompt '{"vision_chunk": 2}' \
-    --enable-auto-tool-choice \
-    --reasoning-parser kimi_k3 \
-    --tool-call-parser kimi_k3 \
-    --tokenizer-mode kimi_k3
-```
-
-Worker nodes use the same performance values and the worker-specific arguments from Section 5.1.1.
-
-### 7.4 Configure the Load Generator
-
-Before running `aisbench_test.py`, create its dataset directory and configure the validation helper:
-
-```shell
-mkdir -p <DATASET_DIRECTORY>
-```
-
-```python
-DATASET_PATH = "<DATASET_DIRECTORY>"
-WORK_PATH = "<AISBENCH_BENCHMARK_DIRECTORY>"
-MODEL_NAME = "kimi-k3"
-MODEL_PATH = "<KIMI_K3_MODEL_PATH>"
-HOST_IP = "<SERVICE_IP>"
-HOST_PORT = "<SERVICE_PORT>"
-DEFAULT_PERFORMANCE_TEST = "default_perf"
-OUTPUT_DIR = "./outputs/default"
-
-# Set the serving endpoints when collecting per-DP prefix-cache metrics.
-# PD deployments should list every relevant endpoint.
-POD_INFO = []
-```
-
-Disable proxies before the test:
-
-```shell
-env | grep -i proxy
-unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
-```
-
-### 7.5 Run the Performance Tests
-
-8K input, 1K output, and no prefix-cache hit:
-
-```shell
-python3 aisbench_test.py \
-    --input_len 8192 \
-    --output_len 1024 \
-    --data_num 16 \
-    --concurrency 4 \
-    --request_rate 0 \
-    --repeat_rate 0 \
-    --prefix_test
-```
-
-128K input, 1K output, and a 99% prefix-cache hit rate:
-
-```shell
-python3 aisbench_test.py \
-    --input_len 131024 \
-    --output_len 1024 \
-    --data_num 16 \
-    --concurrency 4 \
-    --request_rate 0 \
-    --dataset_type prefix_cache \
-    --repeat_rate 0.99 \
-    --prefix_test
-```
-
-`request_rate=0` sends requests as quickly as the configured concurrency permits. `repeat_rate=0.99` makes 99% of requests reuse the same prefix.
-
-### 7.6 Enabled Optimizations
-
-| Feature                                    | Description                                                                                                             |
-| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
-| Chunked Prefill                            | Splits long prefill inputs into chunks to reduce per-step memory peaks.                                                 |
-| Asynchronous scheduling                    | Decouples scheduling and execution.                                                                                     |
-| Prefix Cache                               | Reuses KV state for repeated prefixes.                                                                                  |
-| DP + TP + EP                               | Combines data, tensor, and expert parallelism for the MoE model.                                                        |
-| ACL Graph                                  | Uses `FULL_DECODE_ONLY` replay to reduce decode scheduling overhead.                                                    |
-| KDA + MLA cache management                 | Manages the heterogeneous recurrent and KV states.                                                                      |
-| FlashComm1                                 | Enables communication optimization.                                                                                     |
-| CPU Binding                                | Reduces cross-core scheduling overhead.                                                                                 |
-| DSpark speculative decoding (PD only)      | Uses the Kimi K3 MLA draft model to generate seven greedy draft tokens per forward pass.                                |
-| KDA fused norm gate and attention residual | Uses Triton fused paths when Triton is available. No server option is required.                                         |
-| KDA fused QKV projection                   | Fuses the KDA Q, K, and V projections automatically for supported quantized linear paths. No server option is required. |
-| Stride-aware recurrent KDA state update    | Updates non-contiguous KDA state views in place without copying the full state. No server option is required.           |
-
-The automatic operator optimizations require a serving image that includes their corresponding vLLM-Ascend implementation.
-
-## 8 Performance Tuning
+## 9 Performance Tuning
 
 Use the validated deployment values above as a baseline. Adjust `max-model-len`, `max-num-seqs`, `max-num-batched-tokens`, and `gpu-memory-utilization` together for the target workload.
 
 Refer to the [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md) and the [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for additional guidance.
 
-## 9 FAQ
+## 10 FAQ
 
 For common environment, installation, and general parameter issues, refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
 
@@ -1020,4 +883,4 @@ A: Configure `--tokenizer-mode kimi_k3`, `--enable-auto-tool-choice`, `--reasoni
 - **Q: How should TP size be selected?**
 A: TP size must divide the checkpoint's attention-head count. It also affects KDA state layout and expert placement, so validate memory capacity and communication performance together.
 - **Q: How is DSpark enabled in PD separation?**
-A: Download a Kimi K3 MLA DSpark draft checkpoint, set `DRAFT_MODEL_PATH` on both Prefill and Decode nodes, and pass the same `--speculative-config` to both. Prefill must retain `--enforce-eager`.
+A: Download `Inferact/Kimi-K3-DSpark`, set `DRAFT_MODEL_PATH` on both Prefill and Decode nodes, and pass the same `--speculative-config` to both. Prefill must retain `--enforce-eager`.
