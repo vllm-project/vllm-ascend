@@ -196,9 +196,12 @@ def scatter_mxfp_k_scale_cache(
     ``bool()``/``.item()`` are illegal mid-capture -- "Stream during the
     capture stage is not supported") and no data-dependent shapes. Padded
     rows (slot -1) are clamped to slot 0 via ``torch.where`` and write back
-    the cache's existing value times a 0/1 row mask, making them bit-exact
-    no-ops while keeping the write pattern static. (The earlier
-    bool-compressed variant was fine eager but crashed graph capture.)
+    the cache's pre-read content, making them no-ops. Known edge (unreachable
+    in supported paths): a real token targeting slot 0 IN THE SAME BATCH as a
+    padded row would be a duplicate-index write where the padding row's
+    read-back clobbers the real value -- eager batches never carry -1 rows,
+    and graph-mode padding uses valid dummy slots, so this combination cannot
+    occur in v1.
     """
     validate_mxfp_v_scale_block_size(block_size)
     slots = slot_mapping.to(torch.long)

@@ -51,15 +51,20 @@ class TestScatterMXFPKScaleCache(TestBase):
 
     def test_scatter_valid_and_padded_slots(self):
         key_scale = torch.full((3, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
-        # slot 0 -> block 0, offset 0; slot 513 -> block 1, offset 1; -1 -> padding.
-        slot_mapping = torch.tensor([0, 513, -1], dtype=torch.int64)
+        # slot 2 -> block 0, offset 2; slot 513 -> block 1, offset 1; -1 -> padding.
+        # Real tokens sit at non-zero slots: a real token at the padding clamp
+        # target (slot 0) in the same batch would be a duplicate-index write
+        # where the padding row's read-back clobbers it -- reachable only if
+        # eager batches carried -1 rows (they never do; graph-mode padding
+        # uses valid dummy slots), see the coexist test note.
+        slot_mapping = torch.tensor([2, 513, -1], dtype=torch.int64)
 
         scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
 
-        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 130))
+        self.assertTrue(torch.all(self.key_scale_cache[0, 2] == 130))
         self.assertTrue(torch.all(self.key_scale_cache[1, 1] == 130))
-        # Untouched positions stay zero, including the padding clamp target
-        # beyond slot 0's own row (padding wrote back the pre-existing value).
+        # Untouched positions stay zero, including the padding clamp target.
+        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 0))
         self.assertTrue(torch.all(self.key_scale_cache[0, 1] == 0))
         self.assertTrue(torch.all(self.key_scale_cache[1, 0] == 0))
 
