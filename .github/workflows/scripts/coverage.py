@@ -22,17 +22,8 @@ for tests in (meta.get("curated_tests", {}) or {}).values():
     _configured_paths.update(t.rstrip("/") for t in tests if isinstance(t, str))
 _configured_paths.update(t.rstrip("/") for t in (meta.get("skip_tests", []) or []) if isinstance(t, str))
 
-_pins = dict(meta.get("pinned_routes", {}) or {})
-for pin_config in _pins.values():
-    if not isinstance(pin_config, dict):
-        continue
-    tests = pin_config.get("tests", [])
-    if not isinstance(tests, list):
-        continue
-    for t in tests:
-        if not isinstance(t, str):
-            continue
-        _configured_paths.add(t.rstrip("/"))
+_pins = [t.rstrip("/") for t in (meta.get("accuracy_tests", []) or []) if isinstance(t, str)]
+_configured_paths.update(_pins)
 
 # ============================================================
 # 1. BROKEN PATHS — A non-existent path is referenced in yaml
@@ -91,7 +82,7 @@ for pattern_str, runner_config in sorted(_rm.items()):
 rm_broken = len(rm_errors) > 0
 
 # ============================================================
-# 4. partition and pinned route validity
+# 4. partition validity
 # ============================================================
 part_errors: list[str] = []
 # Collect actual runner keys used in routing
@@ -102,8 +93,6 @@ for p in all_expanded_files:
             for rk in rc.values():
                 actual_runner_keys.add(rk)
             break
-
-actual_runner_keys.update(str(target_partition) for target_partition in _pins)
 
 for key in sorted(actual_runner_keys - _part.keys()):
     part_errors.append(f"Referenced partition {key!r}: missing configuration")

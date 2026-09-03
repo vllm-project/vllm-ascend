@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.attention.backend import AttentionCGSupport
 
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSAPCPImpl,
@@ -35,13 +36,17 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
 )
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
     IndexerOverlapPlan,
 )
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm_ascend.worker.v2.pcp_manager import (
+    AscendPCPAttentionContext,
+    AscendPCPManager,
+)
 
 
 def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
@@ -1105,6 +1110,13 @@ def test_dsa_backend_selects_pcp_and_rejects_legacy_cp():
     ):
         assert AscendDSABackend.get_builder_cls() is AscendDSAPCPMetadataBuilder
         assert AscendDSABackend.get_impl_cls() is AscendDSAPCPImpl
+        assert (
+            AscendDSAPCPMetadataBuilder.get_cudagraph_support(
+                cast(Any, None),
+                cast(Any, None),
+            )
+            is AttentionCGSupport.UNIFORM_BATCH
+        )
 
     with (
         patch("vllm_ascend.attention.dsa_v1.enable_pcp", return_value=True),
@@ -1123,6 +1135,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
     builder._pcp_world_size = 2
     builder._pcp_rank = 1
+    builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)
     builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
 
     raw_slot_mapping = torch.arange(6, dtype=torch.int64)
@@ -1130,6 +1143,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     global_batch = SimpleNamespace(
         num_reqs=2,
         num_tokens=5,
+        num_tokens_after_padding=5,
         query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
         query_start_loc_np=np.array([0, 2, 5], dtype=np.int32),
         seq_lens=torch.tensor([4, 7], dtype=torch.int32),
@@ -1140,6 +1154,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
         dcp_local_seq_lens=None,
         positions=torch.arange(5, dtype=torch.int64),
         attn_state=object(),
+        is_dummy=False,
         is_prefilling_np=np.array([True, True]),
         idx_mapping=torch.tensor([0, 1], dtype=torch.int32),
         num_reqs_after_padding=2,
@@ -1151,10 +1166,14 @@ def test_pcp_metadata_builds_from_manager_global_view():
     local_common = SimpleNamespace(
         attn_state="local",
         num_actual_tokens=2,
+        num_input_tokens=3,
+        num_reqs=2,
     )
     common_attn_metadata = SimpleNamespace(
         num_actual_tokens=2,
+        num_input_tokens=3,
         slot_mapping=raw_slot_mapping,
+        block_table_tensor=torch.tensor([[3]], dtype=torch.int32),
         max_seq_len=8,
         causal=True,
         replace=MagicMock(return_value=local_common),
@@ -1167,11 +1186,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     )
     pcp_manager._global_batch_slot_mappings = global_slot_mappings
     pcp_manager._hidden_restore_idx = hidden_restore_idx
-    pcp_context = pcp_manager.build_attention_context(
-        SimpleNamespace(is_dummy=False, num_tokens_after_padding=3),
-        (),
-        torch.empty(0),
-    )
+    pcp_context = pcp_manager.build_attention_context()
     global_metadata = AscendDSAMetadata(
         num_actual_tokens=5,
         num_decodes=0,
@@ -1200,13 +1215,13 @@ def test_pcp_metadata_builds_from_manager_global_view():
             pcp_context=pcp_context,
             pcp_cache_group_idx=1,
             common_ratio_to_sas_metadata={"local": True},
-            num_actual_reqs=7,
+            num_actual_reqs=2,
         )
 
     assert isinstance(actual, AscendDSAPCPMetadata)
     assert actual.num_actual_tokens == local_metadata.num_actual_tokens
     assert actual.global_dsa_metadata is global_metadata
-    assert actual.hidden_restore_idx is hidden_restore_idx
+    assert torch.equal(actual.hidden_restore_idx, hidden_restore_idx)
     assert actual.local_num_tokens_after_padding == 3
     gather_block_tables.assert_called_once_with(
         global_batch.idx_mapping,
@@ -1215,7 +1230,7 @@ def test_pcp_metadata_builds_from_manager_global_view():
     common_attn_metadata.replace.assert_called_once()
     replace_kwargs = common_attn_metadata.replace.call_args.kwargs
     assert torch.equal(replace_kwargs["slot_mapping"], raw_slot_mapping.view(2, 3)[1])
-    assert replace_kwargs["num_input_tokens"] == 3
+    assert "block_table_tensor" not in replace_kwargs
     global_call = builder._global_metadata_builder.build.call_args
     global_common = global_call.args[1]
     assert global_common.num_actual_tokens == global_batch.num_tokens
@@ -1225,7 +1240,156 @@ def test_pcp_metadata_builds_from_manager_global_view():
     assert global_call.kwargs["num_actual_reqs"] == global_batch.num_reqs
     assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
     assert build_local.call_args.args[2] is local_common
-    assert build_local.call_args.kwargs["num_actual_reqs"] == 7
+    assert build_local.call_args.kwargs["num_actual_reqs"] == 2
+
+
+@pytest.mark.parametrize("is_dummy", [True, False], ids=["capture", "replay"])
+def test_pcp_graph_metadata_builds_fixed_decode_shape(is_dummy: bool):
+    """Cover the fixed graph metadata contract during capture and replay."""
+    graph_size = 4
+    num_actual_reqs = graph_size if is_dummy else 2
+    num_actual_tokens = num_actual_reqs
+    query_start_loc = (
+        torch.arange(graph_size + 1, dtype=torch.int32)
+        if is_dummy
+        else torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32)
+    )
+    expected_query_start_loc = torch.arange(graph_size + 1, dtype=torch.int32)
+    seq_lens = torch.ones(graph_size, dtype=torch.int32) if is_dummy else torch.tensor([8, 9, 0, 0], dtype=torch.int32)
+
+    builder = AscendDSAPCPMetadataBuilder.__new__(AscendDSAPCPMetadataBuilder)
+    builder._pcp_world_size = 2
+    builder._pcp_rank = 1
+    builder._hidden_restore_idx_buffer = torch.empty(8, dtype=torch.int64)
+    builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
+
+    global_slot_mappings = (
+        torch.tensor([[10, 11, 12, 13]], dtype=torch.int64)
+        if is_dummy
+        else torch.tensor([[10, 11, -1, -1]], dtype=torch.int64)
+    )
+    global_batch = SimpleNamespace(
+        num_reqs=num_actual_reqs,
+        num_reqs_after_padding=graph_size,
+        num_tokens=num_actual_tokens,
+        num_tokens_after_padding=graph_size,
+        query_start_loc=query_start_loc.clone(),
+        query_start_loc_np=query_start_loc.numpy().copy(),
+        seq_lens=seq_lens.clone(),
+        seq_lens_np=seq_lens.numpy().copy(),
+        seq_lens_cpu_upper_bound=seq_lens.clone(),
+        num_computed_tokens_np=np.arange(num_actual_reqs, dtype=np.int32),
+        num_scheduled_tokens=np.ones(num_actual_reqs, dtype=np.int32),
+        dcp_local_seq_lens=None,
+        positions=torch.arange(graph_size, dtype=torch.int64),
+        attn_state="global",
+        is_dummy=is_dummy,
+        is_prefilling_np=np.zeros(num_actual_reqs, dtype=np.bool_),
+    )
+    original_hidden_restore_idx = (
+        torch.tensor([3, 1, 2, 0], dtype=torch.int64) if is_dummy else torch.tensor([1, 0, 7, 6], dtype=torch.int64)
+    )
+    pcp_context = AscendPCPAttentionContext(
+        global_batch=global_batch,
+        global_block_tables=(torch.arange(graph_size, dtype=torch.int32).view(-1, 1),),
+        global_slot_mappings=global_slot_mappings,
+        hidden_restore_idx=original_hidden_restore_idx,
+    )
+
+    local_slot_mapping = (
+        torch.arange(20, 20 + 2 * graph_size, dtype=torch.int64)
+        if is_dummy
+        else torch.tensor([20, 21, -1, -1, 30, 31, -1, -1], dtype=torch.int64)
+    )
+    local_common = AscendCommonAttentionMetadata(
+        query_start_loc=query_start_loc.clone(),
+        query_start_loc_cpu=query_start_loc.clone(),
+        seq_lens=seq_lens.clone(),
+        seq_lens_cpu=seq_lens.clone(),
+        seq_lens_cpu_upper_bound=seq_lens.clone(),
+        num_reqs=graph_size,
+        num_actual_tokens=num_actual_tokens,
+        max_query_len=1,
+        max_seq_len=16,
+        block_table_tensor=torch.zeros((graph_size, 1), dtype=torch.int32),
+        slot_mapping=local_slot_mapping,
+        positions=torch.arange(graph_size, dtype=torch.int64),
+        attn_state="local",
+        num_input_tokens=graph_size,
+        is_prefilling=torch.zeros(graph_size, dtype=torch.bool),
+    )
+    global_metadata = AscendDSAMetadata(
+        num_actual_tokens=num_actual_tokens,
+        num_decodes=graph_size,
+        num_decode_tokens=num_actual_tokens,
+        num_prefills=0,
+    )
+    local_metadata = AscendDSAMetadata(
+        num_actual_tokens=num_actual_tokens,
+        num_decodes=graph_size,
+        num_decode_tokens=num_actual_tokens,
+        num_prefills=0,
+    )
+    builder._global_metadata_builder = SimpleNamespace(
+        build=MagicMock(return_value=global_metadata),
+    )
+    shared_local_metadata = {"local": True}
+
+    with patch.object(
+        AscendDSAMetadataBuilder,
+        "build",
+        autospec=True,
+        return_value=local_metadata,
+    ) as build_local:
+        actual = builder.build(
+            0,
+            local_common,
+            pcp_context=pcp_context,
+            pcp_cache_group_idx=0,
+            num_actual_reqs=num_actual_reqs,
+            common_ratio_to_sas_metadata=shared_local_metadata,
+        )
+
+    expected_global_slots = (
+        torch.full((1, graph_size), -1, dtype=torch.int64)
+        if is_dummy
+        else torch.tensor([[10, 11, -1, -1]], dtype=torch.int64)
+    )
+    expected_local_slots = (
+        torch.full((graph_size,), -1, dtype=torch.int64)
+        if is_dummy
+        else torch.tensor([30, 31, -1, -1], dtype=torch.int64)
+    )
+    expected_restore_idx = original_hidden_restore_idx if is_dummy else torch.tensor([1, 0, 0, 0], dtype=torch.int64)
+
+    assert actual.global_dsa_metadata is global_metadata
+    assert actual.local_num_tokens_after_padding == graph_size
+    assert torch.equal(actual.hidden_restore_idx, expected_restore_idx)
+    assert actual.hidden_restore_idx.data_ptr() == builder._hidden_restore_idx_buffer.data_ptr()
+
+    global_call = builder._global_metadata_builder.build.call_args
+    global_common = global_call.args[1]
+    assert global_common.num_reqs == graph_size
+    assert global_common.num_actual_tokens == num_actual_tokens
+    assert global_common.num_input_tokens == graph_size
+    assert torch.equal(global_common.query_start_loc, expected_query_start_loc)
+    assert torch.equal(global_common.query_start_loc_cpu, expected_query_start_loc)
+    assert torch.equal(global_common.seq_lens, seq_lens)
+    assert torch.equal(global_common.slot_mapping, expected_global_slots[0])
+    assert global_call.kwargs["num_actual_reqs"] == num_actual_reqs
+    assert global_call.kwargs["common_ratio_to_sas_metadata"] == {}
+
+    local_call = build_local.call_args
+    built_local_common = local_call.args[2]
+    assert built_local_common.num_reqs == graph_size
+    assert built_local_common.num_actual_tokens == num_actual_tokens
+    assert built_local_common.num_input_tokens == graph_size
+    assert torch.equal(built_local_common.query_start_loc, expected_query_start_loc)
+    assert torch.equal(built_local_common.query_start_loc_cpu, expected_query_start_loc)
+    assert torch.equal(built_local_common.seq_lens, seq_lens)
+    assert torch.equal(built_local_common.slot_mapping, expected_local_slots)
+    assert local_call.kwargs["num_actual_reqs"] == num_actual_reqs
+    assert local_call.kwargs["common_ratio_to_sas_metadata"] is shared_local_metadata
 
 
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])

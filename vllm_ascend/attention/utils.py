@@ -21,6 +21,18 @@ from vllm_ascend.utils import (
 
 SFA_QSFA_TILE_SIZE = 128
 
+_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset({"Glm5NextIndexerCache", "Glm5NextTailCache"})
+
+
+def is_glm5_next_kpool_cache(attn_module: Any) -> bool:
+    """Return True for GLM-5.3-Flash kpool indexer / tail cache layers.
+
+    Those classes subclass DeepseekV32IndexerCache but keep their own
+    ``compress_ratio`` / ``KpoolTailSpec`` layouts. The DeepSeek V3.2 SFA
+    rewrite must not replace them with ``AscendSFAIndexerCacheSpec``.
+    """
+    return type(attn_module).__name__ in _GLM5_NEXT_KPOOL_CACHE_TYPES
+
 
 def get_or_register_attention_buffer(
     vllm_config: VllmConfig,
@@ -477,7 +489,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.wait_for_layer_load(layer_name)
@@ -494,7 +506,7 @@ def maybe_save_kv_layer_to_connector(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)

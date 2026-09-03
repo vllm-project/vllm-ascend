@@ -148,6 +148,44 @@
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
 #       for selecting the MoE runner implementation.
 #
+# ** 7a. File: platform/patch_glm5next_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY`
+#    Why:
+#       The GLM-5.3-Flash architecture is maintained in vllm-ascend
+#       (`vllm_ascend/models/glm5next/`) rather than upstream, so its config
+#       classes are not in vLLM's `model_type` lookup table. Without an entry,
+#       loading a GLM-5.3-Flash checkpoint fails to resolve `glm5_next`.
+#    How：
+#       Insert `Glm5NextConfig` / `Glm5NextTextConfig` / `Glm5NextVisionConfig`
+#       into `_CONFIG_REGISTRY`. The registry is a `LazyConfigDict` whose values
+#       may be either a module attribute name or the class itself, so the
+#       downstream classes are inserted directly.
+#    Related PR (if no, explain why):
+#       No. The upstream GLM-5.3-Flash PR (vllm-project/vllm#53906) is not
+#       merged, and vllm-ascend carries the architecture downstream instead of
+#       depending on it.
+#    Future Plan:
+#       Remove this patch once the supported vLLM version registers the
+#       GLM-5.3-Flash configs itself.
+#
+#   2. `vllm.config.model.ModelConfig.is_deepseek_mla`
+#    Why:
+#       GLM-5.3-Flash uses MLA, but upstream decides `is_deepseek_mla` from a
+#       hard-coded `model_type` tuple that cannot know about a downstream
+#       architecture. Answering False routes the model down the non-MLA KV cache
+#       and quantization paths.
+#    How：
+#       Wrap the property so it additionally returns True for `glm5_next` /
+#       `glm5_next_text` when the text config carries `kv_lora_rank`, preserving
+#       upstream behavior for every other model type.
+#    Related PR (if no, explain why):
+#       No, see above.
+#    Future Plan:
+#       Remove this patch once upstream either includes the GLM-5.3-Flash
+#       model types or resolves MLA from the config contents instead of a
+#       model_type whitelist.
+#
 # ** 8. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
@@ -191,7 +229,25 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 10. File: platform/patch_mamba_config.py**
+# ** 10. File: platform/patch_mamba_block_aligned_split.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       On a PD decode consumer, a request with one prompt token remaining can
+#       be padded to a `1 + K` speculative verifier window before Mamba
+#       alignment runs. Splitting that window at the next block boundary makes
+#       its physical width smaller than the advertised speculative placeholder
+#       count.
+#    How:
+#       Return the complete requested width on KV consumers. Delegate producers
+#       and non-PD deployments to the original upstream method unchanged.
+#    Related issue:
+#       https://github.com/vllm-project/vllm/issues/54392
+#    Future Plan:
+#       Remove this compatibility patch once upstream preserves speculative
+#       window atomicity for PD-admitted requests.
+#
+# ** 10a. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -739,7 +795,9 @@
 #       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
 #    How:
 #       1. patch to remove assert
-#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
+#       2. patch to collect per-layer copy metadata in preprocess_mamba. With
+#          layerwise KV transfer, copy each layer's state only after that
+#          layer finishes loading; otherwise keep the original batched copy.
 #    Future Plan:
 #       Remove this patch when:
 #       vLLM itself supports kv transfer for mamba
@@ -924,6 +982,22 @@
 #    Future Plan:
 #       Remove this patch when torch_npu's Triton includes
 #       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
+#
+#   3. `vllm.third_party.flash_linear_attention.ops.kda`
+#    Why:
+#       GLM-5.3-Flash and Kimi KDA layers import `fused_recurrent_kda` /
+#       `chunk_kda_with_fused_gate` from upstream FLA. Those kernels are CUDA
+#       Triton; Ascend already has NPU Triton equivalents under
+#       `vllm_ascend.ops.triton.kda`.
+#    How：
+#       Rebind the FLA kda entry points to the NPU implementations before the
+#       model is constructed. The NPU wrappers expand GLM's bounded (safe)
+#       gate and beta sigmoid in Python because the NPU recurrent kernel does
+#       not fuse `COMPUTE_GATE` / `SIGMOID_BETA`.
+#    Related PR (if no, explain why):
+#       Native FP8 serving of zai-org/GLM-5.3-Flash on Ascend 950.
+#    Future Plan:
+#       Remove this patch when vLLM Triton ops dispatch to the Ascend backend.
 #
 # ** 22. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

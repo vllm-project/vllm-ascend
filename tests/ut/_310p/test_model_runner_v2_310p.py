@@ -49,6 +49,13 @@ def _make_vllm_config(**overrides):
     return config
 
 
+def test_config_accepts_prefix_caching() -> None:
+    """310P MRv2 supports APC; gate must not reject enable_prefix_caching."""
+    config = _make_vllm_config()
+    config.cache_config.enable_prefix_caching = True
+    NPUModelRunner310V2._validate_config(config)
+
+
 def test_config_accepts_tensor_parallelism() -> None:
     NPUModelRunner310V2._validate_config(_make_vllm_config())
 

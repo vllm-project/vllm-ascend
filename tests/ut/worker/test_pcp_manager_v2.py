@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -45,12 +45,17 @@ def _mock_async_copy_to_cpu(value, out=None, device=None):
     return value.to(device="cpu")
 
 
-def _make_pcp_config(cudagraph_mode: CUDAGraphMode, *, sparse_mla: bool = True):
+def _make_pcp_config(
+    cudagraph_mode: CUDAGraphMode,
+    *,
+    sparse_mla: bool = True,
+    pipeline_parallel_size: int = 1,
+):
     hf_text_config = SimpleNamespace(index_topk=2048) if sparse_mla else SimpleNamespace()
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=2,
-            pipeline_parallel_size=1,
+            pipeline_parallel_size=pipeline_parallel_size,
         ),
         model_config=SimpleNamespace(
             use_mla=True,
@@ -80,6 +85,15 @@ def test_validate_config_allows_sparse_mla_full_decode_only():
 def test_validate_config_allows_gqa():
     vllm_config = _make_pcp_config(CUDAGraphMode.NONE, sparse_mla=False)
     vllm_config.model_config.use_mla = False
+
+    AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
+
+
+def test_validate_config_allows_pipeline_parallelism():
+    vllm_config = _make_pcp_config(
+        CUDAGraphMode.FULL_DECODE_ONLY,
+        pipeline_parallel_size=2,
+    )
 
     AscendPCPManager.validate_config(vllm_config, supports_mm_inputs=False)
 
@@ -218,7 +232,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
 
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
-    assert manager._global_batch is global_batch
+    assert manager.global_batch is global_batch
     np.testing.assert_array_equal(global_batch.seq_lens_np, np.array([18], dtype=np.int32))
     assert global_batch.attn_state == "global-attn-state"
 
@@ -246,45 +260,40 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
 
 
-def test_dummy_attention_context_uses_rank_local_identity_view():
+def test_attention_context_collects_global_pcp_data():
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager.pcp_world_size = 2
-    manager.pcp_rank = 1
-    manager.device = torch.device("cpu")
     input_batch = _make_local_pcp_batch()
-    input_batch.is_dummy = True
     block_tables = (
         torch.tensor([[1]], dtype=torch.int32),
         torch.tensor([[2]], dtype=torch.int32),
     )
-    slot_mappings = torch.arange(
-        len(block_tables) * manager.pcp_world_size * input_batch.num_tokens,
+    slot_mapping_capacity = input_batch.num_tokens_after_padding + 3
+    global_slot_mappings = torch.arange(
+        len(block_tables) * slot_mapping_capacity,
         dtype=torch.int64,
-    ).view(len(block_tables), -1)
-
-    actual = manager.build_attention_context(
-        input_batch,
-        block_tables,
-        slot_mappings,
+    ).view(len(block_tables), slot_mapping_capacity)
+    gather_block_tables = MagicMock(return_value=block_tables)
+    manager._global_batch = input_batch
+    manager._block_tables = SimpleNamespace(
+        gather_block_tables=gather_block_tables,
     )
+    manager._global_batch_slot_mappings = global_slot_mappings
+    hidden_restore_idx = torch.arange(input_batch.num_tokens, dtype=torch.int64)
+    manager._hidden_restore_idx = hidden_restore_idx
 
-    expected_slot_mappings = slot_mappings.view(
-        len(block_tables),
-        manager.pcp_world_size,
-        input_batch.num_tokens,
-    )[:, manager.pcp_rank]
-    restore_start = manager.pcp_rank * input_batch.num_tokens
+    actual = manager.build_attention_context()
+
     assert actual.global_batch is input_batch
     assert actual.global_block_tables is block_tables
-    assert torch.equal(actual.global_slot_mappings, expected_slot_mappings)
     assert torch.equal(
-        actual.hidden_restore_idx,
-        torch.arange(
-            restore_start,
-            restore_start + input_batch.num_tokens,
-        ),
+        actual.global_slot_mappings,
+        global_slot_mappings[:, : input_batch.num_tokens_after_padding],
     )
-    assert actual.local_num_tokens_after_padding == input_batch.num_tokens
+    assert actual.hidden_restore_idx is hidden_restore_idx
+    gather_block_tables.assert_called_once_with(
+        input_batch.idx_mapping,
+        input_batch.num_reqs_after_padding,
+    )
 
 
 def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> None:
@@ -309,3 +318,41 @@ def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> Non
 def test_mrv2_runner_registers_ascend_pcp_manager() -> None:
     runner = NPUModelRunner.__new__(NPUModelRunner)
     assert runner.pcp_manager_cls is AscendPCPManager
+
+
+@pytest.mark.parametrize("is_last_pp_rank", [False, True])
+def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
+    is_last_pp_rank: bool,
+) -> None:
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    local_batch = _make_local_pcp_batch()
+    global_batch = _make_global_pcp_batch()
+    manager._global_batch = global_batch
+    runner.pcp_manager = manager
+    runner.is_last_pp_rank = is_last_pp_rank
+    runner.use_spec_pp = False
+    runner.execute_model_state = vllm_model_runner.ExecuteModelState(
+        input_batch=local_batch,
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=None,
+        aux_hidden_states=None,
+        finished_req_ids=set(),
+        ec_connector_output=None,
+        routed_experts=None,
+    )
+    grammar_output = object()
+    expected_output = object()
+
+    with patch.object(
+        vllm_model_runner.GPUModelRunner,
+        "sample_tokens",
+        return_value=expected_output,
+    ) as parent_sample_tokens:
+        actual_output = runner.sample_tokens(grammar_output)
+
+    expected_batch = local_batch if is_last_pp_rank else global_batch
+    assert runner.execute_model_state.input_batch is expected_batch
+    assert actual_output is expected_output
+    parent_sample_tokens.assert_called_once_with(grammar_output)
