@@ -101,7 +101,7 @@ def test_synthetic_rejection_sample(
     # (grid = (num_logits, ...)) and triton-ascend caps grid dims at 65536.
     # Cap the trials so num_trials * (K + 1) stays within the limit
     # (upstream uses 10 * VOCAB_SIZE trials, which exceeds it).
-    num_trials = 65536 // (num_speculative_steps + 1)
+    num_trials = 65535 // (num_speculative_steps + 1)
     deviation_tol = 1e-2
 
     target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
