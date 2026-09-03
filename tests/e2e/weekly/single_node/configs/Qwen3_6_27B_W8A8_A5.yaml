@@ -52,7 +52,7 @@ test_cases:
       - "70000"
       - "--speculative-config"
       - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
-  - name: "Eagle3_Base_Step_Function_Test_02"
+  - name: "Eagle3_Base_Step_Function_Test_A5_02"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -64,7 +64,7 @@ test_cases:
       - "70000"
       - "--speculative-config"
       - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
-  - name: "Eagle3_Base_Step_Function_Test_03"
+  - name: "Eagle3_Base_Step_Function_Test_A5_03"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -76,7 +76,7 @@ test_cases:
       - "70000"
       - "--speculative-config"
       - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
-  - name: "Eagle3_Base_Step_Function_Test_04"
+  - name: "Eagle3_Base_Step_Function_Test_A5_04"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -88,7 +88,7 @@ test_cases:
       - "70000"
       - "--speculative-config"
       - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
-  - name: "Eagle3_Base_Acceptance_Rate_Boundary_Test_02"
+  - name: "Eagle3_Base_Acceptance_Rate_Boundary_Test_A5_02"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
     envs:
       HCCL_BUFFSIZE: "1024"

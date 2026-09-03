@@ -28,55 +28,50 @@ deployment:
       --host 0.0.0.0
       --port $SERVER_PORT
       --data-parallel-size 16
-      --tensor-parallel-size 16
       --data-parallel-rpc-port 13389
       --data-parallel-size-local 8
       --data-parallel-start-rank 0
       --data-parallel-address $LOCAL_IP
       --enable-expert-parallel
-      --seed 1024
       --max-num-seqs 20
-      --max-model-len 133120
+      --max-model-len 18432
       --max-num-batched-tokens 256
       --trust-remote-code
       --gpu-memory-utilization 0.92
       --quantization ascend
-      --async-scheduling
       --enable-chunked-prefill
       --no-enable-prefix-caching
       --api-server-count 1
       --async-scheduling
-      --additional-config '{"dp_allreduce_on_npu":"True","enable_cpu_binding":"True","multistream_overlap_shared_expert":"True","enable_sparse_c8":"True"}'
+      --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":"True"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
-#  -
-#    envs:
-#      <<: *env_common
-#    server_cmd: >
-#      vllm serve Eco-Tech/GLM-5.1-w8a8
-#      --host 0.0.0.0
-#      --port $SERVER_PORT
-#      --data-parallel-size 2
-#      --tensor-parallel-size 16
-#      --data-parallel-size-local 1
-#      --data-parallel-start-rank 1
-#      --data-parallel-rpc-port 13389
-#      --headless
-#      --data-parallel-address $MASTER_IP
-#      --enable-expert-parallel
-#      --seed 1024
-#      --max-num-seqs 16
-#      --max-model-len 133120
-#      --max-num-batched-tokens 4096
-#      --trust-remote-code
-#      --gpu-memory-utilization 0.95
-#      --quantization ascend
-#      --enable-chunked-prefill
-#      --enable-prefix-caching
-#      --async-scheduling
-#      --additional-config '{"multistream_overlap_shared_expert":true}'
-#      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-#      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve Eco-Tech/GLM-5.1-w8a8
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --data-parallel-size 16
+      --data-parallel-size-local 8
+      --data-parallel-start-rank 0
+      --data-parallel-rpc-port 13389
+      --headless
+      --data-parallel-address $MASTER_IP
+      --enable-expert-parallel
+      --seed 1024
+      --max-num-seqs 20
+      --max-model-len 18432
+      --max-num-batched-tokens 256
+      --trust-remote-code
+      --gpu-memory-utilization 0.92
+      --quantization ascend
+      --enable-chunked-prefill
+      --no-enable-prefix-caching
+      --async-scheduling
+      --additional-config '{"multistream_overlap_shared_expert":True,"multistream_overlap_shared_expert":"True"}'
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp"}'
 benchmarks:
 #  acc_aime2025:
 #    case_type: accuracy

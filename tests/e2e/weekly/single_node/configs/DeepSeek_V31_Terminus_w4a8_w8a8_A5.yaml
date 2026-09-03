@@ -63,7 +63,7 @@ _benchmarks_per2: &benchmarks_per2
 # ACTUAL TEST CASES
 # ==========================================
 test_cases:
-  - name: "chunked_perfill_func_test_002"
+  - name: "chunked_perfill_func_test_A5_002"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -131,7 +131,7 @@ test_cases:
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enable": false},"torchair_graph_config":{"enable":true}}'
-  - name: "mtp_api_test_002"
+  - name: "mtp_api_test_A5_002"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -162,7 +162,7 @@ test_cases:
       - "--disable-log-stats"
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":false,"enable_multistream_mla":true,"graph_batch_sizes":[16],"use_cached_graph":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
-  - name: "mtp_func_test_001"
+  - name: "mtp_func_test_A5_001"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -193,7 +193,7 @@ test_cases:
       - "--disable-log-stats"
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":false,"enable_multistream_mla":true,"graph_batch_sizes":[16],"use_cached_graph":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
-  - name: "mtp_func_test_002"
+  - name: "mtp_func_test_A5_002"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -224,7 +224,7 @@ test_cases:
       - "--disable-log-stats"
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":false,"enable_multistream_mla":true,"graph_batch_sizes":[16],"use_cached_graph":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
-  - name: "mtp_api_test_001_769_250"
+  - name: "mtp_draft_token_test_001_A5_001"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       HCCL_BUFFSIZE: "1024"
@@ -287,7 +287,7 @@ test_cases:
 #      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
 #    benchmarks:
 #      <<: *benchmarks_per1
-  - name: "Deepseek_31_nofeature_mtp_perf_001"
+  - name: "Deepseek_31_nofeature_mtp_A5_perf_001"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       VLLM_RPC_TIMEOUT: "3600000"
@@ -358,7 +358,7 @@ test_cases:
 #      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_shared_expert":false}}'
 #    benchmarks:
 #      <<: *benchmarks_acc1
-  - name: "Vllm_reasoning_output_007"
+  - name: "Vllm_A5_reasoning_output_007"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       OMP_PROC_BIND: "False"
@@ -393,7 +393,7 @@ test_cases:
       - "deepseek_r1"
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_shared_expert":false}}'
-  - name: "Vllm_reasoning_output_009"
+  - name: "Vllm_A5_reasoning_output_009"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       OMP_PROC_BIND: "False"
@@ -428,7 +428,7 @@ test_cases:
       - "deepseek_r1"
       - "--additional-config"
       - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_shared_expert":false}}'
-  - name: "vllm_mix_dsr1_w8a8_fc_func_0001"
+  - name: "vllm_dsv31_fc_A5_mix_func_0001"
     model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
     envs:
       OMP_PROC_BIND: "False"

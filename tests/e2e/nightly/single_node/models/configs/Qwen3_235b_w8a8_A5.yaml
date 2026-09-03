@@ -49,7 +49,7 @@ _benchmarks_perf1: &benchmarks_perf1
 # ==========================================
 
 test_cases:
-  - name: "vllm_Qwen3_235B_Accuracy_FULL_Graph_GPQA"
+  - name: "vllm_Qwen3_235B_A5_Accuracy_GPQA"
     model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-235B-A22B-w8a8-mxfp8"
     envs:
       TASK_QUEUE_ENABLE: "1"
