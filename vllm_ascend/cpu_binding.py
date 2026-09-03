@@ -9,6 +9,7 @@ from collections import defaultdict
 import psutil
 import regex as re
 from vllm.logger import logger
+from vllm_ascend import envs
 
 from vllm_ascend.device.hardware_profile import (
     CPUBindingMode,
@@ -644,6 +645,13 @@ class CpuAlloc:
             anchor_cpu = cpu_pool[0]
             return self.cpu_node.get(anchor_cpu)
 
+        if envs.VLLM_ASCEND_SKIP_MIGRATEPAGES:
+            logger.info(
+                "[migrate] skipped because "
+                "VLLM_ASCEND_SKIP_MIGRATEPAGES=1; CPU thread binding "
+                "continues."
+            )
+            return
         if not shutil.which("migratepages"):
             logger.info("The 'migratepages' command is not available, skipping memory binding.")
             return
