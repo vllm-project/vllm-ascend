@@ -8,11 +8,11 @@ Supported use cases include image-text similarity, zero-shot ImageNet classifica
 
 This guide describes how to deploy and evaluate SigLIP2 with vLLM Ascend on **Atlas 300I DUO**.
 
-This document is validated and written based on the **vLLM-Ascend main branch**. The current model (`siglip2-base-patch16-224`) is fully supported for text and image embedding in this branch. As a pooling model, SigLIP2 is used for offline `llm.embed()` and online `/v1/embeddings` serving; features such as PD separation and MTP are not applicable. Use **main** or a later official release that includes SigLIP2 support.
+This document is validated and written based on **vLLM-Ascend v26.2.0**. The current model (`siglip2-base-patch16-224`) is fully supported for text and image embedding in this version, and all **v26.2.0 and later versions** can run stably. As a pooling model, SigLIP2 is used for offline `llm.embed()` and online `/v1/embeddings` serving; features such as PD separation and MTP are not applicable.
 
 ## 2 Supported Features
 
-Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
 ## 3 Prerequisites
 
@@ -22,7 +22,7 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 |----------------|-----------------------|----------------|
 | `siglip2-base-patch16-224` (FP16) | 1 Atlas 300I DUO node | [Modelscope](https://modelscope.cn/models/google/siglip2-base-patch16-224) \| [HuggingFace](https://huggingface.co/google/siglip2-base-patch16-224) |
 
->**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent deployment commands, use this path or the Hugging Face model id `google/siglip2-base-patch16-224` as shown in this tutorial.
+>**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent commands, replace `<YOUR_MODEL_PATH>` with the path you recorded here (a local directory or a Hugging Face / ModelScope model id such as `google/siglip2-base-patch16-224`).
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
@@ -36,7 +36,7 @@ For ImageNet val zero-shot Top-1 evaluation, prepare:
 
 ## 4 Installation
 
-> **Hardware support:** SigLIP2 in this tutorial is validated on **Atlas 300I DUO** only. Use the `-310p` Docker image and the installation steps below; other platforms are not covered in this guide.
+> **Hardware support:** SigLIP2 in this tutorial is supported and validated on **Atlas 300I DUO** only. Use the corresponding Docker image and the installation steps below.
 
 ### 4.1 Docker Image Installation
 
@@ -102,10 +102,19 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
+### 5.1 Single-Node Online Deployment
+
+Single-node deployment runs text and image embedding on one Atlas 300I DUO node, suitable for development, testing, and online `/v1/embeddings` serving.
+
+Startup command:
+
 ```shell
 #!/bin/sh
-vllm serve google/siglip2-base-patch16-224 \
-    --served-model-name google/siglip2-base-patch16-224 \
+# Replace <YOUR_MODEL_PATH> with the path recorded in Section 3.1.
+export MODEL_PATH=<YOUR_MODEL_PATH>
+
+vllm serve $MODEL_PATH \
+    --served-model-name $MODEL_PATH \
     --runner pooling \
     --chat-template template_basic.jinja \
     --limit-mm-per-prompt '{"image": 1}' \
@@ -123,13 +132,18 @@ Required Parameter Descriptions:
 Key Parameter Descriptions:
 
 - **Tensor parallelism (TP) is not supported** for SigLIP2 online serving. Do not set `--tensor-parallel-size`; deploy on a single Atlas 300I DUO NPU as shown above.
+- `--served-model-name` must match the `"model"` field in `/v1/embeddings` requests; use the same value as `MODEL_PATH`.
 - `--runner pooling` is required. SigLIP2 is an embedding model, not a generative LLM.
 - `--max-model-len 64` matches SigLIP2 text tokenization (`padding=max_length`, `max_length=64`).
 - `--chat-template template_basic.jinja` is required when sending images via `messages` on `/v1/embeddings`.
 - `--limit-mm-per-prompt '{"image": 1}'` allows one image per request.
 - For image-only embedding over HTTP, use an **empty** text prompt in `messages` or offline `prompt=""` with `multi_modal_data`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
+
+### 5.2 Multi-Node PD Separation Deployment
+
+SigLIP2 is a pooling embedding model and **does not support** multi-node PD (Prefill-Decode) separation deployment. Use [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) instead.
 
 ## 6 Functional Verification
 
@@ -138,12 +152,14 @@ Once your server is started, you can verify with the following commands.
 ### Text Embedding
 
 ```bash
+export MODEL_PATH=<YOUR_MODEL_PATH>  # match --served-model-name from Section 5.1
+
 curl -X POST http://127.0.0.1:8000/v1/embeddings \
   -H "Content-Type: application/json" \
-  -d '{
-    "model": "google/siglip2-base-patch16-224",
-    "input": ["This is a photo of a dog."]
-  }'
+  -d "{
+    \"model\": \"${MODEL_PATH}\",
+    \"input\": [\"This is a photo of a dog.\"]
+  }"
 ```
 
 Use the template `"This is a photo of {}."` for zero-shot classification prompts. SigLIP2 was trained with `padding=max_length` and `max_length=64` for text; vLLM applies this when using offline `tokenization_kwargs`.
@@ -153,12 +169,13 @@ Use the template `"This is a photo of {}."` for zero-shot classification prompts
 Encode the image as base64 and send via `messages`:
 
 ```bash
+export MODEL_PATH=<YOUR_MODEL_PATH>  # match --served-model-name from Section 5.1
 IMG_B64=$(base64 -w 0 /path/to/image.jpg)
 
 curl -X POST http://127.0.0.1:8000/v1/embeddings \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"google/siglip2-base-patch16-224\",
+    \"model\": \"${MODEL_PATH}\",
     \"encoding_format\": \"float\",
     \"messages\": [{
       \"role\": \"user\",
@@ -181,8 +198,10 @@ For more usage examples, please reference the [vLLM pooling embed examples](http
 ```python
 from vllm import LLM
 
+MODEL_PATH = "<YOUR_MODEL_PATH>"  # Replace with the path recorded in Section 3.1
+
 llm = LLM(
-    model="google/siglip2-base-patch16-224",
+    model=MODEL_PATH,
     runner="pooling",
     limit_mm_per_prompt={"image": 1},
     max_model_len=64,
@@ -209,13 +228,13 @@ print(len(img_out[0].outputs.embedding))
 
 ImageNet val zero-shot Top-1 is a common accuracy benchmark for SigLIP2.
 
-### Dataset and Labels
+### 7.1 Dataset and Labels
 
 1. Download [ImageNet ILSVRC 2012 val images](https://www.image-net.org/download.php) (login required).
 2. Download `val_label.txt` ([example](https://github.com/rentainhe/simple-imagenet-test/blob/master/val_label.txt)). Each line: `ILSVRC2012_val_00000001.JPEG 65` (PyTorch class id 0–999).
 3. Download `imagenet1000_clsidx_to_labels.txt` for the 1000 class text templates.
 
-### Offline Evaluation
+### 7.2 Offline Evaluation
 
 Embed 1000 class texts and val images separately, then compute cosine similarity (L2-normalized dot product). Example workflow:
 
@@ -242,8 +261,10 @@ def load_val_label(path):
                 gt[parts[0].split(".")[0]] = int(parts[1])
     return gt
 
+MODEL_PATH = "<YOUR_MODEL_PATH>"  # Replace with the path recorded in Section 3.1
+
 llm = LLM(
-    model="google/siglip2-base-patch16-224",
+    model=MODEL_PATH,
     runner="pooling",
     limit_mm_per_prompt={"image": 1},
     max_model_len=64,
@@ -286,6 +307,8 @@ Reference Top-1 on ImageNet val (approximate):
 
 Benchmark `/v1/embeddings` over HTTP with the script below.
 
+### 8.1 HTTP Serving Benchmark
+
 Start the server from [§5 Online Service Deployment](#5-online-service-deployment), then run:
 
 ```python
@@ -304,7 +327,7 @@ import numpy as np
 from PIL import Image
 
 BASE_URL = "http://127.0.0.1:8000"
-MODEL = "google/siglip2-base-patch16-224"  # match --served-model-name
+MODEL = "<YOUR_MODEL_PATH>"  # match --served-model-name from Section 5.1
 NUM_REQUESTS = 200
 CONCURRENCY = 8
 WARMUP = 10
@@ -423,7 +446,7 @@ if __name__ == "__main__":
         run_benchmark("image")
 ```
 
-### Metrics
+### 8.2 Metrics
 
 The script reports:
 
@@ -440,7 +463,25 @@ After about several minutes, you can get the performance evaluation result.
 
 ### 9.1 Recommended Configurations
 
-The recommended configurations are the same as those specified in [§5 Online Service Deployment](#5-online-service-deployment).
+The following configurations are validated on Atlas 300I DUO and are categorized by use case. Start from the [§5.1 Single-Node Online Deployment](#51-single-node-online-deployment) command, then adjust the serve flags below.
+
+| Scenario | Workload | Deployment | NPUs | Max Num Seqs | Max Num Batched Tokens | Max Model Len | Client Concurrency (ref.) |
+|----------|----------|------------|------|--------------|------------------------|---------------|---------------------------|
+| Text high throughput | Text `/v1/embeddings` | Single node | 1 (300I DUO) | 32 | 512 | 64 | 16–32 |
+| Image high throughput | Image `/v1/embeddings` (224×224) | Single node | 1 (300I DUO) | 16 | 256 | 64 | 8–16 |
+| Low latency | Text or image | Single node | 1 (300I DUO) | 8 | 128 | 64 | 4–8 |
+
+> **Note**: `--max-num-seqs` and `--max-num-batched-tokens` are set at `vllm serve` startup. Client concurrency in [§8.1 HTTP Serving Benchmark](#81-http-serving-benchmark) controls how many HTTP requests are sent in parallel; keep it close to `--max-num-seqs` for stable batching. SigLIP2 does not support TP or PD separation.
+
+Example serve flags for the text high-throughput row:
+
+```shell
+vllm serve $MODEL_PATH \
+    ... \
+    --max-num-seqs 32 \
+    --max-num-batched-tokens 512 \
+    --max-model-len 64
+```
 
 ### 9.2 Tuning Guidelines
 
@@ -449,6 +490,25 @@ The recommended configurations are the same as those specified in [§5 Online Se
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+
+#### 9.2.2 Model-Specific Optimizations
+
+##### Optimizations Enabled by Default
+
+The following optimizations are enabled in the recommended [§5.1](#51-single-node-online-deployment) configuration:
+
+| Optimization Technique | Technical Principle | Performance Benefit |
+| ---------------------- | ------------------- | ------------------- |
+| ACL graph capture | Uses `--compilation-config '{"cudagraph_capture_sizes": [64,32]}'` to capture fixed small batch shapes on Atlas 300I DUO | Reduces per-request scheduling overhead for short text and image embed paths |
+| Pooling runner | Uses `--runner pooling` for embedding-only forward passes | Required for SigLIP2; avoids generative decode paths |
+| FP16 inference | Uses `--dtype float16` on Atlas 300I DUO | Matches 300I DUO supported precision and model weights |
+
+##### Optimizations That Require Explicit Enabling
+
+| Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
+| ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
+| Server batch tuning | Online text/image serving | Set `--max-num-seqs` and `--max-num-batched-tokens` at serve startup (see Section 9.1) | Controls how many embed requests are batched on the server | Reduce both flags if OOM occurs; image embed usually needs smaller batches than text |
+| Client concurrency tuning | HTTP benchmark or production clients | Increase parallel `/v1/embeddings` requests (see Section 8.1) | Raises offered load to the server batcher | Throughput gains plateau once client concurrency exceeds `--max-num-seqs`; watch p99 latency |
 
 ## 10 FAQ
 
