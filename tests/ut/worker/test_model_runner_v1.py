@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -178,6 +179,21 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):
+    def test_kimi_k3_gqa_dspark_uses_dedicated_layout_without_dcp(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.dcp_size = 1
+        runner._draft_uses_qwen3_gqa_dspark = MagicMock(return_value=True)
+        runner.model_config = SimpleNamespace(
+            architecture="KimiK3ForConditionalGeneration",
+            architectures=["KimiK3ForConditionalGeneration"],
+            hf_config=SimpleNamespace(
+                model_type="kimi_k3",
+                architectures=["KimiK3ForConditionalGeneration"],
+            ),
+        )
+
+        self.assertTrue(runner._uses_dcp_replicated_dspark_draft_kv())
+
     def _build_runner(
         self,
         *,
@@ -598,34 +614,68 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
     def test_dcp_replicated_draft_cache_allocates_physical_lane_pages(self):
         runner = self._build_runner()
+        runner.use_hybrid_blocks = True
+        runner.attn_backend.get_supported_kernel_block_sizes.return_value = [16]
         base_spec = FullAttentionSpec(
             block_size=16,
             num_kv_heads=2,
             head_size=4,
             head_size_v=4,
             dtype=torch.float16,
+            page_size_padded=1024,
         )
         replication_size = 4
         spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
             base_spec,
             replication_size,
         )
+        self.assertEqual(spec.lane_page_size_bytes, base_spec.page_size_bytes)
+        self.assertEqual(
+            spec.page_size_bytes,
+            replication_size * base_spec.page_size_bytes,
+        )
+        mamba_spec = MambaSpec(
+            block_size=16,
+            shapes=((256,),),
+            dtypes=(torch.float32,),
+            page_size_padded=base_spec.page_size_bytes,
+            mamba_cache_mode="align",
+        )
+        mixed_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                "target_attn": base_spec,
+                "draft_attn": spec,
+            }
+        )
+        self.assertIsNotNone(mixed_spec)
+        assert mixed_spec is not None
         config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
                 KVCacheTensor(
+                    size=base_spec.page_size_bytes * 2,
+                    shared_by=["target_attn", "target_mamba"],
+                ),
+                KVCacheTensor(
                     size=spec.page_size_bytes * 2,
                     shared_by=["draft_attn"],
-                )
+                ),
             ],
             kv_cache_groups=[
                 KVCacheGroupSpec(
-                    layer_names=["draft_attn"],
-                    kv_cache_spec=spec,
-                )
+                    layer_names=["target_attn", "draft_attn"],
+                    kv_cache_spec=mixed_spec,
+                ),
+                KVCacheGroupSpec(
+                    layer_names=["target_mamba"],
+                    kv_cache_spec=mamba_spec,
+                ),
             ],
         )
         raw = runner._allocate_kv_cache_tensors(config)
+        self.assertIs(raw["target_attn"], raw["target_mamba"])
+        self.assertIsInstance(raw["draft_attn"], torch.Tensor)
+        self.assertEqual(raw["draft_attn"].numel(), spec.page_size_bytes * 2)
         runner._kv_cache_spec_attn_group_iterator = lambda: [
             SimpleNamespace(
                 kv_cache_spec=spec,

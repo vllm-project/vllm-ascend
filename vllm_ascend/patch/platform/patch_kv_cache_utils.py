@@ -133,8 +133,8 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     ):
         return None
 
-    all_specs = [*target_attention_specs.values(), *draft_attention_specs.values(), *mamba_specs.values()]
-    if len({spec.block_size for spec in all_specs}) != 1:
+    attention_specs = [*target_attention_specs.values(), *draft_attention_specs.values()]
+    if len({spec.block_size for spec in attention_specs}) != 1:
         return None
 
     base_page_sizes = {spec.page_size_bytes for spec in [*target_attention_specs.values(), *mamba_specs.values()]}

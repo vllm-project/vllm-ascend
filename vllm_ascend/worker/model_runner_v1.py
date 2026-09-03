@@ -709,9 +709,10 @@ class NPUModelRunner(GPUModelRunner):
 
     def _draft_uses_qwen3_gqa_dspark(self) -> bool:
         """Return whether the draft expects Kimi's materialized residual."""
-        if self.speculative_config is None or not self.speculative_config.use_dspark():
+        speculative_config = getattr(self, "speculative_config", None)
+        if speculative_config is None or not speculative_config.use_dspark():
             return False
-        draft_model_config = self.speculative_config.draft_model_config
+        draft_model_config = speculative_config.draft_model_config
         if draft_model_config is None:
             return False
         hf_config = draft_model_config.hf_config
@@ -722,8 +723,8 @@ class NPUModelRunner(GPUModelRunner):
         )
 
     def _uses_dcp_replicated_dspark_draft_kv(self) -> bool:
-        """Whether this runner uses a DCP-sharded K3 target and GQA DSpark."""
-        if getattr(self, "dcp_size", 1) <= 1 or not self._draft_uses_qwen3_gqa_dspark():
+        """Whether this runner uses the K3 target and GQA DSpark KV layout."""
+        if not self._draft_uses_qwen3_gqa_dspark():
             return False
         hf_config = getattr(self.model_config, "hf_config", None)
         architectures = {
@@ -4419,53 +4420,8 @@ class NPUModelRunner(GPUModelRunner):
             self.hybrid_with_attn_and_mamba = self.hybrid_with_attn_and_mamba or (use_mamba and use_attn)
             for idx in range(len(kv_cache_tensor.shared_by)):
                 layer_name = kv_cache_tensor.shared_by[idx]
-                if (
-                    isinstance(
-                        layer_kv_cache_spec[layer_name],
-                        AscendDCPReplicatedDraftAttentionSpec,
-                    )
-                    and layer_name not in kv_cache_raw_tensors
-                ):
-                    current_kv_cache_spec = layer_kv_cache_spec[layer_name]
-                    assert len(kv_cache_tensor.shared_by) == 1, (
-                        "A DCP-replicated draft cache tensor must belong to "
-                        "exactly one draft attention layer."
-                    )
-                    k_dim, v_dim = self._get_attention_kv_cache_dims(
-                        layer_name, current_kv_cache_spec
-                    )
-                    k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-                    if enable_fa_quant(self.vllm_config):
-                        k_cache_dtype, v_cache_dtype = (
-                            self.vllm_config.quant_config.get_kv_quant_dtype(
-                                layer_name,
-                                current_kv_cache_spec.dtype,
-                                self.model_config,
-                            )
-                        )
-                    replicated_num_blocks = (
-                        kv_cache_config.num_blocks
-                        * current_kv_cache_spec.dcp_replication_size
-                    )
-                    k_tensor = self._allocate_int8_cache_tensor(
-                        replicated_num_blocks
-                        * current_kv_cache_spec.block_size
-                        * current_kv_cache_spec.num_kv_heads
-                        * k_dim
-                        * get_dtype_size(k_cache_dtype),
-                        alignment,
-                    )
-                    v_tensor = self._allocate_int8_cache_tensor(
-                        replicated_num_blocks
-                        * current_kv_cache_spec.block_size
-                        * current_kv_cache_spec.num_kv_heads
-                        * v_dim
-                        * get_dtype_size(v_cache_dtype),
-                        alignment,
-                    )
-                    kv_cache_raw_tensors[layer_name] = (k_tensor, v_tensor)
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
-                elif (
+                if (
                     "linear_attn" in layer_name
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
@@ -4839,44 +4795,6 @@ class NPUModelRunner(GPUModelRunner):
                     else:
                         kv_caches[layer_name] = raw_typed.view(kv_cache_shape)
                     continue
-                elif isinstance(
-                    current_kv_cache_spec,
-                    AscendDCPReplicatedDraftAttentionSpec,
-                ):
-                    raw_cache = kv_cache_raw_tensors[layer_name]
-                    assert isinstance(raw_cache, tuple) and len(raw_cache) == 2
-                    raw_k_tensor, raw_v_tensor = raw_cache
-                    replicated_num_blocks = (
-                        kv_cache_config.num_blocks
-                        * current_kv_cache_spec.dcp_replication_size
-                    )
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        replicated_num_blocks,
-                        current_kv_cache_spec.block_size,
-                        current_kv_cache_spec.num_kv_heads,
-                        current_kv_cache_spec.head_size,
-                    )
-                    k_shape = kv_cache_shape[1:]
-                    if hasattr(current_kv_cache_spec, "head_size_v"):
-                        v_shape = (
-                            *kv_cache_shape[1:-1],
-                            current_kv_cache_spec.head_size_v,
-                        )
-                    else:
-                        v_shape = k_shape
-                    k_cache_dtype = v_cache_dtype = current_kv_cache_spec.dtype
-                    if enable_fa_quant(self.vllm_config):
-                        k_cache_dtype, v_cache_dtype = (
-                            self.vllm_config.quant_config.get_kv_quant_dtype(
-                                layer_name,
-                                current_kv_cache_spec.dtype,
-                                self.model_config,
-                            )
-                        )
-                    kv_caches[layer_name] = (
-                        raw_k_tensor.view(k_cache_dtype).view(k_shape),
-                        raw_v_tensor.view(v_cache_dtype).view(v_shape),
-                    )
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
                     # cache_only_layers (extract_hidden_states) are allocated
                     # as a single tensor by the branch at the top of
@@ -4965,8 +4883,20 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
-                    assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
+                    physical_page_size_bytes = current_kv_cache_spec.page_size_bytes
+                    if isinstance(
+                        current_kv_cache_spec,
+                        AscendDCPReplicatedDraftAttentionSpec,
+                    ):
+                        # The custom spec reports the aggregate bytes backing one
+                        # target-DCP logical block. The draft backend still sees
+                        # the original per-lane page layout, only with D times as
+                        # many physical blocks.
+                        physical_page_size_bytes = (
+                            current_kv_cache_spec.lane_page_size_bytes
+                        )
+                    assert sum_page_size_bytes % physical_page_size_bytes == 0
+                    num_blocks = sum_page_size_bytes // physical_page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that

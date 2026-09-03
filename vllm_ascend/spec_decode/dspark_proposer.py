@@ -6,7 +6,12 @@ from dataclasses import replace
 from typing import Any
 
 import torch
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    CUDAGraphMode,
+    VllmConfig,
+    get_layers_from_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
@@ -14,9 +19,12 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionMetadataBuilder,
+    AscendAttentionState,
+)
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import enable_pcp
+from vllm_ascend.attention.utils import enable_dcp, enable_pcp
 from vllm_ascend.core.kv_cache_interface import (
     AscendDCPReplicatedDraftAttentionSpec,
 )
@@ -125,7 +133,7 @@ class AscendDSparkProposer(AscendDflashProposer):
             return False
         spec_config = config.speculative_config
         runner = getattr(self, "runner", None)
-        if spec_config is None or runner is None or runner.dcp_size <= 1:
+        if spec_config is None or runner is None:
             return False
         target_model_config = config.model_config
         target_architectures = {
@@ -148,6 +156,22 @@ class AscendDSparkProposer(AscendDflashProposer):
             and getattr(draft_hf_config, "model_type", None) == "qwen3"
             and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
         )
+
+    def _get_model(self):
+        if not self._uses_dcp_replicated_draft_kv():
+            return super()._get_model()
+
+        # enable_dcp() is cached process-wide. Refresh it while the parent
+        # loader installs the draft's DCP=1 config so the draft Attention
+        # layers construct the ordinary GQA implementation, then restore the
+        # target DCP setting for the rest of worker initialization.
+        enable_dcp.cache_clear()
+        try:
+            return super()._get_model()
+        finally:
+            enable_dcp.cache_clear()
+            with set_current_vllm_config(self.vllm_config):
+                enable_dcp()
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
@@ -321,11 +345,24 @@ class AscendDSparkProposer(AscendDflashProposer):
                         layer_kv_cache_spec,
                         kv_cache_gid,
                     )
-                    attn_group.create_metadata_builders(
-                        draft_vllm_config,
-                        self.device,
-                        kernel_block_size=kernel_block_size,
-                    )
+                    if getattr(self, "replicated_draft_kv", False):
+                        builder_spec = layer_kv_cache_spec.copy_with_new_block_size(
+                            kernel_block_size
+                        )
+                        attn_group.metadata_builders = [
+                            AscendAttentionMetadataBuilder(
+                                builder_spec,
+                                attn_group.layer_names,
+                                draft_vllm_config,
+                                self.device,
+                            )
+                        ]
+                    else:
+                        attn_group.create_metadata_builders(
+                            draft_vllm_config,
+                            self.device,
+                            kernel_block_size=kernel_block_size,
+                        )
                     self._per_group_kernel_block_sizes[kv_cache_gid] = kernel_block_size
                     self._per_group_manager_block_sizes[kv_cache_gid] = layer_kv_cache_spec.block_size
                     if isinstance(
