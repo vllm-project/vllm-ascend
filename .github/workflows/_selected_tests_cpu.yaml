@@ -119,7 +119,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pytest‑cov
+          python3 -m pip install pytest pytest-cov
 
       - name: Run pytest with coverage
         run: |
