@@ -17,7 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -246,45 +246,40 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
 
 
-def test_dummy_attention_context_uses_rank_local_identity_view():
+def test_attention_context_collects_global_pcp_data():
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager.pcp_world_size = 2
-    manager.pcp_rank = 1
-    manager.device = torch.device("cpu")
     input_batch = _make_local_pcp_batch()
-    input_batch.is_dummy = True
     block_tables = (
         torch.tensor([[1]], dtype=torch.int32),
         torch.tensor([[2]], dtype=torch.int32),
     )
-    slot_mappings = torch.arange(
-        len(block_tables) * manager.pcp_world_size * input_batch.num_tokens,
+    slot_mapping_capacity = input_batch.num_tokens_after_padding + 3
+    global_slot_mappings = torch.arange(
+        len(block_tables) * slot_mapping_capacity,
         dtype=torch.int64,
-    ).view(len(block_tables), -1)
-
-    actual = manager.build_attention_context(
-        input_batch,
-        block_tables,
-        slot_mappings,
+    ).view(len(block_tables), slot_mapping_capacity)
+    gather_block_tables = MagicMock(return_value=block_tables)
+    manager._global_batch = input_batch
+    manager._block_tables = SimpleNamespace(
+        gather_block_tables=gather_block_tables,
     )
+    manager._global_batch_slot_mappings = global_slot_mappings
+    hidden_restore_idx = torch.arange(input_batch.num_tokens, dtype=torch.int64)
+    manager._hidden_restore_idx = hidden_restore_idx
 
-    expected_slot_mappings = slot_mappings.view(
-        len(block_tables),
-        manager.pcp_world_size,
-        input_batch.num_tokens,
-    )[:, manager.pcp_rank]
-    restore_start = manager.pcp_rank * input_batch.num_tokens
+    actual = manager.build_attention_context()
+
     assert actual.global_batch is input_batch
     assert actual.global_block_tables is block_tables
-    assert torch.equal(actual.global_slot_mappings, expected_slot_mappings)
     assert torch.equal(
-        actual.hidden_restore_idx,
-        torch.arange(
-            restore_start,
-            restore_start + input_batch.num_tokens,
-        ),
+        actual.global_slot_mappings,
+        global_slot_mappings[:, : input_batch.num_tokens_after_padding],
     )
-    assert actual.local_num_tokens_after_padding == input_batch.num_tokens
+    assert actual.hidden_restore_idx is hidden_restore_idx
+    gather_block_tables.assert_called_once_with(
+        input_batch.idx_mapping,
+        input_batch.num_reqs_after_padding,
+    )
 
 
 def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> None:

@@ -121,6 +121,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    is_glm5_next_kpool_cache,
     using_paged_attention,
 )
 
@@ -149,6 +150,7 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
+from vllm_ascend.models.glm5next.kv_cache import KpoolTailSpec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
@@ -185,6 +187,7 @@ from vllm_ascend.utils import (
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
+    model_uses_kpool_indexer,
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
@@ -4084,6 +4087,15 @@ class NPUModelRunner(GPUModelRunner):
                             layer_kv_cache_spec[layer_name] = spec
         return layer_kv_cache_spec
 
+    def _is_glm5_next_kpool_layer(self, layer_name: str, spec=None) -> bool:
+        compilation_config = getattr(self, "compilation_config", None)
+        if compilation_config is None:
+            compilation_config = getattr(self.vllm_config, "compilation_config", None)
+        static_ctx = getattr(compilation_config, "static_forward_context", {}) if compilation_config else {}
+        if is_glm5_next_kpool_cache(static_ctx.get(layer_name)):
+            return True
+        return isinstance(spec, KpoolTailSpec)
+
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
@@ -4228,6 +4240,7 @@ class NPUModelRunner(GPUModelRunner):
                     or self.hybrid_with_attn_and_mamba
                     or "cache_only_layers" in layer_name
                     or is_hidden_state_cache_spec(layer_kv_cache_spec.get(layer_name))
+                    or self._is_glm5_next_kpool_layer(layer_name, layer_kv_cache_spec.get(layer_name))
                 ) and layer_name not in kv_cache_raw_tensors:
                     # Check if shared_by contains both MambaSpec and HiddenStateCacheSpec.
                     # If so, they must use separate physical memory to avoid corruption:
@@ -4548,6 +4561,54 @@ class NPUModelRunner(GPUModelRunner):
                             .view(indexer_scale_cache_shape)
                         )
                         kv_caches[layer_name] = (indexer_k_cache, indexer_scale_cache)
+                elif self._is_glm5_next_kpool_layer(layer_name, current_kv_cache_spec):
+                    # glm5_next_kpool_reshape: indexer is K-only; tail is packed K||score.
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    if isinstance(raw_tensor, tuple):
+                        raw_tensor = raw_tensor[0] if len(raw_tensor) == 1 else torch.cat(
+                            [t.reshape(-1) for t in raw_tensor if t is not None]
+                        )
+                    assert raw_tensor is not None
+                    page_size_bytes = current_kv_cache_spec.page_size_bytes
+                    assert raw_tensor.numel() % page_size_bytes == 0, (
+                        f"kpool cache numel {raw_tensor.numel()} not divisible by "
+                        f"page_size_bytes {page_size_bytes} for {layer_name}"
+                    )
+                    num_blocks = raw_tensor.numel() // page_size_bytes
+                    assert num_blocks >= kv_cache_config.num_blocks
+                    storage_block_size = getattr(
+                        current_kv_cache_spec, "storage_block_size", current_kv_cache_spec.block_size
+                    )
+                    try:
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            num_blocks,
+                            storage_block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.head_size,
+                            cache_dtype_str=getattr(current_kv_cache_spec, "cache_dtype_str", "auto") or "auto",
+                        )
+                    except TypeError:
+                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                            num_blocks,
+                            storage_block_size,
+                            current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.head_size,
+                        )
+                    raw_typed = raw_tensor.view(current_kv_cache_spec.dtype)
+                    page_size_padded = getattr(current_kv_cache_spec, "page_size_padded", None)
+                    if page_size_padded is not None:
+                        dtype_size = get_dtype_size(current_kv_cache_spec.dtype)
+                        page_stride = page_size_padded // dtype_size
+                        strides = [1] * len(kv_cache_shape)
+                        for dim_idx in range(len(kv_cache_shape) - 2, -1, -1):
+                            strides[dim_idx] = strides[dim_idx + 1] * kv_cache_shape[dim_idx + 1]
+                        strides[0] = page_stride
+                        kv_caches[layer_name] = torch.as_strided(
+                            raw_typed, size=kv_cache_shape, stride=tuple(strides)
+                        )
+                    else:
+                        kv_caches[layer_name] = raw_typed.view(kv_cache_shape)
+                    continue
                 elif isinstance(current_kv_cache_spec, AttentionSpec):
                     # cache_only_layers (extract_hidden_states) are allocated
                     # as a single tensor by the branch at the top of
@@ -4572,8 +4633,10 @@ class NPUModelRunner(GPUModelRunner):
                         continue
                     if self.use_sparse and "cache_only_layers" not in layer_name:
                         raw_cache = kv_cache_raw_tensors[layer_name]
-                        assert isinstance(raw_cache, tuple)
-                        if current_sparse_sfa_c8:
+                        if not isinstance(raw_cache, tuple):
+                            raw_k_tensor = raw_v_tensor = raw_cache
+                            sum_page_size_bytes = raw_k_tensor.numel()
+                        elif current_sparse_sfa_c8:
                             (raw_k_tensor,) = raw_cache
                             raw_v_tensor = None
                             sum_page_size_bytes = raw_k_tensor.numel()
@@ -5058,10 +5121,25 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
                         non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
+                        # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
+                        # evenly divide. Ascend binds KV as block-first views
+                        # and indexes padded pages by runtime block stride, so
+                        # unify_kv_cache_spec_page_size may pad them.
+                        indexes_kv_by_block_stride=model_uses_kpool_indexer(self.model_config),
                     )
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, DeepseekV32IndexerCache):
+                # GLM-5.3-Flash kpool indexer/tail caches subclass the DeepSeek
+                # V3.2 indexer cache but keep compress_ratio / KpoolTailSpec.
+                if is_glm5_next_kpool_cache(attn_module):
+                    if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                        # Indexer/tail pages do not evenly divide the MLA page.
+                        # Ascend indexes KV by block stride, so opt in to padding.
+                        if isinstance(spec, AttentionSpec):
+                            spec = replace(spec, indexes_kv_by_block_stride=True)
+                        kv_cache_spec[layer_name] = spec
+                    continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for
                 # SFA, but keeps Ascend-specific shape/block-size accounting.
                 # Remove this special case once the generic vLLM spec/backend

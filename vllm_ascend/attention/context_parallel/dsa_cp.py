@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
@@ -1983,6 +1983,11 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         )
         self._pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         self._pcp_rank = get_pcp_group().rank_in_group
+        self._hidden_restore_idx_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int64,
+            device=device,
+        )
 
     @classmethod
     def get_cudagraph_support(
@@ -1990,7 +1995,94 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        return AttentionCGSupport.NEVER
+        return AttentionCGSupport.UNIFORM_BATCH
+
+    def _prepare_graph_pcp_context(
+        self,
+        pcp_context: "AscendPCPAttentionContext",
+    ) -> "AscendPCPAttentionContext":
+        """Prepare graph-stable DSA tensors without changing the PCP batch layout."""
+        global_batch = pcp_context.global_batch
+        num_actual_tokens = global_batch.num_tokens
+
+        # Use the preallocated buffer to keep the address fixed for graph replay.
+        hidden_restore_idx = self._hidden_restore_idx_buffer[: global_batch.num_tokens_after_padding]
+        hidden_restore_idx[:num_actual_tokens].copy_(pcp_context.hidden_restore_idx[:num_actual_tokens])
+        hidden_restore_idx[num_actual_tokens:].zero_()
+
+        # The upstream dummy path only invalidates gathered slot mappings.
+        # DSA also consumes the scheduler-global mapping, so clear it here.
+        if global_batch.is_dummy:
+            pcp_context.global_slot_mappings.fill_(-1)
+
+        return replace(
+            pcp_context,
+            hidden_restore_idx=hidden_restore_idx,
+        )
+
+    @staticmethod
+    def _build_graph_common_attn_metadata(
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        num_actual_reqs: int | None,
+    ) -> AscendCommonAttentionMetadata:
+        """Restore DSA graph request metadata after PCP partitioning.
+
+        PCP preserves the fixed graph token shape, but represents the padded
+        local rows as zero-token requests. DSA requires the query offsets to
+        cover every decode graph token, so expand the padded query offsets in
+        both the NPU and CPU metadata views. Padded slot mappings are
+        invalidated separately.
+
+        Example: 2 actual requests in a graph batch padded to 4::
+
+            After PCP partition:
+                query_start_loc = [0, 1, 2, 2, 2]
+
+            After DSA restoration:
+                query_start_loc = [0, 1, 2, 3, 4]
+
+        ``num_actual_reqs`` remains 2, and the two padded slot mappings remain
+        invalid.
+        """
+        if num_actual_reqs is None:
+            return common_attn_metadata
+        num_reqs = common_attn_metadata.num_reqs
+        if num_reqs <= num_actual_reqs:
+            return common_attn_metadata
+
+        is_prefilling = common_attn_metadata.is_prefilling
+        if is_prefilling is not None and bool(is_prefilling.any()):
+            return common_attn_metadata
+        if common_attn_metadata.num_input_tokens != num_reqs:
+            raise RuntimeError("DSA PCP full-decode graph requires one input token per request.")
+
+        # Expand NPU and CPU query offsets to cover padded graph tokens.
+        query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
+        torch.arange(
+            common_attn_metadata.num_actual_tokens + 1,
+            common_attn_metadata.num_input_tokens + 1,
+            dtype=query_start_loc.dtype,
+            device=query_start_loc.device,
+            out=query_start_loc[num_actual_reqs + 1 : num_reqs + 1],
+        )
+        query_start_loc_cpu = torch.empty(
+            num_reqs + 1,
+            dtype=common_attn_metadata.query_start_loc_cpu.dtype,
+        )
+        query_start_loc_cpu[: num_actual_reqs + 1].copy_(
+            common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1]
+        )
+        torch.arange(
+            common_attn_metadata.num_actual_tokens + 1,
+            common_attn_metadata.num_input_tokens + 1,
+            dtype=query_start_loc_cpu.dtype,
+            out=query_start_loc_cpu[num_actual_reqs + 1 : num_reqs + 1],
+        )
+
+        return common_attn_metadata.replace(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+        )
 
     @staticmethod
     def _build_global_common_attn_metadata(
@@ -1999,7 +2091,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         local_common_attn_metadata: AscendCommonAttentionMetadata,
     ) -> AscendCommonAttentionMetadata:
         global_batch = pcp_context.global_batch
-        num_reqs = global_batch.num_reqs
+        num_reqs = global_batch.num_reqs_after_padding
         return AscendCommonAttentionMetadata(
             query_start_loc=global_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(global_batch.query_start_loc_np),
@@ -2017,7 +2109,7 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             dcp_local_seq_lens=global_batch.dcp_local_seq_lens,
             positions=global_batch.positions,
             attn_state=global_batch.attn_state,
-            num_input_tokens=global_batch.num_tokens,
+            num_input_tokens=global_batch.num_tokens_after_padding,
             is_prefilling=torch.from_numpy(global_batch.is_prefilling_np),
         )
 
@@ -2026,15 +2118,16 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         pcp_context: "AscendPCPAttentionContext",
         common_attn_metadata: AscendCommonAttentionMetadata,
     ) -> AscendCommonAttentionMetadata:
-        num_local_padded_tokens = pcp_context.local_num_tokens_after_padding
+        num_local_padded_tokens = common_attn_metadata.num_input_tokens
         gathered_slot_mapping = common_attn_metadata.slot_mapping
+        if pcp_context.global_batch.is_dummy:
+            gathered_slot_mapping.fill_(-1)
         local_slot_mapping = gathered_slot_mapping.view(
             self._pcp_world_size,
             num_local_padded_tokens,
         )[self._pcp_rank]
         return common_attn_metadata.replace(
             slot_mapping=local_slot_mapping,
-            num_input_tokens=num_local_padded_tokens,
         )
 
     def _build_local_dsa_metadata(
@@ -2042,20 +2135,20 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         common_prefix_len: int,
         local_common_attn_metadata: AscendCommonAttentionMetadata,
         fast_build: bool,
-        **kwargs,
+        num_actual_reqs: int | None,
+        common_ratio_to_sas_metadata: dict[Any, Any],
     ) -> dsa_v1.AscendDSAMetadata:
         if local_common_attn_metadata.num_actual_tokens > 0:
             return super().build(
                 common_prefix_len,
                 local_common_attn_metadata,
                 fast_build,
-                **kwargs,
+                num_actual_reqs=num_actual_reqs,
+                common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
             )
 
         # Empty ranks still participate in the global cache update collectives.
-        self.common_ratio_to_sas_metadata = kwargs.get(
-            "common_ratio_to_sas_metadata",
-        )
+        self.common_ratio_to_sas_metadata = common_ratio_to_sas_metadata
         return self.metadata_cls(  # type: ignore[call-arg]
             num_actual_tokens=0,
             head_dim=self.model_config.get_head_size(),
@@ -2067,25 +2160,6 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
             hadamard=dsa_v1.AscendDSAMetadataBuilder.hadamard,
         )
 
-    def _build_global_dsa_metadata(
-        self,
-        common_prefix_len: int,
-        global_common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool,
-        **kwargs,
-    ) -> dsa_v1.AscendDSAMetadata:
-        global_build_kwargs = {
-            **kwargs,
-            "common_ratio_to_sas_metadata": {},
-            "num_actual_reqs": global_common_attn_metadata.num_reqs,
-        }
-        return self._global_metadata_builder.build(
-            common_prefix_len,
-            global_common_attn_metadata,
-            fast_build,
-            **global_build_kwargs,
-        )
-
     def build(
         self,
         common_prefix_len: int,
@@ -2093,34 +2167,48 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         fast_build: bool = False,
         pcp_context: "AscendPCPAttentionContext | None" = None,
         pcp_cache_group_idx: int | None = None,
-        **kwargs,
+        num_actual_reqs: int | None = None,
+        common_ratio_to_sas_metadata: dict[Any, Any] | None = None,
+        **kwargs: Any,
     ) -> AscendDSAPCPMetadata:
         assert pcp_context is not None
         assert pcp_cache_group_idx is not None
+        assert common_ratio_to_sas_metadata is not None
+        pcp_context = self._prepare_graph_pcp_context(pcp_context)
         global_common_attn_metadata = self._build_global_common_attn_metadata(
             pcp_context,
             pcp_cache_group_idx,
             common_attn_metadata,
         )
-        global_dsa_metadata = self._build_global_dsa_metadata(
+        global_common_attn_metadata = self._build_graph_common_attn_metadata(
+            global_common_attn_metadata,
+            pcp_context.global_batch.num_reqs,
+        )
+        global_dsa_metadata = self._global_metadata_builder.build(
             common_prefix_len,
             global_common_attn_metadata,
             fast_build,
-            **kwargs,
+            num_actual_reqs=pcp_context.global_batch.num_reqs,
+            common_ratio_to_sas_metadata={},
         )
         local_common_attn_metadata = self._build_local_common_attn_metadata(
             pcp_context,
             common_attn_metadata,
         )
+        local_common_attn_metadata = self._build_graph_common_attn_metadata(
+            local_common_attn_metadata,
+            num_actual_reqs,
+        )
         local_dsa_metadata = self._build_local_dsa_metadata(
             common_prefix_len,
             local_common_attn_metadata,
             fast_build,
-            **kwargs,
+            num_actual_reqs=num_actual_reqs,
+            common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
         )
         return AscendDSAPCPMetadata.from_local_metadata(
             local_dsa_metadata,
-            pcp_context.local_num_tokens_after_padding,
+            local_common_attn_metadata.num_input_tokens,
             pcp_context.hidden_restore_idx,
             global_dsa_metadata,
         )

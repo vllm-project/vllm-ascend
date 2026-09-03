@@ -95,6 +95,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
+            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -239,4 +240,13 @@ def register_ascend_kv_cache_specs() -> None:
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+
+    # Imported lazily so this module stays independent of any single model.
+    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager, KpoolTailSpec
+
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=KpoolTailSpec,
+        manager_class=KpoolTailManager,
+        uniform_type_base_spec=KpoolTailSpec,
     )

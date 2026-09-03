@@ -64,7 +64,7 @@ def causal_conv1d_fn(
     pad_slot_id: int = PAD_SLOT_ID,
 ):
     """
-    PyTorch implementation of causal_conv1d_fn for 310P.
+    PyTorch implementation of causal_conv1d_fn.
 
     Args:
         x: (dim, cu_seq_len) for varlen
@@ -168,7 +168,7 @@ def causal_conv1d_update(
     pad_slot_id: int = PAD_SLOT_ID,
 ):
     """
-    PyTorch implementation of causal_conv1d_update for 310P.
+    PyTorch implementation of causal_conv1d_update.
 
     Args:
         x: Input tensor

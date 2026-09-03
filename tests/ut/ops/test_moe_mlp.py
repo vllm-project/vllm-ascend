@@ -13,6 +13,8 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
@@ -24,7 +26,6 @@ from vllm_ascend.ops.fused_moe.moe_mlp import (
     unquant_apply_mlp,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
@@ -84,7 +85,10 @@ class TestSwigluOaiDynamicMxQuant(unittest.TestCase):
         output_scale = torch.randn(2, 1)
 
         with (
-            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A5),
+            patch(
+                f"{MOE_MLP}.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
             patch(
                 f"{MOE_MLP}._apply_clipped_swiglu",
                 return_value=activated,
@@ -172,7 +176,10 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         expected_activation = gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
 
         with (
-            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A5),
+            patch(
+                f"{MOE_MLP}.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
             patch(
                 "torch_npu.npu_grouped_matmul",
                 side_effect=[[gate_up_out], [expected_output]],

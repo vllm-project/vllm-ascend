@@ -36,7 +36,6 @@ class AscendPCPAttentionContext:
     global_block_tables: tuple[torch.Tensor, ...]
     global_slot_mappings: torch.Tensor
     hidden_restore_idx: torch.Tensor
-    local_num_tokens_after_padding: int
 
 
 class AscendPCPManager(PCPManager):
@@ -179,40 +178,20 @@ class AscendPCPManager(PCPManager):
             graph_slot_mappings[:, target_start + local_num_tokens : target_start + graph_num_tokens].fill_(-1)
         return graph_slot_mappings
 
-    def build_attention_context(
-        self,
-        input_batch: AscendInputBatch,
-        block_tables: tuple[torch.Tensor, ...],
-        slot_mappings: torch.Tensor,
-    ) -> AscendPCPAttentionContext:
+    def build_attention_context(self) -> AscendPCPAttentionContext:
         """Build the PCP context consumed by attention metadata builders."""
-        if input_batch.is_dummy:
-            local_num_tokens_after_padding = input_batch.num_tokens
-            restore_start = self.pcp_rank * local_num_tokens_after_padding
-            return AscendPCPAttentionContext(
-                global_batch=input_batch,
-                global_block_tables=block_tables,
-                global_slot_mappings=slot_mappings.view(
-                    slot_mappings.shape[0],
-                    self.pcp_world_size,
-                    local_num_tokens_after_padding,
-                )[:, self.pcp_rank],
-                hidden_restore_idx=torch.arange(
-                    restore_start,
-                    restore_start + local_num_tokens_after_padding,
-                    device=self.device,
-                ),
-                local_num_tokens_after_padding=local_num_tokens_after_padding,
-            )
-
         global_batch = self._global_batch
+        hidden_restore_idx = self._hidden_restore_idx
+        assert global_batch is not None
+        assert self._block_tables is not None
+        assert self._global_batch_slot_mappings is not None
+        assert hidden_restore_idx is not None
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             global_block_tables=self._block_tables.gather_block_tables(
                 global_batch.idx_mapping,
                 global_batch.num_reqs_after_padding,
             ),
-            global_slot_mappings=self._global_batch_slot_mappings[:, : global_batch.num_tokens],
-            hidden_restore_idx=self._hidden_restore_idx,
-            local_num_tokens_after_padding=input_batch.num_tokens_after_padding,
+            global_slot_mappings=self._global_batch_slot_mappings[:, : global_batch.num_tokens_after_padding],
+            hidden_restore_idx=hidden_restore_idx,
         )

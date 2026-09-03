@@ -23,6 +23,8 @@ import pytest
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
@@ -32,7 +34,6 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 )
 
 from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
-    AscendDeviceType,
     EXPERT_TOKEN_NUMS_TYPE_COUNT,
     EXPERT_TOKEN_NUMS_TYPE_CUMSUM,
     TokenDispatcherWithAll2AllV,
@@ -126,11 +127,12 @@ class TestTokenDispatcherWithMC2(TestBase):
         )
         self.forward_context_patch.start()
 
-        # Mock get_ascend_device_type()
-        self.ascend_soc_version_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type", return_value=AscendDeviceType.A3
+        # Mock the current hardware profile.
+        self.hardware_profile_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A3),
         )
-        self.ascend_soc_version_patch.start()
+        self.hardware_profile_patch.start()
 
         # Mock get_ascend_config()
         mock_ascend_config = MagicMock()
@@ -157,7 +159,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mc2_group_patch.stop()
         self.rank_group_patch.stop()
         self.forward_context_patch.stop()
-        self.ascend_soc_version_patch.stop()
+        self.hardware_profile_patch.stop()
         self.ascend_config_patch.stop()
         self.ascend_config_utils_patch.stop()
         self.skip_allreduce_patch.stop()
@@ -343,7 +345,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
-        self.dispatcher.a5_need_extra_args = True
+        self.dispatcher.need_shared_expert_args = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
@@ -365,7 +367,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_ids = torch.randint(0, 8, (10, 1))
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
-        self.dispatcher.a5_need_extra_args = True
+        self.dispatcher.need_shared_expert_args = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
