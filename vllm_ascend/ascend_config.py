@@ -632,7 +632,8 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
+        self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"] and use_sparse
+        self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"] and use_sparse
         self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and self.c8_enable_reshape_optim
         quant_config = getattr(vllm_config, "quant_config", None)
         (
@@ -710,7 +711,7 @@ class AscendConfig:
             )
 
     def _validate_sparse_c8_kv_offload_compatibility(self) -> None:
-        if self.sparse_kv_offload_config.enabled and self.vllm_config.cache_config.cache_dtype in ["fp8", "int8"]:
+        if self.sparse_kv_offload_config.enabled and self.enable_sparse_sfa_c8:
             raise NotImplementedError(
                 "Sparse KV offload does not support the sparse SFA C8 main "
                 "cache. Disable enable_sparse_sfa_c8; enable_sparse_li_c8 is "
