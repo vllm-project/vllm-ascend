@@ -825,7 +825,8 @@ class NPUWorker(WorkerBase):
             )
             logger.info(msg)
 
-            maybe_save_startup_plan(self, suggested_to_requested)
+            if suggested_to_requested > 0:
+                maybe_save_startup_plan(self, suggested_to_requested)
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
