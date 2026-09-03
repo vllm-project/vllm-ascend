@@ -185,6 +185,7 @@ def test_block_tables_import_time_binding_follows_implementation_family(
     from vllm.v1.worker.gpu import model_runner as upstream_model_runner
 
     import vllm_ascend.device.hardware_profile as hardware_profile
+    from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
     from vllm_ascend.worker.v2.block_table import (
         AscendBlockTables as DefaultAscendBlockTables,
     )
