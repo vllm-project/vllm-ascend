@@ -2638,6 +2638,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 **extra_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
+            assert compressor_decode_metadata is not None
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -2660,6 +2661,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 **extra_attn_kwargs,
             )[0]
         else:
+            assert compressor_decode_metadata is not None
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
