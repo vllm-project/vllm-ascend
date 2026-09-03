@@ -761,7 +761,7 @@ class KVPoolScheduler:
         else:
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
-            request_tracker.update(new_block_ids)
+            request_tracker.update(new_block_ids, request.num_computed_tokens)
         load_spec = None
         if self.layerwise_offload and num_current_tokens > 0:
             load_spec = LoadSpec(
