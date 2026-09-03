@@ -558,14 +558,6 @@ class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec,
     ) -> AttentionCGSupport:
-        if vllm_config.speculative_config is not None:
-            # MTP bring-up stage: force attention eager so the draft-step
-            # eager semantics (per-step metadata, spec slot writes) land
-            # first. The draft FULL graph reuses the same
-            # persistent-buffer derivation chain (Step3.5 proposer refreshes
-            # query_start_loc/seq_lens in place before each replay) and is
-            # re-enabled after the eager bring-up is verified.
-            return AttentionCGSupport.NEVER
         mode = vllm_config.compilation_config.cudagraph_mode
         if mode.has_piecewise_cudagraphs() and not mode.has_full_cudagraphs():
             # PIECEWISE: QFA runs outside the compiled region as a plain
@@ -575,6 +567,15 @@ class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
             return AttentionCGSupport.UNIFORM_BATCH
         # FULL (incl. FULL_DECODE_ONLY): npugraph_ex captures the
         # allocating QFA wrapper natively (golden-test GRAPH_PATH=7).
+        # Spec decode (MTP) included: the draft graph is a plain
+        # torch.npu.graph ACLGraphWrapper capture whose metadata goes
+        # through the same builder.build() (field passthrough) and whose
+        # per-step lengths live in the proposer's persistent buffers,
+        # refreshed in place before each draft replay -- the same
+        # stable-address contract as the main-model graphs. During draft
+        # capture _EXTRA_CTX.capturing is set by the ACLGraphWrapper
+        # (shared forward-context object), so the QFA metadata op is
+        # still executed inline inside the captured region.
         return AttentionCGSupport.ALWAYS
 
     def __init__(self, *args, **kwargs) -> None:
@@ -2421,10 +2422,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     host sync). No Python-side buffer refresh exists in the captured
     region -- ACL-graph replay never re-runs Python, so such refreshes
     would freeze at capture values. Speculative decoding (MTP) uses the
-    same derivation chain: the draft metadata builders route through
-    AscendAttentionMetadataBuilder.build(), and the Step3.5 proposer
-    refreshes its persistent query_start_loc/seq_lens buffers in place
-    before each draft-step replay.
+    same derivation chain: the draft metadata builder routes through
+    AscendAttentionMetadataBuilder.build(), and the MTP proposer
+    refreshes its persistent query_start_loc/seq_lens/block-table
+    buffers in place before each draft-step replay.
 
     NOTE: the QFA dual operators are called through _get_qfa_ops(), which
     resolves cann_ops_transformer.ops.quant_flash_attn(_metadata) -- the
