@@ -832,7 +832,11 @@ class KVCacheRecvingThread(threading.Thread):
 
         def pp_layer_indices(layer_indices: list[int], prefill_pp_rank: int, group_spec: dict[str, Any]) -> list[int]:
             first_layer_index, end_layer_index = self.pp_layer_indices[prefill_pp_rank]
-            if self.vllm_config.speculative_config is not None and prefill_pp_rank == self._prefill_pp_size - 1:
+            if (
+                self.vllm_config.speculative_config is not None
+                and prefill_pp_rank == self._prefill_pp_size - 1
+                and self.vllm_config.speculative_config.method != "mtp"
+            ):
                 end_layer_index += self.num_draft_layers
             is_index_cache_plane = any(".index_cache" in name for name in group_spec.get("layer_names", []))
 
