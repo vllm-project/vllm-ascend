@@ -333,15 +333,15 @@ def build_dspark_swa_indices(
             and hasattr(torch.ops._C_ascend, "build_dspark_swa_indices")):
         num_reqs = query_start_loc.shape[0] - 1
         if num_decode_tokens == num_reqs * num_speculative_tokens:
-            bt = (block_table if block_table.dtype == torch.int32
-                  else block_table.to(torch.int32))
-            qsl = (query_start_loc if query_start_loc.dtype == torch.int32
-                   else query_start_loc.to(torch.int32))
-            sl = (seq_lens if seq_lens.dtype == torch.int32
-                  else seq_lens.to(torch.int32))
-            return (torch.ops._C_ascend.build_dspark_swa_indices(
-                bt, qsl, sl, num_speculative_tokens, window_size, block_size,
-                index_width, num_decode_tokens), None)
+            bt = block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)
+            qsl = query_start_loc if query_start_loc.dtype == torch.int32 else query_start_loc.to(torch.int32)
+            sl = seq_lens if seq_lens.dtype == torch.int32 else seq_lens.to(torch.int32)
+            return (
+                torch.ops._C_ascend.build_dspark_swa_indices(
+                    bt, qsl, sl, num_speculative_tokens, window_size, block_size, index_width, num_decode_tokens
+                ),
+                None,
+            )
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
     prefix_lens = seq_lens - query_lens
