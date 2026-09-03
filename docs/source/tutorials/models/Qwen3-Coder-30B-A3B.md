@@ -561,15 +561,15 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers model-specific issues.
 
-### Q: How do I enable long context (beyond 256K)?
+### Q: How do I enable long context (beyond 256k)?
 
-Qwen3-Coder-30B-A3B natively supports 256K token context length. For contexts beyond 256K, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
+Qwen3-Coder-30B-A3B natively supports 256k token context length. For contexts beyond 256k, YaRN rope scaling is required to extend up to 1M. Enable YaRN via `--hf-overrides`:
 
 ```bash
 --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":262144}}'
 ```
 
-For contexts within the native 256K range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
+For contexts within the native 256k range, no additional configuration is needed. Just set `--max-model-len` to your desired length.
 
 ### Q: What makes Qwen3-Coder different from Qwen3-30B-A3B?
 

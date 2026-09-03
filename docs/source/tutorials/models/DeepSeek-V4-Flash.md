@@ -80,7 +80,7 @@ Select an image based on your machine type and start the docker image on your no
         -v /root/.cache:/root/.cache \
         -it $IMAGE bash
     ```
-    
+
 === "A2 series"
 
     Start the docker image on each node.
@@ -88,10 +88,10 @@ Select an image based on your machine type and start the docker image on your no
     ```bash
     # deepseek-v4-flash uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
-    
+
     # deepseek-v4-flash-dspark uses the following image
     export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
-    
+
     docker run --rm \
         --name vllm-ascend \
         --shm-size=512g \
@@ -320,7 +320,7 @@ Key Parameter Descriptions:
 - `--tokenizer-mode deepseek_v4`, `--tool-call-parser deepseek_v4`, `--enable-auto-tool-choice`, and `--reasoning-parser deepseek_v4` enable the DeepSeek-V4 tokenizer behavior, automatic tool calling, and reasoning-output parsing.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
-- `--block-size` sets the KV cache block size. To enable the experimental 4K prefix cache hit support, change it from `128` to `32`.
+- `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.
 - `--quantization ascend` enables Ascend quantization for the quantized model.
 - `--model-loader-extra-config` enables multi-threaded weight loading and sets the number of loading threads.
 - `--speculative-config` configures speculative decoding to accelerate inference. Use `mtp` for Multi-Token Prediction (MTP) and `dspark` for DSpark models. When using DSpark, `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`).

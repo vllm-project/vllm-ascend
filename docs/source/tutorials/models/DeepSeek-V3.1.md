@@ -924,29 +924,29 @@ After several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5K/16K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5K/16K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5K input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16K input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|Long Context<br>(64K input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
 
 #### Table 2: Detailed Node Configuration
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput (3.5K)|Server / Single Machine|16|4|4|39K|3|
-|High Throughput (16K)|Server / Single Machine|16|4|4|36K|3|
-|Low Latency (3.5K)|Server / Single Machine|16|8|2|36K|3|
-|Low Latency (16K)|Server / Single Machine|16|8|2|36K|3|
-|High Throughput / Low Latency (64K)|Server / Single Machine|16|8|2|132K|3|
+|High Throughput (3.5k)|Server / Single Machine|16|4|4|39k|3|
+|High Throughput (16k)|Server / Single Machine|16|4|4|36k|3|
+|Low Latency (3.5k)|Server / Single Machine|16|8|2|36k|3|
+|Low Latency (16k)|Server / Single Machine|16|8|2|36k|3|
+|High Throughput / Low Latency (64k)|Server / Single Machine|16|8|2|132k|3|
 
-|High Throughput (16K)|Server-P Node|16|8|2|36K|1|
-|High Throughput (16K)|Server-D Node|16|4|8|36K|1|
-|Low Latency (16K)|Server-P Node|16|8|2|36K|3|
-|Low Latency (16K)|Server-D Node|16|4|8|36K|3|
-|Long Context (64K)|Server-P Node|16|16|1|132K|3|
-|Long Context (64K)|Server-D Node|16|4|8|132K|3|
+|High Throughput (16k)|Server-P Node|16|8|2|36k|1|
+|High Throughput (16k)|Server-D Node|16|4|8|36k|1|
+|Low Latency (16k)|Server-P Node|16|8|2|36k|3|
+|Low Latency (16k)|Server-D Node|16|4|8|36k|3|
+|Long Context (64k)|Server-P Node|16|16|1|132k|3|
+|Long Context (64k)|Server-D Node|16|4|8|132k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 

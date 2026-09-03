@@ -409,7 +409,7 @@ Note: For MooncakeStore with RoCE-based Device-to-Device communication enabled, 
 
 This is because HCCL one-sided communication connections are created lazily after the instance is launched when Device-to-Device communication is involved. Currently, full-mesh connections between all devices are required. Establishing these connections introduces a one-time time overhead and persistent device memory consumption (4 MB of device memory per connection).
 
-**For warm-up, it is recommended to issue requests with an input sequence length of 8K and an output sequence length of 1, with the total number of requests being 2–3× the number of devices (cards/dies).**
+**For warm-up, it is recommended to issue requests with an input sequence length of 8k and an output sequence length of 1, with the total number of requests being 2–3× the number of devices (cards/dies).**
 
 ### Step 2.5: Enable MooncakeStore SSD Offload with Embedded Real Client Mode
 

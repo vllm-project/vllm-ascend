@@ -797,9 +797,9 @@ After about several minutes, you can get the performance evaluation result.
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to [Section 9.2](#92-tuning-guidelines) for tuning based on actual conditions.
 >
-> **Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256K+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, you can also raise `--max-model-len` up to 262144 in the same TP/DP layout.
+> **Parallelism Strategy**: `Qwen3.5-27B-w8a8` and `Qwen3.6-27B-w8a8` are only ~30 GB and easily fit in a single NPU (64 GB HBM per NPU). Following the **DP-first** principle, **TP=2 is the recommended default** for most scenarios, and the remaining NPUs should be allocated to DP for parallel request batches. **TP=8 is only recommended for ultra-long context (256k+) scenarios**, where it shards the KV cache across 8 NPUs to maximize the available context window per rank. For `Qwen3.6-27B-w8a8`, you can also raise `--max-model-len` up to 262144 in the same TP/DP layout.
 >
-> **Atlas inference products**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128K** and **256K** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
+> **Atlas inference products**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
 
 #### Table 1: Scenario Overview
 
