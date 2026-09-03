@@ -1,35 +1,3 @@
-name: Selected CPU Tests
-
-on:
-  workflow_call:
-    inputs:
-      vllm:
-        description: vllm version string
-        required: true
-        type: string
-      ref:
-        description: PR head sha
-        required: true
-        type: string
-      base_ref:
-        description: target base branch name e.g. main
-        required: true
-        type: string
-      # -------- fix start --------
-      base_sha:
-        description: base commit sha, optional. empty skip rebase
-        required: false
-        default: ""
-        type: string
-      # -------- fix end --------
-      test_groups:
-        description: json test groups
-        required: true
-        type: string
-    outputs:
-      coverage_artifact_name:
-        value: ${{ jobs.run_tests.outputs.coverage_artifact_name }}
-
 jobs:
   filter-groups:
     runs-on: ubuntu-latest
@@ -46,7 +14,6 @@ jobs:
           printf "%s" "${RAW_JSON}" > /tmp/test_groups.json
           FILTERED=$(jq -c '[ .[] | select(.npu_type == "cpu") ]' /tmp/test_groups.json)
           echo "filtered_test_groups=${FILTERED}" >> "${GITHUB_OUTPUT}"
-
   run_tests:
     name: cpu‑ut‑run
     needs: [filter-groups]
@@ -60,16 +27,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          raw = os.environ["GROUPS_RAW"]
-          if not raw or raw.strip() == "[]":
-              print("INFO: zero cpu test groups matched, skip test execution")
-              exit(0)
-          PY
-        env:
-          GROUPS_RAW: ${{ needs.filter-groups.outputs.filtered_test_groups }}
+          RAW="${{ needs.filter-groups.outputs.filtered_test_groups }}"
+          if [[ "${RAW}" == "[]" || -z "${RAW}" ]]; then
+              echo "INFO: zero cpu test groups matched, skip test execution"
+              exit 0
+          fi
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -83,10 +45,8 @@ jobs:
             sudo apt-get install -y python3-pip python3-venv python3-full
           fi
           python3 -m venv $GITHUB_WORKSPACE/venv
-          source $GITHUB_WORKSPACE/venv/bin/activate
-          python3 -m pip install --upgrade pip
-          python3 -m pip install torch pytest pytest-cov
-
+          ${GITHUB_WORKSPACE}/venv/bin/python3 -m pip install --upgrade pip
+          ${GITHUB_WORKSPACE}/venv/bin/python3 -m pip install torch pytest pytest-cov
       - name: Set PYTHONPATH for source import
         run: |
           echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
@@ -106,8 +66,7 @@ jobs:
         id: parse_groups
         run: |
           set -euo pipefail
-          source $GITHUB_WORKSPACE/venv/bin/activate
-          python3 - <<'PY'
+          ${GITHUB_WORKSPACE}/venv/bin/python3 - <<'PY'
           import json
           import os
           groups = json.loads(os.environ["TEST_GROUPS"])
@@ -120,21 +79,12 @@ jobs:
           PY
         env:
           TEST_GROUPS: ${{ needs.filter-groups.outputs.filtered_test_groups }}
-
-      - name: Setup python & dependencies
-        run: |
-          set -euo pipefail
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pytest-cov
-
       - name: Run pytest with coverage
         run: |
           set -euo pipefail
-          source $GITHUB_WORKSPACE/venv/bin/activate
           TEST_PATHS="${{ steps.parse_groups.outputs.test_paths }}"
           echo "Running tests: ${TEST_PATHS}"
-          python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
-
+          ${GITHUB_WORKSPACE}/venv/bin/python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
