@@ -154,9 +154,12 @@ class AscendDFlashSpeculator(DFlashSpeculator):
             self.sample_col[:num_sample],
             self.draft_logits,
         )
-        self.draft_tokens[:num_reqs, :num_steps] = draft_tokens.view(
-            num_reqs, num_steps
-        )
+        draft_tokens = draft_tokens.view(num_reqs, num_steps)
+        # ``draft_tokens[:, :num_steps]`` is a strided view when physical K
+        # is smaller than the configured maximum.  Use contiguous per-request
+        # rows so ACL graph capture never records an invalid strided copy.
+        for req_idx in range(num_reqs):
+            self.draft_tokens[req_idx, :num_steps].copy_(draft_tokens[req_idx])
 
     def propose(
         self,

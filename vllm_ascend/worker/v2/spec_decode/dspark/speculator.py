@@ -64,6 +64,24 @@ class _RowwiseConfidenceBuffer:
             self._buffer[req_idx, : self._active_k].copy_(values[req_idx])
 
 
+class _RowwiseDraftTokenBuffer:
+    """Route active-K column writes through contiguous scalar locations."""
+
+    def __init__(self, buffer: torch.Tensor):
+        self._buffer = buffer
+
+    def __setitem__(self, key, value) -> None:
+        if not isinstance(key, tuple) or len(key) != 2:
+            raise TypeError("unsupported draft token buffer index")
+        reqs, col = key
+        if not isinstance(reqs, slice) or reqs.start not in (None, 0) or reqs.step not in (None, 1):
+            raise TypeError("unsupported draft token request index")
+        num_reqs = self._buffer.shape[0] if reqs.stop is None else reqs.stop
+        values = value.reshape(num_reqs)
+        for req_idx in range(num_reqs):
+            self._buffer[req_idx, col] = values[req_idx]
+
+
 class AscendDSparkSpeculator(DSparkSpeculator):
     _speculator_name = "DSpark"
 
@@ -126,12 +144,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         paths shape-safe; the full view is restored before the caller records
         confidences for the next scheduler step.
         """
-        confidence_probs = getattr(self, "draft_token_confidence_probs", None)
         active_k = int(self.num_speculative_steps)
-        if confidence_probs is None or confidence_probs.ndim < 2:
-            super()._sample_sequential(num_reqs, head_hidden)
-            return
-
         max_k = int(
             getattr(self, "_vllm_ascend_max_speculative_steps", active_k)
         )
@@ -141,13 +154,19 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             super()._sample_sequential(num_reqs, head_hidden)
             return
 
-        self.draft_token_confidence_probs = _RowwiseConfidenceBuffer(
-            confidence_probs, active_k
-        )
+        confidence_probs = getattr(self, "draft_token_confidence_probs", None)
+        old_draft_tokens = self.draft_tokens
+        self.draft_tokens = _RowwiseDraftTokenBuffer(old_draft_tokens)
+        if confidence_probs is not None and confidence_probs.ndim >= 2:
+            self.draft_token_confidence_probs = _RowwiseConfidenceBuffer(
+                confidence_probs, active_k
+            )
         try:
             super()._sample_sequential(num_reqs, head_hidden)
         finally:
-            self.draft_token_confidence_probs = confidence_probs
+            self.draft_tokens = old_draft_tokens
+            if confidence_probs is not None and confidence_probs.ndim >= 2:
+                self.draft_token_confidence_probs = confidence_probs
 
     def build_draft_attn_metadatas(
         self,
