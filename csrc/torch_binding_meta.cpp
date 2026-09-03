@@ -568,6 +568,20 @@ npu_copy_and_expand_eagle_inputs_meta(
             out_new_token_indices, out_hidden_state_mapping};
 }
 
+void npu_dsa_local_metadata_meta(
+    const at::Tensor &query_start_loc,
+    const at::Tensor &seq_lens,
+    const at::Tensor &local_query_start_loc,
+    const at::Tensor &local_seq_lens,
+    const at::Tensor &start_pos_out,
+    int64_t local_start,
+    int64_t local_end,
+    int64_t num_reqs,
+    bool compute_start_pos)
+{
+    return;
+}
+
 at::Tensor npu_causal_conv1d_custom_meta(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -1985,6 +1999,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
+    // DsaLocalMetadata
+    ops.impl("npu_dsa_local_metadata", &vllm_ascend::meta::npu_dsa_local_metadata_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
     // moe_grouped_matmul

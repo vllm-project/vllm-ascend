@@ -636,6 +636,24 @@ npu_copy_and_expand_eagle_inputs(
             out_new_token_indices, out_hidden_state_mapping};
 }
 
+void npu_dsa_local_metadata(
+    const at::Tensor &query_start_loc,
+    const at::Tensor &seq_lens,
+    const at::Tensor &local_query_start_loc,
+    const at::Tensor &local_seq_lens,
+    const at::Tensor &start_pos_out,
+    int64_t local_start,
+    int64_t local_end,
+    int64_t num_reqs,
+    bool compute_start_pos)
+{
+    // Parameter order: inputs -> attrs -> outputs (aclnn convention).
+    EXEC_NPU_CMD(aclnnDsaLocalMetadata,
+                 query_start_loc, seq_lens,
+                 local_start, local_end, num_reqs, compute_start_pos,
+                 local_query_start_loc, local_seq_lens, start_pos_out);
+}
+
 at::Tensor npu_causal_conv1d_custom(
     const at::Tensor& output,
     const at::Tensor& x,
@@ -2287,6 +2305,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor out_is_masked_token_mask, Tensor out_new_token_indices, Tensor out_hidden_state_mapping)"
     );
     ops.impl("npu_copy_and_expand_eagle_inputs", torch::kPrivateUse1, &vllm_ascend::npu_copy_and_expand_eagle_inputs);
+
+    ops.def(
+        "npu_dsa_local_metadata(Tensor query_start_loc, Tensor seq_lens, "
+        "Tensor(a!) local_query_start_loc, Tensor(b!) local_seq_lens, Tensor(c!) start_pos_out, "
+        "int local_start, int local_end, int num_reqs, bool compute_start_pos) -> ()"
+    );
+    ops.impl("npu_dsa_local_metadata", torch::kPrivateUse1, &vllm_ascend::npu_dsa_local_metadata);
     ops.def(
         "npu_causal_conv1d_custom(Tensor output, Tensor x, "
         "                         Tensor weight, "
