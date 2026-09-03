@@ -1422,9 +1422,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 if self.try_finish_and_delete_stored_request(req_id):
                     self.set_finished_request(req_id)
         if not has_any_save:
-            assert not self.layer_save_finished_events[
-                physical_layer
-            ].is_set(), f"thread: {physical_layer} save failed "
+            assert not self.layer_save_finished_events[physical_layer].is_set(), (
+                f"thread: {physical_layer} save failed "
+            )
             logger.debug("Layer save event set: layer %d", physical_layer)
             self.layer_save_finished_events[physical_layer].set()
             transfer_tasks.clear()

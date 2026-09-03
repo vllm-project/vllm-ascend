@@ -657,9 +657,9 @@ class KVPoolWorker:
 
     def _get_cache_block_metadata(self, cache: torch.Tensor) -> tuple[int, int, int, int]:
         tensor_num_blocks = cache.shape[0]
-        assert (
-            tensor_num_blocks % self.num_blocks == 0
-        ), "The external block size must be an integer multiple of the kernel block size."
+        assert tensor_num_blocks % self.num_blocks == 0, (
+            "The external block size must be an integer multiple of the kernel block size."
+        )
         block_size_scale = tensor_num_blocks // self.num_blocks
         block_len = cache[0].numel() * cache.element_size() * block_size_scale
         block_stride = cache.stride(0) * cache.element_size() * block_size_scale
