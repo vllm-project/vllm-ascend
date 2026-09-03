@@ -114,12 +114,12 @@ class DsaAttnKvPlan:
         if self.uses_sparse_flash_mla:
             if slot_mapping.ndim != 1:
                 raise ValueError(f"BF16 DSA slot_mapping must be [num_tokens], got {tuple(slot_mapping.shape)}.")
-            # ACLGraph cannot capture host syncs (torch.any/item) or
-            # data-dependent Nonzero/gather. Flatten the paged dimensions and
-            # keep a static [T, 1] index tensor so auxiliary-stream capture
-            # follows the same one-dimensional slot convention as A5 FP8.
+            # Flatten the paged cache and keep a static [T, 1] index tensor so
+            # ACLGraph capture matches the A5 FP8 / SFA one-dimensional slot
+            # convention. Do not clamp PAD_SLOT_ID (-1) to 0: that overwrites
+            # a live physical slot. The scatter kernel skips negative indices.
             flat_cache = cache.view((-1,) + tuple(cache.shape[2:]))
-            indices = slot_mapping.to(torch.int64).clamp(min=0).view(-1, 1).contiguous()
+            indices = slot_mapping.to(torch.int64).view(-1, 1).contiguous()
             updates = x.reshape((slot_mapping.shape[0],) + tuple(flat_cache.shape[1:])).contiguous()
             torch_npu.npu_scatter_nd_update_(flat_cache, indices, updates)
             return
