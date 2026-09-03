@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     MLAAttentionSpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
@@ -2061,6 +2062,73 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         delay_free, params = self.scheduler.request_finished(request, [1, 2, 3])
         self.assertFalse(delay_free)
         self.assertIsNone(params)
+
+    def test_worker_handshake_block_size_is_used_for_transfer_metadata(self):
+        # EngineCore may replace cache_config.block_size with the smallest
+        # physical group size before constructing the scheduler. The workers
+        # retain the logical block size used to interpret their block IDs.
+        config = MockVllmConfig()
+        config.cache_config.block_size = 8
+        group_specs = (
+            FullAttentionSpec(
+                block_size=8,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.bfloat16,
+            ),
+            SlidingWindowSpec(
+                block_size=32,
+                num_kv_heads=1,
+                head_size=128,
+                dtype=torch.bfloat16,
+                sliding_window=64,
+            ),
+        )
+        kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                KVCacheGroupSpec([f"model.layers.{idx}.self_attn"], group_spec)
+                for idx, group_spec in enumerate(group_specs)
+            ]
+        )
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+        ):
+            scheduler = MooncakeConnectorScheduler(config, "test_engine", kv_cache_config)
+        group_tokens_per_block = [info.tokens_per_block for info in scheduler.group_transfer_info]
+        group_blocks_per_window = [info.blocks_per_window for info in scheduler.group_transfer_info]
+        metadata = {
+            0: make_agent_metadata(block_size=128, local_ip="host-0"),
+            1: make_agent_metadata(block_size=128, local_ip="host-1"),
+        }
+
+        scheduler.set_xfer_handshake_metadata_from_workers(metadata)
+        request = self._make_remote_decode_request(prompt_len=129)
+        delay_free, params = scheduler.request_finished(request, ([10, 11], [20, 21]))
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(scheduler.block_size, 8)
+        self.assertEqual(scheduler.transfer_block_size, 128)
+        self.assertEqual(group_tokens_per_block, [8, 32])
+        self.assertEqual(group_blocks_per_window, [0, 3])
+        self.assertEqual([info.tokens_per_block for info in scheduler.group_transfer_info], group_tokens_per_block)
+        self.assertEqual([info.blocks_per_window for info in scheduler.group_transfer_info], group_blocks_per_window)
+        self.assertEqual(params["remote_block_size"], 128)
+        self.assertEqual(params["num_prompt_blocks"], 2)
+
+    def test_worker_handshake_rejects_inconsistent_block_sizes(self):
+        metadata = {
+            0: make_agent_metadata(block_size=64, local_ip="host-0"),
+            1: make_agent_metadata(block_size=128, local_ip="host-1"),
+        }
+
+        with self.assertRaisesRegex(ValueError, "inconsistent block sizes"):
+            self.scheduler.set_xfer_handshake_metadata_from_workers(metadata)
 
     def test_request_finished_rejected_remote_prefill_enqueues_empty_recv(self):
         request = MockRequest(

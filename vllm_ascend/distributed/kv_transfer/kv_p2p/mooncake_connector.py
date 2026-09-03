@@ -1724,6 +1724,9 @@ class MooncakeConnectorScheduler:
         init_ascend_config(vllm_config)
         self.ascend_config = get_ascend_config()
         self.block_size = vllm_config.cache_config.block_size
+        # Keep per-group cache geometry separate from the block size used in
+        # P/D transfer metadata, which is synchronized from local workers.
+        self.transfer_block_size = self.block_size
         self.engine_id = engine_id
         self.local_ip = get_ip()
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -2021,7 +2024,7 @@ class MooncakeConnectorScheduler:
         if not params.get("do_remote_decode") or request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
             return False, None
 
-        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.block_size)
+        num_prompt_blocks = math.ceil(len(request.prompt_token_ids) / self.transfer_block_size)
         computed_block_ids = self._get_transfer_block_ids(block_ids, len(request.prompt_token_ids))
         computed_block_ids = self._get_swa_transfer_block_ids(computed_block_ids)
         computed_block_lens = [len(block_id_list) for block_id_list in computed_block_ids]
@@ -2044,7 +2047,7 @@ class MooncakeConnectorScheduler:
             last_token_id=request.output_token_ids[-1],
             remote_multi_nodes_meta_mapping=self.multi_nodes_meta_mapping,
             num_prompt_blocks=num_prompt_blocks,
-            remote_block_size=self.block_size,
+            remote_block_size=self.transfer_block_size,
         )
 
     def _port_offset_from_handshake_metadata(
@@ -2064,9 +2067,26 @@ class MooncakeConnectorScheduler:
         self,
         metadata: Mapping[int | tuple[int, ...], KVConnectorHandshakeMetadata],
     ) -> None:
-        """Build host mapping for one DP group that may span multiple nodes."""
+        """Build host mapping and sync transfer geometry from local workers."""
         if not metadata:
             return
+
+        worker_block_sizes: set[int] = set()
+        for rank_metadata in metadata.values():
+            worker_block_size = getattr(rank_metadata, "block_size", None)
+            if not isinstance(worker_block_size, int) or worker_block_size <= 0:
+                raise ValueError(f"Mooncake worker reported invalid block size: {worker_block_size}")
+            worker_block_sizes.add(worker_block_size)
+        if len(worker_block_sizes) != 1:
+            raise ValueError(f"Mooncake workers reported inconsistent block sizes: {sorted(worker_block_sizes)}")
+        worker_block_size = worker_block_sizes.pop()
+        if self.transfer_block_size != worker_block_size:
+            logger.info(
+                "MooncakeConnector updated scheduler transfer block size from %d to worker-reported value %d",
+                self.transfer_block_size,
+                worker_block_size,
+            )
+            self.transfer_block_size = worker_block_size
 
         updated_mapping: dict[str, dict[str, Any]] = {}
         kv_port = self.vllm_config.kv_transfer_config.kv_port
