@@ -74,13 +74,31 @@ on:
 # It's used to activate ascend-toolkit environment variables.
 defaults:
   run:
-    shell: bash -el {0}
+    shell: bash
 
 permissions:
   contents: read
   pull-requests: write
 
 jobs:
+  filter-groups:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      filtered_test_groups: ${{ steps.filter.outputs.filtered_test_groups }}
+    env:
+      RAW_JSON: ${{ inputs.test_groups }}
+    steps:
+      - name: Filter out cpu test groups
+        id: filter
+        run: |
+          set -euo pipefail
+          printf "%s" "${RAW_JSON}" > /tmp/test_groups.json
+          FILTERED=$(jq -c '[ .[] | select(.npu_type != "cpu") ]' /tmp/test_groups.json)
+          echo "filtered_test_groups=${FILTERED}" >> "${GITHUB_OUTPUT}"
+
   selected-tests:
     name: ${{ matrix.group.partition_name }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
@@ -105,7 +123,6 @@ jobs:
         UV_SYSTEM_PYTHON: 1
     steps:
       - name: Check NPU availability
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           npu-smi info
 
@@ -160,7 +177,6 @@ jobs:
 
       - name: Get csrc hash
         id: get_csrc_hash
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           # Fail closed so a git error cannot be converted into sha256(empty)
           # and then appear to be a legitimate cache miss.
@@ -180,7 +196,6 @@ jobs:
 
       - name: Get architecture
         id: get_arch
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           ARCH=$(uname -m)
           case "$ARCH" in
@@ -191,7 +206,6 @@ jobs:
 
       - name: Restore vllm-ascend csrc cache
         id: cache-csrc
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         uses: runs-on/cache/restore@v5
         with:
           path: |
@@ -206,7 +220,6 @@ jobs:
           fail-on-cache-miss: false
 
       - name: Install Mooncake wheel
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         run: |
           set -euxo pipefail
 
@@ -224,7 +237,6 @@ jobs:
           pip show mooncake-transfer-engine-npu || true
 
       - name: Install vllm-project/vllm-ascend with device
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         env:
           CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
         run: |
@@ -258,23 +270,12 @@ jobs:
                 [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if hasattr(ops, n)])
           PY
 
-      - name: Install vllm-project/vllm-ascend no device
-        if: ${{ matrix.group.npu_type == 'cpu' }}
-        env:
-          SOC_VERSION: ascend910b1
-          COMPILE_CUSTOM_KERNELS: 0
-        run: |
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install -e .
-
       - name: Uninstall Triton for 310P tests
-        if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
+        if: ${{ matrix.group.npu_type == '310p' }}
         run: |
           pip uninstall -y triton-ascend triton
 
       - name: Run selected tests with device
-        if: ${{ matrix.group.npu_type != 'cpu' }}
         continue-on-error: ${{ inputs.continue_on_error }}
         env:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
@@ -295,25 +296,8 @@ jobs:
             ${TIMING_FLAG} \
             ${{ matrix.group.tests }}
 
-      - name: Run selected tests without device
-        if: ${{ matrix.group.npu_type == 'cpu' }}
-        continue-on-error: ${{ inputs.continue_on_error }}
-        env:
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
-          ENABLE_COVERAGE: ${{ inputs.enable-coverage}}
-        run: |
-          if [ "${{ inputs.enable-coverage }}" = "true" ]; then
-            export ENABLE_COVERAGE=true
-          fi
-          .github/workflows/scripts/run_selected_tests.sh \
-            "${{ matrix.group.npu_type }}" \
-            "${{ matrix.group.num_npus }}" \
-            "without-device" \
-            ${{ matrix.group.tests }}
-
       - name: Upload timing data
-        if: ${{ inputs.upload_timing && matrix.group.npu_type != 'cpu' }}
+        if: ${{ inputs.upload_timing }}
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
