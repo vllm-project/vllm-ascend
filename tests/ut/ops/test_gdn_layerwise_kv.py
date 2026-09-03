@@ -159,10 +159,10 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
 
     connector.save_kv_layer.side_effect = record_ready_state
 
-    def causal_conv1d(output_tensor, mixed_qkv, conv_weights, **kwargs):
-        del conv_weights, kwargs
-        output_tensor.copy_(mixed_qkv)
+    def causal_conv1d(mixed_qkv, *args, **kwargs):
+        del args, kwargs
         model.kv_cache[0].add_(1)
+        return mixed_qkv.clone()
 
     def chunk_attention(**kwargs):
         initial_state = kwargs["initial_state"]
@@ -180,13 +180,17 @@ def test_connector_observes_updated_gdn_state_for_each_compiled_call():
         patch("vllm_ascend.ops.gdn.get_pcp_group", return_value=SimpleNamespace(world_size=1)),
         patch("vllm_ascend.ops.gdn.DeviceOperator.fused_gdn_gating", return_value=gating),
         patch("vllm_ascend.ops.gdn.clear_ssm_states"),
-        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
-        patch.object(
-            torch.ops._C_ascend,
-            "npu_causal_conv1d_custom",
-            side_effect=causal_conv1d,
-            create=True,
+        patch("vllm_ascend.ops.gdn.l2norm_fwd", side_effect=lambda x: x),
+        patch.object(AscendGatedDeltaNetAttention, "_probe_fused_chunk", return_value=False),
+        patch(
+            "vllm_ascend.ops.gdn.gather_ssm_states",
+            side_effect=lambda state, indices, has_initial_state, **kwargs: state.index_select(
+                0, indices.to(torch.long)
+            ),
         ),
+        patch("vllm_ascend.ops.gdn.chunk_gated_delta_rule", side_effect=chunk_attention),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_fn", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
+        patch("vllm_ascend.ops.gdn.causal_conv1d_update", side_effect=lambda x, *a, **k: causal_conv1d(x, *a, **k)),
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),

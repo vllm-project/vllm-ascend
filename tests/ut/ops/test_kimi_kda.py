@@ -533,6 +533,7 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
     attention = SimpleNamespace(
         prefix="kda",
         head_dim=2,
+        num_spec=3,
         kv_cache=(torch.zeros(1), state),
         get_parameter=lambda name: torch.empty(1),
         _run_causal_conv1d=lambda x, *args, **kwargs: x,

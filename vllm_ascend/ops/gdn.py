@@ -20,12 +20,12 @@ from functools import wraps
 import torch
 import torch_npu
 from einops import rearrange
-from torch import nn
 from fla_npu.ops.ascendc import (
     causal_conv1d_fn,
     causal_conv1d_update,
     recurrent_gated_delta_rule,
 )
+from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
