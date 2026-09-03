@@ -133,6 +133,32 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                         ).append(desc)
 
         capture_descs.sort(key=lambda item: item.num_tokens, reverse=True)
+
+        # Ascend's FIA graph-parameter table is keyed by ``num_tokens`` only.
+        # Keeping two FULL graphs with the same token count but different
+        # physical K would make them share one workspace/event/parameter bucket
+        # (for example, N=16 with K=1, 2 and 4), which can feed a workspace
+        # captured for one query width to another kernel.  That combination
+        # fails asynchronously in the FIA MTE with an invalid DDR address.
+        # Keep the widest graph for each token count; narrower K values remain
+        # valid dynamic decisions and dispatch eagerly when no width-matching
+        # graph exists.
+        widest_by_tokens: dict[int, BatchExecutionDescriptor] = {}
+        for desc in capture_descs:
+            current = widest_by_tokens.get(desc.num_tokens)
+            if current is None or (desc.uniform_token_count or 0) > (current.uniform_token_count or 0):
+                widest_by_tokens[desc.num_tokens] = desc
+        kept_descs = set(widest_by_tokens.values())
+        capture_descs[:] = sorted(
+            kept_descs,
+            key=lambda item: item.num_tokens,
+            reverse=True,
+        )
+        for candidates in self._candidates.values():
+            candidates[:] = list(dict.fromkeys(
+                desc for desc in candidates
+                if desc.cg_mode != decode_mode or desc in kept_descs
+            ))
         for key, candidates in self._candidates.items():
             unique = list(dict.fromkeys(candidates))
             candidates[:] = unique
