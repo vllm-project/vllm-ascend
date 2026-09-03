@@ -68,11 +68,14 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           submodules: true
-      # ========= 新增：更新submodule ./vllm到inputs.vllm指定commit =========
-      - name: Sync vllm submodule to target commit
+      - name: Git clone vllm from submodule remote
         run: |
           set -euo pipefail
-          cd ${GITHUB_WORKSPACE}/vllm
+          # 从.gitmodules读取vllm的url
+          VLLM_REMOTE=$(git config -f .gitmodules --get submodule.vllm.url)
+          echo "vllm remote url: ${VLLM_REMOTE}"
+          git clone "${VLLM_REMOTE}" ./vllm-src
+          cd ./vllm-src
           git fetch origin
           git checkout ${{ inputs.vllm }}
       - name: Install python dependencies
