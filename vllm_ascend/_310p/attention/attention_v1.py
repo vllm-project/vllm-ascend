@@ -249,11 +249,11 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         query = query[:num_actual_tokens]
         output_slice = output[:num_actual_tokens]
 
+        from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+
         # Host qLens filled in AscendAttentionMetadataBuilder310.build(); eager fallback only.
         qlens = get_query_lens_cpu(attn_metadata)
         if qlens is None:
-            from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
             if _EXTRA_CTX.capturing:
                 raise RuntimeError(
                     "310P splitfuse requires attn_metadata.query_lens_cpu during graph capture; "
@@ -265,6 +265,12 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
         block_table = attn_metadata.block_tables
 
         if attn_metadata.seq_lens.device != query.device:
+            if _EXTRA_CTX.capturing:
+                raise RuntimeError(
+                    "310P splitfuse requires device seq_lens during graph capture; "
+                    "ensure AscendAttentionMetadataBuilder310.build() bound seq_lens "
+                    "before forward."
+                )
             attn_metadata.seq_lens = attn_metadata.seq_lens.to(
                 device=query.device,
                 non_blocking=True,
@@ -289,8 +295,17 @@ class AscendAttentionBackendImpl310(AscendAttentionBackendImpl):
             )
             return output
 
-        # Generate the specific mask for splitfuse
-        mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
+        # Prefill NZ mask from parent build() is the wrong shape for splitfuse.
+        # Uncompressed splitfuse mask is precomputed in
+        # AscendAttentionMetadataBuilder310.build() (outside ACLGraph).
+        mask = attn_metadata.attn_mask
+        if mask is None:
+            if _EXTRA_CTX.capturing:
+                raise RuntimeError(
+                    "310P splitfuse mask must be precomputed before graph capture; "
+                    "D2H in get_splitfuse_mask is illegal on a captured stream."
+                )
+            mask = AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, query.device)
         torch_npu._npu_paged_attention_splitfuse(
             query=query,
             key_cache=self.key_cache,
