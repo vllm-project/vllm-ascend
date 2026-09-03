@@ -49,6 +49,6 @@ test_cases:
         max_out_len: 1
         batch_size: 16
         request_rate: 0
-        baseline: 100
+        input_throughput_baseline: 100
         input_throughput_threshold: 1
     
