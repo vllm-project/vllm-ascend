@@ -66,16 +66,10 @@ class AscendInputBuffers(InputBuffers):
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
         self.offload_req_ids: torch.Tensor | None = None
-        self.offload_token_to_req: torch.Tensor | None = None
         if enable_sparse_kv_offload:
             self.offload_req_ids = torch.zeros(
                 max_num_reqs,
                 dtype=torch.int64,
-                device=device,
-            )
-            self.offload_token_to_req = torch.zeros(
-                max_num_tokens,
-                dtype=torch.int32,
                 device=device,
             )
 
@@ -96,7 +90,6 @@ class AscendInputBatch(InputBatch):
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
     offload_req_ids: torch.Tensor | None = None
-    offload_token_to_req: torch.Tensor | None = None
 
     if vllm_version_is("0.27.1"):
 
@@ -169,16 +162,12 @@ def prepare_sparse_kv_offload_metadata(
 ) -> AscendInputBatch:
     """Stage sparse-offload request metadata into MRV2 input buffers."""
     req_ids_buffer = input_buffers.offload_req_ids
-    token_to_req_buffer = input_buffers.offload_token_to_req
-    if req_ids_buffer is None or token_to_req_buffer is None:
+    if req_ids_buffer is None:
         input_batch.offload_req_ids = None
-        input_batch.offload_token_to_req = None
         return input_batch
 
     num_reqs = input_batch.num_reqs
     num_reqs_padded = input_batch.num_reqs_after_padding
-    num_tokens = input_batch.num_tokens
-    num_tokens_padded = input_batch.num_tokens_after_padding
     if len(input_batch.req_ids) < num_reqs:
         raise RuntimeError(
             "KV offload request metadata is shorter than the scheduled batch: "
@@ -187,28 +176,11 @@ def prepare_sparse_kv_offload_metadata(
 
     req_ids_np = np.zeros(num_reqs_padded, dtype=np.int64)
     req_ids_np[:num_reqs] = np.fromiter(
-        (
-            adler32(req_id.encode("utf-8"))
-            for req_id in input_batch.req_ids[:num_reqs]
-        ),
+        (adler32(req_id.encode("utf-8")) for req_id in input_batch.req_ids[:num_reqs]),
         dtype=np.int64,
         count=num_reqs,
     )
 
-    query_lens = np.diff(
-        input_batch.query_start_loc_np[: num_reqs + 1]
-    ).astype(np.int32, copy=False)
-    token_to_req = np.repeat(np.arange(num_reqs, dtype=np.int32), query_lens)
-    if token_to_req.shape[0] < num_tokens:
-        raise RuntimeError(
-            "KV offload token_to_req metadata is shorter than the scheduled "
-            f"token batch: metadata={token_to_req.shape[0]}, tokens={num_tokens}"
-        )
-    token_to_req_np = np.zeros(num_tokens_padded, dtype=np.int32)
-    token_to_req_np[:num_tokens] = token_to_req[:num_tokens]
-
     async_copy_to_gpu(req_ids_np, out=req_ids_buffer[:num_reqs_padded])
-    async_copy_to_gpu(token_to_req_np, out=token_to_req_buffer[:num_tokens_padded])
     input_batch.offload_req_ids = req_ids_buffer[:num_reqs_padded]
-    input_batch.offload_token_to_req = token_to_req_buffer[:num_tokens_padded]
     return input_batch

@@ -8,6 +8,7 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+from torch import nn  # noqa: E402
 from vllm.config.compilation import CUDAGraphMode  # noqa: E402
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState  # noqa: E402
@@ -28,7 +29,6 @@ def _make_boundary_decode_metadata():
         query_start_loc_cpu=torch.tensor([0, 1]),
         is_prefilling=torch.tensor([True]),
         req_ids_tensor=torch.tensor([7]),
-        token_to_req=torch.tensor([0]),
     )
 
 
@@ -42,7 +42,10 @@ def _make_boundary_decode_metadata():
     ],
 )
 def test_pd_decode_consumer_is_derived_from_kv_role(kv_transfer_config, expected):
-    vllm_config = SimpleNamespace(kv_transfer_config=kv_transfer_config)
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=kv_transfer_config,
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
+    )
     with patch.object(AscendSFAMetadataBuilder, "__init__", return_value=None):
         builder = AscendSFAKVOffloadMetadataBuilder(
             kv_cache_spec=None,
@@ -69,6 +72,7 @@ def test_boundary_token_classification_depends_on_pd_decode_role(
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = is_pd_decode_consumer
+    builder.token_to_req_buffer = torch.empty(4, dtype=torch.int32)
     metadata = SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly)
 
     with patch(
@@ -89,6 +93,7 @@ def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
     builder.decode_threshold = 1
     builder.is_pd_decode_consumer = True
+    builder.token_to_req_buffer = torch.empty(4, dtype=torch.int32)
     metadata = SimpleNamespace()
     common_metadata = _make_boundary_decode_metadata()
     common_metadata.max_query_len = 2
@@ -104,6 +109,32 @@ def test_pd_decode_consumer_still_rejects_long_prefill_classification():
     assert metadata.num_decodes == 0
     assert metadata.num_prefills == 1
     assert metadata.num_decode_tokens == 0
+
+
+def test_builder_owns_graph_stable_token_to_req_buffer():
+    builder = AscendSFAKVOffloadMetadataBuilder.__new__(AscendSFAKVOffloadMetadataBuilder)
+    builder.token_to_req_buffer = torch.empty(6, dtype=torch.int32)
+    buffer_ptr = builder.token_to_req_buffer.data_ptr()
+
+    token_to_req = builder._build_token_to_req(
+        SimpleNamespace(
+            num_actual_tokens=6,
+            query_start_loc_cpu=torch.tensor([0, 2, 5]),
+        )
+    )
+
+    assert token_to_req.tolist() == [0, 0, 1, 1, 1, 0]
+    assert token_to_req.data_ptr() == buffer_ptr
+
+    token_to_req = builder._build_token_to_req(
+        SimpleNamespace(
+            num_actual_tokens=4,
+            query_start_loc_cpu=torch.tensor([0, 1, 3]),
+        )
+    )
+
+    assert token_to_req.tolist() == [0, 1, 1, 0]
+    assert token_to_req.data_ptr() == buffer_ptr
 
 
 @pytest.mark.parametrize(
@@ -149,7 +180,7 @@ def test_graph_capture_signal_matches_model_runner_v2_wrapper(runtime_mode, expe
     extra_context = SimpleNamespace(capturing=False)
     forward_context = SimpleNamespace(cudagraph_runtime_mode=runtime_mode)
 
-    class CaptureProbe(torch.nn.Module):
+    class CaptureProbe(nn.Module):
         def forward(self):
             return AscendSFAKVOffloadImpl._is_graph_capturing()
 

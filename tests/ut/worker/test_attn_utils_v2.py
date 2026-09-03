@@ -506,7 +506,6 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             positions=torch.arange(8, dtype=torch.int32),
             attn_state=None,
             offload_req_ids=None,
-            offload_token_to_req=None,
         )
         metadata = model_state.prepare_attn(
             input_batch=input_batch,

@@ -216,7 +216,6 @@ def build_attn_metadata(
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
     req_ids_tensor: torch.Tensor | None = None,
-    token_to_req: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -279,7 +278,6 @@ def build_attn_metadata(
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             req_ids_tensor=req_ids_tensor,
-            token_to_req=token_to_req,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -669,7 +667,7 @@ def _allocate_kv_cache(
             continue
 
         if isinstance(example_spec, AscendSFAIndexerCacheSpec):
-            raw_cache: tuple[torch.Tensor, ...]
+            indexer_raw_cache: tuple[torch.Tensor, ...]
             num_blocks = kv_cache_tensor.size // example_spec.page_size_bytes
 
             k_tensor_size = (
@@ -696,17 +694,17 @@ def _allocate_kv_cache(
                     scale_dtype=example_spec.scale_dtype,
                     device=device,
                 )
-                raw_cache = (k_tensor, scale_tensor)
+                indexer_raw_cache = (k_tensor, scale_tensor)
             else:
                 k_tensor = _allocate_int8_cache_tensor(
                     k_tensor_size,
                     alignment,
                     device,
                 )
-                raw_cache = (k_tensor,)
+                indexer_raw_cache = (k_tensor,)
 
             for layer_name_inner in kv_cache_tensor.shared_by:
-                kv_cache_raw_tensors[layer_name_inner] = raw_cache
+                kv_cache_raw_tensors[layer_name_inner] = indexer_raw_cache
 
             continue
 

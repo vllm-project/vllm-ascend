@@ -1315,10 +1315,7 @@ class SparseKVOffloadConfig:
             if vllm_config.speculative_config is not None:
                 method = getattr(vllm_config.speculative_config, "method", None)
                 if method not in ("mtp", "deepseek_mtp"):
-                    raise ValueError(
-                        "Sparse KV offload with model_runner_v2 only supports "
-                        "MTP speculative decoding."
-                    )
+                    raise ValueError("Sparse KV offload with model_runner_v2 only supports MTP speculative decoding.")
 
         self.topk = vllm_config.model_config.hf_text_config.index_topk
         if self.topk_buffer_size < self.topk:
