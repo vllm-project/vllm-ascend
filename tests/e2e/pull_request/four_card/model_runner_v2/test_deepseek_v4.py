@@ -106,7 +106,7 @@ def test_deepseek_v4_mtp_full_decode_only():
     "compilation_config",
     [
         pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
             id="full_decode_only",
         ),
         pytest.param({}, id="default_full_and_piecewise"),
