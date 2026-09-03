@@ -75,8 +75,13 @@ jobs:
             sudo apt-get install -y python3-pip python3-venv python3-full
           fi
           python3 -m venv $GITHUB_WORKSPACE/venv
-          ${GITHUB_WORKSPACE}/venv/bin/python3 -m pip install --upgrade pip
-          ${GITHUB_WORKSPACE}/venv/bin/python3 -m pip install torch pytest pytest-cov
+          VENV_PY=${GITHUB_WORKSPACE}/venv/bin/python3
+          ${VENV_PY} -m pip install --upgrade pip
+          ${VENV_PY} -m pip install torch pytest pytest-cov
+
+          export VLLM_ASCEND_SKIP_BUILD_EXT=1
+          ${VENV_PY} -m pip install -e .
+
       - name: Set PYTHONPATH for source import
         run: |
           echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
