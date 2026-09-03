@@ -105,12 +105,12 @@ The current evaluation results are:
 
 ### Baseline Result
 
-`Minitron-8B-Base` can be deployed through `vllm-ascend` for online inference and benchmark evaluation.  
+`Minitron-8B-Base` can be deployed through `vllm-ascend` for online inference and benchmark evaluation.
 Actual throughput and latency depend on hardware resources, prompt length, output length, concurrency, and runtime configuration.
 
 ### Remarks
 
-This document focuses on functional verification and benchmark accuracy on GSM8K.  
+This document focuses on functional verification and benchmark accuracy on GSM8K.
 Further benchmarking is recommended for:
 
 - request latency
