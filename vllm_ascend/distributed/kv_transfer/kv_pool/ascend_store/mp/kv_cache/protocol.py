@@ -10,9 +10,9 @@ in the client, server, and manager.
 import enum
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Literal, TypeVar
 
-import cloudpickle
+import cloudpickle  # type: ignore
 from vllm.distributed.kv_events import BlockStored
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
@@ -28,7 +28,7 @@ from .scheduler_view import BlocksView, CachedReqsView, RequestView, ScheduledNe
 ACK_RESPONSE = b"OK"
 
 _INTEGER_BYTES = 8
-_BYTE_ORDER = "big"
+_BYTE_ORDER: Literal["big"] = "big"
 _MAX_REGISTRATION_BYTES = 8 * 1024 * 1024
 _SCHEDULER_REQUEST_PAYLOADS = 4
 _WORKER_REQUEST_PAYLOADS = 5
@@ -116,6 +116,9 @@ def decode_registration_request(
     payloads: tuple[bytes, ...],
     expected_type: type[RegistrationT],
 ) -> tuple[RegistrationT, bytes]:
+    identity: SchedulerIdentity | WorkerIdentity
+    session_id: str
+    payload: bytes
     if expected_type is SchedulerRegistration:
         identity, session_id, payload = _decode_scheduler_envelope(payloads, KVCacheMethod.REGISTER_SCHEDULER.value)
     elif expected_type is WorkerRegistration:

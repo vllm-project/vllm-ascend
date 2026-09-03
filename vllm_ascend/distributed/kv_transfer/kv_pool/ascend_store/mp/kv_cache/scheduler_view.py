@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from vllm.v1.core.kv_cache_utils import BlockHash
 
 if TYPE_CHECKING:
-    from ..metadata import AscendStoreKVConnectorWorkerMetadata
+    from ...metadata import AscendStoreKVConnectorWorkerMetadata
 
 
 @dataclass

@@ -34,12 +34,12 @@ class _CPUMemoryAdapter:
             device_uuid="cpu",
             handle_type="test_cpu",
             handle_version=1,
-            handle=index.to_bytes(4),
+            handle=index.to_bytes(4, byteorder="big"),
         )
 
     def import_storage(self, spec: KVCacheStorageSpec) -> tuple[torch.Tensor, int | None]:
         self.import_count += 1
-        index = int.from_bytes(spec.handle)
+        index = int.from_bytes(spec.handle, byteorder="big")
         return self.storages[index], None
 
 

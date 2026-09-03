@@ -250,7 +250,7 @@ def _run_affinity_server(bind_url: str, conn, started_events, release_events) ->
 def _start_server(
     bind_url: str = _DEFAULT_URL,
     worker_hits: dict[tuple[int, int], int] | None = None,
-) -> tuple[mp.Process, str]:
+) -> tuple[mp.process.BaseProcess, str]:
     context = mp.get_context("spawn")
     parent_conn, child_conn = context.Pipe()
     process = context.Process(target=_run_server, args=(bind_url, child_conn, worker_hits or {(0, 0): 16}))
@@ -297,7 +297,7 @@ def _start_affinity_server():
     return process, endpoint, started_events, release_events
 
 
-def _stop_server(process: mp.Process) -> None:
+def _stop_server(process: mp.process.BaseProcess) -> None:
     if process.is_alive():
         process.terminate()
     process.join(timeout=5)
@@ -357,19 +357,27 @@ def test_server_request_stop_completes_run_loop() -> None:
 
 def test_server_close_drains_rpc_before_closing_services() -> None:
     calls = []
+
+    def record(event: str, result: bool = True):
+        def hook(*args: object, **kwargs: object) -> bool:
+            calls.append(event)
+            return result
+
+        return hook
+
     server = KVCacheServer.__new__(KVCacheServer)
     server._close_lock = threading.Lock()
     server._abort_requested = threading.Event()
     server._closed = False
     server._rpc_server = MagicMock()
     server._service = MagicMock()
-    server._rpc_server.request_stop.side_effect = lambda: calls.append("request_stop") or True
+    server._rpc_server.request_stop.side_effect = record("request_stop")
     server._service.stop_lease_maintenance.side_effect = lambda wait=True: calls.append(
         "stop_maintenance_wait" if wait else "stop_maintenance_signal"
     )
-    server._rpc_server.wait_for_drain.side_effect = lambda: calls.append("drain_rpc") or True
+    server._rpc_server.wait_for_drain.side_effect = record("drain_rpc")
     server._service.close.side_effect = lambda: calls.append("close_service")
-    server._rpc_server.close.side_effect = lambda: calls.append("close_rpc") or True
+    server._rpc_server.close.side_effect = record("close_rpc")
 
     assert server.close()
 

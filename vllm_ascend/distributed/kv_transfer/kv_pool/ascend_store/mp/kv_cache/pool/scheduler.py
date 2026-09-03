@@ -83,12 +83,16 @@ class MPKVPoolScheduler(KVPoolScheduler):
     BlockPool operations for the owning process to apply.
     """
 
+    # Narrowed from the parent's Any | None: this service always installs the
+    # command-recording proxy, never the in-process BlockPool.
+    _block_pool: _BlockPoolProxy
+
     def __init__(self, registration: SchedulerRegistration, lookup_handler: WorkerLookupHandler):
         config = registration.config
         use_layerwise = config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
         super().__init__(config, use_layerwise, kv_cache_config=config.build_kv_cache_config())
         self.client = _WorkerLookupBridge(registration.identity, lookup_handler)  # type: ignore[assignment]
-        self._block_pool = _BlockPoolProxy()  # type: ignore[assignment]
+        self._block_pool = _BlockPoolProxy()
 
     # ==============================
     # Scheduler request state across RPC

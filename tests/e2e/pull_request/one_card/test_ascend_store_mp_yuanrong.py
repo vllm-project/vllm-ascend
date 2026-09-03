@@ -25,9 +25,9 @@ _YUANRONG_CONFIG_ENV = "YR_CONFIG_PATH"
 
 def _require_yuanrong() -> None:
     try:
-        from yr.datasystem.hetero_client import HeteroClient  # noqa: F401
-        from yr.datasystem.kv_client import SetParam  # noqa: F401
-        from yr.datasystem.object_client import WriteMode  # noqa: F401
+        from yr.datasystem.hetero_client import HeteroClient  # type: ignore[import-not-found]  # noqa: F401
+        from yr.datasystem.kv_client import SetParam  # type: ignore[import-not-found]  # noqa: F401
+        from yr.datasystem.object_client import WriteMode  # type: ignore[import-not-found]  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("openyuanrong-datasystem is required for this E2E test") from exc
 
@@ -36,6 +36,7 @@ def _validate_yuanrong_config() -> None:
     config_path_value = os.getenv(_YUANRONG_CONFIG_ENV)
     if not config_path_value:
         pytest.skip(f"Set {_YUANRONG_CONFIG_ENV} to run the YuanRong E2E test")
+    assert config_path_value is not None
 
     config_path = Path(config_path_value)
     if not config_path.is_file():
@@ -63,6 +64,7 @@ def test_real_model_yuanrong_lookup_hit_and_retrieve(tmp_path, monkeypatch, use_
     model_path = _model_path()
     if model_path is None:
         pytest.skip("Set ASCEND_STORE_MP_SMOKE_MODEL to a local model path to run this smoke test")
+    assert model_path is not None
     if not torch.npu.is_available():
         pytest.skip("NPU is not available")
     _validate_yuanrong_config()

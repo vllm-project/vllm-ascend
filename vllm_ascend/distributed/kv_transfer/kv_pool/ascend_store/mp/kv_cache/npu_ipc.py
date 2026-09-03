@@ -9,7 +9,7 @@ differ between processes.
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-import cloudpickle
+import cloudpickle  # type: ignore
 import torch
 
 TORCH_NPU_IPC_HANDLE = "torch_npu_ipc"

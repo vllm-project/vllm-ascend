@@ -94,7 +94,7 @@ class MPClient:
     """Thread-safe RPC facade backed by one DEALER-owning I/O thread."""
 
     def __init__(self, server_url: str):
-        self._context = zmq.Context()
+        self._context = zmq.Context()  # type: ignore[attr-defined]
         self._server_url = server_url
         self._request_ids = itertools.count()
 
@@ -206,14 +206,14 @@ class MPClient:
         zmq_socket = None
         monitor_socket = None
         try:
-            zmq_socket = self._context.socket(zmq.DEALER)
-            monitor_socket = zmq_socket.get_monitor_socket(events=zmq.EVENT_CONNECTED | zmq.EVENT_DISCONNECTED)
+            zmq_socket = self._context.socket(zmq.DEALER)  # type: ignore[attr-defined]
+            monitor_socket = zmq_socket.get_monitor_socket(events=zmq.EVENT_CONNECTED | zmq.EVENT_DISCONNECTED)  # type: ignore[attr-defined]
             zmq_socket.connect(self._server_url)
 
-            poller = zmq.Poller()
-            poller.register(zmq_socket, zmq.POLLIN)
-            poller.register(monitor_socket, zmq.POLLIN)
-            poller.register(self._notify_reader.fileno(), zmq.POLLIN)
+            poller = zmq.Poller()  # type: ignore[attr-defined]
+            poller.register(zmq_socket, zmq.POLLIN)  # type: ignore[attr-defined]
+            poller.register(monitor_socket, zmq.POLLIN)  # type: ignore[attr-defined]
+            poller.register(self._notify_reader.fileno(), zmq.POLLIN)  # type: ignore[attr-defined]
             with self._client_lifecycle_condition:
                 if self._lifecycle_state is _ClientState.STARTING:
                     self._lifecycle_state = _ClientState.DISCONNECTED
@@ -276,7 +276,7 @@ class MPClient:
         with contextlib.suppress(BlockingIOError):
             self._notify_writer.send(b"\x01")
 
-    def _process_outbound(self, zmq_socket: zmq.Socket) -> None:
+    def _process_outbound(self, zmq_socket: zmq.Socket) -> None:  # type: ignore[name-defined]
         while True:
             try:
                 request = self._outbound_queue.get_nowait()
@@ -290,8 +290,8 @@ class MPClient:
                 continue
 
             try:
-                zmq_socket.send_multipart(request.frames, flags=zmq.NOBLOCK)
-            except zmq.Again:
+                zmq_socket.send_multipart(request.frames, flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
+            except zmq.Again:  # type: ignore[attr-defined]
                 # Non-blocking send reports transport backpressure through
                 # Again. The server has not accepted this request, so fail
                 # it as busy instead of blocking the client I/O loop.
@@ -310,7 +310,7 @@ class MPClient:
                 request.method, request.future, request.deadline_ns
             )
 
-    def _process_inbound(self, zmq_socket: zmq.Socket) -> None:
+    def _process_inbound(self, zmq_socket: zmq.Socket) -> None:  # type: ignore[name-defined]
         frames = zmq_socket.recv_multipart()
         if not frames:
             logger.error("Discarding malformed response without a request ID")
@@ -339,6 +339,7 @@ class MPClient:
         if status is not ResponseStatus.OK:
             message = responses[0].decode(errors="replace") if responses else "Unknown server error"
             remote_traceback = responses[1].decode(errors="replace") if len(responses) > 1 else None
+            error: MPServerBusyError | MPServerAbortedError | MPRemoteError
             if status is ResponseStatus.BUSY:
                 error = MPServerBusyError(message)
             elif status is ResponseStatus.ABORTED:
@@ -355,11 +356,11 @@ class MPClient:
 
         pending.future.set_result(list(responses))
 
-    def _drain_inbound(self, zmq_socket: zmq.Socket) -> None:
-        while zmq_socket.poll(timeout=0, flags=zmq.POLLIN):
+    def _drain_inbound(self, zmq_socket: zmq.Socket) -> None:  # type: ignore[name-defined]
+        while zmq_socket.poll(timeout=0, flags=zmq.POLLIN):  # type: ignore[attr-defined]
             self._process_inbound(zmq_socket)
 
-    def _handle_transport_disconnected(self, zmq_socket: zmq.Socket) -> None:
+    def _handle_transport_disconnected(self, zmq_socket: zmq.Socket) -> None:  # type: ignore[name-defined]
         with self._client_lifecycle_condition:
             if self._lifecycle_state is not _ClientState.CONNECTED:
                 return
@@ -375,12 +376,12 @@ class MPClient:
             self._lifecycle_state = _ClientState.CONNECTED
             self._client_lifecycle_condition.notify_all()
 
-    def _process_monitor_event(self, zmq_socket: zmq.Socket, monitor_socket: zmq.Socket) -> None:
+    def _process_monitor_event(self, zmq_socket: zmq.Socket, monitor_socket: zmq.Socket) -> None:  # type: ignore[name-defined]
         monitor_event = recv_monitor_message(monitor_socket)
         event = monitor_event["event"]
-        if event == zmq.EVENT_DISCONNECTED:
+        if event == zmq.EVENT_DISCONNECTED:  # type: ignore[attr-defined]
             self._handle_transport_disconnected(zmq_socket)
-        elif event == zmq.EVENT_CONNECTED:
+        elif event == zmq.EVENT_CONNECTED:  # type: ignore[attr-defined]
             self._handle_transport_connected()
 
     @staticmethod
@@ -418,9 +419,9 @@ class MPClient:
             if request.future.set_running_or_notify_cancel():
                 request.future.set_exception(exc)
 
-        for request in self._pending_requests.values():
-            if not request.future.done():
-                request.future.set_exception(exc)
+        for pending in self._pending_requests.values():
+            if not pending.future.done():
+                pending.future.set_exception(exc)
         self._pending_requests.clear()
 
     # ==============================

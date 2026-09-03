@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 import traceback
+from collections.abc import Callable
 from functools import partial
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -48,7 +49,7 @@ class _ObservedBackend:
     def __init__(self, device_index: int | None):
         self.device_index = device_index
         self.registered_buffers: tuple[list[int], list[int]] | None = None
-        self.load_callback = None
+        self.load_callback: Callable[[], None] | None = None
         self.stored_keys: list[str] = []
 
     def set_device(self) -> None:

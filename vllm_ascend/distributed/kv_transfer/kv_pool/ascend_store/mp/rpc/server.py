@@ -180,8 +180,8 @@ class MPServer:
         context = None
         zmq_socket = None
         try:
-            context = zmq.Context()
-            zmq_socket = context.socket(zmq.ROUTER)
+            context = zmq.Context()  # type: ignore[attr-defined]
+            zmq_socket = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
             self.endpoint = self._bind(zmq_socket, bind_url)
         except BaseException:
             if zmq_socket is not None:
@@ -216,7 +216,7 @@ class MPServer:
 
     @staticmethod
     def _collect_owned_executors(routes: Iterable[object]) -> tuple[TaskExecutor, ...]:
-        executors = {}
+        executors: dict[int, TaskExecutor] = {}
         for route in routes:
             # Route validation runs after ownership is claimed so every valid
             # executor can still be shut down when another entry is malformed.
@@ -226,7 +226,7 @@ class MPServer:
         return tuple(executors.values())
 
     @staticmethod
-    def _bind(zmq_socket: zmq.Socket, bind_url: str) -> str:
+    def _bind(zmq_socket: zmq.Socket, bind_url: str) -> str:  # type: ignore[name-defined]
         if bind_url.endswith(":*"):
             base_url = bind_url[:-2]
             port = zmq_socket.bind_to_random_port(base_url)
@@ -261,15 +261,15 @@ class MPServer:
             self._run_thread = threading.current_thread()
 
         try:
-            poller = zmq.Poller()
-            poller.register(self._socket, zmq.POLLIN)
-            poller.register(self._notify_reader.fileno(), zmq.POLLIN)
-            socket_events = zmq.POLLIN
+            poller = zmq.Poller()  # type: ignore[attr-defined]
+            poller.register(self._socket, zmq.POLLIN)  # type: ignore[attr-defined]
+            poller.register(self._notify_reader.fileno(), zmq.POLLIN)  # type: ignore[attr-defined]
+            socket_events = zmq.POLLIN  # type: ignore[attr-defined]
 
             while not self._should_stop_run():
                 # Backpressure must drain queued responses before more requests
                 # are accepted, otherwise memory use can grow without bound.
-                expected_socket_events = zmq.POLLOUT if self._send_backlog else zmq.POLLIN
+                expected_socket_events = zmq.POLLOUT if self._send_backlog else zmq.POLLIN  # type: ignore[attr-defined]
                 if socket_events != expected_socket_events:
                     socket_events = expected_socket_events
                     poller.modify(self._socket, socket_events)
@@ -281,9 +281,9 @@ class MPServer:
                     self._send_responses()
 
                 socket_event = events.get(self._socket, 0)
-                if socket_event & zmq.POLLOUT:
+                if socket_event & zmq.POLLOUT:  # type: ignore[attr-defined]
                     self._send_responses()
-                if socket_event & zmq.POLLIN and not self._send_backlog:
+                if socket_event & zmq.POLLIN and not self._send_backlog:  # type: ignore[attr-defined]
                     self._receive_and_dispatch_request()
         except BaseException:
             self.abort()
@@ -626,8 +626,8 @@ class MPServer:
             response = self._send_backlog[0]
             if response.request_key is None:
                 try:
-                    self._socket.send_multipart(response.frames, flags=zmq.NOBLOCK)
-                except zmq.Again:
+                    self._socket.send_multipart(response.frames, flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
+                except zmq.Again:  # type: ignore[attr-defined]
                     return
                 self._send_backlog.popleft()
                 continue
@@ -643,8 +643,8 @@ class MPServer:
                     continue
 
                 try:
-                    self._socket.send_multipart(response.frames, flags=zmq.NOBLOCK)
-                except zmq.Again:
+                    self._socket.send_multipart(response.frames, flags=zmq.NOBLOCK)  # type: ignore[attr-defined]
+                except zmq.Again:  # type: ignore[attr-defined]
                     return
                 del self._accepted_requests[response.request_key]
                 self._send_backlog.popleft()

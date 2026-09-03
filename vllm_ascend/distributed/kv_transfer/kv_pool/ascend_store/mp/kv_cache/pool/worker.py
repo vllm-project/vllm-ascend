@@ -2,12 +2,13 @@
 
 import threading
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 
 import torch
 from vllm.logger import logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from ....backend.base import Backend
 from ....kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
@@ -15,6 +16,7 @@ from ....kv_transfer import (
     KVCacheStoreLayerSendingThread,
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
+    KVTransferThread,
 )
 from ....metadata import AscendConnectorMetadata, get_group_cache_family
 from ....pool_worker import KVPoolWorker
@@ -43,11 +45,44 @@ class WorkerBackend(Protocol):
 
 
 class _MissingWorkerBackend:
-    """Lookup-only stand-in used before the Worker runtime is active."""
+    """Lookup-only stand-in used before the Worker runtime is active.
+
+    Exists reports misses so lookups degrade instead of failing while the
+    real backend is created by the first cache registration; every mutating
+    operation is a programming error in that state and says so.
+    """
 
     @staticmethod
     def exists(keys: list[str]) -> list[int]:
         return [0] * len(keys)
+
+    @staticmethod
+    def _reject(operation: str) -> NoReturn:
+        raise RuntimeError(f"Worker backend is not active; {operation} requires a registered KV cache")
+
+    @staticmethod
+    def get(keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> list[int] | None:
+        _MissingWorkerBackend._reject("get")
+
+    @staticmethod
+    def put(keys: list[str], addrs: list[list[int]], sizes: list[list[int]]) -> None:
+        _MissingWorkerBackend._reject("put")
+
+    @staticmethod
+    def register_buffer(ptrs: list[int], lengths: list[int]) -> None:
+        _MissingWorkerBackend._reject("register_buffer")
+
+    @staticmethod
+    def unregister_buffer() -> None:
+        _MissingWorkerBackend._reject("unregister_buffer")
+
+    @staticmethod
+    def set_device() -> None:
+        _MissingWorkerBackend._reject("set_device")
+
+    @staticmethod
+    def close() -> None:
+        return None
 
 
 class _ImportedNPUEvent:
@@ -78,7 +113,24 @@ WorkerBackendFactory = Callable[[object, int | None, bool], WorkerBackend]
 # buffers and imported NPU memory.
 
 
-class _MPTransferThreadMixin:
+if TYPE_CHECKING:
+    # The mixin combines with the KVCacheStore*Thread bases at runtime only;
+    # giving mypy their common ancestor resolves name, ident, join,
+    # request_queue, _fatal_error and _set_os_thread_name.
+    _TransferThreadBase = KVTransferThread
+else:
+    _TransferThreadBase = object
+
+
+class _MPTransferThreadMixin(_TransferThreadBase):
+    if TYPE_CHECKING:
+        # Provided by every KVCacheStore*Thread base, but declared on those
+        # subclasses rather than on the shared KVTransferThread ancestor.
+        m_store: Backend
+        ready_event: threading.Event
+
+        def _handle_request(self, request: Any) -> None: ...
+
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         self._admission_lock = threading.Lock()
@@ -167,6 +219,17 @@ class MPKVPoolWorker(KVPoolWorker):
     preserve source-process event ordering, while this service owns its imported
     mappings, created backend, and transfer threads.
     """
+
+    # Redeclared with the MP thread classes so the mixin's stop() contract is
+    # visible to type checkers; the runtime values come from the inherited
+    # startup paths in _start_kv_transfer_threads.
+    kv_send_thread: (
+        MPKVCacheStoreSendingThread | MPKVCacheStoreKeyLayerSendingThread | MPKVCacheStoreLayerSendingThread | None
+    )
+    kv_recv_thread: (
+        MPKVCacheStoreRecvingThread | MPKVCacheStoreKeyLayerRecvingThread | MPKVCacheStoreLayerRecvingThread | None
+    )
+    m_store: WorkerBackend
 
     def __init__(
         self,
@@ -319,8 +382,12 @@ class MPKVPoolWorker(KVPoolWorker):
         self.sync_save_events[self.current_layer] = event  # type: ignore[assignment]
         super().save_kv_layer(self._current_connector_metadata)
 
-    def wait_for_save(self, connector_metadata: AscendConnectorMetadata, event_spec: NPUEventSpec) -> None:
+    def wait_for_save(
+        self, connector_metadata: AscendConnectorMetadata, event_spec: NPUEventSpec | None = None
+    ) -> None:
         """Submit savable requests behind the source event and wait for the send queue."""
+        if event_spec is None:
+            raise ValueError("wait_for_save requires the source NPU event recorded by the vLLM Worker")
         if self.kv_send_thread is None:
             raise RuntimeError("Worker Store runtime is not initialized")
         send_thread = self.kv_send_thread

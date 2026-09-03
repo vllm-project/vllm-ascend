@@ -79,7 +79,7 @@ def _cleanup(client: MPClient | None, conn, process) -> None:
     process.join()
 
 
-def _send_ok_response(router: zmq.Socket, request: list[bytes], responses: tuple[bytes, ...] | None = None) -> None:
+def _send_ok_response(router: zmq.Socket, request: list[bytes], responses: tuple[bytes, ...] | None = None) -> None:  # type: ignore[name-defined]
     identity, *request_frames = request
     request_id, method, _, payloads = decode_request(request_frames)
     response_payloads = payloads if responses is None else responses
@@ -183,8 +183,8 @@ def _run_bounded_server(conn) -> None:
 
 
 def _run_reordering_server(conn) -> None:
-    context = zmq.Context()
-    router = context.socket(zmq.ROUTER)
+    context = zmq.Context()  # type: ignore[attr-defined]
+    router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
     port = router.bind_to_random_port("tcp://127.0.0.1")
 
     try:
@@ -203,8 +203,8 @@ def _run_reordering_server(conn) -> None:
 
 
 def _run_delayed_response_server(conn) -> None:
-    context = zmq.Context()
-    router = context.socket(zmq.ROUTER)
+    context = zmq.Context()  # type: ignore[attr-defined]
+    router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
     port = router.bind_to_random_port("tcp://127.0.0.1")
 
     try:
@@ -232,8 +232,8 @@ def _run_delayed_response_server(conn) -> None:
 
 
 def _run_hanging_server(conn) -> None:
-    context = zmq.Context()
-    router = context.socket(zmq.ROUTER)
+    context = zmq.Context()  # type: ignore[attr-defined]
+    router = context.socket(zmq.ROUTER)  # type: ignore[attr-defined]
     port = router.bind_to_random_port("tcp://127.0.0.1")
 
     try:
@@ -491,7 +491,7 @@ def test_server_returns_handler_base_exception_without_leaking_request() -> None
 
 
 def test_server_returns_executor_failure() -> None:
-    failed_future = Future()
+    failed_future: Future[list[bytes]] = Future()
     failed_future.set_exception(RuntimeError("executor failed"))
     executor = MagicMock()
     executor.submit.return_value = failed_future
@@ -628,7 +628,7 @@ def test_client_backpressure_does_not_leave_an_unsent_request_pending() -> None:
     client = MPClient.__new__(MPClient)
     client._outbound_queue = queue.Queue()
     client._pending_requests = {}
-    future = Future()
+    future: Future[list[bytes]] = Future()
     client._outbound_queue.put(
         SimpleNamespace(
             request_id=b"request-0",
@@ -639,7 +639,7 @@ def test_client_backpressure_does_not_leave_an_unsent_request_pending() -> None:
         )
     )
     zmq_socket = MagicMock()
-    zmq_socket.send_multipart.side_effect = zmq.Again()
+    zmq_socket.send_multipart.side_effect = zmq.Again()  # type: ignore[attr-defined]
 
     client._process_outbound(zmq_socket)
 
@@ -652,7 +652,7 @@ def test_client_transport_send_failure_completes_current_request() -> None:
     client = MPClient.__new__(MPClient)
     client._outbound_queue = queue.Queue()
     client._pending_requests = {}
-    future = Future()
+    future: Future[list[bytes]] = Future()
     client._outbound_queue.put(
         SimpleNamespace(
             request_id=b"request-0",
@@ -681,7 +681,7 @@ def test_server_backpressure_retains_response_without_blocking() -> None:
     response_envelope = SimpleNamespace(frames=response, request_key=None)
     server._send_backlog = deque((response_envelope,))
     server._socket = MagicMock()
-    server._socket.send_multipart.side_effect = zmq.Again()
+    server._socket.send_multipart.side_effect = zmq.Again()  # type: ignore[attr-defined]
 
     server._send_responses()
 

@@ -383,7 +383,7 @@ class KVCacheServiceManager:
         self,
         executor: TaskExecutor | None,
         identity: SchedulerIdentity | WorkerIdentity,
-        service: object,
+        service: "MPKVPoolScheduler | MPKVPoolWorker",
     ) -> None:
         callback = partial(self._close_service, service)
         if executor is None:

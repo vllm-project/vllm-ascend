@@ -2,7 +2,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-import cloudpickle
+import cloudpickle  # type: ignore
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.kv_cache import (

@@ -155,7 +155,7 @@ class ServiceLifecycleManager(Generic[IdentityT, ServiceT]):
     ) -> ServiceT:
         self._validate_session_id(session_id)
         old_service = None
-        registration = None
+        registration: _PendingRegistration[ServiceT] | None = None
 
         with self._lock:
             self._raise_if_closed()

@@ -4,8 +4,9 @@ import argparse
 import logging
 import signal
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from types import FrameType
+from typing import Any
 
 from vllm_ascend import envs
 
@@ -123,7 +124,7 @@ class _ServerShutdown:
         self.graceful_shutdown_unavailable = threading.Event()
         self.server_stopped = threading.Event()
         self._abort_waiter = threading.Event()
-        self._previous_handlers: dict[int, signal.Handlers] = {}
+        self._previous_handlers: dict[int, Callable[[int, FrameType | None], Any] | int | None] = {}
 
     @property
     def exit_code(self) -> int:

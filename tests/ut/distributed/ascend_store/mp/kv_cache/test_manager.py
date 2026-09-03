@@ -63,11 +63,11 @@ class _FakeWorker:
     def __init__(self, matched_tokens: int = 0, closed: threading.Event | None = None):
         self._matched_tokens = matched_tokens
         self._closed = closed
-        self.lookup_hashes = None
-        self.lookup_threads = []
-        self.close_threads = []
-        self.configure_threads = []
-        self.kv_cache_spec = None
+        self.lookup_hashes: list[str] | None = None
+        self.lookup_threads: list[int] = []
+        self.close_threads: list[int] = []
+        self.configure_threads: list[int] = []
+        self.kv_cache_spec: WorkerKVCacheSpec | None = None
         self.close_count = 0
 
     def close(self) -> None:

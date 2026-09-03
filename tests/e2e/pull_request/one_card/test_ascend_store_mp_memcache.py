@@ -39,8 +39,8 @@ _MEMCACHE_LAYERWISE_WORLD_SIZE = 256
 
 def _require_memcache() -> None:
     try:
-        import memcache_hybrid  # noqa: F401
-        import memfabric_hybrid  # noqa: F401
+        import memcache_hybrid  # type: ignore[import-not-found, import-untyped]  # noqa: F401
+        import memfabric_hybrid  # type: ignore[import-not-found, import-untyped]  # noqa: F401
     except ImportError as exc:
         raise RuntimeError("memfabric_hybrid and memcache_hybrid are required for this E2E test") from exc
 
@@ -306,6 +306,7 @@ def test_real_model_memcache_layerwise_hit_and_retrieve(tmp_path: Path, monkeypa
     model_path = _model_path()
     if model_path is None:
         pytest.skip("Set ASCEND_STORE_MP_SMOKE_MODEL to a local model path to run this smoke test")
+    assert model_path is not None
     if not torch.npu.is_available():
         pytest.skip("NPU is not available")
     if os.getenv("PYTHONHASHSEED") != "0":

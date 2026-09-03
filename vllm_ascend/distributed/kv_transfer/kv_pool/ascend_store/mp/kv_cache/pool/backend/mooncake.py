@@ -21,7 +21,7 @@ def _mooncake_register_version_error(exc: TypeError) -> RuntimeError:
     so the message includes where mooncake.engine was actually loaded from.
     """
     try:
-        import mooncake.engine as mooncake_engine
+        import mooncake.engine as mooncake_engine  # type: ignore
 
         loaded_from = getattr(mooncake_engine, "__file__", "<unknown>")
     except Exception:

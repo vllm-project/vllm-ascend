@@ -60,9 +60,9 @@ def _run_smoke_server(endpoint_connection: Connection, control_connection: Conne
     server = None
     control_thread = None
     file_handler = None
-    vllm_logger = None
+    vllm_logger: logging.Logger | None = None
     try:
-        from vllm.logger import logger as vllm_logger
+        from vllm.logger import logger as vllm_imported_logger
 
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp import KVCacheServer
 
@@ -70,6 +70,8 @@ def _run_smoke_server(endpoint_connection: Connection, control_connection: Conne
         # capture it to a file so the test can assert the hit really happened.
         file_handler = logging.FileHandler(log_path)
         file_handler.setLevel(logging.DEBUG)
+        vllm_logger = vllm_imported_logger
+        assert vllm_logger is not None
         vllm_logger.setLevel(logging.DEBUG)
         vllm_logger.addHandler(file_handler)
         vllm_logger.debug("KV cache smoke server log capture ready")
@@ -166,6 +168,7 @@ def test_real_model_lookup_hit_and_retrieve(tmp_path, monkeypatch, use_layerwise
     model_path = _model_path()
     if model_path is None:
         pytest.skip(f"Set {_MODEL_ENV} to a local model path to run this smoke test")
+    assert model_path is not None
     if not torch.npu.is_available():
         pytest.skip("NPU is not available")
 
@@ -274,6 +277,7 @@ def test_real_model_degrades_when_server_unavailable(monkeypatch) -> None:
     model_path = _model_path()
     if model_path is None:
         pytest.skip(f"Set {_MODEL_ENV} to a local model path to run this smoke test")
+    assert model_path is not None
     if not torch.npu.is_available():
         pytest.skip("NPU is not available")
 

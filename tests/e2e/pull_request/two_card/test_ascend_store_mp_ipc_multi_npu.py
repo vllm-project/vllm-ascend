@@ -90,6 +90,7 @@ class _MultiNPUObservedWorker:
         )
 
     def _create_backend(self, _parallel_config, device_index: int | None, lazy_init: bool):
+        assert device_index is not None, "the MP worker resolves the device index before creating the backend"
         self._backend_creation_count += 1
         self._backend = _ObservingMooncakeBackend(_parallel_config, device_index, lazy_init)
         return self._backend

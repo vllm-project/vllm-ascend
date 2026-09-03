@@ -110,7 +110,7 @@ def _run_lookup_server(bind_url: str, conn, worker_results: dict[tuple[str, int,
         server.close()
 
 
-def _start_lookup_server(worker_results: dict[tuple[str, int, int], list[int]]) -> tuple[mp.Process, str]:
+def _start_lookup_server(worker_results: dict[tuple[str, int, int], list[int]]) -> tuple[mp.process.BaseProcess, str]:
     context = mp.get_context("fork")
     parent_conn, child_conn = context.Pipe()
     process = context.Process(target=_run_lookup_server, args=(_DEFAULT_URL, child_conn, worker_results))
@@ -131,7 +131,7 @@ def _start_lookup_server(worker_results: dict[tuple[str, int, int], list[int]]) 
     return process, endpoint
 
 
-def _stop_lookup_server(process: mp.Process) -> None:
+def _stop_lookup_server(process: mp.process.BaseProcess) -> None:
     if process.is_alive():
         process.terminate()
     process.join(timeout=5)
