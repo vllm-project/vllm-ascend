@@ -2238,12 +2238,18 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
+        # All-rank KV pool lookup currently assumes PCP=1.
         expanded: list[str] = []
+        num_head_or_tp_ranks = self.get_group_tp_size(group_id)
+        # Keep each rank shard's block/layer keys contiguous to match
+        # lookup_scheduler()'s [rank_shard][block] result slicing.
         for pp_rank in range(self.pp_size):
-            for tp_rank in range(self.get_group_tp_size(group_id)):
-                for key in keys:
-                    tp_key = self._replace_key_field(key, "head_or_tp_rank", tp_rank)
-                    expanded.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
+            for dcp_rank in range(self.dcp_size):
+                for head_or_tp_rank in range(num_head_or_tp_ranks):
+                    for key in keys:
+                        rank_key = self._replace_key_field(key, "dcp", dcp_rank)
+                        rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
+                        expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
         return expanded
 
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:
