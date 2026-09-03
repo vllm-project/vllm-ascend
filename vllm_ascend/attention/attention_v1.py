@@ -223,6 +223,16 @@ class AscendMetadata:
     # Maximum query length in the batch (None for decoding).
     max_query_len: int | None = None
 
+    # Persistent GPU-side length sources, refreshed in place by the model
+    # runner every step: query_start_loc_gpu is the 0-prefixed cumulative
+    # query boundaries (int32) and seq_lens_gpu the per-request KV lengths
+    # (int32). Graph-capturing backends must source cu_seqlens/seqused from
+    # these instead of the CPU lists above -- ACL-graph replay re-executes
+    # only device work, so Python-side refreshes of hand-managed buffers
+    # never run again after capture.
+    query_start_loc_gpu: torch.Tensor = None
+    seq_lens_gpu: torch.Tensor = None
+
     # ********************** KV Cache Related Properties ********************* #
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
@@ -432,6 +442,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
+            query_start_loc_gpu=common_attn_metadata.query_start_loc,
+            seq_lens_gpu=common_attn_metadata.seq_lens,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens_list,
@@ -529,17 +541,15 @@ class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
     The generic Ascend builder sizes its block-table width with the
     128-token generic block; this backend uses 512-token kernel blocks.
 
-    Cudagraph support is staged (phase-2 bring-up):
-    - PIECEWISE: supported -- QFA executes outside the compiled region as a
-      plain call (validated on-device by the vendored-QFA bring-up PR).
-    - FULL / FULL_DECODE_ONLY: the engine is allowed to attempt capture so
-      the missing .out() wrapper variant surfaces as a concrete capture-time
-      failure instead of being silently downgraded to eager. The vendored
-      bring-up proved the aclnn layer itself is out-semantics and works in
-      FULL graphs once the wrapper exposes caller-owned outputs; until the
-      cann_ops_transformer patch lands, FULL capture is expected to fail or
-      replay corrupt -- the impl guards with an explicit error at capture
-      time.
+    Cudagraph support (final form, no .out wrapper variant needed):
+    - PIECEWISE: QFA executes outside the compiled region as a plain call.
+    - FULL / FULL_DECODE_ONLY: npugraph_ex captures the allocating QFA
+      wrapper plus the in-graph metadata op natively (golden-test
+      GRAPH_PATH=7 methodology). Replay correctness relies on the model
+      runner's persistent length buffers (query_start_loc_gpu /
+      seq_lens_gpu), which the impl derives QFA's cu_seqlens/seqused from
+      through captured device-side ops, so every replay re-reads the
+      current step's lengths.
     """
 
     @classmethod
@@ -2392,12 +2402,18 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     Graph capture: handled natively by torch_npu's npugraph_ex backend (the
     FULL-graph mechanism of this vLLM build), following the ops-transformer
     golden-test methodology (GRAPH_PATH=7). The allocating wrapper is
-    captured directly (at::empty outputs land in the graph pool), the AICPU
-    metadata op runs inline inside the graph, and our only obligations are
-    graph-safe surrounding code: the K-scale scatter uses a device-side
-    mask pattern (no host sync) and the per-step length tensors are written
-    into persistent instance-owned buffers (no H2D construction inside the
-    captured region). Speculative decoding remains out of scope for v1.
+    captured directly (at::empty outputs land in the graph pool) and the
+    AICPU metadata op runs inline inside the graph. Replay safety relies on
+    every per-step input being a stable-address tensor whose content is
+    refreshed outside Python: block_table / slot_mapping come from the
+    model runner's persistent CpuGpuBuffer storages, and cu_seqlens_q /
+    seqused_kv are derived IN-GRAPH from the runner's persistent
+    query_start_loc / seq_lens buffers (captured clamp/cummax ops re-execute
+    each replay). The K-scale scatter uses a device-side mask pattern (no
+    host sync). No Python-side buffer refresh exists in the captured
+    region -- ACL-graph replay never re-runs Python, so such refreshes
+    would freeze at capture values. Speculative decoding remains out of
+    scope for v1.
 
     NOTE: the QFA dual operators are called through _get_qfa_ops(), which
     resolves cann_ops_transformer.ops.quant_flash_attn(_metadata) -- the
@@ -2442,9 +2458,13 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         during capture are free (AICPU, ~us) and each layer's captured call
         consumes the plan it just produced.
         """
-        use_step_cache = not (
-            _EXTRA_CTX.capturing and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
-        )
+        # Bypass the cache during ANY graph capture (FULL and PIECEWISE
+        # warmups alike): the metadata op must execute inside the captured
+        # region so each replay recomputes the plan from the replayed
+        # length buffers. During PIECEWISE capture the attention runs
+        # eagerly between the compiled pieces, so the uncached per-layer
+        # calls are just normal eager executions (~us, AICPU).
+        use_step_cache = not _EXTRA_CTX.capturing
         cache = self._qfa_step_cache(attn_metadata) if use_step_cache else {}
         metadata = cache.get("step")
         if metadata is None:
@@ -2585,28 +2605,53 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         by the vendored-QFA bring-up).
 
         npugraph_ex capture compatibility (golden-test methodology,
-        GRAPH_PATH=7): everything from here down is device-side work on
-        persistent tensors -- cu_seqlens_q / seqused_kv are refreshed each
-        step via pinned CPU staging tensors copied into instance-owned NPU
-        buffers (torch.tensor(device="npu") is an H2D aclrtMemcpy, illegal
-        mid-capture), and the AICPU metadata op is called inline so the
-        captured graph recomputes the plan from the replayed length buffers
-        each step. The per-step Python-side metadata cache is disabled during
-        capture so the metadata op is always re-executed inside the graph.
+        GRAPH_PATH=7): cu_seqlens_q / seqused_kv are derived ON DEVICE from
+        the model runner's persistent int32 buffers (query_start_loc.gpu /
+        seq_lens), which _prepare_inputs refreshes in place every step.
+        The deriving ops are captured together with the QFA calls, so every
+        replay re-executes them and the operators always see the current
+        step's lengths. This replaces the former Python-side staging
+        writes: ACL-graph replay never re-runs Python, so those refreshes
+        only executed during capture and froze the buffers at capture
+        values (and the pinned staging buffer itself was racy under the
+        async scheduler, where the host could overwrite it while the
+        previous step's async H2D copy was still in flight).
         """
         if not attn_metadata.causal:
             raise NotImplementedError("C8_MXFP attention does not support non-causal attention yet.")
         if self.sliding_window is not None:
             raise NotImplementedError("C8_MXFP attention does not support sliding window attention yet.")
 
-        device = quant_query.device
-        actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
-        num_tokens = int(actual_seq_lengths_q[-1])  # type: ignore[index]
+        # T as QFA sees it: the query rows actually fed to the operator
+        # (forward slices query[:num_actual_tokens] before quantizing), so
+        # the TND constraint cu_seqlens_q[-1] == T, the view/output row
+        # counts and the sanitize clamp bound below all share one source.
+        # At graph capture this is the bucket size; eagerly it is the real
+        # token count -- both stay clean where actual_seq_lengths_q[-1]
+        # may carry stale tail entries (padded batches).
+        num_tokens = quant_query.shape[0]
         if num_tokens <= 0:
             return output
 
-        cu_seqlens_q = self._write_qfa_cu_seqlens(actual_seq_lengths_q, device)
-        seqused_kv = self._write_qfa_seqused(attn_metadata.seq_lens_list, device)
+        qsl_gpu = attn_metadata.query_start_loc_gpu
+        seq_lens_gpu = attn_metadata.seq_lens_gpu
+        if qsl_gpu is None or seq_lens_gpu is None:
+            raise RuntimeError(
+                "C8_MXFP attention requires the GPU-side length sources "
+                "(query_start_loc_gpu / seq_lens_gpu) on AscendMetadata."
+            )
+        # Sanitize the tail beyond the current requests: unused
+        # query_start_loc slots carry -1 (the FIA padding convention) and
+        # may also hold stale entries from larger earlier steps (the FULL
+        # dummy-request padding re-copies the whole CPU buffer to GPU).
+        # clamp to [0, num_tokens] bounds both; cummax restores
+        # monotonicity, turning the tail into zero-length requests whose
+        # cu_seqlens_q[-1] still equals the token total. Unused seq_lens
+        # slots are zero-filled by the runner every step; clamp(min=1)
+        # matches the dummy-request convention (block 0, one token). On
+        # clean eager data both ops are identity transforms.
+        cu_seqlens_q = qsl_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values
+        seqused_kv = seq_lens_gpu.clamp(min=1)
         # Upper bound on any single query length (the step's total token
         # count); the vendored-QFA bring-up measured prefill against a constant
         # max_model_len bound as safe too, so a loose bound only affects
@@ -2631,64 +2676,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             num_tokens=num_tokens,
             output=output,
         )
-
-    def _write_qfa_cu_seqlens(self, cumulative_seq_lengths: list[int], device: torch.device) -> torch.Tensor:
-        """Write cu_seqlens (0-prefixed cumulative) into a persistent buffer.
-
-        Eager path: identical semantics to _build_qfa_cu_seqlens. Capture
-        path: the write goes through a persistent CPU-side staging tensor
-        (pinned) into the persistent NPU buffer, so the captured graph sees
-        only a D2D copy between two stable allocations -- torch.tensor(...,
-        device="npu") would be an H2D aclrtMemcpy, which is illegal
-        mid-capture ("operation not permitted when a stream is capturing").
-        The staging tensor's CONTENTS are refreshed from the host list each
-        step before the copy, so replays that re-execute the copy pick up
-        the current values.
-        """
-        num_tokens = int(cumulative_seq_lengths[-1]) if cumulative_seq_lengths else 0
-        num_seqs = len(cumulative_seq_lengths)
-        cu_buf, _, cu_cpu, _ = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
-        cu_cpu[: num_seqs + 1] = torch.tensor(
-            [0, *cumulative_seq_lengths], dtype=torch.int32, device="cpu"
-        )
-        cu_buf[: num_seqs + 1].copy_(cu_cpu[: num_seqs + 1], non_blocking=True)
-        return cu_buf[: num_seqs + 1]
-
-    def _write_qfa_seqused(self, seq_lens_list: list[int], device: torch.device) -> torch.Tensor:
-        """Write seqused_kv into a persistent buffer (see _write_qfa_cu_seqlens)."""
-        num_tokens = sum(seq_lens_list) if seq_lens_list else 0
-        num_seqs = len(seq_lens_list)
-        _, seq_buf, _, seq_cpu = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
-        seq_cpu[:num_seqs] = torch.tensor(seq_lens_list, dtype=torch.int32, device="cpu")
-        seq_buf[:num_seqs].copy_(seq_cpu[:num_seqs], non_blocking=True)
-        return seq_buf[:num_seqs]
-
-    def _qfa_step_buffers(self, num_tokens: int, num_seqs: int, device: torch.device) -> tuple:
-        """Instance-owned persistent buffers for the per-step lengths.
-
-        Returns (cu_buf, seq_buf, cu_cpu, seq_cpu): the NPU-side int32
-        buffers the captured graph reads, plus CPU-side int32 staging
-        tensors (pinned memory) that feed them via D2D copy_ each step.
-        torch.tensor(..., device="npu") is an H2D aclrtMemcpy and illegal
-        inside ACL graph capture, so the host values are first written into
-        the CPU staging tensors and then copied into the NPU buffers. The
-        buffers are sized to the capture bucket (num_tokens) and rewritten
-        every step, so replay refreshes them in-place.
-        """
-        if not hasattr(self, "_qfa_len_buffers"):
-            self._qfa_len_buffers = {}
-        key = (num_tokens, num_seqs)
-        if key not in self._qfa_len_buffers:
-            # cu_seqlens_q needs B+1 entries; overallocate to the max batch
-            # for this token bucket to survive mixed batch shapes.
-            max_seqs = max(num_seqs, num_tokens) + 1
-            self._qfa_len_buffers[key] = (
-                torch.zeros(max_seqs + 1, dtype=torch.int32, device=device),
-                torch.zeros(max_seqs, dtype=torch.int32, device=device),
-                torch.zeros(max_seqs + 1, dtype=torch.int32, pin_memory=True),
-                torch.zeros(max_seqs, dtype=torch.int32, pin_memory=True),
-            )
-        return self._qfa_len_buffers[key]
 
     # KV cache writes for C8_MXFP happen in reshape_and_cache(), invoked from forward()
     # when key/value are present. This hook is only reached when attention is split from
@@ -2789,9 +2776,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             # (GRAPH_PATH=7: torch.compile(backend="npugraph_ex") with the
             # metadata op called inline in forward). The requirements on our
             # side are only graph-safety of the surrounding Python: no host
-            # syncs (scatter uses the device-side mask pattern) and no H2D
-            # tensor construction inside the captured region (cu_seqlens /
-            # seqused are written into persistent instance-owned buffers).
+            # syncs (scatter uses the device-side mask pattern) and no
+            # Python-side refresh of tensors the captured region consumes
+            # (replay never re-runs Python; the per-step lengths are derived
+            # in-graph from the runner's persistent buffers instead).
             pass
         if kv_cache is None or len(kv_cache) < 4:
             raise RuntimeError(
