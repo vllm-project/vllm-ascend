@@ -50,26 +50,32 @@ jobs:
   run_tests:
     name: cpu‑ut‑run
     needs: [filter-groups]
-    if: ${{ fromJSON(jobs.filter-groups.outputs.filtered_test_groups || '[]') | length > 0 }}
     runs-on: ${{ fromJson(inputs.test_groups)[0].runner_label }}
     outputs:
       coverage_artifact_name: cpu‑coverage‑report
     env:
-      FILTERED_GROUPS: ${{ jobs.filter-groups.outputs.filtered_test_groups }}
+      FILTERED_GROUPS: ${{ needs.filter-groups.outputs.filtered_test_groups }}
     steps:
+      - name: Early exit when no cpu test groups
+        shell: bash
+        run: |
+          set -euo pipefail
+          GROUPS="${{ needs.filter-groups.outputs.filtered_test_groups }}"
+          if [[ -z "${GROUPS}" || "${GROUPS}" == "[]" ]]; then
+            echo "INFO: zero cpu test groups matched, skip test execution"
+            exit 0
+          fi
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
-
       - name: Install python dependencies
         run: |
           set -euo pipefail
           python3 -m ensurepip --upgrade
           python3 -m pip install --upgrade pip
           python3 -m pip install pytest pytest-cov
-
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
@@ -81,7 +87,6 @@ jobs:
           else
             echo "INFO: base_sha is empty, skip rebase, use HEAD directly"
           fi
-
       - name: Parse test groups
         id: parse_groups
         run: |
@@ -98,7 +103,7 @@ jobs:
               f.write(f"test_paths={out_paths}\n")
           PY
         env:
-          TEST_GROUPS: ${{ jobs.filter-groups.outputs.filtered_test_groups }}
+          TEST_GROUPS: ${{ needs.filter-groups.outputs.filtered_test_groups }}
 
       - name: Setup python & dependencies
         run: |
