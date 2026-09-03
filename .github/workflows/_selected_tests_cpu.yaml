@@ -40,6 +40,7 @@ jobs:
     steps:
       - name: Keep only cpu test groups
         id: filter
+        shell: bash
         run: |
           set -euo pipefail
           printf "%s" "${RAW_JSON}" > /tmp/test_groups.json
@@ -48,9 +49,13 @@ jobs:
 
   run_tests:
     name: cpu‑ut‑run
+    needs: [filter-groups]
+    if: ${{ fromJSON(jobs.filter-groups.outputs.filtered_test_groups || '[]') | length > 0 }}
     runs-on: ${{ fromJson(inputs.test_groups)[0].runner_label }}
     outputs:
       coverage_artifact_name: cpu‑coverage‑report
+    env:
+      FILTERED_GROUPS: ${{ jobs.filter-groups.outputs.filtered_test_groups }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -93,7 +98,7 @@ jobs:
               f.write(f"test_paths={out_paths}\n")
           PY
         env:
-          TEST_GROUPS: ${{ inputs.test_groups }}
+          TEST_GROUPS: ${{ jobs.filter-groups.outputs.filtered_test_groups }}
 
       - name: Setup python & dependencies
         run: |
