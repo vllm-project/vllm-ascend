@@ -1055,6 +1055,7 @@ def test_ascend_rejection_sampler_methods():
     rs.top_k = None
     rs.synthetic_mode = False
     rs.synthetic_conditional_rates = None
+    rs.is_processed_logprobs_mode = False
     rs.apply_logits_processors = lambda values, *args, **kwargs: values
     rs._get_logprobs_tensors = MagicMock(return_value="lp")
     forward_logits = torch.tensor([[0.1, 0.9], [0.2, 0.8]])
@@ -1068,7 +1069,6 @@ def test_ascend_rejection_sampler_methods():
     )
     forward_sampling = SimpleNamespace(max_num_logprobs=1)
     with (
-        patch.object(AscendRejectionSampler, "is_processed_logprobs_mode", False),
         patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
         patch(
             "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
@@ -1082,21 +1082,21 @@ def test_ascend_rejection_sampler_methods():
         output = rs.forward(forward_meta, None, forward_logits.clone(), forward_sampling)
     assert output.logprobs_tensors == "lp"
 
-    with patch.object(AscendRejectionSampler, "is_processed_logprobs_mode", True):
-        with (
-            patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
-            patch(
-                "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
-                return_value=(forward_logits[:1], None),
-            ),
-            patch(
-                "vllm_ascend.sample.rejection_sampler.rejection_sample",
-                return_value=torch.tensor([[1, 9]], dtype=torch.int32),
-            ),
-        ):
-            processed_output = rs.forward(
-                forward_meta, None, forward_logits.clone(), SimpleNamespace(max_num_logprobs=None)
-            )
+    rs.is_processed_logprobs_mode = True
+    with (
+        patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
+            return_value=(forward_logits[:1], None),
+        ),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.rejection_sample",
+            return_value=torch.tensor([[1, 9]], dtype=torch.int32),
+        ),
+    ):
+        processed_output = rs.forward(
+            forward_meta, None, forward_logits.clone(), SimpleNamespace(max_num_logprobs=None)
+        )
     assert processed_output.logprobs_tensors is None
 
     debug_meta = SimpleNamespace(
@@ -1133,6 +1133,7 @@ def test_rejection_sample_constraint_and_helper_paths():
         uniform = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)
         indices = torch.tensor([[0, 1], [0, 1]])
         draft_probs = torch.tensor([[0.2, 0.8, 0.0], [0.7, 0.3, 0.0]])
+        local_draft_probs = draft_probs[:, :2].contiguous()
 
         def run_sample(**kwargs):
             defaults = dict(
@@ -1209,12 +1210,13 @@ def test_rejection_sample_constraint_and_helper_paths():
             assert run_sample(
                 sampling_metadata=random_meta,
                 target_logits_or_tuple=logits.clone(),
-                draft_probs=draft_probs.clone(),
+                draft_probs=local_draft_probs.clone(),
             ).shape[0] == 1
 
         block_logits = torch.tensor([[0.1, 0.9], [0.2, 0.8], [0.3, 0.7]])
         block_ids = torch.tensor([1, 0, 1], dtype=torch.int32)
         block_probs = torch.tensor([[0.2, 0.8, 0.0], [0.6, 0.4, 0.0], [0.3, 0.7, 0.0]])
+        local_block_probs = block_probs[:, :2].contiguous()
         block_idx = torch.tensor([[0, 1], [0, 1], [0, 1]])
         with (
             patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
@@ -1241,7 +1243,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                 cu_num_draft_tokens=torch.tensor([3]),
                 sampling_metadata=random_meta,
                 target_logits_or_tuple=block_logits.clone(),
-                draft_probs=block_probs.clone(),
+                draft_probs=local_block_probs.clone(),
             ).shape == (1, 4)
             with pytest.raises(ValueError, match="synthetic_mode"):
                 run_sample(
