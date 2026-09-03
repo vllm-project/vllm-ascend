@@ -452,6 +452,9 @@ class DynamicSpecScheduler:
             raise ValueError("v2_batch_k_percentile must be in [0, 100]")
         self._last_v2_batch_physical_k: int | None = None
         self._last_v2_proposal_lengths: list[int] | None = None
+        self._last_v2_request_ids: tuple[Any, ...] | None = None
+        self._v2_result_generation = 0
+        self._last_v2_published_generation = -1
 
         self._steps_since_budget_update = 0
 
@@ -518,6 +521,7 @@ class DynamicSpecScheduler:
         self._confidence_steps = 0
         self._last_confidence_num_reqs: int | None = None
         self._last_confidence_num_draft_tokens: int | None = None
+        self._last_confidence_request_ids: tuple[Any, ...] | None = None
 
     def update_from_token_probs(
         self,
@@ -533,8 +537,44 @@ class DynamicSpecScheduler:
         probabilities through this small adapter.
         """
 
+        num_reqs, num_draft_tokens = token_probs.shape
+        current_request_ids = (
+            tuple(request_ids) if request_ids is not None else None
+        )
+
+        # The V2 DSpark confidence head is part of the captured draft graph,
+        # so it still runs every replay.  The expensive Python/device policy
+        # work does not need to run at the same cadence: reuse the previous
+        # prefix while the batch identity and physical width are unchanged.
+        # A request reorder, shape change, or cadence expiry forces an
+        # immediate refresh so cached lengths cannot be applied to a new row.
+        if (
+            self.hardware_policy is not None
+            and self.confidence_update_interval > 1
+            and self._cached_num_verify_tokens is not None
+            and self._last_confidence_num_reqs == int(num_reqs)
+            and self._last_confidence_num_draft_tokens == int(num_draft_tokens)
+            and self._last_confidence_request_ids == current_request_ids
+        ):
+            self._confidence_steps += 1
+            if self._confidence_steps < self.confidence_update_interval:
+                self.num_verify_tokens = self._cached_num_verify_tokens[:num_reqs]
+                self.reused_last_result = True
+                return self.num_verify_tokens
+
+        self._confidence_steps = 0
         self.reused_last_result = False
-        return self._finish_token_probs_update(token_probs, request_ids=request_ids)
+        result = self._finish_token_probs_update(
+            token_probs,
+            request_ids=request_ids,
+        )
+        self._v2_result_generation += 1
+        if self.hardware_policy is not None and self.confidence_update_interval > 1:
+            self._cached_num_verify_tokens = result
+            self._last_confidence_num_reqs = int(num_reqs)
+            self._last_confidence_num_draft_tokens = int(num_draft_tokens)
+            self._last_confidence_request_ids = current_request_ids
+        return result
 
     def proposal_lengths_for_v2(
         self,
@@ -552,6 +592,13 @@ class DynamicSpecScheduler:
 
         if self.num_verify_tokens is None:
             return None
+        current_request_ids = tuple(request_ids)
+        if (
+            self._last_v2_proposal_lengths is not None
+            and self._last_v2_request_ids == current_request_ids
+            and self._last_v2_published_generation == self._v2_result_generation
+        ):
+            return self._last_v2_proposal_lengths
         values = self.num_verify_tokens.detach().to("cpu").tolist()
         lengths = [
             max(0, min(int(values[idx]), max_k))
@@ -571,6 +618,8 @@ class DynamicSpecScheduler:
         else:
             self._last_v2_batch_physical_k = max(lengths, default=0)
         self._last_v2_proposal_lengths = lengths
+        self._last_v2_request_ids = current_request_ids
+        self._last_v2_published_generation = self._v2_result_generation
         return lengths
 
     def _install_hardware_policy(self, cost_model: HardwareCostModel) -> None:
@@ -591,6 +640,7 @@ class DynamicSpecScheduler:
             self._cached_num_verify_tokens = None
             self._last_confidence_num_reqs = None
             self._last_confidence_num_draft_tokens = None
+            self._last_confidence_request_ids = None
 
     def set_hardware_profile(
         self,
