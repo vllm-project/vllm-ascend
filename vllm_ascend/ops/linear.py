@@ -42,10 +42,10 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
-from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
     maybe_trans_nz,
 )
+from vllm_ascend.weight_switch import WeightSwitchGatherSpec, WeightSwitchMixin
 
 
 def unquantized_gemm(
@@ -81,12 +81,12 @@ def _should_keep_nd_for_compatibility_weight(weight: torch.Tensor) -> bool:
     )
 
 
-class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod):
+class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
 
-    tp_weight_gather_specs = (TPWeightGatherSpec("weight", gather_dim=1),)
-    tp_weight_output_gather_specs = (TPWeightGatherSpec("weight"),)
-    supports_tp_weight_switch = True
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+    weight_switch_output_gather_specs = (WeightSwitchGatherSpec("weight"),)
+    supports_weight_switch = True
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)

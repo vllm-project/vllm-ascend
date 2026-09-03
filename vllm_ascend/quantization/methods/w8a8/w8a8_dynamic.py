@@ -33,7 +33,7 @@ from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
     QuantType,
-    TPWeightGatherSpec,
+    WeightSwitchGatherSpec,
 )
 from ..registry import register_scheme
 
@@ -57,13 +57,13 @@ class AscendW8A8DynamicLinearMethod(AscendLinearScheme):
     """
 
     act_quant_type: torch.dtype = torch.int8
-    tp_weight_gather_specs = (TPWeightGatherSpec("weight"),)
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight", gather_dim=1),
-        TPWeightGatherSpec("weight_scale"),
-        TPWeightGatherSpec("weight_offset"),
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight"),)
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=1),
+        WeightSwitchGatherSpec("weight_scale"),
+        WeightSwitchGatherSpec("weight_offset"),
     )
-    supports_tp_weight_switch = True
+    supports_weight_switch = True
 
     def __init__(self):
         pass

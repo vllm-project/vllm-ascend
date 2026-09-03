@@ -2,10 +2,11 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import DCPMetadataBuilderMixin
 from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADCPImpl,
@@ -25,7 +26,66 @@ from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
     AscendSFAMetadata,
     AscendSFAMetadataBuilder,
+    SFAForwardContext,
 )
+from vllm_ascend.weight_switch import (
+    WeightSwitchConfig,
+    WeightSwitchGatherSpec,
+    WeightSwitchLoadState,
+    WeightSwitchMixin,
+)
+
+
+class _PCPOProjLinearMethod(WeightSwitchMixin):
+    supports_weight_switch = True
+    weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+
+    def apply(self, layer, x, bias=None):
+        return torch.nn.functional.linear(x, layer.weight, bias)
+
+
+def _make_pcp_o_proj_impl():
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl._o_proj_weight_switch_enabled = False
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    impl.o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group, shard_axis="input")
+    impl.o_proj_weight_load_state = WeightSwitchLoadState(
+        input_size_per_partition_before=4,
+        input_size_per_partition_after=2,
+    )
+    impl.o_proj = SimpleNamespace(
+        input_size=8,
+        input_size_per_partition=2,
+        output_size=3,
+        output_size_per_partition=3,
+        weight=torch.nn.Parameter(torch.tensor([[2.0, 3.0], [6.0, 7.0], [10.0, 11.0]]), requires_grad=False),
+        bias=torch.nn.Parameter(torch.tensor([1.0, 2.0, 3.0]), requires_grad=False),
+        quant_method=_PCPOProjLinearMethod(),
+        reduce_results=True,
+        tp_size=2,
+        tp_rank=0,
+        skip_bias_add=False,
+    )
+    return impl
+
+
+def test_sfa_pcp_weight_switch_does_not_install_loader_when_disabled() -> None:
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    with (
+        patch.object(AscendSFAImpl, "__init__", return_value=None),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_pcp_o_proj_weight_sharding",
+            return_value=False,
+        ),
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_pcp_group", return_value=pcp_group),
+        patch.object(AscendSFAPCPImpl, "_get_o_proj_weight_switch_method") as get_method,
+    ):
+        impl = AscendSFAPCPImpl()
+
+    assert not impl.enable_pcp_o_proj_weight_sharding
+    assert impl.o_proj_weight_switch_config.group is pcp_group
+    assert not hasattr(impl, "o_proj_weight_load_state")
+    get_method.assert_not_called()
 
 
 def test_sfa_dcp_extends_v1_backend() -> None:
@@ -148,6 +208,88 @@ def test_sfa_pcp_gathers_indexer_kv_with_its_slot_mapping() -> None:
         kv_cache,
         attn_metadata,
     )
+
+
+def test_sfa_pcp_o_proj_switch_slices_the_tp_local_weight_by_pcp_rank() -> None:
+    AscendSFAPCPImpl.o_proj_full_pools.clear()
+    impl = _make_pcp_o_proj_impl()
+
+    impl._enable_o_proj_full_weight_switch()
+
+    assert impl._o_proj_weight_switch_enabled
+    torch.testing.assert_close(
+        impl.o_proj.weight,
+        torch.tensor([[2.0, 3.0], [6.0, 7.0], [10.0, 11.0]]),
+    )
+    assert impl.o_proj_weight_state.gather_parts["weight"].full_tensor.shape == (3, 4)
+
+
+def test_sfa_pcp_prefill_gathers_weight_and_restores_local_view() -> None:
+    impl = _make_pcp_o_proj_impl()
+    impl._enable_o_proj_full_weight_switch()
+
+    local_weight_ptr = impl.o_proj.weight.data_ptr()
+    full_weight = impl.o_proj_weight_state.gather_parts["weight"].full_tensor
+    full_weight.copy_(torch.arange(12, dtype=torch.float32).view(3, 4))
+
+    def fake_finalize(_self, _attn_output, output, _gather_full_o_proj):
+        assert impl.o_proj.weight.data_ptr() == full_weight.data_ptr()
+        output.fill_(7)
+        return output
+
+    with patch.object(AscendSFAImpl, "_finalize_o_proj", new=fake_finalize):
+        result = impl._finalize_o_proj(torch.empty(1, 4), torch.empty(1, 3), gather_full_o_proj=True)
+
+    assert result.tolist() == [[7.0, 7.0, 7.0]]
+    assert impl.o_proj.weight.data_ptr() == local_weight_ptr
+
+
+def test_sfa_pcp_decode_projects_local_weight_then_reduces_pcp_and_tp() -> None:
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+    impl = _make_pcp_o_proj_impl()
+    impl.o_proj_weight_switch_config = WeightSwitchConfig.from_group(pcp_group, shard_axis="input")
+    impl._enable_o_proj_full_weight_switch()
+
+    full_weight = torch.arange(12, dtype=torch.float32).view(3, 4)
+    input_ = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    expected = torch.nn.functional.linear(input_, full_weight, impl.o_proj.bias)
+    pcp_group.all_reduce = lambda _: torch.nn.functional.linear(input_, full_weight, bias=None)
+    tp_group = SimpleNamespace(world_size=2, rank_in_group=0, all_reduce=lambda x: x)
+    with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
+        result = impl._finalize_o_proj(input_, torch.empty_like(expected), gather_full_o_proj=False)
+
+    torch.testing.assert_close(result, expected)
+
+
+def test_sfa_pcp_prefill_context_starts_weight_gather_but_decode_does_not() -> None:
+    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
+    impl._o_proj_weight_switch_enabled = True
+    impl._all_gather_o_proj_full_weight = MagicMock()
+    base_context = SFAForwardContext(
+        actual_seq_lengths_query=torch.empty(0),
+        actual_seq_lengths_key=torch.empty(0),
+        kv_slot_mapping=torch.empty(0),
+        topk_num_tokens=0,
+    )
+
+    with patch.object(AscendSFAImpl, "_get_parallel_forward_context", return_value=base_context):
+        prefill = impl._get_parallel_forward_context(
+            SimpleNamespace(attn_state=AscendAttentionState.ChunkedPrefill),
+            1,
+            torch.empty(1),
+        )
+    assert prefill.gather_full_o_proj
+    impl._all_gather_o_proj_full_weight.assert_called_once_with()
+
+    base_context.gather_full_o_proj = False
+    with patch.object(AscendSFAImpl, "_get_parallel_forward_context", return_value=base_context):
+        decode = impl._get_parallel_forward_context(
+            SimpleNamespace(attn_state=AscendAttentionState.DecodeOnly),
+            1,
+            torch.empty(1),
+        )
+    assert not decode.gather_full_o_proj
+    impl._all_gather_o_proj_full_weight.assert_called_once()
 
 
 def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:

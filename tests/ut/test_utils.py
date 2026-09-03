@@ -36,7 +36,8 @@ class TestUtils(TestBase):
 
         importlib.reload(platform)
         utils.enable_dsa_cp.cache_clear()
-        utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
+        utils.enable_dsa_cp_full_o_proj.cache_clear()
+        utils.enable_pcp_o_proj_weight_sharding.cache_clear()
 
     def test_nd_to_nz_2d(self):
         # can be divided by 16
@@ -142,15 +143,17 @@ class TestUtils(TestBase):
             self.assertIs(utils.current_stream(), mock_stream)
             mock_current_stream.assert_called_once()
 
-    def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
+    def test_enable_dsa_cp_full_o_proj_is_independent_of_pcp_switch(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = None
 
         with (
             mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+            mock.patch("vllm_ascend.utils.enable_pcp_o_proj_weight_sharding", return_value=False) as pcp_switch,
         ):
-            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
+        pcp_switch.assert_not_called()
 
     def test_enable_sp_uses_upstream_parallel_config(self):
         # Stop any leaked patch("vllm_ascend.utils.enable_sp") from other TestCases.
@@ -199,7 +202,7 @@ class TestUtils(TestBase):
         ):
             self.assertFalse(utils.enable_dsa_cp())
 
-    def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
+    def test_enable_dsa_cp_full_o_proj_accepts_kv_both(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
@@ -209,9 +212,9 @@ class TestUtils(TestBase):
             mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
-            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
 
-    def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_producer(self):
+    def test_enable_dsa_cp_full_o_proj_accepts_kv_producer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
@@ -221,9 +224,9 @@ class TestUtils(TestBase):
             mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
-            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+            self.assertTrue(utils.enable_dsa_cp_full_o_proj())
 
-    def test_enable_dsa_cp_with_o_proj_tp_rejects_kv_consumer(self):
+    def test_enable_dsa_cp_full_o_proj_rejects_kv_consumer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_consumer", is_kv_producer=False, is_kv_consumer=True
@@ -233,11 +236,17 @@ class TestUtils(TestBase):
             mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
-            self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
+            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
 
-    def test_enable_dsa_cp_with_o_proj_tp_rejects_when_dsa_cp_disabled(self):
+    def test_enable_dsa_cp_full_o_proj_rejects_when_dsa_cp_disabled(self):
         with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
-            self.assertFalse(utils.enable_dsa_cp_with_o_proj_tp())
+            self.assertFalse(utils.enable_dsa_cp_full_o_proj())
+
+    def test_enable_pcp_o_proj_weight_sharding_reads_validated_ascend_config(self):
+        ascend_config = SimpleNamespace(enable_pcp_o_proj_weight_sharding=True)
+
+        with mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config):
+            self.assertTrue(utils.enable_pcp_o_proj_weight_sharding())
 
     def test_vllm_version_is(self):
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):

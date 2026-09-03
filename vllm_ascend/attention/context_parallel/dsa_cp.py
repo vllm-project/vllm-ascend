@@ -43,11 +43,11 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.ops.rope_dsv4 import RopeDataProxy, get_cos_and_sin_dsa, get_full_cos_and_sin_dsa
 from vllm_ascend.ops.triton.dsa_cp import build_local_metadata_triton
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin, TPWeightSwitchState
 from vllm_ascend.utils import (
-    enable_dsa_cp_with_o_proj_tp,
+    enable_dsa_cp_full_o_proj,
     olora_tp_enable,
 )
+from vllm_ascend.weight_switch import WeightSwitchConfig, WeightSwitchMixin, WeightSwitchState
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -1118,10 +1118,11 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and get_current_hardware_profile().supports(
+        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj() and get_current_hardware_profile().supports(
             HardwareCapability.DSA_O_PROJ_TP
         )
-        self._o_proj_tp_weight_switch_enabled = False
+        self.o_proj_weight_switch_config = WeightSwitchConfig.from_group(self.tp_group)
+        self._o_proj_weight_switch_enabled = False
 
         self.eps = kwargs["eps"]
 
@@ -1222,48 +1223,48 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 "DSA-CP expects full-head attn_sink loaded on every TP rank, "
                 f"got {self.attn_sink.numel()} heads, expected {self.num_heads}."
             )
-        if self.enable_dsa_cp_with_o_proj_tp:
-            self._enable_o_proj_tp_full_weight_switch()
+        if self.enable_dsa_cp_full_o_proj:
+            self._enable_o_proj_full_weight_switch()
 
     @staticmethod
-    def _get_tp_weight_switch_method(layer: torch.nn.Module) -> TPWeightSwitchMixin:
+    def _get_weight_switch_method(layer: torch.nn.Module) -> WeightSwitchMixin:
         quant_method = layer.quant_method
         linear_method = getattr(quant_method, "quant_method", quant_method)
-        if not isinstance(linear_method, TPWeightSwitchMixin) or not linear_method.supports_tp_weight_switch:
+        if not isinstance(linear_method, WeightSwitchMixin) or not linear_method.supports_weight_switch:
             raise RuntimeError(
-                "DSA-CP o_proj TP full-weight switching requires a TP weight-switch capable method, "
+                "DSA-CP o_proj full-weight switching requires a weight-switch capable method, "
                 f"got {type(linear_method).__name__}."
             )
         return linear_method
 
-    def _enable_linear_tp_weight_switch(
+    def _enable_linear_weight_switch(
         self,
         layer: torch.nn.Module,
         name: str,
-    ) -> tuple[TPWeightSwitchMixin, TPWeightSwitchState]:
-        linear_method = self._get_tp_weight_switch_method(layer)
-        state = linear_method.enable_tp_weight_switch(
+    ) -> tuple[WeightSwitchMixin, WeightSwitchState]:
+        linear_method = self._get_weight_switch_method(layer)
+        state = linear_method.enable_weight_switch(
             layer,
-            self.tp_size,
+            self.o_proj_weight_switch_config,
             pool=AscendDSACPImpl.o_proj_full_pools,
             pool_key_prefix=(type(linear_method).__qualname__, name, "dsa_cp_o_proj"),
-            clone_tp_tensors=True,
+            clone_local_tensors=True,
         )
         return linear_method, state
 
-    def _enable_o_proj_tp_full_weight_switch(self) -> None:
-        """Allocate o_proj TP/full buffers when the DSA-CP backend is enabled."""
-        if self._o_proj_tp_weight_switch_enabled:
+    def _enable_o_proj_full_weight_switch(self) -> None:
+        """Allocate local/full O-proj buffers in the configured domain."""
+        if self._o_proj_weight_switch_enabled:
             return
-        self.wo_a_tp_weight_method, self.wo_a_tp_weight_state = self._enable_linear_tp_weight_switch(
+        self.wo_a_weight_method, self.wo_a_weight_state = self._enable_linear_weight_switch(
             self.wo_a,
             "wo_a",
         )
-        self.wo_b_tp_weight_method, self.wo_b_tp_weight_state = self._enable_linear_tp_weight_switch(
+        self.wo_b_weight_method, self.wo_b_weight_state = self._enable_linear_weight_switch(
             self.wo_b,
             "wo_b",
         )
-        self._o_proj_tp_weight_switch_enabled = True
+        self._o_proj_weight_switch_enabled = True
 
     def _maybe_all_gather_o_proj_full_weight(
         self,
@@ -1271,39 +1272,39 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
     ) -> None:
         if not enabled:
             return
-        self._enable_o_proj_tp_full_weight_switch()
-        self.wo_a_tp_weight_method.all_gather_tp_weight(
-            self.wo_a_tp_weight_state,
-            self.tp_group,
+        self._enable_o_proj_full_weight_switch()
+        self.wo_a_weight_method.all_gather_weight(
+            self.wo_a_weight_state,
+            self.o_proj_weight_switch_config,
         )
-        self.wo_b_tp_weight_method.all_gather_tp_weight(
-            self.wo_b_tp_weight_state,
-            self.tp_group,
+        self.wo_b_weight_method.all_gather_weight(
+            self.wo_b_weight_state,
+            self.o_proj_weight_switch_config,
         )
 
     def _switch_o_proj_to_full_weight(self) -> None:
-        self.wo_a_tp_weight_method.wait_tp_weight_all_gather(self.wo_a_tp_weight_state)
-        self.wo_b_tp_weight_method.wait_tp_weight_all_gather(self.wo_b_tp_weight_state)
-        self.wo_a_tp_weight_method.switch_tp_weight(
+        self.wo_a_weight_method.wait_weight_all_gather(self.wo_a_weight_state)
+        self.wo_b_weight_method.wait_weight_all_gather(self.wo_b_weight_state)
+        self.wo_a_weight_method.switch_weight(
             self.wo_a,
-            self.wo_a_tp_weight_state,
+            self.wo_a_weight_state,
             use_full_weight=True,
         )
-        self.wo_b_tp_weight_method.switch_tp_weight(
+        self.wo_b_weight_method.switch_weight(
             self.wo_b,
-            self.wo_b_tp_weight_state,
+            self.wo_b_weight_state,
             use_full_weight=True,
         )
 
-    def _switch_o_proj_to_tp_weight(self) -> None:
-        self.wo_a_tp_weight_method.switch_tp_weight(
+    def _switch_o_proj_to_local_weight(self) -> None:
+        self.wo_a_weight_method.switch_weight(
             self.wo_a,
-            self.wo_a_tp_weight_state,
+            self.wo_a_weight_state,
             use_full_weight=False,
         )
-        self.wo_b_tp_weight_method.switch_tp_weight(
+        self.wo_b_weight_method.switch_weight(
             self.wo_b,
-            self.wo_b_tp_weight_state,
+            self.wo_b_weight_state,
             use_full_weight=False,
         )
 
@@ -1445,7 +1446,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         wait_for_kv_layer_from_connector(layer_name)
         full_gather_wo_a_enabled = (
             self.tp_size > 1
-            and self.enable_dsa_cp_with_o_proj_tp
+            and self.enable_dsa_cp_full_o_proj
             and common_attn_metadata.attn_state
             not in {
                 AscendAttentionState.DecodeOnly,
@@ -1521,7 +1522,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             output[...] = self._gather_cp_output(local_output, cp_metadata, output.shape[0])
         finally:
             if full_gather_wo_a_enabled:
-                self._switch_o_proj_to_tp_weight()
+                self._switch_o_proj_to_local_weight()
 
         maybe_save_kv_layer_to_connector(layer_name, list(kv_cache))
 
