@@ -227,7 +227,11 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
     # block. Preserve that default so the next preprocess keeps the right
     # accept_token_bias when multiple draft tokens were accepted.
     num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
-    num_accepted_tokens = input_batch.num_accepted_tokens_cpu
+    # Consume the per-step snapshot staged above rather than
+    # input_batch.num_accepted_tokens_cpu: async scheduling can condense/reuse
+    # input_batch rows before this fallback runs, so the live field is not
+    # guaranteed to hold this step's values (review feedback).
+    num_accepted_tokens = num_accepted_tokens_cpu_tensor.tolist()
     for i in range(num_reqs):
         num_tokens_running_state = num_computed_tokens[i] + num_scheduled_tokens[i] - num_draft_tokens[i]
         new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens[i] - 1
