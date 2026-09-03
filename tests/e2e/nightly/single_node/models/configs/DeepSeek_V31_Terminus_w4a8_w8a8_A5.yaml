@@ -1,0 +1,518 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--quantization"
+  - "ascend"
+#_benchmarks_per1: &benchmarks_per1
+#  perf:
+#    case_type: performance
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_in3500_bs400_dsv3.1_w4a8
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 64
+#    max_out_len: 1
+#    batch_size: 1
+#    request_rate: 0
+#    baseline: 667
+#    threshold: 0.95
+#    temperature: 0
+#    ignore_eos: True
+_benchmarks_per2: &benchmarks_per2
+  perf:
+    case_type: performance
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_in3500_bs400_dsv3.1_w4a8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 180
+    max_out_len: 1500
+    batch_size: 45
+    request_rate: 0
+    baseline: 45.396
+    threshold: 0.95
+    temperature: 0
+    ignore_eos: True
+#_benchmarks_per3: &benchmarks_acc1
+#  acc:
+#    case_type: accuracy
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gsm8k-lite
+#    request_conf: vllm_api_general_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+#    max_out_len: 4096
+#    batch_size: 16
+#    baseline: 95.98
+#    top_p: 0.95
+#    threshold: 5
+#    temperature: 0.6
+#    ignore_eos: false
+#_benchmarks_per4: &benchmarks_acc2
+#  acc:
+#    case_type: accuracy
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/BFCL
+#    request_conf: vllm_api_function_call_chat
+#    dataset_conf: BFCL/BFCL_gen_simple
+#    max_out_len: 20480
+#    batch_size: 16
+#    baseline: 74
+#    threshold: 5
+#    temperature: 0.6
+#    ignore_eos: false
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+test_cases:
+  - name: "chunked_perfill_func_test_002"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-num-seqs"
+      - "16"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--disable-log-stats"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - name: "prefill_cache_func_spcp_001"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "100"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "200"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      VLLM_RPC_TIMEOUT: "3600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3600000"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+      DISABLE_L2_CACHE: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--seed"
+      - "1024"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "24"
+      - "--max-model-len"
+      - "8200"
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--enable-prefix-caching"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - "--compilation_config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enable": false},"torchair_graph_config":{"enable":true}}'
+  - name: "mtp_api_test_002"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - "--disable-log-stats"
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":false,"enable_multistream_mla":true,"graph_batch_sizes":[16],"use_cached_graph":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
+  - name: "mtp_func_test_001"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - "--disable-log-stats"
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":false,"enable_multistream_mla":true,"graph_batch_sizes":[16],"use_cached_graph":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
+  - name: "mtp_func_test_002"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "8192"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - "--disable-log-stats"
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_moe":false,"enable_multistream_mla":true,"graph_batch_sizes":[16],"use_cached_graph":true},"chunked_prefill_for_mla":true,"enable_weight_nz_layout":true}'
+  - name: "mtp_api_test_001_769_250"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "8"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "36864"
+      - "--max-num-batched-tokens"
+      - "2048"
+      - "--max-num-seqs"
+      - "16"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"graph_batch_sizes":[16]}}'
+#  - name: "deepseek_R1_W8A8_Perfermance_0006"
+#    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+#    envs:
+#      HCCL_BUFFSIZE: "1024"
+#      OMP_PROC_BIND: "False"
+#      OMP_NUM_THREADS: "10"
+#      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+#      VLLM_USE_V1: "1"
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--data-parallel-size"
+#      - "2"
+#      - "--tensor-parallel-size"
+#      - "4"
+#      - "--enable-expert-paralle"
+#      - "--seed"
+#      - "1024"
+#      - "--max-model-len"
+#      - "5500"
+#      - "--max-num-batched-tokens"
+#      - "4096"
+#      - "--max-num-seqs"
+#      - "16"
+#      - "--speculative-config"
+#      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+#      - "--trust-remote-code"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--disable-log-stats"
+#      - "--compilation_config"
+#      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+#    benchmarks:
+#      <<: *benchmarks_per1
+  - name: "Deepseek_31_nofeature_mtp_perf_001"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      VLLM_RPC_TIMEOUT: "3600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+      HCCL_BUFFSIZE: "1024"
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "10"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_V1: "1"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "36768"
+      - "--max-num-batched-tokens"
+      - "4096"
+      - "--max-num-seqs"
+      - "24"
+      - "--trust-remote-code"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp","disable_padded_drafter_batch":"False"}'
+      - "--compilation_config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks_per2
+#  - name: "Vllm_reasoning_output_012"
+#    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+#    envs:
+#      OMP_PROC_BIND: "False"
+#      OMP_NUM_THREADS: "100"
+#      VLLM_USE_V1: "1"
+#      HCCL_BUFFSIZE: "1024"
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--data-parallel-size"
+#      - "4"
+#      - "--data-parallel-size-local"
+#      - "4"
+#      - "--data-parallel-rpc-port"
+#      - "13389"
+#      - "--tensor-parallel-size"
+#      - "2"
+#      - "--seed"
+#      - "1024"
+#      - "--enable-expert-parallel"
+#      - "--max-num-seqs"
+#      - "32"
+#      - "--max-model-len"
+#      - "6000"
+#      - "--max-num-batched-tokens"
+#      - "6000"
+#      - "--trust-remote-code"
+#      - "--enforce-eager"
+#      - "--gpu-memory-utilization"
+#      - "0.92"
+#      - "--no-enable-prefix-caching"
+#      - "--reasoning-parser"
+#      - "deepseek_r1"
+#      - "--additional-config"
+#      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_shared_expert":false}}'
+#    benchmarks:
+#      <<: *benchmarks_acc1
+  - name: "Vllm_reasoning_output_007"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "100"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "1024"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "4"
+      - "--data-parallel-size-local"
+      - "4"
+      - "--data-parallel-rpc-port"
+      - "13389"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--seed"
+      - "1024"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "6000"
+      - "--max-num-batched-tokens"
+      - "6000"
+      - "--trust-remote-code"
+      - "--enforce-eager"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--no-enable-prefix-caching"
+      - "--reasoning-parser"
+      - "deepseek_r1"
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_shared_expert":false}}'
+  - name: "Vllm_reasoning_output_009"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "100"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "1024"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "4"
+      - "--data-parallel-size-local"
+      - "4"
+      - "--data-parallel-rpc-port"
+      - "13389"
+      - "--tensor-parallel-size"
+      - "2"
+      - "--seed"
+      - "1024"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "32"
+      - "--max-model-len"
+      - "6000"
+      - "--max-num-batched-tokens"
+      - "6000"
+      - "--trust-remote-code"
+      - "--enforce-eager"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--no-enable-prefix-caching"
+      - "--reasoning-parser"
+      - "deepseek_r1"
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":true,"enable_multistream_shared_expert":false}}'
+  - name: "vllm_mix_dsr1_w8a8_fc_func_0001"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+    envs:
+      OMP_PROC_BIND: "False"
+      OMP_NUM_THREADS: "100"
+      VLLM_USE_V1: "1"
+      HCCL_BUFFSIZE: "1024"
+      VLLM_ASCEND_ENABLE_MLAPO: "1"
+      VLLM_RPC_TIMEOUT: "3600000"
+      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3600000"
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      DISABLE_L2_CACHE: "1"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--data-parallel-size"
+      - "2"
+      - "--tensor-parallel-size"
+      - "4"
+      - "--seed"
+      - "1024"
+      - "--enable-expert-parallel"
+      - "--max-num-seqs"
+      - "20"
+      - "--max-model-len"
+      - "40000"
+      - "--max-num-batched-tokens"
+      - "2048"
+      - "--trust-remote-code"
+      - "--no-enable-prefix-caching"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "deepseek_v31"
+      - "--chat-template"
+      - "/root/.cache/modelscope/hub/models/vllm-ascend/tool_chat_template_deepseekv31.jinja"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - "--compilation_config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--additional-config"
+      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+#  - name: "vllm_mix_dsr1_w8a8_fc_accuracy_0001"
+#    model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+#    envs:
+#      OMP_PROC_BIND: "False"
+#      OMP_NUM_THREADS: "100"
+#      VLLM_USE_V1: "1"
+#      HCCL_BUFFSIZE: "1024"
+#      VLLM_ASCEND_ENABLE_MLAPO: "1"
+#      VLLM_RPC_TIMEOUT: "3600000"
+#      VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "3600000"
+#      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+#      DISABLE_L2_CACHE: "1"
+#      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--data-parallel-size"
+#      - "2"
+#      - "--tensor-parallel-size"
+#      - "4"
+#      - "--seed"
+#      - "1024"
+#      - "--enable-expert-parallel"
+#      - "--max-num-seqs"
+#      - "20"
+#      - "--max-model-len"
+#      - "40000"
+#      - "--max-num-batched-tokens"
+#      - "2048"
+#      - "--trust-remote-code"
+#      - "--no-enable-prefix-caching"
+#      - "--gpu-memory-utilization"
+#      - "0.9"
+#      - "--enable-auto-tool-choice"
+#      - "--tool-call-parser"
+#      - "deepseek_v31"
+#      - "--chat-template"
+#      - "/root/.cache/modelscope/hub/models/vllm-ascend/tool_chat_template_deepseekv31.jinja"
+#      - "--speculative-config"
+#      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+#      - "--compilation_config"
+#      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+#      - "--additional-config"
+#      - '{"ascend_scheduler_config":{"enabled":false},"torchair_graph_config":{"enabled":false}}'
+#    benchmarks:
+#      <<: *benchmarks_acc2
