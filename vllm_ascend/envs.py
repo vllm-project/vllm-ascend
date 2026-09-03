@@ -71,6 +71,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to fuse GMM1 + SiTU + per-token INT8 quant via
+    # torch.vllm_ascendC.grouped_matmul_situ_quant on A3 W4A8 SiTU MoE.
+    # 1 (default): prefer the fused kernel when the extension is available;
+    # 0: keep the legacy npu_grouped_matmul + dequant_situ_quant split path.
+    "VLLM_ASCEND_ENABLE_GMSQ_SITU": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_GMSQ_SITU", "1"))),
 }
 
 # end-env-vars-definition
