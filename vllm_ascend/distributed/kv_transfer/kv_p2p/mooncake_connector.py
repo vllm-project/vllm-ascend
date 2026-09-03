@@ -13,7 +13,7 @@ import time
 from collections import OrderedDict, defaultdict, deque
 from collections.abc import Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import msgspec
@@ -58,6 +58,12 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.scheduler import (
+    SFAPDRD2HScheduler,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    get_sparse_kv_offload_manager,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
@@ -79,6 +85,17 @@ from vllm_ascend.utils import (
     model_uses_sfa_sparse,
 )
 
+from .mooncake_dsa_metadata import (
+    DsaConnectorMetadata,
+    DsaLocalResult,
+    DsaLocalResultKind,
+    DsaStepRequest,
+    DsaTransferPhase,
+    DsaWorkerResultMetadata,
+    RemoteEndpoint,
+    RemoteSource,
+)
+
 # isort: off
 if TYPE_CHECKING:
     from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
@@ -96,6 +113,65 @@ DONE_RECVING_MSG = b"done_recving_msg"
 # other peers already waiting in the global executor queue can make progress.
 MAX_REQUESTS_PER_PEER_HANDLER = 5
 KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
+
+def _resolve_remote_endpoint(
+    base_port: int,
+    remote_handshake_port: int,
+    remote_host: str,
+    remote_engine_id: str,
+    remote_multi_nodes_meta_mapping: Mapping[str, Mapping[str, object]] | None,
+) -> RemoteEndpoint:
+    rank = str(remote_handshake_port - base_port)
+    info = None if remote_multi_nodes_meta_mapping is None else remote_multi_nodes_meta_mapping.get(rank)
+    if info is None:
+        return RemoteEndpoint(remote_host, remote_handshake_port, remote_engine_id)
+    if not isinstance(info, Mapping):
+        raise TypeError(f"remote endpoint mapping for rank {rank} must be a mapping")
+    return RemoteEndpoint(
+        str(info.get("host", remote_host)),
+        int(info.get("handshake_port", remote_handshake_port)),
+        str(info.get("engine_id", remote_engine_id)),
+    )
+
+
+def _project_remote_endpoints(
+    *,
+    remote_host: str,
+    remote_port: int,
+    remote_engine_id: str,
+    remote_multi_nodes_meta_mapping: Mapping[str, Mapping[str, object]] | None,
+    prefill_tp_size: int,
+) -> tuple[RemoteEndpoint, ...]:
+    if isinstance(prefill_tp_size, bool) or not isinstance(prefill_tp_size, int) or prefill_tp_size <= 0:
+        raise ValueError("prefill_tp_size must be a positive integer")
+    mapping = {} if remote_multi_nodes_meta_mapping is None else remote_multi_nodes_meta_mapping
+    if not isinstance(mapping, Mapping):
+        raise TypeError("remote_multi_nodes_meta_mapping must be a mapping")
+    if mapping:
+        numeric_mapping = {int(rank): info for rank, info in mapping.items()}
+        ranks = sorted(numeric_mapping)
+        if len(ranks) == prefill_tp_size and ranks != list(range(prefill_tp_size)):
+            base = ranks[0]
+            if ranks == list(range(base, base + prefill_tp_size)):
+                numeric_mapping = {rank - base: info for rank, info in numeric_mapping.items()}
+        expected = set(range(prefill_tp_size))
+        if set(numeric_mapping) != expected:
+            raise ValueError(
+                "remote endpoint mapping must cover Prefill TP ranks "
+                f"0..{prefill_tp_size - 1}, got {sorted(numeric_mapping)}"
+            )
+        mapping = {str(rank): numeric_mapping[rank] for rank in expected}
+    return tuple(
+        _resolve_remote_endpoint(
+            remote_port,
+            remote_port + rank,
+            remote_host,
+            remote_engine_id,
+            mapping,
+        )
+        for rank in range(prefill_tp_size)
+    )
 
 
 class RemotePortInfo(TypedDict):
@@ -473,6 +549,8 @@ class KVCacheRecvingThread(threading.Thread):
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
         self.remote_block_size_scale: dict[str, dict[int, list[list[int]]]] = SizedDict()
         self.remote_block_stride_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_block_len_per_addr: dict[str, dict[int, list[list[int]]]] = SizedDict()
+        self.remote_metadata_hosts: dict[str, dict[int, str]] = SizedDict()
         self.remote_kv_group2layeridx: dict[str, dict[int, dict[int, tuple[dict[str, Any], list[int]]]]] = SizedDict()
         self.remote_metadata_lock = threading.Lock()
         # Reformat metadata keyed by request_id then CP shard index. Populated by the
@@ -606,6 +684,296 @@ class KVCacheRecvingThread(threading.Thread):
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
 
+    def add_dsa_request(
+        self,
+        command: DsaStepRequest,
+        remote_endpoint: RemoteEndpoint,
+        on_result: Any,
+    ) -> None:
+        self.request_queue.put(
+            {
+                "request_id": command.request_id,
+                "remote_host": remote_endpoint.remote_host,
+                "remote_handshake_port": remote_endpoint.remote_port,
+                "dsa_command": command,
+                "dsa_remote_endpoint": remote_endpoint,
+                "dsa_on_result": on_result,
+            }
+        )
+
+    @staticmethod
+    def _expand_dsa_block_ids(
+        block_ids: tuple[int, ...], scale: int
+    ) -> list[int]:
+        if scale <= 0:
+            raise ValueError(
+                "DSA positional block scale must be positive"
+            )
+        return [
+            block_id * scale + offset
+            for block_id in block_ids
+            for offset in range(scale)
+        ]
+
+    @staticmethod
+    def _dsa_indexer_token_scale(
+        *, remote_block_len: int, local_block_len: int
+    ) -> int:
+        if (
+            remote_block_len <= 0
+            or local_block_len <= 0
+            or local_block_len % remote_block_len
+        ):
+            return 1
+        return local_block_len // remote_block_len
+
+    def _build_dsa_transfer_lists(
+        self,
+        local_layout: list[list[tuple[int, int, int, int, int]]],
+        remote_base_addrs: list[list[int]],
+        remote_strides: list[list[int]],
+        remote_scales: list[list[int]],
+        remote_lens: list[list[int]],
+        source_block_ids: tuple[int, ...],
+        destination_block_ids: tuple[int, ...],
+        *,
+        allow_empty: bool = False,
+    ) -> tuple[list[int], list[int], list[int]]:
+        local_addresses: list[int] = []
+        remote_addresses: list[int] = []
+        lengths: list[int] = []
+        for layer_idx, layer_layout in enumerate(local_layout):
+            remote_n = (
+                len(remote_base_addrs[layer_idx])
+                if layer_idx < len(remote_base_addrs)
+                else 0
+            )
+            for position, base, block_len, stride, local_scale in layer_layout:
+                if position >= remote_n:
+                    continue
+                try:
+                    remote_base = remote_base_addrs[layer_idx][position]
+                    remote_stride = remote_strides[layer_idx][position]
+                    remote_scale = remote_scales[layer_idx][position]
+                    remote_len = remote_lens[layer_idx][position]
+                except IndexError as exc:
+                    raise ValueError(
+                        "incomplete DSA positional handshake arrays: "
+                        f"layer={layer_idx} position={position}"
+                    ) from exc
+                source_physical = self._expand_dsa_block_ids(
+                    source_block_ids, remote_scale
+                )
+                token_scale = self._dsa_indexer_token_scale(
+                    remote_block_len=remote_len,
+                    local_block_len=block_len,
+                )
+                if token_scale > 1:
+                    if not destination_block_ids:
+                        raise ValueError(
+                            "DSA Indexer destination blocks are empty"
+                        )
+                    max_src = len(destination_block_ids) * token_scale
+                    for index, source_id in enumerate(
+                        source_physical[:max_src]
+                    ):
+                        destination_id = destination_block_ids[
+                            index // token_scale
+                        ]
+                        page_slot = index % token_scale
+                        local_addresses.append(
+                            base
+                            + destination_id * block_len
+                            + page_slot * remote_len
+                        )
+                        remote_addresses.append(
+                            remote_base + source_id * remote_len
+                        )
+                        lengths.append(remote_len)
+                    continue
+                if block_len != remote_len:
+                    raise ValueError(
+                        "DSA positional block length mismatch: "
+                        f"local={block_len}, remote={remote_len}, "
+                        f"layer={layer_idx}, position={position}"
+                    )
+                destination_physical = self._expand_dsa_block_ids(
+                    destination_block_ids, local_scale
+                )
+                if len(source_physical) != len(destination_physical):
+                    raise ValueError(
+                        "DSA source/destination block coverage mismatch: "
+                        f"source={len(source_physical)}, "
+                        f"destination={len(destination_physical)}"
+                    )
+                for source_id, destination_id in zip(
+                    source_physical, destination_physical
+                ):
+                    local_addresses.append(
+                        base + destination_id * stride
+                    )
+                    remote_addresses.append(
+                        remote_base + source_id * remote_stride
+                    )
+                    lengths.append(block_len)
+        if not local_addresses and not allow_empty:
+            raise ValueError("DSA transfer phase must not be empty")
+        return local_addresses, remote_addresses, lengths
+
+    def _execute_dsa_receive(
+        self,
+        command: DsaStepRequest,
+        remote_endpoint: RemoteEndpoint,
+        on_result: Any,
+    ) -> None:
+        source = command.source
+        remote_engine_id = remote_endpoint.remote_engine_id
+        remote_host = remote_endpoint.remote_host
+        remote_port = remote_endpoint.remote_port
+        result_kind = DsaLocalResultKind.TRANSFER_FAILED
+        failure_phase: DsaTransferPhase | None = (
+            DsaTransferPhase.INDEXER_D2D
+        )
+        try:
+            if source is None:
+                raise ValueError("DSA receive requires a remote source")
+            with self.remote_metadata_lock:
+                has_metadata = (
+                    remote_engine_id in self.kv_caches_base_addr
+                    and remote_port
+                    in self.kv_caches_base_addr[remote_engine_id]
+                    and self.remote_metadata_hosts.get(
+                        remote_engine_id, {}
+                    ).get(remote_port)
+                    == remote_host
+                )
+            if not has_metadata:
+                self._get_remote_metadata(remote_host, remote_port)
+            with self.remote_metadata_lock:
+                if (
+                    remote_engine_id not in self.kv_caches_base_addr
+                    or remote_port
+                    not in self.kv_caches_base_addr[remote_engine_id]
+                    or self.remote_metadata_hosts.get(
+                        remote_engine_id, {}
+                    ).get(remote_port)
+                    != remote_host
+                ):
+                    raise ValueError(
+                        "DSA GET_META identity did not match endpoint "
+                        f"{remote_engine_id!r} at "
+                        f"{remote_host}:{remote_port}"
+                    )
+                remote_bases = self.kv_caches_base_addr[
+                    remote_engine_id
+                ][remote_port]
+                remote_strides = self.remote_block_stride_per_addr[
+                    remote_engine_id
+                ][remote_port]
+                remote_scales = self.remote_block_size_scale[
+                    remote_engine_id
+                ][remote_port]
+                remote_lens = self.remote_block_len_per_addr[
+                    remote_engine_id
+                ][remote_port]
+                remote_te_port = self.remote_te_port[
+                    remote_engine_id
+                ][remote_port]
+            session_id = f"{remote_host}:{remote_te_port}"
+            indexer_lists = self._build_dsa_transfer_lists(
+                self._dsa_indexer_local_layout,
+                remote_bases,
+                remote_strides,
+                remote_scales,
+                remote_lens,
+                source.indexer_block_ids,
+                command.indexer_hbm_block_ids,
+                allow_empty=True,
+            )
+            if (
+                indexer_lists[0]
+                and self.engine.batch_transfer_sync_read(
+                    session_id, *indexer_lists
+                )
+                < 0
+            ):
+                logger.error(
+                    "Blockwise DSA Indexer transfer failed: "
+                    "request_id=%s, entries=%s",
+                    command.request_id,
+                    len(indexer_lists[0]),
+                )
+            else:
+                failure_phase = DsaTransferPhase.MAIN_D2RH
+                if self._dsa_main_owner:
+                    main_lists = self._build_dsa_transfer_lists(
+                        self._dsa_main_local_layout,
+                        remote_bases,
+                        remote_strides,
+                        remote_scales,
+                        remote_lens,
+                        source.main_block_ids,
+                        command.main_host_block_ids,
+                    )
+                else:
+                    main_lists = ([], [], [])
+                if (
+                    main_lists[0]
+                    and self.engine.batch_transfer_sync_read(
+                        session_id, *main_lists
+                    )
+                    < 0
+                ):
+                    logger.error(
+                        "Blockwise DSA Main transfer failed: "
+                        "request_id=%s, entries=%s",
+                        command.request_id,
+                        len(main_lists[0]),
+                    )
+                else:
+                    result_kind = DsaLocalResultKind.RECEIVE_COMPLETE
+                    failure_phase = None
+        except Exception:
+            logger.exception(
+                "Blockwise DSA receive failed: request_id=%s, phase=%s",
+                command.request_id,
+                failure_phase,
+            )
+        finally:
+            if source is not None:
+                try:
+                    self._send_done_recv_signal(
+                        source.remote_request_id,
+                        remote_host,
+                        remote_port,
+                        {},
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to send blockwise DSA completion signal: "
+                        "request_id=%s",
+                        command.request_id,
+                    )
+        on_result(
+            DsaLocalResult(
+                command.request_id,
+                self.tp_rank,
+                result_kind,
+                failure_phase,
+            )
+        )
+
+    def _handle_dsa_request(self, request_data: dict[str, Any]) -> None:
+        on_result = request_data["dsa_on_result"]
+        try:
+            self._execute_dsa_receive(
+                request_data["dsa_command"],
+                request_data["dsa_remote_endpoint"],
+                on_result,
+            )
+        finally:
+            self.request_queue.task_done()
+
     def get_and_clear_finished_requests(self) -> set[str]:
         """
         Get and clear the requests that have been completed.
@@ -650,7 +1018,8 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _submit_request(self, request_data: dict[str, Any]) -> None:
         peer_key = (request_data["remote_host"], request_data["remote_handshake_port"])
-        self._mark_request_task_submitted(request_data)
+        if "dsa_command" not in request_data:
+            self._mark_request_task_submitted(request_data)
         should_start_worker = False
         with self.peer_request_queues_lock:
             self.peer_request_queues[peer_key].append(request_data)
@@ -674,7 +1043,10 @@ class KVCacheRecvingThread(threading.Thread):
 
             requests_handled += 1
             try:
-                self._handle_request(req_meta)
+                if "dsa_command" in req_meta:
+                    self._handle_dsa_request(req_meta)
+                else:
+                    self._handle_request(req_meta)
             except Exception:
                 logger.exception(
                     "Error handling KV cache transfer request for peer %s:%d.",
@@ -1489,6 +1861,8 @@ class KVCacheRecvingThread(threading.Thread):
                 self.remote_te_port[engine_id][remote_handshake_port] = agent_meta.te_rpc_port
                 self.remote_block_size_scale[engine_id][remote_handshake_port] = agent_meta.block_size_scale
                 self.remote_block_stride_per_addr[engine_id][remote_handshake_port] = agent_meta.block_strides
+                self.remote_block_len_per_addr[engine_id][remote_handshake_port] = agent_meta.block_lens
+                self.remote_metadata_hosts[engine_id][remote_handshake_port] = remote_host
         except Exception:
             if isinstance(sock, zmq.Socket):  # type: ignore
                 sock.close()
@@ -1605,6 +1979,227 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         )
 
 
+@dataclass(slots=True)
+class _DsaSchedulerRequest:
+    request: Any
+    source: RemoteSource
+    num_computed_tokens: int
+    num_external_tokens: int
+    main_block_ids: tuple[int, ...] = ()
+    indexer_hbm_block_ids: tuple[int, ...] = ()
+    command_emitted: bool = False
+    results_by_rank: dict[int, DsaLocalResult] = field(default_factory=dict)
+
+
+class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
+    """Build one-shot blockwise Mooncake receives for Decode workers."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig | None,
+    ) -> None:
+        super().__init__(vllm_config, True, kv_cache_config)
+        self._main_block_size = self.block_size[self.main_group_idx]
+        self._dsa_requests: dict[str, _DsaSchedulerRequest] = {}
+        prefill = vllm_config.kv_transfer_config.get_from_extra_config(
+            "prefill", {}
+        )
+        self._dsa_prefill_tp_size = int(prefill.get("tp_size", 0))
+        if self._dsa_prefill_tp_size <= 0:
+            raise ValueError(
+                "Blockwise DSA requires kv_connector_extra_config."
+                "prefill.tp_size"
+            )
+        self._expected_tp_ranks = frozenset(
+            range(vllm_config.parallel_config.tensor_parallel_size)
+        )
+
+    def get_num_new_matched_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> tuple[int, bool]:
+        existing = self._dsa_requests.get(request.request_id)
+        if existing is not None:
+            return existing.num_external_tokens, True
+        params = request.kv_transfer_params
+        if params is None or not params.get("do_remote_prefill"):
+            return 0, False
+        prompt_tokens = len(request.prompt_token_ids or ())
+        external_tokens = max(prompt_tokens - num_computed_tokens, 0)
+        if external_tokens == 0:
+            return 0, False
+        remote_groups = tuple(
+            tuple(group) for group in params["remote_block_ids"]
+        )
+        if not remote_groups:
+            raise ValueError(
+                "remote_block_ids must contain at least one group"
+            )
+        source = RemoteSource(
+            remote_request_id=params["remote_request_id"],
+            endpoints_by_prefill_rank=_project_remote_endpoints(
+                remote_host=params["remote_host"],
+                remote_port=params["remote_port"],
+                remote_engine_id=params["remote_engine_id"],
+                remote_multi_nodes_meta_mapping=params.get(
+                    "remote_multi_nodes_meta_mapping"
+                ),
+                prefill_tp_size=self._dsa_prefill_tp_size,
+            ),
+            indexer_block_ids=(
+                remote_groups[0]
+                if len(remote_groups) == 1
+                else remote_groups[self.indexer_group_idx]
+            ),
+            main_block_ids=(
+                remote_groups[0]
+                if len(remote_groups) == 1
+                else remote_groups[self.main_group_idx]
+            ),
+        )
+        self._dsa_requests[request.request_id] = _DsaSchedulerRequest(
+            request=request,
+            source=source,
+            num_computed_tokens=num_computed_tokens,
+            num_external_tokens=external_tokens,
+        )
+        return external_tokens, True
+
+    def update_state_after_alloc(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+    ) -> None:
+        tracker = self._dsa_requests.get(request.request_id)
+        if tracker is None:
+            return
+        groups = tuple(tuple(group) for group in blocks.get_block_ids())
+        required_group = max(self.main_group_idx, self.indexer_group_idx)
+        if len(groups) <= required_group:
+            raise ValueError(
+                "Blockwise DSA allocation is missing SFA KV cache groups: "
+                f"required={required_group + 1}, got={len(groups)}"
+            )
+        indexer_block_ids = groups[self.indexer_group_idx]
+        if not indexer_block_ids:
+            raise ValueError(
+                "Indexer destination block IDs must not be empty"
+            )
+        bound_tokens = tracker.num_computed_tokens + num_external_tokens
+        bound_blocks = cdiv(bound_tokens, self._main_block_size)
+        main_block_ids = groups[self.main_group_idx]
+        if bound_blocks > len(main_block_ids):
+            raise ValueError(
+                "vLLM has not allocated enough Main Host blocks"
+            )
+        tracker.indexer_hbm_block_ids = indexer_block_ids
+        tracker.main_block_ids = main_block_ids[:bound_blocks]
+        if isinstance(request.kv_transfer_params, dict):
+            request.kv_transfer_params["do_remote_prefill"] = False
+
+    def build_connector_meta(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> DsaConnectorMetadata:
+        del scheduler_output
+        requests: list[DsaStepRequest] = []
+        for request_id in sorted(self._dsa_requests):
+            tracker = self._dsa_requests[request_id]
+            if (
+                tracker.command_emitted
+                or not tracker.indexer_hbm_block_ids
+                or not tracker.main_block_ids
+            ):
+                continue
+            requests.append(
+                DsaStepRequest(
+                    request_id=request_id,
+                    source=tracker.source,
+                    main_host_block_ids=tracker.main_block_ids,
+                    indexer_hbm_block_ids=tracker.indexer_hbm_block_ids,
+                )
+            )
+            tracker.command_emitted = True
+        return DsaConnectorMetadata(tuple(requests))
+
+    def update_connector_output(self, connector_output: Any) -> None:
+        metadata = connector_output.kv_connector_worker_meta
+        if metadata is None:
+            return
+        if not isinstance(metadata, DsaWorkerResultMetadata):
+            raise TypeError(
+                "kv_connector_worker_meta must be "
+                "DsaWorkerResultMetadata"
+            )
+        completed: list[str] = []
+        for result in metadata.results:
+            tracker = self._dsa_requests.get(result.request_id)
+            if tracker is None:
+                logger.warning_once(
+                    "Ignoring DSA result for released request %r",
+                    result.request_id,
+                )
+                continue
+            if result.tp_rank not in self._expected_tp_ranks:
+                raise ValueError(
+                    f"illegal Decode TP rank {result.tp_rank}"
+                )
+            existing = tracker.results_by_rank.get(result.tp_rank)
+            if existing is not None:
+                if existing != result:
+                    raise ValueError(
+                        f"conflicting DSA result for {result.identity}"
+                    )
+                continue
+            tracker.results_by_rank[result.tp_rank] = result
+            if set(tracker.results_by_rank) != self._expected_tp_ranks:
+                continue
+            if any(
+                item.kind is DsaLocalResultKind.TRANSFER_FAILED
+                for item in tracker.results_by_rank.values()
+            ):
+                tracker.request.num_computed_tokens = 0
+                logger.error(
+                    "Blockwise DSA receive failed for %s; "
+                    "falling back to local recompute",
+                    result.request_id,
+                )
+            completed.append(result.request_id)
+        if completed:
+            finished = set(connector_output.finished_recving or ())
+            finished.update(completed)
+            connector_output.finished_recving = finished
+            for request_id in completed:
+                self._dsa_requests.pop(request_id, None)
+
+    def set_xfer_handshake_metadata(
+        self,
+        metadata: Mapping[
+            int | tuple[int, ...], KVConnectorHandshakeMetadata
+        ],
+    ) -> None:
+        del metadata
+
+    def set_xfer_handshake_metadata_from_workers(
+        self,
+        metadata: Mapping[
+            int | tuple[int, ...], KVConnectorHandshakeMetadata
+        ],
+    ) -> None:
+        del metadata
+
+    def request_finished(
+        self,
+        request: "Request",
+        block_ids: Any,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        del block_ids
+        return request.request_id in self._dsa_requests, None
+
+
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(  # type: ignore[misc]
         self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
@@ -1612,12 +2207,74 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         assert vllm_config.kv_transfer_config is not None
         self._kv_transfer_config = vllm_config.kv_transfer_config
         self.engine_id = vllm_config.kv_transfer_config.engine_id
+        self._dsa_pd_offload = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "dsa_pd_offload", False
+            )
+        )
+        if not isinstance(self._dsa_pd_offload, bool):
+            raise ValueError(
+                "kv_connector_extra_config.dsa_pd_offload must be bool"
+            )
+        self._dsa_decode = (
+            self._dsa_pd_offload
+            and vllm_config.kv_transfer_config.kv_role == "kv_consumer"
+        )
+        if self._dsa_pd_offload:
+            kv_role = vllm_config.kv_transfer_config.kv_role
+            if kv_role not in ("kv_producer", "kv_consumer"):
+                raise ValueError(
+                    "Blockwise DSA requires kv_role='kv_producer' or "
+                    "kv_role='kv_consumer'"
+                )
+            prefill = vllm_config.kv_transfer_config.get_from_extra_config(
+                "prefill", {}
+            )
+            decode = vllm_config.kv_transfer_config.get_from_extra_config(
+                "decode", {}
+            )
+            prefill_tp = int(prefill.get("tp_size", 0))
+            decode_tp = int(decode.get("tp_size", 0))
+            if (
+                prefill_tp <= 0
+                or decode_tp <= 0
+                or prefill_tp < decode_tp
+                or prefill_tp % decode_tp
+            ):
+                raise ValueError(
+                    "Blockwise DSA currently requires positive P_TP/D_TP "
+                    "with P_TP >= D_TP and P_TP % D_TP == 0"
+                )
+            init_ascend_config(vllm_config)
+            offload = get_ascend_config().sparse_kv_offload_config
+            if kv_role == "kv_producer" and offload.enabled:
+                raise ValueError(
+                    "Blockwise DSA Prefill requires sparse KV offload disabled"
+                )
+            if kv_role == "kv_consumer":
+                if not offload.enabled:
+                    raise ValueError(
+                        "Blockwise DSA Decode requires sparse KV offload enabled"
+                    )
+                if not offload.use_fused_overlap:
+                    raise ValueError(
+                        "Blockwise DSA Decode requires fused overlap"
+                    )
+                if offload.host_backend != "mooncake":
+                    raise ValueError(
+                        "Blockwise DSA Decode requires host_backend='mooncake'"
+                    )
         self._connector_metadata = MooncakeConnectorMetadata()
 
         if role == KVConnectorRole.SCHEDULER:
-            self.connector_scheduler: MooncakeConnectorScheduler | None = MooncakeConnectorScheduler(
-                vllm_config, str(self.engine_id), kv_cache_config
-            )
+            if self._dsa_decode:
+                self.connector_scheduler = _MooncakeDsaDecodeScheduler(
+                    vllm_config, kv_cache_config
+                )
+            else:
+                self.connector_scheduler = MooncakeConnectorScheduler(
+                    vllm_config, str(self.engine_id), kv_cache_config
+                )
             self.connector_worker: MooncakeConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
@@ -1641,6 +2298,13 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def update_connector_output(self, connector_output: Any) -> None:
+        assert self.connector_scheduler is not None
+        if isinstance(
+            self.connector_scheduler, _MooncakeDsaDecodeScheduler
+        ):
+            self.connector_scheduler.update_connector_output(connector_output)
 
     def request_finished(
         self,
@@ -1668,7 +2332,7 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
-        return self.connector_worker.get_finished()
+        return self.connector_worker.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get the block ids whose KV load failed."""
@@ -1677,8 +2341,23 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, MooncakeConnectorMetadata)
+        if self._dsa_decode:
+            assert isinstance(
+                self._connector_metadata, DsaConnectorMetadata
+            )
+        else:
+            assert isinstance(
+                self._connector_metadata, MooncakeConnectorMetadata
+            )
         self.connector_worker.start_load_kv(self._connector_metadata)
+
+    def build_connector_worker_meta(
+        self,
+    ) -> DsaWorkerResultMetadata | None:
+        if not self._dsa_decode:
+            return None
+        assert self.connector_worker is not None
+        return self.connector_worker.build_connector_worker_meta()
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """MooncakeConnector does not do layerwise saving."""
@@ -2203,6 +2882,19 @@ class MooncakeConnectorWorker:
             self.tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         self.local_remote_block_port_mapping: dict[str, list[list[int]] | None] = {}
         self.remote_port_send_num: dict[str, dict[int, RemotePortInfo]] = {}
+        self._dsa_pd_offload = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "dsa_pd_offload", False
+            )
+        )
+        self._dsa_decode = (
+            self._dsa_pd_offload and self.kv_role == "kv_consumer"
+        )
+        if self._dsa_decode:
+            self._dsa_active_commands: dict[str, DsaStepRequest] = {}
+            self._dsa_results: queue.SimpleQueue[DsaLocalResult] = (
+                queue.SimpleQueue()
+            )
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -2567,6 +3259,90 @@ class MooncakeConnectorWorker:
 
         return ptrs, lengths
 
+    def _dsa_consumer_device_register_regions(
+        self, kv_caches: dict[str, torch.Tensor]
+    ) -> RegisterRegions:
+        indexer_caches = {
+            name: self._as_kv_cache_tuple(cache)
+            for name, cache in kv_caches.items()
+            if "indexer" in name.lower()
+        }
+        if not indexer_caches:
+            raise ValueError(
+                "Blockwise DSA Decode has no Indexer device cache"
+            )
+        return collect_storage_merged_register_regions(indexer_caches)
+
+    def _build_dsa_local_layouts(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        layer_name_to_idx: dict[str, int],
+    ) -> tuple[
+        list[list[tuple[int, int, int, int, int]]],
+        list[list[tuple[int, int, int, int, int]]],
+        bool,
+    ]:
+        manager = get_sparse_kv_offload_manager()
+        pool = manager.get_mooncake_host_pool()
+        layer_count = len(self.kv_caches_base_addr)
+        indexer_layout = [[] for _ in range(layer_count)]
+        main_layout = [[] for _ in range(layer_count)]
+
+        def tensor_entry(
+            position: int,
+            tensor: torch.Tensor,
+            require_exact_capacity: bool,
+        ) -> tuple[int, int, int, int, int]:
+            tensor_blocks = int(tensor.shape[0])
+            if require_exact_capacity and tensor_blocks != self.num_blocks:
+                raise RuntimeError(
+                    "Mooncake Host Main capacity must match "
+                    f"kv_cache_config: tensor_blocks={tensor_blocks}, "
+                    f"configured_blocks={self.num_blocks}"
+                )
+            if tensor_blocks % self.num_blocks:
+                raise ValueError(
+                    "DSA tensor block count must be divisible by "
+                    "kv_cache_config.num_blocks"
+                )
+            return (
+                position,
+                tensor.data_ptr(),
+                tensor.element_size() * math.prod(tensor.shape[1:]),
+                tensor.stride(0) * tensor.element_size(),
+                tensor_blocks // self.num_blocks,
+            )
+
+        for layer_name, cache in kv_caches.items():
+            if "indexer" not in layer_name.lower():
+                continue
+            layer_idx = layer_name_to_idx[layer_name]
+            for position, tensor in enumerate(
+                self._as_kv_cache_tuple(cache)
+            ):
+                indexer_layout[layer_idx].append(
+                    tensor_entry(position, tensor, False)
+                )
+        if not any(indexer_layout):
+            raise ValueError(
+                "Blockwise DSA Decode has no Indexer layout"
+            )
+
+        if pool.is_owner:
+            pool.register(self.engine)
+            for layer_name in manager.offload_layer_names:
+                layer_idx = layer_name_to_idx[layer_name]
+                host_k, host_v = (
+                    manager.get_fused_overlap_cpu_kv_inputs(layer_name)
+                )
+                main_layout[layer_idx].extend(
+                    (
+                        tensor_entry(0, host_k, True),
+                        tensor_entry(1, host_v, True),
+                    )
+                )
+        return indexer_layout, main_layout, pool.is_owner
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
         self.use_mla = self.vllm_config.model_config.is_deepseek_mla
@@ -2606,6 +3382,8 @@ class MooncakeConnectorWorker:
         # TODO: For DSV4 use_compress, metadata/transfer can be optimized by
         # aggregating layer views that share the same raw KVCacheTensor.
         for layer_name, kv_cache_tuple in kv_caches.items():
+            if self._dsa_decode and "indexer" not in layer_name.lower():
+                continue
             layer_idx = layer_name_to_idx[layer_name]
             for single_kv_cache in self._as_kv_cache_tuple(kv_cache_tuple):
                 tensor_num_blocks = single_kv_cache.shape[0]
@@ -2617,9 +3395,19 @@ class MooncakeConnectorWorker:
                 self.block_size_scale[layer_idx].append(block_size_scale)
                 self.kv_caches_base_addr[layer_idx].append(single_kv_cache.data_ptr())
 
+        dsa_local_layouts = None
+        if self._dsa_decode:
+            dsa_local_layouts = self._build_dsa_local_layouts(
+                kv_caches, layer_name_to_idx
+            )
+
         if has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
+        elif self._dsa_decode:
+            register_regions = (
+                self._dsa_consumer_device_register_regions(kv_caches)
+            )
         elif self.use_hybrid:
             ptrs, lengths = self._get_registered_kv_tensor_buffers_hybrid(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
@@ -2696,6 +3484,12 @@ class MooncakeConnectorWorker:
                 self.kv_group2layeridx,
                 self.block_size_scale,
             )
+            if dsa_local_layouts is not None:
+                (
+                    self.kv_recv_thread._dsa_indexer_local_layout,
+                    self.kv_recv_thread._dsa_main_local_layout,
+                    self.kv_recv_thread._dsa_main_owner,
+                ) = dsa_local_layouts
             self.kv_recv_thread.start()
         start_wait_time = time.time()
         thread = self.kv_send_thread if self.kv_role == "kv_producer" else self.kv_recv_thread
@@ -2707,7 +3501,12 @@ class MooncakeConnectorWorker:
                 raise RuntimeError("Timeout waiting for KV Cache thread to be ready.")
             time.sleep(3)
 
-    def get_finished(self) -> tuple[set[str], set[str]]:
+    def get_finished(
+        self, finished_req_ids: set[str] | None = None
+    ) -> tuple[set[str], set[str]]:
+        if self._dsa_decode:
+            for request_id in finished_req_ids or ():
+                self._dsa_active_commands.pop(request_id, None)
         done_sending = (
             self.kv_send_thread.get_and_clear_finished_requests(  # type: ignore[union-attr]
             )
@@ -3694,8 +4493,14 @@ class MooncakeConnectorWorker:
 
         return (local_block_ids,), (remote_block_ids,)
 
-    def start_load_kv(self, metadata: MooncakeConnectorMetadata):
+    def start_load_kv(
+        self,
+        metadata: MooncakeConnectorMetadata | DsaConnectorMetadata,
+    ):
         """Start loading KV blocks from remote engine."""
+        if isinstance(metadata, DsaConnectorMetadata):
+            self._dispatch_dsa_commands(metadata.requests)
+            return
         for req_id in metadata.reqs_in_batch:
             if self.kv_send_thread is not None:
                 self.kv_send_thread.task_tracker.add_req_to_process(req_id)
@@ -3791,7 +4596,16 @@ class MooncakeConnectorWorker:
 
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size == 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
-                if self.tp_rank in self._prefill_get_remote_rank(req_id):
+                source_ranks = (
+                    range(
+                        0,
+                        self._prefill_tp_size,
+                        self._prefill_tp_size // self._decode_tp_size,
+                    )
+                    if self._dsa_pd_offload
+                    else self._prefill_get_remote_rank(req_id)
+                )
+                if self.tp_rank in source_ranks:
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
@@ -3799,6 +4613,67 @@ class MooncakeConnectorWorker:
         if self.kv_send_thread is not None and self.pcp_size * self.dcp_size > 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
+
+    def _dispatch_dsa_commands(
+        self,
+        commands: tuple[DsaStepRequest, ...],
+    ) -> None:
+        if not self._dsa_decode:
+            raise RuntimeError(
+                "DSA commands are valid only on the Decode consumer"
+            )
+        for command in commands:
+            existing = self._dsa_active_commands.get(
+                command.request_id
+            )
+            if existing is not None:
+                if existing != command:
+                    raise ValueError(
+                        "conflicting blockwise DSA receive for "
+                        f"{command.request_id!r}"
+                    )
+                continue
+            leader_rank = self.tp_rank * (
+                self._prefill_tp_size // self._decode_tp_size
+            )
+            endpoints = command.source.endpoints_by_prefill_rank
+            if len(endpoints) != self._prefill_tp_size:
+                raise ValueError(
+                    "DSA endpoint tuple must contain "
+                    f"{self._prefill_tp_size} Prefill ranks"
+                )
+            self._dsa_active_commands[command.request_id] = command
+            assert self.kv_recv_thread is not None
+            self.kv_recv_thread.add_dsa_request(
+                command,
+                endpoints[leader_rank],
+                lambda result, request=command: (
+                    self._finish_dsa_receive(request, result)
+                ),
+            )
+
+    def _finish_dsa_receive(
+        self,
+        command: DsaStepRequest,
+        result: DsaLocalResult,
+    ) -> None:
+        if self._dsa_active_commands.get(command.request_id) != command:
+            return
+        self._dsa_active_commands.pop(command.request_id, None)
+        self._dsa_results.put(result)
+
+    def build_connector_worker_meta(
+        self,
+    ) -> DsaWorkerResultMetadata | None:
+        results: list[DsaLocalResult] = []
+        while True:
+            try:
+                results.append(self._dsa_results.get_nowait())
+            except queue.Empty:
+                break
+        if not results:
+            return None
+        return DsaWorkerResultMetadata(tuple(results))
 
     def _get_tp_num_need_pulls(self, prefill_tp_size: int | None) -> int:
         if prefill_tp_size is None:

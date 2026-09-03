@@ -675,6 +675,15 @@ class SparseKVOffloadManager:
             MooncakeHostPool,
         )
 
+    def get_mooncake_host_pool(self) -> MooncakeHostPool:
+        """Return the prepared Mooncake allocator used by Decode Main KV."""
+        allocator = self._host_kv_allocator
+        if not isinstance(allocator, MooncakeHostPool):
+            raise RuntimeError(
+                "Sparse KV offload is not using the Mooncake Host backend"
+            )
+        return allocator
+
     def _requires_fused_membership_staging(self) -> bool:
         """Whether the active Host allocator needs a CPU planner bridge."""
         return self._uses_mooncake_host_pool()
