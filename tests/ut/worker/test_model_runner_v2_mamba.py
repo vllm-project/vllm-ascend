@@ -10,6 +10,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -67,6 +68,30 @@ def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+
+
+def test_mamba_group_info_supports_uniform_type_groups():
+    spec = _mamba_spec()
+    uniform_spec = UniformTypeKVCacheSpecs.from_specs({"mamba.0": spec, "mamba.1": spec})
+    assert uniform_spec is not None
+    config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["mamba.0", "mamba.1"],
+                kv_cache_spec=uniform_spec,
+            )
+        ],
+    )
+    state = object.__new__(AscendMambaHybridModelState)
+    state._mamba_spec = None
+    state._mamba_group_ids = []
+
+    group_ids, selected_spec = state._get_mamba_group_info(config)
+
+    assert group_ids == [0]
+    assert selected_spec == spec
 
 
 def test_prepare_inputs_propagates_padded_request_count():
