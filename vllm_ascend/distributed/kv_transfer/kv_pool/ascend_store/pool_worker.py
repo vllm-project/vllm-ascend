@@ -643,7 +643,14 @@ class KVPoolWorker:
     def _uses_mamba_kv_cache(use_hybrid: bool, kv_cache_config: KVCacheConfig | None):
         if not use_hybrid or kv_cache_config is None:
             return False
-        return any([isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups])
+        for group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                if any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.kv_cache_specs.values()):
+                    return True
+            elif isinstance(kv_cache_spec, MambaSpec):
+                return True
+        return False
 
     @staticmethod
     def _as_cache_tuple(cache_or_caches) -> tuple[torch.Tensor, ...]:

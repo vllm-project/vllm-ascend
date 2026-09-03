@@ -337,6 +337,51 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         return sched_output
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_running_chunk_updates_mamba_blocks_at_current_position(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        request = MagicMock()
+        request.num_computed_tokens = 128
+        request.num_prompt_tokens = 256
+        request.prompt_token_ids = list(range(256))
+        request.all_token_ids = list(range(256))
+        request.block_hashes = [b"h"] * 16
+        scheduler._unfinished_requests["r1"] = (request, [[] for _ in range(4)])
+        scheduler._request_trackers["r1"] = RequestTracker(
+            req_id="r1",
+            token_len=128,
+            allocated_block_ids_by_group=[
+                [1, 2, 3, 4, 5, 6, 7, 8],
+                [0, 0, 0, 0, 0, 0, 0, 9, 10, 11, 12],
+                [0, 0, 0, 0, 0, 0, 0, 13, 14, 15, 16],
+                [0, 0, 0, 0, 0, 0, 0, 17, 18, 19, 20],
+            ],
+            mamba_group_ids=[1, 2, 3],
+            num_speculative_blocks=3,
+            block_sizes=[16] * 4,
+        )
+        new_block_ids = (
+            [21, 22, 23, 24, 25, 26, 27, 28],
+            [0, 0, 0, 0, 10, 11, 12, 29],
+            [0, 0, 0, 0, 14, 15, 16, 30],
+            [0, 0, 0, 0, 18, 19, 20, 31],
+        )
+        scheduler._build_req_meta = MagicMock(return_value=None)
+
+        scheduler._process_running_cached_request(
+            new_block_ids,
+            "r1",
+            0,
+            MagicMock(),
+            self._make_running_chunk_output(new_block_ids),
+            False,
+        )
+
+        self.assertEqual(
+            scheduler._request_trackers["r1"].allocated_block_ids_by_group[1],
+            [0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 10, 11, 12, 29],
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_new_req(self, mock_client_cls):
         config = self._make_config()
         scheduler = KVPoolScheduler(config, use_layerwise=False)
