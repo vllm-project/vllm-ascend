@@ -21,38 +21,62 @@
 | LinFeng Yuan| [@linfeng-yuan](https://github.com/linfeng-yuan) | 2026/05 |
 
 ## Contributors
-<!-- last_commit: edcae83da32af8e1f1b7b97c7e19e8114e0535a5 -->
+<!-- last_commit: 5f5ea8af8c9e93ce7ce62455014c6b0491d0ce1d -->
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2026-08-16:
+Updated on 2026-09-03:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
-| 518 | [@DavidJiang9](https://github.com/DavidJiang9) | 2026/08/13 | [c10e1c0](https://github.com/vllm-project/vllm-ascend/commit/c10e1c01d51c533021ae4bc5eeebf784ae36dafc) |
-| 517 | [@hw-zhoutianyang](https://github.com/hw-zhoutianyang) | 2026/08/12 | [6c47fb9](https://github.com/vllm-project/vllm-ascend/commit/6c47fb9e3ac8af04c873fce79318bc2afabf9188) |
-| 516 | [@lrf-vm](https://github.com/lrf-vm) | 2026/08/08 | [462154e](https://github.com/vllm-project/vllm-ascend/commit/462154e6cd99084d81b94fcfdf26b4aed2cac914) |
-| 515 | [@voidvelocity](https://github.com/voidvelocity) | 2026/08/07 | [60eacbe](https://github.com/vllm-project/vllm-ascend/commit/60eacbe8bd20ad9dcd7615896184110e556c0584) |
-| 514 | [@xqchen7](https://github.com/xqchen7) | 2026/08/07 | [7c0f6e6](https://github.com/vllm-project/vllm-ascend/commit/7c0f6e6d8cc3134019ea6ebd71a3dad6733492e5) |
-| 513 | [@Karryking3](https://github.com/Karryking3) | 2026/08/06 | [bb630a6](https://github.com/vllm-project/vllm-ascend/commit/bb630a62a210059ba04041bdb952e3fca22f94df) |
-| 512 | [@ella1107](https://github.com/ella1107) | 2026/07/30 | [71d136c](https://github.com/vllm-project/vllm-ascend/commit/71d136ca26c4692db6b1e5bd07f507b73f09887b) |
-| 511 | [@axx-ty911](https://github.com/axx-ty911) | 2026/07/30 | [7890de8](https://github.com/vllm-project/vllm-ascend/commit/7890de8eb72ff669c4962ff379090a14dc19b21a) |
-| 510 | [@ffggs](https://github.com/ffggs) | 2026/07/29 | [5cf0420](https://github.com/vllm-project/vllm-ascend/commit/5cf0420ab3a4ca5f8ba2a707e4e5c31eef1cc968) |
-| 509 | [@jiaqi-lee](https://github.com/jiaqi-lee) | 2026/07/25 | [5225ae2](https://github.com/vllm-project/vllm-ascend/commit/5225ae20fb09aa41cc3278b294aad23c9dc33f22) |
-| 508 | [@Oranbean258](https://github.com/Oranbean258) | 2026/07/23 | [e6f3f49](https://github.com/vllm-project/vllm-ascend/commit/e6f3f4954602a3d2fc41857e0c61806b9c8840ff) |
-| 507 | [@lyur01](https://github.com/lyur01) | 2026/07/23 | [f9602a1](https://github.com/vllm-project/vllm-ascend/commit/f9602a13c52359fe1b56dc8318436d31f03012ba) |
-| 506 | [@zhangjiale-zjl](https://github.com/zhangjiale-zjl) | 2026/07/23 | [9d03a3a](https://github.com/vllm-project/vllm-ascend/commit/9d03a3a682d196cb534885a7cbdf86ef0b0694aa) |
-| 505 | [@aisong1988](https://github.com/aisong1988) | 2026/07/22 | [c926c21](https://github.com/vllm-project/vllm-ascend/commit/c926c213cbf2ca0c1d13d4bdaea97d39a5748b15) |
-| 504 | [@q664171689](https://github.com/q664171689) | 2026/07/18 | [ebad45e](https://github.com/vllm-project/vllm-ascend/commit/ebad45e3666f8453e045ade27d02b47a7fe1669c) |
-| 503 | [@qijiajin](https://github.com/qijiajin) | 2026/07/18 | [d42948a](https://github.com/vllm-project/vllm-ascend/commit/d42948ac2c1cba80fe30acd0bd61e4991beb58d2) |
-| 502 | [@Wyz-134](https://github.com/Wyz-134) | 2026/07/17 | [9b8423e](https://github.com/vllm-project/vllm-ascend/commit/9b8423e15a836f1b011b61aece5305459f939c32) |
-| 501 | [@zh98530](https://github.com/zh98530) | 2026/07/17 | [a272c88](https://github.com/vllm-project/vllm-ascend/commit/a272c88a5c6560c2ef655b05970a05b895d342e4) |
-| 500 | [@singzhou](https://github.com/singzhou) | 2026/07/15 | [f924703](https://github.com/vllm-project/vllm-ascend/commit/f924703d7d97a90c5d72d58bf32865501b7f87c0) |
-| 499 | [@ZhangwenTaoHW](https://github.com/ZhangwenTaoHW) | 2026/07/13 | [b89a491](https://github.com/vllm-project/vllm-ascend/commit/b89a491644cd02a16a5b17c1a124cec254866559) |
-| 498 | [@zhaochuang001](https://github.com/zhaochuang001) | 2026/07/11 | [7be596c](https://github.com/vllm-project/vllm-ascend/commit/7be596cd3fa93c45a4ef4ff5384d0c852659d83c) |
-| 497 | [@Liuchenbing-2026](https://github.com/Liuchenbing-2026) | 2026/07/10 | [123c5cc](https://github.com/vllm-project/vllm-ascend/commit/123c5ccc78d3aabe3f793223e096ee5e97606a20) |
-| 496 | [@KadenZhang3321](https://github.com/KadenZhang3321) | 2026/07/08 | [d17a99c](https://github.com/vllm-project/vllm-ascend/commit/d17a99cd51d535c4026ffb596bafa0a23fa87064) |
-| 495 | [@TYYTao](https://github.com/TYYTao) | 2026/07/06 | [79928c2](https://github.com/vllm-project/vllm-ascend/commit/79928c2ff1b5521d7f57c58233c87782ec77afc1) |
+| 542 | [@MaybeChz](https://github.com/MaybeChz) | 2026/08/31 | [fa3537f](https://github.com/vllm-project/vllm-ascend/commit/fa3537f92b4c47d97a17bc9443924a1f9d69aec2) |
+| 541 | [@chenzhh69](https://github.com/chenzhh69) | 2026/08/28 | [e20c2b0](https://github.com/vllm-project/vllm-ascend/commit/e20c2b061fa72cc581b6513cbc3e2995527b934f) |
+| 540 | [@lsjfy-open-com](https://github.com/lsjfy-open-com) | 2026/08/28 | [3827486](https://github.com/vllm-project/vllm-ascend/commit/3827486f19db928809af401ea0121ca7d487448f) |
+| 539 | [@JavaPythonAIForBAT](https://github.com/JavaPythonAIForBAT) | 2026/08/27 | [f347522](https://github.com/vllm-project/vllm-ascend/commit/f3475221a3e1e0de81806de25c1fa58f64216ca3) |
+| 538 | [@du-ping1](https://github.com/du-ping1) | 2026/07/30 | [3cba6f7](https://github.com/vllm-project/vllm-ascend/commit/3cba6f774544d8fae4506debb98d37cda6e2c3ec) |
+| 537 | [@Zhaocen](https://github.com/Zhaocen) | 2026/08/25 | [c120a6e](https://github.com/vllm-project/vllm-ascend/commit/c120a6e6d91a102f3a4d267b08601905021a4318) |
+| 536 | [@DavidJiang9](https://github.com/DavidJiang9) | 2026/08/13 | [c10e1c0](https://github.com/vllm-project/vllm-ascend/commit/c10e1c01d51c533021ae4bc5eeebf784ae36dafc) |
+| 535 | [@hw-zhoutianyang](https://github.com/hw-zhoutianyang) | 2026/08/12 | [6c47fb9](https://github.com/vllm-project/vllm-ascend/commit/6c47fb9e3ac8af04c873fce79318bc2afabf9188) |
+| 534 | [@lrf-vm](https://github.com/lrf-vm) | 2026/08/08 | [462154e](https://github.com/vllm-project/vllm-ascend/commit/462154e6cd99084d81b94fcfdf26b4aed2cac914) |
+| 533 | [@xqchen7](https://github.com/xqchen7) | 2026/08/07 | [7c0f6e6](https://github.com/vllm-project/vllm-ascend/commit/7c0f6e6d8cc3134019ea6ebd71a3dad6733492e5) |
+| 532 | [@voidvelocity](https://github.com/voidvelocity) | 2026/08/07 | [60eacbe](https://github.com/vllm-project/vllm-ascend/commit/60eacbe8bd20ad9dcd7615896184110e556c0584) |
+| 531 | [@Karryking3](https://github.com/Karryking3) | 2026/08/06 | [bb630a6](https://github.com/vllm-project/vllm-ascend/commit/bb630a62a210059ba04041bdb952e3fca22f94df) |
+| 530 | [@zongersama](https://github.com/zongersama) | 2026/08/04 | [a7e415e](https://github.com/vllm-project/vllm-ascend/commit/a7e415e5bd3551486ccf01c3002ad8fd0d8cf725) |
+| 529 | [@axx-ty911](https://github.com/axx-ty911) | 2026/07/30 | [7890de8](https://github.com/vllm-project/vllm-ascend/commit/7890de8eb72ff669c4962ff379090a14dc19b21a) |
+| 528 | [@ella1107](https://github.com/ella1107) | 2026/07/30 | [71d136c](https://github.com/vllm-project/vllm-ascend/commit/71d136ca26c4692db6b1e5bd07f507b73f09887b) |
+| 527 | [@RuiningWANG](https://github.com/RuiningWANG) | 2026/07/30 | [c9e95ba](https://github.com/vllm-project/vllm-ascend/commit/c9e95ba32421fd4a29176db1e67d13896ef70406) |
+| 526 | [@ffggs](https://github.com/ffggs) | 2026/07/29 | [5cf0420](https://github.com/vllm-project/vllm-ascend/commit/5cf0420ab3a4ca5f8ba2a707e4e5c31eef1cc968) |
+| 525 | [@zmc1997](https://github.com/zmc1997) | 2026/07/27 | [ee618ae](https://github.com/vllm-project/vllm-ascend/commit/ee618ae8fa9b2c8a3eca6d200f0fc8a96c50a2be) |
+| 524 | [@jiaqi-lee](https://github.com/jiaqi-lee) | 2026/07/25 | [5225ae2](https://github.com/vllm-project/vllm-ascend/commit/5225ae20fb09aa41cc3278b294aad23c9dc33f22) |
+| 523 | [@zhangjiale-zjl](https://github.com/zhangjiale-zjl) | 2026/07/23 | [9d03a3a](https://github.com/vllm-project/vllm-ascend/commit/9d03a3a682d196cb534885a7cbdf86ef0b0694aa) |
+| 522 | [@lyur01](https://github.com/lyur01) | 2026/07/23 | [f9602a1](https://github.com/vllm-project/vllm-ascend/commit/f9602a13c52359fe1b56dc8318436d31f03012ba) |
+| 521 | [@Oranbean258](https://github.com/Oranbean258) | 2026/07/23 | [e6f3f49](https://github.com/vllm-project/vllm-ascend/commit/e6f3f4954602a3d2fc41857e0c61806b9c8840ff) |
+| 520 | [@floatlibai](https://github.com/floatlibai) | 2026/07/22 | [f5b5514](https://github.com/vllm-project/vllm-ascend/commit/f5b5514afdb9ed53e7382ce8abdefec0bd0e5c62) |
+| 519 | [@aisong1988](https://github.com/aisong1988) | 2026/07/22 | [c926c21](https://github.com/vllm-project/vllm-ascend/commit/c926c213cbf2ca0c1d13d4bdaea97d39a5748b15) |
+| 518 | [@LYMAXPUP](https://github.com/LYMAXPUP) | 2026/07/20 | [753d7ba](https://github.com/vllm-project/vllm-ascend/commit/753d7ba875e623a83fec86440e8c00603880c0b1) |
+| 517 | [@KINGFIOX](https://github.com/KINGFIOX) | 2026/07/20 | [093ce8c](https://github.com/vllm-project/vllm-ascend/commit/093ce8cb78fa3d558482098110704d53eed16f88) |
+| 516 | [@q664171689](https://github.com/q664171689) | 2026/07/18 | [ebad45e](https://github.com/vllm-project/vllm-ascend/commit/ebad45e3666f8453e045ade27d02b47a7fe1669c) |
+| 515 | [@qijiajin](https://github.com/qijiajin) | 2026/07/18 | [d42948a](https://github.com/vllm-project/vllm-ascend/commit/d42948ac2c1cba80fe30acd0bd61e4991beb58d2) |
+| 514 | [@hughpu](https://github.com/hughpu) | 2026/07/17 | [12ddf3c](https://github.com/vllm-project/vllm-ascend/commit/12ddf3ce42b5029eb6292c4cf992921e1b00d845) |
+| 513 | [@wanqi01](https://github.com/wanqi01) | 2026/07/17 | [4919119](https://github.com/vllm-project/vllm-ascend/commit/491911909068e34e11b114e21878e2b2a25d7a4e) |
+| 512 | [@zh98530](https://github.com/zh98530) | 2026/07/17 | [a272c88](https://github.com/vllm-project/vllm-ascend/commit/a272c88a5c6560c2ef655b05970a05b895d342e4) |
+| 511 | [@Wyz-134](https://github.com/Wyz-134) | 2026/07/17 | [9b8423e](https://github.com/vllm-project/vllm-ascend/commit/9b8423e15a836f1b011b61aece5305459f939c32) |
+| 510 | [@singzhou](https://github.com/singzhou) | 2026/07/15 | [f924703](https://github.com/vllm-project/vllm-ascend/commit/f924703d7d97a90c5d72d58bf32865501b7f87c0) |
+| 509 | [@grandolantow](https://github.com/grandolantow) | 2026/07/14 | [1a1392b](https://github.com/vllm-project/vllm-ascend/commit/1a1392bf0adc0630bc7f4b3f2a385ed46b272c5a) |
+| 508 | [@earthmanylf](https://github.com/earthmanylf) | 2026/07/13 | [15474a6](https://github.com/vllm-project/vllm-ascend/commit/15474a661e4cfd28a135e1f87a193911829d0c50) |
+| 507 | [@Jingzhe0518](https://github.com/Jingzhe0518) | 2026/07/13 | [96b1b50](https://github.com/vllm-project/vllm-ascend/commit/96b1b507b272a497b1419a806631322a18bc9212) |
+| 506 | [@ZhangwenTaoHW](https://github.com/ZhangwenTaoHW) | 2026/07/13 | [b89a491](https://github.com/vllm-project/vllm-ascend/commit/b89a491644cd02a16a5b17c1a124cec254866559) |
+| 505 | [@zhaochuang001](https://github.com/zhaochuang001) | 2026/07/11 | [7be596c](https://github.com/vllm-project/vllm-ascend/commit/7be596cd3fa93c45a4ef4ff5384d0c852659d83c) |
+| 504 | [@Liuchenbing-2026](https://github.com/Liuchenbing-2026) | 2026/07/10 | [123c5cc](https://github.com/vllm-project/vllm-ascend/commit/123c5ccc78d3aabe3f793223e096ee5e97606a20) |
+| 503 | [@wangyichao1999](https://github.com/wangyichao1999) | 2026/07/10 | [cc348a0](https://github.com/vllm-project/vllm-ascend/commit/cc348a087aaee1e5bccf0c3260f57336984f30c8) |
+| 502 | [@immengzi](https://github.com/immengzi) | 2026/07/10 | [064fb9a](https://github.com/vllm-project/vllm-ascend/commit/064fb9a7dc17639975e343c4a81bab4f75c51f36) |
+| 501 | [@suluner](https://github.com/suluner) | 2026/07/10 | [7d953ad](https://github.com/vllm-project/vllm-ascend/commit/7d953ad85b0f807e0ffaae9a7e30cfd861f821c1) |
+| 500 | [@0moyi0-2024](https://github.com/0moyi0-2024) | 2026/07/10 | [eb0ce34](https://github.com/vllm-project/vllm-ascend/commit/eb0ce34e98ea66d83482d1573283fb98afa93b83) |
+| 499 | [@KadenZhang3321](https://github.com/KadenZhang3321) | 2026/07/08 | [d17a99c](https://github.com/vllm-project/vllm-ascend/commit/d17a99cd51d535c4026ffb596bafa0a23fa87064) |
+| 498 | [@a741855259](https://github.com/a741855259) | 2026/07/07 | [fbcc143](https://github.com/vllm-project/vllm-ascend/commit/fbcc143a4ce050d3456f08c64757c8ac16063c01) |
+| 497 | [@jingmao-yan](https://github.com/jingmao-yan) | 2026/07/07 | [a2e9139](https://github.com/vllm-project/vllm-ascend/commit/a2e91398a989e507343abc6bf311fc35ce168c0f) |
+| 496 | [@TYYTao](https://github.com/TYYTao) | 2026/07/06 | [79928c2](https://github.com/vllm-project/vllm-ascend/commit/79928c2ff1b5521d7f57c58233c87782ec77afc1) |
+| 495 | [@DHX98](https://github.com/DHX98) | 2026/07/06 | [8116bcd](https://github.com/vllm-project/vllm-ascend/commit/8116bcdc4528759e832a5dbd4d4cc7cee1786ca3) |
 | 494 | [@ShySummer](https://github.com/ShySummer) | 2026/07/05 | [9154baa](https://github.com/vllm-project/vllm-ascend/commit/9154baadc9dbac857fe197d03bccb1731664f3df) |
 | 493 | [@tyy0829](https://github.com/tyy0829) | 2026/07/05 | [a0219ac](https://github.com/vllm-project/vllm-ascend/commit/a0219ac14caad375c74793539ad230688b58f9d6) |
 | 492 | [@xinhai9906](https://github.com/xinhai9906) | 2026/07/04 | [f81dd51](https://github.com/vllm-project/vllm-ascend/commit/f81dd51845185d18ea26cfbef2042f9b3bc0de2e) |
