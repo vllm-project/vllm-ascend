@@ -1,8 +1,20 @@
+from functools import wraps
+from typing import Any, cast
+
 import vllm.v1.worker.gpu.spec_decode.speculator as base_speculator
 from vllm.v1.sample.ops import topk_topp_sampler
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu import structured_outputs
-from vllm.v1.worker.gpu.sample import bad_words, gumbel, logprob, penalties, prompt_logprob, sampler, states
+from vllm.v1.worker.gpu.sample import (
+    bad_words,
+    gumbel,
+    logprob,
+    penalties,
+    prompt_logprob,
+    sampler,
+    states,
+    trace_replay,
+)
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark import speculator as dspark_speculator
@@ -22,6 +34,36 @@ from vllm_ascend.worker.v2.spec_decode.dflash.speculator import _prepare_dflash_
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
 )
+
+# CUDA accepts a zero-size Triton grid, while Ascend rejects coreDim=0.
+# The v1 Triton patch may already have installed this wrapper; keep this
+# installation idempotent because both Triton patch modules are imported.
+if not getattr(trace_replay.apply_trace_tokens, "_vllm_ascend_empty_batch_guard", False):
+    _upstream_apply_trace_tokens = trace_replay.apply_trace_tokens
+
+    @wraps(_upstream_apply_trace_tokens)
+    def apply_trace_tokens(
+        sampled,
+        idx_mapping,
+        trace_token_ids,
+        trace_len,
+        total_len,
+        prompt_len,
+    ) -> None:
+        if sampled.shape[0] == 0:
+            return
+
+        _upstream_apply_trace_tokens(
+            sampled,
+            idx_mapping,
+            trace_token_ids,
+            trace_len,
+            total_len,
+            prompt_len,
+        )
+
+    cast(Any, apply_trace_tokens)._vllm_ascend_empty_batch_guard = True
+    trace_replay.apply_trace_tokens = apply_trace_tokens
 
 # triton ops that need to be filed in ops/triton
 penalties.apply_penalties = apply_penalties
