@@ -1353,12 +1353,30 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
 _LEGACY_TOP_LEVEL_SUBCONFIG_KEYS = {"enable_npugraph_ex": "ascend_compilation_config"}
 
 
+def _lax_equal(left: Any, right: Any) -> bool:
+    """Equality under pydantic lax bool coercion (e.g. ``"false"`` == False).
+
+    Falls back to strict inequality for values that are not bool-coercible,
+    so non-bool options never compare equal by accident.
+    """
+    if left == right:
+        return True
+    try:
+        return TypeAdapter(bool).validate_python(left) == TypeAdapter(bool).validate_python(right)
+    except ValueError:
+        return False
+
+
 def _hoist_legacy_top_level_subconfig_keys(kwargs: dict[str, Any]) -> dict[str, Any]:
     """Fold legacy top-level keys into their nested sub-config dict.
 
     Returns a new dict; the caller's ``additional_config`` is never mutated.
-    A key set both at the top level and inside its sub-config is rejected so
-    one option has exactly one source of truth.
+    A key set to conflicting values both at the top level and inside its
+    sub-config is rejected so one option has exactly one source of truth. An
+    identical value in both places is an idempotent re-set: platform hooks
+    (``_update_compilation_modes`` / ``_setup_compile_backend``) write the
+    resolved sub-config back into additional_config for worker processes,
+    which then re-run this hoist with both copies present.
     """
     hoisted = dict(kwargs)
     for key, subconfig_key in _LEGACY_TOP_LEVEL_SUBCONFIG_KEYS.items():
@@ -1369,9 +1387,10 @@ def _hoist_legacy_top_level_subconfig_keys(kwargs: dict[str, Any]) -> dict[str, 
             nested = {}
         elif not isinstance(nested, dict):
             raise ValueError(f"additional_config.{subconfig_key} must be a dictionary.")
-        if key in nested:
+        if key in nested and not _lax_equal(hoisted[key], nested[key]):
             raise ValueError(
-                f"additional_config.{key} is also set inside additional_config.{subconfig_key}; "
+                f"additional_config.{key}={hoisted[key]!r} conflicts with "
+                f"additional_config.{subconfig_key}.{key}={nested[key]!r}; "
                 f"set it only in additional_config.{subconfig_key}.{key}."
             )
         merged = dict(nested)
