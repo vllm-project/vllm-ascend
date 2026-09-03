@@ -13,6 +13,8 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
@@ -24,7 +26,6 @@ from vllm_ascend.ops.fused_moe.moe_mlp import (
     unquant_apply_mlp,
 )
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType
 
 MOE_MLP = "vllm_ascend.ops.fused_moe.moe_mlp"
 MXFP4_TEST_DTYPE = getattr(torch, "float4_e2m1fn_x2", torch.float16)
@@ -84,7 +85,10 @@ class TestSwigluOaiDynamicMxQuant(unittest.TestCase):
         output_scale = torch.randn(2, 1)
 
         with (
-            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A5),
+            patch(
+                f"{MOE_MLP}.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
             patch(
                 f"{MOE_MLP}._apply_clipped_swiglu",
                 return_value=activated,
@@ -172,7 +176,10 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         expected_activation = gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
 
         with (
-            patch(f"{MOE_MLP}.ASCEND_DEVICE_TYPE", AscendDeviceType.A5),
+            patch(
+                f"{MOE_MLP}.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType.A5),
+            ),
             patch(
                 "torch_npu.npu_grouped_matmul",
                 side_effect=[[gate_up_out], [expected_output]],
@@ -513,7 +520,7 @@ def _patch_npu_stream():
     evt = MagicMock(name="before_gmm2_evt")
     stream = MagicMock(name="npu_stream")
     stream.record_event.return_value = evt
-    return patch("torch.npu.current_stream", return_value=stream), evt
+    return patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream), evt
 
 
 @contextmanager
@@ -526,7 +533,7 @@ def _mock_w8a8_gelu_compute(gate_up, *, gmm2_out=None, capture_quant=False):
     stream_patch, evt = _patch_npu_stream()
     captured = {}
 
-    def _dynamic_quant(x, dst_type=None):
+    def _dynamic_quant(x, dst_type=None, **kwargs):
         if capture_quant:
             captured["x"] = x.detach().clone()
             scale = torch.ones(1, dtype=torch.float32)
@@ -536,8 +543,9 @@ def _mock_w8a8_gelu_compute(gate_up, *, gmm2_out=None, capture_quant=False):
 
     with (
         stream_patch,
-        patch("torch_npu.npu_grouped_matmul", return_value=[gate_up], create=True) as mock_gmm,
-        patch("torch_npu.npu_dynamic_quant", side_effect=_dynamic_quant, create=True) as mock_dq,
+        patch(f"{MOE_MLP}.torch_npu.npu_grouped_matmul", return_value=[gate_up], create=True) as mock_gmm,
+        patch(f"{MOE_MLP}.torch_npu.npu_dynamic_quant", side_effect=_dynamic_quant, create=True) as mock_dq,
+        patch.object(DeviceOperator, "npu_dynamic_quant", side_effect=_dynamic_quant),
         patch.object(
             DeviceOperator,
             "npu_grouped_matmul_gmm2",
@@ -778,14 +786,16 @@ class TestQuantApplyMlpMxfpSwigluOAI(_GeluPathBase):
 
                 with (
                     stream_patch,
-                    patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True) as mock_gmm1,
+                    patch(
+                        f"{MOE_MLP}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True
+                    ) as mock_gmm1,
                     patch(
                         f"{MOE_MLP}._swiglu_oai_dynamic_mx_quant",
                         return_value=(quantized_swiglu_out, swiglu_out_scale),
                     ) as mock_small_ops_quant,
                     patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=expected) as mock_gmm2,
                     patch.object(DeviceOperator, "npu_dynamic_quant") as mock_dynamic_quant,
-                    patch("torch_npu.npu_clipped_swiglu", create=True) as mock_clipped_swiglu,
+                    patch(f"{MOE_MLP}.torch_npu.npu_clipped_swiglu", create=True) as mock_clipped_swiglu,
                     patch(f"{MOE_MLP}.dispose_tensor"),
                 ):
                     output, output_evt = quant_apply_mlp(**kwargs)
@@ -879,8 +889,10 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         stream_patch, evt = _patch_npu_stream()
         with (
             stream_patch,
-            patch("torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [gmm2_out]], create=True) as mock_gmm,
-            patch("torch_npu.npu_dynamic_quant", create=True) as mock_dq,
+            patch(
+                f"{MOE_MLP}.torch_npu.npu_grouped_matmul", side_effect=[[gate_up], [gmm2_out]], create=True
+            ) as mock_gmm,
+            patch(f"{MOE_MLP}.torch_npu.npu_dynamic_quant", create=True) as mock_dq,
             patch.object(DeviceOperator, "npu_grouped_matmul_gmm2") as mock_gmm2,
             patch(f"{MOE_MLP}.dispose_tensor"),
         ):

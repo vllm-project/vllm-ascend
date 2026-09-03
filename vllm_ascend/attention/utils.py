@@ -12,15 +12,26 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.utils import FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE
 from vllm_ascend.utils import (
-    AscendDeviceType,
     get_ascend_config,
-    get_ascend_device_type,
     is_pd_decode_recompute_scheduler_enabled,
 )
 
 SFA_QSFA_TILE_SIZE = 128
+
+_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset({"Glm5NextIndexerCache", "Glm5NextTailCache"})
+
+
+def is_glm5_next_kpool_cache(attn_module: Any) -> bool:
+    """Return True for GLM-5.3-Flash kpool indexer / tail cache layers.
+
+    Those classes subclass DeepseekV32IndexerCache but keep their own
+    ``compress_ratio`` / ``KpoolTailSpec`` layouts. The DeepSeek V3.2 SFA
+    rewrite must not replace them with ``AscendSFAIndexerCacheSpec``.
+    """
+    return type(attn_module).__name__ in _GLM5_NEXT_KPOOL_CACHE_TYPES
 
 
 def get_or_register_attention_buffer(
@@ -206,7 +217,7 @@ def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
 def using_paged_attention(runtime_shape: int, vllm_config: VllmConfig, head_size: int | None = None) -> bool:
     if vllm_config.speculative_config is not None:
         return False
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if not get_current_hardware_profile().supports(HardwareCapability.PAGED_ATTENTION):
         return False
     # TODO: Remove this fallback when A2/A3 FIA TND supports Gemma4's
     # 512-dim global attention heads. Decode can use PA directly; prefill is
@@ -478,7 +489,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.wait_for_layer_load(layer_name)
@@ -495,7 +506,7 @@ def maybe_save_kv_layer_to_connector(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
@@ -555,7 +566,7 @@ def transdata(nd_mat, block_size: tuple = (16, 16)):
 
 def enabling_mlapo(vllm_config: VllmConfig) -> bool:
     config_val = get_ascend_config().enable_mlapo
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if get_current_hardware_profile().supports(HardwareCapability.UNRESTRICTED_MLAPO):
         return bool(config_val)
 
     is_decode_instance = (

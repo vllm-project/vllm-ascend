@@ -45,16 +45,14 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.quantization.methods.w8a8_mxfp8 import AscendW8A8MXFP8DynamicLinearMethod
-from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_ND,
     ACL_FORMAT_FRACTAL_NZ,
-    AscendDeviceType,
-    get_ascend_device_type,
     maybe_trans_nz,
     vllm_version_is,
     weak_ref_tensors,
@@ -185,6 +183,10 @@ class AscendMLADecodeMetadata:
     attn_mask: torch.Tensor | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
+    # mla_nope_zero_rope_cache: all-zero rope operands for MLA-NoPE models.
+    # Owned by the metadata builder, so it is None for every model that does
+    # not need it.
+    nope_zero_rope_cache: dict[tuple, torch.Tensor] | None = None
 
 
 @dataclass
@@ -297,6 +299,12 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
 
         self.reorder_batch_threshold = self.decode_threshold
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+        # mla_nope_zero_rope_cache: MLA-NoPE models (qk_rope_head_dim == 0) feed
+        # FIA an all-zero rope operand shaped like the paged KV cache. Hold the
+        # buffers here rather than at module scope: they are then allocated only
+        # for the models that need them, shared by every MLA layer in this group,
+        # and freed with the model instead of living for the whole process.
+        self.nope_zero_rope_cache: dict[tuple, torch.Tensor] | None = {} if self.rope_dim == 0 else None
         static_forward_context = vllm_config.compilation_config.static_forward_context
         # MLA layers are grouped by RoPE mode before metadata builders are created.
         self.use_mla_rope = static_forward_context[layer_names[0]].impl.use_mla_rope if layer_names else True
@@ -703,6 +711,7 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
             actual_seq_lengths_q=actual_seq_lengths_q,
             sin=sin,
             cos=cos,
+            nope_zero_rope_cache=self.nope_zero_rope_cache,
         )
         return decode_metadata
 
@@ -828,6 +837,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         **kwargs,
     ):
         self.vllm_config = get_current_vllm_config()
+        self.support_fp8_attention = get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
@@ -866,7 +876,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.layer_name = kwargs.get("layer_name")
         self.fa_quant_layer = enable_fa_quant(self.vllm_config, self.layer_name)
         if self.fa_quant_layer:
-            self.dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+            self.dtype = torch.float8_e4m3fn if self.support_fp8_attention else torch.int8
         else:
             self.dtype = self.vllm_config.model_config.dtype
         # For models whose num_heads is not a power of 2 (e.g., GLM-4.7-Flash
@@ -893,11 +903,15 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 graph_params = get_draft_graph_params()
             attn_metadata = draft_attn_metadatas
-            attn_keys = list(attn_metadata[0].keys())
+            # mla_graph_keys_filter: hybrid models such as GLM-5.3-Flash put KDA
+            # layers in the same metadata dict, but only MLA layers contribute a
+            # captured FIA op, so zipping unfiltered keys against attn_params
+            # pairs MLA params with KDA layer names.
+            attn_keys = [k for k in attn_metadata[0] if getattr(attn_metadata[0][k], "decode", None) is not None]
         else:
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
-            attn_keys = list(attn_metadata.keys())
+            attn_keys = [k for k in attn_metadata if getattr(attn_metadata[k], "decode", None) is not None]
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
@@ -1071,7 +1085,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         # self.W_UV = maybe_trans_nz(self.W_UV)
 
         if self.enable_mlapo:
-            device_type = get_ascend_device_type()
             layer_quant_method = None if self.fused_qkv_a_proj is None else self.fused_qkv_a_proj.quant_method
             if layer_quant_method is None or isinstance(layer_quant_method, UnquantizedLinearMethod):
                 quant_method = None
@@ -1085,10 +1098,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                 quant_method,
                 (AscendW8A8LinearMethod, AscendW8A8MXFP8DynamicLinearMethod),
             )
-            supports_native_weights = device_type == AscendDeviceType.A5 and isinstance(
-                layer_quant_method,
-                UnquantizedLinearMethod,
-            )
+            supports_native_weights = get_current_hardware_profile().supports(
+                HardwareCapability.MLAPO_NATIVE_WEIGHTS
+            ) and isinstance(layer_quant_method, UnquantizedLinearMethod)
             if self.fused_qkv_a_proj is None or not (supports_quantized_weights or supports_native_weights):
                 self.enable_mlapo = False
                 logger.warning_once(
@@ -1147,7 +1159,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.mlapo_num_heads = self.num_heads_padded
             if self.head_padding > 0:
                 self.mlapo_W_UK_T = F.pad(self.W_UK_T, (0, 0, 0, 0, 0, self.head_padding))
-        elif get_ascend_device_type() == AscendDeviceType.A5:
+        elif get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
             self.dequant_scale_w_uq_qr = self.q_proj.weight_scale.data.transpose(0, 1).flatten(1)
             weight_scale = self.fused_qkv_a_proj.weight_scale.transpose(0, 1).flatten(1)
             self.dequant_scale_w_dq = weight_scale[: self.q_lora_rank, ...]
@@ -1168,7 +1180,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # memory for stability.
         ascend_config = get_ascend_config()
         if (
-            get_ascend_device_type() != AscendDeviceType.A5
+            not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
             and self.enable_mlapo
             and self.vllm_config.kv_transfer_config is not None
             and self.vllm_config.kv_transfer_config.is_kv_consumer
@@ -1259,17 +1271,28 @@ class AscendMLAImpl(MLAAttentionImpl):
             toks = prefill_metadata.chunked_context.seq_tot[i]
             context_seq_len_npu = self.get_context_seq_len_npu(i, attn_metadata)
             kv_c_normed = torch.empty(toks, num_heads, latent_kv_dim, dtype=cache_kv_c.dtype, device=cache_kv_c.device)
-            k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
+            # mla_nope_chunked_load: with qk_rope_head_dim == 0 the rope cache
+            # and its output buffer are both zero-width, and the fused paged
+            # gather silently leaves the latent output unfilled. Hand it the
+            # latent cache twice and drop the duplicate.
+            if rope_dim == 0:
+                pe_cache = cache_kv_c
+                k_pe = torch.empty_like(kv_c_normed)
+            else:
+                pe_cache = cache_k_pe
+                k_pe = torch.empty(toks, num_heads, rope_dim, dtype=q_pe.dtype, device=q_pe.device)
 
             DeviceOperator.kv_cache_load(
                 cache_kv_c,
-                cache_k_pe,
+                pe_cache,
                 prefill_metadata.block_table,
                 context_seq_len_npu,
                 prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
             )
+            if rope_dim == 0:
+                k_pe = kv_c_normed.new_empty(toks, num_heads, 0)
             kv_c_normed, k_pe = self._reorg_kvcache(
                 kv_c_normed,
                 k_pe,
@@ -1278,7 +1301,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 toks=toks,
             )
             kv_c_normed = kv_c_normed.squeeze()
-            if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+            if self.fa_quant_layer and self.support_fp8_attention:
                 kv_c_normed = torch.mul(kv_c_normed.to(self.fak_descale_float.dtype), self.fak_descale_float).to(
                     torch.bfloat16
                 )
@@ -1292,8 +1315,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             if self.head_padding > 0:
                 key = torch.cat((k_nope, k_pe), dim=-1)
             else:
-                common_kwargs["query_rope"] = q_pe
-                common_kwargs["key_rope"] = k_pe.contiguous()
+                # mla_nope_chunked_ctx: with qk_rope_head_dim == 0 the rope
+                # operands are empty and FIA rejects them, same as the decode
+                # and non-chunked prefill paths.
+                if self.qk_rope_head_dim > 0:
+                    common_kwargs["query_rope"] = q_pe
+                    common_kwargs["key_rope"] = k_pe.contiguous()
                 query = q_nope
                 key = k_nope
 
@@ -1363,8 +1390,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             query = torch.cat((q_nope, q_pe), dim=-1)
             key = torch.cat((k_nope, k_pe), dim=-1)
         else:
-            common_kwargs["query_rope"] = q_pe
-            common_kwargs["key_rope"] = k_pe.contiguous()
+            if self.qk_rope_head_dim > 0:
+                common_kwargs["query_rope"] = q_pe
+                common_kwargs["key_rope"] = k_pe.contiguous()
             query, key = q_nope, k_nope
 
         attn_output, attn_lse = torch_npu.npu_fused_infer_attention_score(
@@ -1414,6 +1442,29 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         return k_pe, kv_c_normed
 
+    def _exec_kv_mla_nope(self, kv_no_split, kv_cache, slots, is_prefill: bool):
+        # GLM MLA-NoPE: qk_rope_head_dim==0. KvRmsNormRopeCache rejects empty cos.
+        B, N, S, _ = kv_no_split.shape
+        assert self.kv_a_layernorm is not None
+        k_nope = self.kv_a_layernorm(kv_no_split.reshape(-1, self.kv_lora_rank))
+        k_nope = k_nope.view(B, N, S, self.kv_lora_rank)
+        k_pe = k_nope.new_empty(B, N, S, 0)
+        # mla_nope_kv_write: reshape() on a non-contiguous cache returns a copy,
+        # so the flat scatter would silently write nowhere. A padded page size
+        # can leave the cache non-contiguous, so fall back to indexed
+        # assignment there instead of taking the flat path blindly.
+        cache = kv_cache[0]
+        idx = slots.to(torch.int64)
+        token = k_nope.reshape(-1, cache.shape[-1]).to(cache.dtype)
+        if cache.is_contiguous():
+            cache.view(-1, cache.shape[-1]).index_copy_(0, idx, token)
+        else:
+            block_size = cache.shape[1]
+            cache[idx // block_size, idx % block_size] = token.view(-1, *cache.shape[2:])
+        if is_prefill:
+            return k_pe, k_nope
+        return kv_cache[1], kv_cache[0]
+
     def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
@@ -1432,9 +1483,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         S = 1
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+        if self.qk_rope_head_dim == 0:
+            return self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=False)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+        if self.support_fp8_attention and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1469,9 +1522,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         S = 1
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+        if self.qk_rope_head_dim == 0:
+            return self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=True)
         cache_mode = "PA"
         c_kv_scale = None
-        if get_ascend_device_type() == AscendDeviceType.A5 and self.fa_quant_layer:
+        if self.support_fp8_attention and self.fa_quant_layer:
             c_kv_scale = self.fak_descale_reciprocal
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv_no_split,
@@ -1498,6 +1553,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             return x
         B, N, D = x.shape
         S = 1
+        if D == 0:
+            return x
         x = x.view(B, N, S, D)
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
@@ -1521,25 +1578,35 @@ class AscendMLAImpl(MLAAttentionImpl):
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
-        if self.fa_quant_layer and get_ascend_device_type() != AscendDeviceType.A5:
+        if self.fa_quant_layer and not self.support_fp8_attention:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // (nz_fmt_last_dim * 2), block_size, nz_fmt_last_dim * 2
             )
-            k_pe = k_pe.view(
-                -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
+            if self.qk_rope_head_dim == 0:
+                k_pe = k_nope.new_empty(k_nope.shape[0], self.num_kv_heads, 0, block_size, nz_fmt_last_dim)
+            else:
+                k_pe = k_pe.view(
+                    -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
+                )
         elif self.enable_kv_nz:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
                 -1, self.num_kv_heads, self.kv_lora_rank // nz_fmt_last_dim, block_size, nz_fmt_last_dim
             )
-            k_pe = k_pe.view(
-                -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
-            )
+            if self.qk_rope_head_dim == 0:
+                k_pe = k_nope.new_empty(k_nope.shape[0], self.num_kv_heads, 0, block_size, nz_fmt_last_dim)
+            else:
+                k_pe = k_pe.view(
+                    -1, self.num_kv_heads, self.qk_rope_head_dim // nz_fmt_last_dim, block_size, nz_fmt_last_dim
+                )
         else:
             k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
-            k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
+            # mla_nope_skip_kpe_view: empty rope cache cannot view(-1, ..., 0)
+            if self.qk_rope_head_dim == 0:
+                k_pe = k_nope.new_empty(k_nope.shape[0], self.num_kv_heads, block_size, 0)
+            else:
+                k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
         attn_output_shape: tuple | None = None
         if (
@@ -1581,7 +1648,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_mask = None
             sparse_mode = 0
             actual_seq_lengths = None
-            if get_ascend_device_type() == AscendDeviceType.A5:
+            if self.support_fp8_attention:
                 input_layout = "BNSD"
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1).contiguous()
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
@@ -1623,9 +1690,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             sparse_mode = 0
             attn_mask = None
 
+        # mla_nope_zero_rope64: FIA MLA requires rope D=64. All-zero rope
+        # keeps NoPE scores and stays on the kv_lora_rank=512 MLA kernel.
+        if self.qk_rope_head_dim == 0:
+            rope_dim = 64
+            zero_rope_cache = decode_meta.nope_zero_rope_cache
+            assert zero_rope_cache is not None, (
+                "MLA-NoPE decode needs the zero rope buffers owned by the metadata "
+                "builder, but none were created: hf_text_config.qk_rope_head_dim "
+                "disagrees with this layer's qk_rope_head_dim."
+            )
+            q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
+            k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
+
         common_kwargs = {
-            "query_rope": q_pe,
-            "key_rope": k_pe,
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
             "input_layout": input_layout,
@@ -1637,6 +1715,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             "actual_seq_qlen": actual_seq_lengths,
             "actual_seq_kvlen": decode_meta.seq_lens_list,
         }
+        common_kwargs["query_rope"] = q_pe
+        common_kwargs["key_rope"] = k_pe
         if self.fa_quant_layer:
             extra_fa_args = {
                 "query_quant_mode": 3,
@@ -1727,7 +1807,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_k_nope, decode_k_pe = kv_cache[0], kv_cache[1]
         hidden_states = hidden_states[:bsz]
 
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if self.support_fp8_attention:
             if self.mlapo_weight_quant_mode == 0:
                 quantized_x = hidden_states
                 dequant_scale_x = None
@@ -1861,7 +1941,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         )
         decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
         dequant_scale_q_nope = None
-        if self.fa_quant_layer and get_ascend_device_type() == AscendDeviceType.A5:
+        if self.fa_quant_layer and self.support_fp8_attention:
             decode_ql_nope, dequant_scale_q_nope = torch_npu.npu_dynamic_quant(
                 decode_ql_nope, dst_type=torch.float8_e4m3fn
             )
@@ -1968,7 +2048,9 @@ class AscendMLAImpl(MLAAttentionImpl):
             gate = self.g_proj(hidden_states.contiguous())[0]
 
         # MLA Preprocess
-        can_use_decode_prolog = self.use_mla_rope or get_ascend_device_type() == AscendDeviceType.A5
+        can_use_decode_prolog = self.use_mla_rope or get_current_hardware_profile().supports(
+            HardwareCapability.MLA_DECODE_PROLOG_WITHOUT_ROPE
+        )
         if (
             (self.fa_quant_layer or self.enable_mlapo)
             and can_use_decode_prolog
@@ -2086,3 +2168,18 @@ class AscendMLAPCPImpl(AscendMLAImpl):
         ]
 
         return prefill_k_pe, prefill_k_c_normed
+
+
+# mla_nope_zero_rope_cache: the paged key_rope operand is cache-sized
+# (num_blocks x block_size x 64), so rebuilding it on every MLA layer of every
+# step would allocate hundreds of MB per call. It is read-only zeros, so one
+# buffer per shape is shared by every MLA layer. `cache` belongs to the metadata
+# builder, which keeps the buffers alive exactly as long as the model.
+def _mla_nope_zero_rope(ref: torch.Tensor, rope_dim: int, cache: dict[tuple, torch.Tensor]) -> torch.Tensor:
+    shape = (*ref.shape[:-1], rope_dim)
+    key = (shape, ref.dtype, ref.device)
+    buf = cache.get(key)
+    if buf is None:
+        buf = torch.zeros(shape, dtype=ref.dtype, device=ref.device)
+        cache[key] = buf
+    return buf

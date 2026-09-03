@@ -18,9 +18,9 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
-from vllm_ascend.utils import is_310p
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -32,7 +32,7 @@ mamba_utils._TEMPORAL_TILES = 1
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return not is_310p()
+    return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
 
 
 def _get_mamba_groups(
@@ -207,7 +207,10 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
     # block. Preserve that default so the next preprocess keeps the right
     # accept_token_bias when multiple draft tokens were accepted.
     num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
-    num_accepted_tokens = input_batch.num_accepted_tokens_cpu
+    # InputBatch rows may be condensed/reused by async scheduling before this
+    # fallback consumes the snapshot. Keep this step's accepted counts
+    # independent from those mutable request rows.
+    num_accepted_tokens = num_accepted_tokens_cpu_tensor
     for i in range(num_reqs):
         num_tokens_running_state = num_computed_tokens[i] + num_scheduled_tokens[i] - num_draft_tokens[i]
         new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens[i] - 1
@@ -251,11 +254,140 @@ def _batch_memcpy_unavailable(src_ptrs, dst_ptrs, sizes):
     )
 
 
+def _reset_layerwise_copy_meta(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
+    copy_bufs._layer_copy_metadata = {}
+    copy_bufs._layer_copy_slices = {}
+    copy_bufs._layer_copy_staged = False
+    copy_bufs._layer_tensor_copy_pairs = {}
+    copy_bufs._tensor_copy_pairs = []
+
+
+def _collect_mamba_copy_meta_with_layers(
+    copy_bufs: mamba_utils.MambaCopyBuffers,
+    kv_cache_config,
+    mamba_state_copy_funcs,
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    accept_token_bias: int,
+    req_state,
+    forward_context: dict[str, Any],
+) -> None:
+    """Collect copy metadata grouped per layer (triton pointer path).
+
+    Same iteration order and buffer rows as upstream collect_mamba_copy_meta, but
+    records for every layer which rows belong to it so a layerwise KV load can
+    consume its slice as soon as that layer finishes loading.
+    """
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+
+    layer_copy_metadata = copy_bufs._layer_copy_metadata
+    src_ptrs_np = copy_bufs.src_ptrs.np
+    dst_ptrs_np = copy_bufs.dst_ptrs.np
+    sizes_np = copy_bufs.sizes.np
+    offset = copy_bufs.offset
+
+    for mamba_group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[mamba_group_id]
+        dest_block_id = block_ids[dest_block_idx]
+        layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
+        for layer_name in layer_names:
+            attention = forward_context[layer_name]
+            kv_caches: list[torch.Tensor] = attention.kv_cache
+            layer_meta = layer_copy_metadata.setdefault(layer_name, ([], [], []))
+            for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
+                copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
+                src_ptr = copy_spec.start_addr
+                dst_ptr = state[dest_block_id].data_ptr()
+                size = copy_spec.num_elements * state.element_size()
+                src_ptrs_np[offset] = src_ptr
+                dst_ptrs_np[offset] = dst_ptr
+                sizes_np[offset] = size
+                layer_meta[0].append(src_ptr)
+                layer_meta[1].append(dst_ptr)
+                layer_meta[2].append(size)
+                offset += 1
+
+    copy_bufs.offset = offset
+
+
+def prepare_mamba_copy_by_layer(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
+    """Stage all layer copy metadata before layerwise model execution.
+
+    ``CpuGpuBuffer.copy_to_gpu`` is non-blocking. Repacking the same pinned CPU
+    buffers for every layer can therefore overwrite metadata that an earlier
+    H2D copy has not consumed yet. Pack all layers once and keep their GPU
+    slices immutable for the duration of the forward pass.
+    """
+    layer_copy_metadata = getattr(copy_bufs, "_layer_copy_metadata", None)
+    if not layer_copy_metadata or getattr(copy_bufs, "_layer_copy_staged", False):
+        return
+
+    offset = 0
+    layer_copy_slices = {}
+    for layer_name, (src_ptrs, dst_ptrs, sizes) in layer_copy_metadata.items():
+        num_copies = len(src_ptrs)
+        end = offset + num_copies
+        copy_bufs.src_ptrs.np[offset:end] = src_ptrs
+        copy_bufs.dst_ptrs.np[offset:end] = dst_ptrs
+        copy_bufs.sizes.np[offset:end] = sizes
+        layer_copy_slices[layer_name] = (offset, end)
+        offset = end
+
+    copy_bufs.offset = offset
+    copy_bufs._layer_copy_slices = layer_copy_slices
+    if offset:
+        copy_bufs.src_ptrs.copy_to_gpu(offset)
+        copy_bufs.dst_ptrs.copy_to_gpu(offset)
+        copy_bufs.sizes.copy_to_gpu(offset)
+    copy_bufs._layer_copy_staged = True
+
+
+def do_mamba_copy_block_for_layer(copy_bufs: mamba_utils.MambaCopyBuffers, layer_name: str) -> None:
+    """Copy one layer's running state after its layerwise load completes."""
+    layer_copy_metadata = getattr(copy_bufs, "_layer_copy_metadata", None)
+    if not layer_copy_metadata:
+        return
+    metadata = layer_copy_metadata.pop(layer_name, None)
+    if metadata is None:
+        return
+    if not _can_launch_triton_batch_memcpy():
+        for src_state, dst_state in copy_bufs._layer_tensor_copy_pairs.pop(layer_name, []):
+            dst_state.copy_(src_state.clone())
+        return
+    layer_slice = copy_bufs._layer_copy_slices.pop(layer_name, None)
+    if layer_slice is None:
+        return
+    start, end = layer_slice
+    if start == end:
+        return
+    _batch_memcpy_triton(
+        copy_bufs.src_ptrs.gpu[start:end],
+        copy_bufs.dst_ptrs.gpu[start:end],
+        copy_bufs.sizes.gpu[start:end],
+    )
+
+
+def finish_mamba_copy_by_layer(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
+    remaining = getattr(copy_bufs, "_layer_copy_metadata", {})
+    if remaining:
+        raise RuntimeError(f"Mamba state copy was not executed for loaded layers: {sorted(remaining)}")
+    copy_bufs._layer_copy_slices = {}
+    copy_bufs._layer_copy_staged = False
+    copy_bufs._layer_tensor_copy_pairs = {}
+    copy_bufs._tensor_copy_pairs = []
+    copy_bufs.offset = 0
+
+
 if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_npu
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
+    # Layerwise KV pool: collect copy metadata grouped per layer so each
+    # layer's state copy can run right after its layer load finishes.
+    mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_with_layers
 else:
     mamba_utils.batch_memcpy = _batch_memcpy_unavailable
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
@@ -314,6 +446,7 @@ def preprocess_mamba(
         mamba_state_idx.pop(req_id, None)
 
     copy_bufs.offset = 0
+    _reset_layerwise_copy_meta(copy_bufs)
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
@@ -362,11 +495,18 @@ def preprocess_mamba(
             )
             input_batch.num_accepted_tokens_cpu[i] = 1
     if _can_launch_triton_batch_memcpy():
-        # Only stage the pointer table here. This runs inside the existing
-        # input-preparation event scope, so its pinned CPU buffers cannot be
-        # reused until the asynchronous H2D copies finish. The state copy must
-        # remain after KV transfer and is executed by do_mamba_copy_block().
-        _stage_mamba_copy_metadata(copy_bufs)
+        # Layerwise mode: stage per-layer pointer tables here (same protected
+        # input-preparation scope), then each layer's state copy is executed by
+        # do_mamba_copy_block_for_layer() right after that layer's KV load
+        # finishes. Non-layerwise callers still get the bulk staging below.
+        if getattr(copy_bufs, "_layer_copy_metadata", None):
+            prepare_mamba_copy_by_layer(copy_bufs)
+        else:
+            _stage_mamba_copy_metadata(copy_bufs)
 
 
 mamba_utils.preprocess_mamba = preprocess_mamba
+
+mamba_utils.prepare_mamba_copy_by_layer = prepare_mamba_copy_by_layer
+mamba_utils.do_mamba_copy_block_for_layer = do_mamba_copy_block_for_layer
+mamba_utils.finish_mamba_copy_by_layer = finish_mamba_copy_by_layer

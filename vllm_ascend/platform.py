@@ -31,7 +31,14 @@ from vllm.platforms import Platform, PlatformEnum
 # todo: please remove it when solve cuda hard code in vllm
 os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
+
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.device.hardware_profile import (
+    AttentionBackendFamily,
+    HardwareCapability,
+    QuantizationBackendFamily,
+    get_current_hardware_profile,
+)
 
 # isort: off
 from vllm_ascend.utils import (
@@ -39,16 +46,13 @@ from vllm_ascend.utils import (
     COMPILATION_PASS_KEY,
     COMPRESSED_TENSORS_METHOD,
     FP8_METHOD,
-    AscendDeviceType,
     bootstrap_custom_op_env,
     check_kv_extra_config,
     enable_sfa_dcp_replicated_indexer,
-    get_ascend_device_type,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
     update_cudagraph_capture_sizes,
-    is_310p,
     enable_sp,
 )
 
@@ -71,7 +75,7 @@ logger.info_once(
 
 _CUSTOM_OP_REGISTERED = False
 # Delete after the driver is released; temporarily hard-coded to 4
-MAX_CAPTURE_SIZES_FOR_950 = 4
+MAX_REDUCED_CAPTURE_SIZES = 4
 
 
 class NPUPlatform(Platform):
@@ -216,9 +220,24 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         use_compress = getattr(attn_selector_config, "use_compress", False)
-        key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
+        use_mla = attn_selector_config.use_mla
+        use_sparse = attn_selector_config.use_sparse
+        # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
+        try:
+            from vllm.config import get_current_vllm_config
+            from vllm_ascend.utils import enable_sfa
 
-        if _validate_fa3_backend(key, attn_selector_config):
+            if use_sparse and not enable_sfa(get_current_vllm_config()):
+                use_sparse = False
+        except Exception:
+            pass
+        key = (use_mla, use_sparse)
+        backend_key = (*key, use_compress)
+
+        if attn_selector_config.use_pcp and attn_selector_config.use_dcp:
+            raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
+
+        if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
@@ -227,7 +246,7 @@ class NPUPlatform(Platform):
             (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
             (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
         }
-        backend_map_310 = {
+        compatibility_backend_map = {
             (
                 False,
                 False,
@@ -237,10 +256,22 @@ class NPUPlatform(Platform):
             # (True, True):  "...AscendSFABackend310",
         }
 
-        if is_310p():
-            return backend_map_310.get(key, backend_map_310[(False, False)])
+        if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
+            return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
-        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
+        if attn_selector_config.use_pcp:
+            pcp_backend_map = {
+                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
+                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
+            }
+            pcp_backend = pcp_backend_map.get(backend_key)
+            if pcp_backend is None:
+                raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
+            return pcp_backend
+
+        return backend_map[backend_key]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -274,15 +305,15 @@ class NPUPlatform(Platform):
                 if ASCEND_QUANTIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUANTIZATION_METHOD)
 
-        if is_310p():
-            from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
-        else:
+        if get_current_hardware_profile().quantization_backend_family is QuantizationBackendFamily.STANDARD:
             from vllm_ascend.quantization import (  # noqa: F401
                 AscendCompressedTensorsConfig,
                 AscendFp8Config,
                 AscendModelOptMxFp8Config,
                 AscendModelSlimConfig,
             )
+        else:
+            from vllm_ascend._310p.quantization import AscendModelSlimConfig310  # noqa: F401
 
         _config_deprecated_logging()
 
@@ -845,19 +876,22 @@ def _validate_eplb_config(vllm_config: VllmConfig) -> None:
             raise ValueError("additional_config.eplb_config.load_collection_phase requires --enable-eplb.")
         if vllm_config.parallel_config.enable_eplb:
             upstream_eplb_config = vllm_config.parallel_config.eplb_config
-            if upstream_eplb_config.use_async:
+            if upstream_eplb_config.communicator not in (None, "torch_gloo"):
                 raise ValueError(
-                    "Async EPLB is not supported by Model Runner V2 on Ascend yet; set eplb_config.use_async to false."
+                    "Async EPLB on Ascend requires the torch_gloo communicator "
+                    f"(CPU staging), but got {upstream_eplb_config.communicator!r}. "
+                    "Set eplb_config.communicator to 'torch_gloo'."
                 )
-            if upstream_eplb_config.communicator not in (None, "torch_nccl", "torch_gloo"):
-                raise ValueError(
-                    "Do not set eplb_config.communicator on Ascend; "
-                    "torch.distributed over HCCL is selected automatically."
+            if not upstream_eplb_config.use_async:
+                logger.warning(
+                    "Synchronous EPLB is not supported on Ascend; "
+                    "parameter=eplb_config.use_async, value=False, "
+                    "action: forcing asynchronous EPLB."
                 )
-            # ParallelConfig chooses torch_gloo as its generic synchronous
-            # default before this platform hook runs. Ascend maps torch_nccl
-            # to torch.distributed over the HCCL device process group.
-            upstream_eplb_config.communicator = "torch_nccl"
+                upstream_eplb_config.use_async = True
+                upstream_eplb_config.communicator = "torch_gloo"
+            if vllm_config.parallel_config.enable_elastic_ep:
+                raise ValueError("Async EPLB is not supported with elastic EP on Ascend.")
     elif "load_collection_phase" in eplb_config:
         raise ValueError(
             "additional_config.eplb_config.load_collection_phase is only supported by "
@@ -1024,7 +1058,12 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         )
 
     if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
+        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
+
+        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
+            vllm_config.cache_config.cache_dtype,
+            str(model_config.dtype).replace("torch.", ""),
+        )
 
     # Update compilation mode in some cases
     enforce_eager = getattr(model_config, "enforce_eager", False)
@@ -1099,11 +1138,15 @@ def _setup_compile_backend(
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    # Upstream MoE SP shards tokens before the MoE runner, independent shared-
-    # expert DP shards them inside AscendSharedExperts, and DSA-CP shards Q at
-    # its attention boundary. All three layouts require TP-aligned graph gears
-    # so every captured graph has a stable local token shape. Keep the layout
-    # constraint separate from the feature switches so none enables another.
+    additional_config = vllm_config.additional_config or {}
+    if (
+        not additional_config.get("enable_flashcomm1", False)
+        and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
+    ):
+        vllm_config.parallel_config.all2all_backend = (
+            "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
+        )
+        logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
     requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
@@ -1156,8 +1199,8 @@ def _setup_compile_backend(
             ]
         )
         # TODO(2026/7/15): Delete the reduced gear after the new driver is released.
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            _prune_capture_sizes_for_950(vllm_config)
+        if get_current_hardware_profile().supports(HardwareCapability.REDUCED_CUDAGRAPH_CAPTURE_SIZES):
+            _prune_reduced_capture_sizes(vllm_config)
         additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False
         additional_config["ascend_compilation_config"]["enable_static_kernel"] = False
     elif compilation_config.cudagraph_mode.has_full_cudagraphs():
@@ -1189,20 +1232,27 @@ def _setup_worker_and_scheduler(
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         additional_config = vllm_config.additional_config or {}
-        if ("enable_flashcomm1" not in additional_config) and (not os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1")):
-            parallel_config.all2all_backend = "flashinfer_all2allv"  # a trikky way to disable SP moe.
-        if is_310p():
-            parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
-        elif ascend_config.xlite_graph_config.enabled:
+        if (
+            not additional_config.get("enable_flashcomm1", False)
+            and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
+        ):
+            parallel_config.all2all_backend = (
+                "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
+            )
+            logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
+        hardware_profile = get_current_hardware_profile()
+        if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(
+            HardwareCapability.STANDARD_WORKER_PATCHES
+        ):
             logger.info("openEuler Xlite enabled. See: https://atomgit.com/openeuler/GVirt/tree/master/xlite")
             parallel_config.worker_cls = "vllm_ascend.xlite.xlite_worker.XliteWorker"
         else:
-            parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+            parallel_config.worker_cls = hardware_profile.default_worker_cls
 
     refresh_block_size(vllm_config)
 
-    # Activate custom ops, except on 310P
-    if get_ascend_device_type() != AscendDeviceType._310P:
+    # Automatically activate all custom ops on profiles using the standard path.
+    if get_current_hardware_profile().supports(HardwareCapability.AUTO_ENABLE_CUSTOM_OPS):
         vllm_config.compilation_config.custom_ops = ["all"]
 
     # Select specialized scheduler class
@@ -1400,14 +1450,14 @@ def _config_deprecated_logging():
     warnings_logger.propagate = False
 
 
-def _prune_capture_sizes_for_950(vllm_config):
+def _prune_reduced_capture_sizes(vllm_config):
     original_sizes = vllm_config.compilation_config.cudagraph_capture_sizes
     if not original_sizes:
         return
-    if len(original_sizes) <= MAX_CAPTURE_SIZES_FOR_950:
+    if len(original_sizes) <= MAX_REDUCED_CAPTURE_SIZES:
         return
-    step = (len(original_sizes) - 1) / (MAX_CAPTURE_SIZES_FOR_950 - 1)
-    indices = [round(i * step) for i in range(MAX_CAPTURE_SIZES_FOR_950)]
+    step = (len(original_sizes) - 1) / (MAX_REDUCED_CAPTURE_SIZES - 1)
+    indices = [round(i * step) for i in range(MAX_REDUCED_CAPTURE_SIZES)]
     indices[0], indices[-1] = 0, len(original_sizes) - 1
     sampled_sizes = [original_sizes[i] for i in indices]
     update_cudagraph_capture_sizes(vllm_config, sampled_sizes)
@@ -1415,7 +1465,7 @@ def _prune_capture_sizes_for_950(vllm_config):
         "Adjusted ACL graph batch sizes for model: %d → %d sizes due to HDK incompatibility"
         "and this warning will be cleared soon.",
         len(original_sizes),
-        MAX_CAPTURE_SIZES_FOR_950,
+        MAX_REDUCED_CAPTURE_SIZES,
     )
 
 
@@ -1455,8 +1505,10 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
                 f"DCP for SFA is only supported when dcp_size({parallel_config.decode_context_parallel_size}) "
                 f"== tp_size({parallel_config.tensor_parallel_size})."
             )
-        if get_ascend_device_type() == AscendDeviceType.A5:
-            raise NotImplementedError("SFA DCP with replicated indexer is not supported on A5 yet.")
+        if not get_current_hardware_profile().supports(HardwareCapability.SFA_DCP_REPLICATED_INDEXER):
+            raise NotImplementedError(
+                "SFA DCP with replicated indexer is not supported by the current hardware profile."
+            )
 
 
 def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> None:

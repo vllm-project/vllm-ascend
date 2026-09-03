@@ -272,7 +272,8 @@ def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch
     num_experts = layer.w13_weight.shape[0]
     ascend_config = SimpleNamespace(enable_fused_mc2=1)
 
-    monkeypatch.setattr(routed_experts_module, "_MEGA_MOE_SUPPORTED", False)
+    monkeypatch.setattr(routed_experts_module, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(routed_experts_module, "get_current_vllm_config", lambda: None)
     monkeypatch.setattr(routed_experts_module, "get_ascend_config", lambda: ascend_config)
     monkeypatch.setattr(routed_experts_module.torch_npu, "npu_format_cast", lambda weight, _: weight)
     monkeypatch.setattr(routed_experts_module.torch.npu, "empty_cache", lambda: None)
@@ -320,7 +321,7 @@ def test_unquantized_apply_builds_current_fused_experts_input(monkeypatch, moe_c
     monkeypatch.setattr(
         routed_experts_module,
         "_EXTRA_CTX",
-        SimpleNamespace(moe_comm_type=moe_comm_type, moe_comm_method=moe_comm_method),
+        SimpleNamespace(moe_comm_type=moe_comm_type, moe_comm_method=moe_comm_method, use_mega_moe=False),
     )
 
     result = method.apply(
@@ -818,7 +819,7 @@ def test_routed_experts_forward_impl_runs_current_flow(monkeypatch, return_with_
         router_logits=prepared_router_logits,
         input_ids=input_ids,
     )
-    expected_load = torch.tensor([0, 0, 3, 5], dtype=torch.int32) if v2_eplb else torch.zeros_like(expert_load)
+    expected_load = torch.zeros_like(expert_load)
     torch.testing.assert_close(expert_load, expected_load)
     moe_comm_method.finalize.assert_called_once_with(
         hidden_states=routed_out,

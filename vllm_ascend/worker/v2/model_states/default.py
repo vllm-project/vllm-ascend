@@ -51,10 +51,16 @@ class AscendModelState(DefaultModelState):
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
             num_reqs = input_batch.num_reqs_after_padding
+        else:
+            # Piecewise cudagraphs and eager use the actual request count.
+            num_reqs = input_batch.num_reqs
+
+        if cudagraph_mode == CUDAGraphMode.FULL or self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            # PCP pads each rank to the largest rank-local token count even
+            # during eager prefill, so token-shaped metadata must match the
+            # padded model input.
             num_input_tokens = input_batch.num_tokens_after_padding
         else:
-            # For piecewise cudagraphs and eager, use unpadded sizes.
-            num_reqs = input_batch.num_reqs
             num_input_tokens = input_batch.num_tokens
 
         num_actual_reqs = input_batch.num_reqs
@@ -62,15 +68,7 @@ class AscendModelState(DefaultModelState):
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
-        pcp_context = (
-            self.pcp_manager.build_attention_context(
-                input_batch,
-                block_tables,
-                slot_mappings,
-            )
-            if self.pcp_manager is not None
-            else None
-        )
+        pcp_context = self.pcp_manager.build_attention_context() if self.pcp_manager is not None else None
         # attn_metadata is needed when update_full_graph_params, but no way can get it now.
         # Temporarily store it in model_state.
         self.attn_metadata = build_attn_metadata(

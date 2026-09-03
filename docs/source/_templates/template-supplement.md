@@ -27,9 +27,56 @@
 | **Jinja Template Escaping** | `{% raw %}` ... `{% endraw %}` | No escaping required |
 | **Chinese Anchor Generation** | Filters Chinese characters<br>`## 5. 在线部署` → `#5` | Preserves Chinese characters<br>`## 5. 在线部署` → `#5.-在线部署` |
 
-## 3 Tabs
+## 3 Document Navigation Configuration
 
-### 3.1 MkDocs + Material
+### 3.1 Framework Differences
+
+| / | Sphinx + MyST-Parser (v0.23.0 and earlier) | MkDocs + Material (main branch) |
+|------|----------------------------------------|-------------------------------|
+| **Navigation Definition** | `toctree` directive in source files | `nav` field in `mkdocs.yml` |
+| **Not Included in Navigation** | Build warning, inaccessible via navigation | Build warning, still independently accessible but not displayed in navigation |
+| **Navigation Title Source** | `:caption:` in `toctree` or page H1 | Dynamically mapped by `nav_titles.py` Hook |
+
+### 3.2 nav Configuration in mkdocs.yml
+
+Define the navigation structure in the `nav` field of `mkdocs.yml`:
+
+```yaml
+nav:
+  - index.md
+  - installation.md
+  - tutorials/models/DeepSeek-V3.2.md
+```
+
+**Note**: The `nav` configuration primarily affects whether documents appear in the navigation bar.
+
+### 3.3 nav_titles.py: Navigation Title Mapping
+
+（`docs/hooks/nav_titles.py`）is a MkDocs Hook that dynamically maps bilingual titles based on the `DOCS_LANG` environment variable:
+
+```python
+TITLES = {
+    "index.md": {"en": "Home", "zh": "首页"},
+    "installation.md": {"en": "Installation", "zh": "安装"},
+}
+```
+
+Registered via the hooks field in mkdocs.yml:
+
+```yaml
+hooks:
+  - docs/hooks/nav_titles.py
+```
+
+### 3.4 New Document Addition Checklist
+
+- Place the document file in the appropriate directory
+- Add the file path to nav in mkdocs.yml (otherwise the document will not appear in the navigation bar)
+- Add the title mapping to TITLES in nav_titles.py (otherwise the Chinese document may not render correctly)
+
+## 4 Tabs
+
+### 4.1 MkDocs + Material
 
 Uses the `=== "Tab Label"` syntax. The vLLM-Ascend documentation currently has `content.tabs.link` enabled, allowing same-name tabs to automatically synchronize across different tab groups.
 
@@ -53,7 +100,7 @@ Uses the `=== "Tab Label"` syntax. The vLLM-Ascend documentation currently has `
 
 **Rendering Effect**: For two side-by-side tab groups, when a user clicks on either "A3 series" or "A2 series," all tab groups on the page with identically named tabs will synchronize to the same selection.
 
-### 3.2 Sphinx + MyST-Parser
+### 4.2 Sphinx + MyST-Parser
 
 Uses the `{tab-set}` and `{tab-item}` directives, requiring explicit declaration of synchronization groups (`:sync-group:`) and synchronization keys (`:sync:`).
 
@@ -95,7 +142,7 @@ Uses the `{tab-set}` and `{tab-item}` directives, requiring explicit declaration
 | `:sync: A3` | Synchronization key used to match tabs with identical content across groups |
 | `::::` / `:::::` | Closing tags (colon count must match the opening tags) |
 
-### 3.3 Syntax Differences
+### 4.3 Syntax Differences
 
 | Sphinx Syntax | MkDocs Syntax | MkDocs Notes |
 |---------------|---------------|--------------|
@@ -109,9 +156,9 @@ Uses the `{tab-set}` and `{tab-item}` directives, requiring explicit declaration
 > - Inconsistent indentation may cause MkDocs to fail to recognize tab content
 > - Spaces and capitalization in tab labels must be exactly identical, otherwise cross-group synchronization will fail
 
-## 4 Placeholders
+## 5 Placeholders
 
-### 4.1 MkDocs + Material
+### 5.1 MkDocs + Material
 
 **Example:**
 
@@ -119,7 +166,7 @@ Uses the `{tab-set}` and `{tab-item}` directives, requiring explicit declaration
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 ```
 
-### 4.2 Sphinx + MyST-Parser
+### 5.2 Sphinx + MyST-Parser
 
 **Example:**
 
@@ -127,11 +174,11 @@ export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 ```
 
-## 5 Note / Admonition
+## 6 Note / Admonition
 
 > **Use Case**: Used to highlight important notes, warnings, precautions, and other information.
 
-### 5.1 MkDocs + Material
+### 6.1 MkDocs + Material
 
 Uses the `!!! note "Title"` syntax, with content scope controlled by **indentation**, supporting multiple admonition types.
 
@@ -153,7 +200,7 @@ Uses the `!!! note "Title"` syntax, with content scope controlled by **indentati
 
 **Key Rule**: Content must be indented `4 spaces` from the !!! declaration line, and content sections can be separated by blank lines (no additional indentation required).
 
-### 5.2 Sphinx + MyST-Parser
+### 6.2 Sphinx + MyST-Parser
 
 Uses the `::{note}` directive syntax, with content scope controlled by colon hierarchy + indentation, requiring explicit closing.
 
@@ -174,14 +221,14 @@ Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P 
 :::
 ```
 
-### 5.3 Notes
+### 6.3 Notes
 
 > - Insufficient indentation (fewer than 4 spaces) will cause content to break out of the admonition box.
 > - If the admonition contains a code block, the code block requires an additional 4 spaces of indentation (8 spaces total).
 
-## 6 Jinja Template Escaping
+## 7 Jinja Template Escaping
 
-### 6.1 Background
+### 7.1 Background
 
 In vLLM-Ascend documentation, it is sometimes necessary to display code examples containing Jinja template syntax (such as prompt templates, RAG evaluation scripts, etc.). The two frameworks handle this differently, as these examples inherently contain `{{ variable }}`yntax.
 
@@ -192,7 +239,7 @@ MkDocs uses Jinja2 as its template engine. The `{{ }}` in the document body will
 | Sphinx + MyST-Parser | Not parsed; preserved as-is | None |
 | MkDocs + Material | Parsed as template variables; attempted substitution | Rendering anomalies; template code corrupted |
 
-### 6.2 Solution
+### 7.2 Solution
 
 > **Applicable Branches**：`main` (latest version) and `v0.24.0` and later versions
 
@@ -229,13 +276,13 @@ Wrap Jinja template code with `{% raw %} ... {% endraw %}` blocks to instruct th
     ```
 ```
 
-### 6.3 Sphinx (v0.23.0 and earlier): No Escaping Required
+### 7.3 Sphinx (v0.23.0 and earlier): No Escaping Required
 
 > **Applicable Branches**: `v0.23.0`, `v0.18.0` and other historical branches
 
 Sphinx uses Docutils to parse Markdown and **does not include the Jinja2 template engine**, so `{{ }}` in the document body is not processed and is rendered as-is.
 
-### 7.1 Background
+### 8.1 Background
 
 This issue **only occurs in Chinese documentation**.
 
@@ -243,14 +290,14 @@ The vLLM Ascend community's Chinese documentation is translated from English sou
 
 In the Sphinx framework, if no anchor is explicitly specified in the English source file, the Chinese translation preserves Chinese characters when generating anchors (e.g., `#5-在线服务部署`). In the MkDocs framework, MkDocs automatically filters out non-ASCII characters from anchors, causing Chinese titles to generate anchor IDs inconsistent with Sphinx (e.g., `#5-在线服务部署` → `#5`).
 
-### 7.2 Anchor Generation Rules Comparison
+### 8.2 Anchor Generation Rules Comparison
 
 | Framework | Anchor Generation Rule | Example Heading | Generated Anchor |
 |-----------|------------------------|-----------------|------------------|
 | Sphinx + MyST-Parser | Preserves Chinese characters | `## 5. 在线服务部署` | `#5-在线服务部署` |
 | MkDocs + Material | Filters Chinese characters; only digits, letters, and hyphens are preserved | `## 5. 在线服务部署` | `#5` |
 
-### 7.3 Solution
+### 8.3 Solution
 
 **Option 1: Manually Specify Anchor IDs (Recommended)**
 
@@ -280,7 +327,7 @@ Please refer to [Online Serving](#5-online-serving)
 **Example:**
 Omitted
 
-### 7.4 Notes
+### 8.4 Notes
 
 - Anchor IDs should use only ASCII characters (letters, digits, hyphens) to ensure correct parsing under both frameworks.
 - Once an anchor ID is specified in the English source file, it does not need to be re-specified in the Chinese file.

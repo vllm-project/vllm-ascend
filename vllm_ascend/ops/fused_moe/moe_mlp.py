@@ -23,17 +23,12 @@ from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    dispose_tensor,
-    enable_custom_op,
-    get_ascend_device_type,
-)
+from vllm_ascend.utils import dispose_tensor, enable_custom_op
 
-ASCEND_DEVICE_TYPE = get_ascend_device_type()
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
 
@@ -143,7 +138,7 @@ def _apply_clipped_swiglu(
     swiglu_alpha: float,
     swiglu_beta: float,
 ) -> torch.Tensor:
-    if ASCEND_DEVICE_TYPE == AscendDeviceType.A5:
+    if get_current_hardware_profile().supports(HardwareCapability.SWIGLU_OAI_MX_QUANT):
         hidden_size = hidden_states.shape[-1] // 2
         gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
         up = hidden_states[..., hidden_size:].clamp(
@@ -169,7 +164,7 @@ def _swiglu_oai_dynamic_mx_quant(
     swiglu_alpha: float,
     swiglu_beta: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
+    if not get_current_hardware_profile().supports(HardwareCapability.SWIGLU_OAI_MX_QUANT):
         raise RuntimeError("The MiniMax-M3 SwiGLU-OAI MX quant path is only expected on Ascend A5.")
 
     hidden_states = _apply_clipped_swiglu(

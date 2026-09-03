@@ -1,7 +1,9 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pytest
+from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -76,3 +78,22 @@ def test_execute_model_disables_profiling_timer_and_clears_stale_time():
     assert runner._cpp_execution_time_ms is None
     mock_synchronize.assert_not_called()
     mock_perf_counter.assert_not_called()
+
+
+def test_full_decode_only_keeps_graph_descriptor_request_count():
+    runner = _make_runner()
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    runner.decode_query_len = 1
+    query_start_loc_np = np.array([0, 1, 2, 2, 2, 2], dtype=np.int32)
+
+    actual, num_reqs_padded = runner._pad_query_start_loc_for_fia(
+        num_tokens_padded=4,
+        num_reqs_padded=4,
+        num_reqs=2,
+        query_start_loc_np=query_start_loc_np,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_desc_num_reqs=4,
+    )
+
+    assert num_reqs_padded == 4
+    np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))

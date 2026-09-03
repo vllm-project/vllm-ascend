@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import copy
+import inspect as _inspect
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from functools import partial
@@ -122,6 +123,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "Step3p7ForConditionalGeneration",
             "Gemma4ForConditionalGeneration",
             "Gemma4UnifiedForConditionalGeneration",
+            "Glm5NextForConditionalGeneration",
         ]:
             return config.image_token_id
         if model_name == "PixtralForConditionalGeneration":
@@ -362,11 +364,35 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.draft_window_size = get_ascend_config().draft_window_size
         if self.draft_window_size is not None:
+            # Compatibility validation before enabling sliding-window draft
+            # attention. model_config may be absent in unit-test harnesses,
+            # so look it up defensively.
+            _target_hf_config = getattr(getattr(self.vllm_config, "model_config", None), "hf_config", None)
+            _target_model_type = getattr(_target_hf_config, "model_type", "") or ""
+            _target_is_deepseek_v4 = _target_model_type.startswith("deepseek_v4")
+            if self.method == "mtp":
+                # MTP reuses the target's own layers; capping its attention
+                # to a window would also window the target model.
+                logger.warning(
+                    "[sliding-window] draft method is MTP, which is not "
+                    "compatible with draft_window_size; the window is ignored."
+                )
+            elif self.method == "dspark" and _target_is_deepseek_v4:
+                logger.warning(
+                    "[sliding-window] DSpark drafts trained natively with a "
+                    "DeepSeek-V4 target are long-context stable; enabling the "
+                    "sliding window degrades acceptance length."
+                )
+
+        if self.draft_window_size is not None and self.method != "mtp":
             # EAGLE3: seq_lens is context-only, K draft positions lie beyond it
             #   -> future_offset = K.
-            # DFlash: set_inputs_first_pass bakes the query stretch into seq_lens
-            #   -> future_offset = 0.
-            future_offset = 0 if self.method == "dflash" else self.num_speculative_tokens
+            # DFlash / DSpark: set_inputs_first_pass bakes the query stretch into
+            #   seq_lens (dspark_proposer adds num_query_per_req at cad.seq_lens),
+            #   so the window end must not add K again -> future_offset = 0.
+            # MTP is excluded: it reuses the target's own layers, so windowing
+            # it would also window the target model.
+            future_offset = 0 if self.method in ("dflash", "dspark") else self.num_speculative_tokens
             self.sliding_window = SlidingWindowAdapter(
                 self.draft_window_size,
                 self.kernel_block_size,
@@ -524,9 +550,32 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     self.model.lm_head = target_lm_head
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
-            for _, layer_module in self.model.model.layers.items():
-                if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
-                    layer_module.shared_head.head = model.lm_head
+            # Multimodal wrappers such as Glm5NextForConditionalGeneration keep
+            # lm_head on the nested language model, so resolve it the same way
+            # the EAGLE branch above does.
+            target_lm_head = getattr(model, "lm_head", None)
+            if target_lm_head is None and hasattr(model, "get_language_model"):
+                target_lm_head = getattr(model.get_language_model(), "lm_head", None)
+            if target_lm_head is None and hasattr(model, "language_model"):
+                target_lm_head = getattr(model.language_model, "lm_head", None)
+            if target_lm_head is None:
+                logger.warning(
+                    "[spec_decode/base] Target model has no accessible lm_head;"
+                    " MTP layers keep their own shared_head weights."
+                )
+            else:
+                # Comparing weights only tells the two heads apart when the draft
+                # actually loaded one. A checkpoint that ships no MTP head leaves
+                # shared_head.head at its allocation-time contents, which compare
+                # unequal and would leave the draft predicting from garbage, so ask
+                # the model whether it owns a head before falling back to the
+                # comparison.
+                draft_owns_head = getattr(self.model, "has_own_lm_head", None)
+                for _, layer_module in self.model.model.layers.items():
+                    if draft_owns_head is False or torch.equal(
+                        layer_module.shared_head.head.weight, target_lm_head.weight
+                    ):
+                        layer_module.shared_head.head = target_lm_head
 
         if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
             logger.info(
@@ -713,9 +762,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = (None, None)
-            inputs_embeds = self.model.embed_input_ids(
-                self.input_ids[:num_tokens], multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
-            )
+            if _draft_embed_accepts_mm(self.model.embed_input_ids):
+                inputs_embeds = self.model.embed_input_ids(
+                    self.input_ids[:num_tokens], multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
+                )
+            else:
+                inputs_embeds = self.model.embed_input_ids(self.input_ids[:num_tokens])
             self.inputs_embeds[:num_tokens] = inputs_embeds
             inputs_embeds = self.inputs_embeds[:num_tokens]
         else:
@@ -935,14 +987,24 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.block_table_tensor, num_reqs_padded
                 )
 
-        if self.draft_window_size is not None:
+        if self.draft_window_size is not None and self.method not in ("dspark", "mtp"):
+            # DSpark's draft attention reads the per-group block_table assembled
+            # in build_draft_attn_metadata (which overwrites this table), so the
+            # window is applied there instead. Applying here would window a table
+            # that gets discarded and leave seq_lens windowed against an unwindowed
+            # table -> FIA reads the oldest blocks. See sw-dspark-flow-analysis.md.
+            # MTP is excluded: it reuses the target's own layers, so windowing
+            # it would also window the target model.
             self.sliding_window.apply(common_attn_metadata)
 
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
-            inputs_embeds = self.model.embed_input_ids(
-                self.input_ids[:num_tokens], multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
-            )
+            if _draft_embed_accepts_mm(self.model.embed_input_ids):
+                inputs_embeds = self.model.embed_input_ids(
+                    self.input_ids[:num_tokens], multimodal_embeddings=mm_embeds, is_multimodal=is_mm_embed
+                )
+            else:
+                inputs_embeds = self.model.embed_input_ids(self.input_ids[:num_tokens])
             self.inputs_embeds[:num_tokens] = inputs_embeds
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
@@ -1180,11 +1242,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model.set_skip_topk(False)
 
         ret_hidden_states = self.model(**model_kwargs)
-        if not self.model_returns_tuple():
-            last_hidden_states = ret_hidden_states
-            hidden_states = last_hidden_states
-        else:
-            last_hidden_states, hidden_states = ret_hidden_states
+        last_hidden_states, hidden_states = _split_draft_outputs(ret_hidden_states)
 
         # step 1+ skip indexer
         draft_model = getattr(self.model, "model", None)
@@ -1198,11 +1256,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():
-            max_num_reqs_across_dp = (
-                self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
-            )
+            if self.method == "dspark":
+                # DSpark draft decoding runs outside ACLGraph. Its real LMHead
+                # input is B * K; only pad it to the current target graph bucket.
+                num_indices = batch_size * self.num_speculative_tokens
+                token_indices_to_sample = token_indices_to_sample[:num_indices]
+                max_num_reqs_across_dp = (num_input_tokens // self.num_query_per_req) * self.num_speculative_tokens
+            else:
+                max_num_reqs_across_dp = (
+                    self.vllm_config.scheduler_config.max_num_seqs * self.runner.uniform_decode_query_len
+                )
             # It is necessary to evaluate the case where num_indices becomes large
-            # in the context of the dummy‑run accompaniment of p‑eagle.
+            # in the context of the dummy-run accompaniment of p-eagle.
             if num_indices > max_num_reqs_across_dp:
                 ori_token_indices_to_sample = token_indices_to_sample
             else:
@@ -1284,6 +1349,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         "rejection sampling. Falling back to greedy."
                     )
                 raw_logits = self.model.compute_logits(sample_hidden_states)
+                if lmhead_tp_enable():
+                    # Remove B_max - B communication padding.
+                    raw_logits = raw_logits[:num_indices]
                 logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
                 num_blk = logits.shape[0]
                 draft_token_ids = self._dspark_draft_buffer[:num_blk]
@@ -1441,11 +1509,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 model_kwargs["hidden_states"] = model_hidden_states
 
             ret_hidden_states = self.model(**model_kwargs)
-            if not self.model_returns_tuple():
-                last_hidden_states = ret_hidden_states
-                hidden_states = last_hidden_states
-            else:
-                last_hidden_states, hidden_states = ret_hidden_states
+            last_hidden_states, hidden_states = _split_draft_outputs(ret_hidden_states)
 
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states
@@ -1837,8 +1901,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Compute the slot mapping.
             # When sliding window is enabled, block_table_tensor may be cropped
             # for attention, but slot mapping needs the full block table to
-            # address the absolute KV cache positions.
-            if self.draft_window_size is not None:
+            # address the absolute KV cache positions. (self.sliding_window is
+            # None for MTP - the adapter is not constructed for it.)
+            if self.sliding_window is not None:
                 block_table_for_slot = self.sliding_window.full_block_table
             else:
                 block_table_for_slot = old_common_metadata.block_table_tensor
@@ -2323,6 +2388,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
                     common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
+                # Apply the sliding window to the per-group block_table + seq_lens
+                # that DSpark's draft FIA actually reads. This branch overwrites
+                # common_attn_metadata.block_table_tensor with the full per-group
+                # table, so the window applied earlier (line 922) is bypassed; we
+                # skipped it there for dspark and re-apply here on the per-group
+                # table so FIA reads the recent-blocks clone instead of block 0.
+                # (dspark only - self.sliding_window is None for MTP.)
+                if self.sliding_window is not None:
+                    self.sliding_window.apply(common_attn_metadata)
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
@@ -2357,3 +2431,40 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             buf[num_actual_tokens:num_input_tokens].fill_(-1)
         for buf in getattr(self, "_per_group_context_slot_mapping_buffers", {}).values():
             buf[self._dflash_num_context :].fill_(-1)
+
+
+# draft_embed_mm_kwargs: text-only MTP heads such as Glm5NextMTP expose
+# embed_input_ids(input_ids) with no multimodal parameters, so forwarding the
+# multimodal kwargs of a multimodal target model raises TypeError.
+
+_DRAFT_EMBED_MM_SUPPORT: dict = {}
+
+
+def _draft_embed_accepts_mm(embed_fn) -> bool:
+    key = getattr(embed_fn, "__func__", embed_fn)
+    cached = _DRAFT_EMBED_MM_SUPPORT.get(key)
+    if cached is None:
+        try:
+            cached = "multimodal_embeddings" in _inspect.signature(embed_fn).parameters
+        except (TypeError, ValueError):
+            # C-bound callables and some test doubles reject introspection.
+            # Treat them as text-only: that is the side that cannot raise
+            # TypeError, since it only means the mm kwargs are not forwarded.
+            cached = False
+        _DRAFT_EMBED_MM_SUPPORT[key] = cached
+    return cached
+
+
+def _split_draft_outputs(ret):
+    """Return (logit_hidden, recycle_hidden) for any MTP head return shape.
+
+    draft_tuple_outputs: DeepSeek-family heads return
+    ``(logit_hidden, recycle_hidden)``; Glm5NextMTP returns the same 2-tuple
+    even though it is absent from the architecture whitelist; other families
+    return a bare tensor.
+    """
+    if not isinstance(ret, (tuple, list)):
+        return ret, ret
+    if len(ret) == 2:
+        return ret[0], ret[1]
+    return ret[0], ret[0]

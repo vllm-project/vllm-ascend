@@ -17,11 +17,13 @@ import json
 import os
 import subprocess
 import sys
+from importlib.util import find_spec as real_find_spec
 from types import SimpleNamespace
-from unittest import skip
+from typing import Any
 from unittest.mock import patch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import KVTransferConfig
+from vllm.config import VllmConfig as _VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
@@ -41,8 +43,29 @@ from vllm_ascend.ascend_config import (
     clear_ascend_config,
     get_ascend_config,
     init_ascend_config,
+    is_mega_moe_supported,
 )
-from vllm_ascend.utils import AscendDeviceType, clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
+
+
+def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
+    """Build a test config with the model metadata required by AscendConfig."""
+    config = _VllmConfig(*args, **kwargs)
+    if config.model_config is None:
+        config.model_config = SimpleNamespace(
+            is_moe=False,
+            is_deepseek_mla=False,
+            use_mla=False,
+            enforce_eager=True,
+            architectures=[],
+            hf_text_config=SimpleNamespace(),
+            get_total_num_kv_heads=lambda: 0,
+            get_num_experts=lambda: 0,
+            get_hidden_size=lambda: 0,
+        )
+    return config
 
 
 def test_config_modules_do_not_load_vllm_config():
@@ -105,6 +128,7 @@ class TestAscendConfig(TestBase):
         is_deepseek_mla: bool = False,
     ):
         return SimpleNamespace(
+            is_moe=False,
             is_deepseek_mla=is_deepseek_mla,
             use_mla=is_deepseek_mla,
             enforce_eager=True,
@@ -186,6 +210,8 @@ class TestAscendConfig(TestBase):
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
+        self.assertEqual(ascend_config.weight_nz_mode, 1)
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -204,7 +230,7 @@ class TestAscendConfig(TestBase):
 
             self.assertTrue(ascend_config.rl_config.enabled)
             self.assertEqual(ascend_config.weight_nz_mode, 0)
-            self.assertEqual(os.environ["VLLM_ASCEND_ENABLE_NZ"], "0")
+            self.assertNotIn("VLLM_ASCEND_ENABLE_NZ", os.environ)
             self.assertEqual(os.environ["VLLM_SERVER_DEV_MODE"], "1")
 
     @_clean_up_ascend_config
@@ -227,15 +253,19 @@ class TestAscendConfig(TestBase):
                 "fusion_ops_gmmswigluquant": False,
             },
             "multistream_overlap_shared_expert": True,
+            "enable_force_eplb": True,
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
             "xlite_graph_config": {"enabled": False, "full_mode": True},
             "finegrained_tp_config": {"lmhead_tensor_parallel_size": "0"},
+            "mega_moe_max_tokens": 32768,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        self.assertTrue(ascend_config.enable_force_eplb)
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 32768)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
@@ -247,6 +277,24 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertTrue(ascend_config.xlite_graph_config.full_mode)
         self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
+        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
+        # out-of-range values are invalid on main.
+        invalid_values = [0, -1]
+
+        for invalid_value in invalid_values:
+            clear_ascend_config()
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"mega_moe_max_tokens": invalid_value}
+
+            with (
+                self.subTest(invalid_value=invalid_value),
+                self.assertRaisesRegex(ValueError, "mega_moe_max_tokens must be"),
+            ):
+                init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -399,7 +447,10 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.ascend_config.logger.warning")
-    @patch("vllm_ascend.utils.is_310p", return_value=True)
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType._310P),
+    )
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_disable_npugraph_ex_on_310p(
         self, mock_fix_incompatible_config, mock_is_310p, mock_warning
@@ -415,87 +466,11 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
         self.assertFalse(ascend_compilation_config.enable_static_kernel)
         warning_messages = [call.args[0] for call in mock_warning.call_args_list]
-        self.assertIn("npugraph_ex is not supported on Ascend 310P. Disabling it.", warning_messages)
+        self.assertIn("npugraph_ex is not supported by the current hardware profile. Disabling it.", warning_messages)
         self.assertIn(
-            "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it.",
+            "static kernel requires npugraph_ex, which is not supported by the current hardware profile. Disabling it.",
             warning_messages,
         )
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.AscendConfig._is_megamoe_supported_by_config")
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_falls_back_to_envs(self, mock_fix_incompatible_config, mock_info_once, mock_is_megamoe):
-        mock_is_megamoe.return_value = True
-        test_vllm_config = VllmConfig()
-        test_vllm_config.parallel_config.tensor_parallel_size = 4
-        with patch.dict(
-            os.environ,
-            {
-                "VLLM_ASCEND_ENABLE_MLAPO": "0",
-                "VLLM_ASCEND_ENABLE_NZ": "2",
-            },
-        ):
-            ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertEqual(ascend_config.enable_fused_mc2, 0)
-        self.assertFalse(ascend_config.enable_mlapo)
-        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
-        self.assertEqual(ascend_config.weight_nz_mode, 2)
-        mock_info_once.assert_any_call(
-            "AscendConfig.enable_mlapo falls back to environment variable VLLM_ASCEND_ENABLE_MLAPO with value False. "
-            "Please use additional_config.enable_mlapo instead, because VLLM_ASCEND_ENABLE_MLAPO will be "
-            "removed in the next release."
-        )
-        mock_info_once.assert_any_call(
-            "AscendConfig.weight_nz_mode falls back to environment variable VLLM_ASCEND_ENABLE_NZ with value 2. "
-            "Please use additional_config.weight_nz_mode instead, because VLLM_ASCEND_ENABLE_NZ will be removed "
-            "in the next release."
-        )
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_skips_default_env_fallback_logs(self, mock_fix_incompatible_config, mock_info_once):
-        test_vllm_config = VllmConfig()
-        with patch.dict(os.environ, {}, clear=True):
-            init_ascend_config(test_vllm_config)
-
-        fallback_logs = [
-            call.args[0]
-            for call in mock_info_once.call_args_list
-            if "falls back to environment variable" in call.args[0]
-        ]
-        self.assertEqual(fallback_logs, [])
-
-    @_clean_up_ascend_config
-    @patch("vllm_ascend.ascend_config.logger.info_once")
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_migrated_config_overrides_envs(self, mock_fix_incompatible_config, mock_info_once):
-        test_vllm_config = VllmConfig()
-        test_vllm_config.additional_config = {
-            "enable_fused_mc2": 0,
-            "enable_mlapo": True,
-            "msmonitor_use_daemon": False,
-            "enable_transpose_kv_cache_by_block": True,
-            "weight_nz_mode": 1,
-        }
-        with patch.dict(
-            os.environ,
-            {
-                "VLLM_ASCEND_ENABLE_MLAPO": "0",
-                "VLLM_ASCEND_ENABLE_NZ": "2",
-            },
-        ):
-            ascend_config = init_ascend_config(test_vllm_config)
-
-        self.assertEqual(ascend_config.enable_fused_mc2, 0)
-        self.assertTrue(ascend_config.enable_mlapo)
-        self.assertFalse(ascend_config.msmonitor_use_daemon)
-        self.assertTrue(ascend_config.enable_transpose_kv_cache_by_block)
-        self.assertEqual(ascend_config.weight_nz_mode, 1)
-        mock_info_once.assert_any_call("AscendConfig.enable_mlapo is set from additional_config with value True.")
-        mock_info_once.assert_any_call("AscendConfig.weight_nz_mode is set from additional_config with value 1.")
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -923,8 +898,11 @@ class TestUpstreamConfigCompatibility(TestBase):
         self.assertTrue(AscendConfig._is_megamoe_supported_by_config(supported))
         self.assertFalse(AscendConfig._is_megamoe_supported_by_config(unsupported))
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A2)
-    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A2),
+    )
+    def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_profile):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="hierarchy",
@@ -934,16 +912,44 @@ class TestUpstreamConfigCompatibility(TestBase):
         with self.assertRaisesRegex(ValueError, "supports at most 512 experts"):
             config._validate_mc2_comm_alg(vllm_config)
 
-    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A5)
-    def test_mc2_hierarchy_comm_rejects_unsupported_device(self, mock_device_type):
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_mc2_hierarchy_comm_rejects_unsupported_device(self, _mock_profile):
         config = AscendConfig(
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="hierarchy",
         )
         vllm_config = SimpleNamespace(model_config=SimpleNamespace(get_num_experts=lambda: 1))
 
-        with self.assertRaisesRegex(NotImplementedError, "only supported on A2 and A3"):
+        with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
             config._validate_mc2_comm_alg(vllm_config)
+
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A5),
+    )
+    def test_mc2_fullmesh_v2_rejects_unsupported_device(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            mc2_comm_alg="fullmesh_v2",
+        )
+
+        with self.assertRaisesRegex(NotImplementedError, "not supported by the current hardware profile"):
+            config._validate_mc2_comm_alg(SimpleNamespace())
+
+    @patch(
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        return_value=get_hardware_profile(AscendDeviceType.A3),
+    )
+    def test_mc2_fullmesh_uses_a3_operator_alias(self, _mock_profile):
+        config = AscendConfig(
+            sparse_kv_offload_config=SimpleNamespace(enabled=False),
+            mc2_comm_alg="fullmesh",
+        )
+
+        self.assertEqual(config.get_mc2_comm_alg(), "fullmesh_v1")
 
 
 class TestTopLevelSwitchTypeValidation(TestBase):
@@ -1013,17 +1019,6 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "weight_nz_mode must be one of 0, 1, or 2"):
             init_ascend_config(vc)
 
-    @skip("Deprecated env compatibility will be removed; additional_config is the supported path.")
-    @_clean_up
-    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_enable_mlapo_env_false_no_longer_crashes(self, mock_fix):
-        # Regression: `export VLLM_ASCEND_ENABLE_MLAPO=false` used to crash
-        # startup with ValueError (int("false")). The before-validator reads
-        # os.getenv directly and resolves "false" to False.
-        vc = VllmConfig()
-        with patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MLAPO": "false"}):
-            self.assertFalse(init_ascend_config(vc).enable_mlapo)
-
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_cpu_binding_rejects_invalid_int(self, mock_fix):
@@ -1044,13 +1039,23 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
-    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=False)
+    @patch.object(AscendConfig, "_is_megamoe_supported_by_config", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_fused_mc2_is_disabled_for_unsupported_megamoe_config(self, mock_fix, mock_megamoe_supported):
+    def test_fused_mc2_rolls_back_even_when_config_supported(self, mock_fix, mock_megamoe_supported):
+        # After the megamoe op rollback (#15267), enable_fused_mc2=1 short-circuits
+        # _MEGA_MOE_SUPPORTED to False in _validate_user_input_ranges, regardless
+        # of whether the model config supports megamoe. So even when
+        # _is_megamoe_supported_by_config() is True, is_mega_moe_supported() ends
+        # up False and the fused path routes to dispatch_ffn_combine instead of
+        # mega_moe.
         vc = VllmConfig()
         vc.additional_config = {"enable_fused_mc2": 1}
 
-        self.assertEqual(init_ascend_config(vc).enable_fused_mc2, 0)
+        config = init_ascend_config(vc)
+        self.assertEqual(config.enable_fused_mc2, 1)
+        # The rollback forces _MEGA_MOE_SUPPORTED=False, so the fused path
+        # routes to dispatch_ffn_combine instead of mega_moe.
+        self.assertFalse(is_mega_moe_supported())
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1075,6 +1080,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         supported_vc = VllmConfig()
         supported_vc.model_config = SimpleNamespace(
+            is_moe=False,
             hf_text_config=SimpleNamespace(index_topk=2048),
             hf_config=SimpleNamespace(),
             enforce_eager=True,
@@ -1172,7 +1178,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_kv_nz_uses_vllm_config_preconditions(self, mock_fix, mock_sparse):
         vc = VllmConfig()
-        vc.model_config = SimpleNamespace(is_deepseek_mla=True, architectures=[], enforce_eager=True)
+        vc.model_config = SimpleNamespace(
+            is_moe=False,
+            is_deepseek_mla=True,
+            architectures=[],
+            enforce_eager=True,
+        )
         vc.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
         vc.additional_config = {"enable_kv_nz": "true"}
 
@@ -1229,5 +1240,30 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # only _NON_USER_INPUT_KEYS is stripped, so typos reach pydantic and are rejected.
         vc = VllmConfig()
         vc.additional_config = {"unknown_option": True}
-        with self.assertRaises(ValueError):
+        with (
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=None),
+            self.assertRaises(ValueError),
+        ):
             init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    @patch(
+        "vllm_ascend.ascend_config.importlib.util.find_spec",
+        side_effect=lambda name, *args, **kwargs: (
+            object() if name == "vllm_omni" else real_find_spec(name, *args, **kwargs)
+        ),
+    )
+    def test_omni_additional_config_warns_and_is_preserved(self, _mock_find_spec, mock_warning):
+        vllm_config = VllmConfig()
+        vllm_config.additional_config = {"vllm_omni_option": True}
+
+        init_ascend_config(vllm_config)
+
+        self.assertIs(vllm_config.additional_config["vllm_omni_option"], True)
+        mock_warning.assert_any_call(
+            "The following additional_config keys are invalid for vLLM-Ascend: %s. "
+            "They may be used by vLLM-Omni or another project. "
+            "Please remove them if they are not needed for your use case.",
+            ["vllm_omni_option"],
+        )

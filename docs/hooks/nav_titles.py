@@ -46,9 +46,9 @@ TITLES = {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
     },
-    "developer_guide/Design_Documents/eplb_swift_balancer.md": {
-        "en": "EPLB Swift Balancer",
-        "zh": "EPLB 快速均衡器",
+    "developer_guide/Design_Documents/model_runner_v1_eplb.md": {
+        "en": "Model Runner V1 EPLB Architecture",
+        "zh": "Model Runner V1 EPLB 架构",
     },
     "developer_guide/Design_Documents/model_runner_v2_eplb.md": {
         "en": "Model Runner V2 EPLB Architecture",
@@ -81,10 +81,10 @@ TITLES = {
         "zh": "服务性能分析指南",
     },
     "faqs.md": {"en": "FAQs", "zh": "常见问题"},
-    "getting_started.md": {"en": "Overview", "zh": "概览"},
+    "getting_started/overview.md": {"en": "Overview", "zh": "概览"},
     "index.md": {"en": "Home", "zh": "首页"},
-    "installation.md": {"en": "Installation", "zh": "安装指南"},
-    "quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
+    "getting_started/installation.md": {"en": "Installation", "zh": "安装指南"},
+    "getting_started/quick_start.md": {"en": "Quick Start", "zh": "快速开始"},
     "tutorials/features/dynamic_chunked_pipeline_parallel.md": {
         "en": "Dynamic Chunked Pipeline Parallel",
         "zh": "动态分块流水线并行",
@@ -116,13 +116,16 @@ TITLES = {
     "tutorials/models/Dots3-Note.md": {"en": "Dots3 Note", "zh": "Dots3 Note"},
     "tutorials/models/GLM4.x.md": {"en": "GLM-4.x(4.5/4.6/4.7)", "zh": "GLM-4.x(4.5/4.6/4.7)"},
     "tutorials/models/GLM5.2.md": {"en": "GLM-5.2", "zh": "GLM-5.2"},
+    "tutorials/models/GLM5.3.md": {"en": "GLM-5.3 (Experimental)", "zh": "GLM-5.3 (Experimental)"},
     "tutorials/models/GLM5.md": {"en": "GLM-5 & GLM-5.1", "zh": "GLM-5 & GLM-5.1"},
     "tutorials/models/Hunyuan-A13B-Instruct.md": {"en": "Hunyuan-A13B-Instruct", "zh": "Hunyuan-A13B-Instruct"},
     "tutorials/models/Hy3-preview.md": {"en": "Hy3-preview", "zh": "Hy3-preview"},
+    "tutorials/models/Hy4-preview.md": {"en": "Hy4-preview (Experimental)", "zh": "Hy4-preview (Experimental)"},
     "tutorials/models/InternVL3.5.md": {"en": "InternVL3.5(38B/241B-A28B)", "zh": "InternVL3.5(38B/241B-A28B)"},
     "tutorials/models/Kimi-K2-Thinking.md": {"en": "Kimi-K2-Thinking", "zh": "Kimi-K2-Thinking"},
     "tutorials/models/Kimi-K2.5.md": {"en": "Kimi-K2.5", "zh": "Kimi-K2.5"},
     "tutorials/models/Kimi-K2.6.md": {"en": "Kimi-K2.6", "zh": "Kimi-K2.6"},
+    "tutorials/models/Kimi-K3.md": {"en": "Kimi-K3", "zh": "Kimi-K3"},
     "tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md": {
         "en": "LLaVA-OneVision-Qwen2-0.5B-OV",
         "zh": "LLaVA-OneVision-Qwen2-0.5B-OV",
@@ -174,6 +177,10 @@ TITLES = {
     "tutorials/models/Qwen3-Reranker.md": {"en": "Qwen3-Reranker", "zh": "Qwen3-Reranker"},
     "tutorials/models/gpt-oss-120b.md": {"en": "gpt-oss-120b", "zh": "gpt-oss-120b"},
     "user_guide/configuration/additional_config.md": {"en": "Additional Configuration", "zh": "附加配置"},
+    "user_guide/configuration/encoder_cache_manager.md": {
+        "en": "Score Encoder Cache Manager",
+        "zh": "Score 编码器缓存管理器",
+    },
     "user_guide/configuration/env_vars.md": {"en": "Environment Variables", "zh": "环境变量"},
     "user_guide/deployment_guide/using_mindie_motor.md": {"en": "Using MindIE Motor", "zh": "使用 MindIE Motor"},
     "user_guide/deployment_guide/using_volcano_kthena.md": {"en": "Using Volcano Kthena", "zh": "使用 Volcano Kthena"},
@@ -217,8 +224,8 @@ TITLES = {
     "user_guide/feature_guide/rl.md": {"en": "vLLM-Ascend for RL", "zh": "vLLM-Ascend 强化学习"},
     "user_guide/index.md": {"en": "Overview", "zh": "概览"},
     "user_guide/release_notes.md": {"en": "Release Notes", "zh": "发布说明"},
-    "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "功能矩阵"},
-    "user_guide/support_matrix/supported_features.md": {"en": "Supported Features", "zh": "支持的功能"},
+    "user_guide/support_matrix/feature_matrix.md": {"en": "Feature Matrix", "zh": "特性矩阵"},
+    "user_guide/support_matrix/supported_features.md": {"en": "Supported Features", "zh": "支持的特性"},
     "user_guide/support_matrix/supported_models.md": {"en": "Supported Models", "zh": "支持的模型"},
 }
 

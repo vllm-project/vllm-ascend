@@ -63,13 +63,14 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
 from vllm_ascend.cpu_binding import bind_cpus
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
+    get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -78,10 +79,8 @@ from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
-    AscendDeviceType,
     check_ascend_device_type,
     enable_sp,
-    get_ascend_device_type,
     register_ascend_customop,
     setup_ascend_local_comm_res,
 )
@@ -135,7 +134,7 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
 
         ops.register_dummy_fusion_op()
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.ATB_EXTENSIONS):
             _register_atb_extensions()
         register_ascend_customop(vllm_config)
         # init ascend config and soc version
@@ -435,7 +434,7 @@ class NPUWorker(WorkerBase):
         gc.collect()
         torch.npu.empty_cache()
 
-        if get_ascend_device_type() == AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
             setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
@@ -599,7 +598,7 @@ class NPUWorker(WorkerBase):
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
 
-        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             memory_info = getattr(self, "_gva_layerwise_memory_info", None)
             if memory_info is None:
@@ -822,7 +821,7 @@ class NPUWorker(WorkerBase):
 
         # Call ATB matmul to warm up; otherwise, the first operation (ReshapeAndCache)
         # may cause performance degradation at runtime.
-        if get_ascend_device_type() != AscendDeviceType.A5:
+        if get_current_hardware_profile().supports(HardwareCapability.ATB_WARMUP):
             self._warm_up_atb()
         # Bind after warmup so hot allocations are already materialized on the
         # worker process before migratepages/taskset run.
@@ -982,7 +981,7 @@ class NPUWorker(WorkerBase):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
-        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
                 kv_cache_spec,

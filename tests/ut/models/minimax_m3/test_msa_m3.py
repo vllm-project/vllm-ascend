@@ -1559,3 +1559,30 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     assert kwargs["block_size"] == 128
     assert kwargs["top_k"] == 2
     assert torch.equal(output, torch.ones_like(output))
+
+
+def test_m3_impls_provide_update_graph_params_protocol():
+    """Both M3 impls must satisfy the update_graph_params protocol.
+
+    The implementations are no-ops (replay parameters are refreshed by the
+    metadata builders), but the method must exist so the full-graph
+    parameter-update backend selection treats them uniformly.
+    """
+    from vllm_ascend.models.minimax_m3.msa_m3 import (
+        AscendMiniMaxM3IndexerImpl,
+        AscendMiniMaxM3SparseImpl,
+    )
+
+    for impl_cls in (AscendMiniMaxM3IndexerImpl, AscendMiniMaxM3SparseImpl):
+        method = getattr(impl_cls, "update_graph_params", None)
+        assert callable(method)
+        # Signature parity with AscendAttentionBackendImpl.update_graph_params.
+        params = inspect.signature(method).parameters
+        assert list(params)[:5] == [
+            "update_stream",
+            "forward_context",
+            "num_tokens",
+            "vllm_config",
+            "speculative_config",
+        ]
+        assert params["speculative_config"].default is None
