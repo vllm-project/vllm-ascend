@@ -215,12 +215,23 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
-            super().initialize_kv_cache(kv_cache_config)
-            if self.pcp_manager is not None:
-                assert isinstance(self.pcp_manager, AscendPCPManager)
-                self.pcp_manager.vllm_config = self.vllm_config
-                self.model_state.pcp_manager = self.pcp_manager
+        # Adaptive verification changes the target query length at runtime.
+        # The upstream V2 initializer enables varlen target FULL graphs for
+        # this case, but Ascend FIA cannot safely capture/replay those graphs.
+        # Keep the adaptive-verification manager for runtime compaction and
+        # profiling, while hiding it only during graph/KV initialization so
+        # the target manager builds the safe fixed-width FULL graph set.
+        adaptive_verification = self.adaptive_verification
+        self.adaptive_verification = None
+        try:
+            with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
+                super().initialize_kv_cache(kv_cache_config)
+                if self.pcp_manager is not None:
+                    assert isinstance(self.pcp_manager, AscendPCPManager)
+                    self.pcp_manager.vllm_config = self.vllm_config
+                    self.model_state.pcp_manager = self.pcp_manager
+        finally:
+            self.adaptive_verification = adaptive_verification
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
