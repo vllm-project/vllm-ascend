@@ -1605,6 +1605,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker = self._make_worker(
             tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
         )
+        worker._uses_vllm_mooncake_connector = MagicMock(return_value=False)
         fake_cache = MagicMock()
         fake_cache.shape = [100, 16, 4, 64]
         fake_cache.__getitem__.return_value.numel.return_value = 16 * 4 * 64
