@@ -130,6 +130,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.maybe_dummy_run_with_lora = MagicMock(return_value=nullcontext())
         runner.lora_config = None
         runner.max_num_tokens = 4
+        runner.device = torch.device("cpu")
         runner.supports_mm_inputs = False
         runner.model_config = SimpleNamespace(is_encoder_decoder=False)
         runner.enable_prompt_embeds = False
