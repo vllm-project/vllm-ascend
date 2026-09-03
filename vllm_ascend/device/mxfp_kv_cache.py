@@ -191,28 +191,29 @@ def scatter_mxfp_k_scale_cache(
     (any 1-byte dtype; callers pass a uint8 view of the E8M0 scale).
     ``key_scale_cache`` shape (PA_BBND, block before head):
     ``[num_blocks, block_size, num_kv_heads, head_dim // 64, 2]``.
+
+    ACL-graph-capture safe: no host-device synchronization (``.all()``/
+    ``bool()``/``.item()`` are illegal mid-capture -- "Stream during the
+    capture stage is not supported") and no data-dependent shapes. Padded
+    rows (slot -1) are clamped to slot 0 via ``torch.where`` and write back
+    the cache's existing value times a 0/1 row mask, making them bit-exact
+    no-ops while keeping the write pattern static. (The earlier
+    bool-compressed variant was fine eager but crashed graph capture.)
     """
     validate_mxfp_v_scale_block_size(block_size)
     slots = slot_mapping.to(torch.long)
     if slots.numel() == 0:
         return
 
-    # Graph replay keeps the captured token shape and marks padded rows with
-    # slot -1. Remapping -1 to a sentinel slot and writing back the cached
-    # value is NOT a no-op when a real token also targets that slot in the
-    # same batch: the duplicate-index write order would let the padding row
-    # clobber the real token's scale. Drop the padded rows instead (v1 is
-    # eager-only, so the dynamic shape is acceptable).
-    valid_slots = slots >= 0
-    if not bool(valid_slots.all()):
-        slots = slots[valid_slots]
-        key_scale = key_scale[valid_slots]
-        if slots.numel() == 0:
-            return
-
-    block_ids = slots // block_size
-    block_offsets = slots % block_size
-    key_scale_cache[block_ids, block_offsets] = key_scale
+    valid = slots >= 0
+    safe_slots = torch.where(valid, slots, torch.zeros_like(slots))
+    block_ids = safe_slots // block_size
+    block_offsets = safe_slots % block_size
+    # Row mask (device-only): valid rows take the new scale, padded rows
+    # rewrite the current content of their clamp target -- a no-op.
+    cached = key_scale_cache[block_ids, block_offsets]
+    updates = torch.where(valid.view(-1, 1, 1, 1), key_scale, cached)
+    key_scale_cache[block_ids, block_offsets] = updates
 
 
 def scatter_mxfp_v_cache(

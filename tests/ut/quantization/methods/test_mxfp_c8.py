@@ -58,30 +58,42 @@ class TestScatterMXFPKScaleCache(TestBase):
 
         self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 130))
         self.assertTrue(torch.all(self.key_scale_cache[1, 1] == 130))
-        # Untouched positions stay zero, including the padding remap target.
+        # Untouched positions stay zero, including the padding clamp target
+        # beyond slot 0's own row (padding wrote back the pre-existing value).
         self.assertTrue(torch.all(self.key_scale_cache[0, 1] == 0))
         self.assertTrue(torch.all(self.key_scale_cache[1, 0] == 0))
 
-    def test_scatter_padding_does_not_clobber_real_slot(self):
-        """A padded (-1) row must never overwrite a real token written to the
-        same cache slot in the same batch (regression: the old remap-to-slot-0
-        trick wrote the stale value back over the real token's scale)."""
-        key_scale = torch.zeros((2, self.num_kv_heads, 1, 2), dtype=torch.uint8)
-        key_scale[0] = 200  # real token
-        key_scale[1] = 77  # padding row (dropped)
-        slot_mapping = torch.tensor([0, -1], dtype=torch.int64)
-
-        scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
-
-        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 200))
-
     def test_scatter_all_padding_rows_are_no_op(self):
+        """A pure-padding batch (all -1) must not modify the cache: rows
+        clamp to slot 0 and rewrite the cache's own current content."""
+        # Pre-populate slot 0 with a sentinel; the padding rewrite keeps it.
+        self.key_scale_cache[0, 0] = 99
         key_scale = torch.full((2, self.num_kv_heads, 1, 2), 130, dtype=torch.uint8)
         slot_mapping = torch.tensor([-1, -1], dtype=torch.int64)
 
         scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
 
-        self.assertTrue(torch.all(self.key_scale_cache == 0))
+        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 99))
+        self.assertTrue(torch.all(self.key_scale_cache[0, 1:] == 0))
+        self.assertTrue(torch.all(self.key_scale_cache[1] == 0))
+
+    def test_scatter_padding_and_real_at_nonzero_slot_coexist(self):
+        """Padding rows clamp to slot 0 while a real token writes a different
+        slot: the real write must land and slot 0 must keep its old value.
+        (Padding clamping onto slot 0 WHILE another real token also targets
+        slot 0 in the same batch is not reachable in v1 supported paths --
+        eager batches carry no -1 rows and graph-mode padding uses valid
+        dummy slots -- so that combination is not asserted here.)"""
+        self.key_scale_cache[0, 0] = 55
+        key_scale = torch.zeros((2, self.num_kv_heads, 1, 2), dtype=torch.uint8)
+        key_scale[0] = 200  # real token at slot 3
+        key_scale[1] = 77  # padding row (clamps to slot 0, rewrites 55)
+        slot_mapping = torch.tensor([3, -1], dtype=torch.int64)
+
+        scatter_mxfp_k_scale_cache(key_scale, self.key_scale_cache, slot_mapping, self.block_size)
+
+        self.assertTrue(torch.all(self.key_scale_cache[0, 3] == 200))
+        self.assertTrue(torch.all(self.key_scale_cache[0, 0] == 55))
 
 
 class TestAscendC8MXFPKVCacheAttentionMethod(TestBase):

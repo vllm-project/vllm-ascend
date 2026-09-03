@@ -2852,6 +2852,29 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         num_tokens = int(actual_seq_lengths_q[-1])  # type: ignore[index]
         if num_tokens <= 0:
             return output
+
+        if _EXTRA_CTX.capturing and self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            # FULL-graph capture: the captured graph must contain NO host-side
+            # tensor construction (H2D copies replay against freed host memory)
+            # and no AICPU metadata op (its captured inputs would be stale).
+            # Use persistent placeholder tensors for the captured call; the
+            # replay-time update (_update_qfa_graph_param) re-sends the whole
+            # call with the current step's freshly-built tensors, so the
+            # placeholders only need to stay alive and address-stable.
+            ph_cu_seqlens_q, ph_seqused_kv, ph_metadata = self._qfa_capture_placeholders(num_tokens, device)
+            return self._run_qfa(
+                quant_query,
+                query_scale,
+                kv_cache,
+                attn_metadata,
+                cu_seqlens_q=ph_cu_seqlens_q,
+                seqused_kv=ph_seqused_kv,
+                qfa_metadata=ph_metadata,
+                max_seqlen_q=num_tokens,
+                num_tokens=num_tokens,
+                output=output,
+            )
+
         cu_seqlens_q = _build_qfa_cu_seqlens(actual_seq_lengths_q, device)
         seqused_kv = torch.tensor(attn_metadata.seq_lens_list, dtype=torch.int32, device=device)
         # Upper bound on any single query length (the step's total token
@@ -2878,6 +2901,24 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             num_tokens=num_tokens,
             output=output,
         )
+
+    def _qfa_capture_placeholders(self, num_tokens: int, device: torch.device) -> tuple:
+        """Persistent placeholder tensors for FULL-graph capture (per size).
+
+        Allocated once per capture size and cached on the instance; kept alive
+        for the process lifetime so the captured references stay valid. The
+        replay update replaces every parameter of the re-sent call, so their
+        VALUES are never consumed -- only their addresses matter.
+        """
+        if not hasattr(self, "_qfa_placeholders"):
+            self._qfa_placeholders = {}
+        if num_tokens not in self._qfa_placeholders:
+            self._qfa_placeholders[num_tokens] = (
+                torch.zeros(num_tokens + 1, dtype=torch.int32, device=device),  # cu_seqlens_q
+                torch.ones(1, dtype=torch.int32, device=device),  # seqused_kv (len>=1 for checker)
+                torch.zeros(4096, dtype=torch.int32, device=device),  # metadata plan (checker: non-null)
+            )
+        return self._qfa_placeholders[num_tokens]
 
     # KV cache writes for C8_MXFP happen in reshape_and_cache(), invoked from forward()
     # when key/value are present. This hook is only reached when attention is split from
