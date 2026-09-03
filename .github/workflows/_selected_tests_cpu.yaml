@@ -27,7 +27,6 @@ on:
       coverage_artifact_name:
         value: ${{ jobs.run_tests.outputs.coverage_artifact_name }}
   workflow_dispatch: {}
-
 jobs:
   filter-groups:
     runs-on: ubuntu-latest
@@ -67,6 +66,7 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
+          submodules: true
       - name: Install python dependencies
         run: |
           set -euo pipefail
@@ -77,20 +77,21 @@ jobs:
           python3 -m venv $GITHUB_WORKSPACE/venv
           VENV_PY=${GITHUB_WORKSPACE}/venv/bin/python3
           VENV_SITE=$(${VENV_PY} -c "import site; print(site.getsitepackages()[0])")
-
           ${VENV_PY} -m pip install --upgrade pip
-          # CPU UT最小公开依赖，不要执行 pip install -e .
           ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema
 
+          # 同时注册 vllm‑ascend 源码目录 + vllm子模块目录
           echo "$GITHUB_WORKSPACE" > "${VENV_SITE}/vllm_ascend_src.pth"
+          echo "$GITHUB_WORKSPACE/vllm" >> "${VENV_SITE}/vllm_ascend_src.pth"
+
+          # 调试输出，方便看日志排查
+          echo "=== pth file content ==="
+          cat "${VENV_SITE}/vllm_ascend_src.pth"
+          echo "=== ls vllm submodule ==="
+          ls -la $GITHUB_WORKSPACE/vllm
         env:
           VLLM_ASCEND_CPU_ONLY: 1
           SKIP_TRITON_ASCEND_IMPORT: 1
-
-      - name: Set PYTHONPATH for source import
-        run: |
-          echo "PYTHONPATH=$GITHUB_WORKSPACE" >> $GITHUB_ENV
-          
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
@@ -126,10 +127,8 @@ jobs:
           echo "Running tests: ${TEST_PATHS}"
           ${GITHUB_WORKSPACE}/venv/bin/python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
         env:
-          PYTHONPATH: $GITHUB_WORKSPACE
           VLLM_ASCEND_CPU_ONLY: 1
           SKIP_TRITON_ASCEND_IMPORT: 1
-
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
