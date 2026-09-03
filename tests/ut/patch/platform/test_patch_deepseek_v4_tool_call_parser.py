@@ -361,9 +361,7 @@ def test_registered_parser_is_patch_loaded():
         DeepSeekV4ToolParser.extract_tool_calls_streaming
         is patch_deepseek_v4_tool_call_parser._patched_extract_tool_calls_streaming
     )
-    assert DeepSeekV4ToolParser.supports_required_and_named == (
-        not VLLM_ENFORCE_STRICT_TOOL_CALLING
-    )
+    assert DeepSeekV4ToolParser.supports_required_and_named == (not VLLM_ENFORCE_STRICT_TOOL_CALLING)
 
 
 def test_required_and_named_support_tracks_strict_tool_calling():
