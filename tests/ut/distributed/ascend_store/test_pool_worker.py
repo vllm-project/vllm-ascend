@@ -569,6 +569,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         worker = KVPoolWorker(config, use_layerwise=use_layerwise)
+        worker._uses_vllm_mooncake_connector = MagicMock(return_value=False)
         return worker
 
     def setUp(self):
