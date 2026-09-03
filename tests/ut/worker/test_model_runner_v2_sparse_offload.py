@@ -15,7 +15,6 @@ def _make_speculator():
         target_input_buffers=SimpleNamespace(
             offload_req_ids=torch.tensor([11, 22, 0, 0], dtype=torch.int64),
         ),
-        _offload_draft_metadata_logged=False,
     )
 
 

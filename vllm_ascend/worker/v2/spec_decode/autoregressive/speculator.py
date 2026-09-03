@@ -94,7 +94,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
-        self._offload_draft_metadata_logged = False
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
@@ -192,8 +191,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # Use the first executable draft attention layer as the architecture
         # discriminator and cache it for ACL graph parameter updates.
         self.attn_backend = _get_graph_update_backend(self.attn_groups)
-        if self.attn_backend is None:
-            raise ValueError("Draft model does not have an executable attention backend")
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
@@ -389,10 +386,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             if metadata is None:
                 continue
             metadata.req_ids_tensor = req_ids_tensor
-
-        if not self._offload_draft_metadata_logged:
-            logger.info("Sparse KV offload MTP draft request metadata uses ModelRunner V2 input buffers.")
-            self._offload_draft_metadata_logged = True
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""
