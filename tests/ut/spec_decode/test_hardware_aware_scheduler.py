@@ -18,6 +18,9 @@ from vllm_ascend.spec_decode.dynamic.device_allocator import assign_prefix_budge
 from vllm_ascend.spec_decode.dynamic.policy import HardwareAwarePrefixPolicy
 from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
 from vllm_ascend.worker.v2.spec_decode.physical_k import physical_k_scope
+from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
+    AscendDFlashSpeculator,
+)
 
 
 class _FakeDSparkModel:
@@ -154,6 +157,37 @@ def test_v2_physical_k_scope_keeps_mixed_batch_on_safe_width() -> None:
         assert active_k == 5
         assert speculator.num_speculative_steps == 5
         assert speculator.num_query_per_req == 5
+
+
+def test_v2_dflash_physical_k_writes_only_active_prefix() -> None:
+    """A smaller captured K must not resize the fixed draft-token buffer."""
+    speculator = SimpleNamespace(
+        num_speculative_steps=4,
+        sample_indices=torch.arange(8, dtype=torch.int64),
+        sample_pos=torch.zeros(8, dtype=torch.int64),
+        sample_idx_mapping=torch.zeros(8, dtype=torch.int32),
+        temperature=torch.zeros(2),
+        seeds=torch.zeros(2, dtype=torch.int64),
+        sample_col=torch.arange(4, dtype=torch.int32).repeat(2),
+        draft_logits=None,
+        draft_tokens=torch.full((2, 5), -1, dtype=torch.int64),
+    )
+    speculator._run_model = lambda *args: torch.zeros((8, 1))
+    speculator.sample_draft = lambda *args: torch.arange(8, dtype=torch.int64)
+
+    AscendDFlashSpeculator._generate_draft(
+        speculator,
+        num_reqs=2,
+        num_tokens_padded=8,
+        attn_metadata=None,
+        slot_mappings=None,
+        num_tokens_across_dp=None,
+    )
+
+    assert speculator.draft_tokens.tolist() == [
+        [0, 1, 2, 3, -1],
+        [4, 5, 6, 7, -1],
+    ]
 
 
 def test_hardware_policy_allocates_prefixes_globally() -> None:
