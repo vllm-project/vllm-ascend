@@ -241,9 +241,7 @@ def test_rotary_embedding_triton_kernel_fp8(
     torch.set_default_device(device)
 
     max_positions = max(num_tokens, 32)
-    inv_freq = 1.0 / (
-        10000 ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim)
-    )
+    inv_freq = 1.0 / (10000 ** (torch.arange(0, rotary_dim, 2, dtype=torch.float32, device=device) / rotary_dim))
     freqs = torch.outer(
         torch.arange(max_positions, dtype=torch.float32, device=device),
         inv_freq,
