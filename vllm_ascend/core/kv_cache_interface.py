@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, replace
+from typing import Any
 
 import torch
 from typing_extensions import Self
@@ -99,6 +100,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         )
         first_spec = specs[0]
         merged = super().merge(specs)
+        # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main;
+        # only carry it through on the legacy lane.
+        merged_kwargs: dict[str, Any] = {}
+        if vllm_version_is("0.27.1"):
+            merged_kwargs["indexes_kv_by_block_stride"] = first_spec.indexes_kv_by_block_stride
         return replace(
             merged,
             scale_dim=first_spec.scale_dim,
@@ -106,7 +112,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
-            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            **merged_kwargs,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
