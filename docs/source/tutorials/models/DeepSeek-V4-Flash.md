@@ -878,6 +878,7 @@ Before you start, please:
     ```
 
 2. Prepare the script `run_dp_template.sh` on each node.
+
 === "A2 series"
 
 1. Prefill node (4 P nodes share the same script)
