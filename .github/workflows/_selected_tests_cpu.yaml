@@ -82,8 +82,8 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y python3-pip
           fi
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pytest-cov
+          python3 -m pip install --break-system-packages --upgrade pip
+          python3 -m pip install --break-system-packages pytest pytest-cov
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
