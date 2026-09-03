@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 import torch_npu
+from fla_npu.ops.ascendc import recurrent_gated_delta_rule
 
 torch_npu.npu.set_compile_mode(jit_compile=False)
 
@@ -56,15 +57,17 @@ def golden_recurrent_gated_delta_rule(
         scale = k.shape[-1] ** -0.5
     q = q * scale
 
-    seq_start = 0
-    for i in range(len(actual_seq_lengths)):
+    lengths = actual_seq_lengths.tolist()
+    seq_start = int(lengths[0])
+    for i in range(1, len(lengths)):
+        seq_len = int(lengths[i])
         if num_accepted_tokens is None:
             init_state = initial_state[ssm_state_indices[seq_start]]
         else:
-            init_state = initial_state[ssm_state_indices[seq_start + num_accepted_tokens[i] - 1]]
+            init_state = initial_state[ssm_state_indices[seq_start + num_accepted_tokens[i - 1] - 1]]
         for head_id in range(n_heads_v):
             S = init_state[head_id]
-            for slot_id in range(seq_start, seq_start + actual_seq_lengths[i]):
+            for slot_id in range(seq_start, seq_start + seq_len):
                 q_i = q[slot_id][head_id // (n_heads_v // n_heads_k)]
                 k_i = k[slot_id][head_id // (n_heads_v // n_heads_k)]
                 v_i = v[slot_id][head_id]
@@ -77,7 +80,7 @@ def golden_recurrent_gated_delta_rule(
                 S = S + S_
                 initial_state[ssm_state_indices[slot_id]][head_id] = S
                 o[slot_id][head_id] = (S * q_i.unsqueeze(-2)).sum(dim=-1)
-        seq_start += actual_seq_lengths[i]
+        seq_start += seq_len
 
     return o.to(query.dtype), initial_state.to(query.dtype)
 
@@ -127,7 +130,7 @@ def test_recurrent_gated_delta_rule(
         state,
         beta,
         scale,
-        seq_lengths,
+        torch.cat((torch.zeros(1, dtype=torch.int32), seq_lengths)),
         ssm_state_indices,
         g,
         num_accepted_tokens,
@@ -135,22 +138,17 @@ def test_recurrent_gated_delta_rule(
     out_golden = out_golden.to(torch.float32)
     state_golden = state_golden.to(torch.float32)
 
-    # torch_npu op expects actual_seq_lengths = [start_pos, len1, len2, ..., lenB]
-    actual_seq_lengths_npu = torch.cat(
-        [
-            torch.zeros(1, dtype=torch.int32),
-            seq_lengths,
-        ]
-    )
+    # FLA recurrent API uses [start_offset, len1, len2, ...].
+    actual_seq_lengths_npu = torch.cat((torch.zeros(1, dtype=torch.int32), seq_lengths))
 
     state_npu = state.npu()
-    npu_out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
-        query=query.npu(),
-        key=key.npu(),
-        value=value.npu(),
-        g=g.npu(),
+    npu_out = recurrent_gated_delta_rule(
+        query.npu(),
+        key.npu(),
+        value.npu(),
+        state_npu,
         beta=beta.npu(),
-        state=state_npu,
+        g=g.npu(),
         scale=scale,
         actual_seq_lengths=actual_seq_lengths_npu.npu(),
         ssm_state_indices=ssm_state_indices.npu(),
@@ -221,7 +219,7 @@ def test_recurrent_gated_delta_rule_no_accepted(
         state,
         beta,
         scale,
-        seq_lengths,
+        torch.cat((torch.zeros(1, dtype=torch.int32), seq_lengths)),
         ssm_state_indices,
         g,
         None,
@@ -229,21 +227,16 @@ def test_recurrent_gated_delta_rule_no_accepted(
     out_golden = out_golden.to(torch.float32)
     state_golden = state_golden.to(torch.float32)
 
-    actual_seq_lengths_npu = torch.cat(
-        [
-            torch.zeros(1, dtype=torch.int32),
-            seq_lengths,
-        ]
-    )
+    actual_seq_lengths_npu = torch.cat((torch.zeros(1, dtype=torch.int32), seq_lengths))
 
     state_npu = state.npu()
-    npu_out = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
-        query=query.npu(),
-        key=key.npu(),
-        value=value.npu(),
-        g=g.npu(),
+    npu_out = recurrent_gated_delta_rule(
+        query.npu(),
+        key.npu(),
+        value.npu(),
+        state_npu,
         beta=beta.npu(),
-        state=state_npu,
+        g=g.npu(),
         scale=scale,
         actual_seq_lengths=actual_seq_lengths_npu.npu(),
         ssm_state_indices=ssm_state_indices.npu(),
