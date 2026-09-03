@@ -2536,6 +2536,180 @@ int64_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tenso
 
 namespace {
 
+void check_current_kv_index_tensor(const at::Tensor& tensor, const torch::ScalarType dtype, const char* name) {
+  TORCH_CHECK(tensor.device().is_cpu(), name, " must be a CPU tensor");
+  TORCH_CHECK(tensor.scalar_type() == dtype, name, " has an invalid dtype");
+  TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+}
+
+struct CurrentKvIndexCopyPayload {
+  at::Tensor slot_mapping;
+  at::Tensor src_idx_buffer;
+  at::Tensor dst_idx_buffer;
+  at::Tensor count_buffer;
+  int64_t num_actual_tokens;
+  int64_t max_num_tokens;
+  int64_t num_host_slots;
+  bool delete_after_run;
+};
+
+std::unique_ptr<CurrentKvIndexCopyPayload> make_current_kv_index_copy_payload(
+    const at::Tensor& slot_mapping, int64_t num_actual_tokens, int64_t max_num_tokens, int64_t num_host_slots,
+    const at::Tensor& src_idx_buffer, const at::Tensor& dst_idx_buffer, const at::Tensor& count_buffer) {
+  check_current_kv_index_tensor(slot_mapping, torch::kInt64, "slot_mapping");
+  check_current_kv_index_tensor(src_idx_buffer, torch::kInt64, "src_idx_buffer");
+  check_current_kv_index_tensor(dst_idx_buffer, torch::kInt64, "dst_idx_buffer");
+  check_current_kv_index_tensor(count_buffer, torch::kInt32, "count_buffer");
+  TORCH_CHECK(num_actual_tokens >= 0, "num_actual_tokens must not be negative");
+  TORCH_CHECK(max_num_tokens > 0, "max_num_tokens must be positive");
+  TORCH_CHECK(max_num_tokens <= std::numeric_limits<int32_t>::max(), "max_num_tokens exceeds int32 capacity");
+  TORCH_CHECK(num_actual_tokens <= max_num_tokens, "num_actual_tokens exceeds max_num_tokens");
+  TORCH_CHECK(num_host_slots > 0, "num_host_slots must be positive");
+  TORCH_CHECK(slot_mapping.numel() >= num_actual_tokens, "slot_mapping is smaller than num_actual_tokens");
+  TORCH_CHECK(src_idx_buffer.numel() >= max_num_tokens, "src_idx_buffer is too small");
+  TORCH_CHECK(dst_idx_buffer.numel() >= max_num_tokens, "dst_idx_buffer is too small");
+  TORCH_CHECK(count_buffer.numel() >= 1, "count_buffer is empty");
+
+  return std::make_unique<CurrentKvIndexCopyPayload>(CurrentKvIndexCopyPayload{
+      slot_mapping, src_idx_buffer, dst_idx_buffer, count_buffer, num_actual_tokens, max_num_tokens, num_host_slots,
+      false});
+}
+
+void build_current_kv_index_copy_descriptors(CurrentKvIndexCopyPayload* payload) noexcept {
+  if (payload == nullptr) {
+    return;
+  }
+  const auto* slots = payload->slot_mapping.data_ptr<int64_t>();
+  auto* src_idx = payload->src_idx_buffer.data_ptr<int64_t>();
+  auto* dst_idx = payload->dst_idx_buffer.data_ptr<int64_t>();
+  auto* count = payload->count_buffer.data_ptr<int32_t>();
+  int32_t num_copies = 0;
+
+  for (int64_t token_idx = 0; token_idx < payload->num_actual_tokens; ++token_idx) {
+    const int64_t slot = slots[token_idx];
+    if (slot < 0 || slot >= payload->num_host_slots) {
+      continue;
+    }
+    src_idx[num_copies] = token_idx;
+    dst_idx[num_copies] = slot;
+    ++num_copies;
+  }
+
+  if (num_copies > 0) {
+    const int64_t last_src = src_idx[num_copies - 1];
+    const int64_t last_dst = dst_idx[num_copies - 1];
+    for (int64_t i = num_copies; i < payload->max_num_tokens; ++i) {
+      src_idx[i] = last_src;
+      dst_idx[i] = last_dst;
+    }
+  } else {
+    std::fill_n(src_idx, payload->max_num_tokens, 0);
+    std::fill_n(dst_idx, payload->max_num_tokens, 0);
+  }
+  count[0] = num_copies;
+}
+
+int64_t compute_current_kv_index_copy_descriptors(
+    const at::Tensor& slot_mapping, int64_t num_actual_tokens, int64_t max_num_tokens, int64_t num_host_slots,
+    const at::Tensor& src_idx_buffer, const at::Tensor& dst_idx_buffer, const at::Tensor& count_buffer) {
+  auto payload = make_current_kv_index_copy_payload(slot_mapping, num_actual_tokens, max_num_tokens, num_host_slots,
+                                                    src_idx_buffer, dst_idx_buffer, count_buffer);
+  build_current_kv_index_copy_descriptors(payload.get());
+  return count_buffer.data_ptr<int32_t>()[0];
+}
+
+struct CurrentKvIndexCopyGraphPayloadRegistry {
+  aclmdlRI model_ri;
+  std::vector<std::unique_ptr<CurrentKvIndexCopyPayload>> payloads;
+};
+
+std::mutex& current_kv_index_copy_graph_registry_mutex() {
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::unordered_map<aclmdlRI, std::unique_ptr<CurrentKvIndexCopyGraphPayloadRegistry>>&
+current_kv_index_copy_graph_registries() {
+  static auto* registries =
+      new std::unordered_map<aclmdlRI, std::unique_ptr<CurrentKvIndexCopyGraphPayloadRegistry>>();
+  return *registries;
+}
+
+void delete_current_kv_index_copy_graph_payloads(void* args) noexcept {
+  auto* registry = static_cast<CurrentKvIndexCopyGraphPayloadRegistry*>(args);
+  std::unique_ptr<CurrentKvIndexCopyGraphPayloadRegistry> owned_registry;
+  {
+    std::lock_guard<std::mutex> lock(current_kv_index_copy_graph_registry_mutex());
+    auto& registries = current_kv_index_copy_graph_registries();
+    const auto it = registries.find(registry->model_ri);
+    if (it != registries.end() && it->second.get() == registry) {
+      owned_registry = std::move(it->second);
+      registries.erase(it);
+    }
+  }
+}
+
+CurrentKvIndexCopyPayload* retain_current_kv_index_copy_graph_payload(
+    aclmdlRI model_ri, std::unique_ptr<CurrentKvIndexCopyPayload> payload) {
+  auto* raw_payload = payload.get();
+  std::lock_guard<std::mutex> lock(current_kv_index_copy_graph_registry_mutex());
+  auto& registries = current_kv_index_copy_graph_registries();
+  auto it = registries.find(model_ri);
+  if (it == registries.end()) {
+    auto registry = std::make_unique<CurrentKvIndexCopyGraphPayloadRegistry>();
+    registry->model_ri = model_ri;
+    auto* raw_registry = registry.get();
+    it = registries.emplace(model_ri, std::move(registry)).first;
+    const aclError register_ret =
+        aclmdlRIDestroyRegisterCallback(model_ri, delete_current_kv_index_copy_graph_payloads, raw_registry);
+    if (register_ret != ACL_SUCCESS) {
+      registries.erase(it);
+    }
+    TORCH_CHECK(register_ret == ACL_SUCCESS,
+                "failed to bind current KV index_copy payload registry to graph lifetime, error code: ",
+                register_ret);
+  }
+  it->second->payloads.push_back(std::move(payload));
+  return raw_payload;
+}
+
+void current_kv_index_copy_descriptor_callback(void* args) noexcept {
+  auto* payload = static_cast<CurrentKvIndexCopyPayload*>(args);
+  build_current_kv_index_copy_descriptors(payload);
+  if (payload->delete_after_run) {
+    delete payload;
+  }
+}
+
+void enqueue_current_kv_index_copy_descriptors(
+    const at::Tensor& slot_mapping, int64_t num_actual_tokens, int64_t max_num_tokens, int64_t num_host_slots,
+    const at::Tensor& src_idx_buffer, const at::Tensor& dst_idx_buffer, const at::Tensor& count_buffer) {
+  auto payload = make_current_kv_index_copy_payload(slot_mapping, num_actual_tokens, max_num_tokens, num_host_slots,
+                                                    src_idx_buffer, dst_idx_buffer, count_buffer);
+  const auto stream = c10_npu::getCurrentNPUStream().stream();
+  aclmdlRICaptureStatus capture_status = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
+  aclmdlRI model_ri = nullptr;
+  const aclError capture_ret = aclmdlRICaptureGetInfo(stream, &capture_status, &model_ri);
+  TORCH_CHECK(capture_ret == ACL_SUCCESS,
+              "aclmdlRICaptureGetInfo for current KV index_copy descriptors failed, error code: ", capture_ret);
+  TORCH_CHECK(capture_status != ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED,
+              "current KV index_copy descriptors cannot enqueue on an invalidated graph capture");
+  const bool graph_lifetime = capture_status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE;
+  TORCH_CHECK(!graph_lifetime || model_ri != nullptr, "active graph capture returned a null model runtime instance");
+
+  payload->delete_after_run = !graph_lifetime;
+  auto* raw_payload = payload.get();
+  if (graph_lifetime) {
+    raw_payload = retain_current_kv_index_copy_graph_payload(model_ri, std::move(payload));
+  }
+  const aclError ret = aclrtLaunchHostFunc(stream, current_kv_index_copy_descriptor_callback, raw_payload);
+  if (ret == ACL_SUCCESS && !graph_lifetime) {
+    payload.release();
+  }
+  TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc for current KV index_copy descriptors failed, error code: ",
+              ret);
+}
+
 struct LruResidentCompactWithPlanPayload {
   uintptr_t req_ids_ptr;
   uintptr_t last_req_ids_ptr;
@@ -2960,6 +3134,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
                  auto options = torch::TensorOptions().dtype(torch::kInt16).device(torch::kCPU);
                  return at::from_blob(reinterpret_cast<void*>(ptr_val), shape, options);
              });
+
+    ops.def("sparse_kv_compute_current_kv_index_copy_descriptors(Tensor slot_mapping, int num_actual_tokens, "
+            "int max_num_tokens, int num_host_slots, Tensor(a!) src_idx_buffer, Tensor(b!) dst_idx_buffer, "
+            "Tensor(c!) count_buffer) -> int");
+    ops.impl("sparse_kv_compute_current_kv_index_copy_descriptors", torch::kCPU,
+             &vllm_ascend::compute_current_kv_index_copy_descriptors);
+
+    ops.def("sparse_kv_enqueue_current_kv_index_copy_descriptors(Tensor slot_mapping, int num_actual_tokens, "
+            "int max_num_tokens, int num_host_slots, Tensor(a!) src_idx_buffer, Tensor(b!) dst_idx_buffer, "
+            "Tensor(c!) count_buffer) -> ()");
+    ops.impl("sparse_kv_enqueue_current_kv_index_copy_descriptors", torch::kCPU,
+             &vllm_ascend::enqueue_current_kv_index_copy_descriptors);
 #endif
 
     ops.def("device_print(str msg) -> ()");

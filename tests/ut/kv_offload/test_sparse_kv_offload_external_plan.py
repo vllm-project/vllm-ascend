@@ -456,7 +456,7 @@ def test_eager_external_plan_copies_inputs_and_preserves_cpp_argument_order():
     manager.tp_group.broadcast.assert_called_once_with(manager.fused_plan_metadata_npu, src=0)
 
 
-def test_capture_external_plan_and_current_kv_use_separate_side_streams():
+def test_capture_external_plan_side_stream_and_mooncake_writeback_wait():
     manager = _make_plan_manager()
     sparse_kv_ops = _make_sparse_kv_ops()
     manager.current_kv_save_stream = MagicMock()
@@ -523,9 +523,11 @@ def test_capture_external_plan_and_current_kv_use_separate_side_streams():
         manager.inject_current_kv_into_selection = MagicMock()
         manager.wait_for_current_kv_writeback(capturing=True)
 
-    assert current_stream.record_event.call_count == 2
-    manager.current_kv_save_stream.wait_event.assert_called_once_with(input_event)
+    current_stream.record_event.assert_called_once_with()
+    manager.current_kv_save_stream.wait_event.assert_not_called()
     manager.fused_plan_stream.wait_event.assert_called_once_with(input_event)
+    writeback_args = manager._offload_new_kv_on_current_stream.call_args.args
+    assert writeback_args[-3:] == (False, True, True)
     planner = (
         sparse_kv_ops
         .sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows
