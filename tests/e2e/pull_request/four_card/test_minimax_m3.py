@@ -16,6 +16,13 @@
 # This file is a part of the vllm-ascend project.
 #
 
+"""Four-card MiniMax-M3 W8A8 functional smoke test.
+
+Full GPQA and TextVQA accuracy coverage remains in the MiniMax-M3 W8A8
+nightly configuration. This pull-request test only checks bounded greedy
+generation with TP4 and EP.
+"""
+
 from __future__ import annotations
 
 import os
@@ -30,7 +37,7 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 MINIMAX_M3_MODEL_PATH = os.environ.get("MINIMAX_M3_MODEL_PATH", "Eco-Tech/MiniMax-M3-w8a8-0626")
 GSM8K_QUESTION = "Ali had $21. Leila gave him half of her $100. How much does Ali have now?"
 GSM8K_ANSWER = "71"
-MAX_TOKENS = 512
+MAX_TOKENS = 128
 
 GSM8K_PROMPT_TEMPLATE = (
     'Answer the following question.The last line of the response should follow this format: "answer:$ANSWER" '
@@ -50,7 +57,11 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 def _extract_predicted_answer(text: str) -> str:
     matches = ANSWER_RE.findall(text)
     if matches:
-        return _normalize_number(matches[-1])
+        # The first formatted answer belongs to the requested question. Some
+        # MiniMax-M3 environments continue with unrelated GSM8K examples after
+        # answering it, so taking the last match can turn a correct completion
+        # into a false failure.
+        return _normalize_number(matches[0])
 
     numbers = NUMBER_RE.findall(text)
     assert numbers, f"No numeric answer found in model output: {text!r}"
@@ -71,6 +82,16 @@ def _configure_jemalloc() -> None:
         os.environ["LD_PRELOAD"] = f"{jemalloc_path}:{ld_preload}" if ld_preload else jemalloc_path
 
 
+def test_extract_predicted_answer_ignores_follow_up_examples() -> None:
+    output = (
+        "Ali has $71. answer:71\n\n"
+        "---\nQuestion: How many meters did James run?\n"
+        "James ran 540 meters. answer:540"
+    )
+
+    assert _extract_predicted_answer(output) == GSM8K_ANSWER
+
+
 @pytest.mark.e2e_model(str(MINIMAX_M3_MODEL_PATH))
 @pytest.mark.e2e_coverage(
     arch="multimodal",
@@ -81,19 +102,19 @@ def _configure_jemalloc() -> None:
     quantization="W8A8",
     graph_mode="full_decode_only",
 )
-@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3,4,5,6,7"})
+@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3"})
 @wait_until_npu_memory_free()
-def test_minimax_m3_gsm8k_one_case() -> None:
+def test_minimax_m3_w8a8_tp4_gsm8k_one_case() -> None:
     _configure_jemalloc()
 
     example_prompts = [GSM8K_PROMPT_TEMPLATE.format(question=GSM8K_QUESTION)]
     with VllmRunner(
         MINIMAX_M3_MODEL_PATH,
         max_model_len=8192,
-        max_num_seqs=8,
+        max_num_seqs=4,
         max_num_batched_tokens=2048,
         dtype="auto",
-        tensor_parallel_size=8,
+        tensor_parallel_size=4,
         enable_expert_parallel=True,
         distributed_executor_backend="mp",
         gpu_memory_utilization=0.95,
