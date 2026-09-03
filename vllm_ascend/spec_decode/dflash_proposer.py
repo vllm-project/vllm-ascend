@@ -148,6 +148,7 @@ class AscendDflashProposer(AscendEagleProposer):
             query_start_loc_ptr=cad.query_start_loc,
             seq_lens_ptr=cad.seq_lens,
             num_rejected_tokens_ptr=(num_rejected_tokens_gpu if has_num_rejected else 0),
+            valid_sampled_tokens_count_ptr=0,
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
             block_size=self.kernel_block_size,
@@ -156,6 +157,7 @@ class AscendDflashProposer(AscendEagleProposer):
             total_input_tokens=num_context,
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
+            HAS_VALID_SAMPLED_COUNT=False,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]

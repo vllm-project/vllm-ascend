@@ -18,6 +18,74 @@ from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compu
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 
 
+_INVALID_CURRENT_WINDOW_ANCHOR = (
+    "DSpark current-window anchor is invalid. A partial Mamba-aligned "
+    "window requires one valid sampled-token count per rejected request; "
+    "route the affected request through the target-only fallback."
+)
+
+
+def _derive_current_window_rejected_tokens(
+    query_start_loc: torch.Tensor,
+    real_rejected_tokens: torch.Tensor,
+    valid_sampled_tokens_count: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Validate DSpark anchors and derive physical, current-window rejects.
+
+    ``real_rejected_tokens`` describes the logical rollback of the previous
+    complete speculative window and must remain unchanged.  A Mamba-aligned
+    scheduler chunk can be shorter than that rollback distance, so proposal
+    positions and slots instead discard only the invalid tokens physically
+    present in the current context.
+
+    The assertion is intentionally asynchronous: all inputs already live on
+    the accelerator and a host read here would serialize the decode hot path.
+    Invalid rows cannot be repaired by clamping because there is no trustworthy
+    request-local anchor; the caller must use the request-level target-only
+    fallback instead.
+    """
+    if query_start_loc.ndim != 1 or real_rejected_tokens.ndim != 1:
+        raise ValueError("DSpark anchor metadata must use one-dimensional tensors")
+    if query_start_loc.shape[0] != real_rejected_tokens.shape[0] + 1:
+        raise ValueError("query_start_loc must contain one more element than real_rejected_tokens")
+    if real_rejected_tokens.dtype not in (torch.int32, torch.int64):
+        raise TypeError("real_rejected_tokens must use an integer dtype")
+
+    num_ctx = query_start_loc[1:] - query_start_loc[:-1]
+    real_rejected = real_rejected_tokens.to(dtype=num_ctx.dtype)
+    legacy_anchor_valid = (real_rejected >= 0) & (real_rejected < num_ctx)
+
+    if valid_sampled_tokens_count is None:
+        # The legacy anchor ``ctx_end - rejected`` remains valid for complete
+        # windows.  It is explicitly rejected for a partial window instead of
+        # silently indexing before this request's context.
+        torch._assert_async(torch.all(legacy_anchor_valid), _INVALID_CURRENT_WINDOW_ANCHOR)
+        return real_rejected, None
+
+    if valid_sampled_tokens_count.ndim != 1:
+        raise ValueError("valid_sampled_tokens_count must be one-dimensional")
+    if valid_sampled_tokens_count.shape[0] != real_rejected_tokens.shape[0]:
+        raise ValueError("valid_sampled_tokens_count must contain one value per request")
+    if valid_sampled_tokens_count.dtype not in (torch.int32, torch.int64):
+        raise TypeError("valid_sampled_tokens_count must use an integer dtype")
+
+    valid_count = valid_sampled_tokens_count.to(dtype=num_ctx.dtype)
+    use_current_window_anchor = real_rejected > 0
+    anchor_valid = torch.where(
+        use_current_window_anchor,
+        (valid_count > 0) & (valid_count <= num_ctx),
+        legacy_anchor_valid,
+    )
+    torch._assert_async(torch.all(anchor_valid), _INVALID_CURRENT_WINDOW_ANCHOR)
+
+    current_window_rejected = torch.where(
+        use_current_window_anchor,
+        num_ctx - valid_count,
+        real_rejected,
+    )
+    return current_window_rejected, valid_count
+
+
 class AscendDSparkProposer(AscendDflashProposer):
     """DSpark block proposer.
 
@@ -215,6 +283,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         token_indices_to_sample: torch.Tensor | None,
         cad: CommonAttentionMetadata,
         num_rejected_tokens_gpu: torch.Tensor | None,
+        valid_sampled_tokens_count_gpu: torch.Tensor | None = None,
         req_scheduled_tokens=None,
         long_seq_metadata=None,
         num_prefill_reqs=0,
@@ -228,6 +297,17 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_query_total = batch_size * self.num_query_per_req
         num_sample_total = batch_size * self.num_speculative_tokens
         has_num_rejected = num_rejected_tokens_gpu is not None
+        has_valid_sampled_count = valid_sampled_tokens_count_gpu is not None
+        current_window_rejected_tokens = None
+        if has_num_rejected:
+            assert num_rejected_tokens_gpu is not None
+            current_window_rejected_tokens, valid_sampled_tokens_count_gpu = (
+                _derive_current_window_rejected_tokens(
+                    cad.query_start_loc,
+                    num_rejected_tokens_gpu,
+                    valid_sampled_tokens_count_gpu,
+                )
+            )
         primary_gid = getattr(self, "kv_cache_gid", 0)
         self._per_group_block_table_buffers = {
             attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
@@ -271,6 +351,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                 query_start_loc_ptr=cad.query_start_loc,
                 seq_lens_ptr=cad.seq_lens,
                 num_rejected_tokens_ptr=num_rejected_tokens_gpu,
+                valid_sampled_tokens_count_ptr=(
+                    valid_sampled_tokens_count_gpu if has_valid_sampled_count else 0
+                ),
                 # Scalars
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 block_size=kernel_block_size,
@@ -279,6 +362,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 total_input_tokens=self._dflash_num_context,
                 batch_size=batch_size,
                 HAS_NUM_REJECTED=has_num_rejected,
+                HAS_VALID_SAMPLED_COUNT=has_valid_sampled_count,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
@@ -288,7 +372,8 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         effective_seq_lens = cad.seq_lens
         if has_num_rejected:
-            effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
+            assert current_window_rejected_tokens is not None
+            effective_seq_lens = effective_seq_lens - current_window_rejected_tokens
 
         cad.query_start_loc = self.arange_dflash[: batch_size + 1] * self.num_query_per_req
         cad.seq_lens = effective_seq_lens + self.num_query_per_req

@@ -1818,6 +1818,7 @@ class NPUModelRunner(GPUModelRunner):
         elif self.speculative_config.use_eagle() or self.speculative_config.uses_draft_model():
             common_attn_metadata = spec_decode_common_attn_metadata
             sampled_token_ids = valid_sampled_token_ids
+            valid_sampled_tokens_count = None
 
             if self.vllm_config.speculative_config.disable_padded_drafter_batch:
                 # When padded-batch is disabled, the sampled_token_ids should be
@@ -1899,6 +1900,11 @@ class NPUModelRunner(GPUModelRunner):
                 else:
                     target_hidden_states = hidden_states[token_indices]
             assert self.drafter is not None
+            dspark_propose_kwargs = (
+                {"valid_sampled_tokens_count_gpu": valid_sampled_tokens_count}
+                if isinstance(self.drafter, AscendDSparkProposer)
+                else {}
+            )
             # Dynamic SD: pass the scheduled per-step K explicitly, unified with
             # the other proposers (ngram/suffix/medusa/extract) and matching
             # vLLM's ``propose(num_speculative_tokens=...)``. ``_propose`` sets
@@ -1921,6 +1927,7 @@ class NPUModelRunner(GPUModelRunner):
                 scheduler_output=scheduler_output,
                 num_scheduled_tokens=num_scheduled_tokens,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+                **dspark_propose_kwargs,
             )
             if hasattr(self.drafter, "take_last_draft_probs"):
                 draft_probs = self.drafter.take_last_draft_probs()

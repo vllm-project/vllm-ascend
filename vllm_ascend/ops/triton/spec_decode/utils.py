@@ -85,6 +85,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     query_start_loc_ptr,  # [num_reqs + 1]
     seq_lens_ptr,  # [num_reqs]
     num_rejected_tokens_ptr,  # [num_reqs] or null (0) when not padded
+    valid_sampled_tokens_count_ptr,  # [num_reqs] or null (0) when unavailable
     # Scalars
     parallel_drafting_token_id,  # tl.int32
     block_size,  # tl.int32
@@ -93,6 +94,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     total_input_tokens,  # tl.int32
     batch_size,  # tl.int32
     HAS_NUM_REJECTED: tl.constexpr = False,
+    HAS_VALID_SAMPLED_COUNT: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
     TILE_SIZE: tl.constexpr = 256,
 ):
@@ -131,21 +133,54 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         req_idx = offs // num_query_per_req
         q_idx = offs % num_query_per_req
 
+        ctx_start = tl.load(query_start_loc_ptr + req_idx, mask=mask, other=0)
         ctx_end = tl.load(query_start_loc_ptr + req_idx + 1, mask=mask, other=0)
+        num_ctx = ctx_end - ctx_start
         if HAS_NUM_REJECTED:
             num_rejected = tl.load(num_rejected_tokens_ptr + req_idx, mask=mask, other=0)
         else:
             num_rejected = tl.zeros([TILE_SIZE], dtype=tl.int32)
-        valid_ctx_end = ctx_end - num_rejected
+        # num_rejected belongs to the previous complete speculative window and
+        # remains the rollback distance below. A Mamba-aligned scheduler chunk
+        # can be shorter than that window, so verification rows must locate
+        # their anchor from the accepted-token count in the current request.
+        if HAS_VALID_SAMPLED_COUNT:
+            valid_count = tl.load(valid_sampled_tokens_count_ptr + req_idx, mask=mask, other=0)
+            use_valid_anchor = num_rejected > 0
+            valid_ctx_end = tl.where(
+                use_valid_anchor,
+                ctx_start + valid_count,
+                ctx_end - num_rejected,
+            )
+            anchor_count_valid = tl.where(
+                use_valid_anchor,
+                (valid_count > 0) & (valid_count <= num_ctx),
+                (num_rejected >= 0) & (num_rejected < num_ctx),
+            )
+            current_window_rejected = tl.where(
+                use_valid_anchor,
+                num_ctx - valid_count,
+                num_rejected,
+            )
+        else:
+            valid_ctx_end = ctx_end - num_rejected
+            anchor_count_valid = (num_rejected >= 0) & (num_rejected < num_ctx)
+            current_window_rejected = num_rejected
 
+        # The proposer validates the same predicate with an asynchronous
+        # device assertion before launching this kernel.  Keep it in the
+        # kernel mask as a second line of defence so an invalid request-local
+        # anchor can never issue an out-of-range target-position or block-table
+        # load while that assertion is being reported.
+        query_mask = mask & anchor_count_valid
         seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
-        effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
+        effective_seq_len = seq_len - current_window_rejected
+        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=query_mask, other=0)
 
         # RoPE position id of the query token, derived from the last context
         # token's position. Written to out_query_positions for position embeddings.
         query_pos = last_pos + 1 + q_idx
-        tl.store(out_query_positions_ptr + offs, query_pos, mask=mask)
+        tl.store(out_query_positions_ptr + offs, query_pos, mask=query_mask)
 
         # Linear KV-cache token index used to look up the physical slot via the
         # block_table. This is kept separate from query_pos for multimodal
@@ -156,21 +191,23 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         # identical, so this only changes behaviour for multimodal inputs.
         query_kv_slot_pos = effective_seq_len + q_idx
         block_num_q = query_kv_slot_pos // block_size
-        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
-            tl.int64
-        )
+        block_id_q = tl.load(
+            block_table_ptr + req_idx * block_table_stride + block_num_q,
+            mask=query_mask,
+            other=0,
+        ).to(tl.int64)
         slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
-        tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
+        tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=query_mask)
 
-        bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
+        bonus = tl.load(next_token_ids_ptr + req_idx, mask=query_mask, other=0)
         in_id = tl.where(q_idx == 0, bonus, parallel_drafting_token_id)
-        tl.store(out_input_ids_ptr + offs, in_id, mask=mask)
+        tl.store(out_input_ids_ptr + offs, in_id, mask=query_mask)
 
         if SAMPLE_FROM_ANCHOR:
             sample_out_idx = req_idx * num_speculative_tokens + q_idx
-            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=mask)
+            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=query_mask)
         else:
-            sample_mask = mask & (q_idx > 0)
+            sample_mask = query_mask & (q_idx > 0)
             sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
             tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=sample_mask)
 

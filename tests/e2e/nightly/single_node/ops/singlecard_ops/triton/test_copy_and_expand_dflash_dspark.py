@@ -24,6 +24,7 @@ def copy_and_expand_dflash_dspark_ref(
     query_start_loc,
     seq_lens,
     num_rejected_tokens,
+    valid_sampled_tokens_count,
     num_query_per_req,
     num_speculative_tokens,
     sample_from_anchor,
@@ -51,13 +52,19 @@ def copy_and_expand_dflash_dspark_ref(
 
         if num_rejected_tokens is not None:
             num_rejected = num_rejected_tokens[req_idx].item()
-            valid_ctx_end = ctx_end - num_rejected
         else:
             num_rejected = 0
+        if valid_sampled_tokens_count is not None and num_rejected > 0:
+            valid_ctx_end = ctx_start + valid_sampled_tokens_count[req_idx].item()
+        else:
             valid_ctx_end = ctx_end
+            valid_ctx_end -= num_rejected
 
         seq_len = seq_lens[req_idx].item()
-        effective_seq_len = seq_len - num_rejected
+        current_window_rejected = num_rejected
+        if valid_sampled_tokens_count is not None and num_rejected > 0:
+            current_window_rejected = ctx_end - ctx_start - valid_sampled_tokens_count[req_idx].item()
+        effective_seq_len = seq_len - current_window_rejected
         last_pos = target_positions[valid_ctx_end - 1].item()
 
         for q_idx in range(num_query_per_req):
@@ -94,22 +101,39 @@ def copy_and_expand_dflash_dspark_ref(
     }
 
 
-# (batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected)
+# (batch_size, ctx_lens, num_spec, sample_from_anchor,
+#  has_num_rejected, has_valid_sampled_count, partial_window)
 CONFIGS = [
-    (1, [4], 3, False, False),
-    (64, [4] * 64, 3, False, False),
-    (256, [4] * 256, 3, False, False),
-    (1, [2048], 3, False, False),
-    (4, [1024] * 4, 3, False, False),
-    (8, [512] * 8, 3, False, False),
-    (64, [4] * 64, 3, True, False),
-    (64, [4] * 64, 3, False, True),
-    (8, [512] * 8, 3, True, True),
+    (1, [4], 3, False, False, False, False),
+    (64, [4] * 64, 3, False, False, False, False),
+    (256, [4] * 256, 3, False, False, False, False),
+    (1, [2048], 3, False, False, False, False),
+    (4, [1024] * 4, 3, False, False, False, False),
+    (8, [512] * 8, 3, False, False, False, False),
+    (64, [4] * 64, 3, True, False, False, False),
+    (64, [4] * 64, 3, False, True, False, False),
+    (8, [512] * 8, 3, True, True, False, False),
+    # PR #51113 Mamba boundary case: the current chunk can be shorter than
+    # the real rejection count from the previous complete DSpark window.
+    (2, [5, 8], 7, True, True, True, True),
+    # A valid-count tensor must not move the anchor on a reject-free row.
+    (1, [5], 7, True, False, True, False),
 ]
 
 
-@pytest.mark.parametrize("batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected", CONFIGS)
-def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected):
+@pytest.mark.parametrize(
+    "batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected,has_valid_sampled_count,partial_window",
+    CONFIGS,
+)
+def test_copy_and_expand_dflash_dspark(
+    batch_size,
+    ctx_lens,
+    num_spec,
+    sample_from_anchor,
+    has_num_rejected,
+    has_valid_sampled_count,
+    partial_window,
+):
     init_device_properties_triton()
     device = "npu"
     torch.manual_seed(0)
@@ -125,6 +149,8 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
 
     history = torch.randint(0, 100, (batch_size,), dtype=torch.int32, device=device)
     seq_lens = ctx + history
+    if partial_window:
+        seq_lens = ctx + 379
     target_positions = torch.cat(
         [
             torch.arange(
@@ -137,15 +163,34 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         ]
     )
     max_blocks = int((seq_lens.max() + num_query_per_req + KV_BLOCK_SIZE) // KV_BLOCK_SIZE) + 2
-    block_table = torch.randint(1, 10000, (batch_size, max_blocks), dtype=torch.int32, device=device)
+    if partial_window:
+        # Consecutive, request-distinct block IDs make the expected physical
+        # slots below direct constants rather than another copy of the kernel
+        # formula.
+        block_table = torch.stack(
+            [torch.arange(100 + 100 * i, 100 + 100 * i + max_blocks) for i in range(batch_size)]
+        ).to(dtype=torch.int32, device=device)
+    else:
+        block_table = torch.randint(1, 10000, (batch_size, max_blocks), dtype=torch.int32, device=device)
 
     if has_num_rejected:
-        num_rejected_tokens = torch.minimum(
-            torch.randint(0, num_spec + 1, (batch_size,), dtype=torch.int32, device=device),
-            ctx - 1,
-        ).clamp(min=0)
+        if partial_window:
+            num_rejected_tokens = torch.full((batch_size,), num_spec, dtype=torch.int32, device=device)
+        else:
+            num_rejected_tokens = torch.minimum(
+                torch.randint(0, num_spec + 1, (batch_size,), dtype=torch.int32, device=device),
+                ctx - 1,
+            ).clamp(min=0)
     else:
         num_rejected_tokens = None
+    valid_sampled_tokens_count = None
+    if has_valid_sampled_count:
+        if partial_window:
+            valid_sampled_tokens_count = torch.ones(batch_size, dtype=torch.int32, device=device)
+        elif num_rejected_tokens is not None:
+            valid_sampled_tokens_count = ctx - num_rejected_tokens
+        else:
+            valid_sampled_tokens_count = ctx.clone()
 
     next_token_ids = torch.randint(0, 150000, (batch_size,), dtype=torch.int32, device=device)
     context_slot_mapping = torch.randint(0, 1 << 30, (total_ctx,), dtype=torch.int32, device=device)
@@ -159,6 +204,7 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         query_start_loc,
         seq_lens,
         num_rejected_tokens,
+        valid_sampled_tokens_count,
         num_query_per_req,
         num_spec,
         sample_from_anchor,
@@ -189,6 +235,9 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         query_start_loc_ptr=query_start_loc,
         seq_lens_ptr=seq_lens,
         num_rejected_tokens_ptr=(num_rejected_tokens if num_rejected_tokens is not None else 0),
+        valid_sampled_tokens_count_ptr=(
+            valid_sampled_tokens_count if valid_sampled_tokens_count is not None else 0
+        ),
         parallel_drafting_token_id=PARALLEL_DRAFTING_TOKEN_ID,
         block_size=KV_BLOCK_SIZE,
         num_query_per_req=num_query_per_req,
@@ -196,6 +245,7 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         total_input_tokens=total_ctx,
         batch_size=batch_size,
         HAS_NUM_REJECTED=has_num_rejected,
+        HAS_VALID_SAMPLED_COUNT=has_valid_sampled_count,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         TILE_SIZE=_COPY_EXPAND_TILE_SIZE,
     )
@@ -206,6 +256,25 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
     torch.testing.assert_close(out_context_slot_mapping, ref["out_context_slot_mapping"])
     torch.testing.assert_close(out_query_slot_mapping, ref["out_query_slot_mapping"])
     torch.testing.assert_close(out_token_indices, ref["out_token_indices"])
+
+    if partial_window:
+        # ctx=5/rejected=7/valid=1 anchors at position 379, then expands the
+        # fixed K=7 DSpark query at positions and physical slots 380..386.
+        # The second request deliberately has ctx=8 to prove row-local anchor
+        # semantics in a mixed batch.
+        expected_positions = torch.tensor(
+            [380, 381, 382, 383, 384, 385, 386] * 2,
+            dtype=torch.int32,
+            device=device,
+        )
+        expected_slots = torch.tensor(
+            [13180, 13181, 13182, 13183, 13184, 13185, 13186,
+             25980, 25981, 25982, 25983, 25984, 25985, 25986],
+            dtype=torch.int32,
+            device=device,
+        )
+        torch.testing.assert_close(out_query_positions, expected_positions)
+        torch.testing.assert_close(out_query_slot_mapping, expected_slots)
 
     gc.collect()
     torch.npu.empty_cache()

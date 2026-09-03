@@ -841,6 +841,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         scheduler_output: SchedulerOutput = None,
         num_scheduled_tokens: int = 0,
         num_rejected_tokens_gpu: torch.Tensor | None = None,
+        valid_sampled_tokens_count_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         batch_size = common_attn_metadata.batch_size()
 
@@ -876,6 +877,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             target_hidden_states = model.combine_hidden_states(target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
 
+        dspark_first_pass_kwargs = (
+            {"valid_sampled_tokens_count_gpu": valid_sampled_tokens_count_gpu}
+            if self.method == "dspark"
+            else {}
+        )
         num_tokens, token_indices_to_sample, common_attn_metadata, long_seq_args = self.set_inputs_first_pass(
             target_token_ids=target_token_ids,
             next_token_ids=next_token_ids,
@@ -888,6 +894,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             long_seq_metadata=long_seq_metadata,
             num_prefill_reqs=num_prefill_reqs,
             num_decode_reqs=num_decode_reqs,
+            **dspark_first_pass_kwargs,
         )
         assert self.runner is not None
         dcp_manager = getattr(self.runner, "dcp_manager", None)
