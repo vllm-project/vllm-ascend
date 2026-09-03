@@ -1,4 +1,3 @@
-import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -6,7 +5,6 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -29,9 +27,6 @@ from vllm_ascend.worker.v2.spec_decode.physical_k import (
     query_width,
     v2_varlen_physical_k_enabled,
 )
-
-logger = init_logger(__name__)
-
 
 class DFlashAclGraphManager(DFlashCudaGraphManager):
     def __init__(
@@ -175,9 +170,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
-        debug_capture_sync = os.environ.get("VLLM_ASCEND_DFLASH_CAPTURE_SYNC") == "1"
-        previous_desc: tuple[int, int, int] | None = None
-
         # The upstream DFlash graph manager builds ``attn_state`` before it
         # invokes the supplied forward function.  For a variable-width graph,
         # that preparation must observe the same physical K as the forward
@@ -254,21 +246,8 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 )
             width = num_tokens // num_reqs
             draft_k = width if self._sample_from_anchor() else width - 1
-            is_capturing = torch.npu.is_current_stream_capturing()
-            nonlocal previous_desc
-            current_desc = (num_tokens, num_reqs, draft_k)
-            # The ACL graph capture API reports many device-side failures only
-            # at the next stream synchronization.  Sync before the next
-            # descriptor's warmup so the failing descriptor can be identified.
-            if debug_capture_sync and not is_capturing:
-                logger.warning(
-                    "DFlash V2 graph-capture sync before desc=%s; previous=%s",
-                    current_desc,
-                    previous_desc,
-                )
-                torch.npu.current_stream().synchronize()
             with physical_k_scope(self.speculator, draft_k=draft_k):
-                result = forward_fn(
+                return forward_fn(
                     num_reqs,
                     num_tokens,
                     attn_metadata,
@@ -276,9 +255,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                     num_tokens_across_dp,
                     cg_mode,
                 )
-            if debug_capture_sync and is_capturing:
-                previous_desc = current_desc
-            return result
 
         try:
             with communicator_switch(), model_capture_wrapper(self.speculator, False):
@@ -292,12 +268,6 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                     causal,
                     progress_bar_desc,
                 )
-                if debug_capture_sync:
-                    logger.warning(
-                        "DFlash V2 graph-capture final sync; last_desc=%s",
-                        previous_desc,
-                    )
-                    torch.npu.current_stream().synchronize()
         finally:
             if dflash_cudagraph_module is not None:
                 dflash_cudagraph_module._prepare_dflash_inputs_to_capture = (
