@@ -11,6 +11,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -513,9 +514,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
             self.vllm_config.attention_config.indexer_kv_dtype, self.vllm_config.model_config
         )
-        if c8_k_cache_dtype == torch.float8_e4m3fn:
+        if self.c8_k_cache_dtype == torch.float8_e4m3fn:
             self.c8_k_scale_cache_dtype = torch.float32
-        elif c8_k_cache_dtype == torch.int8:
+        elif self.c8_k_cache_dtype == torch.int8:
             self.c8_k_scale_cache_dtype = torch.float16
 
         if self.enable_sparse_sfa_c8:

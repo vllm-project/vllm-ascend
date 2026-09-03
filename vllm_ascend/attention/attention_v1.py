@@ -511,7 +511,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             if not self.enable_c8_quant:
                 raise ValueError(
-                    "The current GQA‑related models adopt static quantization. KV quantization is configured via `--kv‑cache‑dtype` upon service startup, and the corresponding quantized weights are required."
+                    "The current GQA‑related models adopt static quantization. "
+                    "KV quantization is configured via `--kv‑cache‑dtype` upon service startup, "
+                    "and the corresponding quantized weights are required."
                 )
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
