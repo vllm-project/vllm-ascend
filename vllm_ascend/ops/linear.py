@@ -94,7 +94,18 @@ class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            new_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            old_fp32 = getattr(layer, "weight_fp32", None)
+            if (
+                isinstance(old_fp32, torch.Tensor)
+                and old_fp32.data_ptr() != new_fp32.data_ptr()
+                and old_fp32.shape == new_fp32.shape
+                and old_fp32.dtype == new_fp32.dtype
+            ):
+                # RL weight-update path: copy the new weight to the existing fp32 weight tensor
+                old_fp32.copy_(new_fp32)
+            else:
+                layer.weight_fp32 = new_fp32
         if "conv1d" not in layer.prefix:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
