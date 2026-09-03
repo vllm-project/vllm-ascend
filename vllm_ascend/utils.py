@@ -151,27 +151,6 @@ def should_reuse_topk(config: Any, layer_id: int) -> bool:
     return 0 <= layer_id < len(index_topk_pattern) and index_topk_pattern[layer_id] == "S"
 
 
-def pp_stage_requires_topk_indices(config: Any, start_layer: int) -> bool:
-    """Return whether a PP stage needs Top-K indices from its predecessor."""
-    num_hidden_layers = getattr(config, "num_hidden_layers", 0)
-    if start_layer <= 0 or start_layer >= num_hidden_layers:
-        return False
-
-    indexer_types = getattr(config, "indexer_types", None)
-    if indexer_types is not None:
-        for layer_id in range(start_layer, min(len(indexer_types), num_hidden_layers)):
-            indexer_type = indexer_types[layer_id]
-            if not isinstance(indexer_type, str):
-                continue
-            indexer_type = indexer_type.lower()
-            if indexer_type == "full":
-                return False
-            if indexer_type == "shared":
-                return True
-
-    return bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
-
-
 def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
     if vllm_config is None:
         from vllm.config import get_current_vllm_config

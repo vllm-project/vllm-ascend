@@ -13,6 +13,8 @@ import torch
 from vllm.config import VllmConfig
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.utils import should_reuse_topk
+
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
@@ -240,6 +242,27 @@ def configure_pp_topk_transport(
         )
 
     model.make_empty_intermediate_tensors = wrapped_tensor_factory
+
+
+def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
+    """Return whether a PP stage needs Top-K indices from its predecessor."""
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0)
+    if start_layer <= 0 or start_layer >= num_hidden_layers:
+        return False
+
+    indexer_types = getattr(config, "indexer_types", None)
+    if indexer_types is not None:
+        for layer_id in range(start_layer, min(len(indexer_types), num_hidden_layers)):
+            indexer_type = indexer_types[layer_id]
+            if not isinstance(indexer_type, str):
+                continue
+            indexer_type = indexer_type.lower()
+            if indexer_type == "full":
+                return False
+            if indexer_type == "shared":
+                return True
+
+    return bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
 
 
 def restore_pp_topk_indices(
