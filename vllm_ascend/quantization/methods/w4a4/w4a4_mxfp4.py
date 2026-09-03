@@ -41,7 +41,7 @@ from ..registry import register_scheme
 
 
 # Select checkpoint parameter names for packed compressed-tensors weights.
-def _use_packed_mxfp4_weight_names() -> bool:
+def _use_compressed_tensors_mxfp4_weight_names() -> bool:
     quant_config = get_current_vllm_config().quant_config
     if quant_config is None:
         return False
@@ -50,10 +50,7 @@ def _use_packed_mxfp4_weight_names() -> bool:
     return callable(get_name) and get_name() == COMPRESSED_TENSORS_METHOD
 
 
-def _rename_packed_weight_parameter(
-    layer: torch.nn.Module,
-    weight_name: str,
-) -> None:
+def _rename_packed_weight_parameter(layer: torch.nn.Module, weight_name: str) -> None:
     packed_weight_name = f"{weight_name}_packed"
     if not hasattr(layer, packed_weight_name):
         return
@@ -94,7 +91,7 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
-        weight_name = "weight_packed" if _use_packed_mxfp4_weight_names() else "weight"
+        weight_name = "weight_packed" if _use_compressed_tensors_mxfp4_weight_names() else "weight"
         params_dict = {weight_name: torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
         return params_dict
 
@@ -185,7 +182,7 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
         param_dict = {}
-        suffix = "_packed" if _use_packed_mxfp4_weight_names() else ""
+        suffix = "_packed" if _use_compressed_tensors_mxfp4_weight_names() else ""
         param_dict[f"w13_weight{suffix}"] = torch.empty(
             num_experts, 2 * intermediate_size_per_partition, hidden_sizes // 2, dtype=torch.uint8
         )
