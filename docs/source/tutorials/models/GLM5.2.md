@@ -1108,7 +1108,6 @@ Please refer to the following python file for further explanation and restrictio
 
 Recommended configurations for serving `GLM-5.2` with a 1M context window on Atlas 800 A3 (64GB x 16) and quantized GLM-5.2(W4A8C8) weights:
 
-
 #### 5.2.1 Single-Node 1M Deployment
 
 - Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) for the 1M context.
