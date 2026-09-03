@@ -16,7 +16,10 @@ def parse_args():
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
     parser.add_argument("--is-pd-disaggregated", action="store_true", help="Is pd-disaggregated deployment.")
     parser.add_argument("--is-prefill", action="store_true", help="Is prefill dp.")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.is_prefill and not args.is_pd_disaggregated:
+        parser.error("--is-prefill requires --is-pd-disaggregated.")
+    return args
 
 
 args = parse_args()
