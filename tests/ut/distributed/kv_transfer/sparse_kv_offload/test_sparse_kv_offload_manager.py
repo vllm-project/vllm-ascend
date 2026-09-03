@@ -326,10 +326,14 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                     ),
                     patch.object(manager_module, "_sparse_kv_ops", return_value=MagicMock()),
                 ):
-                    SparseKVOffloadManager(
+                    manager = SparseKVOffloadManager(
                         vllm_config,
                         kv_cache_config,
                         offload_config,
+                    )
+                    manager.prepare_host_kv_allocation(
+                        device_id=7,
+                        dp_rank=0,
                     )
 
                 initialized_config = offload_backend.initialize.call_args.args[0]
@@ -344,6 +348,52 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
                 self.assertEqual(initialized_config.world_size, 2)
                 self.assertEqual(initialized_config.rank_id, rank)
                 tp_group.barrier.assert_called_once_with()
+
+    def test_layer_allocation_uses_backend_callback_on_non_owner_rank(self):
+        host_k = MagicMock()
+        host_v = MagicMock()
+        allocate_host = MagicMock(return_value=[host_k, host_v])
+
+        result = manager_module.allocate_kv_cache_tensors_for_sparse_kv_offload(
+            k_tensor_size=128,
+            v_tensor_size=64,
+            alignment=32,
+            tp_rank=1,
+            keep_device_kv_cache=False,
+            npu_kv_cache_allocate_func=MagicMock(),
+            host_kv_cache_allocate_func=allocate_host,
+        )
+
+        self.assertIs(result[2], host_k)
+        self.assertIs(result[3], host_v)
+        allocate_host.assert_called_once_with([128, 64], 32)
+
+    def test_manager_close_releases_host_allocator_once(self):
+        manager = object.__new__(SparseKVOffloadManager)
+        allocator = MagicMock()
+        manager._host_kv_allocator = allocator
+
+        manager.close()
+        manager.close()
+
+        allocator.close.assert_called_once_with()
+        self.assertIsNone(manager._host_kv_allocator)
+
+    def test_manager_close_retains_host_allocator_when_close_fails(self):
+        manager = object.__new__(SparseKVOffloadManager)
+        allocator = MagicMock()
+        allocator.close.side_effect = [RuntimeError("close failed"), None]
+        manager._host_kv_allocator = allocator
+
+        with self.assertRaisesRegex(RuntimeError, "close failed"):
+            manager.close()
+
+        self.assertIs(manager._host_kv_allocator, allocator)
+
+        manager.close()
+
+        self.assertIsNone(manager._host_kv_allocator)
+        self.assertEqual(allocator.close.call_count, 2)
 
     def test_manager_rejects_pool_larger_than_dram_limit(self):
         vllm_config, kv_cache_config, offload_config = self._make_manager_init_inputs()

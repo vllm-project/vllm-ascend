@@ -45,6 +45,17 @@ OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
 
+
+class HostKVAllocator(typing.Protocol):
+    def allocate_tensors(
+        self,
+        sizes: list[int],
+        alignment: int,
+    ) -> list[torch.Tensor]: ...
+
+    def close(self) -> None: ...
+
+
 FSA_EXTERNAL_PLAN_READY_MARKER = 0x5A45
 FSA_PAIRED_SELECTION_COPY_MARKER = 0x5A56
 FSA_SELECTION_MEMBERSHIP_MAP_INT16_COUNT = 16376
@@ -320,8 +331,17 @@ def allocate_kv_cache_tensors_for_sparse_kv_offload(
     tp_rank: int,
     keep_device_kv_cache: bool,
     npu_kv_cache_allocate_func: typing.Callable,
+    host_kv_cache_allocate_func: typing.Callable[
+        [list[int], int], list[torch.Tensor | None]
+    ]
+    | None = None,
 ):
-    if tp_rank == 0:
+    if host_kv_cache_allocate_func is not None:
+        [k_tensor_cpu, v_tensor_cpu] = host_kv_cache_allocate_func(
+            [k_tensor_size, v_tensor_size],
+            alignment,
+        )
+    elif tp_rank == 0:
         [k_tensor_cpu, v_tensor_cpu] = empty_aligned_int8_cpu_tensors(
             [k_tensor_size, v_tensor_size],
             alignment,
@@ -383,7 +403,7 @@ def reshape_kv_cache_tensors_for_sparse_kv_offload(
     k_cache = raw_k_tensor.view(k_cache_dtype).view(k_shape) if raw_k_tensor is not None else None
     v_cache = raw_v_tensor.view(v_cache_dtype).view(v_shape) if raw_v_tensor is not None else None
 
-    if tp_rank == 0:
+    if raw_k_tensor_cpu is not None and raw_v_tensor_cpu is not None:
         k_cache_cpu = raw_k_tensor_cpu.view(k_cache_dtype).view(k_shape)
         v_cache_cpu = raw_v_tensor_cpu.view(v_cache_dtype).view(v_shape)
     else:
@@ -535,23 +555,70 @@ class SparseKVOffloadManager:
                 f"limit={sparse_kv_offload_config.dram_size_per_dp_GB} GiB, "
                 f"num_blocks={kv_cache_config.num_blocks}"
             )
-        actual_pool_size_bytes = min(planned_pool_size_bytes, dram_limit_bytes)
+        self.host_pool_size_bytes = min(
+            planned_pool_size_bytes,
+            dram_limit_bytes,
+        )
+        self._host_kv_allocator: HostKVAllocator | None = None
+        self._host_allocation_prepared = False
         logger.info(
             "SparseKVOffloadManager starts CPU KV pool initialization: "
             "planned=%.2f GiB, configured_limit=%s GiB, num_blocks=%s.",
-            actual_pool_size_bytes / (1 << 30),
+            self.host_pool_size_bytes / (1 << 30),
             sparse_kv_offload_config.dram_size_per_dp_GB,
             kv_cache_config.num_blocks,
         )
+
+    def prepare_host_kv_allocation(
+        self,
+        *,
+        device_id: int,
+        dp_rank: int,
+    ) -> None:
+        """Prepare Host KV allocation before per-layer cache allocation."""
+        if self._host_allocation_prepared:
+            return
+
+        # dp_rank is part of the backend-neutral contract. The existing
+        # MemFabric allocator does not need it.
+        del dp_rank
         config = offload.OffloadConfig()
-        config.device_id = torch_npu.npu.current_device()
-        config.reserve_size = actual_pool_size_bytes
-        config.alloc_size = actual_pool_size_bytes if self.tp_rank == 0 else 0
+        config.device_id = device_id
+        config.reserve_size = self.host_pool_size_bytes
+        config.alloc_size = (
+            self.host_pool_size_bytes if self.tp_rank == 0 else 0
+        )
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
-        assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
+        assert offload.initialize(config) == 0, (
+            "Sparse KV offload offload.initialize failed."
+        )
         self.tp_group.barrier()
+        self._host_allocation_prepared = True
+
+    def allocate_host_kv_tensors(
+        self,
+        sizes: list[int],
+        alignment: int,
+    ) -> list[torch.Tensor | None]:
+        """Allocate one layer's Host K/V through the prepared allocator."""
+        if not self._host_allocation_prepared:
+            raise RuntimeError(
+                "prepare_host_kv_allocation must run before Host KV allocation"
+            )
+        if self._host_kv_allocator is not None:
+            return self._host_kv_allocator.allocate_tensors(sizes, alignment)
+        if self.tp_rank == 0:
+            return empty_aligned_int8_cpu_tensors(sizes, alignment)
+        return [None for _ in sizes]
+
+    def close(self) -> None:
+        """Release backend-owned Host KV resources."""
+        allocator = self._host_kv_allocator
+        if allocator is not None:
+            allocator.close()
+            self._host_kv_allocator = None
 
     def _warmup_external_lru_planner_threads(self) -> int:
         if not (self.use_fused_overlap and self.tp_rank == 0):
