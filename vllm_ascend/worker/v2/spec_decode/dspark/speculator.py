@@ -139,11 +139,11 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         )
         if self._dynamic_update_log_count < 8:
             logger.warning(
-                "V2 hardware-aware K decision #%d: reqs=%d active_k=%d selected=%s",
+                "V2 hardware-aware K decision #%d: reqs=%d active_k=%d selected_shape=%s",
                 self._dynamic_update_log_count + 1,
                 num_reqs,
                 active_k,
-                selected.detach().to("cpu").tolist(),
+                tuple(selected.shape),
             )
             self._dynamic_update_log_count += 1
 
