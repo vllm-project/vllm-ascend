@@ -34,11 +34,12 @@ from vllm.model_executor.models.utils import extract_layer_index
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.mla.index_group import SparseMLAIndexGroupBuilder
 
-from vllm_ascend.utils import is_mtp_layer, pp_stage_requires_topk_indices, should_reuse_topk
+from vllm_ascend.utils import is_mtp_layer, should_reuse_topk
 from vllm_ascend.worker.v2 import pp_utils
 from vllm_ascend.worker.v2.pp_utils import (
     add_pp_topk_indices,
     configure_pp_topk_transport,
+    pp_stage_requires_topk_indices,
     restore_pp_topk_indices,
 )
 
