@@ -1201,7 +1201,6 @@ Before you start, please:
        }'
    ```
 
-
 3. Start the server with the following command on each node.
 
     1. Prefill node
