@@ -570,9 +570,6 @@ jobs:
     needs: [select-tests]
     if: ${{ !cancelled() && needs.select-tests.result == 'success' }}
     runs-on: linux-amd64-cpu-8-hk
-    defaults:
-      run:
-        container: null
     outputs:
       npu_test_groups: ${{ steps.filter.outputs.npu_test_groups }}
       cpu_test_groups: ${{ steps.filter.outputs.cpu_test_groups }}
