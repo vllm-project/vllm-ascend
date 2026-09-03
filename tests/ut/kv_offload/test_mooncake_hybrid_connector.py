@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
     MooncakeConnectorScheduler,
+    MooncakeConnectorWorker,
 )
 
 
@@ -239,6 +240,39 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         )
         self.assertIn(peer_key, thread.active_peer_request_handlers)
         thread.executor.submit.assert_called_once_with(thread._handle_peer_requests, peer_key)
+
+
+class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_shared_backing_is_registered_once(self):
+        alignment = 2 * 1024 * 1024
+        backing_size = 4 * alignment
+        layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.1.self_attn",
+        ]
+        raw_tensor = torch.empty(backing_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
+        kv_caches = {
+            layer_names[0]: backing[:alignment],
+            layer_names[1]: backing[alignment : 2 * alignment],
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    size=backing_size,
+                    layers=[layer_name],
+                )
+                for layer_name in layer_names
+            ]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers(kv_caches)
+
+        self.assertEqual(ptrs, [backing.data_ptr()])
+        self.assertEqual(lengths, [backing_size])
 
 
 class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
