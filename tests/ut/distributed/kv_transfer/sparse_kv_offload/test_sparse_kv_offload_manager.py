@@ -470,6 +470,38 @@ class TestSparseKVOffloadMemoryPlanning(unittest.TestCase):
         self.assertIsNone(manager._host_kv_allocator)
         self.assertEqual(allocator.close.call_count, 2)
 
+    def test_manager_close_retries_membership_region_release(self):
+        manager = object.__new__(SparseKVOffloadManager)
+        region = MagicMock()
+        region.release.side_effect = [
+            RuntimeError("release failed"),
+            None,
+        ]
+        membership = MagicMock()
+        planner = MagicMock()
+        device_staging = MagicMock()
+        manager.fused_overlap_membership_region = region
+        manager.fused_overlap_membership_map = membership
+        manager.fused_overlap_planner_membership_map = planner
+        manager.fused_overlap_membership_plan_device_staging = device_staging
+        manager._host_kv_allocator = None
+
+        with self.assertRaisesRegex(RuntimeError, "release failed"):
+            manager.close()
+
+        self.assertIs(manager.fused_overlap_membership_region, region)
+        self.assertIs(manager.fused_overlap_membership_map, membership)
+
+        manager.close()
+
+        self.assertIsNone(manager.fused_overlap_membership_region)
+        self.assertIsNone(manager.fused_overlap_membership_map)
+        self.assertIsNone(manager.fused_overlap_planner_membership_map)
+        self.assertIsNone(
+            manager.fused_overlap_membership_plan_device_staging
+        )
+        self.assertEqual(region.release.call_count, 2)
+
     def test_manager_rejects_pool_larger_than_dram_limit(self):
         vllm_config, kv_cache_config, offload_config = _make_manager_init_inputs()
         offload_backend = SimpleNamespace(

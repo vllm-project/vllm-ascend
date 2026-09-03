@@ -529,7 +529,9 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             or self._fused_overlap_selection_capacity[3] < cache_blocks_per_row
             or self.selection_kv_block_table.device != device
             or self.selection_kv_block_status.device != device
-            or self.selection_membership_map.device.type != "cpu"
+            or not get_sparse_kv_offload_manager().is_fused_membership_storage(
+                self.selection_membership_map
+            )
             or self.fused_overlap_last_req_ids.device != device
         )
         if needs_realloc:
