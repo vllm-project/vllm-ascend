@@ -33,12 +33,7 @@ on:
         required: false
         type: string
         default: 'release'
-        description: "Build type: 'daily' or 'release'. Daily uses swr.cn-north-4 and quay.io base image."
-      quay_daily_username:
-        required: false
-        type: string
-        default: ''
-        description: "Quay username for daily base image pull"
+        description: "Build type: 'daily' or 'release'. Daily uses swr.cn-north-12 base image."
       cann_version:
         required: false
         type: string
@@ -50,17 +45,11 @@ on:
         default: 'auto'
         description: "Base image date (YYYYMMDD). 'auto' to auto-detect latest available, or specify a custom date."
     secrets:
-      HW_USERNAME:
+      SWR_USERNAME:
         required: false
-      HW_TOKEN:
-        required: false
-      HW_USERNAME_DAILY:
-        required: false
-      HW_TOKEN_DAILY:
+      SWR_PASSWORD:
         required: false
       GITEE_TOKEN:
-        required: false
-      QUAY_DAILY_PASSWORD:
         required: false
 
 jobs:
@@ -98,30 +87,13 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.vllm_ascend_branch }}
 
-      - name: Login to Huawei Cloud SWR (Release)
+      - name: Login to SWR north-12
         id: login-swr
-        if: ${{ inputs.build_type != 'daily' || (inputs.build_type == 'daily' && matrix.os == 'ubuntu' && matrix.arch_name == 'arm64') }}
         env:
-          HW_USERNAME: ${{ secrets.HW_USERNAME }}
-          HW_TOKEN: ${{ secrets.HW_TOKEN }}
+          SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+          SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
         run: |
-          echo "$HW_TOKEN" | docker login -u "$HW_USERNAME" --password-stdin swr.cn-southwest-2.myhuaweicloud.com
-
-      - name: Login to Huawei Cloud SWR (Daily)
-        id: login-swr-daily
-        if: ${{ inputs.build_type == 'daily' }}
-        env:
-          HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-          HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
-        run: |
-          docker login -u cn-north-4@"$HW_USERNAME_DAILY" -p "$HW_TOKEN_DAILY" swr.cn-north-4.myhuaweicloud.com
-
-      - name: Login to Quay.io (for daily base image pull)
-        if: ${{ inputs.build_type == 'daily' }}
-        env:
-          QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
-        run: |
-          docker login -u "${{ inputs.quay_daily_username }}" -p "$QUAY_DAILY_PASSWORD" quay.io
+          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin swr.cn-north-12.myhuaweicloud.com
 
       - name: Build nightly-${{ inputs.target }} image
         id: build
@@ -133,13 +105,13 @@ jobs:
           BRANCH_TAG="${BRANCH_TAG//\//-}"
 
           if [ "${{ inputs.build_type }}" = "daily" ]; then
-            SWR_REGISTRY="swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend"
-            SWR_TEMP_REGISTRY="swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend-temp"
+            SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend"
+            SWR_TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp"
             TAG_PREFIX="daily"
-            BASE_IMAGE="quay.io/atlas_inference/vllm-ascend"
+            BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend"
           else
-            SWR_REGISTRY="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend"
-            SWR_TEMP_REGISTRY="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend-temp"
+            SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
+            SWR_TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp"
             TAG_PREFIX="nightly-ci"
             BASE_IMAGE=""
           fi
@@ -152,14 +124,14 @@ jobs:
           fi
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             # Resolve the base image date: 'auto' backtracks day-by-day from today to find
-            # the latest date for which the quay base image exists; otherwise use the
+            # the latest date for which the SWR base image exists; otherwise use the
             # user-supplied date (YYYYMMDD).
             if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
               DATE=""
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
                 CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
-                if docker manifest inspect "quay.io/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
+                if docker manifest inspect "swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
                   break
@@ -220,14 +192,14 @@ jobs:
             echo "push_registry=${SWR_REGISTRY}"
           fi
 
-          if [ "${{ github.repository_owner }}" = "vllm-project" ] && [ "${{ steps.login-swr.outcome == 'success' || steps.login-swr-daily.outcome == 'success' }}" = "true" ]; then
+          if [ "${{ github.repository_owner }}" = "vllm-project" ] && [ "${{ steps.login-swr.outcome == 'success' }}" = "true" ]; then
             echo "swr_logged_in=true"
           else
             echo "swr_logged_in=false"
           fi
 
       - name: Push image to SWR
-        if: ${{ github.repository_owner == 'vllm-project' && (steps.login-swr.conclusion == 'success' || steps.login-swr-daily.conclusion == 'success') }}
+        if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
           PUSH_REGISTRY="${{ steps.build.outputs.push_registry }}"
           FULL_TAG="${{ steps.build.outputs.full_tag }}"
@@ -246,7 +218,7 @@ jobs:
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
-          RELEASE_SWR_REGISTRY="swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend"
+          RELEASE_SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
           RELEASE_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
           # Release copy uses a stable tag without arch info (single-arch arm64 image)
           RELEASE_IMAGE="${RELEASE_SWR_REGISTRY}:${RELEASE_TAG}"
@@ -262,19 +234,19 @@ jobs:
     # only when BOTH arch images exist. Owner gate keeps it disabled in upstream forks.
     if: ${{ always() && github.repository_owner == 'vllm-project' && inputs.build_type == 'daily' }}
     steps:
-      - name: Login to Huawei Cloud SWR (Daily)
+      - name: Login to SWR north-12
         env:
-          HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
-          HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
+          SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
+          SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
         run: |
-          docker login -u cn-north-4@"$HW_USERNAME_DAILY" -p "$HW_TOKEN_DAILY" swr.cn-north-4.myhuaweicloud.com
+          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin swr.cn-north-12.myhuaweicloud.com
 
       - name: Create multi-arch manifest
         run: |
           # Registry and tag are recomputed here (not from matrix outputs) so merge still
           # works even when the last-completed matrix instance failed to push.
-          MAIN_REGISTRY="swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend"
-          TEMP_REGISTRY="swr.cn-north-4.myhuaweicloud.com/inference/vllm-ascend-temp"
+          MAIN_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend"
+          TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp"
 
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
