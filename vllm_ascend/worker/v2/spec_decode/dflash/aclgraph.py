@@ -1,3 +1,4 @@
+import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -145,6 +146,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
         """Capture ACL graphs for DFlash."""
+        debug_capture_sync = os.environ.get("VLLM_ASCEND_DFLASH_CAPTURE_SYNC") == "1"
+        previous_desc: tuple[int, int, int] | None = None
+
         def forward_with_runtime_width(
             num_reqs: int,
             num_tokens: int,
@@ -164,8 +168,21 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 )
             width = num_tokens // num_reqs
             draft_k = width if self._sample_from_anchor() else width - 1
+            is_capturing = torch.npu.is_current_stream_capturing()
+            nonlocal previous_desc
+            current_desc = (num_tokens, num_reqs, draft_k)
+            # The ACL graph capture API reports many device-side failures only
+            # at the next stream synchronization.  Sync before the next
+            # descriptor's warmup so the failing descriptor can be identified.
+            if debug_capture_sync and not is_capturing:
+                logger.warning(
+                    "DFlash V2 graph-capture sync before desc=%s; previous=%s",
+                    current_desc,
+                    previous_desc,
+                )
+                torch.npu.current_stream().synchronize()
             with physical_k_scope(self.speculator, draft_k=draft_k):
-                return forward_fn(
+                result = forward_fn(
                     num_reqs,
                     num_tokens,
                     attn_metadata,
@@ -173,6 +190,9 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                     num_tokens_across_dp,
                     cg_mode,
                 )
+            if debug_capture_sync and is_capturing:
+                previous_desc = current_desc
+            return result
 
         with communicator_switch(), model_capture_wrapper(self.speculator, False):
             super().capture(
@@ -185,6 +205,12 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 causal,
                 progress_bar_desc,
             )
+            if debug_capture_sync:
+                logger.warning(
+                    "DFlash V2 graph-capture final sync; last_desc=%s",
+                    previous_desc,
+                )
+                torch.npu.current_stream().synchronize()
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         """Override run_fullgraph to update full graph params in run_fullgraph."""
