@@ -4,6 +4,7 @@ import torch
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
+from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.sample import rejection_sampler as rejection_sampler_module
 from vllm_ascend.sample import sampler as sampler_module
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -17,7 +18,11 @@ def test_sampler_uses_vllm_penalties_on_310p_when_triton_is_available():
 
     with (
         patch.object(sampler_module, "HAS_TRITON", True),
-        patch.object(sampler_module, "is_310p", return_value=True),
+        patch.object(
+            sampler_module,
+            "get_current_hardware_profile",
+            return_value=MagicMock(supports=lambda _: False),
+        ),
         patch.object(Sampler, "apply_penalties", return_value=logits) as fallback,
         patch.object(sampler_module, "apply_all_penalties") as triton_penalties,
     ):
@@ -36,7 +41,11 @@ def test_sampler_uses_triton_penalties_off_310p():
 
     with (
         patch.object(sampler_module, "HAS_TRITON", True),
-        patch.object(sampler_module, "is_310p", return_value=False),
+        patch.object(
+            sampler_module,
+            "get_current_hardware_profile",
+            return_value=MagicMock(supports=lambda _: True),
+        ),
         patch.object(sampler_module, "apply_all_penalties", return_value=expected) as triton_penalties,
     ):
         result = AscendSampler.apply_penalties(logits, metadata, output_token_ids)
@@ -78,7 +87,11 @@ def test_rejection_sampler_uses_vllm_penalties_on_310p_when_triton_is_available(
 
     with (
         patch.object(rejection_sampler_module, "HAS_TRITON", True),
-        patch.object(rejection_sampler_module, "is_310p", return_value=True),
+        patch.object(
+            rejection_sampler_module,
+            "get_current_hardware_profile",
+            return_value=MagicMock(supports=lambda _: False),
+        ),
         patch.object(rejection_sampler_module.Sampler, "apply_penalties", return_value=logits) as fallback,
         patch.object(rejection_sampler_module, "apply_all_penalties") as triton_penalties,
     ):
