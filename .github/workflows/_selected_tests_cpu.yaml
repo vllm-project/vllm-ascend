@@ -78,7 +78,7 @@ jobs:
           VENV_PY=${GITHUB_WORKSPACE}/venv/bin/python3
           VENV_SITE=$(${VENV_PY} -c "import site; print(site.getsitepackages()[0])")
           ${VENV_PY} -m pip install --upgrade pip
-          ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema vllm==0.23.1
+          ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema vllm==0.23.0
 
           echo "$GITHUB_WORKSPACE" > "${VENV_SITE}/vllm_ascend_src.pth"
           if [ -d "${GITHUB_WORKSPACE}/vllm" ]; then
