@@ -1,3 +1,33 @@
+name: Selected CPU Tests
+on:
+  workflow_call:
+    inputs:
+      vllm:
+        description: vllm version string
+        required: true
+        type: string
+      ref:
+        description: PR head sha
+        required: true
+        type: string
+      base_ref:
+        description: target base branch name e.g. main
+        required: true
+        type: string
+      base_sha:
+        description: base commit sha, optional. empty skip rebase
+        required: false
+        default: ""
+        type: string
+      test_groups:
+        description: json test groups
+        required: true
+        type: string
+    outputs:
+      coverage_artifact_name:
+        value: ${{ jobs.run_tests.outputs.coverage_artifact_name }}
+  workflow_dispatch: {}
+
 jobs:
   filter-groups:
     runs-on: ubuntu-latest
