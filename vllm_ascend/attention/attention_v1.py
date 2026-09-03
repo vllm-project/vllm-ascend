@@ -2582,12 +2582,12 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
 
         npugraph_ex capture compatibility (golden-test methodology,
         GRAPH_PATH=7): everything from here down is device-side work on
-        persistent tensors -- cu_seqlens_q / seqused_kv are written into
-        instance-owned buffers (copy_, a D2D op) instead of being built with
-        torch.tensor (an H2D copy that would replay against freed host
-        memory), and the AICPU metadata op is called inline so the captured
-        graph recomputes the plan from the (replayed) length buffers each
-        step. The per-step Python-side metadata cache is disabled during
+        persistent tensors -- cu_seqlens_q / seqused_kv are refreshed each
+        step via pinned CPU staging tensors copied into instance-owned NPU
+        buffers (torch.tensor(device="npu") is an H2D aclrtMemcpy, illegal
+        mid-capture), and the AICPU metadata op is called inline so the
+        captured graph recomputes the plan from the replayed length buffers
+        each step. The per-step Python-side metadata cache is disabled during
         capture so the metadata op is always re-executed inside the graph.
         """
         if not attn_metadata.causal:
@@ -2628,15 +2628,48 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             output=output,
         )
 
-    def _qfa_step_buffers(self, num_tokens: int, num_seqs: int, device: torch.device) -> tuple:
-        """Instance-owned persistent int32 buffers for the per-step lengths.
+    def _write_qfa_cu_seqlens(self, cumulative_seq_lengths: list[int], device: torch.device) -> torch.Tensor:
+        """Write cu_seqlens (0-prefixed cumulative) into a persistent buffer.
 
-        During npugraph_ex capture every tensor consumed by the captured
-        region must live in a stable allocation; rebuilding cu_seqlens_q /
-        seqused_kv with torch.tensor (H2D) each step would leave the captured
-        graph reading freed host memory. The buffers are sized to the capture
-        bucket (num_tokens) and rewritten with copy_ (D2D) each step, so
-        replay refreshes them in-place.
+        Eager path: identical semantics to _build_qfa_cu_seqlens. Capture
+        path: the write goes through a persistent CPU-side staging tensor
+        (pinned) into the persistent NPU buffer, so the captured graph sees
+        only a D2D copy between two stable allocations -- torch.tensor(...,
+        device="npu") would be an H2D aclrtMemcpy, which is illegal
+        mid-capture ("operation not permitted when a stream is capturing").
+        The staging tensor's CONTENTS are refreshed from the host list each
+        step before the copy, so replays that re-execute the copy pick up
+        the current values.
+        """
+        num_tokens = int(cumulative_seq_lengths[-1]) if cumulative_seq_lengths else 0
+        num_seqs = len(cumulative_seq_lengths)
+        cu_buf, _, cu_cpu = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
+        cu_cpu[: num_seqs + 1] = torch.tensor(
+            [0, *cumulative_seq_lengths], dtype=torch.int32, device="cpu"
+        )
+        cu_buf[: num_seqs + 1].copy_(cu_cpu[: num_seqs + 1], non_blocking=True)
+        return cu_buf[: num_seqs + 1]
+
+    def _write_qfa_seqused(self, seq_lens_list: list[int], device: torch.device) -> torch.Tensor:
+        """Write seqused_kv into a persistent buffer (see _write_qfa_cu_seqlens)."""
+        num_tokens = sum(seq_lens_list) if seq_lens_list else 0
+        num_seqs = len(seq_lens_list)
+        _, seq_buf, _, seq_cpu = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
+        seq_cpu[:num_seqs] = torch.tensor(seq_lens_list, dtype=torch.int32, device="cpu")
+        seq_buf[:num_seqs].copy_(seq_cpu[:num_seqs], non_blocking=True)
+        return seq_buf[:num_seqs]
+
+    def _qfa_step_buffers(self, num_tokens: int, num_seqs: int, device: torch.device) -> tuple:
+        """Instance-owned persistent buffers for the per-step lengths.
+
+        Returns (cu_buf, seq_buf, cu_cpu, seq_cpu): the NPU-side int32
+        buffers the captured graph reads, plus CPU-side int32 staging
+        tensors (pinned memory) that feed them via D2D copy_ each step.
+        torch.tensor(..., device="npu") is an H2D aclrtMemcpy and illegal
+        inside ACL graph capture, so the host values are first written into
+        the CPU staging tensors and then copied into the NPU buffers. The
+        buffers are sized to the capture bucket (num_tokens) and rewritten
+        every step, so replay refreshes them in-place.
         """
         if not hasattr(self, "_qfa_len_buffers"):
             self._qfa_len_buffers = {}
@@ -2648,33 +2681,10 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             self._qfa_len_buffers[key] = (
                 torch.zeros(max_seqs + 1, dtype=torch.int32, device=device),
                 torch.zeros(max_seqs, dtype=torch.int32, device=device),
+                torch.zeros(max_seqs + 1, dtype=torch.int32, pin_memory=True),
+                torch.zeros(max_seqs, dtype=torch.int32, pin_memory=True),
             )
         return self._qfa_len_buffers[key]
-
-    def _write_qfa_cu_seqlens(self, cumulative_seq_lengths: list[int], device: torch.device) -> torch.Tensor:
-        """Write cu_seqlens (0-prefixed cumulative) into a persistent buffer.
-
-        Eager path: identical semantics to _build_qfa_cu_seqlens. Capture
-        path: the D2D copy_ is recorded into the graph, so replays refresh
-        the buffer contents from the (persistent) host-side list each step.
-        """
-        num_tokens = int(cumulative_seq_lengths[-1]) if cumulative_seq_lengths else 0
-        num_seqs = len(cumulative_seq_lengths)
-        cu_buf, _ = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
-        cu_buf[: num_seqs + 1].copy_(
-            torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
-        )
-        return cu_buf[: num_seqs + 1]
-
-    def _write_qfa_seqused(self, seq_lens_list: list[int], device: torch.device) -> torch.Tensor:
-        """Write seqused_kv into a persistent buffer (see _write_qfa_cu_seqlens)."""
-        num_tokens = sum(seq_lens_list) if seq_lens_list else 0
-        num_seqs = len(seq_lens_list)
-        _, seq_buf = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
-        seq_buf[:num_seqs].copy_(
-            torch.tensor(seq_lens_list, dtype=torch.int32, device=device)
-        )
-        return seq_buf[:num_seqs]
 
     # KV cache writes for C8_MXFP happen in reshape_and_cache(), invoked from forward()
     # when key/value are present. This hook is only reached when attention is split from
