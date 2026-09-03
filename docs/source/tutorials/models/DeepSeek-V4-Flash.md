@@ -1074,7 +1074,7 @@ Before you start, please:
    export ASCEND_RT_VISIBLE_DEVICES=$1
    export TASK_QUEUE_ENABLE=1
 
-   vllm serve /mnt/weights/DeepSeek-V4-Flash-0731-w8a8 \
+   vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
        --host 0.0.0.0 \
        --port $2 \
        --data-parallel-size $3 \
@@ -1146,7 +1146,7 @@ Before you start, please:
    export HCCL_BUFFSIZE=1024
    export ASCEND_RT_VISIBLE_DEVICES=$1
 
-   vllm serve /mnt/weights/DeepSeek-V4-Flash-0731-w8a8 \
+   vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
        --host 0.0.0.0 \
        --port $2 \
        --data-parallel-size $3 \
