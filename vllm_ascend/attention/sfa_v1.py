@@ -3,14 +3,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
-import scipy  # type: ignore
 import torch
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
-from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
     AttentionCGSupport,
@@ -45,7 +44,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     OFFLOAD_V_CACHE_NPU_INDEX,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.ops.triton.rope import rope_forward_triton_siso
 from vllm_ascend.quantization.methods import (
     AscendW8A8DynamicLinearMethod,
     AscendW8A8LinearMethod,
@@ -411,10 +409,6 @@ class AscendSFAImpl(MLAAttentionImpl):
     understand this class
     """
 
-    # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
-    q_hadamard: torch.Tensor | None = None
-    k_hadamard: torch.Tensor | None = None
-
     def __init__(
         self,
         num_heads: int,
@@ -485,24 +479,12 @@ class AscendSFAImpl(MLAAttentionImpl):
                 "topk_indices_buffer is required when indexer is None and "
                 f"skip_topk is enabled. layer_name={self.layer_name}."
             )
-        # indexer param
+        # The indexer module owns its compute rules; SFA only keeps the
+        # indexer head_dim for cache-layout composition on CP paths.
         if self.has_indexer:
-            self.n_head: int = self.indexer.n_head  # 64
             self.head_dim: int = self.indexer.head_dim  # 128
-            self.wq_b = self.indexer.wq_b
-            self.wk_weights_proj = self.indexer.wk_weights_proj
-            self.k_norm = self.indexer.k_norm
         else:
-            self.n_head = getattr(hf_config, "index_n_heads", 0)
             self.head_dim = getattr(hf_config, "index_head_dim", 0)
-            self.wq_b = None
-            self.wk_weights_proj = None
-            self.k_norm = None
-        self.is_rope_neox_style = True
-        self.use_torch_npu_lightning_indexer = False
-        if self.vllm_config.model_config.hf_config.model_type in ["glm_moe_dsa"]:
-            self.is_rope_neox_style = False
-            self.use_torch_npu_lightning_indexer = True
 
         # Sparse C8 has two independent meanings in SFA:
         # - SFA packed KV cache for npu_kv_quant_sparse_flash_attention.
@@ -510,7 +492,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         # The user-facing switches control these layouts independently. LI C8
         # applies only to layers that own an indexer cache.
         self.enable_sparse_sfa_c8 = ascend_config.enable_sparse_sfa_c8
-        self.enable_sparse_li_c8 = self.has_indexer and ascend_config.is_sparse_li_c8_layer(self.indexer.k_cache.prefix)
+        self.enable_sparse_li_c8 = self.has_indexer and self.indexer.enable_sparse_li_c8
         if self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8:
             if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
                 self.c8_k_cache_dtype = torch.float8_e4m3fn
@@ -530,27 +512,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
-
-    @property
-    def kv_cache_indexer_k_idx(self) -> int:
-        """Index of the indexer key cache in the KV cache tuple.
-
-        When sparse C8 packs the SFA KV cache into a single tensor, the indexer
-        key cache moves from slot 2 to slot 1:
-
-        ================  =========  =========  =============  ==============
-        Layout            kv_cache[0]  kv_cache[1]  kv_cache[2]  kv_cache[3]
-        ================  =========  =========  =============  ==============
-        Default           k_nope     k_pe       indexer_k      indexer_scale
-        Sparse C8         packed_kv  indexer_k  indexer_scale  (unused)
-        ================  =========  =========  =============  ==============
-        """
-        return 1 if self.enable_sparse_sfa_c8 else 2
-
-    @property
-    def kv_cache_indexer_scale_idx(self) -> int:
-        """Index of the indexer scale cache in the KV cache tuple."""
-        return 2 if self.enable_sparse_sfa_c8 else 3
 
     @staticmethod
     def update_graph_params(
@@ -622,14 +583,8 @@ class AscendSFAImpl(MLAAttentionImpl):
                     device=self.weight_dq.device,
                 )
 
-        if self.has_indexer and self.enable_sparse_li_c8 and AscendSFAImpl.q_hadamard is None:
-            AscendSFAImpl.q_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
-                128**0.5
-            )
-        if self.has_indexer and self.enable_sparse_li_c8 and AscendSFAImpl.k_hadamard is None:
-            AscendSFAImpl.k_hadamard = torch.tensor(scipy.linalg.hadamard(128), dtype=torch.bfloat16, device="npu") / (
-                128**0.5
-            )
+        if self.has_indexer:
+            self.indexer.process_weights_after_loading()
 
     @staticmethod
     def _get_layer_quant_method(layer: torch.nn.Module | None):
@@ -1111,139 +1066,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         )
         return hidden_states, ql_nope, q_pe, q_c
 
-    def indexer_select_pre_process(
-        self,
-        x: torch.Tensor,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-    ):
-        if not self.has_indexer:
-            raise RuntimeError(
-                f"indexer_select_pre_process should not be called when indexer is None. layer_name={self.layer_name}."
-            )
-
-        assert self.wk_weights_proj is not None
-        assert self.k_norm is not None
-
-        kw, _ = self.wk_weights_proj(x)
-        k_li = kw[:, : self.head_dim]
-        k_li = self.k_norm(k_li).unsqueeze(1)
-        k_li = k_li.view(-1, 1, self.head_dim)
-
-        if HAS_TRITON:
-            cos = cos.view(-1, self.qk_rope_head_dim)
-            sin = sin.view(-1, self.qk_rope_head_dim)
-            k_li = rope_forward_triton_siso(
-                k_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            k_li_pe, k_li_nope = torch.split(
-                k_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            cos = cos.view(-1, 1, 1, self.qk_rope_head_dim)
-            sin = sin.view(-1, 1, 1, self.qk_rope_head_dim)
-
-            k_li_pe = k_li_pe.unsqueeze(2)
-            k_li_pe = torch_npu.npu_rotary_mul(k_li_pe, cos, sin)
-            k_li_pe = k_li_pe.squeeze(2)
-
-            k_li = torch.cat([k_li_pe, k_li_nope], dim=-1)  # [b*s,128]
-
-        if self.enable_sparse_li_c8:
-            k_li = k_li @ AscendSFAImpl.k_hadamard
-            k_li, k_li_scale = torch_npu.npu_dynamic_quant(k_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            k_li_scale = k_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-            k_li_scale = k_li_scale.unsqueeze(-1)  # [b*s,1]
-        else:
-            k_li_scale = None
-
-        return k_li, k_li_scale
-
-    def indexer_select_post_process(
-        self,
-        x: torch.Tensor,
-        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_cache: tuple[torch.Tensor, ...],
-        attn_metadata: M,
-        cos: torch.Tensor,
-        sin: torch.Tensor,
-        actual_seq_lengths_query: torch.Tensor,
-        actual_seq_lengths_key: torch.Tensor,
-    ):
-        if not self.has_indexer:
-            raise RuntimeError(
-                f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
-            )
-
-        assert self.wk_weights_proj is not None
-        assert self.wq_b is not None
-
-        kw, _ = self.wk_weights_proj(x)
-        weights = kw[:, self.head_dim :]
-        if isinstance(q_c, tuple):
-            q_c_tensor, q_c_scale = q_c
-            q_c_tensor = q_c_tensor.view(-1, q_c_tensor.shape[-1])
-            quant_matmul_kwargs = dict(
-                bias=None,
-                output_dtype=x.dtype,
-            )
-            if q_c_tensor.dtype == torch.float8_e4m3fn:
-                if q_c_scale.dim() == 2:
-                    q_c_scale = q_c_scale.view(q_c_scale.shape[0], -1, 2)
-                quant_matmul_kwargs.update(
-                    scale_dtype=torch_npu.float8_e8m0fnu,
-                    pertoken_scale_dtype=torch_npu.float8_e8m0fnu,
-                    group_sizes=[1, 1, getattr(self.wq_b.quant_method.quant_method, "group_size", 32)],
-                )
-            elif q_c_scale.dim() > 1 and q_c_scale.shape[-1] == 1:
-                q_c_scale = q_c_scale.squeeze(dim=-1)
-            q_li = torch_npu.npu_quant_matmul(
-                q_c_tensor,
-                self.wq_b.weight,
-                self.wq_b.weight_scale,
-                pertoken_scale=q_c_scale,
-                **quant_matmul_kwargs,
-            )
-        else:
-            q_li, _ = self.wq_b(q_c)
-        q_li = q_li.view(-1, self.n_head, self.head_dim)
-        if HAS_TRITON:
-            q_li = rope_forward_triton_siso(
-                q_li, cos, sin, rope_dim=self.qk_rope_head_dim, is_neox_style=self.is_rope_neox_style
-            )
-        else:
-            q_li_pe, q_li_nope = torch.split(
-                q_li, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1
-            )
-
-            q_li_pe = q_li_pe.unsqueeze(2)
-            q_li_pe = torch_npu.npu_rotary_mul(q_li_pe, cos, sin)
-            q_li_pe = q_li_pe.squeeze(2)
-            q_li = torch.cat([q_li_pe, q_li_nope], dim=-1)
-
-        q_li_scale = None
-        q_li_shape_ori = None
-        if self.enable_sparse_li_c8:
-            q_li_shape_ori = q_li.shape
-            q_li = q_li @ AscendSFAImpl.q_hadamard
-            q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
-            q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
-
-        return DeviceOperator.indexer_select_post_process(
-            self,
-            q_li,
-            q_li_scale,
-            q_li_shape_ori,
-            weights,
-            kv_cache,
-            attn_metadata,
-            actual_seq_lengths_query,
-            actual_seq_lengths_key,
-            self.enable_sparse_li_c8,
-            self.use_torch_npu_lightning_indexer,
-        )
-
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:
         if self.topk_indices_buffer is None:
             raise RuntimeError("IndexCache requires topk_indices_buffer when skip_topk is enabled.")
@@ -1263,10 +1085,6 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert topk_indices_to_cache.shape[1] == 1
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
         topk_indices_buffer.copy_(topk_indices_to_cache)
-
-    def _use_li_c8_reshape_optim(self) -> bool:
-        """Whether this layer can use the LI C8 cache-write operator."""
-        return self.enable_sparse_li_c8 and get_ascend_config().c8_enable_reshape_optim
 
     def _execute_sparse_flash_attention_process(
         self,
@@ -1446,7 +1264,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 f"got {len(main_cache)} for layer_name={self.layer_name}."
             )
 
-        expected_indexer_tensors = 2 if self.enable_sparse_li_c8 else 1
+        expected_indexer_tensors = self.indexer.num_cache_tensors
         if len(indexer_cache) != expected_indexer_tensors:
             raise RuntimeError(
                 f"SFA indexer cache expects {expected_indexer_tensors} tensor(s), "
@@ -1454,51 +1272,21 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
         return (*main_cache, *indexer_cache)
 
-    def _write_indexer_cache(
-        self,
-        k_li: torch.Tensor,
-        k_li_scale: torch.Tensor | None,
-        slot_mapping: torch.Tensor,
-        kv_cache: tuple,
-        attn_metadata: M,
-    ) -> None:
-        dsa_k_cache_idx = self.kv_cache_indexer_k_idx
-        dsa_k_scale_cache_idx = self.kv_cache_indexer_scale_idx
-
-        use_li_c8_reshape_optim = self._use_li_c8_reshape_optim()
-        if use_li_c8_reshape_optim:
-            torch.ops._C_ascend.store_kv_block(
-                k_li,
-                kv_cache[dsa_k_cache_idx],
-                attn_metadata.group_len,
-                attn_metadata.group_key_idx,
-                attn_metadata.group_key_cache_idx,
-                attn_metadata.block_size,
+    def _get_indexer_attn_metadata(self) -> Any | None:
+        """Fetch the indexer cache layer's own metadata, built by the indexer
+        backend's builder; ``None`` when this layer has no indexer."""
+        if not self.has_indexer:
+            return None
+        forward_metadata = get_forward_context().attn_metadata
+        indexer_metadata = (
+            forward_metadata.get(self.indexer.k_cache.prefix) if isinstance(forward_metadata, dict) else None
+        )
+        if indexer_metadata is None:
+            raise RuntimeError(
+                "No metadata was built for the indexer cache layer "
+                f"prefix={self.indexer.k_cache.prefix}. layer_name={self.layer_name}."
             )
-        else:
-            torch_npu.npu_scatter_nd_update_(
-                kv_cache[dsa_k_cache_idx].view(-1, k_li.shape[-1]),
-                slot_mapping.view(-1, 1),
-                k_li.view(-1, k_li.shape[-1]),
-            )  # b, s, n, d
-        if self.enable_sparse_li_c8:
-            assert len(kv_cache) == (3 if self.enable_sparse_sfa_c8 else 4)
-            assert k_li_scale is not None
-            if use_li_c8_reshape_optim:
-                torch.ops._C_ascend.store_kv_block(
-                    k_li_scale,
-                    kv_cache[dsa_k_scale_cache_idx],
-                    attn_metadata.group_len,
-                    attn_metadata.group_key_idx,
-                    attn_metadata.group_key_cache_idx,
-                    attn_metadata.block_size,
-                )
-            else:
-                torch_npu.npu_scatter_nd_update_(
-                    kv_cache[dsa_k_scale_cache_idx].view(-1, k_li_scale.shape[-1]),
-                    slot_mapping.view(-1, 1),
-                    k_li_scale.view(-1, k_li_scale.shape[-1]),
-                )
+        return indexer_metadata
 
     def forward(
         self,
@@ -1519,8 +1307,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         cos = attn_metadata.cos
         sin = attn_metadata.sin
-        slot_mapping_li = attn_metadata.slot_mapping
         slot_mapping_sfa = self._get_sfa_kv_slot_mapping(attn_metadata)
+        indexer_attn_metadata = self._get_indexer_attn_metadata()
 
         # Inputs and outputs may be padded for CUDA graphs
         num_input_tokens = attn_metadata.num_input_tokens
@@ -1546,10 +1334,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                     "SFA Prolog V3 requires one cache index per input token, "
                     f"got token_x={hidden_states.shape[0]} and cache_index={slot_mapping_sfa.numel()}."
                 )
-            if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(x=hidden_states, cos=cos, sin=sin)
-            else:
-                k_li, k_li_scale = None, None
+            # Keep the raw hidden states for the indexer's k path: the fused
+            # preprocess below returns new tensors and does not modify this
+            # one in place.
+            k_hidden_states = hidden_states if self.has_indexer else None
             wait_for_kv_layer_from_connector(layer_name)
 
             if fused_type == PreprocessType.PROLOG_V3:
@@ -1581,14 +1369,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             assert self.q_a_layernorm is not None, "q_a_layernorm must be initialized"
             q_c = self.q_a_layernorm(q_c)
 
-            if self.has_indexer:
-                k_li, k_li_scale = self.indexer_select_pre_process(
-                    x=hidden_states,
-                    cos=cos,
-                    sin=sin,
-                )
-            else:
-                k_li, k_li_scale = None, None
+            # The prepared hidden states feed the indexer's k path (same stage
+            # as the weights path input).
+            k_hidden_states = hidden_states if self.has_indexer else None
 
             wait_for_kv_layer_from_connector(layer_name)
 
@@ -1602,12 +1385,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             k_pe, k_nope = kv_outputs[:2]
             knope_scale = kv_outputs[2] if len(kv_outputs) == 3 else None
-            k_li, k_li_scale, fused_kv_no_split, kv_ag_handles = self._prepare_kv_for_parallel(
+            # k_li no longer exists at this point: it is computed by
+            # indexer.forward_k below and gathered at cache-write time, so
+            # the fused gather below only carries the main KV.
+            _, _, fused_kv_no_split, kv_ag_handles = self._prepare_kv_for_parallel(
                 k_pe,
                 k_nope,
                 knope_scale,
-                k_li,
-                k_li_scale,
+                None,
+                None,
                 parallel_context.gather_full_o_proj,
             )
 
@@ -1622,12 +1408,12 @@ class AscendSFAImpl(MLAAttentionImpl):
             (
                 k_pe,
                 k_nope,
-                k_li,
+                _,
             ) = self._store_parallel_kv(
                 k_pe,
                 k_nope,
                 knope_scale,
-                k_li,
+                None,
                 fused_kv_no_split,
                 kv_ag_handles,
                 kv_cache,
@@ -1637,48 +1423,48 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
 
         if self.has_indexer:
-            assert k_li is not None
-            if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
-                assert attn_metadata.pcp_slot_mapping is not None
-                indexer_cache_slot_mapping = attn_metadata.pcp_slot_mapping
-            else:
-                indexer_cache_slot_mapping = slot_mapping_li
-            self._write_indexer_cache(
-                k_li,
-                k_li_scale,
-                indexer_cache_slot_mapping,
-                kv_cache,
-                attn_metadata,
+            # One unified indexer call: k path -> cache write -> top-k
+            # selection (the selection kernel reads the freshly written
+            # cache). skip_topk layers still run the k path and the write
+            # (compute_topk=False) so their cache stays up to date, then
+            # reuse the shared top-k indices. The parallel-layout values the
+            # indexer needs ride on its own metadata: sequence lengths
+            # (sharded under DSA-CP) and the decode-token count the PCP
+            # cache-write gather splits on.
+            assert k_hidden_states is not None
+            indexer_attn_metadata.actual_seq_lengths_query = parallel_context.actual_seq_lengths_query
+            indexer_attn_metadata.actual_seq_lengths_key = parallel_context.actual_seq_lengths_key
+            indexer_attn_metadata.num_decode_tokens = attn_metadata.num_decode_tokens
+            topk_indices = self.indexer(
+                hidden_states,
+                q_c,
+                cos,
+                sin,
+                k_hidden_states,
+                indexer_attn_metadata,
+                compute_topk=not self.skip_topk,
             )
+            if self.skip_topk:
+                topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
+            elif self.use_index_cache:
+                self._update_indexcache_topk_indices(topk_indices)
+        elif self.skip_topk:
+            # Layers sharing another layer's indexer (e.g. GLM-5.2 "shared"
+            # layers) own no indexer and only reuse the shared top-k indices.
+            topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
+        else:
+            raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
 
         # Notify for every layer that wrote the cache, not just indexer layers:
         # by this point all of the layer's KV (main + indexer) has been
-        # scattered, so the connector can dispatch the PD pull immediately.
+        # scattered - indexer layers persisted it inside indexer.forward
+        # above - so the connector can dispatch the PD pull.
         notify_kv_cache_written(self.layer_name or "")
 
         # Open the prefetch gate for every SFA layer. Some GLM-5.2 layers
         # reuse cached top-k indices and have no indexer, so recording this
-        # inside indexer_select_post_process would leave their gate closed.
+        # inside the indexer's forward would leave their gate closed.
         record_attention_compute_start()
-
-        if self.skip_topk:
-            topk_indices = self._get_indexcache_topk_indices(parallel_context.topk_num_tokens)
-        else:
-            if not self.has_indexer:
-                raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
-            assert q_c is not None
-            topk_indices = self.indexer_select_post_process(
-                x=hidden_states,
-                q_c=q_c,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                cos=cos,
-                sin=sin,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
-            )
-            if self.use_index_cache:
-                self._update_indexcache_topk_indices(topk_indices)
 
         attn_output = self._execute_sparse_flash_attention_process(
             ql_nope,

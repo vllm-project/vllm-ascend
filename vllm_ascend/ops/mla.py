@@ -32,33 +32,44 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
+from vllm_ascend.attention.indexer import (
+    AscendSFAIndexerBackend,
+    AscendSFAIndexerMetadata,
+)
+
 
 class IndexerWrapper(nn.Module):
-    """
-    A wrapper of Indexer for Deepseek v3.2.
-    This wrapper is currently used to solve the fp8 hard code issue of vllm's deepseek_v2.py.
-    It wraps the original Indexer, inherits its module weights
-    (including wq_b, wk_weights_proj or wk/weights_proj, k_norm)
-    while deleting the unused topk_indices_buffer to save memory.
-    TODO: Will be removed once original Indexer supports different quantization methods.
+    """Model-facing wrapper owning the per-layer indexer backend.
+
+    Mirrors the wrapper/backend split of AscendMultiHeadLatentAttention: the
+    wrapper wires the upstream weight module into the model tree and
+    dispatches; all compute and cache persistence live in the
+    ``AscendSFAIndexerBackend`` instance it owns.
     """
 
-    def __init__(self, vllm_indexer: nn.Module) -> None:
+    def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
         super().__init__()
+        self.impl = AscendSFAIndexerBackend(vllm_indexer, qk_rope_head_dim)
 
-        self.n_head: int = vllm_indexer.n_head  # 64
-        self.head_dim: int = vllm_indexer.head_dim  # 128
-        self.topk_tokens: int = vllm_indexer.topk_tokens  # 2048
-        self.q_lora_rank: int = vllm_indexer.q_lora_rank  # 1536
-        self.wq_b = vllm_indexer.wq_b
-        self.wk_weights_proj = vllm_indexer.wk_weights_proj
-        self.k_norm = vllm_indexer.k_norm
-        self.softmax_scale = vllm_indexer.softmax_scale
-        self.k_cache = getattr(vllm_indexer, "k_cache", None)
-        vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
+    # Interface consumed by the SFA impl - delegated to the backend impl.
+    @property
+    def k_cache(self):
+        return self.impl.k_cache
 
-    def forward(self):
-        return
+    def process_weights_after_loading(self) -> None:
+        self.impl.process_weights_after_loading()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        k_hidden_states: torch.Tensor,
+        indexer_metadata: AscendSFAIndexerMetadata,
+        compute_topk: bool = True,
+    ) -> torch.Tensor | None:
+        return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -102,7 +113,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:
-            ascend_indexer = IndexerWrapper(mla_modules.indexer)
+            ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
         else:
             ascend_indexer = None
         self.mla_attn = MLAAttention(

@@ -119,37 +119,6 @@ def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
     )
 
 
-def test_sfa_pcp_gathers_indexer_kv_with_its_slot_mapping() -> None:
-    impl = AscendSFAPCPImpl.__new__(AscendSFAPCPImpl)
-    attn_metadata = SimpleNamespace(num_decode_tokens=1)
-    k_li = torch.arange(8, dtype=torch.float32).view(2, 4)
-    k_li_scale = torch.ones(2, 1, dtype=torch.float32)
-    slots = torch.tensor([7, 8], dtype=torch.int64)
-    gathered_k_li = torch.arange(16, dtype=torch.float32).view(4, 4)
-    gathered_scale = torch.full((4, 1), 2.0)
-    gathered_slots = torch.tensor([1, 2, 7, 8], dtype=torch.int64)
-    kv_cache = (torch.empty(1), torch.empty(1), torch.empty(1))
-
-    with (
-        patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp._gather_prefill_cache_inputs",
-            return_value=((gathered_k_li, gathered_scale), gathered_slots),
-        ) as gather,
-        patch.object(AscendSFAImpl, "_write_indexer_cache", autospec=True) as base_write,
-    ):
-        impl._write_indexer_cache(k_li, k_li_scale, slots, kv_cache, attn_metadata)
-
-    gather.assert_called_once_with((k_li, k_li_scale), slots, 1)
-    base_write.assert_called_once_with(
-        impl,
-        gathered_k_li,
-        gathered_scale,
-        gathered_slots,
-        kv_cache,
-        attn_metadata,
-    )
-
-
 def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
     dcp_impl = AscendSFADCPImpl.__new__(AscendSFADCPImpl)
     combined_impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
