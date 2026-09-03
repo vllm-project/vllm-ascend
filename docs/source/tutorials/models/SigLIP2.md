@@ -8,7 +8,7 @@ Supported use cases include image-text similarity, zero-shot ImageNet classifica
 
 This guide describes how to deploy and evaluate SigLIP2 with vLLM Ascend on **Atlas 300I DUO**.
 
-This document is validated and written based on **vLLM-Ascend v26.2.0**. The current model (`siglip2-base-patch16-224`) is fully supported for text and image embedding in this version, and all **v26.2.0 and later versions** can run stably. As a pooling model, SigLIP2 is used for offline `llm.embed()` and online `/v1/embeddings` serving; features such as PD separation and MTP are not applicable.
+This document is validated and written based on the **vLLM-Ascend main branch** as of **2026-09-03**. The current model (`siglip2-base-patch16-224`) is fully supported for text and image embedding on this branch. As a pooling model, SigLIP2 is used for offline `llm.embed()` and online `/v1/embeddings` serving; features such as PD separation and MTP are not applicable. Use the **main branch** snapshot from that date or a later official release that includes SigLIP2 support.
 
 ## 2 Supported Features
 
