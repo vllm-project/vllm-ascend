@@ -268,6 +268,7 @@ def test_hccl_sleep_preserves_anchor_and_manages_business_groups():
 
     with (
         patch.object(manager, "_ensure_lifecycle_anchor", return_value=True),
+        patch.object(manager, "prepare_moe_hccl_teardown", return_value=True) as mock_prepare_moe,
         patch.object(manager, "iter_alive_group_coordinators", return_value=groups),
     ):
         assert manager.destroy_hccl() == 2
@@ -276,6 +277,7 @@ def test_hccl_sleep_preserves_anchor_and_manages_business_groups():
 
     anchor_group.destroy_hccl.assert_not_called()
     anchor_group.restore_hccl.assert_not_called()
+    mock_prepare_moe.assert_called_once_with()
     tp_group.destroy_hccl.assert_called_once_with()
     ep_group.destroy_hccl.assert_called_once_with()
     tp_group.restore_hccl.assert_called_once_with()
@@ -296,6 +298,87 @@ def test_hccl_sleep_skips_teardown_when_anchor_initialization_fails():
 
     business_group.destroy_hccl.assert_not_called()
     business_group.restore_hccl.assert_not_called()
+
+
+def test_hccl_sleep_prepares_moe_state_before_business_group_teardown():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    business_group = MagicMock(group_name="mc2")
+    business_group.destroy_hccl.return_value = True
+    calls: list[str] = []
+
+    def record_prepare() -> bool:
+        calls.append("prepare")
+        return True
+
+    def record_destroy() -> bool:
+        calls.append("destroy")
+        return True
+
+    with (
+        patch.object(manager, "_ensure_lifecycle_anchor", return_value=True),
+        patch.object(manager, "prepare_moe_hccl_teardown", side_effect=record_prepare),
+        patch.object(manager, "iter_alive_group_coordinators", return_value=[business_group]),
+    ):
+        business_group.destroy_hccl.side_effect = record_destroy
+        assert manager.destroy_hccl() == 1
+
+    assert calls == ["prepare", "destroy"]
+
+
+def test_hccl_wakeup_refreshes_dispatcher_then_moe_runtime_state():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    calls: list[str] = []
+
+    def record_restore() -> int:
+        calls.append("restore")
+        return 2
+
+    def record_dispatcher() -> None:
+        calls.append("dispatcher")
+
+    def record_runtime() -> None:
+        calls.append("runtime")
+
+    with (
+        patch.object(manager, "restore_hccl", side_effect=record_restore),
+        patch.object(manager, "refresh_moe_hccl_groups", side_effect=record_dispatcher),
+        patch.object(manager, "refresh_moe_hccl_runtime_state", side_effect=record_runtime),
+        patch(
+            "vllm_ascend.device_allocator.sleep_mem_optimized.set_current_vllm_config",
+            return_value=nullcontext(),
+        ),
+    ):
+        manager.wakeup()
+
+    assert calls == ["restore", "dispatcher", "runtime"]
+
+
+def test_hccl_prepare_calls_moe_communicator_lifecycle_hooks():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    prepareable = MagicMock()
+    unrelated = object()
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.moe_comm_method._MoECommMethods",
+        {"fused": prepareable, "other": unrelated},
+    ):
+        assert manager.prepare_moe_hccl_teardown() is True
+
+    prepareable.prepare_hccl_teardown.assert_called_once_with()
+
+
+def test_hccl_runtime_refresh_calls_moe_communicator_hooks():
+    manager = HcclSleepWakeupManager(MagicMock(), MagicMock())
+    refreshable = MagicMock()
+    unrelated = object()
+
+    with patch(
+        "vllm_ascend.ops.fused_moe.moe_comm_method._MoECommMethods",
+        {"fused": refreshable, "other": unrelated},
+    ):
+        manager.refresh_moe_hccl_runtime_state()
+
+    refreshable.refresh_hccl_runtime_state.assert_called_once_with()
 
 
 def test_sleep_wakeup_releases_anchor_after_aclgraph_recapture():
