@@ -2643,7 +2643,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
         """
         num_tokens = int(cumulative_seq_lengths[-1]) if cumulative_seq_lengths else 0
         num_seqs = len(cumulative_seq_lengths)
-        cu_buf, _, cu_cpu = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
+        cu_buf, _, cu_cpu, _ = self._qfa_step_buffers(max(num_tokens, 1), num_seqs, device)
         cu_cpu[: num_seqs + 1] = torch.tensor(
             [0, *cumulative_seq_lengths], dtype=torch.int32, device="cpu"
         )
