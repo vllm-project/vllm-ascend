@@ -231,10 +231,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     Qwen3-32B-W8A8:
 
     ```bash
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export TASK_QUEUE_ENABLE=1
-    export HCCL_OP_EXPANSION_MODE="AIV"
 
     vllm serve your_model_path \
         --served-model-name qwen3 \
@@ -253,10 +252,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     Qwen3-32B-W4A4:
 
     ```bash
-    export ASCEND_RT_VISIBLE_DEVICES=0,1
-    export VLLM_USE_V1=1
-    export TASK_QUEUE_ENABLE=1
     export HCCL_BUFFSIZE=1024
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
     vllm serve your_model_path \
         --port 8004 \
         --data-parallel-size 1 \
@@ -540,10 +537,9 @@ Please refer to the [vLLM Features](https://docs.vllm.ai/en/stable/features), [v
 <u>High Throughput Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
@@ -565,10 +561,9 @@ vllm serve your_model_path \
 <u>Long Context Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --host <host_ip> \
@@ -592,10 +587,9 @@ vllm serve your_model_path \
 <u>Low Latency Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
