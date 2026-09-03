@@ -11,8 +11,6 @@ DeepSeek-V4-Flash is the lightweight variant of the DeepSeek-V4 family, suitable
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-> **Note**: Please replace the version placeholder above with your actual validation version.
-
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
@@ -655,11 +653,12 @@ Before you start, please:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=2560
+        export HCCL_BUFFSIZE=1800
         export TASK_QUEUE_ENABLE=1
         export HCCL_OP_EXPANSION_MODE="AIV"
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
         export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
 
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -678,7 +677,7 @@ Before you start, please:
             --max-num-seqs 16 \
             --no-disable-hybrid-kv-cache-manager \
             --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
-            --speculative-config '{"num_speculative_tokens": 7,"method": "dspark","enforce_eager": true}' \
+            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
             --trust-remote-code \
             --block-size 32 \
             --tokenizer-mode deepseek_v4 \
@@ -688,7 +687,7 @@ Before you start, please:
             --gpu-memory-utilization 0.9 \
             --quantization ascend \
             --enforce-eager \
-            --additional-config '{"enable_cpu_binding": true, "enable_shared_expert_dp": true,  "enable_dsa_cp": false, "enable_flashcomm1":true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1":true}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -719,7 +718,7 @@ Before you start, please:
         export VLLM_RPC_TIMEOUT=3600000
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
         export HCCL_EXEC_TIMEOUT=204
-        export HCCL_CONNECT_TIMEOUT=1200
+        export HCCL_CONNECT_TIMEOUT=120
         export HCCL_IF_IP=$local_ip
         export GLOO_SOCKET_IFNAME=$nic_name
         export TP_SOCKET_IFNAME=$nic_name
@@ -727,7 +726,7 @@ Before you start, please:
         export OMP_PROC_BIND=false
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        export HCCL_BUFFSIZE=1024
+        export HCCL_BUFFSIZE=2400
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /path/to/DeepSeek-V4-Flash-0731-w8a8 \
@@ -742,8 +741,8 @@ Before you start, please:
             --seed 1024 \
             --served-model-name dsv4 \
             --max-model-len 1048576 \
-            --max-num-batched-tokens 256 \
-            --max-num-seqs 32 \
+            --max-num-batched-tokens 480 \
+            --max-num-seqs 60 \
             --async-scheduling \
             --block-size 32 \
             --no-disable-hybrid-kv-cache-manager \
@@ -754,10 +753,10 @@ Before you start, please:
             --tool-call-parser deepseek_v4 \
             --enable-auto-tool-choice \
             --reasoning-parser deepseek_v4 \
-            --gpu-memory-utilization 0.9 \
+            --gpu-memory-utilization 0.95 \
             --quantization ascend \
-            --speculative-config '{"num_speculative_tokens": 7,"method": "dspark","enforce_eager": true}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+            --speculative-config '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [12, 24, 48, 96, 192, 256, 288, 360]}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_consumer",
@@ -1075,6 +1074,8 @@ Key Parameter Descriptions:
 - `speculative-config`: When DSpark is enabled, Prefill and Decode must use the same number of speculative tokens, and `num_speculative_tokens` must be at least 5 (check the checkpoint's `config.json`). For MTP, we recommend setting Prefill to 1 and Decode to the actual number of speculative tokens.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
+- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: Enables the fused MoE computation (MC2) optimization, which consolidates shared expert and routed expert computation into fused kernels to reduce launch overhead and improve MoE inference throughput.
+- `cudagraph_capture_sizes` (inside `--compilation-config`): Batch size tiers for ACL graph capture in Decode phase. vLLM pre-compiles graphs for these batch sizes to avoid runtime compilation overhead. In DSpark mode (`num_speculative_tokens=5`), each sequence processes 6 tokens per step (1 real + 5 speculative), so actual concurrency ≈ `batch_size / 6` (e.g., 360 → 60 concurrency). If unset, vLLM auto-captures on demand; set explicitly when concurrency patterns are predictable.
 
 Deployment Verification:
 
@@ -1142,28 +1143,6 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 ## 9 Performance Tuning
 
 ### 9.1 Recommended Configurations
-
-> **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
-
-#### Table 1: Scenario Overview
-
-> `*Total NPUs` indicates the total number of NPUs used across all nodes.
-
-|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
-|--------|---------------|-----------|---------------|-------------------|
-|High Throughput|Single-Node Mixed|16 (A3)|DeepSeek-V4-Flash-w8a8-mtp|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|High Throughput|1P1D deployment|32 (A3)|DeepSeek-V4-Flash-w8a8-mtp|dp16 tp1 on both P and D nodes; balanced latency and throughput|
-|Long Context (1M)|Single-Node (A3)|8 (A3)|DeepSeek-V4-Flash-w8a8-mtp|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Long Context (1M)|1P1D deployment|32 (A3)|DeepSeek-V4-Flash-w8a8-mtp|dp16 tp1 on both P and D nodes; balanced latency and throughput|
-
-#### Table 2: Detailed Node Configuration
-
-|Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Speculation Num|
-|--------|-------------|-----|--|--|------------|----------------------|--------------|--------------------|
-|High Throughput (A3)|Server / Single Machine|8|4|4|64|10240|1048576|1|
-|Long Context (1M, A3)|Server / Single Machine|8|4|4|64|10240|1048576|1|
-|PD Separation (A3)|Server-P Node|8|4|4|16|8192|1048576|1|
-|PD Separation (A3)|Server-D Node|8|1|16|60|120|1048576|1|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
