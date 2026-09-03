@@ -389,14 +389,15 @@ class NPUModelRunner(GPUModelRunner):
         # dsa c8
         self.enable_sparse_sfa_c8 = vllm_config.cache_config.cache_dtype in ["fp8", "int8"]
         self.enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
-        self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
-            vllm_config.attention_config.indexer_kv_dtype, 
-            vllm_config.model_config
-        )
-        if self.c8_k_cache_dtype == torch.float8_e4m3fn:
-            self.c8_k_scale_cache_dtype = torch.float32
-        elif self.c8_k_cache_dtype == torch.int8:
-            self.c8_k_scale_cache_dtype = torch.float16
+        if self.enable_sparse_li_c8:
+            self.c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
+                vllm_config.attention_config.indexer_kv_dtype, 
+                vllm_config.model_config
+            )
+            if self.c8_k_cache_dtype == torch.float8_e4m3fn:
+                self.c8_k_scale_cache_dtype = torch.float32
+            elif self.c8_k_cache_dtype == torch.int8:
+                self.c8_k_scale_cache_dtype = torch.float16
 
         self.attn_backend = get_attn_backend(
             0,
