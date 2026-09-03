@@ -6,6 +6,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (  # type: ignore[import-not-found]
@@ -28,6 +29,8 @@ from vllm_ascend.worker.v2.spec_decode.physical_k import (
     query_width,
     v2_varlen_physical_k_enabled,
 )
+
+logger = init_logger(__name__)
 
 
 class DFlashAclGraphManager(DFlashCudaGraphManager):
