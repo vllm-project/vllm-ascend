@@ -265,12 +265,12 @@ class CoverageSelector:
 
                     # Bracket counting to find header end
                     start_idx = node.lineno - 1
-                    paren_count = lines[start_idx].count('(') - lines[start_idx].count(')')
+                    paren_count = lines[start_idx].count("(") - lines[start_idx].count(")")
 
                     line_idx = start_idx
                     while paren_count > 0 and line_idx < len(lines):
                         line_idx += 1
-                        paren_count += lines[line_idx].count('(') - lines[line_idx].count(')')
+                        paren_count += lines[line_idx].count("(") - lines[line_idx].count(")")
 
                     header_end = line_idx + 1  # Convert to 1-indexed
 
@@ -332,7 +332,11 @@ class CoverageSelector:
             # Class and function docstrings
             for node in ast.walk(tree):
                 if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-                    if node.body and isinstance(node.body[0], ast.Expr) and isinstance(node.body[0].value, ast.Constant):
+                    if (
+                        node.body
+                        and isinstance(node.body[0], ast.Expr)
+                        and isinstance(node.body[0].value, ast.Constant)
+                    ):
                         docstring_lines.add(node.body[0].lineno)
         except Exception:
             pass
