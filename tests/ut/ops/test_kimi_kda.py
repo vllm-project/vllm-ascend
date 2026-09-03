@@ -530,12 +530,18 @@ def test_kda_forward_preserves_live_rows_with_nan_padding(mode):
         recurrent_state.add_(1)
         return v.clone()
 
+    def causal_conv1d(x, *args, **kwargs):
+        # mirrors the split-write contract of _run_causal_conv1d:
+        # [N, 3C] merged qkv -> three [1, N, H, D] views (head_dim=2 here)
+        q, k, v = x.chunk(3, dim=-1)
+        return tuple(t.view(1, t.shape[0], -1, 2) for t in (q, k, v))
+
     attention = SimpleNamespace(
         prefix="kda",
         head_dim=2,
         kv_cache=(torch.zeros(1), state),
         get_parameter=lambda name: torch.empty(1),
-        _run_causal_conv1d=lambda x, *args, **kwargs: x,
+        _run_causal_conv1d=causal_conv1d,
         _run_recurrent=recurrent,
         o_norm=lambda x, g: x * torch.sigmoid(g),
     )

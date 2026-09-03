@@ -46,6 +46,7 @@ struct CausalConv1dTilingData {
     int64_t activationMode;
     int64_t padSlotId;
     int64_t hasBias;
+    int64_t split_qkv; // P2: when 1, kernel writes q/k/v into y_q/y_k/y_v (each [N, dim/3]) instead of merged y
     int64_t baseDim;
     int64_t baseDimCnt;
     int64_t hasNumAcceptedTokens;
