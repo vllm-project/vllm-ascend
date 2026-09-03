@@ -90,8 +90,31 @@ def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
 
 
+def _dynamic_spec_config_enabled(vllm_config: VllmConfig) -> bool:
+    """Whether the user opted into the dynamic speculative-length path.
+
+    Reads the raw ``additional_config`` dict instead of the parsed
+    ``AscendConfig`` because this module can be consulted (through the
+    ``use_v2_model_runner`` property) before ``init_ascend_config`` has run.
+    """
+    additional_config = getattr(vllm_config, "additional_config", None) or {}
+    dynamic_spec_config = additional_config.get("dynamic_spec_config") or {}
+    return dynamic_spec_config.get("method") is not None
+
+
 def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
     """Feature whitelist: only whitelisted features may be enabled with a whitelisted model."""
+    # Dynamic speculative length (dynamic_spec_config in additional_config or
+    # num_speculative_tokens_per_batch_size in speculative_config) is only
+    # implemented for the V1 model runner.
+    if _dynamic_spec_config_enabled(vllm_config) or (
+        vllm_config.speculative_config is not None
+        and getattr(vllm_config.speculative_config, "num_speculative_tokens_per_batch_size", None)
+    ):
+        logger.info_once(
+            "Dynamic speculative length is not supported by Model Runner V2; using the V1 model runner instead."
+        )
+        return False
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
         return True
@@ -111,8 +134,7 @@ def _v2_model_runner_environment_ready(vllm_config: VllmConfig) -> bool:
 
     from vllm.triton_utils import HAS_TRITON
 
-    if is_310p() or not HAS_TRITON:
-        logger.warning_once("310p not support Model Runner V2.")
+    if not is_310p() and not HAS_TRITON:
         logger.warning_once("Model Runner V2 requires Triton; using the V1 model runner instead.")
         return False
 
@@ -126,7 +148,9 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     runner is enabled by default only when all of the following hold:
 
     * the model is on the default-V2 model whitelist,
-    * the enabled features are on the V2 feature whitelist,
+    * the enabled features are on the V2 feature whitelist (dynamic
+      speculative length -- ``dynamic_spec_config`` or
+      ``num_speculative_tokens_per_batch_size`` -- forces V1),
     * the runtime provides Triton.
     """
     use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER

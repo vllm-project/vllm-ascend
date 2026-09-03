@@ -41,10 +41,11 @@ def _make_model_config(**kwargs) -> SimpleNamespace:
     return SimpleNamespace(**attrs)
 
 
-def _make_vllm_config(model_config=None, speculative_config=None) -> SimpleNamespace:
+def _make_vllm_config(model_config=None, speculative_config=None, additional_config=None) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=model_config,
         speculative_config=speculative_config,
+        additional_config=additional_config,
     )
 
 
@@ -87,6 +88,29 @@ class TestIsSupportedV2ModelRunnerFeature:
         config = _make_vllm_config(speculative_config=None)
 
         assert is_supported_v2_model_runner_feature(config) is True
+
+    def test_dynamic_spec_config_forces_v1(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(
+            additional_config={"dynamic_spec_config": {"method": "dspark", "method_params": {}}},
+        )
+
+        assert is_supported_v2_model_runner_feature(config) is False
+
+    def test_dynamic_spec_config_with_none_method(self):
+        config = _make_vllm_config(
+            additional_config={"dynamic_spec_config": {"method": None, "method_params": {}}},
+        )
+
+        assert is_supported_v2_model_runner_feature(config) is True
+
+    def test_num_speculative_tokens_per_batch_size_forces_v1(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(
+            speculative_config=SimpleNamespace(method="eagle", num_speculative_tokens_per_batch_size=4),
+        )
+
+        assert is_supported_v2_model_runner_feature(config) is False
 
     @pytest.mark.parametrize("method", ["eagle", "mtp", "dflash"])
     def test_whitelisted_methods(self, monkeypatch, method):
