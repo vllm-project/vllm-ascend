@@ -216,6 +216,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata) -> None:
+        """Fence the previous save before this step can reuse KV blocks."""
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_previous_save()
+
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         assert self.connector_worker is not None
         self._mamba_copy_bufs = None
