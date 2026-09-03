@@ -550,9 +550,13 @@ class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
     ) -> AttentionCGSupport:
         mode = vllm_config.compilation_config.cudagraph_mode
         if mode.has_piecewise_cudagraphs() and not mode.has_full_cudagraphs():
-            return AttentionCGSupport.PARTIAL
-        # FULL (incl. FULL_DECODE_ONLY): let the engine attempt the capture;
-        # the impl raises at capture time with the actionable reason.
+            # PIECEWISE: QFA runs outside the compiled region as a plain
+            # call (validated on-device). UNIFORM_BATCH is the support
+            # level the other piecewise-capable Ascend backends report
+            # (e.g. mla_v1); AttentionCGSupport has no PARTIAL member.
+            return AttentionCGSupport.UNIFORM_BATCH
+        # FULL (incl. FULL_DECODE_ONLY): npugraph_ex captures the
+        # allocating QFA wrapper natively (golden-test GRAPH_PATH=7).
         return AttentionCGSupport.ALWAYS
 
     def __init__(self, *args, **kwargs) -> None:
