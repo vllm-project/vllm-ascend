@@ -41,11 +41,19 @@ def _make_model_config(**kwargs) -> SimpleNamespace:
     return SimpleNamespace(**attrs)
 
 
-def _make_vllm_config(model_config=None, speculative_config=None, additional_config=None) -> SimpleNamespace:
+def _make_vllm_config(
+    model_config=None,
+    speculative_config=None,
+    additional_config=None,
+    lora_config=None,
+    offload_config=None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=model_config,
         speculative_config=speculative_config,
         additional_config=additional_config,
+        lora_config=lora_config,
+        offload_config=offload_config,
     )
 
 
@@ -107,19 +115,64 @@ class TestIsSupportedV2ModelRunnerFeature:
     def test_num_speculative_tokens_per_batch_size_forces_v1(self, monkeypatch):
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
         config = _make_vllm_config(
-            speculative_config=SimpleNamespace(method="eagle", num_speculative_tokens_per_batch_size=4),
+            speculative_config=SimpleNamespace(method="eagle3", num_speculative_tokens_per_batch_size=4),
         )
 
         assert is_supported_v2_model_runner_feature(config) is False
 
-    @pytest.mark.parametrize("method", ["eagle", "mtp", "dflash"])
+    def test_lora_forces_v1(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config(lora_config=SimpleNamespace(max_lora_rank=16))
+
+        assert is_supported_v2_model_runner_feature(config) is False
+
+    def test_prefetch_offload_forces_v1(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        offload_config = SimpleNamespace(
+            offload_backend="prefetch",
+            uva=SimpleNamespace(cpu_offload_gb=0),
+            prefetch=SimpleNamespace(offload_group_size=4),
+        )
+        config = _make_vllm_config(offload_config=offload_config)
+
+        assert is_supported_v2_model_runner_feature(config) is False
+
+    def test_uva_offload_forces_v1(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        offload_config = SimpleNamespace(
+            offload_backend="auto",
+            uva=SimpleNamespace(cpu_offload_gb=8),
+            prefetch=SimpleNamespace(offload_group_size=0),
+        )
+        config = _make_vllm_config(offload_config=offload_config)
+
+        assert is_supported_v2_model_runner_feature(config) is False
+
+    def test_inactive_offload_config_keeps_v2(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        offload_config = SimpleNamespace(
+            offload_backend="auto",
+            uva=SimpleNamespace(cpu_offload_gb=0),
+            prefetch=SimpleNamespace(offload_group_size=0),
+        )
+        config = _make_vllm_config(offload_config=offload_config)
+
+        assert is_supported_v2_model_runner_feature(config) is True
+
+    def test_missing_offload_config_keeps_v2(self, monkeypatch):
+        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
+        config = _make_vllm_config()
+
+        assert is_supported_v2_model_runner_feature(config) is True
+
+    @pytest.mark.parametrize("method", ["eagle3", "mtp", "dflash"])
     def test_whitelisted_methods(self, monkeypatch, method):
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
         config = _make_vllm_config(speculative_config=SimpleNamespace(method=method))
 
         assert is_supported_v2_model_runner_feature(config) is True
 
-    @pytest.mark.parametrize("method", ["ngram", "ngram_gpu", "unknown_method"])
+    @pytest.mark.parametrize("method", ["ngram", "ngram_gpu", "eagle", "unknown_method"])
     def test_unsupported_method(self, method):
         config = _make_vllm_config(speculative_config=SimpleNamespace(method=method))
 
@@ -128,7 +181,7 @@ class TestIsSupportedV2ModelRunnerFeature:
     def test_whitelisted_method_logs_info(self, monkeypatch):
         info_calls = []
         monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: info_calls.append(args))
-        config = _make_vllm_config(speculative_config=SimpleNamespace(method="eagle"))
+        config = _make_vllm_config(speculative_config=SimpleNamespace(method="eagle3"))
 
         assert is_supported_v2_model_runner_feature(config) is True
         assert len(info_calls) == 1
