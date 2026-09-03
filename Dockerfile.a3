@@ -37,13 +37,14 @@ RUN if [ -n "$APTMIRROR" ]; then \
         sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
     fi && \
     apt-get update -y && \
-    apt-get install -y git vim wget curl protobuf-compiler net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
+    apt-get install -y git vim wget curl protobuf-compiler net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 ca-certificates && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url ${MOONCAKE_INDEX_URL} && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
+
 
 # Upgrade CANN ops package to 9.2.0
 ARG TARGETPLATFORM
@@ -77,7 +78,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install --timeout 300 -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
