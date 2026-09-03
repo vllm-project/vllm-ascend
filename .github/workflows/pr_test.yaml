@@ -180,7 +180,6 @@ jobs:
           done
 
   run-selected-tests-cpu:
-    needs: pre-commit
     strategy:
       fail-fast: false
       matrix:
