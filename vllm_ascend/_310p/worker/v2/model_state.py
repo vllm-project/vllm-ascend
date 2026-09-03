@@ -281,10 +281,8 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         # Upstream uses Triton scatter kernels. On 310P the decorated kernel is
         # unusable; keep the op Triton-free via NPU indexing. Filter padding
         # ``-1`` indices: ``index_fill_`` treats ``-1`` as the last slot.
-        # Align postprocess (``run_fused_postprocess_align``) is only needed when
-        # speculative decoding is enabled; 310P MRv2 rejects MTP, so prefix-cache
-        # correctness relies on ``preprocess_state`` / precopy only.
         del num_computed_tokens
+
         valid = idx_mapping >= 0
         valid_indices = idx_mapping.masked_select(valid).to(dtype=torch.long)
         if valid_indices.numel() == 0:
@@ -292,6 +290,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
 
         if isinstance(num_sampled, int):
             DeviceOperator.index_fill(self.num_accepted_tokens_gpu, 0, valid_indices, max(num_sampled, 1))
-        else:
-            accepted = torch.clamp(num_sampled.masked_select(valid), min=1).to(self.num_accepted_tokens_gpu.dtype)
-            self.num_accepted_tokens_gpu.index_copy_(0, valid_indices, accepted)
+            return
+
+        accepted = torch.clamp(num_sampled.masked_select(valid), min=1).to(self.num_accepted_tokens_gpu.dtype)
+        self.num_accepted_tokens_gpu.index_copy_(0, valid_indices, accepted)
