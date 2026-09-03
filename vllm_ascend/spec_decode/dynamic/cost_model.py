@@ -308,5 +308,21 @@ class HardwareCostModel:
                 return self.latency_ms[key]
         return self.latency_ms[keys[-1]]
 
+    def supports_token_batch(self, token_batch_size: int) -> bool:
+        """Return whether the profile covers a requested token batch.
+
+        ``latency`` intentionally keeps the historical nearest-shape lookup
+        for compatibility.  Using the largest profile point for a larger
+        batch, however, is not a valid hardware estimate: a profile collected
+        at batch 4 must not be reused as if it described batch 16.  Callers
+        that make a runtime scheduling decision can use this predicate to
+        fall back to a safe full-width path instead of paying for a decision
+        based on an out-of-range curve.
+        """
+
+        if token_batch_size <= 0:
+            raise ValueError("token_batch_size must be > 0")
+        return token_batch_size <= max(self.latency_ms)
+
     def sps(self, token_batch_size: int) -> float:
         return 1000.0 / self.latency(token_batch_size)

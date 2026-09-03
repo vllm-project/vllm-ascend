@@ -522,6 +522,7 @@ class DynamicSpecScheduler:
         self._last_confidence_num_reqs: int | None = None
         self._last_confidence_num_draft_tokens: int | None = None
         self._last_confidence_request_ids: tuple[Any, ...] | None = None
+        self._v2_full_width_fast_path = False
 
     def update_from_token_probs(
         self,
@@ -599,6 +600,13 @@ class DynamicSpecScheduler:
             and self._last_v2_published_generation == self._v2_result_generation
         ):
             return self._last_v2_proposal_lengths
+        if self._v2_full_width_fast_path:
+            lengths = [max_k] * len(request_ids)
+            self._last_v2_batch_physical_k = max_k
+            self._last_v2_proposal_lengths = lengths
+            self._last_v2_request_ids = current_request_ids
+            self._last_v2_published_generation = self._v2_result_generation
+            return lengths
         values = self.num_verify_tokens.detach().to("cpu").tolist()
         lengths = [
             max(0, min(int(values[idx]), max_k))
@@ -783,6 +791,7 @@ class DynamicSpecScheduler:
         """Apply the policy to probabilities produced by any DSpark path."""
 
         num_reqs, num_draft_tokens = token_probs.shape
+        self._v2_full_width_fast_path = False
         if num_reqs == 0 or num_draft_tokens == 0:
             self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
             self.num_verify_tokens.zero_()
@@ -793,6 +802,24 @@ class DynamicSpecScheduler:
         # time this method is called, but it can still skip sorting/allocation.
         if self.hardware_policy is not None:
             physical_k = min(num_draft_tokens, self.num_speculative_tokens)
+            # A sparse profile is only valid for the shapes it measured.  The
+            # legacy lookup clamps larger batches to the largest profiled
+            # point, which can make an unrelated small-batch outlier look
+            # artificially cheap and repeatedly trigger the dynamic path.
+            # Preserve dynamic K for covered shapes, but use a graph-safe,
+            # zero-allocation full-width fallback until a matching profile is
+            # supplied for this batch.
+            if self.cost_model is not None and not self.cost_model.supports_token_batch(
+                int(num_reqs) * (physical_k + 1)
+            ):
+                self.num_verify_tokens = self._num_verify_tokens_buffer[:num_reqs]
+                self.num_verify_tokens.fill_(physical_k)
+                self.reused_last_result = True
+                self._v2_full_width_fast_path = True
+                self._hybrid_last_num_reqs = int(num_reqs)
+                self._hybrid_last_num_draft_tokens = physical_k
+                self._hybrid_full_width_active = True
+                return self.num_verify_tokens
             use_hybrid_fast_path = self._hybrid_should_hold_full_width(
                 num_reqs=int(num_reqs),
                 physical_k=physical_k,

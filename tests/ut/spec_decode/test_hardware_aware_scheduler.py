@@ -517,6 +517,44 @@ def test_hardware_policy_uses_nearest_profiled_shape() -> None:
 
     assert model.latency(2) == 2.0
     assert model.latency(10) == 2.0
+    assert model.supports_token_batch(4)
+    assert not model.supports_token_batch(10)
+
+
+def test_hardware_scheduler_uses_full_width_for_unprofiled_batch() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
+    scheduler = DynamicSpecScheduler(
+        method="dspark",
+        policy="hardware_aware",
+        method_params={
+            "profile": {
+                "fingerprint": {"device": "Ascend"},
+                "latency_ms": {"1": 1.0, "2": 1.0, "4": 1.0},
+            },
+            "hardware_min_budget_ratio": 0.0,
+        },
+        max_batch_size=2,
+        num_speculative_tokens=2,
+        device=torch.device("cpu"),
+    )
+    model = _FakeDSparkModel()
+    draft_ids = torch.tensor([[1, 2, 3], [1, 2, 3]])
+    hidden = torch.zeros((4, 1))
+
+    lengths = scheduler.update(
+        model=model,
+        last_hidden_states=hidden,
+        draft_token_ids=draft_ids,
+        num_reqs=2,
+    )
+
+    # The requested verification width is 2 * (K + bonus) = 6, outside the
+    # profile's largest measured shape 4.  Do not optimize from a clamped
+    # small-batch latency; keep the safe full-width graph and mark the V2
+    # host publication as a cheap constant path.
+    assert lengths.tolist() == [2, 2]
+    assert scheduler._v2_full_width_fast_path
 
 
 def test_hardware_profile_fingerprint_mismatch() -> None:
