@@ -763,6 +763,11 @@ class BaseDeviceAdaptor:
         indices: torch.Tensor,
         value: int,
     ) -> torch.Tensor:
+        # aclnnInplaceIndexFill rejects empty indices (EZ0015: shape size
+        # must be greater than zero), which callers legitimately produce
+        # when nothing needs filling (e.g. no discarded spec requests).
+        if indices.numel() == 0:
+            return tensor
         tensor.index_fill_(dim, indices, value)
         return tensor
 
