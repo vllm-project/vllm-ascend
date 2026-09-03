@@ -34,8 +34,10 @@ initial MRv2 model-level validation uses Qwen3-30B-A3B W8A8 with asynchronous
 EPLB. Validate accuracy and performance with the target model, topology, and
 traffic before production deployment.
 
-> [!IMPORTANT]
-> Ascend 950 Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16", "W4A16MXFP4".
+!!!IMPORTANT
+
+    Ascend 950 Products does not support using EPLB with quant type "W4A8MXFP4", "W4A16MXFP4".
+    A2 does not support redundant experts.
 
 ### Model Runner V2 Weight Formats
 
@@ -68,11 +70,12 @@ validation on the target hardware before production use.
 EPLB is not recommended in the following scenarios because the load-balancing benefit may not offset its runtime overhead:
 
 - P node workloads with input sequences shorter than `1024` tokens.
-- D node workloads where the number of experts per die is `<= 8` (`<= 16` on 950DT), or where the per-die load is below `128` tokens.
+- D node workloads where the number of experts per die is `> 8` (`> 16` on 950DT), or where the per-die load is below `128` tokens.
 
-> [!WARNING]
-> Meeting the above conditions may lead to performance degradation.
-> When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
+!!!WARNING
+
+    Meeting the above conditions may lead to performance degradation.
+    When there are around 8 experts per die, the EPLB benefit may be comparable to its overhead. Benchmark the actual workload and enable EPLB only after confirming a performance gain.
 
 ## How to Use EPLB
 
@@ -147,12 +150,10 @@ vllm serve Qwen/Qwen3-30B-A3B \
   --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
 ```
 
-> [!IMPORTANT]
-> MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to
-> asynchronous Gloo movement. It rejects legacy `dynamic_eplb`,
-> recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
-> well as communicators other than Gloo. Validate the target model, topology,
-> graph mode, and traffic independently before production use.
+!!! IMPORTANT
+
+    MRv2 supports asynchronous EPLB only and normalizes `use_async=false` to asynchronous Gloo movement. It rejects legacy `dynamic_eplb`, recording/static-map fields, `DYNAMIC_EPLB`, and `EXPERT_MAP_RECORD`, as
+    well as communicators other than Gloo. Validate the target model, topology, graph mode, and traffic independently before production use.
 
 ### Model Runner V1: Legacy EPLB
 
@@ -164,8 +165,9 @@ Legacy MRv1 EPLB has three usage modes:
 | **Recording** (generate expert map) | `expert_map_record_path` | `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true` |
 | **Static EPLB** (load pre-recorded map) | `expert_map_path` | none required |
 
-> [!IMPORTANT]
-> For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`. Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
+!!!IMPORTANT
+
+    For Dynamic EPLB and Recording modes, the env variable acts as a safety guard: setting `dynamic_eplb: true` in config alone is not enough — the assertion requires `DYNAMIC_EPLB=true` or `EXPERT_MAP_RECORD=true`. Static EPLB (loading a pre-recorded map via `expert_map_path`) does **not** require an env variable.
 
 #### Dynamic EPLB
 

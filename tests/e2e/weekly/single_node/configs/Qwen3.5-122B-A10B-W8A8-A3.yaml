@@ -163,7 +163,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":0}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "8000"
@@ -182,7 +182,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":0}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "18432"
@@ -201,7 +201,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":0}'
       - "--max-model-len"
       - "18432"
       - "--max-num-batched-tokens"
@@ -219,7 +219,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":0}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "34304"
@@ -238,7 +238,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":0}'
       - "--max-model-len"
       - "34304"
       - "--max-num-batched-tokens"
@@ -256,7 +256,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":0}'
       - "--enable-expert-parallel"
       - "--max-model-len"
       - "67584"
@@ -276,7 +276,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--additional-config"
-      - '{"enable_fused_mc2":1}'
+      - '{"enable_fused_mc2":0}'
       - "--max-model-len"
       - "67584"
       - "--max-num-batched-tokens"

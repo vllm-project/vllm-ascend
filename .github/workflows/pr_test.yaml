@@ -47,6 +47,10 @@ jobs:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
+      # Short hash used only for job-name display.
+      main_commit_short: ${{ steps.vllm.outputs.main_commit_short }}
+      src: ${{ steps.filter.outputs.src }}
+      ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -89,6 +93,9 @@ jobs:
             exit 1
           }
           echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
+          # Short form is for display only (job names); main_commit keeps the
+          # full hash for checkout refs and artifact names.
+          echo "main_commit_short=${main_commit:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: cp problem matchers
         run: |
@@ -115,6 +122,41 @@ jobs:
               - 'requirements.txt'
               - 'requirements-dev.txt'
               - 'requirements-lint.txt'
+            # Source paths that require precision/full test execution. This
+            # category is the single source of truth for "does this PR need
+            # NPU tests" and is consumed by every downstream job.
+            src:
+              - 'vllm_ascend/**'
+              - 'setup.py'
+              - 'csrc/**'
+              - 'packages.txt'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'pyproject.toml'
+              - 'cmake/**'
+              - 'tests/ut/**'
+              - 'tests/e2e/pull_request/**'
+              - 'tests/e2e/*.py'
+              - 'tests/e2e/*.sh'
+              - 'tools/**'
+              - 'CMakeLists.txt'
+              # CI pipeline files: a PR that touches the test selection or
+              # execution pipeline itself must run the full suite, because
+              # the precise-selection result can no longer be trusted.
+            ci_pipeline:
+              - '.github/workflows/pr_test.yaml'
+              - '.github/workflows/_selected_tests.yaml'
+              - '.github/workflows/_selected_tests_upstream.yaml'
+              - '.github/workflows/_ensure_csrc_cache.yaml'
+              - '.github/workflows/_build_csrc_cache.yaml'
+              - '.github/workflows/scripts/csrc_cache_targets.json'
+              - '.github/workflows/scripts/resolve_csrc_cache_targets.py'
+              - '.github/workflows/scripts/select_tests.py'
+              - '.github/workflows/scripts/test_selector.py'
+              - '.github/workflows/scripts/run_selected_tests.sh'
+              - '.github/workflows/scripts/test_config.yaml'
+              - '.github/workflows/scripts/runner_label.json'
+              - '.github/workflows/scripts/coverage.py'
 
       - name: Install vllm-ascend dev (conditional)
         if: steps.filter.outputs.lint_tracker == 'true'
@@ -179,14 +221,19 @@ jobs:
             echo "============================"
           done
 
-  recommend-tests-from-coverage:
-    name: Recommend tests from coverage
+  recommend-tests:
+    name: Recommend tests
     needs: pre-commit
-    # Skip the coverage-based recommendation path when the PR opts into the
-    # full suite via the ready-all label; select-tests will produce the test
-    # groups in that case. The pre-commit check is explicit so the job can
-    # never be made to run after a failed pre-commit by adding !cancelled().
-    if: ${{ needs.pre-commit.result == 'success' && !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
+    # The recommendation only runs under the ready-precise label: that is the
+    # only mode whose result depends on it. ready-all runs --all-tests and
+    # unlabeled runs select nothing, so both skip this job. The pre-commit
+    # check is explicit so the job can never be made to run after a failed
+    # pre-commit by adding !cancelled().
+    if: >-
+      ${{
+        needs.pre-commit.result == 'success' &&
+        contains(github.event.pull_request.labels.*.name, 'ready-precise')
+      }}
     runs-on: linux-amd64-cpu-8-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
@@ -283,17 +330,28 @@ jobs:
   select-tests:
     needs:
       - pre-commit
-      - recommend-tests-from-coverage
+      - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
-    # !cancelled() is required so this job still runs when recommend-tests-from-coverage
-    # is skipped under ready-all, but not when the workflow itself is cancelled.
-    # The explicit pre-commit success check stops it from running when pre-commit
-    # failed (!cancelled() alone would override the transitive skip). Modes:
-    #   recommended - recommend job succeeded with coverage paths
-    #   all         - ready-all forced (full selected suite)
-    #   none        - recommend job succeeded but produced no paths (no tests)
-    # Recommend job failure does not fall back to all; this job fails instead.
-    if: ${{ !cancelled() && needs.pre-commit.result == 'success' }}
+    # It runs only when a ready label asks for test execution; unlabeled runs
+    # skip it and ci-gate decides whether that is allowed (no src paths) or
+    # requires a label (src or ci_pipeline paths present). !cancelled() keeps
+    # it out of the graph only when the workflow itself is cancelled; the
+    # explicit pre-commit success check stops it from running when pre-commit
+    # failed (!cancelled() alone would override the transitive skip). The
+    # src/ci_pipeline path categories are computed by the paths-filter step
+    # in pre-commit. Modes:
+    #   recommended - recommend job succeeded with coverage paths (ready-precise)
+    #   all         - ready-all forced, or the PR touches the CI pipeline itself
+    #   none        - ready-precise on a PR whose diff recommends no tests
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        )
+      }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -346,37 +404,6 @@ jobs:
           git rebase "$BASE_SHA"
           echo "base_sha=$BASE_SHA" >> "$GITHUB_OUTPUT"
 
-      - uses: dorny/paths-filter@v4
-        id: filter
-        with:
-          list-files: json
-          filters: |
-            src:
-              - 'vllm_ascend/**'
-              - 'setup.py'
-              - 'csrc/**'
-              - 'packages.txt'
-              - 'requirements.txt'
-              - 'requirements-dev.txt'
-              - 'pyproject.toml'
-              - 'cmake/**'
-              - '.github/workflows/pr_test.yaml'
-              - '.github/workflows/_selected_tests.yaml'
-              - '.github/workflows/_ensure_csrc_cache.yaml'
-              - '.github/workflows/_build_csrc_cache.yaml'
-              - '.github/workflows/scripts/csrc_cache_targets.json'
-              - '.github/workflows/scripts/resolve_csrc_cache_targets.py'
-              - '.github/workflows/scripts/select_tests.py'
-              - '.github/workflows/scripts/run_selected_tests.sh'
-              - '.github/workflows/scripts/test_config.yaml'
-              - '.github/workflows/scripts/runner_label.json'
-              - 'tests/ut/**'
-              - 'tests/e2e/pull_request/**'
-              - 'tests/e2e/*.py'
-              - 'tests/e2e/*.sh'
-              - 'tools/**'
-              - 'CMakeLists.txt'
-
       - name: Validate test coverage config
         run: |
           pip install pyyaml
@@ -385,31 +412,47 @@ jobs:
       - name: Decide test selection mode
         id: decide
         env:
+          HAS_READY_PRECISE: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
-          RECOMMEND_RESULT: ${{ needs.recommend-tests-from-coverage.result }}
-          COVERAGE_PATHS: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths }}
+          # Reported by the paths-filter step in the pre-commit job; this job
+          # does not run its own filter. Both are diagnostic only here (they
+          # decide which modes are *allowed* in ci-gate), the labels above
+          # decide which mode *runs*.
+          SRC: ${{ needs.pre-commit.outputs.src }}
+          CI_PIPELINE: ${{ needs.pre-commit.outputs.ci_pipeline }}
+          RECOMMEND_RESULT: ${{ needs.recommend-tests.result }}
+          COVERAGE_PATHS: ${{ needs.recommend-tests.outputs.coverage_paths }}
         run: |
           set -euo pipefail
           if [ "${HAS_READY_ALL}" = "true" ]; then
             MODE="all"
-          elif [ "${RECOMMEND_RESULT}" = "success" ]; then
+          elif [ "${CI_PIPELINE}" = "true" ]; then
+            # The PR changes the test selection/execution pipeline itself,
+            # so the precise recommendation can no longer be trusted even
+            # though ready-precise was set. Escalate to the full suite.
+            MODE="all"
+          elif [ "${HAS_READY_PRECISE}" = "true" ]; then
+            if [ "${RECOMMEND_RESULT}" != "success" ]; then
+              echo "::error::Coverage test recommendation did not succeed (result: ${RECOMMEND_RESULT}); not falling back to all tests"
+              exit 1
+            fi
             if [ -n "${COVERAGE_PATHS// /}" ]; then
               MODE="recommended"
             else
               MODE="none"
             fi
           else
-            echo "::error::Coverage test recommendation did not succeed (result: ${RECOMMEND_RESULT}); not falling back to all tests"
+            echo "::error::select-tests ran without a ready label; this is a workflow bug"
             exit 1
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
-          echo "Selection mode: ${MODE}"
+          echo "Selection mode: ${MODE} (src=${SRC:-unknown} ci_pipeline=${CI_PIPELINE:-unknown})"
 
       - name: Select tests from coverage recommendations
         id: scope-rec
         if: steps.decide.outputs.mode == 'recommended'
         env:
-          COVERAGE_PATHS: ${{ needs.recommend-tests-from-coverage.outputs.coverage_paths }}
+          COVERAGE_PATHS: ${{ needs.recommend-tests.outputs.coverage_paths }}
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex pyyaml -q
@@ -422,7 +465,7 @@ jobs:
 
       - name: Select all tests
         id: scope-all
-        if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
+        if: steps.decide.outputs.mode == 'all'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
@@ -430,9 +473,7 @@ jobs:
 
       - name: Set no-tests output when no tests selected
         id: noop
-        if: >-
-          ${{ steps.decide.outputs.mode == 'none' ||
-              (steps.decide.outputs.mode == 'all' && steps.filter.outputs.src != 'true') }}
+        if: steps.decide.outputs.mode == 'none'
         run: |
           {
             echo "has_tests=false"
@@ -443,7 +484,7 @@ jobs:
 
       - name: Select A5 tests
         id: scope-a5
-        if: steps.filter.outputs.src == 'true'
+        if: needs.pre-commit.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
           pip install regex
@@ -453,7 +494,7 @@ jobs:
 
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
-        if: steps.filter.outputs.src != 'true'
+        if: needs.pre-commit.outputs.src != 'true'
         run: |
           {
             echo "has_tests=false"
@@ -475,10 +516,10 @@ jobs:
               print("target_ids=" + json.dumps(target_ids, separators=(",", ":")), file=output)
           PY
 
-  ensure-csrc-cache:
+  prepare-csrc-cache:
     needs:
       - select-tests
-    # !cancelled() is required: select-tests depends on recommend-tests-from-coverage,
+    # !cancelled() is required: select-tests depends on recommend-tests,
     # which is skipped under ready-all. Without a status check function, the skipped
     # need propagates transitively and skips this job even when select-tests succeeded.
     if: >-
@@ -502,25 +543,30 @@ jobs:
     needs:
       - pre-commit
       - select-tests
-      - ensure-csrc-cache
-    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
+      - prepare-csrc-cache
+    # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.ensure-csrc-cache.result == 'success' &&
+        needs.prepare-csrc-cache.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         ) &&
         needs.select-tests.outputs.has_tests == 'true'
       }}
+    name: run-selected-tests (vllm@${{ matrix.vllm_version_short }})
     strategy:
       fail-fast: false
       matrix:
+        # vllm_version keeps the full hash (it becomes the checkout ref in
+        # _selected_tests.yaml); only the job name shows the short form.
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
+        vllm_version_short:
+          - ${{ needs.pre-commit.outputs.main_commit_short }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -533,21 +579,24 @@ jobs:
     needs:
       - pre-commit
       - select-tests
-      - ensure-csrc-cache
-    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
+      - prepare-csrc-cache
+    # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
-        needs.ensure-csrc-cache.result == 'success' &&
+        needs.prepare-csrc-cache.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise') &&
         needs.select-tests.outputs.has_tests == 'true'
       }}
+    name: run-selected-tests-upstream (vllm@${{ matrix.vllm_version_short }})
     strategy:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
+        vllm_version_short:
+          - ${{ needs.pre-commit.outputs.main_commit_short }}
     uses: ./.github/workflows/_selected_tests_upstream.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -558,7 +607,7 @@ jobs:
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
+    # !cancelled() overrides transitive skip-propagation from recommend-tests
     # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
@@ -568,10 +617,13 @@ jobs:
         needs.select-tests.outputs.has_tests_a5 == 'true' &&
         contains(github.event.pull_request.labels.*.name, 'ready-a5')
       }}
+    name: run-selected-tests-a5 (vllm@${{ matrix.vllm_version_short }})
     strategy:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
+        vllm_version_short:
+          - ${{ needs.pre-commit.outputs.main_commit_short }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -603,6 +655,8 @@ jobs:
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
+          echo "src filter: ${{ needs.pre-commit.outputs.src }}"
+          echo "ci_pipeline filter: ${{ needs.pre-commit.outputs.ci_pipeline }}"
           echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
@@ -614,6 +668,22 @@ jobs:
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})."
             echo "::error::This job runs lint / markdownlint / mypy / gitleaks on all files. Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
+            exit 1
+          fi
+
+          if [ "${SELECT_TESTS_RESULT}" = "skipped" ]; then
+            # select-tests only runs under a ready label. An unlabeled run
+            # passes the gate when (and only when) the paths-filter in
+            # pre-commit found no src or ci_pipeline paths in the diff.
+            SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
+            CI_PIPELINE_FILTER="${{ needs.pre-commit.outputs.ci_pipeline }}"
+            if [ "${SRC_FILTER}" != "true" ] && [ "${CI_PIPELINE_FILTER}" != "true" ]; then
+              echo "::notice::No source paths changed; precision tests are not required for this PR."
+              echo "=== CI Gate: PASSED ==="
+              exit 0
+            fi
+            echo "::error::This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge."
+            echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), or 'ready-all' to run the full suite. The workflow reruns automatically once the label is added."
             exit 1
           fi
 

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
@@ -225,6 +226,18 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
     def __init__(self, calls: list[dict[str, Any]]):
         self.calls = calls
+        self.for_cudagraph_capture = False
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata,
+        **kwargs,
+    ):
+        self.for_cudagraph_capture = True
+        return super().build_for_cudagraph_capture(
+            common_attn_metadata,
+            **kwargs,
+        )
 
     def build(
         self,
@@ -238,6 +251,10 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         call = {
             "common_attn_metadata": common_attn_metadata,
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
+            "for_cudagraph_capture": self.for_cudagraph_capture,
+            "num_actual_reqs": kwargs["num_actual_reqs"],
+            "pcp_context": kwargs.get("pcp_context"),
+            "pcp_cache_group_idx": kwargs.get("pcp_cache_group_idx"),
         }
         assert "block_size" not in kwargs
         self.calls.append(call)
@@ -360,16 +377,25 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
 
 
 @pytest.mark.parametrize(
-    ("caller", "cudagraph_mode", "expected_input_tokens"),
+    (
+        "caller",
+        "cudagraph_mode",
+        "for_capture",
+        "pcp_size",
+        "expected_input_tokens",
+    ),
     [
-        ("default", None, 5),
-        ("model_state", CUDAGraphMode.NONE, 5),
-        ("model_state", CUDAGraphMode.FULL, 8),
+        ("default", None, False, 1, 5),
+        ("model_state", CUDAGraphMode.NONE, False, 1, 5),
+        ("model_state", CUDAGraphMode.FULL, False, 1, 8),
+        ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
     ],
 )
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     caller,
     cudagraph_mode,
+    for_capture,
+    pcp_size,
     expected_input_tokens,
 ):
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
@@ -381,6 +407,14 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     dcp_local_seq_lens = torch.tensor(
         [2, 1, 0, 0],
         dtype=torch.int32,
+    )
+    pcp_context = object() if caller == "pcp_capture" else None
+    pcp_manager = (
+        SimpleNamespace(
+            build_attention_context=MagicMock(return_value=pcp_context),
+        )
+        if pcp_context is not None
+        else None
     )
 
     if caller == "default":
@@ -403,7 +437,12 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.max_model_len = 8
-        model_state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+        model_state.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=pcp_size,
+            ),
+        )
+        model_state.pcp_manager = pcp_manager
         input_batch = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
@@ -426,6 +465,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             slot_mappings=slot_mappings,
             attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
+            for_capture=for_capture,
         )
 
     assert set(metadata) == set(layer_names)
@@ -434,6 +474,9 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         common_metadata = call["common_attn_metadata"]
         assert common_metadata.num_actual_tokens == 5
         assert common_metadata.num_input_tokens == expected_input_tokens
+        assert call["for_cudagraph_capture"] is for_capture
+        assert call["num_actual_reqs"] == 2
+        assert call["pcp_context"] is pcp_context
         if caller != "default":
             assert torch.equal(
                 common_metadata.is_prefilling,
@@ -444,6 +487,12 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
     assert calls[1][cache_name]["first_group"] is True
+    if pcp_context is not None:
+        assert [call["pcp_cache_group_idx"] for call in calls] == [0, 1]
+        assert pcp_manager is not None
+        pcp_manager.build_attention_context.assert_called_once_with()
+    else:
+        assert all(call["pcp_cache_group_idx"] is None for call in calls)
 
 
 class _PrefillStateBuilder:

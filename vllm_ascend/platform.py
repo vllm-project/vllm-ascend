@@ -220,7 +220,18 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         use_compress = getattr(attn_selector_config, "use_compress", False)
-        key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
+        use_mla = attn_selector_config.use_mla
+        use_sparse = attn_selector_config.use_sparse
+        # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
+        try:
+            from vllm.config import get_current_vllm_config
+            from vllm_ascend.utils import enable_sfa
+
+            if use_sparse and not enable_sfa(get_current_vllm_config()):
+                use_sparse = False
+        except Exception:
+            pass
+        key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
         if attn_selector_config.use_pcp and attn_selector_config.use_dcp:
