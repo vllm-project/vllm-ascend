@@ -15,11 +15,16 @@ Run on one card:  ASCEND_RT_VISIBLE_DEVICES=0 python3 test_mhc_ascendc.py
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 
-sys.path.insert(0, "/vllm-workspace/vllm-ascend")
+# Run from any checkout location; falls through to the installed package
+# when the repo layout is absent.
+_REPO_ROOT = os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+if os.path.isdir(os.path.join(_REPO_ROOT, "vllm_ascend")) and _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import torch  # noqa: E402
 
@@ -36,16 +41,16 @@ from vllm.model_executor.kernels.mhc.torch import mhc_post_torch, mhc_pre_torch 
 
 from vllm_ascend.ops import mhc_ascendc as m  # noqa: E402
 
-CONFIG_PATH = "/mnt/public/models/GLM-5.3-Flash-BF16/config.json"
+# Standard GLM-5.3-Flash text-config constants (inlined so the test is
+# self-contained and runs on any machine / in CI).
 DEVICE = "npu"
 
-CFG = json.load(open(CONFIG_PATH))["text_config"]
-HIDDEN = CFG["hidden_size"]  # 4096
-HC_MULT = CFG["hc_mult"]  # 4
+HIDDEN = 4096
+HC_MULT = 4
 MIX_HC = (2 + HC_MULT) * HC_MULT  # 24
-SINKHORN = CFG["hc_sinkhorn_iters"]  # 20
-RMS_EPS = CFG["rms_norm_eps"]  # 1e-5
-HC_EPS = CFG["hc_eps"]  # 1e-6
+SINKHORN = 20
+RMS_EPS = 1e-5
+HC_EPS = 1e-6
 T = 8
 
 ATOL = 1e-2  # task tolerance (comb's Sinkhorn normalisation order differs)
