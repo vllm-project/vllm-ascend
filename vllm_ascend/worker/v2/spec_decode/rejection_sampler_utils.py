@@ -153,9 +153,16 @@ def _resample_kernel(
         target_log_probs = target_logits - target_lse
         draft_log_probs = draft_logits - draft_lse
         ratio = tl.exp(draft_log_probs - target_log_probs)
+        # The more numerically stable form is:
+        #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
+        # NPU: upstream uses tldevice.log1p(-ratio) here, but the CUDA
+        # libdevice extern is not usable on triton-ascend. tl.log(1.0 - ratio)
+        # is still exact where it matters: by the Sterbenz lemma,
+        # 1.0 - ratio is exactly representable in fp32 for ratio in [0.5, 1),
+        # so no catastrophic cancellation occurs.
         residual_logits = tl.where(
             ratio < 1.0,
-            target_log_probs + tl.log(1 - ratio),
+            target_log_probs + tl.log(1.0 - ratio),
             float("-inf"),
         ).to(tl.float32)
     else:
