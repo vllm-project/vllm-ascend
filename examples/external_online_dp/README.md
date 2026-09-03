@@ -19,7 +19,7 @@ All the arguments that can be set by users are:
 6. `--dp-rpc-port`: Port of data parallel master node, default 12345
 7. `--vllm-start-port`: Starting port of vLLM serving instances, default 9000
 8. `--is-pd-disaggregated`: Is pd-disaggregated deployment.
-9. `--is-prefill`: Is prefill dp.
+9. `--is-prefill`: Is prefill dp, which requires --is-pd-disaggregated.
 
 An example of running external DP in one single node:
 
@@ -46,12 +46,12 @@ An example of running external DP in two nodes for pd-disaggregated deployment:
 
 ```(python)
 cd examples/external_online_dp
-# For pd-disaggregated deployment, we can create launch_online_dp_p.py for prefill-dp, launch_online_dp_p.py for decode-dp.
+# For pd-disaggregated deployment, we can create launch_online_dp_p.py for prefill-dp, launch_online_dp_d.py for decode-dp.
 # running Prefill-DP2TP4 & Decode-DP4TP2 in two nodes with 8 NPUs each
 
-# On node 0:
+# On node 0 for Prefill:
 python launch_online_dp.py --dp-size 2 --tp-size 4 --dp-size-local 2 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12342 --is-pd-disaggregated --is-prefill
 
-# On node 1:
+# On node 1 for Decode:
 python launch_online_dp.py --dp-size 4 --tp-size 2 --dp-size-local 4 --dp-rank-start 0 --dp-address x.x.x.x --dp-rpc-port 12342 --is-pd-disaggregated
 ```
