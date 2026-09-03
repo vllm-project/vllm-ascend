@@ -1456,6 +1456,10 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
 
     def test_evicted_allocated_gva_is_reallocated(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import (
+            LAYERWISE_READ_LEASE_TTL_MS,
+        )
+
         worker = self._make_gva_worker()
         key = worker._make_layerwise_full_key(0, "h0")
         worker._allocated_gvas[key] = 101
@@ -1465,7 +1469,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
         worker._alloc_gvas_for_save([request])
 
-        worker.m_store.batch_alloc.assert_called_once_with([key], [64])
+        worker.m_store.batch_alloc.assert_called_once_with([key], [64], LAYERWISE_READ_LEASE_TTL_MS)
         self.assertEqual(worker._allocated_gvas[key], 202)
         self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [202])
 
