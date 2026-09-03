@@ -1108,13 +1108,10 @@ Please refer to the following python file for further explanation and restrictio
 
 Recommended configurations for serving `GLM-5.2` with a 1M context window on Atlas 800 A3 (64GB x 16) and quantized GLM-5.2(W4A8C8) weights:
 
-| Mode | Hardware | Parallelism | Context |
-| ---- | -------- | ----------- | ------- |
-| Single-node co-located | 1 Atlas 800 A3 (64GB x 16) | `DP1 PP1 TP16 PCP1 DCP16` | `1024000` |
-| Dual-node co-located | 2 Atlas 800 A3 (64GB x 16) | `DP4 PP1 TP8 PCP1 DCP8` | `1024000` |
-| 1P1D PD disaggregation | 4 Atlas 800 A3 (64GB x 16) | Prefill `DP2 PP1 TP16 PCP1 DCP16`, Decode `DP4 PP1 TP8 PCP1 DCP8` | `1048576` |
 
 #### 5.2.1 Single-Node 1M Deployment
+
+- Quantized model `GLM-5.2-w4a8c8` can be deployed on 1 Atlas 800 A3 (64GB × 16) for the 1M context.
 
 Recommended command:
 
@@ -1154,6 +1151,8 @@ vllm serve <MODEL_PATH> \
 ```
 
 #### 5.2.2 Dual-Node Co-Located 1M Deployment
+
+- `GLM-5.2-w4a8c8` can be deployed on 2 Atlas 800 A3 (64GB × 16) for the 1M context.
 
 Recommended command for both co-located nodes:
 
@@ -1767,9 +1766,7 @@ The service returns HTTP 200 OK. The JSON response contains the `choices` field 
 
 ## 7 Accuracy Evaluation
 
-Here are two accuracy evaluation methods.
-
-### 7.1 Using AISBench
+### Using AISBench
 
 1. Refer to [Using AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details.
 
