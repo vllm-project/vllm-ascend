@@ -19,7 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.memfabric_mte_transport import 
 from vllm_ascend.distributed.parallel_state import get_kvpp_group
 
 # Dedicated kvpp CPU group: one in-flight prefetch, so tags only distinguish
-# the ready/done handshake, not the transformer layer.
+# the staging-ready/data-ready handshake, not the transformer layer.
 _KVPP_READY_TAG = 0
 _KVPP_DONE_TAG = 1
 
@@ -371,9 +371,10 @@ class KVPPScheduler:
         token = torch.ones(1, dtype=torch.uint8, device="cpu")
 
         with torch.profiler.record_function(f"kvpp.comm_total.layer_{layer_index}"):
-            scratch_ready.synchronize()
-
             if local_kvpp_rank != owner_kvpp_rank:
+                # The previous prefetch future completed before this task was
+                # submitted, so this rank's staging region can be overwritten.
+                # Scratch reuse is a separate device-stream dependency below.
                 dist.send(
                     token,
                     dst=owner_global_rank,
@@ -388,6 +389,7 @@ class KVPPScheduler:
                 )
                 with torch.profiler.record_function(f"kvpp.transport_receive.layer_{layer_index}"):
                     with torch.npu.stream(self._kv_transfer_stream):
+                        self._kv_transfer_stream.wait_event(scratch_ready)
                         receive_completion = self.transport.copy_active_pages_from_staging(
                             self.layer_cache_bundles[layer_name],
                             active_pages,
