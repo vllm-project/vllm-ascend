@@ -5,6 +5,7 @@ from collections import defaultdict
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
@@ -42,8 +43,8 @@ from vllm_ascend.core.recompute_scheduler import (
 from vllm_ascend.utils import vllm_version_is
 
 
-def _create_live_recompute_scheduler(*, async_scheduling: bool = False):
-    vllm_config = make_dyntra_test_config()
+def _create_live_recompute_scheduler(*, async_scheduling: bool = False, max_num_seqs: int = 16):
+    vllm_config = make_dyntra_test_config(max_num_seqs=max_num_seqs)
     vllm_config.scheduler_config.async_scheduling = async_scheduling
     scheduler_cls = AsyncRecomputeScheduler if async_scheduling else RecomputeScheduler
     return vllm_config, create_dyntra_lb_scheduler(vllm_config, scheduler_cls=scheduler_cls)
@@ -188,7 +189,7 @@ def test_truncate_computed_blocks_supports_legacy_short_mamba_group():
         ),
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=MagicMock(spec=MambaSpec)),
+                SimpleNamespace(kv_cache_spec=object.__new__(MambaSpec)),
                 SimpleNamespace(kv_cache_spec=MagicMock()),
             ]
         ),
@@ -577,3 +578,186 @@ def test_async_recompute_scheduler_constructs():
 
     assert isinstance(scheduler, AsyncRecomputeScheduler)
     assert request.request_id in scheduler_output.num_scheduled_tokens
+
+
+def test_schedule_caps_running_request_with_long_prefill_threshold():
+    _, scheduler = _create_live_recompute_scheduler()
+    scheduler.max_num_scheduled_tokens = 8
+    scheduler.scheduler_config.long_prefill_token_threshold = 4
+    request = create_request(
+        request_id=1,
+        num_tokens=20,
+        block_size=scheduler.vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+    first_output = scheduler.schedule()
+    scheduler.update_from_output(first_output, create_model_runner_output([request]))
+
+    scheduler_output = scheduler.schedule()
+
+    assert scheduler_output.num_scheduled_tokens[request.request_id] == 4
+
+
+def test_schedule_skips_running_request_without_new_tokens():
+    _, scheduler = _create_live_recompute_scheduler()
+    keep, victim = _warmup_two_running(scheduler)
+    keep.num_computed_tokens = keep.num_tokens_with_spec
+
+    scheduler_output = scheduler.schedule()
+
+    assert keep.request_id not in scheduler_output.num_scheduled_tokens
+    assert victim.request_id in scheduler_output.num_scheduled_tokens
+    assert keep in scheduler.running
+
+
+def test_schedule_producer_preempts_current_request_when_no_victim_left():
+    _, scheduler = _create_live_recompute_scheduler()
+    request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
+    scheduler.add_request(request)
+    first_output = scheduler.schedule()
+    scheduler.update_from_output(first_output, create_model_runner_output([request]))
+    scheduler.kv_cache_manager.allocate_slots = lambda *args, **kwargs: None
+
+    scheduler_output = scheduler.schedule()
+
+    assert request.status == RequestStatus.PREEMPTED
+    assert request not in scheduler.running
+    assert request.request_id not in scheduler_output.num_scheduled_tokens
+    assert scheduler_output.total_num_scheduled_tokens == 0
+
+
+def test_schedule_skips_waiting_when_running_slots_are_full():
+    _, scheduler = _create_live_recompute_scheduler(max_num_seqs=1)
+    running = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
+    waiting = create_request(request_id=2, block_size=scheduler.vllm_config.cache_config.block_size)
+    scheduler.add_request(running)
+    first_output = scheduler.schedule()
+    scheduler.update_from_output(first_output, create_model_runner_output([running]))
+    scheduler.add_request(waiting)
+
+    scheduler_output = scheduler.schedule()
+
+    assert waiting.status == RequestStatus.WAITING
+    assert waiting not in scheduler.running
+    assert waiting.request_id not in scheduler_output.num_scheduled_tokens
+    assert running.request_id in scheduler_output.num_scheduled_tokens
+
+
+def test_schedule_skips_waiting_request_still_blocked_on_remote_kv():
+    _, scheduler = _create_live_recompute_scheduler()
+    request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
+    scheduler.add_request(request)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler._is_blocked_waiting_status = lambda _status: True
+    scheduler._try_promote_blocked_waiting_request = lambda _request: False
+
+    scheduler_output = scheduler.schedule()
+
+    assert request.request_id not in scheduler_output.num_scheduled_tokens
+    assert request not in scheduler.running
+    assert request in scheduler.skipped_waiting
+
+
+def test_schedule_skips_waiting_request_with_stale_output_tokens():
+    _, scheduler = _create_live_recompute_scheduler()
+    request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
+    scheduler.add_request(request)
+    request.num_stale_output_tokens = 2
+    request.drop_stale_output = False
+
+    scheduler_output = scheduler.schedule()
+
+    assert request.request_id not in scheduler_output.num_scheduled_tokens
+    assert request not in scheduler.running
+    assert request in scheduler.skipped_waiting
+
+
+def test_schedule_truncates_connector_partial_tail_when_external_tokens_cover_it():
+    _, scheduler = _create_live_recompute_scheduler()
+    request = create_request(
+        request_id=1,
+        num_tokens=32,
+        block_size=scheduler.vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+    allocated = scheduler.kv_cache_manager.empty_kv_cache_blocks
+    scheduler.connector = MagicMock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (24, False)
+    scheduler._get_computed_blocks_for_connector = MagicMock(return_value=(allocated, 20, 0, False))
+    scheduler._truncate_computed_blocks_for_connector = MagicMock(return_value=allocated)
+    scheduler.kv_cache_manager.allocate_slots = MagicMock(return_value=allocated)
+    scheduler.kv_cache_manager.get_blocks = MagicMock(return_value=allocated)
+
+    scheduler_output = scheduler.schedule()
+
+    scheduler._truncate_computed_blocks_for_connector.assert_called_once()
+    assert request.status == RequestStatus.RUNNING
+    assert request.request_id in scheduler_output.num_scheduled_tokens
+
+
+def test_schedule_falls_back_from_diverged_hit_when_external_tokens_do_not_cover_tail():
+    _, scheduler = _create_live_recompute_scheduler()
+    request = create_request(
+        request_id=1,
+        num_tokens=32,
+        block_size=scheduler.vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+    allocated = scheduler.kv_cache_manager.empty_kv_cache_blocks
+    scheduler.connector = MagicMock()
+    scheduler.connector.get_num_new_matched_tokens.return_value = (2, False)
+    scheduler._get_computed_blocks_for_connector = MagicMock(return_value=(allocated, 20, 0, True))
+    scheduler.kv_cache_manager.get_computed_blocks = MagicMock(return_value=(allocated, 16, 0))
+    scheduler.kv_cache_manager.allocate_slots = MagicMock(return_value=allocated)
+    scheduler.kv_cache_manager.get_blocks = MagicMock(return_value=allocated)
+
+    scheduler_output = scheduler.schedule()
+
+    scheduler.kv_cache_manager.get_computed_blocks.assert_called_once_with(request)
+    assert request.status == RequestStatus.RUNNING
+    assert request.request_id in scheduler_output.num_scheduled_tokens
+
+
+def test_schedule_stops_waiting_when_chunked_prefill_is_disabled():
+    _, scheduler = _create_live_recompute_scheduler()
+    scheduler.max_num_scheduled_tokens = 4
+    scheduler.scheduler_config.enable_chunked_prefill = False
+    request = create_request(
+        request_id=1,
+        num_tokens=20,
+        block_size=scheduler.vllm_config.cache_config.block_size,
+    )
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert request.status == RequestStatus.WAITING
+    assert request not in scheduler.running
+    assert request.request_id not in scheduler_output.num_scheduled_tokens
+
+
+def test_schedule_resumes_preempted_waiting_request():
+    _, scheduler = _create_live_recompute_scheduler()
+    keep, victim = _warmup_two_running(scheduler)
+    _fail_first_allocate(scheduler)
+    scheduler.schedule()
+    assert victim.status == RequestStatus.PREEMPTED
+
+    scheduler_output = scheduler.schedule()
+
+    assert victim.status == RequestStatus.RUNNING
+    assert victim.request_id in scheduler_output.num_scheduled_tokens
+
+
+def test_schedule_rejects_invalid_waiting_request_status():
+    _, scheduler = _create_live_recompute_scheduler()
+    request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
+    scheduler.add_request(request)
+    request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler._is_blocked_waiting_status = lambda _status: False
+    allocated = scheduler.kv_cache_manager.empty_kv_cache_blocks
+    scheduler.kv_cache_manager.allocate_slots = MagicMock(return_value=allocated)
+    scheduler.kv_cache_manager.get_blocks = MagicMock(return_value=allocated)
+
+    with pytest.raises(RuntimeError, match="Invalid request status"):
+        scheduler.schedule()
