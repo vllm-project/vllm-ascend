@@ -8,7 +8,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 _MC2: GroupCoordinator | None = None
 
 # Module specific tensor parallel groups
-_MLP_TP: GroupCoordinator | None = None
 _OTP: GroupCoordinator | None = None
 _LMTP: GroupCoordinator | None = None
 _EMBED_TP: GroupCoordinator | None = None
@@ -92,11 +91,10 @@ def init_ascend_model_parallel(
             group_ranks, get_world_group().local_rank, backend, group_name="dynamic_eplb"
         )
 
-    # Initialize fine-grained TP process groups on Ascend for four components:
+    # Initialize fine-grained TP process groups on Ascend for three components:
     # 1. LM Head: output logits projection (`lmhead_tensor_parallel_size`)
     # 2. O Proj: attention output projection (`oproj_tensor_parallel_size`)
     # 3. Embedding: The token embedding table at the input of the model (`embedding_tensor_parallel_size`)
-    # 4. MLP: feed-forward network in transformer blocks (`mlp_tensor_parallel_size`)
     _group_cache = {}
 
     def _create_or_get_group(group_size: int, group_name: str) -> GroupCoordinator:
@@ -120,9 +118,8 @@ def init_ascend_model_parallel(
     otp_size = get_ascend_config().finegrained_tp_config.oproj_tensor_parallel_size
     lmhead_tp_size = get_ascend_config().finegrained_tp_config.lmhead_tensor_parallel_size
     embedding_tp_size = get_ascend_config().finegrained_tp_config.embedding_tensor_parallel_size
-    mlp_tp_size = get_ascend_config().finegrained_tp_config.mlp_tensor_parallel_size
 
-    global _OTP, _LMTP, _EMBED_TP, _MLP_TP
+    global _OTP, _LMTP, _EMBED_TP
 
     if otp_size > 0:
         _OTP = _create_or_get_group(otp_size, "otp")
@@ -130,8 +127,6 @@ def init_ascend_model_parallel(
         _LMTP = _create_or_get_group(lmhead_tp_size, "lmheadtp")
     if embedding_tp_size > 0:
         _EMBED_TP = _create_or_get_group(embedding_tp_size, "emtp")
-    if mlp_tp_size > 0:
-        _MLP_TP = _create_or_get_group(mlp_tp_size, "mlptp")
 
 
 def model_parallel_initialized():
@@ -141,11 +136,6 @@ def model_parallel_initialized():
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, "mc2 group is not initialized"
     return _MC2
-
-
-def get_mlp_tp_group() -> GroupCoordinator:
-    assert _MLP_TP is not None, "mlp group is not initialized"
-    return _MLP_TP
 
 
 def get_otp_group() -> GroupCoordinator:
@@ -178,11 +168,6 @@ def destroy_ascend_model_parallel():
     if _MC2:
         _MC2.destroy()
     _MC2 = None
-
-    global _MLP_TP
-    if _MLP_TP:
-        _MLP_TP.destroy()
-    _MLP_TP = None
 
     global _LMTP
     if _LMTP:

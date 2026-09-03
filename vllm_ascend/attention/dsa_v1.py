@@ -46,7 +46,6 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
-    olora_tp_enable,
     oproj_tp_enable,
 )
 from vllm_ascend.worker.device_metadata import (
@@ -1314,7 +1313,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP / olora_tp paths below, so it must win first.
+        # orthogonal to the OTP path below, so it must win first.
         use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
         if use_a5_quant_o_proj:
             o = o_proj_input
@@ -1400,9 +1399,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 )
             dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
             output[...] = self._oproj_rs_out_buf[:num_tokens]
-        elif olora_tp_enable():
-            o_proj_input = self.wo_a(o_proj_input)
-            output[...] = self.wo_b(o_proj_input)
         else:
             # A5 BF16 wo_a is reshaped to [groups, hidden, rank] at load time,
             # matching the A3 layout expected by npu_transpose_batchmatmul.

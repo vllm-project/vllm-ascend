@@ -56,7 +56,7 @@ class CVLinearWrapper:
 
         Criteria:
         - custom_op is None or CustomReplicatedOp: no TP communication
-        - Other custom_op (e.g., MLPColumnParallelOp with all_gather): has TP communication
+        - Other custom_op (e.g., OProjRowParallelOp with all_to_all): has TP communication
         - ColumnParallelLinear with gather_output=True: has all-gather communication
         Note: ColumnParallelLinear even with custom_op=None only communicates when gather_output=True.
               wq_b uses default gather_output=False, so no communication and can be split.

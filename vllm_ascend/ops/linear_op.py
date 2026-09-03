@@ -19,10 +19,11 @@ communication groups and forward functions into classes (linear ops).
 Current class inheritance structure:
 CustomLinearOp
 ├── CustomColumnParallelOp
-│   ├── MLPColumnParallelOp
-└── CustomRowParallelOp
-│   ├── MLPRowParallelOp
-│   ├── OProjRowParallelOp
+│   ├── DSV4OProjColumnParallelOp
+│   └── ShardedCPColumnParallelOp
+├── CustomRowParallelOp
+│   ├── DSV4OProjRowParallelOp
+│   └── OProjRowParallelOp
 └── CustomReplicatedOp
 How to extend a new linear op? Taking column parallel op as an example:
 1. Inherit from CustomColumnParallelOp and create a new class MyColumnParallelOp
@@ -35,10 +36,8 @@ Row parallel op follows a similar approach - inherit from RowColumnParallelOp an
 get_row_parallel_op.
 """
 
-from functools import lru_cache
 from types import SimpleNamespace
 
-import regex as re
 import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter
@@ -46,13 +45,9 @@ from vllm.distributed import split_tensor_along_last_dim
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 
-from vllm_ascend.distributed.parallel_state import (
-    get_mlp_tp_group,
-    get_otp_group,
-)
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.utils import (
     enable_dsa_cp,
-    mlp_tp_enable,
     oproj_tp_enable,
     shared_expert_dp_enabled,
 )
@@ -146,48 +141,6 @@ class CustomReplicatedOp(CustomLinearOp):
         output = self.quant_method.apply(self.layer, input_, bias)
         output_bias = self.bias if self.skip_bias_add else None
 
-        return output, output_bias
-
-
-class MLPColumnParallelOp(CustomColumnParallelOp):
-    def __init__(self, layer):
-        super().__init__(layer)
-
-    @property
-    def comm_group(self):
-        return get_mlp_tp_group()
-
-    def apply_impl(
-        self,
-        input_: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        bias = self.bias if not self.skip_bias_add else None
-        # Matrix multiply.
-        assert self.quant_method is not None
-        input_parallel = self.comm_group.all_gather(input_, 0)
-        output = self.quant_method.apply(self.layer, input_parallel, bias)
-
-        output_bias = self.bias if self.skip_bias_add else None
-        return output, output_bias
-
-
-class MLPRowParallelOp(CustomRowParallelOp):
-    def __init__(self, layer):
-        super().__init__(layer)
-
-    @property
-    def comm_group(self):
-        return get_mlp_tp_group()
-
-    def apply_impl(self, input_: torch.Tensor) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
-        input_parallel = self.get_input_parallel(input_)
-
-        assert self.quant_method is not None
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.layer.bias
-        output_parallel = self.quant_method.apply(self.layer, input_parallel, bias=bias_)
-        output = self.comm_group.reduce_scatter(output_parallel, 0)
-
-        output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
 
@@ -296,23 +249,17 @@ def _is_shared_expert_layer(prefix: str) -> bool:
     return "shared_experts" in prefix or "shared_expert" in prefix or "share_expert" in prefix
 
 
-def _get_column_parallel_op(
-    prefix, layer
-) -> MLPColumnParallelOp | DSV4OProjColumnParallelOp | ShardedCPColumnParallelOp | None:
+def _get_column_parallel_op(prefix, layer) -> DSV4OProjColumnParallelOp | ShardedCPColumnParallelOp | None:
     if enable_dsa_cp() and ("q_b_proj" in prefix or "kv_b_proj" in prefix):
         return ShardedCPColumnParallelOp(layer)
     if "wo_a" in prefix and oproj_tp_enable():
         return DSV4OProjColumnParallelOp(layer)
-    if "gate_up_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
-        return MLPColumnParallelOp(layer)
     return None
 
 
-def _get_row_parallel_op(prefix, layer) -> MLPRowParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | None:
+def _get_row_parallel_op(prefix, layer) -> OProjRowParallelOp | DSV4OProjRowParallelOp | None:
     if "wo_b" in prefix and oproj_tp_enable():
         return DSV4OProjRowParallelOp(layer)
-    if "down_proj" in prefix and mlp_tp_enable() and not is_moe_layer(prefix):
-        return MLPRowParallelOp(layer)
     if "o_proj" in prefix and oproj_tp_enable():
         return OProjRowParallelOp(layer)
     return None
@@ -329,13 +276,7 @@ def get_parallel_op(disable_tp, prefix, layer, direct):
     elif disable_tp:
         return None, 0, 1
     custom_op: (
-        MLPColumnParallelOp
-        | DSV4OProjColumnParallelOp
-        | MLPRowParallelOp
-        | OProjRowParallelOp
-        | DSV4OProjRowParallelOp
-        | ShardedCPColumnParallelOp
-        | None
+        DSV4OProjColumnParallelOp | OProjRowParallelOp | DSV4OProjRowParallelOp | ShardedCPColumnParallelOp | None
     ) = None
     if direct == "row":
         custom_op = _get_row_parallel_op(prefix, layer)
@@ -363,25 +304,3 @@ def get_replicated_op(disable_tp, prefix, layer) -> tuple[CustomReplicatedOp | N
 
     custom_op = CustomReplicatedOp(layer)
     return custom_op, custom_op.tp_rank, custom_op.tp_size
-
-
-def is_moe_layer(prefix: str) -> bool:
-    @lru_cache(maxsize=1)
-    def get_moe_params():
-        from vllm.config import get_current_vllm_config
-
-        vllm_config = get_current_vllm_config()
-        config = vllm_config.model_config.hf_text_config
-        n_routed_experts = getattr(config, "n_routed_experts", 0)
-        first_k_dense_replace = getattr(config, "first_k_dense_replace", float("inf"))
-        moe_layer_freq = getattr(config, "moe_layer_freq", 1)
-        return n_routed_experts, first_k_dense_replace, moe_layer_freq
-
-    match = re.search(r"layers\.(\d+)\.", prefix)
-    if match is None:
-        return False
-    layer_idx = int(match.group(1))
-
-    n_routed_experts, first_k_dense_replace, moe_layer_freq = get_moe_params()
-
-    return n_routed_experts is not None and layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0

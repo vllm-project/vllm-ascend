@@ -349,12 +349,6 @@ msgstr ""
 "| `embedding_tensor_parallel_size` | int  | `0` | embedding 的自定义张量并行大小。 |"
 
 msgid ""
-"| `mlp_tensor_parallel_size`       | int  | `0` | The custom tensor parallel"
-" size of mlp.       |"
-msgstr ""
-"| `mlp_tensor_parallel_size`       | int  | `0` | mlp 的自定义张量并行大小。       |"
-
-msgid ""
 "| `enable_npugraph_ex`               | bool | `True` | Whether to enable "
 "npugraph_ex backend.                                                 |"
 msgstr ""

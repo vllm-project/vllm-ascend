@@ -42,7 +42,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         self.mock_group.rank_in_group = 0
         self.mock_group.unique_name = "test_tp_group"
 
-        parallel_state._MLP_TP = self.mock_group
         parallel_state._OTP = self.mock_group
 
         mock_vllm_config = MagicMock()
