@@ -9,7 +9,7 @@ test_cases:
       HCCL_BUFFSIZE: "1024"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      LD_PRELOAD: "/usr/lib64/libjemalloc.so.2"
+      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
       SERVER_PORT: "DEFAULT_PORT"
     kv_pool:
       type: "memcache"
@@ -54,14 +54,26 @@ test_cases:
       - "--kv-transfer-config"
       - '{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both", "kv_connector_extra_config": {"backend": "memcache", "lookup_rpc_port": "0"}}'
     benchmarks:
-      perf:
+      perf_1:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K-in32768-bs400
+        dataset_path: vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen_prefix
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-        num_prompts: 64
-        max_out_len: 1500
-        batch_size: 32
+        num_prompts: 1
+        max_out_len: 1
+        batch_size: 16
         request_rate: 0
-        baseline: 1
-        threshold: 0.97
+        input_throughput_baseline: 100
+        input_throughput_threshold: 5
+      perf_2:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K_prefix90_in32768_bs128_qwen
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 128
+        max_out_len: 1
+        batch_size: 16
+        request_rate: 0
+        input_throughput_baseline: 23406.6
+        input_throughput_threshold: 5
+      
