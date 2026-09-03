@@ -55,9 +55,7 @@ class AscendSampler(Sampler):
         """Use Triton-Ascend penalties on NPU when Triton is available; else vLLM default."""
         # Triton-Ascend penalty kernels are not supported on 310P. Keep the
         # vLLM implementation for this device even when Triton is installed.
-        if not HAS_TRITON or not get_current_hardware_profile().supports(
-            HardwareCapability.TRITON_PENALTIES
-        ):
+        if not HAS_TRITON or not get_current_hardware_profile().supports(HardwareCapability.TRITON_PENALTIES):
             logger.warning_once(
                 "[sample/sampler] Triton unavailable or unsupported on 310P, falling back to vLLM default "
                 "penalty implementation. Penalty performance may be degraded on NPU. "

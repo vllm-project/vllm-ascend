@@ -4,7 +4,6 @@ import torch
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.sample import rejection_sampler as rejection_sampler_module
 from vllm_ascend.sample import sampler as sampler_module
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
