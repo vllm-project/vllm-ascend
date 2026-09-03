@@ -61,6 +61,12 @@ jobs:
               echo "INFO: zero cpu test groups matched, skip test execution"
               exit 0
           fi
+      - name: Checkout vllm source by input vllm commit
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-src
       - name: Checkout code
         uses: actions/checkout@v4
         with:
@@ -78,13 +84,16 @@ jobs:
           VENV_PY=${GITHUB_WORKSPACE}/venv/bin/python3
           VENV_SITE=$(${VENV_PY} -c "import site; print(site.getsitepackages()[0])")
           ${VENV_PY} -m pip install --upgrade pip
-          ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema vllm==0.23.0
-
+          # 不要安装pypi vllm==0.23.0，改为源码安装
+          ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema
+          # install vllm from source, empty target device, no compile gpu kernel
+          cd ${GITHUB_WORKSPACE}/vllm-src
+          VLLM_TARGET_DEVICE=empty ${VENV_PY} -m pip install .
+          ${VENV_PY} -m pip uninstall -y triton
           echo "$GITHUB_WORKSPACE" > "${VENV_SITE}/vllm_ascend_src.pth"
           if [ -d "${GITHUB_WORKSPACE}/vllm" ]; then
             echo "${GITHUB_WORKSPACE}/vllm" >> "${VENV_SITE}/vllm_ascend_src.pth"
           fi
-
           echo "=== pth file content ==="
           cat "${VENV_SITE}/vllm_ascend_src.pth"
           echo "=== check vllm module ==="
@@ -92,7 +101,6 @@ jobs:
         env:
           VLLM_ASCEND_CPU_ONLY: 1
           SKIP_TRITON_ASCEND_IMPORT: 1
-
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
@@ -130,7 +138,6 @@ jobs:
         env:
           VLLM_ASCEND_CPU_ONLY: 1
           SKIP_TRITON_ASCEND_IMPORT: 1
-
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
