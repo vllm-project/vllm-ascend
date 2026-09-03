@@ -558,6 +558,14 @@ class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec,
     ) -> AttentionCGSupport:
+        if vllm_config.speculative_config is not None:
+            # MTP bring-up stage: force attention eager so the draft-step
+            # eager semantics (per-step metadata, spec slot writes) land
+            # first. The draft FULL graph reuses the same
+            # persistent-buffer derivation chain (Step3.5 proposer refreshes
+            # query_start_loc/seq_lens in place before each replay) and is
+            # re-enabled after the eager bring-up is verified.
+            return AttentionCGSupport.NEVER
         mode = vllm_config.compilation_config.cudagraph_mode
         if mode.has_piecewise_cudagraphs() and not mode.has_full_cudagraphs():
             # PIECEWISE: QFA runs outside the compiled region as a plain
@@ -2412,8 +2420,11 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
     each replay). The K-scale scatter uses a device-side mask pattern (no
     host sync). No Python-side buffer refresh exists in the captured
     region -- ACL-graph replay never re-runs Python, so such refreshes
-    would freeze at capture values. Speculative decoding remains out of
-    scope for v1.
+    would freeze at capture values. Speculative decoding (MTP) uses the
+    same derivation chain: the draft metadata builders route through
+    AscendAttentionMetadataBuilder.build(), and the Step3.5 proposer
+    refreshes its persistent query_start_loc/seq_lens buffers in place
+    before each draft-step replay.
 
     NOTE: the QFA dual operators are called through _get_qfa_ops(), which
     resolves cann_ops_transformer.ops.quant_flash_attn(_metadata) -- the
@@ -2763,8 +2774,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             return output.fill_(0)
         if getattr(self, "enable_hamming_sparse", False):
             raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
-        if self.vllm_config.speculative_config is not None:
-            raise NotImplementedError("C8_MXFP v1 does not support speculative decoding yet.")
         if self.vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("C8_MXFP v1 does not support PD disaggregation (kv_transfer) yet.")
         if _EXTRA_CTX.capturing:
