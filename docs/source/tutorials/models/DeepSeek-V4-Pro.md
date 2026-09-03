@@ -11,8 +11,6 @@ DeepSeek-V4-Pro, the maximum reasoning effort mode of DeepSeek-V4, significantly
 
 This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, single-node and multi-node deployment, accuracy and performance evaluation.
 
-> **Note**: Please replace the version placeholder above with your actual validation version.
-
 ## 2 Supported Features
 
 Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
