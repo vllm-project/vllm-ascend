@@ -1,0 +1,134 @@
+name: Selected CPU Tests
+
+on:
+  workflow_call:
+    inputs:
+      vllm:
+        description: vllm version string
+        required: true
+        type: string
+      ref:
+        description: PR head sha
+        required: true
+        type: string
+      base_ref:
+        description: target base branch name e.g. main
+        required: true
+        type: string
+      # -------- fix start --------
+      base_sha:
+        description: base commit sha, optional. empty skip rebase
+        required: false
+        default: ""
+        type: string
+      # -------- fix end --------
+      test_groups:
+        description: json test groups
+        required: true
+        type: string
+    outputs:
+      coverage_artifact_name:
+        value: ${{ jobs.run_tests.outputs.coverage_artifact_name }}
+
+jobs:
+  filter-groups:
+    runs-on: ubuntu-latest
+    outputs:
+      filtered_test_groups: ${{ steps.filter.outputs.filtered_test_groups }}
+    env:
+      RAW_JSON: ${{ inputs.test_groups }}
+    steps:
+      - name: Keep only cpu test groups
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf "%s" "${RAW_JSON}" > /tmp/test_groups.json
+          FILTERED=$(jq -c '[ .[] | select(.npu_type == "cpu") ]' /tmp/test_groups.json)
+          echo "filtered_test_groups=${FILTERED}" >> "${GITHUB_OUTPUT}"
+
+  run_tests:
+    name: cpu‑ut‑run
+    needs: [filter-groups]
+    runs-on: ${{ fromJson(inputs.test_groups)[0].runner_label }}
+    outputs:
+      coverage_artifact_name: cpu‑coverage‑report
+    env:
+      FILTERED_GROUPS: ${{ needs.filter-groups.outputs.filtered_test_groups }}
+    steps:
+      - name: Early exit when no cpu test groups
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          raw = os.environ["GROUPS_RAW"]
+          if not raw or raw.strip() == "[]":
+              print("INFO: zero cpu test groups matched, skip test execution")
+              exit(0)
+          PY
+        env:
+          GROUPS_RAW: ${{ needs.filter-groups.outputs.filtered_test_groups }}
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - name: Install python dependencies
+        run: |
+          set -euo pipefail
+          if command -v apt-get &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y python3-pip
+          fi
+          python3 -m pip install --upgrade pip --break-system-packages
+          python3 -m pip install pytest pytest-cov --break-system-packages
+      - name: Resolve source snapshot (optional rebase)
+        run: |
+          set -euo pipefail
+          BASE_SHA="${{ inputs.base_sha }}"
+          if [ -n "${BASE_SHA}" ]; then
+            git config user.name "ci‑runner"
+            git config user.email "ci@runner.local"
+            git rebase "${BASE_SHA}"
+          else
+            echo "INFO: base_sha is empty, skip rebase, use HEAD directly"
+          fi
+      - name: Parse test groups
+        id: parse_groups
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          groups = json.loads(os.environ["TEST_GROUPS"])
+          paths = []
+          for g in groups:
+              paths.extend(g["test_paths"])
+          out_paths = " ".join(paths)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf‑8") as f:
+              f.write(f"test_paths={out_paths}\n")
+          PY
+        env:
+          TEST_GROUPS: ${{ needs.filter-groups.outputs.filtered_test_groups }}
+
+      - name: Setup python & dependencies
+        run: |
+          set -euo pipefail
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pytest pytest‑cov
+
+      - name: Run pytest with coverage
+        run: |
+          set -euo pipefail
+          TEST_PATHS="${{ steps.parse_groups.outputs.test_paths }}"
+          echo "Running tests: ${TEST_PATHS}"
+          python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu‑coverage‑report
+          path: coverage.xml
+          retention-days: 7
