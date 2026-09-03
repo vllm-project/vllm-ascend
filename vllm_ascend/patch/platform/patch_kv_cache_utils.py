@@ -41,9 +41,7 @@ from vllm_ascend.core.kv_cache_interface import (
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
-_orig_unify_kv_cache_spec_page_size = (
-    vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size
-)
+_orig_unify_kv_cache_spec_page_size = vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
 if vllm_version_is("0.28.0"):
@@ -53,14 +51,6 @@ else:
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
-
-
-def _make_ascend_kv_cache_tensor(
-    *,
-    size: int,
-    layers: list[str],
-) -> KVCacheTensor:
-    return KVCacheTensor(size=size, shared_by=layers)
 
 
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
@@ -190,18 +180,13 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     ):
         return None
 
-    base_page_sizes = {
-        spec.page_size_bytes
-        for spec in [*target_attention_specs.values(), *mamba_specs.values()]
-    }
+    base_page_sizes = {spec.page_size_bytes for spec in [*target_attention_specs.values(), *mamba_specs.values()]}
     if len(base_page_sizes) != 1:
         return None
     base_page_size = next(iter(base_page_sizes))
     for spec in draft_attention_specs.values():
         if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
-            if spec.page_size_bytes != (
-                base_page_size * spec.dcp_replication_size
-            ):
+            if spec.page_size_bytes != (base_page_size * spec.dcp_replication_size):
                 return None
         elif spec.page_size_bytes != base_page_size:
             return None
@@ -261,29 +246,19 @@ def _unify_kv_cache_spec_page_size(
 ) -> dict[str, KVCacheSpec]:
     """Align each replicated draft lane, preserving non-rectangular pages."""
     replicated_specs = {
-        name: spec
-        for name, spec in kv_cache_spec.items()
-        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+        name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
     }
     if replicated_specs:
         # First ask vLLM to align only the target's ordinary pages.  The draft's
         # DCP multiplier describes additional physical storage, not a larger
         # scheduler page.  Feeding either the multiplied draft page or its GQA
         # page into the generic unifier can change the logical block size.
-        ordinary_specs = {
-            name: spec
-            for name, spec in kv_cache_spec.items()
-            if name not in replicated_specs
-        }
+        ordinary_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in replicated_specs}
         try:
-            aligned_ordinary_specs = _orig_unify_kv_cache_spec_page_size(
-                ordinary_specs
-            )
+            aligned_ordinary_specs = _orig_unify_kv_cache_spec_page_size(ordinary_specs)
         except NotImplementedError:
             aligned_ordinary_specs = {}
-        ordinary_page_sizes = {
-            spec.page_size_bytes for spec in aligned_ordinary_specs.values()
-        }
+        ordinary_page_sizes = {spec.page_size_bytes for spec in aligned_ordinary_specs.values()}
         if len(ordinary_page_sizes) == 1:
             base_page_size = next(iter(ordinary_page_sizes))
             aligned_specs = {
@@ -300,10 +275,7 @@ def _unify_kv_cache_spec_page_size(
                     **replicated_specs,
                 }.items()
             }
-            if (
-                _get_kimi_k3_dspark_mixed_kv_cache_groups(aligned_specs)
-                is not None
-            ):
+            if _get_kimi_k3_dspark_mixed_kv_cache_groups(aligned_specs) is not None:
                 return aligned_specs
     return _orig_unify_kv_cache_spec_page_size(kv_cache_spec)
 
@@ -706,21 +678,11 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
     ]
     if not draft_layers:
         return None
-    target_layers = [
-        name
-        for name in kv_cache_groups[0].layer_names
-        if name not in draft_layers
-    ]
-    if not target_layers or any(
-        not isinstance(first_specs[name], FullAttentionSpec)
-        for name in target_layers
-    ):
+    target_layers = [name for name in kv_cache_groups[0].layer_names if name not in draft_layers]
+    if not target_layers or any(not isinstance(first_specs[name], FullAttentionSpec) for name in target_layers):
         return None
 
-    bytes_per_block = sum(
-        first_specs[name].page_size_bytes
-        for name in kv_cache_groups[0].layer_names
-    )
+    bytes_per_block = sum(first_specs[name].page_size_bytes for name in kv_cache_groups[0].layer_names)
     if any(
         sum(
             group.kv_cache_spec.kv_cache_specs[name].page_size_bytes
@@ -737,9 +699,7 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
         available_memory // bytes_per_block,
     )
 
-    recurrent_layers_by_group = [
-        list(group.layer_names) for group in kv_cache_groups[1:]
-    ]
+    recurrent_layers_by_group = [list(group.layer_names) for group in kv_cache_groups[1:]]
     kv_cache_tensors: list[KVCacheTensor] = []
     for layer_idx, target_layer in enumerate(target_layers):
         page_size = first_specs[target_layer].page_size_bytes
@@ -748,17 +708,17 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
             if layer_idx < len(recurrent_layers):
                 layers.append(recurrent_layers[layer_idx])
         kv_cache_tensors.append(
-            _make_ascend_kv_cache_tensor(
+            KVCacheTensor(
                 size=page_size * num_blocks,
-                layers=layers,
+                shared_by=layers,
             )
         )
     for draft_layer in draft_layers:
         page_size = first_specs[draft_layer].page_size_bytes
         kv_cache_tensors.append(
-            _make_ascend_kv_cache_tensor(
+            KVCacheTensor(
                 size=page_size * num_blocks,
-                layers=[draft_layer],
+                shared_by=[draft_layer],
             )
         )
 
@@ -773,9 +733,7 @@ def _get_kimi_k3_replicated_dspark_kv_cache_config(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
-        prefix_cache_retention_interval=(
-            vllm_config.cache_config.prefix_cache_retention_interval
-        ),
+        prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
     )
 
 
