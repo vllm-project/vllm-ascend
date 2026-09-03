@@ -122,6 +122,7 @@ class PPTransportDataType(str, Enum):
     """Data types carried between PP ranks via ``IntermediateTensors``."""
 
     AUX_HIDDEN_STATES = "aux_hidden_states"
+    TOPK_INDICES = "topk_indices"
 
 
 def make_empty_intermediate_tensors(

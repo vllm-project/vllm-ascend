@@ -540,6 +540,35 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
 
 
+def test_should_reuse_topk_keeps_frequency_logic():
+    config = SimpleNamespace(index_topk_freq=4, index_skip_topk_offset=3)
+
+    assert not utils.should_reuse_topk(config, 2)
+    assert utils.should_reuse_topk(config, 3)
+
+
+def test_indexshare_pp_stage_requires_topk_inside_group():
+    config = SimpleNamespace(
+        num_hidden_layers=8,
+        indexer_types=["full", "shared", "shared", "shared"] * 2,
+    )
+
+    assert utils.pp_stage_requires_topk_indices(config, 2)
+    assert not utils.pp_stage_requires_topk_indices(config, 4)
+
+
+def test_index_cache_pp_stage_requires_topk_when_first_layer_reuses():
+    config = SimpleNamespace(
+        num_hidden_layers=8,
+        use_index_cache=True,
+        index_topk_freq=4,
+        index_skip_topk_offset=3,
+    )
+
+    assert utils.pp_stage_requires_topk_indices(config, 3)
+    assert not utils.pp_stage_requires_topk_indices(config, 2)
+
+
 def test_check_gdn_layer_supports_kimi_linear_config_property():
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
