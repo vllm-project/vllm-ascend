@@ -435,8 +435,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 head_dim=self.head_dim,
                 idx_head_dim=self.idx_head_dim,
                 eps=self.q_norm.variance_epsilon,
-                attn_out_fp8=False,
-                indexer_out_fp8=False,
+                attn_out_fp8=self.kv_cache_torch_dtype == torch.float8_e4m3fn,
+                indexer_out_fp8=self.indexer.index_cache.dtype == torch.float8_e4m3fn,
                 q_bias=None,
                 k_bias=None,
             )
@@ -585,7 +585,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             projected, _ = self.o_proj(attn_out)
             return projected
         q, k, v, index_q, index_k = self._sparse_prepare(positions, hidden_states)
-        attn_out = torch.empty_like(q)
+        attn_out = torch.empty_like(q, dtype=torch.bfloat16)
         torch.ops.vllm.minimax_m3_sparse_forward(
             q,
             k,
