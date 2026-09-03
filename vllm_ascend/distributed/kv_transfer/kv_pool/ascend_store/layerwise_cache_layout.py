@@ -23,6 +23,7 @@ _PREFETCH_LAYERS = "layerwise_prefetch_layers"
 _INDEPENDENT_LAYERS = "layerwise_independent_layers"
 _DEFAULT_MAX_PREFETCH_LAYERS = 8
 _INDEXER_CACHE_SUFFIX = ".indexer.k_cache"
+_LAYERWISE_REUSE_CONNECTORS = ("AscendStoreConnector", "AscendStoreMPConnector", "MooncakeConnectorStoreV1")
 
 
 def get_layerwise_physical_layer_index(layer_name: str, base_layers: int) -> int:
@@ -84,7 +85,7 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
 
     connector_name = getattr(kv_transfer_config, "kv_connector", None)
     root_extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None) or {}
-    if connector_name in ("AscendStoreConnector", "MooncakeConnectorStoreV1"):
+    if connector_name in _LAYERWISE_REUSE_CONNECTORS:
         connector_configs = [
             {
                 "kv_connector": connector_name,
@@ -99,10 +100,7 @@ def get_layerwise_reuse_config(kv_transfer_config: Any) -> dict[str, Any] | None
     for connector_config in connector_configs:
         if not isinstance(connector_config, dict):
             continue
-        if connector_config.get("kv_connector") not in (
-            "AscendStoreConnector",
-            "MooncakeConnectorStoreV1",
-        ):
+        if connector_config.get("kv_connector") not in _LAYERWISE_REUSE_CONNECTORS:
             continue
         extra_config = connector_config.get("kv_connector_extra_config") or {}
         protocol = get_layerwise_protocol(str(extra_config.get("backend", "mooncake")))
