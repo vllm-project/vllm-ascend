@@ -294,15 +294,17 @@ Single-node deployment completes both Prefill and Decode within the same node. T
         --model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}' \
         --quantization ascend \
         --port 8900 \
-        --block-size 32 \
+        --block-size 128 \
         --speculative-config '{"method":"dspark","num_speculative_tokens":7,"enforce_eager":true}' \
         --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --async-scheduling \
         --additional-config '{
             "ascend_compilation_config": {
                 "enable_npugraph_ex": true,
                 "enable_static_kernel": false
             },
             "enable_cpu_binding": true,
+            "enable_dsa_cp": true,
             "enable_flashcomm1": true,
             "multistream_overlap_shared_expert": true
         }'
