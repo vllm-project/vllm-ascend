@@ -369,3 +369,49 @@ a3-560t:
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-4-cn12-001
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+a5:
+#   multi_node:
+#     test_config:
+#       - name: Qwen3-235B-W8A8-EPLB
+#         size: 2
+#         config_file_path: Qwen3-235B-W8A8-EPLB.yaml
+#   single_node:
+#     test_config:
+#       - name: Qwen3.5-397B-A17B-w4a8-mtp
+#         os: linux-aarch64-a5-8
+#         config_file_path: Qwen3.5-397B-A17B-w4a8-mtp.yaml
+  single_node:
+    test_config:
+      - name: Qwen3_235b_w8a8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_235b_w8a8_A5.yaml
+      - name: DeepSeek_V31_W4A4C8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V31_W4A4C8_A5.yaml
+      - name: Qwen3_32b_w8a8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_32b_w8a8_A5.yaml
+      - name: GLM5_1_W4A4_A5
+        os: linux-aarch64-a5-8
+        config_file_path: GLM5_1_W4A4_A5.yaml
+      - name: Qwen3_6_27b_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_6_27b_A5.yaml
+      - name: Qwen3_6_27B_W8A8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_6_27B_W8A8_A5.yaml
+      - name: Qwen3_5_35B_A3B_FP8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_5_35B_A3B_FP8_A5.yaml
+      - name: KimiK26_w4a4c8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: KimiK26_w4a4c8_A5.yaml
+      - name: DeepSeek_V4_Flash_A5
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V4_Flash_A5.yaml
+      - name: Qwen3_5_397B_A17B_w8a8_mxfp8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: Qwen3_5_397B_A17B_w8a8_mxfp8_A5.yaml
+      - name: DeepSeek_V31_Terminus_w4a8_w8a8_A5
+        os: linux-aarch64-a5-8
+        config_file_path: DeepSeek_V31_Terminus_w4a8_w8a8_A5.yaml
