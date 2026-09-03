@@ -61,20 +61,20 @@ jobs:
               echo "INFO: zero cpu test groups matched, skip test execution"
               exit 0
           fi
-      - name: Checkout vllm source by input vllm commit
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ inputs.vllm }}
-          path: ./vllm-src
-          fetch-depth: 0
-
+      # ========= 删除原来的 Checkout vllm source by input vllm commit step =========
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           submodules: true
+      # ========= 新增：更新submodule ./vllm到inputs.vllm指定commit =========
+      - name: Sync vllm submodule to target commit
+        run: |
+          set -euo pipefail
+          cd ${GITHUB_WORKSPACE}/vllm
+          git fetch origin
+          git checkout ${{ inputs.vllm }}
       - name: Install python dependencies
         run: |
           set -euo pipefail
@@ -88,8 +88,8 @@ jobs:
           ${VENV_PY} -m pip install --upgrade pip
           # 不要安装pypi vllm==0.23.0，改为源码安装
           ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema
-          # install vllm from source, empty target device, no compile gpu kernel
-          cd ${GITHUB_WORKSPACE}/vllm-src
+          # install vllm from submodule dir, empty target device, no compile gpu kernel
+          cd ${GITHUB_WORKSPACE}/vllm
           VLLM_TARGET_DEVICE=empty ${VENV_PY} -m pip install .
           ${VENV_PY} -m pip uninstall -y triton
           echo "$GITHUB_WORKSPACE" > "${VENV_SITE}/vllm_ascend_src.pth"
