@@ -348,6 +348,43 @@ an external router separately. See upstream
 [Data Parallel Deployment](https://docs.vllm.ai/en/latest/serving/data_parallel_deployment/)
 for the supported load-balancing modes.
 
+## Trace Replay
+
+Trace replay forces the engine to emit a predetermined token sequence during
+decoding while computing real logprobs from the model's unmodified logit
+distribution. It is only supported by model runner V2. When using the normal
+`vllm serve` command with the token-in/token-out endpoint, explicitly enable
+model runner V2 and the scale-out endpoints:
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 \
+VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
+vllm serve Qwen/Qwen3-8B \
+    --enable-trace-replay
+```
+
+`VLLM_USE_V2_MODEL_RUNNER=1` prevents the server from falling back to model
+runner V1, which is incompatible with trace replay.
+`VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` registers the
+`/inference/v1/generate` endpoint for a normal serving process.
+
+Send requests to `/inference/v1/generate`:
+
+```bash
+curl http://127.0.0.1:8000/inference/v1/generate \
+    -H "Content-Type: application/json" \
+    -d '{
+        "request_id": "rollout-001",
+        "token_ids": [151644, 8948, 198],
+        "sampling_params": {
+            "trace_decode_token_ids": [15, 284, 1026, 374],
+            "logprobs": 1
+        }
+    }'
+```
+
+The output tokens will always be `[15, 284, 1026, 374]`. The logprobs reflect the model's true probability for each forced token under the current inference configuration.
+
 ## Configuration checklist
 
 | Setting | When to use it | Purpose |
@@ -361,6 +398,9 @@ for the supported load-balancing modes.
 | `--weight-transfer-config '{"backend": "hccl"}'` | Cross-NPU weight transfer | Register the Ascend HCCL transfer engine |
 | `--weight-transfer-config '{"backend": "ipc"}'` | Same-NPU weight transfer | Select the Ascend NPU IPC transfer engine |
 | `--enable-return-routed-experts` | MoE router replay | Return encoded expert routing decisions |
+| `VLLM_USE_V2_MODEL_RUNNER=1` | Trace replay | Select the required model runner V2 implementation |
+| `VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1` | Token-in/token-out requests on a normal server | Register `/inference/v1/generate` |
+| `--enable-trace-replay` | trace replay | Forces decoding to follow a predetermined token sequence |
 
 For the Ascend-specific option definitions, see
 [Additional Configuration](../configuration/additional_config.md) and

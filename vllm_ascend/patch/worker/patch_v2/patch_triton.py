@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.sample import (
     sampler,
     states,
     thinking_budget,
+    trace_replay,
 )
 from vllm.v1.worker.gpu.spec_decode import rejection_sampler, rejection_sampler_utils
 from vllm.v1.worker.gpu.spec_decode.dflash import speculator as dflash_speculator
@@ -32,6 +33,7 @@ from vllm_ascend.worker.v2.sample.gumbel import apply_temperature
 from vllm_ascend.worker.v2.sample.logprob import compute_token_logprobs, compute_topk_logprobs
 from vllm_ascend.worker.v2.sample.min_p import apply_min_p
 from vllm_ascend.worker.v2.sample.penalties import apply_penalties, bincount
+from vllm_ascend.worker.v2.sample.trace_replay import apply_trace_tokens
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import _prepare_dflash_inputs_kernel_ascend
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import (
     rejection_sample as npu_rejection_sample,
@@ -74,3 +76,4 @@ rejection_sampler.get_num_nans = get_num_nans
 thinking_budget._load_effective_token = _load_effective_token_ascend
 # TODO: Remove after Triton-Ascend 3.6.0 is the minimum supported version.
 thinking_budget._update_committed_marker_cache_kernel = _update_committed_marker_cache_kernel_ascend
+trace_replay.apply_trace_tokens = apply_trace_tokens
