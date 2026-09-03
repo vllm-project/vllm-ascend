@@ -102,7 +102,6 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
         expected_weight = torch.arange(1, 4, dtype=torch.bfloat16).repeat_interleave(128).expand(4, 384)
         torch.testing.assert_close(weight, expected_weight)
         assert weight is layer._merged_conv_weight
-        assert torch.count_nonzero(output) == 0
         if kwargs["run_mode"] == 0:
             assert kwargs["cache_indices_opt"] is prefill_conv.cache_indices
             assert kwargs["initial_state_mode_opt"] is prefill_conv.initial_state_mode
@@ -112,10 +111,30 @@ def test_decode_and_prefill_use_their_own_metadata_and_merge_outputs(monkeypatch
             assert kwargs["cache_indices_opt"] is spec_conv.cache_indices
             assert kwargs["num_accepted_tokens_opt"] is spec_conv.num_accepted_tokens
             assert kwargs["initial_state_mode_opt"] is None
-        # A distinct return catches accidentally ignoring the declared op result.
         return x.clone()
 
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_causal_conv1d_custom", conv, raising=False)
+    def fla_fn(x, weight, bias=None, **kwargs):
+        return conv(torch.zeros_like(x), x, weight, run_mode=0,
+                    conv_state=kwargs["conv_states"],
+                    cache_indices_opt=kwargs["cache_indices"],
+                    initial_state_mode_opt=kwargs["has_initial_state"],
+                    num_accepted_tokens_opt=None)
+
+    def fla_update(x, conv_state, weight, bias=None, **kwargs):
+        return conv(torch.zeros_like(x), x, weight, run_mode=1,
+                    conv_state=conv_state,
+                    cache_indices_opt=kwargs["conv_state_indices"],
+                    initial_state_mode_opt=None,
+                    num_accepted_tokens_opt=kwargs["num_accepted_tokens"])
+
+    monkeypatch.setattr(
+        "vllm_ascend.models.glm5next.ops.causal_conv1d.causal_conv1d_fn",
+        fla_fn,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.models.glm5next.ops.causal_conv1d.causal_conv1d_update",
+        fla_update,
+    )
     calls = []
 
     def recurrent(q, k, v, gate, beta, state, starts, indices, *args):

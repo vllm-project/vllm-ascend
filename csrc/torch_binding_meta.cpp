@@ -691,23 +691,6 @@ npu_copy_and_expand_eagle_inputs_meta(
             out_new_token_indices, out_hidden_state_mapping};
 }
 
-at::Tensor npu_causal_conv1d_custom_meta(
-    const at::Tensor& output,
-    const at::Tensor& x,
-    const at::Tensor& weight,
-    const at::Tensor& conv_state,
-    const c10::optional<at::Tensor>& bias_opt,
-    const c10::optional<at::Tensor>& query_start_loc_opt,
-    const c10::optional<at::Tensor>& cache_indices_opt,
-    const c10::optional<at::Tensor>& initial_state_mode_opt,
-    const c10::optional<at::Tensor>& num_accepted_tokens_opt,
-    int64_t  activation_mode,
-    int64_t  pad_slot_id,
-    int64_t  run_mode)
-{
-    return output;
-}
-
 at::Tensor npu_causal_conv1d_310_meta(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -741,25 +724,6 @@ at::Tensor npu_recurrent_gated_delta_rule_310_meta(
 {
 
     at::Tensor output = at::empty_symint(value.sym_sizes(), value.options());
-    return output;
-}
-
-at::Tensor npu_recurrent_gated_delta_rule_meta(
-    const at::Tensor& query,
-    const at::Tensor& key,
-    const at::Tensor& value,
-    at::Tensor& state,
-    const c10::optional<at::Tensor>& beta,
-    const c10::optional<double> scale,
-    const c10::optional<at::Tensor>& actual_seq_lengths,
-    const c10::optional<at::Tensor>& ssm_state_indices,
-    const c10::optional<at::Tensor>& num_accepted_tokens,
-    const c10::optional<at::Tensor>& g,
-    const c10::optional<at::Tensor>& gk)
-{
-
-    auto options = value.options().dtype(at::ScalarType::BFloat16);
-    at::Tensor output = at::empty_symint(value.sym_sizes(), options);
     return output;
 }
 
@@ -2163,8 +2127,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("get_physical_device_id", &vllm_ascend::meta::get_physical_device_id_meta);
     //Gemma rmsnorm meta implementation
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
-    // recurrent_gated_delta_rule meta implementation
-    ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
@@ -2219,8 +2181,6 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sign_bits_pack", &vllm_ascend::meta::npu_sign_bits_pack_meta);
     // CopyAndExpandEagleInputs
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
-    // causal_conv1d_fn
-    ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);
     ops.impl("compressor", &vllm_ascend::meta::compressor_meta);
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
