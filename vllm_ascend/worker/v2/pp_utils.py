@@ -260,7 +260,7 @@ def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
 def restore_pp_topk_indices(
     intermediate_tensors: IntermediateTensors,
     topk_indices_buffer: torch.Tensor,
-) -> torch.Tensor:
+) -> None:
     """Restore Top-K indices received from the preceding PP stage."""
     received_tensors = get_pp_transport_tensors(
         intermediate_tensors,
@@ -283,24 +283,21 @@ def restore_pp_topk_indices(
             f"received {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
         )
     topk_indices_buffer[:num_tokens].copy_(received_topk_indices)
-    return received_topk_indices
 
 
 def add_pp_topk_indices(
     intermediate_tensors: IntermediateTensors,
     topk_indices_buffer: torch.Tensor,
     num_tokens: int,
-) -> torch.Tensor:
+) -> None:
     """Append locally available Top-K indices to an outgoing PP payload."""
     if num_tokens > topk_indices_buffer.shape[0]:
         raise ValueError(
             "PP Top-K indices exceed the local buffer capacity: "
             f"requested {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
         )
-    topk_indices = topk_indices_buffer[:num_tokens]
     add_pp_transport_tensors(
         intermediate_tensors,
         PPTransportDataType.TOPK_INDICES,
-        [topk_indices],
+        [topk_indices_buffer[:num_tokens]],
     )
-    return topk_indices
