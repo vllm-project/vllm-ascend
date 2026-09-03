@@ -24,8 +24,6 @@ Refer to [Supported Models](../../user_guide/support_matrix/supported_models.md)
 
 >**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/google/siglip2-base-patch16-224`. In subsequent commands, replace `<YOUR_MODEL_PATH>` with the path you recorded here (a local directory or a Hugging Face / ModelScope model id such as `google/siglip2-base-patch16-224`).
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
-
 ### 3.2 ImageNet Labels (Optional, for Accuracy Evaluation)
 
 For ImageNet val zero-shot Top-1 evaluation, prepare:
@@ -149,7 +147,7 @@ SigLIP2 is a pooling embedding model and **does not support** multi-node PD (Pre
 
 Once your server is started, you can verify with the following commands.
 
-### Text Embedding
+### 6.1 Text Embedding
 
 ```bash
 export MODEL_PATH=<YOUR_MODEL_PATH>  # match --served-model-name from Section 5.1
@@ -164,7 +162,7 @@ curl -X POST http://127.0.0.1:8000/v1/embeddings \
 
 Use the template `"This is a photo of {}."` for zero-shot classification prompts. SigLIP2 was trained with `padding=max_length` and `max_length=64` for text; vLLM applies this when using offline `tokenization_kwargs`.
 
-### Image Embedding
+### 6.2 Image Embedding
 
 Encode the image as base64 and send via `messages`:
 
@@ -193,7 +191,7 @@ The service returns HTTP 200 OK with a JSON response containing the `embedding` 
 
 For more usage examples, please reference the [vLLM pooling embed examples](https://github.com/vllm-project/vllm/tree/main/examples/pooling/embed).
 
-### Offline Embedding
+### 6.3 Offline Embedding
 
 ```python
 from vllm import LLM
@@ -485,13 +483,7 @@ vllm serve $MODEL_PATH \
 
 ### 9.2 Tuning Guidelines
 
-#### 9.2.1 General Tuning Reference
-
-Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
-
-Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
-
-#### 9.2.2 Model-Specific Optimizations
+#### 9.2.1 Model-Specific Optimizations
 
 ##### Optimizations Enabled by Default
 
@@ -509,6 +501,12 @@ The following optimizations are enabled in the recommended [§5.1](#51-single-no
 | ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
 | Server batch tuning | Online text/image serving | Set `--max-num-seqs` and `--max-num-batched-tokens` at serve startup (see Section 9.1) | Controls how many embed requests are batched on the server | Reduce both flags if OOM occurs; image embed usually needs smaller batches than text |
 | Client concurrency tuning | HTTP benchmark or production clients | Increase parallel `/v1/embeddings` requests (see Section 8.1) | Raises offered load to the server batcher | Throughput gains plateau once client concurrency exceeds `--max-num-seqs`; watch p99 latency |
+
+#### 9.2.2 General Tuning Reference
+
+Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
+
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
