@@ -64,15 +64,28 @@ DSV3_2_SFA_DCP_GOLDENS = (
         "The president of United States is平行于我 charm与技术oi",
     ],
 )
-DSV3_2_SFA_PCP_GOLDENS = [
-    "The capital of France isoint054 Rund compasses",
-    "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
+DSV3_2_SFA_PCP_GOLDENS = (
     (
-        "The president of United States isoint054 Rund959arki"
-        if vllm_version_is("0.27.1")
-        else "The president of United States isoint054 Rund596\u5e84\u7a3c"
-    ),
-]
+        [
+            "The capital of France isoint054 Rund compasses",
+            "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
+            "The president of United States isoint054 Rund959arki",
+        ],
+    )
+    if vllm_version_is("0.27.1")
+    else (
+        [
+            "The capital of France isoint054 Rund compasses",
+            "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
+            "The president of United States isoint054 Rund596\u5e84\u7a3c",
+        ],
+        [
+            "The capital of France isoint054 Rund compasses",
+            "Hello, my name is Tom, I amERIChiretailhallenging",
+            "The president of United States isoint054 Rund596\u5e84\u7a3c",
+        ],
+    )
+)
 
 DSV4_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 DSV4_PROMPTS = [
