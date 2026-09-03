@@ -278,7 +278,7 @@ Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsin
 ## 5 Online Service Deployment
 
 !!! warning "DSpark long-context limitation"
-    For the current `Inferact/Kimi-K3-DSpark` draft weights, DSpark acceptance is low for approximately 20K–40K-token inputs and remains low for longer contexts. Consequently, 128K inputs may receive no effective speculative-decoding benefit. This is a limitation of the current draft weights, not of the DSpark framework; validate acceptance and end-to-end performance for the target workload before enabling the draft model.
+    For the current `Inferact/Kimi-K3-DSpark` draft weights, DSpark acceptance is low for approximately 20k–40k-token inputs and remains low for longer contexts. Consequently, 128k inputs may receive no effective speculative-decoding benefit. This is a limitation of the current draft weights, not of the DSpark framework; validate acceptance and end-to-end performance for the target workload before enabling the draft model.
 
 The A2 capabilities have not changed in this release and remain consistent with **vLLM-Ascend 0.23.0**; no iterative updates have been made.
 
@@ -610,7 +610,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
     | `--data-parallel-size 8`       | Creates eight global DP ranks across eight nodes.                               |
     | `--data-parallel-size-local 1` | Runs one DP rank on the current node.                                           |
     | `--language-model-only`        | Disables the multimodal encoder for this validated A2 baseline.                 |
-    | `--max-model-len 262144`       | Sets a 256K combined input and output context limit.                            |
+    | `--max-model-len 262144`       | Sets a 256k combined input and output context limit.                            |
     | `--compilation-config`         | Uses `FULL_DECODE_ONLY` graph replay with capture sizes `1`, `2`, `4`, and `8`. |
     | `--additional-config`          | Enables NPU graph execution and CPU binding while keeping FlashComm1 disabled.  |
 
@@ -1143,7 +1143,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Use `vllm bench serve` to measure the online serving performance of the Kimi K3 service. The following is a minimal example for eight 128K-input, 1K-output requests. Replace the service address, model path, dataset path, and result directory for the target environment.
+Use `vllm bench serve` to measure the online serving performance of the Kimi K3 service. The following is a minimal example for eight 128k-input, 1k-output requests. Replace the service address, model path, dataset path, and result directory for the target environment.
 
 Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 

@@ -218,7 +218,7 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 | Scenario | Deployment Mode | *Total NPUs | Weight Version | Key Considerations |
 | ---------- | ---------------- | ------------- | ---------------- | ------------------------ |
-| High Throughput<br>(32K context → 1K output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
+| High Throughput<br>(32k context → 1k output) | 1P1D deployment | 16 (A3) | glm5.1w4a8 | For short-sequence high throughput, try adjusting xxx parameters |
 | Long Context | | | | |
 | Low Latency | | | | |
 
@@ -228,8 +228,8 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 | Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched Tokens | Max Model Len | MTP Speculation Num | FUSED_MC2 | EP Switch | FC+CP Switch | Async Scheduling |
 | ---------- | --------------- | ------- | ---- | ---- | ---- | ------------- | -------------------- | --------------------- | ----------- | ----------- | -------------- | ------------------ |
-| High Throughput (32K→1K) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 4096 | 30k | 3 | Off | On | On | On |
-| High Throughput (32K→1K) | Server-D Node | 8 | 2 | 8 | 8 | 4096 | 30k | 12 | Off | On | Off | On |
+| High Throughput (32k→1k) | Server-P Node / Single Machine | 8 | 8 | 2 | 32 | 4096 | 30k | 3 | Off | On | On | On |
+| High Throughput (32k→1k) | Server-D Node | 8 | 2 | 8 | 8 | 4096 | 30k | 12 | Off | On | Off | On |
 | Long Context | Server-P Node / Single Machine | | | | | | | | | | | |
 | Long Context | Server-D Node | | | | | | | | | | | |
 | Low Latency | Server-P Node / Single Machine | | | | | | | | | | | |
