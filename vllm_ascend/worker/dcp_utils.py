@@ -514,18 +514,15 @@ class DCPManager:
         is_mla = self._is_mla_kv_cache_spec(kv_cache_spec)
         if is_mla:
             if dcp_metadata.draft_base_seq_lens is None:
-                local_seq_lens = torch.as_tensor(
-                    dcp_metadata.num_computed_tokens_of_dcp,
-                    device=seq_lens.device,
-                )
+                # MLA draft history is consumed on the host to build the DCP
+                # MTP attention mask below. Keep it on CPU instead of moving the
+                # per-rank DCP lengths to NPU and copying the summed result back.
+                local_seq_lens = torch.as_tensor(dcp_metadata.num_computed_tokens_of_dcp)
                 draft_base_seq_lens = local_seq_lens.sum(dim=-1)
                 if original_is_prefilling is not None:
-                    is_prefilling = original_is_prefilling[: draft_base_seq_lens.shape[0]].to(
-                        device=draft_base_seq_lens.device
-                    )
+                    is_prefilling = original_is_prefilling[: draft_base_seq_lens.shape[0]]
                     prefill_query_lens = original_query_lens_cpu[: draft_base_seq_lens.shape[0]].to(
-                        device=draft_base_seq_lens.device,
-                        dtype=draft_base_seq_lens.dtype,
+                        dtype=draft_base_seq_lens.dtype
                     )
                     draft_base_seq_lens = draft_base_seq_lens + torch.where(
                         is_prefilling,
@@ -537,19 +534,23 @@ class DCPManager:
         else:
             seq_lens_for_dcp = seq_lens_cpu if seq_lens_cpu is not None else seq_lens
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
-        dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
+        if is_mla:
+            dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens.numpy()
+        else:
+            dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
         dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
         if is_mla and getattr(self, "speculative_config", None) is not None:
             num_draft_reqs = query_lens_cpu.shape[0]
-            draft_histories = (dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index).to("cpu")
-            mask = self.generate_mtp_attention_mask_for_decode(
-                draft_histories.tolist(),
-                query_lens_cpu[:num_draft_reqs].numpy(),
-                num_decode_reqs=num_draft_reqs,
-            )
-            self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
-            self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
-            dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
+            draft_histories = dcp_metadata.draft_base_seq_lens[:num_draft_reqs] + draft_index
+            if not self.use_sparse:
+                mask = self.generate_mtp_attention_mask_for_decode(
+                    draft_histories.tolist(),
+                    query_lens_cpu[:num_draft_reqs].numpy(),
+                    num_decode_reqs=num_draft_reqs,
+                )
+                self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
+                self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
+                dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
         common_attn_metadata.context_parallel_metadata = dcp_metadata
 
         if common_attn_metadata.is_prefilling is not None:
@@ -575,7 +576,9 @@ class DCPManager:
             return
 
         seq_lens_for_dcp = seq_lens
-        if seq_lens_cpu is not None:
+        # SFA DCP writes rank_seq_lens into a device buffer below, so compute it
+        # from the device seq_lens to avoid a CPU->NPU copy on the drafting path.
+        if not is_sfa_dcp and seq_lens_cpu is not None:
             seq_lens_for_dcp = seq_lens_cpu
         local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_for_dcp + draft_index + 1)
         rank_seq_lens = local_seq_lens[:, self.dcp_world_rank]
@@ -626,7 +629,7 @@ class DCPManager:
             max_query_len=(int(query_lens_cpu[:num_reqs].max().item()) if num_reqs else 0),
         )
 
-        if self.speculative_config:
+        if self.speculative_config and not self.use_sparse:
             if self.num_decode_reqs > 0:
                 decode_scheduled = num_scheduled_tokens[: self.num_decode_reqs]
                 if fixed_decode_seq_lens_cpu is not None:

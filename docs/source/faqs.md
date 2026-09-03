@@ -247,7 +247,7 @@ This is often due to system compatibility issues. You can resolve this by using 
    export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
    # If in China region, uncomment to use a mirror:
    # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
-   
+
    # Pull the image for the ARM64 platform and save it
    docker pull --platform linux/arm64 "${IMAGE_NAME}"
    docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
@@ -301,10 +301,6 @@ Single-node deployment is recommended when the model fits within the memory of a
 - **W8A8**: Good balance of accuracy and memory reduction. Use for large models (e.g., 32B) on memory-constrained hardware.
 - **W4A8/W4A4**: Maximum memory reduction. Suitable for deploying larger models on smaller hardware configurations, with some accuracy trade-off.
 
-### 25. When should I enable FlashComm_v1?
-
-Enable FlashComm_v1 (`VLLM_ASCEND_ENABLE_FLASHCOMM1=1`) when using Tensor Parallelism (TP ≥ 2) with high concurrency. It is threshold-protected and will not activate in low-concurrency scenarios where it could degrade performance.
-
-### 26. What is the difference between FIA and PA operators for attention?
+### 25. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.

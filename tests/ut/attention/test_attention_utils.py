@@ -13,9 +13,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from types import SimpleNamespace
+
 import torch
 
-from vllm_ascend.attention.utils import filter_chunked_req_indices
+from vllm_ascend.attention.utils import filter_chunked_req_indices, get_or_register_attention_buffer
+
+
+def test_get_or_register_attention_buffer() -> None:
+    module_a = torch.nn.Module()
+    module_b = torch.nn.Module()
+    vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            static_forward_context={
+                "layer.a": module_a,
+                "layer.b": module_b,
+            }
+        )
+    )
+    factory_call_count = 0
+
+    def factory() -> torch.Tensor:
+        nonlocal factory_call_count
+        factory_call_count += 1
+        return torch.tensor([1, 2, 3])
+
+    buffer = get_or_register_attention_buffer(
+        vllm_config,
+        ["layer.a", "layer.b"],
+        "_test_buffer",
+        factory,
+    )
+
+    assert factory_call_count == 1
+    assert module_a._buffers["_test_buffer"] is buffer
+    assert module_b._buffers["_test_buffer"] is buffer
+    assert "_test_buffer" not in module_a.state_dict()
+    assert "_test_buffer" not in module_b.state_dict()
 
 
 def test_filter_chunked_req_indices_empty_mask() -> None:

@@ -285,16 +285,9 @@ class NPUModelRunner310(NPUModelRunner):
 
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
-                    np.where(new_mask, 0, prev_idx)
-                ]
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
-            else:
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            # Keep accepted-token ownership by request when async scheduling
+            # condenses/reorders the 310P input batch.
+            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -662,8 +655,6 @@ class NPUModelRunner310(NPUModelRunner):
                 num_tokens_padded,
             )
 
-        if forward_context.flash_comm_v1_enabled and not isinstance(hidden_states, IntermediateTensors):
-            hidden_states = self._all_gather_hidden_states_and_aux(hidden_states)
         return hidden_states
 
     def _check_and_update_cudagraph_mode(

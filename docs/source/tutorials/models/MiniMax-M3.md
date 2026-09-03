@@ -10,9 +10,9 @@ This document is written based on the latest vLLM-Ascend version. This model is 
 
 ## 2 Supported Features
 
-Refer to [supported models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
-Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
+Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 
 ## 3 Prerequisites
 
@@ -24,20 +24,22 @@ It is recommended to place the model weight in a shared cache directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 - Step 1: Download the latest Docker image
+
   ```bash
   docker pull quay.io/ascend/vllm-ascend:{tag}
   ```
 
 - Step 2: Start Docker container
+
   ```bash
   # Set the vLLM Ascend image name.
   export IMAGE=quay.io/ascend/vllm-ascend:{tag}
@@ -80,6 +82,7 @@ You can use the official all-in-one Docker image. For the available image tags a
   ```
 
 - Step 3: compile Rust frontend
+
   ```bash
   cd /vllm-workspace/vllm
 
@@ -104,7 +107,7 @@ You can use the official all-in-one Docker image. For the available image tags a
 
   Expected result: The version information is displayed, matching the pulled image version.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Start the online serving service with the following command:
 
@@ -117,9 +120,9 @@ Single-node deployment completes both Prefill and Decode within the same node. B
 === "BF16 Deployment"
 
   ```bash
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
   export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --served-model-name minimax-m3 \
@@ -150,9 +153,9 @@ Single-node deployment completes both Prefill and Decode within the same node. B
 === "W8A8 Deployment"
 
   ```bash
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
   export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
   --served-model-name minimax-m3 \
@@ -203,19 +206,12 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export TASK_QUEUE_ENABLE=1
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -246,19 +242,12 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export TASK_QUEUE_ENABLE=1
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -292,19 +281,12 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-  export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -336,19 +318,13 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-  export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -745,7 +721,7 @@ The recommended configurations are the same as those specified in Chapter 5, “
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 

@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.mla import MultiHeadLatentAttentionWrapper
@@ -30,12 +31,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.layer.attention.layer import DSAAttention
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-)
 
 
 @dataclass
@@ -156,7 +153,6 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         kv_cache: torch.Tensor | None = None,
         attn_metadata: AttentionMetadata | None = None,
     ) -> torch.Tensor:
-        need_gather_q_kv = bool(_EXTRA_CTX.flash_comm_v1_enabled)
         output_shape = hidden_states.shape
 
         output = torch.empty(output_shape, dtype=hidden_states.dtype, device=hidden_states.device)
@@ -164,15 +160,15 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         # All DSA forward paths (attention + o_proj, including OTP HCCL
         # collectives) run inside the dsa_forward custom op, which is required
         # for ACL graph capture (registered with dispatch_key="PrivateUse1").
-        torch.ops.vllm.dsa_forward(hidden_states, need_gather_q_kv, output, self.prefix)
+        torch.ops.vllm.dsa_forward(hidden_states, output, self.prefix)
 
         output = output.view(-1, output_shape[-1])
         return output
 
 
+@eager_break_during_capture
 def dsa_forward(
     hidden_states: torch.Tensor,
-    need_gather_q_kv: bool,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -183,20 +179,17 @@ def dsa_forward(
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a
         # zero input so HCCL collectives are captured by the ACL graph.
-        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, need_gather_q_kv, output)
+        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, output)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)
 
-    self.dsa_attn.impl.forward(
-        self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, need_gather_q_kv, output
-    )
+    self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
     return
 
 
 def dsa_forward_fake(
     hidden_states: torch.Tensor,
-    need_gather_q_kv: bool,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -230,12 +223,12 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             indexer_k_cache, indexer_scale_cache, indexer_full_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
         else:
             indexer_k_cache, indexer_scale_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
 
-    if get_ascend_device_type() in {AscendDeviceType.A5}:
+    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
         kv_cache = tuple(
             [
                 unfold_kvcache(cache)

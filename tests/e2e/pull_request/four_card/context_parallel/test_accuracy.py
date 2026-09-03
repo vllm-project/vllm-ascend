@@ -139,7 +139,6 @@ FULL_FEATURE_MODEL_CASES = [
             "long_prefill_token_threshold": 128,
             "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {
-                "enable_flashcomm1": True,
                 "enable_dsa_cp": True,
                 "enable_sparse_sfa_c8": True,
                 "enable_sparse_li_c8": True,
@@ -172,7 +171,6 @@ FULL_FEATURE_MODEL_CASES = [
                 "cudagraph_mode": "FULL_DECODE_ONLY",
             },
             "additional_config": {
-                "enable_flashcomm1": True,
                 "enable_dsa_cp": True,
             },
         },

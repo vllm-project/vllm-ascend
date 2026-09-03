@@ -68,7 +68,7 @@ def _get_dyntra_lb_config(vllm_config) -> DyntraLBConfig:
     dyntra_lb_config = scheduler_config.get("dyntra_lb_config") or {}
     if not isinstance(dyntra_lb_config, dict):
         return DyntraLBConfig()
-    return DyntraLBConfig(dyntra_lb_config)
+    return DyntraLBConfig(**dyntra_lb_config)
 
 
 def _dyntra_lb_enabled(vllm_config) -> bool:

@@ -322,6 +322,72 @@ The following code configures vLLM Ascend to use speculative decoding where prop
       --speculative-config '{"method": "dspark", "model": "deepseek-ai/dspark_qwen3_8b_block7", "num_speculative_tokens": 7, "enforce_eager": true}'
     ```
 
+## Draft KV Sliding Window {: #draft-kv-sliding-window }
+
+Draft models are often trained on short contexts (e.g. 4-8K tokens). When the
+running context grows far beyond that, the draft's attention goes
+out-of-distribution and the acceptance rate collapses — speculation turns
+into overhead. The **draft KV sliding window** caps only the *draft model's*
+attention to the most recent `draft_window_size` tokens. The target model
+still attends to the full context, so output quality is unchanged.
+
+Enable it through `--additional-config` with any of the `eagle3`, `dflash`,
+and `dspark` methods:
+
+```shell
+vllm serve path/to/target/model \
+  --tensor-parallel-size 8 \
+  --speculative-config '{"method": "dspark", "model": "path/to/draft/model", "num_speculative_tokens": 7, "enforce_eager": true}' \
+  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+  --additional-config '{"draft_window_size": 2048}'
+```
+
+For offline inference, pass the same key inside `additional_config`:
+
+```python
+llm = LLM(
+    model="path/to/target/model",
+    speculative_config={
+        "method": "dspark",
+        "model": "path/to/draft/model",
+        "num_speculative_tokens": 7,
+        "enforce_eager": True,
+    },
+    additional_config={"draft_window_size": 2048},
+)
+```
+
+`additional_config` is forwarded to `EngineArgs` like the other engine
+options.
+
+- **`draft_window_size`** (int, optional): the number of most recent tokens
+  the draft attention can read. Omit the key (or remove it) to disable the
+  window. Typical values are 512-4096; the window is block-aligned internally,
+  so any positive value works.
+- Works on the default model runner (MRV1). Not yet supported under
+  `VLLM_USE_V2_MODEL_RUNNER=1`.
+- For `mtp` the window is ignored (force-disabled): MTP reuses the target
+  model's own layers, so windowing it would change the target's computation.
+
+### When to enable it
+
+- **Enable** when the draft was trained on short contexts and acceptance
+  degrades as conversations grow: e.g. an early GLM-5.2 DSpark draft dropped
+  from mean acceptance ~5 (short context) to ~1 at 32K; a 512-1024 window
+  restored it to ~4.7-5.5, with end-to-end throughput up to +381% at 32K.
+- **Leave it off** when the draft is already stable at long context — the
+  window then only removes information the draft could have used. In
+  particular, if the draft itself was trained with sliding-window attention
+  (its config carries a native `sliding_window`), keep
+  `draft_window_size` at or above that training window, or disable the
+  feature; a window smaller than the training window measurably reduces
+  acceptance (observed -4.5% mean acceptance for a 1024 window against a
+  2048-native SWA DSpark draft at 32K input).
+
+Check the effect with the server log: `SpecDecoding metrics: Mean acceptance
+length: ...` lines report the acceptance per interval — compare runs with the
+window off and on under your real workload before settling on a value.
+
 ## Speculating using Suffix Decoding
 
 The following code configures vLLM to use speculative decoding where proposals are generated using Suffix Decoding [(SuffixDecoding: Extreme Speculative Decoding for Emerging AI Applications)](https://arxiv.org/abs/2411.04975).
@@ -706,4 +772,9 @@ vllm serve path/to/target/model \
 
 ### Ascend-specific notes
 
-Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand64` (fp64) directly inside the Triton kernel. NPU Triton does **not** support `tl_rand64`/fp64, so vLLM Ascend reimplements synthetic mode in `vllm_ascend/sample/rejection_sampler.py` and `vllm_ascend/ops/triton/reject_sample.py`: the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`. This is why synthetic mode is available on the Ascend `v1/sample` rejection-sampler path.
+Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand64` (fp64) directly inside the Triton kernel. NPU Triton does **not** support `tl_rand64`/fp64, so vLLM Ascend reimplements synthetic mode per model-runner path:
+
+- **MRV1** (`vllm_ascend/sample/rejection_sampler.py` + `vllm_ascend/ops/triton/reject_sample.py`): the kernels receive the uniform probabilities as an explicit pointer argument instead of generating them internally. The probabilities are produced by `generate_uniform_probs` in fp64 (matching upstream, so the draw never samples exactly `0.0`) and cast to fp32 for the greedy kernels, which the fp32-only Ascend Triton kernels then compare against `rates[pos]`.
+- **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
+
+The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.

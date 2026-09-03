@@ -38,7 +38,7 @@ msgstr ""
 "运行该模型。请注意，仅 vLLM Ascend 0.9.2rc1 及更高版本支持该模型。"
 
 msgid "## Supported Features"
-msgstr "## 支持的功能"
+msgstr "## 支持的特性"
 
 msgid ""
 "Refer to [supported "

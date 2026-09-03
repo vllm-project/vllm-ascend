@@ -126,7 +126,6 @@ def _mock_npu_env():
     _mock = _MockTPGroup()
     mock_cfg = MagicMock()
     mock_cfg.enable_context_parallel = False
-    mock_cfg.enable_flashcomm1 = False
     mock_cfg.weight_nz_mode = 1
     mock_cfg.enable_mlapo = True
     mock_cfg.enable_fused_mc2 = 0
@@ -157,7 +156,6 @@ def _mock_npu_env():
         ),
         # These tests do not exercise context parallelism. Short-circuit the
         # backend routing checks so their mocked config stays scoped to VWN.
-        patch("vllm_ascend.attention.attention_v1.enable_pcp", return_value=False),
         patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",

@@ -12,7 +12,7 @@ The `Qwen3.6-35B-A3B` model is first supported in `vllm-ascend:v0.18.0rc1`. Use 
 
 Refer to [supported features](../../user_guide/support_matrix/supported_features.md) to get the model's supported feature matrix, including BF16, W8A8 quantization, chunked prefill, automatic prefix caching, asynchronous scheduling, tensor parallelism, expert parallelism, and ACLGraph support.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get feature configuration details.
 
 ## 3 Prerequisites
 
@@ -29,7 +29,7 @@ It is recommended to download the model weight to `/root/.cache/`.
 
 Select an image based on your machine type. For example, use `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}` for Atlas A2 inference products, `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3` for Atlas A3 inference products, and `quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p` for Atlas 300I DUO.
 
-Refer to [using docker](../../installation.md#set-up-using-docker) for the complete installation guide.
+Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the complete installation guide.
 
 === "Atlas A3 inference products"
 
@@ -146,7 +146,7 @@ python -c "import vllm, vllm_ascend; print('vllm and vllm_ascend are ready')"
 
 ### 4.2 Source Code Installation
 
-You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../installation.md#set-up-using-python).
+You can also build and install `vllm-ascend` from source. Refer to [set up using python](../../getting_started/installation.md#installation-existing-cann-install).
 
 !!! note
 
@@ -171,19 +171,17 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
-
-    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=1024
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     vllm serve Eco-Tech/Qwen3.6-35B-A3B-w8a8 \
       --host 0.0.0.0 \
@@ -201,7 +199,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
       --gpu-memory-utilization 0.90 \
       --enable-prefix-caching \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
-      --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true, "multistream_overlap_shared_expert": true}'
+      --additional-config '{"enable_cpu_binding":true, "multistream_overlap_shared_expert": true}'
     ```
 
     **Key parameters:**
@@ -215,7 +213,6 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--enable-prefix-caching` enables prefix caching. For long-context serving, monitor memory usage because prefix caching can increase KV cache pressure.
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode ACLGraph replay to reduce dispatch overhead.
-    - `--additional-config` enables Ascend-specific optimizations. `enable_flashcomm1` enables FlashComm1, `multistream_overlap_shared_expert` overlaps shared expert computation, and `enable_cpu_binding` enables Ascend-native CPU binding.
 
 === "Atlas 300I DUO"
 
@@ -250,7 +247,7 @@ Single-node deployment runs both Prefill and Decode on the same node. `Qwen3.6-3
     - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
     - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1. If your usage scenario involves fewer than two concurrent requests, it is recommended to enable MTP. Otherwise, it is recommended not to enable MTP.
 
-Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
+Common Issues Tip: If the service fails to start, HBM is insufficient, or requests are not scheduled as expected, refer to [Public FAQs](../../faqs.md) first, and then check the model-specific FAQ in Section 10.
 
 ## 6 Functional Verification
 
@@ -342,13 +339,13 @@ The following configurations are validated in specific test environments and are
 
 | Scenario | Node Role | NPUs | TP | DP | Max Num Seqs | Max Model Len | Max Num Batched Tokens | Prefix Cache | Main Optimizations |
 | -------- | --------- | ---- | -- | -- | ------------ | ------------- | ---------------------- | ------------ | ------------------ |
-| Long context | Single node | 2 or more | 2 | 1 | 128 | 262144 | 16384 | On | FullGraph, FlashComm1, shared expert overlap, CPU binding |
-| High throughput | Single node | 8 or more | 2 | 4 or more | 32 per DP | 65536 | 8192 | On | FullGraph, FlashComm1, async scheduling, shared expert overlap |
+| Long context | Single node | 2 or more | 2 | 1 | 128 | 262144 | 16384 | On | FullGraph, sequence parallelism, shared expert overlap, CPU binding |
+| High throughput | Single node | 8 or more | 2 | 4 or more | 32 per DP | 65536 | 8192 | On | FullGraph, sequence parallelism, async scheduling, shared expert overlap |
 | Low latency | Single node | 2 or more | 2 | 1 | Tune by concurrency | 32768 or 65536 | 1024 to 4096 | Workload dependent | FullGraph, CPU binding, speculative decoding disabled |
 
 ### 9.2 Tuning Guidelines
 
-Refer to [public performance tuning documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [feature matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
+Refer to [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods, and refer to [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for feature descriptions.
 
 Recommended tuning order:
 
@@ -357,7 +354,7 @@ Recommended tuning order:
 3. Tune `--max-num-batched-tokens`. Larger values usually improve prefill throughput but increase activation memory. Decode-heavy workloads usually need smaller values.
 4. Tune `--max-num-seqs` according to service concurrency. Requests above this value wait in the queue and the waiting time is counted in TTFT and TPOT.
 5. Tune `--gpu-memory-utilization`. Increase it to provide more KV cache, but leave headroom for runtime memory fluctuation and expert imbalance.
-6. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With FlashComm1, use capture sizes that are multiples of TP size.
+6. Tune ACLGraph capture. `FULL_DECODE_ONLY` is recommended for decode. If you set `cudagraph_capture_sizes` manually, include common decode batch sizes. With sequence parallelism, use capture sizes that are multiples of TP size.
 
 ### 9.3 Model-Specific Optimizations
 
@@ -365,14 +362,13 @@ Recommended tuning order:
 | ------------ | ---------- | ------- | ----- |
 | Hybrid attention support | Enabled by model implementation | Supports Qwen3.6 long-context inference. | Tune context length based on KV cache capacity. |
 | Full decode ACLGraph | `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` | Reduces operator dispatch overhead and stabilizes decode performance. | Recommended for decode-heavy serving. |
-| FlashComm1 | `--additional-config '{"enable_flashcomm1": true}'` | Reduces communication overhead in TP and high-concurrency scenarios. | May not help low-concurrency workloads. |
 | Shared expert overlap | `--additional-config '{"multistream_overlap_shared_expert": true}'` | Overlaps shared expert computation in MoE workloads. | Recommended for throughput scenarios. |
 | Prefix caching | `--enable-prefix-caching` | Improves repeated-prefix workloads. | Monitor HBM usage for long-context workloads. |
 | Qwen3.6 MTP speculative decoding | `--speculative-config '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'` | Can improve decode throughput when stable and accepted tokens are high. | Validate stability, TTFT, TPOT, and throughput for your workload. |
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, refer to [FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
+For common environment, installation, and general parameter issues, refer to [Public FAQs](../../faqs.md). This section only covers model-specific issues for Qwen3.6-35B-A3B.
 
 ### Q1: Why does the service report OOM during startup or soon after accepting requests?
 

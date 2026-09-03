@@ -78,6 +78,7 @@ plugins:
         - "_build/*"
         - "*.zh.md"
         - "_templates/*"
+        - "**/*.inc.md"
         - "release.template.md"
         - "zh/*"
         # Internal helpers that should never be served as static files.
@@ -147,6 +148,7 @@ extra_css:
 
 extra_javascript:
   - javascripts/mathjax.js
+  - javascripts/tabbed-toc.js
   - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
 
 extra:
@@ -156,15 +158,38 @@ extra:
   # floating "report issue" button in docs/overrides/main.html).
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
-  # Version substitutions used by macros plugin
+  # ================== Released documentation stack ===========================
+  # These values are used by Quickstart, Installation, release image/tag examples,
+  # and the pip installation doctest. Update this group only after a vLLM Ascend
+  # release and its complete compatible stack have been published and verified;
+  # do not update it for main development. Git and container tags include the
+  # leading "v" and are used across tutorials.
   vllm_version: v0.23.0
   vllm_ascend_version: v0.23.0
-  pip_vllm_ascend_version: 0.23.0
-  pip_vllm_version: 0.23.0
+  # Stable documentation target used by the developer-preview banner.
+  stable_vllm_ascend_version: v0.23.0
+  # PyPI versions omit the leading "v" and are used by installation commands/tests.
+  release_vllm_ascend_version: 0.23.0
+  release_vllm_version: 0.23.0
+  # The supported Python range and the Python version inside release images differ.
+  release_python_version: ">= 3.10, < 3.13"
+  release_image_python_version: "3.12"
+  release_hdk_version: "26.0.RC1"
+  release_cann_version: "9.1.0"
+  release_pytorch_version: "2.10.0"
+  release_torch_npu_version: "2.10.0.post4"
+  release_nnal_version: "9.1.0"
+  release_triton_ascend_version: "3.2.2"
+  # ================== Current main development stack ==========================
+  # The compatibility policy and CPU-only build instructions use these values.
+  # Update this group when repository requirements or the verified main build image changes.
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
-  main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post4"
+  main_pytorch_version: "2.10.0"
+  main_torch_npu_version: "2.10.0.post4"
+  main_torchvision_version: "0.25.0"
+  main_torchaudio_version: "2.10.0"
   main_triton_ascend_version: "3.2.2"
   social:
     - icon: fontawesome/brands/github
@@ -178,9 +203,9 @@ extra:
 nav:
   - index.md
   - Getting Started:
-    - getting_started.md
-    - quick_start.md
-    - installation.md
+    - getting_started/overview.md
+    - getting_started/quick_start.md
+    - getting_started/installation.md
     - Model Tutorials:
         - tutorials/models/index.md
         - tutorials/models/Qwen3-Dense.md
@@ -211,14 +236,17 @@ nav:
         - tutorials/models/GLM4.x.md
         - tutorials/models/GLM5.md
         - tutorials/models/GLM5.2.md
+        - tutorials/models/GLM5.3.md
         - tutorials/models/Kimi-K2-Thinking.md
         - tutorials/models/Kimi-K2.5.md
         - tutorials/models/Kimi-K2.6.md
+        - tutorials/models/Kimi-K3.md
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
         - tutorials/models/MiniMax-M3.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
+        - tutorials/models/Hy4-preview.md
         - tutorials/models/Minitron-8B-Base.md
         - tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md
         - tutorials/models/gpt-oss-120b.md
@@ -248,6 +276,7 @@ nav:
         - user_guide/configuration/index.md
         - user_guide/configuration/env_vars.md
         - user_guide/configuration/additional_config.md
+        - user_guide/configuration/encoder_cache_manager.md
     - Feature Guide:
         - user_guide/feature_guide/index.md
         - user_guide/feature_guide/graph_mode.md
@@ -279,6 +308,7 @@ nav:
         - user_guide/feature_guide/flash_attention.md
         - user_guide/feature_guide/short_request_first.md
         - user_guide/feature_guide/batch_job_aware_scheduler.md
+        - user_guide/feature_guide/rl.md
     - Deployment Guide:
         - user_guide/deployment_guide/index.md
         - user_guide/deployment_guide/using_volcano_kthena.md
@@ -300,7 +330,7 @@ nav:
         - developer_guide/Design_Documents/ModelRunner_prepare_inputs.md
         - developer_guide/Design_Documents/disaggregated_prefill.md
         - developer_guide/Design_Documents/layerwise_and_sparse_kv_cache_offloading.md
-        - developer_guide/Design_Documents/eplb_swift_balancer.md
+        - developer_guide/Design_Documents/model_runner_v1_eplb.md
         - developer_guide/Design_Documents/model_runner_v2_eplb.md
         - developer_guide/Design_Documents/ACL_Graph.md
         - developer_guide/Design_Documents/KV_Cache_Pool_Guide.md

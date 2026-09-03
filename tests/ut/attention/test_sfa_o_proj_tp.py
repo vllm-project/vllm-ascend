@@ -13,6 +13,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import sys
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -100,15 +101,50 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl._apply_o_proj_full_weight = MagicMock(side_effect=_apply_with_full_weight)
 
         impl.enable_dsa_cp_with_o_proj_tp = True
-        output = impl._finalize_o_proj(
-            attn_output=torch.randn(2, 8),
-            output=torch.empty(2, 3),
-            gather_full_o_proj=True,
-        )
+        gathered_output = torch.cat((torch.ones(2, 3), torch.full((2, 3), 2.0)))
+        tp_group = SimpleNamespace(all_gather=MagicMock(return_value=gathered_output))
+        with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
+            output = impl._finalize_o_proj(
+                attn_output=torch.randn(2, 8),
+                output=torch.empty(3, 3),
+                gather_full_o_proj=True,
+            )
 
         self.assertEqual(impl.o_proj.weight.data_ptr(), original_weight_ptr)
         self.assertEqual(impl.o_proj.weight_scale.data_ptr(), original_scale_ptr)
-        self.assertTrue(torch.equal(output, torch.ones(2, 3)))
+        tp_group.all_gather.assert_called_once()
+        self.assertTrue(torch.equal(output, gathered_output[:3]))
+
+    def test_prepare_native_hidden_states_slices_replicated_token_state(self):
+        impl = self._make_impl()
+        hidden_states = torch.arange(24).reshape(6, 4)
+        attn_metadata = SimpleNamespace(
+            dsa_cp_context=SimpleNamespace(
+                num_tokens_pad=6,
+                local_start=3,
+                local_end_with_pad=6,
+            )
+        )
+
+        local_hidden_states = impl._prepare_native_hidden_states(hidden_states, attn_metadata)
+
+        torch.testing.assert_close(local_hidden_states, hidden_states[3:6])
+
+    def test_prepare_native_hidden_states_pads_unaligned_token_state(self):
+        impl = self._make_impl()
+        hidden_states = torch.arange(20).reshape(5, 4)
+        attn_metadata = SimpleNamespace(
+            dsa_cp_context=SimpleNamespace(
+                num_tokens_pad=6,
+                local_start=3,
+                local_end_with_pad=6,
+            )
+        )
+
+        local_hidden_states = impl._prepare_native_hidden_states(hidden_states, attn_metadata)
+
+        torch.testing.assert_close(local_hidden_states[:2], hidden_states[3:5])
+        torch.testing.assert_close(local_hidden_states[2], torch.zeros(4, dtype=hidden_states.dtype))
 
     def test_enable_o_proj_switch_rejects_unsupported_method(self):
         impl = self._make_impl(_UnsupportedOProjLinearMethod())
@@ -147,6 +183,7 @@ class TestAscendSFAOProjTPParams(TestBase):
         attn_output = MagicMock()
         impl._v_up_proj = MagicMock(return_value=attn_output)
         impl.o_proj = MagicMock()
+        impl._prepare_native_hidden_states = MagicMock(side_effect=lambda hidden_states, _: hidden_states)
 
         output = MagicMock()
         finalized_output = MagicMock()
@@ -187,4 +224,5 @@ class TestAscendSFAOProjTPParams(TestBase):
         notify_cache_written.assert_called_once_with(impl.layer_name)
         record_gate.assert_called_once_with()
         save_layer.assert_called_once_with(impl.layer_name, list(kv_cache))
+        impl._prepare_native_hidden_states.assert_called_once()
         impl.o_proj.assert_not_called()

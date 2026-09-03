@@ -27,13 +27,13 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import enable_sp, enable_sp_by_pass
 
 
 class PrepareAndFinalize(ABC):
@@ -229,8 +229,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
 
 class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     """
-    MoE communication strategy using MC2, which is based on All2All. Hence, it inherits
-    All2All and share the same finalize method.
+    MoE communication strategy using MC2, based on All2All with additional
+    DP-wide padding and unpadding for sequence-parallel inputs.
     Designed for Ascend or environments requiring explicit padding and slicing control.
     Relies on `mc2_mask` and `padded_num_tokens` from forward_context for alignment.
     """
@@ -262,14 +262,26 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
           3. If TP > 1, split tensors along token dimension and select current TP rank's slice.
           4. Split and return corresponding `mc2_mask`.
 
-        Skips padding/slicing if `replace_allreduce` is True.
+        With `replace_allreduce`, inputs are already TP-sharded. Pad only the
+        local shard to the DP-wide MC2 length, preserving its original mask.
 
         Returns:
             MoEPrepareOutput, possibly sliced/padded.
         """
         self.replace_allreduce = replace_allreduce
         mc2_mask = _EXTRA_CTX.mc2_mask
-        if self.tp_size > 1:
+        if self.replace_allreduce:
+            # SP shards use the local token count, not the largest DP batch.
+            # Select valid bits before adding padding for uniform MC2 batches.
+            self.num_tokens = hidden_states.shape[0]
+            start = self.tp_rank * self.num_tokens
+            mc2_mask = mc2_mask[start : start + self.num_tokens]
+            pad_size = _EXTRA_CTX.padded_num_tokens // self.tp_size - self.num_tokens
+            if pad_size > 0:
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                mc2_mask = nn.functional.pad(mc2_mask, (0, pad_size), value=False)
+        elif self.tp_size > 1:
             # Also slice mc2_mask
             split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
             mc2_mask = split_mc2_mask[self.tp_rank]
@@ -300,11 +312,30 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             pertoken_scale=None,
         )
 
+    def finalize(
+        self,
+        hidden_states: torch.Tensor,
+        reduce_results: bool,
+        padded_hidden_states_shape: torch.Size | None = None,
+    ) -> torch.Tensor:
+        if self.replace_allreduce:
+            # Return the original SP shard to the residual/shared-expert path.
+            return hidden_states[: self.num_tokens]
+        return super().finalize(hidden_states, reduce_results, padded_hidden_states_shape)
+
     def pad_and_split_input_ids(
         self,
         input_ids,
     ):
-        if not self.replace_allreduce:
+        if self.replace_allreduce:
+            # MoE-only SP retains full token IDs, while model-level SP may
+            # already shard them. Align to the local hidden states first.
+            if input_ids.numel() != self.num_tokens:
+                input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
+            pad_size = _EXTRA_CTX.padded_num_tokens // self.tp_size - self.num_tokens
+            if pad_size > 0:
+                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+        else:
             target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
             if pad_size > 0:
@@ -341,13 +372,11 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     def _use_ep_sequence_parallel(self) -> bool:
         """Whether MoE itself must use the EP sequence-parallel path.
 
-        ``enable_sp_by_pass`` enables the compilation pass, which already
-        inserts a TP reduce-scatter/all-gather pair around RMSNorm.  It does
-        not mean that the MoE configuration owns sequence-parallel tokens.
-        When the MoE config has ``sp_size == 1``, selecting the EP path here
-        would gather the tokens a second time before routing.
+        The MoE configuration owns sequence-parallel tokens.  Selecting the
+        EP path from any other flag would gather tokens a second time before
+        routing.
         """
-        return enable_sp() or (enable_sp_by_pass() and self.moe_config.is_sequence_parallel)
+        return self.moe_config.is_sequence_parallel
 
     def prepare(
         self,
@@ -387,15 +416,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 round_mode="round",
             )
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
-        router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True, True)
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states)
+        router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits)
 
-        # TODO(fuzhihong): To adapt to self.num_token in the all_gather_input_id_with_dp_group method,
-        #  when flashcomm1 is used and dp = N(N >=2).
         self.num_tokens = hidden_states.shape[0]
 
         if pertoken_scale is not None:
-            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale, True, True)
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -522,7 +549,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
             hidden_states = hidden_states[: self.num_tokens_pcp]
 
-        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states, True)
+        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
 
         return hidden_states
 

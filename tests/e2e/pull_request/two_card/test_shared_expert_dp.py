@@ -8,51 +8,26 @@ MODELS = [
 ]
 
 PROMPTS = [
-    "Hello, my name is",
+    "Hello, what's your name?",
     "The capital of the United States is",
     "The capital of France is",
     "The future of AI is",
 ]
 
-FEATURE_CONFIGS = [
-    pytest.param(
-        {
-            "enable_flashcomm1": True,
-            "enable_shared_expert_dp": False,
-        },
-        id="flashcomm-only",
-    ),
-    pytest.param(
-        {
-            "enable_flashcomm1": False,
-            "enable_shared_expert_dp": True,
-        },
-        id="shared-expert-dp-only",
-    ),
-    pytest.param(
-        {
-            "enable_flashcomm1": True,
-            "enable_shared_expert_dp": True,
-        },
-        id="flashcomm-and-shared-expert-dp",
-    ),
-]
-
 
 @wait_until_npu_memory_free(0.7)
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("feature_config", FEATURE_CONFIGS)
-def test_deepseek_v2_lite_flashcomm_shared_expert_dp_matrix_tp2(
-    model: str,
-    feature_config: dict[str, bool],
-    monkeypatch,
-) -> None:
-    # FlashComm v1 / shared-expert-DP require HCCL_OP_EXPANSION_MODE to be unset.
+def test_deepseek_v2_lite_enable_shared_expert_dp_tp2(model: str, monkeypatch) -> None:
     monkeypatch.delenv("HCCL_OP_EXPANSION_MODE", raising=False)
 
-    # Each independent feature combination must stay numerically consistent
-    # with the plain eager baseline. `additional_config` is excluded from the
-    # baseline by compare_logprobs, so the baseline has both flags disabled.
+    # Shared-expert-DP must stay numerically consistent with the plain eager
+    # baseline. `additional_config` is excluded from the baseline by
+    # compare_logprobs, so the baseline runs without the feature.
+    feature_config = {
+        "enable_shared_expert_dp": True,
+    }
+
+    # Eager mode: shared-expert-DP vs eager baseline.
     compare_logprobs(
         runner_kwargs={
             "model_name": model,
@@ -65,6 +40,7 @@ def test_deepseek_v2_lite_flashcomm_shared_expert_dp_matrix_tp2(
         prompts=PROMPTS,
     )
 
+    # ACLGraph (FULL_DECODE_ONLY): shared-expert-DP vs eager baseline.
     compare_logprobs(
         runner_kwargs={
             "model_name": model,

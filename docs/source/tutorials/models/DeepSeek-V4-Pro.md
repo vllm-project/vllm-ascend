@@ -15,9 +15,9 @@ This document will show the main verification steps of the model, including supp
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -29,13 +29,13 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy a multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy a multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
@@ -119,7 +119,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy a multi-node environment, you need to set up the environment on each node.
 
@@ -159,7 +159,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
@@ -235,7 +234,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export HCCL_OP_EXPANSION_MODE="AIV"
 
     export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
@@ -314,7 +312,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --safetensors-load-strategy 'prefetch' \
@@ -371,7 +368,6 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
     export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-    export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
     vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
       --safetensors-load-strategy 'prefetch' \
@@ -425,9 +421,8 @@ Key Parameter Descriptions:
 - `--speculative-config` configures the MTP (Multi-Token Prediction) speculative decoding to accelerate inference.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` enables the FlashComm communication optimization.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -603,8 +598,6 @@ Before you start, please:
         export TASK_QUEUE_ENABLE=1
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -633,7 +626,7 @@ Before you start, please:
             --block-size 128 \
             --enforce-eager \
             --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -674,8 +667,6 @@ Before you start, please:
         export TASK_QUEUE_ENABLE=1
         export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
         export ASCEND_RT_VISIBLE_DEVICES=$1
-        export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
             --host 0.0.0.0 \
@@ -704,7 +695,7 @@ Before you start, please:
             --block-size 128 \
             --enforce-eager \
             --speculative-config '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}' \
-            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true}' \
+            --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true,"enable_fused_mc2":1}' \
             --kv-transfer-config \
             '{"kv_connector": "MooncakeHybridConnector",
             "kv_role": "kv_producer",
@@ -972,7 +963,6 @@ Before you start, please:
         sysctl -w kernel.numa_balancing=0
         sysctl kernel.sched_migration_cost_ns=50000
 
-        export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8-mtp \
@@ -1164,10 +1154,9 @@ Key Parameter Descriptions:
 
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
-- `enable_dsa_cp: true` enables DSA context parallelism on prefill nodes. DSA-CP and FlashComm1 must be enabled separately when both are required.
+- `enable_dsa_cp: true` enables DSA context parallelism on prefill nodes.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
-- `VLLM_ASCEND_ENABLE_FLASHCOMM1=1`: enables the communication optimization function on the prefill nodes.
-- `VLLM_ASCEND_ENABLE_FUSED_MC2=1`: enables the Fused MC2 fusion operator to accelerate communication on prefill nodes (A3 series).
+- `additional_config.enable_fused_mc2=1`: enables the Fused MC2 fusion operator to accelerate communication on prefill nodes (A3 series).
 - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, enable this configuration only on decode nodes.
 - `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes.
 - `enable_shared_expert_dp: true`: enables data parallelism for shared experts, applicable to MoE models.
@@ -1176,7 +1165,7 @@ Deployment Verification:
 
 After the PD separation service is fully started, send a request through the proxy port on the prefill master node to verify that Prefill and Decode nodes are working correctly together. Refer to [Prefill-Decode Disaggregation (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the proxy verification method.
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -1262,8 +1251,8 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.

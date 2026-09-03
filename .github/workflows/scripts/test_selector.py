@@ -59,10 +59,13 @@ def _get_test_files_from_pr_diff(diff_file: str) -> list[str]:
         return test_files_found
 
     # Pattern to match test file paths: tests/e2e/pull_request/ or tests/ut/ directory
-    # In diff output: +++ b/tests/ut/core/test_xxx.py
+    # In diff output:
+    #   - +++ b/tests/ut/core/test_xxx.py (new/modified test file)
+    #   - rename to tests/ut/attention/test_xxx.py (renamed test file)
     # Test files must be in tests/e2e/pull_request/ or tests/ut/ directory and start with test_
     test_file_pattern = re.compile(
-        r"^\+\+\+ [ab]/(tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py)", re.MULTILINE
+        r"^(?:\+\+\+ [ab]/|rename to )((?:tests/e2e/pull_request(?:/.+)?/test_\w+\.py|tests/ut(?:/.+)?/test_\w+\.py))",
+        re.MULTILINE,
     )
 
     changed_test_files = set()
@@ -161,6 +164,7 @@ class CoverageSelector:
         self.coverage_data_dir = Path(coverage_data_dir) if coverage_data_dir else None
         self.source_dir = Path(source_dir) if source_dir else None
         self.test_case_map = {}  # test_case_name -> {files: {filepath: {lines}}}
+        self._noise_lines_cache = {}  # filepath -> set of noise lines (import + def)
 
     def scan_test_cases(self) -> list[str]:
         """Scan all test case directories"""
@@ -237,6 +241,68 @@ class CoverageSelector:
             print(f"  Warning: Error reading {cov_file}: {e}")
         return files
 
+    def _get_function_def_lines(self, filepath: str) -> set[int]:
+        """
+        Get function definition line numbers (def line only, not function body).
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers where function definitions occur
+        """
+        def_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=filepath)
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    def_lines.add(node.lineno)
+        except Exception:
+            pass
+        return def_lines
+
+    def _filter_noise_lines(self, filepath: str, lines: set[int]) -> set[int]:
+        """
+        Filter out invalid noise lines from coverage data:
+        1. import/from...import statement lines
+        2. Function definition lines (def line only)
+
+        Args:
+            filepath: Source file path
+            lines: Original set of covered line numbers
+
+        Returns:
+            Filtered set with noise lines removed
+        """
+        if not lines:
+            return lines
+
+        # Use cache to avoid re-parsing the same file multiple times
+        if filepath not in self._noise_lines_cache:
+            import_lines = FunctionParser._get_import_lines(filepath)
+            # Get function definition lines
+            def_lines = self._get_function_def_lines(filepath)
+            self._noise_lines_cache[filepath] = import_lines | def_lines
+
+        return lines - self._noise_lines_cache[filepath]
+
+    def _resolve_source_file(self, filename: str) -> Path | None:
+        """
+        Resolve source file path from relative filename.
+
+        Args:
+            filename: Relative file path (e.g., 'vllm_ascend/core/worker.py')
+
+        Returns:
+            Path object if found, None otherwise
+        """
+        if not self.source_dir:
+            return None
+
+        source_path = self.source_dir / REPO_NAME / filename
+        return source_path if source_path.exists() else None
+
     def build_test_case_map(self) -> dict:
         """Build test case -> covered files mapping (with line numbers)"""
         print("Scanning test cases...")
@@ -255,6 +321,11 @@ class CoverageSelector:
                 for filename in covered_files:
                     lines = self.get_covered_lines_from_file(str(cov_file), filename)
                     if lines:
+                        # Filter noise lines if source_dir is available
+                        if self.source_dir:
+                            source_file = self._resolve_source_file(filename)
+                            if source_file and source_file.exists():
+                                lines = self._filter_noise_lines(str(source_file), lines)
                         file_lines_map[filename].update(lines)
 
             normalized_name = self.normalize_test_name(test_case)
@@ -434,7 +505,7 @@ class CodeChangeDetector:
 
     def detect_renames(self, diff_output: str) -> dict[str, str]:
         """
-        Detect file renames in git diff output.
+        Detect file renames in git diff output (product code only, vllm_ascend/).
 
         Args:
             diff_output: diff content
@@ -459,7 +530,9 @@ class CodeChangeDetector:
                     # Remove a/ or b/ prefix if present
                     old_path = current_old_path[2:] if current_old_path.startswith("a/") else current_old_path
                     new_path = current_new_path[2:] if current_new_path.startswith("b/") else current_new_path
-                    renames[old_path] = new_path
+                    # Only record product code renames (vllm_ascend/)
+                    if old_path.startswith(f"{REPO_NAME}/"):
+                        renames[old_path] = new_path
                     current_old_path = None
                     current_new_path = None
 
@@ -1221,8 +1294,10 @@ def main():
             print(f"Parsed {len(changed_files_with_lines)} changed files:")
             for file_path, line_set in changed_files_with_lines.items():
                 print(f"  {file_path}")
+
+            # detect_renames already filters to vllm_ascend/ prefix only (product code renames)
             if renames:
-                print(f"\n=== Detected {len(renames)} Renamed File(s) - Using File-Level Matching ===")
+                print(f"\n=== Detected {len(renames)} Product Code Renamed File(s) - Using File-Level Matching ===")
                 for old_path, new_path in renames.items():
                     print(f"  {old_path} -> {new_path}")
 

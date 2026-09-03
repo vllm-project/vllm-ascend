@@ -39,15 +39,13 @@ from vllm.models.deepseek_v4.attention import DeepseekV4IndexerCache
 from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
+from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-    npu_stream_switch,
-)
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import npu_stream_switch
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -92,9 +90,10 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         super().__init__(head_dim, dtype, prefix, cache_config, compress_ratio)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             self.dtype = torch.float8_e4m3fn
-            vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
+            if not is_a5_bf16_kv_enabled(vllm_config):
+                vllm_config.cache_config.cache_dtype = "float8_e4m3fn"
 
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
@@ -109,7 +108,9 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
-            scale_dtype=torch.float if get_ascend_device_type() in {AscendDeviceType.A5} else torch.float16,
+            scale_dtype=torch.float
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else torch.float16,
         )
 
     def forward(self): ...
@@ -289,8 +290,11 @@ class DeepseekV4Indexer(nn.Module):
             prefix=f"{prefix}.weights_proj",
             return_bias=False,
         )
-        ascend_device_type = get_ascend_device_type()
-        k_dtype = torch.float8_e4m3fn if ascend_device_type == AscendDeviceType.A5 else torch.int8
+        k_dtype = (
+            torch.float8_e4m3fn
+            if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
+            else torch.int8
+        )
 
         if self.compress_ratio == 4:
             # TODO(cmq): change the dtype of cache
@@ -325,6 +329,42 @@ class DeepseekV4Indexer(nn.Module):
         assert hadamard is not None
         return cache_req_metadata, hadamard
 
+    def update_cache(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        metadata: AscendIndexerMetadata,
+    ) -> None:
+        """Update Indexer caches without projecting queries or selecting TopK."""
+        if hidden_states.shape[0] == 0:
+            return
+
+        state_cache, key_cache, scale_cache, full_cache = self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
+        _, hadamard = self._get_indexer_cache_metadata(metadata)
+        compressor = self.compressor
+        assert compressor is not None
+        key, slot_mapping = compressor(
+            hidden_states=hidden_states,
+            state_cache=state_cache,
+            metadata=metadata.compressor,
+        )
+        if key.shape[0] == 0:
+            return
+        if compressor.rotate:
+            key = rotate_activation(key, hadamard)
+        _, key_scale = self.ops.quantize_key_and_update_cache(
+            key,
+            key_cache,
+            full_cache,
+            slot_mapping,
+        )
+        if key_scale is not None:
+            self.ops.update_scale_cache(
+                key_scale,
+                scale_cache,
+                slot_mapping,
+            )
+
     def _get_cached_topk_indices(self, num_tokens: int, offset: int = 0) -> torch.Tensor:
         if self.topk_indices_buffer is None:
             raise RuntimeError("topk_indices_buffer is required to read cached TopK indices")
@@ -356,6 +396,7 @@ class DeepseekV4Indexer(nn.Module):
         overlap_plan: IndexerOverlapPlan,
         *,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ) -> torch.Tensor:
         num_tokens = hidden_states.shape[0]
         cache_metadata, _ = self._get_indexer_cache_metadata(metadata)
@@ -396,9 +437,10 @@ class DeepseekV4Indexer(nn.Module):
                 cos,
                 sin,
                 qr_pertoken_scale,
+                write_cache=write_cache,
             )
 
-        if self.skip_topk or aux_stream is None:
+        if write_cache and (self.skip_topk or aux_stream is None):
             compressed_kv, compress_slot_mapping = overlap_plan.compute_attention_compressed_kv()
             overlap_plan.scatter_attention_compressed_kv(compressed_kv, compress_slot_mapping)
 
@@ -571,6 +613,7 @@ class DeepseekV4Indexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ):
         (indexer_state_cache, indexer_k_cache, indexer_scale_cache, indexer_full_cache) = (
             self.ops.unpack_dsa_indexer_kv_cache(kv_cache)
@@ -582,7 +625,7 @@ class DeepseekV4Indexer(nn.Module):
         if (
             _is_w8a8_dynamic(self.wq_b)
             and qr_pertoken_scale is not None
-            and get_ascend_device_type() not in {AscendDeviceType.A5}
+            and not get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
         ):
             q = torch_npu.npu_quant_matmul(
                 qr,
@@ -605,15 +648,18 @@ class DeepseekV4Indexer(nn.Module):
         )
 
         q = rotate_activation(q, hadamard)
-        kv, indexer_slot_mapping = compressor(
-            hidden_states=x,
-            state_cache=indexer_state_cache,
-            metadata=metadata.compressor,
-        )
-        if kv.numel() == 0:
-            kv = None
-        elif compressor.rotate:
-            kv = rotate_activation(kv, hadamard)
+        kv = None
+        indexer_slot_mapping = None
+        if write_cache:
+            kv, indexer_slot_mapping = compressor(
+                hidden_states=x,
+                state_cache=indexer_state_cache,
+                metadata=metadata.compressor,
+            )
+            if kv.numel() == 0:
+                kv = None
+            elif compressor.rotate:
+                kv = rotate_activation(kv, hadamard)
 
         return (
             q,
@@ -634,6 +680,7 @@ class DeepseekV4Indexer(nn.Module):
         cos: torch.Tensor,
         sin: torch.Tensor,
         qr_pertoken_scale: torch.Tensor | None = None,
+        write_cache: bool = True,
     ):
         q, kv, ik, isc, ifc, cache_metadata, indexer_slot_mapping = self._indexer_qkv_prepare(
             x,
@@ -643,17 +690,29 @@ class DeepseekV4Indexer(nn.Module):
             cos,
             sin,
             qr_pertoken_scale,
+            write_cache=write_cache,
         )
 
         weights = self.weights_proj(x) * (self.softmax_scale * self.n_heads**-0.5)
 
-        return self.ops.quantize_update_cache_and_select_topk(
+        if write_cache:
+            return self.ops.quantize_update_cache_and_select_topk(
+                q,
+                kv,
+                weights,
+                ik,
+                isc,
+                ifc,
+                indexer_slot_mapping,
+                cache_metadata,
+            )
+
+        q, q_scale = self.ops.quantize_query(q)
+        return self.ops.select_topk(
             q,
-            kv,
             weights,
+            q_scale,
             ik,
             isc,
-            ifc,
-            indexer_slot_mapping,
             cache_metadata,
         )
