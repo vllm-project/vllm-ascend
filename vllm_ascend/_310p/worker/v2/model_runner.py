@@ -39,7 +39,7 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -596,11 +596,24 @@ class NPUModelRunner310V2(NPUModelRunner):
         }
         kv_caches: dict[str, Any] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            layer_names = [name for name in kv_cache_tensor.shared_by if name not in shared_layers]
-            if not layer_names:
+            if vllm_version_is("0.27.1"):
+                # One allocation per tensor, shared by all its layers.
+                tensor_layer_units: list[tuple[str, int]] = [
+                    (name, kv_cache_tensor.size)
+                    for name in kv_cache_tensor_layers(kv_cache_tensor)
+                    if name not in shared_layers
+                ]
+            else:
+                # Standardized layout: layer ``i`` owns the region at
+                # ``offset + i * layer_stride`` bytes; 310P allocates typed
+                # K/V tensors per layer, sized from the region's block count.
+                tensor_layer_units = [
+                    (name, kv_cache_tensor.layer_stride) for name in kv_cache_tensor.layers if name not in shared_layers
+                ]
+            if not tensor_layer_units:
                 continue
             cache_groups: dict[tuple[Any, ...], list[str]] = {}
-            for layer_name in layer_names:
+            for layer_name, unit_size in tensor_layer_units:
                 kv_cache_spec = layer_specs[layer_name]
                 cache_key: tuple[Any, ...]
                 if isinstance(kv_cache_spec, AttentionSpec):
@@ -612,17 +625,18 @@ class NPUModelRunner310V2(NPUModelRunner):
                         if storage_block_size != kv_cache_spec.block_size
                         else self.kernel_block_sizes[group_id]
                     )
-                    cache_key = (kv_cache_spec, backend, kernel_block_size)
+                    cache_key = (kv_cache_spec, backend, kernel_block_size, unit_size)
                 else:
-                    cache_key = (kv_cache_spec,)
+                    cache_key = (kv_cache_spec, unit_size)
                 cache_groups.setdefault(cache_key, []).append(layer_name)
 
             for cache_key, cache_layer_names in cache_groups.items():
                 layer_name = cache_layer_names[0]
+                unit_size = cache_key[-1]
                 kv_cache_spec = layer_specs[layer_name]
-                if kv_cache_tensor.size % kv_cache_spec.page_size_bytes != 0:
+                if unit_size % kv_cache_spec.page_size_bytes != 0:
                     raise ValueError("KV cache allocation is not page aligned.")
-                num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                num_blocks = unit_size // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError("KV cache allocation contains fewer blocks than requested.")
 
@@ -658,7 +672,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                     cache: Any = (k_cache, v_cache)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     # Hybrid recurrent state stays ND (int8 raw + as_strided views).
-                    raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                    raw_tensor = torch.zeros(unit_size, dtype=torch.int8, device=self.device)
                     state_tensors = []
                     storage_offset_bytes = 0
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):

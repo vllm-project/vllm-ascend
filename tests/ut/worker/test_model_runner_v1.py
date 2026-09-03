@@ -26,7 +26,22 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+
+
+def _make_kv_cache_tensors(size: int, shared_by: list[str]) -> list[KVCacheTensor]:
+    """Build KV cache tensor descriptors across vLLM versions.
+
+    v0.27.1 packs all layers of a tensor into one descriptor via ``shared_by``;
+    newer versions give each layer its own region of one shared backing, so
+    each layer becomes its own descriptor and the regions alias through the
+    shared backing allocation.
+    """
+    if vllm_version_is("0.27.1"):
+        return [KVCacheTensor(size=size, shared_by=list(shared_by))]
+    return [KVCacheTensor(size=size, layers=[name], layer_stride=size, block_stride=0) for name in shared_by]
+
+
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -42,13 +57,13 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.use_compress = True
         runner._has_gdn = False
 
-        runner._determine_batch_execution_and_padding = MagicMock(
+        runner._determine_batch_execution_and_padding = MagicMock(  # type: ignore[method-assign]
             return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
         )
-        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)  # type: ignore[method-assign]
         runner.synchronize_input_prep = MagicMock(return_value=nullcontext())
         runner._get_cumsum_and_arange = MagicMock(return_value=np.array([1], dtype=np.int32))
-        runner._pad_query_start_loc_for_fia = MagicMock(return_value=1)
+        runner._pad_query_start_loc_for_fia = MagicMock(return_value=1)  # type: ignore[method-assign]
 
         runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
         runner.seq_lens = MagicMock()
@@ -62,7 +77,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         block_tables.__getitem__.side_effect = lambda index: SimpleNamespace(
             slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
         )
-        runner.input_batch = SimpleNamespace(block_table=block_tables)
+        runner.input_batch = SimpleNamespace(block_table=block_tables)  # type: ignore[assignment]
         runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
 
         def check_slots_before_build(**_kwargs):
@@ -70,7 +85,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
                 torch.testing.assert_close(slot_mapping, torch.full_like(slot_mapping, -1))
             raise RuntimeError("metadata checked")
 
-        runner._build_attention_metadata = check_slots_before_build
+        runner._build_attention_metadata = check_slots_before_build  # type: ignore[method-assign,assignment]
 
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
@@ -132,7 +147,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.num_accepted_tokens = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         runner.prev_positions = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         batch_counts = torch.ones(12, dtype=torch.int32)
-        runner.input_batch = SimpleNamespace(
+        runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
             num_accepted_tokens_cpu=batch_counts.numpy(),
             num_accepted_tokens_cpu_tensor=batch_counts,
         )
@@ -297,7 +312,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes * 2, shared_by=["draft_attn"])],
+            kv_cache_tensors=_make_kv_cache_tensors(kv_cache_spec.page_size_bytes * 2, ["draft_attn"]),
             kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
         )
 
@@ -438,12 +453,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=indexer_spec.page_size_bytes * 2,
-                    shared_by=layer_names,
-                )
-            ],
+            kv_cache_tensors=_make_kv_cache_tensors(indexer_spec.page_size_bytes * 2, layer_names),
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     layer_names=layer_names,
@@ -454,8 +464,13 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
-        assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
+        if vllm_version_is("0.27.1"):
+            assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
+            assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
+        else:
+            # Regions alias through the shared backing allocation, not identity.
+            assert raw_caches[layer_names[0]][0].data_ptr() == raw_caches[layer_names[1]][0].data_ptr()
+            assert raw_caches[layer_names[0]][1].data_ptr() == raw_caches[layer_names[1]][1].data_ptr()
 
     def test_reshape_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
@@ -469,7 +484,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[KVCacheTensor(size=kv_cache_spec.page_size_bytes * 2, shared_by=["draft_attn"])],
+            kv_cache_tensors=_make_kv_cache_tensors(kv_cache_spec.page_size_bytes * 2, ["draft_attn"]),
             kv_cache_groups=[KVCacheGroupSpec(layer_names=["draft_attn"], kv_cache_spec=kv_cache_spec)],
         )
         kv_cache_raw_tensors = runner._allocate_kv_cache_tensors(kv_cache_config)
@@ -519,12 +534,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=num_physical_blocks,
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=kv_cache_spec.page_size_bytes * num_physical_blocks,
-                    shared_by=[layer_name],
-                )
-            ],
+            kv_cache_tensors=_make_kv_cache_tensors(kv_cache_spec.page_size_bytes * num_physical_blocks, [layer_name]),
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     layer_names=[layer_name],
@@ -612,12 +622,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=spec.page_size_bytes * 2,
-                    shared_by=[layer_name],
-                )
-            ],
+            kv_cache_tensors=_make_kv_cache_tensors(spec.page_size_bytes * 2, [layer_name]),
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     layer_names=[layer_name],
@@ -685,14 +690,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=main_spec.page_size_bytes * 2,
-                    shared_by=[attn_layer_name],
-                ),
-                KVCacheTensor(
-                    size=indexer_spec.page_size_bytes * 2,
-                    shared_by=[indexer_layer_name],
-                ),
+                *_make_kv_cache_tensors(main_spec.page_size_bytes * 2, [attn_layer_name]),
+                *_make_kv_cache_tensors(indexer_spec.page_size_bytes * 2, [indexer_layer_name]),
             ],
             kv_cache_groups=[
                 KVCacheGroupSpec(
@@ -812,14 +811,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 kv_cache_config = KVCacheConfig(
                     num_blocks=2,
                     kv_cache_tensors=[
-                        KVCacheTensor(
-                            size=main_spec.page_size_bytes * 2,
-                            shared_by=[attn_layer_name],
-                        ),
-                        KVCacheTensor(
-                            size=indexer_spec.page_size_bytes * 2,
-                            shared_by=[indexer_layer_name],
-                        ),
+                        *_make_kv_cache_tensors(main_spec.page_size_bytes * 2, [attn_layer_name]),
+                        *_make_kv_cache_tensors(indexer_spec.page_size_bytes * 2, [indexer_layer_name]),
                     ],
                     kv_cache_groups=[
                         KVCacheGroupSpec(
@@ -979,12 +972,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         kv_cache_config = KVCacheConfig(
             num_blocks=2,
-            kv_cache_tensors=[
-                KVCacheTensor(
-                    size=indexer_spec.page_size_bytes * 2,
-                    shared_by=[layer_name],
-                )
-            ],
+            kv_cache_tensors=_make_kv_cache_tensors(indexer_spec.page_size_bytes * 2, [layer_name]),
             kv_cache_groups=[
                 KVCacheGroupSpec(
                     layer_names=[layer_name],
@@ -1029,7 +1017,7 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
         runner.cached = {}
         runner._pending_encoder_cache_copies = deque()
         runner.late_interaction_runner = MagicMock()
-        runner._sync_device = MagicMock()
+        runner._sync_device = MagicMock()  # type: ignore[method-assign]
         return runner
 
     def test_reset_clears_score_encoder_cache_state(self):

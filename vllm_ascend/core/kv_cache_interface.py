@@ -18,6 +18,8 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.utils import vllm_version_is
+
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
@@ -46,11 +48,30 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+    # Tokens covered by one stored state. Upstream removed ``compress_ratio``
+    # from MLAAttentionSpec in favor of ``tokens_per_state``; Ascend kernels
+    # still key off ``compress_ratio``, so it is carried explicitly here.
+    compress_ratio: int = 1
 
     @property
     def storage_block_size(self) -> int:
         """Return the physical block size consumed by Ascend kernels."""
         return self.block_size // self.compress_ratio
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not vllm_version_is("0.27.1"):
+            # The standardized layout computes pages from ``tokens_per_state``;
+            # keep it in sync with Ascend's ``compress_ratio``. Only fill the
+            # defaults: upstream ``merge`` re-constructs specs with the merged
+            # (already-synced) values explicitly, and its post-construction
+            # field assert would reject a re-synced instance.
+            if self.tokens_per_state == 1 and self.compress_ratio != 1:
+                object.__setattr__(self, "tokens_per_state", self.compress_ratio)
+            if self.state_content_bytes is None and self.scale_dim:
+                scale_bytes = self.scale_dim * get_dtype_size(self.scale_dtype)
+                state_content_bytes = self.head_size * get_dtype_size(self.dtype) + scale_bytes
+                object.__setattr__(self, "state_content_bytes", state_content_bytes)
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -95,7 +116,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
-            indexes_kv_by_block_stride=first_spec.indexes_kv_by_block_stride,
+            compress_ratio=first_spec.compress_ratio,
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -135,6 +156,16 @@ class AscendSFAIndexerCacheSpec(MLAAttentionSpec):
             * num_heads_per_page
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        # Expose the DCP replication and inline quant scale through the
+        # standardized page fields (``num_head_slots`` = H, ``state_content_bytes``
+        # = C) so the layout stride math reproduces ``real_page_size_bytes``.
+        object.__setattr__(self, "num_head_slots", self.sfa_dcp_replicated_indexer_size)
+        scale_bytes = self.scale_dim * get_dtype_size(self.scale_dtype)
+        state_content_bytes = self.head_size * get_dtype_size(self.dtype) + scale_bytes
+        object.__setattr__(self, "state_content_bytes", state_content_bytes)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -183,7 +214,12 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     model_version: str | None = None
 
     def __post_init__(self):
-        pass
+        if not vllm_version_is("0.27.1"):
+            # Keep the standardized ``tokens_per_state`` in sync with Ascend's
+            # ``compress_ratio``; only fill the default so an explicit value
+            # (e.g. from upstream merge) is preserved.
+            if self.tokens_per_state == 1 and self.compress_ratio != 1:
+                object.__setattr__(self, "tokens_per_state", self.compress_ratio)
 
     @property
     def storage_block_size(self) -> int:
@@ -192,6 +228,12 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     @property
     def real_page_size_bytes(self) -> int:
         return self.storage_block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
+
+    @property
+    def unpadded_page_size_bytes(self) -> int:
+        # Upstream sizes pages from ``tokens_per_state``; Ascend carries the
+        # compression in ``compress_ratio`` instead, so override the page math.
+        return self.real_page_size_bytes
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:

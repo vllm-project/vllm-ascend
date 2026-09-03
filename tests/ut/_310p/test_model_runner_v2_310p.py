@@ -173,7 +173,9 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
-        kv_cache_tensors=[SimpleNamespace(size=128, shared_by=[layer_name])],
+        kv_cache_tensors=[
+            SimpleNamespace(size=128, shared_by=[layer_name], layers=[layer_name], layer_stride=128, offset=0)
+        ],
     )
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
@@ -240,7 +242,7 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
         if model_runner_module.vllm_version_is("0.27.1"):
             result = runner.prepare_inputs(scheduler_output, batch_desc)
         else:
-            result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+            result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)  # type: ignore[call-arg]
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
@@ -359,7 +361,15 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["model.layers.0.self_attn"])],
-        kv_cache_tensors=[SimpleNamespace(size=8192, shared_by=["model.layers.0.self_attn"])],
+        kv_cache_tensors=[
+            SimpleNamespace(
+                size=8192,
+                shared_by=["model.layers.0.self_attn"],
+                layers=["model.layers.0.self_attn"],
+                layer_stride=8192,
+                offset=0,
+            )
+        ],
     )
     runner = object.__new__(NPUModelRunner310V2)
     runner.device = torch.device("cpu")
@@ -390,7 +400,7 @@ def test_model_state_uses_greedy_sampler() -> None:
     model_state = object.__new__(Ascend310PModelState)
     model_state.rope_state = None
 
-    model_inputs = model_state.prepare_inputs(SimpleNamespace(), req_states=None)
+    model_inputs = model_state.prepare_inputs(SimpleNamespace(), req_states=None)  # type: ignore[arg-type]
     sampler, speculator = model_state.custom_sampler(object())
 
     assert model_inputs == {}
@@ -422,7 +432,7 @@ def test_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
 
     with patch.object(AscendModelState, "prepare_attn", return_value={}):
         model_state.prepare_attn(
-            capture_batch,
+            capture_batch,  # type: ignore[arg-type]
             CUDAGraphMode.NONE,
             (),
             object(),
@@ -430,10 +440,17 @@ def test_model_state_only_refreshes_seq_lens_for_full_runtime() -> None:
             object(),
             for_capture=True,
         )
-        model_state.prepare_attn(input_batch, CUDAGraphMode.PIECEWISE, (), object(), [], object())
+        model_state.prepare_attn(
+            input_batch,  # type: ignore[arg-type]
+            CUDAGraphMode.PIECEWISE,
+            (),
+            object(),
+            [],
+            object(),
+        )
         torch.testing.assert_close(capture_seq_lens, torch.full((2,), -1, dtype=torch.int32))
 
-        model_state.prepare_attn(input_batch, CUDAGraphMode.FULL, (), object(), [], object())
+        model_state.prepare_attn(input_batch, CUDAGraphMode.FULL, (), object(), [], object())  # type: ignore[arg-type]
         torch.testing.assert_close(capture_seq_lens, input_batch.seq_lens)
 
 
