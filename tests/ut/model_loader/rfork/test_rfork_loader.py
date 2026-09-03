@@ -16,6 +16,7 @@
 
 from functools import wraps
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -32,6 +33,7 @@ from vllm_ascend.model_loader.rfork.rfork_loader import (
     _rfork_pre_transfer_weight_processing,
     _rfork_skip_unquantized_moe_post_load_processing,
 )
+from vllm_ascend.model_loader.rfork.rfork_worker import RForkWorker
 from vllm_ascend.model_loader.rfork.seed_protocol import get_local_seed_key
 
 
@@ -41,6 +43,8 @@ class DummyLoadConfig:
 
     def __init__(self, model_loader_extra_config):
         self.model_loader_extra_config = model_loader_extra_config
+        self.rfork_worker: Any = None
+        self.rfork_draft_worker: Any = None
 
 
 @pytest.mark.parametrize("config_value", [True, False])
@@ -297,6 +301,144 @@ def test_rfork_worker_receives_parallel_ranks(monkeypatch):
     assert captured["device_id"] == 11
 
 
+def test_rfork_worker_set_excluded_weight_blocks_normalizes_input():
+    worker = RForkWorker.__new__(RForkWorker)
+
+    worker.set_excluded_weight_blocks([(128, 4096)])
+    assert worker._excluded_weight_blocks == [(128, 4096)]
+
+    worker.set_excluded_weight_blocks(None)
+    assert worker._excluded_weight_blocks == []
+
+
+def test_rfork_worker_pre_transfer_forwards_excluded_blocks():
+    worker: Any = RForkWorker.__new__(RForkWorker)
+    forwarded_blocks = []
+    worker.device_id = 0
+    worker.ready_to_start_seed_service = False
+    worker._excluded_weight_blocks = [(128, 4096)]
+
+    def register_memory_region(model, processed_layout, blocks):
+        forwarded_blocks.append(blocks)
+        return True
+
+    worker.transfer_backend = SimpleNamespace(
+        is_initialized=lambda: True,
+        register_memory_region=register_memory_region,
+    )
+
+    assert worker.pre_transfer(object(), False)
+    assert forwarded_blocks == [[(128, 4096)]]
+    assert worker.ready_to_start_seed_service
+
+
+def test_rfork_target_registered_blocks_not_collected_for_target_model():
+    load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "strategy"})
+    loader = RForkModelLoader(load_config)
+    load_config.rfork_worker = SimpleNamespace(transfer_backend=SimpleNamespace(registered_weight_blocks=[(128, 4096)]))
+    target_model_config = SimpleNamespace()
+    vllm_config = _vllm_config(model_config=target_model_config)
+
+    assert loader._get_target_registered_blocks(vllm_config, target_model_config) == []
+
+
+def test_rfork_target_registered_blocks_collected_for_draft_model():
+    load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "strategy"})
+    loader = RForkModelLoader(load_config)
+    draft_model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5_mtp"))
+    target_blocks = [(128, 4096), (8192, 1024)]
+    load_config.rfork_worker = SimpleNamespace(transfer_backend=SimpleNamespace(registered_weight_blocks=target_blocks))
+    vllm_config = _vllm_config(model_config=draft_model_config)
+
+    blocks = loader._get_target_registered_blocks(vllm_config, draft_model_config)
+
+    assert blocks == target_blocks
+    assert blocks is not target_blocks
+
+
+def test_rfork_target_registered_blocks_empty_without_target_worker():
+    load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "strategy"})
+    loader = RForkModelLoader(load_config)
+    draft_model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5_mtp"))
+    vllm_config = _vllm_config(model_config=draft_model_config)
+
+    assert loader._get_target_registered_blocks(vllm_config, draft_model_config) == []
+
+
+def _make_reset_transfer_state_worker(unregister_result):
+    worker: Any = RForkWorker.__new__(RForkWorker)
+    worker.device_id = 0
+    worker.ready_to_start_seed_service = True
+    worker.transfer_backend = SimpleNamespace(unregister_memory_region=lambda: unregister_result)
+    return worker
+
+
+def test_reset_transfer_state_propagates_unregister_result():
+    worker = _make_reset_transfer_state_worker(False)
+
+    assert not worker.reset_transfer_state()
+    assert worker.ready_to_start_seed_service is False
+
+    worker = _make_reset_transfer_state_worker(True)
+
+    assert worker.reset_transfer_state()
+    assert worker.ready_to_start_seed_service is False
+
+
+def test_reset_transfer_state_survives_backend_exception():
+    worker: Any = RForkWorker.__new__(RForkWorker)
+    worker.device_id = 0
+    worker.ready_to_start_seed_service = True
+
+    def raise_error():
+        raise RuntimeError("engine down")
+
+    worker.transfer_backend = SimpleNamespace(unregister_memory_region=raise_error)
+
+    assert not worker.reset_transfer_state()
+    assert worker.ready_to_start_seed_service is False
+
+
+def test_rfork_draft_load_passes_target_registered_blocks_to_worker(monkeypatch):
+    import vllm.model_executor.model_loader as model_loader
+
+    load_config = DummyLoadConfig({"model_url": "model", "model_deploy_strategy_name": "strategy"})
+    loader = RForkModelLoader(load_config)
+    draft_model_config = SimpleNamespace(
+        dtype=torch.float32,
+        model="/models/test",
+        hf_config=SimpleNamespace(model_type="qwen3_5_mtp"),
+    )
+    vllm_config = _vllm_config(model_config=draft_model_config)
+    target_blocks = [(128, 4096)]
+    load_config.rfork_worker = SimpleNamespace(transfer_backend=SimpleNamespace(registered_weight_blocks=target_blocks))
+    captured_blocks = []
+    draft_worker = SimpleNamespace(
+        is_seed_available=lambda: False,
+        set_excluded_weight_blocks=lambda blocks: captured_blocks.append(list(blocks)),
+        post_transfer=lambda: True,
+        reset_transfer_state=lambda: True,
+        start_seed_service=lambda model, processed_layout: None,
+    )
+    load_config.rfork_draft_worker = draft_worker
+
+    expected_model = SimpleNamespace()
+
+    def fake_get_model(**kwargs):
+        return expected_model
+
+    monkeypatch.setattr(model_loader, "get_model", fake_get_model)
+    monkeypatch.setattr(
+        "vllm_ascend.model_loader.rfork.rfork_loader.get_ascend_config",
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(dynamic_eplb=False, expert_map_record_path=None)),
+    )
+
+    model = loader.load_model(vllm_config=vllm_config, model_config=draft_model_config)
+
+    assert model is expected_model
+    assert captured_blocks == [target_blocks]
+
+
 @pytest.mark.parametrize(
     "model_config",
     [
@@ -547,10 +689,11 @@ def test_rfork_fallback_clears_only_failed_model_state_before_reinit(monkeypatch
 
     rfork_worker = SimpleNamespace(
         is_seed_available=lambda: True,
+        set_excluded_weight_blocks=lambda blocks: None,
         pre_transfer=lambda model, processed_layout: True,
         transfer=lambda model, processed_layout: False,
         post_transfer=lambda: True,
-        reset_transfer_state=lambda: None,
+        reset_transfer_state=lambda: True,
         start_seed_service=lambda model, processed_layout: None,
     )
 
@@ -610,8 +753,9 @@ def test_rfork_seed_miss_fallback_preserves_existing_process_global_state(monkey
 
     rfork_worker = SimpleNamespace(
         is_seed_available=lambda: False,
+        set_excluded_weight_blocks=lambda blocks: None,
         post_transfer=lambda: True,
-        reset_transfer_state=lambda: None,
+        reset_transfer_state=lambda: True,
         start_seed_service=lambda model, processed_layout: None,
     )
 
