@@ -38,6 +38,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSABackend
 from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+from vllm_ascend.utils import lmhead_tp_enable, lmhead_tp_max_num_logits
 from vllm_ascend.worker.v2.aclgraph_utils import _get_graph_update_backend
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
@@ -48,7 +49,98 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 logger = logging.getLogger(__name__)
 
 
-class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
+class LmheadTPDraftSamplingMixin:
+    """Group-aligned draft LM-head sampling for lmhead TP (V1 parity).
+
+    With lmhead TP the draft LM head is vocab-sharded on the lmhead-TP group
+    like the target head, so every ``sample_draft`` call (prefill step and
+    each decode draft step, on busy and idle ranks alike) must contribute the
+    same row count: the group-agreed capacity from
+    ``lmhead_tp_max_num_logits``. Greedy sampling pads the hidden states with
+    zero rows up to that capacity and trims the sampled tokens back, mirroring
+    V1's per-step ``token_indices_to_sample`` padding in ``llm_base_proposer``.
+    Probabilistic sampling (gumbel) writes per-row results into fixed-size
+    draft buffers that cannot hold the padding rows: rejected at init time by
+    ``_lmhead_tp_validate_draft_sampling`` (called from every speculator
+    ``__init__``), and kept as a runtime fallback guard here.
+
+    The capacity equals the runner's ``max_num_reqs * decode_query_len``
+    because LLM-family spec-decode model states sample one token per step
+    (``num_new_sampled_tokens_per_step == 1``); the row guard below fails
+    loudly if that ever drifts.
+    """
+
+    # Speculators whose draft sampling does not funnel through sample_draft
+    # cannot be row-aligned by this mixin; they opt out and are rejected at
+    # construction (DSpark: _sample_sequential calls compute_draft_logits
+    # directly).
+    _lmhead_tp_sample_draft_supported = True
+
+    def _lmhead_tp_max_num_logits(self) -> int:
+        return lmhead_tp_max_num_logits(self.max_num_reqs, self.num_speculative_steps + 1)
+
+    def _lmhead_tp_validate_draft_sampling(self) -> None:
+        """Fail unsupported draft sampling at construction, not first use."""
+        if not lmhead_tp_enable():
+            return
+        if not self._lmhead_tp_sample_draft_supported:
+            raise NotImplementedError(
+                f"lmhead TP does not support {type(self).__name__}: its draft "
+                "sampling does not go through sample_draft, so the "
+                "group-aligned row padding cannot be applied."
+            )
+        if self.speculative_config.draft_sample_method == "probabilistic":
+            raise NotImplementedError(
+                "lmhead TP does not support draft_sample_method='probabilistic': "
+                "the gumbel path writes into fixed-size draft buffers that cannot "
+                "hold the group-aligned padding rows."
+            )
+        if self.use_local_argmax_reduction:
+            raise NotImplementedError(
+                "lmhead TP does not support use_local_argmax_reduction: "
+                "get_top_tokens reduces over the local vocab shard only, which "
+                "silently produces wrong tokens under pure-DP lmhead TP."
+            )
+
+    def sample_draft(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        draft_step: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+    ):
+        if not lmhead_tp_enable():
+            return super().sample_draft(
+                hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
+            )
+        if draft_logits is not None:
+            raise NotImplementedError(
+                "lmhead TP does not support draft_sample_method='probabilistic': "
+                "the gumbel path writes into fixed-size draft buffers that cannot "
+                "hold the group-aligned padding rows."
+            )
+        capacity = self._lmhead_tp_max_num_logits()
+        num_logits = hidden_states.shape[0]
+        if num_logits > capacity:
+            # A mismatch would desync the draft LM-head all_gather/all_to_all
+            # across the group and hang the collectives. Fail fast instead.
+            raise ValueError(
+                f"lmhead TP draft rows ({num_logits}) exceed the group-agreed "
+                f"capacity ({capacity} = max_num_reqs * logits_rows_per_req)."
+            )
+        if num_logits == capacity:
+            return super().sample_draft(
+                hidden_states, positions, idx_mapping, temperature, seeds, draft_step, draft_logits
+            )
+        padded = torch.nn.functional.pad(hidden_states, (0, 0, 0, capacity - num_logits))
+        out = super().sample_draft(padded, positions, idx_mapping, temperature, seeds, draft_step, draft_logits)
+        return out[:num_logits]
+
+
+class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
@@ -69,6 +161,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         AscendInputBuffers after super().__init__.
         """
         super().__init__(vllm_config, device)
+        self._lmhead_tp_validate_draft_sampling()
 
         self.attn_architecture: str | None = None
         self.attn_backend: type[AttentionBackend] | None = None
