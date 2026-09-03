@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from __future__ import annotations
 
 import torch
 import torch_npu
@@ -216,7 +217,7 @@ def quant_apply_mlp(
     swiglu_alpha: float = 1.0,
     swiglu_beta: float = 0.0,
     use_w4a8_per_channel_gmm_swiglu: bool = False,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.npu.Event | None]:
     input_hidden_dtype = hidden_states.dtype
     situ_beta = 1.0 if activation_situ_beta is None else activation_situ_beta
     act_name = getattr(activation, "value", activation)
@@ -665,7 +666,8 @@ def unquant_apply_mlp(
     lora_context=None,
     expanded_row_idx: torch.Tensor | None = None,
     topk_ids: torch.Tensor | None = None,
-) -> torch.Tensor:
+    record_before_gmm2: bool = False,
+) -> tuple[torch.Tensor, torch.npu.Event | None]:
     if need_trans:
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
@@ -749,7 +751,9 @@ def unquant_apply_mlp(
     if topk_scales is not None:
         gate_up_out *= topk_scales
 
-    before_gmm2_evt = torch.npu.current_stream().record_event()
+    before_gmm2_evt = None
+    if record_before_gmm2:
+        before_gmm2_evt = torch.npu.current_stream().record_event()
     # gmm2: down_proj
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[gate_up_out],
@@ -773,7 +777,10 @@ def unquant_apply_mlp(
     return hidden_states, before_gmm2_evt
 
 
-def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
+def unified_apply_mlp(
+    *,
+    mlp_compute_input: MoEMlpComputeInput,
+) -> tuple[torch.Tensor, torch.npu.Event | None]:
     """
     Unified MoE MLP entry.
     Quant path is dispatched by DeviceOperator with explicit typed kernel flags.
@@ -823,6 +830,7 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
             lora_context=mlp_compute_input.lora_context,
             expanded_row_idx=mlp_compute_input.expanded_row_idx,
             topk_ids=mlp_compute_input.topk_ids,
+            record_before_gmm2=mlp_compute_input.record_before_gmm2,
         )
 
     from vllm_ascend.lora.fused_moe import has_lora

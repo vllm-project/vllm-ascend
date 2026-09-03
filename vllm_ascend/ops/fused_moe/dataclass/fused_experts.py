@@ -57,6 +57,7 @@ class MoEFusedExpertsInput:
     activation: MoEActivation | str = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
+    record_before_gmm2: bool = False
     # Optional per-layer MoE LoRA state (vllm_ascend.lora MoELoRAContext).
     # ``Any`` avoids coupling the core contracts to the LoRA module; only the
     # unquant MLP path reads it, and only when a LoRA adapter is active.
@@ -95,6 +96,7 @@ def build_fused_experts_input(
     w1_offset: torch.Tensor | None = None,
     w2_offset: torch.Tensor | None = None,
     lora_context=None,
+    record_before_gmm2: bool = False,
 ) -> MoEFusedExpertsInput:
     return MoEFusedExpertsInput(
         hidden_states=hidden_states,
@@ -122,6 +124,7 @@ def build_fused_experts_input(
         activation=activation,
         need_trans=need_trans,
         dynamic_eplb=dynamic_eplb,
+        record_before_gmm2=record_before_gmm2,
         quant=build_quant_params(
             quant_type=quant_type,
             comm_quant_mode=comm_quant_mode,

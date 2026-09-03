@@ -62,6 +62,7 @@ def _build_apply_layer():
 def _build_unquantized_method(*, dynamic_eplb: bool = False):
     method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
     method.dynamic_eplb = dynamic_eplb
+    method.record_before_gmm2 = False
     method.tid2eid = None
     method.moe = SimpleNamespace(has_bias=False)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)

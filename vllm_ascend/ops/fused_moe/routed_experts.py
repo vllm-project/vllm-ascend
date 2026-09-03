@@ -46,7 +46,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
-        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
+        ascend_config = get_ascend_config()
+        self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.record_before_gmm2 = ascend_config.multistream_overlap_shared_expert
         self.tid2eid = tid2eid
         self.lora_context = None
 
@@ -169,6 +171,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w1_scale_bias=w1_scale_bias,
                 w2_scale_bias=w2_scale_bias,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
+                record_before_gmm2=self.record_before_gmm2,
             )
         )
         return final_hidden_states

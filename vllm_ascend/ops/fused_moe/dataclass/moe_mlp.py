@@ -48,6 +48,7 @@ class MoEMlpComputeInput:
     activation: MoEActivation = MoEActivation.SILU
     need_trans: bool = False
     dynamic_eplb: bool = False
+    record_before_gmm2: bool = False
     activation_situ_beta: float | None = None
     activation_situ_linear_beta: float | None = None
     swiglu_limit: float = 0.0
@@ -103,6 +104,7 @@ def build_mlp_compute_input(
         activation=activation,
         need_trans=fused_experts_input.need_trans,
         dynamic_eplb=fused_experts_input.dynamic_eplb,
+        record_before_gmm2=fused_experts_input.record_before_gmm2,
         activation_situ_beta=activation_situ_beta,
         activation_situ_linear_beta=activation_situ_linear_beta,
         swiglu_limit=swiglu_limit,
