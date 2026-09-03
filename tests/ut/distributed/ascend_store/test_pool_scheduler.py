@@ -707,7 +707,6 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
 
         entered = scheduler.get_stats()
         self.assertEqual(entered.data["delayed_release_requests"], 1)
-        self.assertEqual(entered.data["delayed_release_started"], 1)
 
         scheduler.update_finished_sending({"r1"})
         released = scheduler.get_stats()

@@ -113,8 +113,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._current_step_has_real_forward = False
         self._mamba_copy_bufs = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
-        self.connector_scheduler: KVPoolScheduler | None = None
-        self.connector_worker: KVPoolWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -332,8 +330,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_stats()
+        connector_scheduler: KVPoolScheduler | None = getattr(self, "connector_scheduler", None)
+        if connector_scheduler is not None:
+            return connector_scheduler.get_stats()
         return None
 
     @classmethod

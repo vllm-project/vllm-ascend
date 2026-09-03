@@ -12,14 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
 
 class _MetricChild:
     def __init__(self):
-        self.observations = []
         self.value = 0
-
-    def observe(self, value):
-        self.observations.append(value)
-
-    def inc(self, value=1):
-        self.value += value
 
     def set(self, value):
         self.value = value
@@ -33,22 +26,18 @@ class _Metric:
         return self.child
 
 
-def test_stats_aggregate_delayed_release_values():
+def test_stats_keep_latest_delayed_release_count():
     first = AscendStoreKVConnectorStats()
-    first.record_delayed_release_started()
+    first.set_delayed_release_requests(1)
     second = AscendStoreKVConnectorStats()
-    second.record_delayed_release_started()
     second.set_delayed_release_requests(2)
 
     first.aggregate(second)
 
-    assert first.data == {
-        "delayed_release_requests": 2,
-        "delayed_release_started": 2,
-    }
+    assert first.data == {"delayed_release_requests": 2}
 
 
-def test_prom_metrics_observe_request_level_values():
+def test_prom_metrics_observe_delayed_release_count():
     prom = AscendStorePromMetrics(
         MagicMock(),
         {"gauge": _Metric, "counter": _Metric, "histogram": _Metric},
@@ -56,12 +45,6 @@ def test_prom_metrics_observe_request_level_values():
         {0: ["test-model"]},
     )
 
-    prom.observe(
-        {
-            "delayed_release_requests": 2,
-            "delayed_release_started": 3,
-        }
-    )
+    prom.observe({"delayed_release_requests": 2})
 
     assert prom._delayed_release_requests[0].value == 2
-    assert prom._delayed_release_started[0].value == 3

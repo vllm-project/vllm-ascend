@@ -145,7 +145,6 @@ class KVPoolScheduler:
         self._loading_req_ids: set[str] = set()
         self._delayed_free_req_ids: set[str] = set()
         self._kv_stats = AscendStoreKVConnectorStats()
-        self._delayed_release_dirty = False
 
         self._block_pool: BlockPool | None = None
         self.sending_event_id = 0
@@ -1022,18 +1021,16 @@ class KVPoolScheduler:
 
     def _set_delayed_free(self, req_id: str, delayed: bool) -> None:
         if delayed:
+            if req_id in self._delayed_free_req_ids:
+                return
+            self._delayed_free_req_ids.add(req_id)
+        else:
             if req_id not in self._delayed_free_req_ids:
-                self._delayed_free_req_ids.add(req_id)
-                self._kv_stats.record_delayed_release_started()
-                self._delayed_release_dirty = True
-        elif req_id in self._delayed_free_req_ids:
+                return
             self._delayed_free_req_ids.discard(req_id)
-            self._delayed_release_dirty = True
+        self._kv_stats.set_delayed_release_requests(len(self._delayed_free_req_ids))
 
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
-        if self._delayed_release_dirty:
-            self._kv_stats.set_delayed_release_requests(len(self._delayed_free_req_ids))
-            self._delayed_release_dirty = False
         if self._kv_stats.is_empty():
             return None
         stats = self._kv_stats
