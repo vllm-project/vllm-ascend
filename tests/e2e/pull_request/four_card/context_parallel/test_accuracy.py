@@ -173,6 +173,10 @@ FULL_FEATURE_MODEL_CASES = [
             "additional_config": {
                 "enable_dsa_cp": True,
             },
+            "speculative_config": {
+                "num_speculative_tokens": 3,
+                "method": "mtp",
+            },
         },
     ),
 ]
