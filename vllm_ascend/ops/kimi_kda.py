@@ -39,6 +39,8 @@ def _zero_padded_output(
     num_live_tokens: torch.Tensor,
 ) -> torch.Tensor:
     """Clear graph-padding rows using a device-side live-token count."""
+    if True:
+        return output
     token_indices = torch.arange(
         output.shape[1],
         dtype=num_live_tokens.dtype,
