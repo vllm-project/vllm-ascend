@@ -223,6 +223,62 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     torch.testing.assert_close(k_nope, kv[:2, :2])
 
 
+def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+
+    def fake_gather(tensors, slot_mapping, num_decode_tokens):
+        assert num_decode_tokens == 0
+        return (
+            tuple(torch.cat((tensor + 100, tensor), dim=0) for tensor in tensors),
+            slot_mapping,
+        )
+
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    metadata = _make_pcp_metadata(num_actual_tokens=3, num_decode_tokens=1)
+    metadata.slot_mapping = torch.tensor(
+        [5, 10, 11, -1, -1, 20, 21, -1],
+        dtype=torch.int64,
+    )
+    prefill_metadata = metadata.prefill
+    assert prefill_metadata is not None
+    prefill_metadata.pcp_local_num_input_tokens = 4
+    prefill_metadata.pcp_local_prefill_start = 3
+    prefill_metadata.pcp_local_prefill_end = 5
+
+    impl.pcp_enabled = True
+    impl.use_mla_rope = True
+    impl.kv_a_layernorm = object()
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 2
+    impl.qk_rope_head_dim = 0
+
+    gathered_k_pe = torch.empty(6, 1, 1, 0)
+    gathered_k_nope = torch.arange(12, dtype=torch.float32).view(6, 1, 1, 2)
+    impl._exec_kv_mla_nope = MagicMock(return_value=(gathered_k_pe, gathered_k_nope))
+
+    with (
+        patch(
+            "vllm_ascend.attention.mla_v1.get_pcp_group",
+            return_value=pcp_group,
+        ),
+        patch(
+            "vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs",
+            side_effect=fake_gather,
+        ),
+    ):
+        k_pe, k_nope = impl.exec_kv_prefill(
+            torch.arange(6, dtype=torch.float32).view(3, 2),
+            torch.empty(3, 0),
+            torch.empty(3, 0),
+            (torch.empty(0), torch.empty(0)),
+            torch.empty(0, dtype=torch.int64),
+            attn_metadata=metadata,
+        )
+
+    assert k_pe.shape == (2, 1, 1, 0)
+    torch.testing.assert_close(k_nope, gathered_k_nope[3:5])
+
+
 class TestDecodeMLAPreprocessResult(TestBase):
     def test_decode_mla_preprocess_result_default(self):
         result = DecodeMLAPreprocessResult()
@@ -528,6 +584,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
         mock_vllm_config.speculative_config = None
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
 
         for qk_rope_head_dim, expected in ((64, None), (0, {})):
             with self.subTest(qk_rope_head_dim=qk_rope_head_dim):
