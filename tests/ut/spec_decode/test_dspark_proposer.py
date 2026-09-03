@@ -89,6 +89,9 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         method="dspark",
         runner=SimpleNamespace(device_metadata_executor=executor),
         dcp_size=dcp_size,
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=2 if pcp_enabled else 1)
+        ),
         sliding_window=None,
         _per_group_block_table_buffers={group_id: torch.ones((1, 1), dtype=torch.int32) for group_id in range(2)},
         _per_group_query_slot_mapping_buffers={group_id: torch.zeros(1, dtype=torch.int32) for group_id in range(2)},
@@ -99,13 +102,12 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         slot_mapping=torch.zeros(1, dtype=torch.int32),
     )
 
-    with patch("vllm_ascend.spec_decode.llm_base_proposer.enable_pcp", return_value=pcp_enabled):
-        metadata, first = AscendSpecDecodeBaseProposer.build_draft_attn_metadata(
-            proposer,
-            common_attn_metadata,
-            num_input_tokens=1,
-            num_actual_tokens=1,
-        )
+    metadata, first = AscendSpecDecodeBaseProposer.build_draft_attn_metadata(
+        proposer,
+        common_attn_metadata,
+        num_input_tokens=1,
+        num_actual_tokens=1,
+    )
 
     assert metadata[0]["draft.attn.0"] is first
     assert all(not builder.enabled for builder in builders)

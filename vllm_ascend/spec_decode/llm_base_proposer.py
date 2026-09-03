@@ -44,7 +44,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, enable_pcp
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.device_op import DeviceOperator
@@ -2379,7 +2379,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         device_metadata_tasks: list[DeviceMetadataTask] = []
         device_metadata_executor = (
             getattr(self.runner, "device_metadata_executor", None)
-            if self.method == "dspark" and self.dcp_size == 1 and not enable_pcp()
+            if (
+                self.method == "dspark"
+                and self.dcp_size == 1
+                and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+            )
             else None
         )
         for attn_group in self.draft_attn_groups:
