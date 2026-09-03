@@ -17,9 +17,27 @@
 import torch
 from vllm.triton_utils import tl, triton
 
-from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+from vllm_ascend.ops.triton.triton_utils import get_ub_size_bytes, get_vectorcore_num
 
 _FP8_E4M3_MAX = 448.0
+
+# --- RoPE tile sizing constants ---
+# All Triton RoPE arithmetic promotes to float32 (4 bytes) per element.
+_ROPE_FLOAT32_BYTES = 4
+# Fraction of total UB that may be used for RoPE tiles. The remainder
+# absorbs compiler scratch, register spill, and double-buffering overhead.
+_ROPE_UB_SAFETY_FACTOR = 0.5
+# Default tile sizes when UB headroom is sufficient (common head_dim <= 128).
+_ROPE_DEFAULT_BLOCK_SIZE_NEOX = 64
+_ROPE_DEFAULT_BLOCK_SIZE_NON_NEOX = 32
+# Minimum tile size (Triton requires power-of-2 constexpr >= 1).
+_ROPE_MIN_BLOCK_SIZE = 1
+# Live tensors in the hottest loop iteration (all float32):
+#   NeoX:     q_tile_1, q_tile_2, new_q_tile_1, new_q_tile_2  -> 4
+#   Non-NeoX: q_tile(x2), new_q_tile_1, new_q_tile_2, q_tile_out(x2) -> 6
+# Each "x2" accounts for the extra dimension in the 3-D pair layout.
+_ROPE_NUM_LIVE_TENSORS_NEOX = 4
+_ROPE_NUM_LIVE_TENSORS_NON_NEOX = 6
 
 
 def _fp8_rope_head_block(n_heads: int, cap: int = 16) -> int:
@@ -27,6 +45,69 @@ def _fp8_rope_head_block(n_heads: int, cap: int = 16) -> int:
     if n_heads <= 0:
         return 1
     return min(triton.next_power_of_2(n_heads), cap)
+
+
+def _compute_rope_block_size_head(
+    head_dim: int,
+    rope_dim: int,
+    is_neox_style: bool,
+) -> int:
+    """Dynamically compute BLOCK_SIZE_HEAD so the RoPE tile fits within NPU UB.
+
+    The Triton RoPE kernel tiles over q/k heads in chunks of BLOCK_SIZE_HEAD.
+    Each tile keeps multiple float32 tensors alive in the Unified Buffer:
+
+    NeoX path (per head-tile iteration):
+      q_tile_1, q_tile_2            -- input halves,  (BLOCK, rope_dim/2)
+      new_q_tile_1, new_q_tile_2    -- output halves, (BLOCK, rope_dim/2)
+      cos_row, sin_row              -- shared, (rope_dim/2,)  [small]
+
+    Non-NeoX path uses a 3-D pair layout (BLOCK, rope_dim/2, 2), so each
+    full tensor occupies twice the memory of a single NeoX half.
+
+    The calculation:
+      1. Determine pad_rope_dim (power-of-2 ceiling of rope_dim).
+      2. Compute bytes-per-head for the live tensors.
+      3. Find the largest power-of-2 BLOCK_SIZE_HEAD whose total UB
+         footprint stays within (ub_size * safety_factor).
+      4. Cap at the default max for performance on small head_dim.
+    """
+    # When rope_dim is unknown (-1), head_dim is a safe upper bound
+    # because rope_dim <= head_dim is always asserted by the caller.
+    effective_rope_dim = rope_dim if rope_dim > 0 else head_dim
+    pad_rope_dim = triton.next_power_of_2(effective_rope_dim)
+    half_dim = pad_rope_dim // 2
+
+    if is_neox_style:
+        num_live_tensors = _ROPE_NUM_LIVE_TENSORS_NEOX
+        bytes_per_head_per_tensor = half_dim * _ROPE_FLOAT32_BYTES
+        default_max = _ROPE_DEFAULT_BLOCK_SIZE_NEOX
+    else:
+        num_live_tensors = _ROPE_NUM_LIVE_TENSORS_NON_NEOX
+        bytes_per_head_per_tensor = half_dim * 2 * _ROPE_FLOAT32_BYTES
+        default_max = _ROPE_DEFAULT_BLOCK_SIZE_NON_NEOX
+
+    # cos_row + sin_row are loaded once per row and shared across tiles.
+    shared_bytes = 2 * half_dim * _ROPE_FLOAT32_BYTES
+
+    ub_size = get_ub_size_bytes()
+    available_ub = int(ub_size * _ROPE_UB_SAFETY_FACTOR) - shared_bytes
+
+    bytes_per_head = num_live_tensors * bytes_per_head_per_tensor
+    if bytes_per_head <= 0:
+        return default_max
+
+    max_block = available_ub // bytes_per_head
+    max_block = max(max_block, _ROPE_MIN_BLOCK_SIZE)
+
+    # Cap at the default max for performance on small head_dim.
+    block_size = min(max_block, default_max)
+
+    # Triton requires power-of-2 constexpr; find largest pow2 <= block_size.
+    result = 1
+    while result * 2 <= block_size:
+        result *= 2
+    return result
 
 
 @triton.jit
@@ -99,7 +180,7 @@ def _triton_rope(
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+        sin_offsets = cos_offsets + (rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
         if USE_COS_SIN:
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
@@ -224,7 +305,7 @@ def _triton_rope_siso(
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+        sin_offsets = cos_offsets + (rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
         if USE_COS_SIN:
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
@@ -448,16 +529,9 @@ def rope_forward_triton(
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
-    # TODO: use a more robust method to get BLOCK_SIZE_HEAD
-    if is_neox_style:
-        BLOCK_SIZE_HEAD = 64
-    else:
-        BLOCK_SIZE_HEAD = 32
-    # Large head_dim RoPE can overflow UB with the default tile on A2/A3.
-    # Keep the original tile for common head_dim models.
-    large_head_dim_threshold, large_head_block_size = 256, 16
-    if head_dim >= large_head_dim_threshold:
-        BLOCK_SIZE_HEAD = min(BLOCK_SIZE_HEAD, large_head_block_size)
+    # Dynamically size the head tile to fit within NPU Unified Buffer,
+    # replacing the previous hardcoded head_dim threshold approach.
+    BLOCK_SIZE_HEAD = _compute_rope_block_size_head(head_dim, rope_dim, is_neox_style)
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 

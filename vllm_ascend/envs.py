@@ -71,6 +71,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Override the Unified Buffer (UB) size in KB for Triton kernel tile sizing.
+    # 0 (default): auto-detect from device properties, falling back to 192 KB
+    # (safe for Ascend 910B/A3). Set to a positive value to override when
+    # auto-detection is unavailable or for debugging UB overflow issues.
+    "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB", 0)),
 }
 
 # end-env-vars-definition
