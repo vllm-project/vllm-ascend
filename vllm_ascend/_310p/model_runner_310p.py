@@ -684,6 +684,7 @@ class NPUModelRunner310(NPUModelRunner):
     def initialize_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
         kv_cache_allocation_context: AbstractContextManager | None = None,
     ) -> dict[str, torch.Tensor]:
         """
@@ -918,7 +919,11 @@ class NPUModelRunner310(NPUModelRunner):
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
 
-    def may_reinitialize_input_batch(self, kv_cache_config: KVCacheConfig) -> None:
+    def may_reinitialize_input_batch(
+        self,
+        kv_cache_config: KVCacheConfig,
+        kernel_block_sizes: list[int] | None = None,
+    ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
         `[self.cache_config.block_size]`. This usually happens when there
