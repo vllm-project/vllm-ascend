@@ -182,18 +182,14 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
+    export HCCL_BUFFSIZE=400
+    export HCCL_INTRA_ROCE_ENABLE=0
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
 
     # Reduce memory fragmentation and avoid out-of-memory errors.
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=400
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=100
-    export TASK_QUEUE_ENABLE=1
-    export VLLM_ASCEND_ENABLE_PREFETCH_MLP=1
-    export HCCL_INTRA_PCIE_ENABLE=1
-    export HCCL_INTRA_ROCE_ENABLE=0
 
     vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
       --host 0.0.0.0 \
@@ -226,19 +222,17 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
     # Load model from ModelScope to speed up download.
     export VLLM_USE_MODELSCOPE=True
-
-    # Reduce memory fragmentation and avoid out-of-memory errors.
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export HCCL_BUFFSIZE=1024
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
+    # Reduce memory fragmentation and avoid out-of-memory errors.
+
     echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
     sysctl -w vm.swappiness=0
     sysctl -w kernel.numa_balancing=0
     sysctl kernel.sched_migration_cost_ns=50000
-    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
     vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
       --host 0.0.0.0 \
@@ -291,22 +285,18 @@ Run the following script on node 0.
 ```shell
 #!/bin/sh
 
-export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export VLLM_USE_MODELSCOPE=True
 export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host 0.0.0.0 \
@@ -339,25 +329,21 @@ Run the following script on node 1.
 ```shell
 #!/bin/sh
 
-export VLLM_USE_MODELSCOPE=True
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxxx"
 local_ip="xxxx"
 
+export VLLM_USE_MODELSCOPE=True
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 # The value of node0_ip must be consistent with local_ip on node 0.
 node0_ip="xxxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export HCCL_BUFFSIZE=1024
-export TASK_QUEUE_ENABLE=1
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host 0.0.0.0 \
@@ -407,7 +393,7 @@ INFO:     Application startup complete.
 - `--api-server-count` controls how many API server processes are started on the master node.
 - `--headless` starts a worker node without exposing an API server. Use it on non-master nodes.
 - `--tensor-parallel-size 8` maps one TP group to the 8 NPUs on each A2 node.
-- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL, Gloo, and TP communication to the selected network.
+- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` bind HCCL and Gloo communication to the selected network.
 - `multistream_overlap_shared_expert` overlaps shared expert computation for better throughput on MoE workloads.
 
 ### 5.3 Multi-Node Deployment with Ray
@@ -445,22 +431,16 @@ unset http_proxy
 nic_name="xxxx"
 local_ip="xxxx"
 
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 export IP_ADDRESS=$local_ip
 export NETWORK_CARD_NAME=$nic_name
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$IP_ADDRESS
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host ${IP_ADDRESS} \
@@ -521,22 +501,16 @@ unset http_proxy
 nic_name="xxxx"
 local_ip="xxxx"
 
-export VLLM_ENGINE_READY_TIMEOUT_S=30000
-export VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT=480
 export IP_ADDRESS=$local_ip
 export NETWORK_CARD_NAME=$nic_name
-export HCCL_IF_IP=$IP_ADDRESS
-export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export TP_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1536
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
-export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-export VLLM_TORCH_PROFILER_WITH_STACK=0
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$IP_ADDRESS
 export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH
+export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w8a8-mtp \
   --host ${IP_ADDRESS} \
@@ -593,7 +567,6 @@ Common Issues Tip: If the decode node fails to initialize, check that `--tensor-
 - `--kv-transfer-config` sets the Mooncake connector. `kv_role` is `kv_producer` on prefill and `kv_consumer` on decode.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout.
 - `--no-enable-prefix-caching` disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
-- `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT` is the timeout in seconds for automatically releasing the prefiller KV cache for a request.
 - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'` is recommended on the decode node to reduce decode dispatch overhead.
 
 ### 5.5 Prefill-Decode Disaggregation (Ascend 950DT series)
@@ -620,29 +593,22 @@ unset http_proxy
 
 source /root/.bashrc
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
-export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxx"
 local_ip="xxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_ALGO=level0:fullmesh
-export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=204
-export HCCL_CONNECT_TIMEOUT=180
 export HCCL_BUFFSIZE=300
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export DYNAMIC_EPLB="true"
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
+export HCCL_ALGO=level0:fullmesh
+
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --host 0.0.0.0 \
@@ -702,29 +668,22 @@ unset http_proxy
 
 source /root/.bashrc
 export PROMETHEUS_MULTIPROC_DIR=/dev/shm/vllm_metrics && mkdir -p $PROMETHEUS_MULTIPROC_DIR
-export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
-
 # Get these values through ifconfig.
 # nic_name is the network interface name corresponding to local_ip.
 nic_name="xxx"
 local_ip="xxx"
 
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-export HCCL_ALGO=level0:fullmesh
-export VLLM_RPC_TIMEOUT=3600000
 export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-export HCCL_EXEC_TIMEOUT=200
-export HCCL_CONNECT_TIMEOUT=1800
 export HCCL_BUFFSIZE=1200
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export TASK_QUEUE_ENABLE=1
+export HCCL_IF_IP=$local_ip
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export DYNAMIC_EPLB="true"
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export HCCL_DFS_CONFIG="task_exception:off,inconsistent_check:off"
+export HCCL_ALGO=level0:fullmesh
+
 
 vllm serve Eco-Tech/Qwen3.5-397B-A17B-w4a4-mxfp4 \
   --host 0.0.0.0 \
@@ -962,7 +921,7 @@ For common environment, installation, and general parameter issues, refer to [Pu
 
 **Cause:** Network interface names, IP addresses, DP ranks, or RPC ports are inconsistent across nodes.
 
-**Solution:** Verify multi-node communication first. Ensure `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` match the selected NIC. Ensure all nodes use the same `--data-parallel-rpc-port`, non-master nodes use `--headless`, and `--data-parallel-start-rank` does not overlap.
+**Solution:** Verify multi-node communication first. Ensure `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` match the selected NIC. Ensure all nodes use the same `--data-parallel-rpc-port`, non-master nodes use `--headless`, and `--data-parallel-start-rank` does not overlap.
 
 ### Q3: Why is prefix caching disabled in the PD disaggregation examples?
 

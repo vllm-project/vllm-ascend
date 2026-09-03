@@ -82,6 +82,10 @@ def test_npu_connector_observes_updated_gdn_state_after_compile():
         patch("vllm_ascend.attention.utils.has_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.is_v1_kv_transfer_group", return_value=True),
         patch("vllm_ascend.attention.utils.get_kv_transfer_group", return_value=connector),
+        # NPU-only side effects live in the compiled forward on device; stub them
+        # so the inductor graph stays fullgraph (no graph break).
+        patch("vllm_ascend.ops.gdn.wait_for_kv_layer_from_connector", lambda *a, **k: None),
+        patch("vllm_ascend.ops.gdn.record_attention_compute_start", lambda: None),
     ):
         eager_output = _run_gdn_forward(model, hidden_states, output)
         torch.testing.assert_close(eager_output, hidden_states + 1)

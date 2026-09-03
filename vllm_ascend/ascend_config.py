@@ -257,10 +257,11 @@ class AscendConfig:
             "enable_mc2_hierarchy_comm": false,
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
+            "enable_force_eplb": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 131072,
+            "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
             "c8_enable_reshape_optim": false,
             "enable_fused_mc2": 0,
@@ -391,10 +392,18 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    enable_force_eplb: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    mega_moe_max_tokens: int = 131072
+    # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
+    # The same value is passed as dispatch_ffn_combine's max_output_size
+    # and CANN MegaMoe buffer's max_recv_token_num.
+    # This is a reference value: if the actual per-rank received token
+    # count exceeds it, tokens may be truncated, causing precision
+    # degradation. Do not set it too large because workspace memory scales
+    # linearly with this value. Default 65536.
+    mega_moe_max_tokens: int = 65536
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
@@ -472,6 +481,13 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if (
+            self.enable_force_eplb
+            and self.eplb_config.dynamic_eplb
+            and vc.model_config is not None
+            and vc.model_config.is_moe
+        ):
+            raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp

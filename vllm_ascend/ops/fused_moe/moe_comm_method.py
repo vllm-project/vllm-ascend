@@ -285,6 +285,8 @@ class FusedMC2CommImpl(MoECommMethod):
         self,
         dispatch_quant_mode: int = 0,
         dispatch_quant_out_dtype: torch.dtype | None = None,
+        *,
+        is_decode_only_node: bool,
     ):
         # FusedMC2CommImpl always builds a TokenDispatcherWithMC2 (see
         # setup_moe_comm_method), which is where global_bs / ep_world_size live.
@@ -312,10 +314,33 @@ class FusedMC2CommImpl(MoECommMethod):
         num_topk = self.moe_config.experts_per_token
         num_experts = self.moe_config.num_experts
         expert_per_rank = max(1, num_experts // int(self.token_dispatcher.ep_world_size))
-        max_recv_token_num = max(
+        absolute_safe_max_recv_token_num = max(
             1,
             num_max_tokens_per_rank * int(self.token_dispatcher.ep_world_size) * min(num_topk, expert_per_rank),
         )
+
+        if is_decode_only_node:
+            max_recv_token_num = absolute_safe_max_recv_token_num
+        else:
+            # P nodes and PD-mixed nodes use the configured value. This keeps
+            # the existing memory/performance tradeoff for prefill workloads.
+            max_recv_token_num = get_ascend_config().mega_moe_max_tokens
+            logger.warning_once(
+                "MegaMoe symm buffer: max_recv_token_num is set from "
+                "mega_moe_max_tokens=%d (reference value) on a P or PD-mixed "
+                "node. If the actual per-rank received token count after "
+                "dispatch exceeds this value, precision degradation will "
+                "occur. The absolute safe upper bound is %d "
+                "(num_max_tokens_per_rank=%d, ep_world_size=%d, num_topk=%d, "
+                "expert_per_rank=%d). Please tune mega_moe_max_tokens in "
+                "additional_config based on actual expert load distribution.",
+                max_recv_token_num,
+                absolute_safe_max_recv_token_num,
+                num_max_tokens_per_rank,
+                int(self.token_dispatcher.ep_world_size),
+                num_topk,
+                expert_per_rank,
+            )
 
         logger.info(
             "CANN MegaMoe sym-buffer alloc (must match across all EP ranks): ep_rank=%s ep_world=%s global_bs=%s",
@@ -339,6 +364,7 @@ class FusedMC2CommImpl(MoECommMethod):
     def _apply_cann_mega_moe(
         self,
         fused_experts_input: MoEFusedExpertsInput,
+        is_decode_only_node: bool,
     ):
         # TokenDispatcherWithMC2 carries global_bs (used below for the mc2_mask
         # branch); assert the subtype so mypy resolves it off the base class.
@@ -373,6 +399,7 @@ class FusedMC2CommImpl(MoECommMethod):
             self.mega_moe_symm_buffer = self._init_mega_moe_symm_buffer(
                 dispatch_quant_mode,
                 dispatch_quant_out_dtype,
+                is_decode_only_node=is_decode_only_node,
             )
         else:
             self.mega_moe_symm_buffer.dispatch_quant_mode = dispatch_quant_mode
@@ -429,7 +456,9 @@ class FusedMC2CommImpl(MoECommMethod):
         expert_tokens = None
         if get_ascend_config().enable_fused_mc2 == 1:
             if _EXTRA_CTX.use_mega_moe:
-                out, expert_tokens = self._apply_cann_mega_moe(fused_experts_input)
+                out, expert_tokens = self._apply_cann_mega_moe(
+                    fused_experts_input, is_decode_only_node=_EXTRA_CTX.is_decode_only_node
+                )
             else:
                 assert not (
                     fused_experts_input.weights.w1_scale_bias is None
