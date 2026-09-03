@@ -51,14 +51,18 @@ class TestAttentionGraphHelpers(TestBase):
         self.assertEqual(result.numel(), 8)
         self.assertEqual(graph_params.workspaces[1].numel(), 8)
 
-    def test_large_head_uses_paged_attention_on_a2(self):
+    def test_large_head_uses_paged_attention_on_non_a5_profiles(self):
         vllm_config = MagicMock()
         vllm_config.speculative_config = None
-        with patch(
-            "vllm_ascend.attention.utils.get_current_hardware_profile",
-            return_value=get_hardware_profile(AscendDeviceType.A2),
-        ):
-            self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
+        for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType._310P):
+            with self.subTest(device_type=device_type):
+                with patch(
+                    "vllm_ascend.attention.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(device_type),
+                ):
+                    self.assertTrue(
+                        using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
+                    )
 
 
 class TestAscendAttentionBackend(TestBase):
