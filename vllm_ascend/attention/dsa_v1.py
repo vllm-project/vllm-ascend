@@ -329,8 +329,7 @@ def build_dspark_swa_indices(
     # draft tokens — the DSpark decode contract, checked here. The kernel
     # does not produce per_token_lens (the only caller discards it), so the
     # tuple contract is preserved with None in its place.
-    if (num_decode_tokens is not None
-            and hasattr(torch.ops._C_ascend, "build_dspark_swa_indices")):
+    if num_decode_tokens is not None and hasattr(torch.ops._C_ascend, "build_dspark_swa_indices"):
         num_reqs = query_start_loc.shape[0] - 1
         if num_decode_tokens == num_reqs * num_speculative_tokens:
             bt = block_table if block_table.dtype == torch.int32 else block_table.to(torch.int32)
