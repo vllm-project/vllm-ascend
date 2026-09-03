@@ -183,6 +183,53 @@ class TestBlockTableComputeSlotMapping(TestBase):
             np.array([7, 11], dtype=np.int32),
         )
 
+    def test_virtual_kernel_blocks_expand_physical_block_ids(self):
+        self.block_size = 384
+        self.kernel_sizes = [128]
+        block_table = self.create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+
+        block_table.add_row([2, 5], 0)
+
+        self.assertTrue(block_table.use_hybrid_blocks)
+        self.assertEqual(block_table.physical_block_size, 384)
+        self.assertEqual(block_table.logical_block_size, 128)
+        self.assertEqual(block_table.blocks_per_phys_block, 3)
+        self.assertEqual(block_table.num_blocks_per_row[0], 6)
+        np.testing.assert_array_equal(
+            block_table.block_table.np[0, :6],
+            np.array([6, 7, 8, 15, 16, 17], dtype=np.int32),
+        )
+
+    def test_selects_first_kernel_size_that_divides_physical_block(self):
+        self.block_size = 384
+        self.kernel_sizes = [100, 128, 64]
+        block_table = self.create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+        )
+
+        self.assertEqual(block_table.logical_block_size, 128)
+        self.assertEqual(block_table.blocks_per_phys_block, 3)
+
+    def test_rejects_kernel_sizes_that_do_not_divide_physical_block(self):
+        self.block_size = 384
+        self.kernel_sizes = [100, 160]
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"None of the kernel sizes \[100, 160\] can divide physical block size 384",
+        ):
+            self.create_block_table(
+                dcp_world_size=1,
+                dcp_rank=0,
+                cp_kv_cache_interleave_size=1,
+            )
+
     def _test_slot_mapping_for_ranks(self, dcp_world_size, cp_kv_cache_interleave_size, test_configs):
         """Helper method to test slot_mapping across multiple ranks
 
@@ -388,6 +435,71 @@ class TestBlockTableComputeSlotMapping(TestBase):
             test_configs.append((dcp_rank, req_indices, positions, np.array(expected_result, dtype=np.int32)))
 
         self._test_slot_mapping_for_ranks(dcp_world_size=8, cp_kv_cache_interleave_size=128, test_configs=test_configs)
+
+
+class TestMultiGroupBlockTable(unittest.TestCase):
+    @staticmethod
+    def _create(*, kernel_sizes, max_num_blocks=None, block_sizes=None):
+        from vllm_ascend.worker.block_table import MultiGroupBlockTable
+
+        block_sizes = [384, 384] if block_sizes is None else block_sizes
+        max_num_blocks = [4, 5] if max_num_blocks is None else max_num_blocks
+        return MultiGroupBlockTable(
+            max_num_reqs=2,
+            max_model_len=1024,
+            max_num_batched_tokens=64,
+            pin_memory=False,
+            device=torch.device("cpu"),
+            block_sizes=block_sizes,
+            max_num_blocks=max_num_blocks,
+            kernel_sizes=kernel_sizes,
+            kv_cache_groups=[MagicMock(name="attention"), MagicMock(name="mamba")],
+        )
+
+    @patch("vllm_ascend.worker.block_table.BlockTable")
+    def test_forwards_flat_kernel_size_to_each_group(self, block_table_cls):
+        self._create(kernel_sizes=[128, 384])
+
+        self.assertEqual(block_table_cls.call_count, 2)
+        attention_call, mamba_call = block_table_cls.call_args_list
+        self.assertEqual(attention_call.args[0], 384)
+        self.assertEqual(attention_call.args[2], 4)
+        self.assertEqual(attention_call.args[6], [128])
+        self.assertEqual(mamba_call.args[0], 384)
+        self.assertEqual(mamba_call.args[2], 5)
+        self.assertEqual(mamba_call.args[6], [384])
+
+    @patch("vllm_ascend.worker.block_table.BlockTable")
+    def test_broadcasts_single_kernel_size_to_all_groups(self, block_table_cls):
+        self._create(kernel_sizes=[128])
+
+        self.assertEqual(
+            [call_args.args[6] for call_args in block_table_cls.call_args_list],
+            [[128], [128]],
+        )
+
+    @patch("vllm_ascend.worker.block_table.BlockTable")
+    def test_defaults_each_group_to_no_virtual_split(self, block_table_cls):
+        self._create(kernel_sizes=None)
+
+        self.assertEqual(
+            [call_args.args[6] for call_args in block_table_cls.call_args_list],
+            [[0], [0]],
+        )
+
+    def test_rejects_mismatched_kernel_size_count(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"kernel_sizes length \(3\) must match block_sizes length \(2\)",
+        ):
+            self._create(kernel_sizes=[128, 256, 384])
+
+    def test_rejects_mismatched_max_block_count(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"max_num_blocks length \(1\) must match block_sizes length \(2\)",
+        ):
+            self._create(kernel_sizes=[128, 384], max_num_blocks=[4])
 
 
 if __name__ == "__main__":
