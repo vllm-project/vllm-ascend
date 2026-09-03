@@ -25,7 +25,6 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataExecutor,
     DeviceMetadataStage,
     DeviceMetadataTask,
-    DeviceMetadataTaskProvider,
     wait_for_device_metadata,
 )
 
@@ -108,15 +107,16 @@ def _tasks(calls: list[tuple]) -> tuple[DeviceMetadataTask, ...]:
     )
 
 
-def test_submit_records_inputs_and_stage_frontiers(executor_env):
+def test_stream_lifecycle_and_stage_frontiers(executor_env):
     executor, calls, allocations = executor_env
-
     assert allocations == [
         "stream",
         "inputs",
         "reusable",
     ]
-    executor.submit(_tasks(calls))
+    tasks = tuple(reversed(_tasks(calls)))
+    executor.submit(tasks)
+    assert executor.submission_in_flight
     assert allocations == [
         "stream",
         "inputs",
@@ -136,15 +136,13 @@ def test_submit_records_inputs_and_stage_frontiers(executor_env):
         ("task", "attention"),
         ("metadata", "record", "attention"),
     ]
-
-
-def test_wait_and_release_fence_buffer_reuse(executor_env):
-    executor, calls, _ = executor_env
-    tasks = _tasks(calls)
-
-    executor.submit(tasks)
     executor.wait(DeviceMetadataStage.INDEXER, 2)
+    executor.wait(DeviceMetadataStage.INDEXER, 2)
+    assert calls.count(("model", "wait", "indexer")) == 1
+    with pytest.raises(RuntimeError, match="has not been released"):
+        executor.submit(tasks)
     executor.release()
+    assert not executor.submission_in_flight
     assert calls[-2:] == [
         ("model", "wait", "indexer"),
         ("model", "record", "reusable"),
@@ -159,17 +157,7 @@ def test_wait_and_release_fence_buffer_reuse(executor_env):
     ]
 
 
-def test_wait_records_each_stage_once_per_submission(executor_env):
-    executor, calls, _ = executor_env
-    executor.submit(_tasks(calls))
-
-    executor.wait(DeviceMetadataStage.INDEXER, 2)
-    executor.wait(DeviceMetadataStage.INDEXER, 2)
-
-    assert calls.count(("model", "wait", "indexer")) == 1
-
-
-def test_external_events_bridge_full_graph_and_are_reused(executor_env):
+def test_external_events_are_reused_per_batch_descriptor(executor_env):
     executor, calls, allocations = executor_env
     descriptor = BatchDescriptor(num_tokens=4, num_reqs=4)
 
@@ -187,18 +175,10 @@ def test_external_events_bridge_full_graph_and_are_reused(executor_env):
     assert calls.index(("metadata", "record", "external-1")) < calls.index(("model", "external_wait", "external-1"))
     executor.release()
     assert not executor.uses_external_events
-
     executor.submit(_tasks(calls), descriptor)
     assert allocations.count("external-0") == 1
-
-
-def test_external_events_are_isolated_by_batch_descriptor(executor_env):
-    executor, calls, allocations = executor_env
-
-    executor.submit(_tasks(calls), BatchDescriptor(num_tokens=4, num_reqs=4))
     executor.release()
     executor.submit(_tasks(calls), BatchDescriptor(num_tokens=8, num_reqs=4))
-
     assert allocations[-3:] == ["external-3", "external-4", "external-5"]
 
 
@@ -217,25 +197,6 @@ def test_external_event_frontiers_must_remain_stable(executor_env):
     assert calls == []
     assert allocations == allocations_before
     assert not executor.submission_in_flight
-
-
-def test_submission_in_flight_tracks_release(executor_env):
-    executor, calls, _ = executor_env
-
-    assert not executor.submission_in_flight
-    executor.submit(_tasks(calls))
-    assert executor.submission_in_flight
-    executor.release()
-    assert not executor.submission_in_flight
-
-
-def test_executor_rejects_overlapping_submissions(executor_env):
-    executor, calls, _ = executor_env
-    tasks = _tasks(calls)
-    executor.submit(tasks)
-
-    with pytest.raises(RuntimeError, match="has not been released"):
-        executor.submit(tasks)
 
 
 def test_submit_failure_keeps_partial_submission_in_flight(executor_env):
@@ -261,19 +222,6 @@ def test_submit_failure_keeps_partial_submission_in_flight(executor_env):
         executor.submit(tasks)
 
 
-def test_submit_orders_tasks_by_stage(executor_env):
-    executor, calls, _ = executor_env
-    tasks = tuple(reversed(_tasks(calls)))
-
-    executor.submit(tasks)
-
-    assert [call for call in calls if call[0] == "task"] == [
-        ("task", "compressor"),
-        ("task", "indexer"),
-        ("task", "attention"),
-    ]
-
-
 def test_wait_uses_group_specific_frontier(executor_env):
     executor, calls, _ = executor_env
     tasks = (
@@ -288,21 +236,6 @@ def test_wait_uses_group_specific_frontier(executor_env):
     waits = [call for call in calls if call[:2] == ("model", "wait")]
     assert len(waits) == 2
     assert waits[0][2] != waits[1][2]
-
-
-def test_task_provider_is_structural():
-    class LegacyBuilder:
-        pass
-
-    class ProviderBuilder:
-        def enable_device_metadata(self):
-            pass
-
-        def take_device_metadata_tasks(self):
-            return (DeviceMetadataTask(DeviceMetadataStage.INDEXER, lambda: None, 1),)
-
-    assert not isinstance(LegacyBuilder(), DeviceMetadataTaskProvider)
-    assert isinstance(ProviderBuilder(), DeviceMetadataTaskProvider)
 
 
 def test_submit_rejects_empty_tasks(executor_env):

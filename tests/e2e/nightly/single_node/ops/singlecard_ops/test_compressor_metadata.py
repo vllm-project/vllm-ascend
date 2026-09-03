@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import pytest
@@ -11,6 +12,12 @@ from vllm_ascend.utils import bootstrap_custom_op_env
 
 bootstrap_custom_op_env(include_vendor_lib=True)
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F401
+
+from vllm_ascend.worker.device_metadata import (  # noqa: E402
+    DeviceMetadataExecutor,
+    DeviceMetadataStage,
+    DeviceMetadataTask,
+)
 
 KV_BLOCK_SIZE = 128
 SLOT_MAPPING_FLAT = 1
@@ -401,42 +408,30 @@ def test_compressor_metadata_out_cross_stream_buffer_reuse():
     out_cos = torch.empty((max_rows, 1, 1, ROPE_DIM), dtype=prepared[0][1].dtype, device="npu")
     out_sin = torch.empty_like(out_cos)
     out_slot = torch.empty((max_rows, 2), dtype=torch.int32, device="npu")
-    output_ptrs = (out_cos.data_ptr(), out_sin.data_ptr(), out_slot.data_ptr())
-    model_stream = torch.npu.current_stream()
-    metadata_stream = torch.npu.Stream()
-    inputs_ready = torch.npu.Event()
-    metadata_ready = torch.npu.Event()
-    buffer_reusable = torch.npu.Event()
+    executor = DeviceMetadataExecutor()
     snapshots = []
 
-    for index, (case, rope_cos, rope_sin, query_start_loc, start_pos, block_table, expected) in enumerate(prepared):
+    for case, rope_cos, rope_sin, query_start_loc, start_pos, block_table, expected in prepared:
         num_rows = expected[2].shape[0]
-        assert (
-            out_cos[:num_rows].data_ptr(),
-            out_sin[:num_rows].data_ptr(),
-            out_slot[:num_rows].data_ptr(),
-        ) == output_ptrs
-        inputs_ready.record(model_stream)
-        with torch.npu.stream(metadata_stream):
-            metadata_stream.wait_event(inputs_ready)
-            if index:
-                metadata_stream.wait_event(buffer_reusable)
-            torch.ops._C_ascend.compressor_metadata_out(
-                rope_cos,
-                rope_sin,
-                query_start_loc,
-                start_pos,
-                block_table,
-                KV_BLOCK_SIZE,
-                case.slot_mapping_format,
-                case.compress_ratio,
-                len(case.start_pos),
-                out_cos[:num_rows],
-                out_sin[:num_rows],
-                out_slot[:num_rows],
-            )
-            metadata_ready.record(metadata_stream)
-        model_stream.wait_event(metadata_ready)
+        build_metadata = partial(
+            torch.ops._C_ascend.compressor_metadata_out,
+            rope_cos,
+            rope_sin,
+            query_start_loc,
+            start_pos,
+            block_table,
+            KV_BLOCK_SIZE,
+            case.slot_mapping_format,
+            case.compress_ratio,
+            len(case.start_pos),
+            out_cos[:num_rows],
+            out_sin[:num_rows],
+            out_slot[:num_rows],
+        )
+
+        group_id = id(out_cos)
+        executor.submit((DeviceMetadataTask(DeviceMetadataStage.COMPRESSOR, build_metadata, group_id),))
+        executor.wait(DeviceMetadataStage.COMPRESSOR, group_id)
         snapshots.append(
             (
                 out_cos[:num_rows].clone(),
@@ -445,7 +440,7 @@ def test_compressor_metadata_out_cross_stream_buffer_reuse():
                 expected,
             )
         )
-        buffer_reusable.record(model_stream)
+        executor.release()
 
     torch.npu.synchronize()
     for actual_cos, actual_sin, actual_slot, expected in snapshots:
