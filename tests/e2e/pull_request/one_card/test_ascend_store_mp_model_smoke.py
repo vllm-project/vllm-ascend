@@ -12,12 +12,12 @@ import json
 import logging
 import multiprocessing
 import os
-import re
 import threading
 import time
 from multiprocessing.connection import Connection
 
 import pytest
+import regex as re
 
 from tests.e2e.pull_request.one_card.test_ascend_store_mp_ipc import (
     _SERVER_URL,
