@@ -148,7 +148,13 @@ class AscendPCPManager(PCPManager):
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
         # Keep the request-shaped metadata at that same fixed graph extent.
         graph_num_reqs = graph_num_tokens if is_decode_only else input_batch.num_reqs_after_padding
-        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding:
+        # On newer vLLM, the base PCP manager may already honor
+        # ``padded_num_tokens`` while leaving request-shaped metadata at the
+        # actual request count. Pad when either extent is still short so the
+        # runtime metadata matches the fixed graph capture layout.
+        needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
+        needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
+        if is_decode_only and (needs_token_padding or needs_request_padding):
             assert self._input_buffers is not None
             input_buffers = self._input_buffers
             actual_tokens = local_batch.num_tokens
