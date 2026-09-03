@@ -214,10 +214,7 @@ if vllm_version_is("0.27.1"):
                 # source before it is loaded. Guard exactly like upstream
                 # batch_memcpy (barrier between the load and the store, the
                 # condition is uniform within the program).
-                row_left_overlap = (
-                    row_dst < row_src
-                    and row_dst + copy_size > row_src
-                )
+                row_left_overlap = row_dst < row_src and row_dst + copy_size > row_src
                 for i in range(0, copy_size, COPY_BLOCK_SIZE):
                     mask = (i + offsets) < copy_size
                     data = tl.load(row_src + i + offsets, mask=mask)
