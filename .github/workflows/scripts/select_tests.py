@@ -106,6 +106,18 @@ CPU_UT_BATCH_PATH = "tests/ut"
 # Full-suite mode roots scanned by --all-tests.
 _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
 
+# Generic ``linux-aarch64-a3-N-`` labels are mixed pools of 560T and 752T
+# machines (i.e. random machine class). When accuracy tests are selected (or
+# the full suite runs), reroute those partitions to the dedicated 560T labels.
+# Accuracy tests are exactly the files listed in ``accuracy_tests`` in
+# test_config.yaml; they must run on 560T machines (800i labels), so 752T
+# machines are not started for runs that include them.
+_A3_560T_LABEL_MAP = {
+    "linux-aarch64-a3-2-": "linux-aarch64-a3-800i-2",
+    "linux-aarch64-a3-4-": "linux-aarch64-a3-800i-4",
+    "linux-aarch64-a3-8-": "linux-aarch64-a3-800i-8",
+}
+
 # Populated by _load_runner_mapping(). Ordered list of
 # (regex, {variant: logical partition key}).
 _RUNNER_MAPPING: list[tuple[re.Pattern, dict[str, PartitionKey]]] = []
@@ -390,7 +402,7 @@ def _dedup_groups(groups: dict[PartitionKey, list[str]]) -> None:
 
 
 def _load_estimated_times(meta: dict) -> dict[str, float]:
-    """Load per-test estimated times from the config meta dict.
+    """Load per-file estimated times from the config meta dict.
 
     Tests not listed default to 600s when used by _partition_tests.
     """
@@ -420,30 +432,22 @@ def _load_partition_config(meta: dict) -> dict[PartitionKey, PartitionInfo]:
     return result
 
 
-def _load_pinned_routes(meta: dict) -> dict[str, PartitionKey]:
-    """Load file-level routes applied after normal test selection.
+def _load_accuracy_tests(meta: dict) -> set[str]:
+    """Load the accuracy test files from the config meta dict.
 
-    Each ``pinned_routes`` key is a destination logical partition. Tests stay
-    classified by their existing technical directory and are moved only when
-    they were actually selected by the normal module/explicit-test flow.
+    These are the tests whose selection forces A3 partitions onto the
+    dedicated 560T runner labels.
     """
-    result: dict[str, PartitionKey] = {}
-    for target_partition, value in (meta.get("pinned_routes", {}) or {}).items():
-        if not isinstance(value, dict):
-            raise ValueError(f"Pinned route {target_partition!r} must be a mapping")
-        tests = value.get("tests")
-        if not isinstance(tests, list) or not tests:
-            raise ValueError(f"Pinned route {target_partition!r} must define a non-empty tests list")
-        for test in tests:
-            if not isinstance(test, str) or not test:
-                raise ValueError(f"Pinned route {target_partition!r} contains an invalid test path")
-            normalized = _as_posix_path(test.rstrip("/"))
-            if "::" in normalized:
-                raise ValueError(f"Pinned route {target_partition!r} must use file-level paths, not nodeids: {test}")
-            if normalized in result:
-                raise ValueError(f"Test path is configured in more than one pinned route: {normalized}")
-            result[normalized] = str(target_partition)
-    return result
+    raw = meta.get("accuracy_tests", []) or []
+    if not isinstance(raw, list) or not all(isinstance(t, str) and t for t in raw):
+        raise ValueError("accuracy_tests must be a list of test file paths")
+    tests = set()
+    for t in raw:
+        normalized = _as_posix_path(t.rstrip("/"))
+        if "::" in normalized:
+            raise ValueError(f"accuracy_tests must use file-level paths, not nodeids: {t}")
+        tests.add(normalized)
+    return tests
 
 
 def _load_curated_tests(meta: dict) -> dict[str, list[str]]:
@@ -471,7 +475,6 @@ def _load_skip_tests(meta: dict) -> set[str]:
 def _validate_runner_config(
     runners: dict[str, RunnerInfo],
     partition_config: dict[PartitionKey, PartitionInfo],
-    pinned_routes: dict[str, PartitionKey],
 ) -> None:
     unknown_labels = sorted(
         {info.runner_label for info in partition_config.values() if info.runner_label not in runners}
@@ -480,7 +483,6 @@ def _validate_runner_config(
         raise ValueError("Partition configuration references unknown runner label(s): " + ", ".join(unknown_labels))
 
     referenced_partitions = {partition_key for _, variants in _RUNNER_MAPPING for partition_key in variants.values()}
-    referenced_partitions.update(pinned_routes.values())
     unknown_partitions = sorted(referenced_partitions - partition_config.keys())
     if unknown_partitions:
         raise ValueError(
@@ -488,25 +490,33 @@ def _validate_runner_config(
         )
 
 
-def _apply_pinned_routes(
+def _has_accuracy_tests(
     all_groups: dict[PartitionKey, list[str]],
-    pinned_routes: dict[str, PartitionKey],
-) -> dict[PartitionKey, list[str]]:
-    """Move selected files (including selected nodeids) to pinned partitions."""
-    if not pinned_routes:
-        return all_groups
+    accuracy_tests: set[str],
+) -> bool:
+    """Check whether any selected test is an accuracy test."""
+    return any(
+        _as_posix_path(_pytest_node_file_path(target)) in accuracy_tests
+        for tests in all_groups.values()
+        for target in tests
+    )
 
-    result: dict[PartitionKey, list[str]] = defaultdict(list)
-    for partition_key, tests in all_groups.items():
-        for target in tests:
-            file_path = _as_posix_path(_pytest_node_file_path(target))
-            target_partition = pinned_routes.get(file_path)
-            if target_partition is None:
-                result[partition_key].append(target)
-                continue
-            result[target_partition].append(target)
 
-    return result
+def _prefer_560t_partitions(
+    partition_config: dict[PartitionKey, PartitionInfo],
+) -> dict[PartitionKey, PartitionInfo]:
+    """Reroute generic A3 partitions to their dedicated 560T labels.
+
+    The generic ``linux-aarch64-a3-N-`` labels are mixed 560T/752T pools;
+    accuracy runs must land on 560T only, so swap the labels. Counts are kept
+    because the 800i partitions declare the same group counts.
+    """
+    updated = dict(partition_config)
+    for key, info in updated.items():
+        target_label = _A3_560T_LABEL_MAP.get(info.runner_label)
+        if target_label is not None:
+            updated[key] = PartitionInfo(runner_label=target_label, count=info.count)
+    return updated
 
 
 def _apply_runner_label_override(
@@ -551,21 +561,13 @@ def _lookup_estimated_time(
 ) -> float:
     """Look up the estimated time for *test_name*, falling back to defaults.
 
-    1. Try exact match (handles both file-level and ``::nodeid`` keys).
-    2. Strip any ``::nodeid`` suffix and try again.
-    3. Otherwise use *default*.
-
-    File/nodeid containment is resolved by :func:`_dedup_groups` before this
-    lookup is used. A nodeid selected on its own retains its exact estimate.
+    Lookup is file-level only: strip any ``::nodeid`` suffix and try the
+    file path. Otherwise use *default*.
     """
-    val = estimated_times.get(test_name)
+    base = _pytest_node_file_path(test_name)
+    val = estimated_times.get(base)
     if val is not None:
         return val
-    base = _pytest_node_file_path(test_name)
-    if base != test_name:
-        val = estimated_times.get(base)
-        if val is not None:
-            return val
     return default
 
 
@@ -772,10 +774,10 @@ def main():
     partition_config = _load_partition_config(meta)
     estimated_times = _load_estimated_times(meta)
     _load_runner_mapping(meta)
-    pinned_routes = _load_pinned_routes(meta)
+    accuracy_tests = _load_accuracy_tests(meta)
     curated_tests = _load_curated_tests(meta)
     skip_tests = _load_skip_tests(meta)
-    _validate_runner_config(runners, partition_config, pinned_routes)
+    _validate_runner_config(runners, partition_config)
 
     all_groups: dict[PartitionKey, list[str]] = defaultdict(list)
     matched_modules: list[str] = []
@@ -848,13 +850,18 @@ def main():
             all_groups[key] = filtered
         _dedup_groups(all_groups)
 
-    # Normalize every input mode before pinning. A bare file contains all of
-    # its nodeids, even when the targets came from different selection modes.
+    # Normalize every input mode. A bare file contains all of its nodeids,
+    # even when the targets came from different selection modes.
     _dedup_groups(all_groups)
-    all_groups = _apply_pinned_routes(all_groups, pinned_routes)
+
+    # Full-suite runs (ready-all) and any run that includes accuracy tests
+    # (files listed in accuracy_tests) are pinned to 560T machines: replace
+    # the mixed-pool A3 labels before resolving partitions to runners.
+    if args.all_tests or _has_accuracy_tests(all_groups, accuracy_tests):
+        partition_config = _prefer_560t_partitions(partition_config)
 
     # A command-line override is an explicit, transient choice and therefore
-    # has higher priority than static pinned routes.
+    # has higher priority than static routing.
     if args.runner_label_override:
         try:
             all_groups, partition_config = _apply_runner_label_override(
