@@ -1008,6 +1008,14 @@ def graph_manager_wrapper(model_runner):
             lora_capture_cases: list[int] | None = None,
             varlen_decode: bool = False,
         ):
+            # Ascend FIA cannot safely capture the upstream V2 varlen target
+            # graphs used by adaptive verification.  Keep the static FULL
+            # graph and let the existing PIECEWISE graph handle the compacted
+            # (possibly non-uniform) verification batch.  This only affects
+            # the target graph manager; the DSpark/DFlash manager still uses
+            # its own physical-K graph policy.
+            if varlen_decode:
+                varlen_decode = False
             return ModelAclGraphManager(
                 vllm_config,
                 device,
