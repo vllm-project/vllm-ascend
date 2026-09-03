@@ -78,13 +78,12 @@ jobs:
       - name: Install python dependencies
         run: |
           set -euo pipefail
-          export PIP_BREAK_SYSTEM_PACKAGES=1
           if command -v apt-get &> /dev/null; then
             sudo apt-get update
             sudo apt-get install -y python3-pip
           fi
-          python3 -m pip install --upgrade pip
-          python3 -m pip install pytest pytest-cov
+          python3 -m pip install --upgrade pip --break-system-packages
+          python3 -m pip install pytest pytest-cov --break-system-packages
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
