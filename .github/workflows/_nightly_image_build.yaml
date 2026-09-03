@@ -33,7 +33,12 @@ on:
         required: false
         type: string
         default: 'release'
-        description: "Build type: 'daily' or 'release'. Daily uses swr.cn-north-12 base image."
+        description: "Build type: 'daily' or 'release'. Daily uses swr_registry base image."
+      swr_registry:
+        required: false
+        type: string
+        default: 'swr.cn-north-12.myhuaweicloud.com'
+        description: 'SWR registry domain'
       cann_version:
         required: false
         type: string
@@ -87,13 +92,13 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.vllm_ascend_branch }}
 
-      - name: Login to SWR north-12
+      - name: Login to SWR
         id: login-swr
         env:
           SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
           SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
         run: |
-          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin swr.cn-north-12.myhuaweicloud.com
+          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin ${{ inputs.swr_registry }}
 
       - name: Build nightly-${{ inputs.target }} image
         id: build
@@ -105,13 +110,13 @@ jobs:
           BRANCH_TAG="${BRANCH_TAG//\//-}"
 
           if [ "${{ inputs.build_type }}" = "daily" ]; then
-            SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend"
-            SWR_TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp"
+            SWR_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
+            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
             TAG_PREFIX="daily"
-            BASE_IMAGE="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend"
+            BASE_IMAGE="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
           else
-            SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
-            SWR_TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_ci/vllm-atlas-temp"
+            SWR_REGISTRY="${{ inputs.swr_registry }}/ascend/vllm-ascend"
+            SWR_TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_ci/vllm-atlas-temp"
             TAG_PREFIX="nightly-ci"
             BASE_IMAGE=""
           fi
@@ -131,7 +136,7 @@ jobs:
               for i in $(seq 0 30); do
                 CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
                 CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
-                if docker manifest inspect "swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
+                if docker manifest inspect "${{ inputs.swr_registry }}/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
                   DATE="$CANDIDATE_DATE"
                   echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
                   break
@@ -218,7 +223,7 @@ jobs:
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
-          RELEASE_SWR_REGISTRY="swr.cn-north-12.myhuaweicloud.com/ascend/vllm-ascend"
+          RELEASE_SWR_REGISTRY="${{ inputs.swr_registry }}/ascend/vllm-ascend"
           RELEASE_TAG="nightly-ci-${BRANCH_TAG}-${{ inputs.target }}"
           # Release copy uses a stable tag without arch info (single-arch arm64 image)
           RELEASE_IMAGE="${RELEASE_SWR_REGISTRY}:${RELEASE_TAG}"
@@ -234,19 +239,19 @@ jobs:
     # only when BOTH arch images exist. Owner gate keeps it disabled in upstream forks.
     if: ${{ always() && github.repository_owner == 'vllm-project' && inputs.build_type == 'daily' }}
     steps:
-      - name: Login to SWR north-12
+      - name: Login to SWR
         env:
           SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
           SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
         run: |
-          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin swr.cn-north-12.myhuaweicloud.com
+          echo "$SWR_PASSWORD" | docker login -u "$SWR_USERNAME" --password-stdin ${{ inputs.swr_registry }}
 
       - name: Create multi-arch manifest
         run: |
           # Registry and tag are recomputed here (not from matrix outputs) so merge still
           # works even when the last-completed matrix instance failed to push.
-          MAIN_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-ascend"
-          TEMP_REGISTRY="swr.cn-north-12.myhuaweicloud.com/atlas_inference/vllm-atlas-temp"
+          MAIN_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-ascend"
+          TEMP_REGISTRY="${{ inputs.swr_registry }}/atlas_inference/vllm-atlas-temp"
 
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
