@@ -84,9 +84,9 @@ jobs:
           fi
           python3 -m venv $GITHUB_WORKSPACE/venv
           echo "$GITHUB_WORKSPACE/venv/bin" >> $GITHUB_PATH
-          python -m pip install --upgrade pip
+          python3 -m pip install --upgrade pip
           # CPU UT最小依赖，不装triton‑ascend等昇腾私有包
-          python -m pip install torch pytest pytest-cov
+          python3 -m pip install torch pytest pytest-cov
 
       - name: Set PYTHONPATH for source import
         run: |
