@@ -82,6 +82,33 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         self.attn_backends = attn_backends
 
+    def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        """Keep DSpark confidence writes compatible with active physical K.
+
+        Upstream DSpark assigns the confidence result to the whole fixed-width
+        request buffer.  During V2 graph capture the physical-K scope exposes a
+        smaller ``num_speculative_steps``, so the result has shape ``[B, K]``
+        while the buffer is still ``[B, max_K]``.  A narrow view preserves the
+        fixed backing allocation and makes both the dense and top-k sampling
+        paths shape-safe; the full view is restored before the caller records
+        confidences for the next scheduler step.
+        """
+        confidence_probs = getattr(self, "draft_token_confidence_probs", None)
+        active_k = int(self.num_speculative_steps)
+        if confidence_probs is None or confidence_probs.ndim < 2:
+            super()._sample_sequential(num_reqs, head_hidden)
+            return
+
+        if confidence_probs.shape[1] <= active_k:
+            super()._sample_sequential(num_reqs, head_hidden)
+            return
+
+        self.draft_token_confidence_probs = confidence_probs[:, :active_k]
+        try:
+            super()._sample_sequential(num_reqs, head_hidden)
+        finally:
+            self.draft_token_confidence_probs = confidence_probs
+
     def build_draft_attn_metadatas(
         self,
         num_reqs_padded,
