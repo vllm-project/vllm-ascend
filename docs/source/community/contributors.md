@@ -5,30 +5,59 @@
 | Name | GitHub ID | Date |
 |:-----------:|:-----:|:-----:|
 | Xiyuan Wang | [@wangxiyuan](https://github.com/wangxiyuan) | 2025/01 |
-| Yikun Jiang| [@Yikun](https://github.com/Yikun) | 2025/02 |
-| Yi Gan| [@ganyi1996ppo](https://github.com/ganyi1996ppo) | 2025/02 |
-| Shoujian Zheng| [@jianzs](https://github.com/jianzs) | 2025/06 |
+| Yikun Jiang | [@Yikun](https://github.com/Yikun) | 2025/02 |
+| Shoujian Zheng | [@jianzs](https://github.com/jianzs) | 2025/06 |
 | Wengang Chen | [@ApsarasX](https://github.com/ApsarasX) | 2025/08 |
-| Mengqing Cao | [@MengqingCao](https://github.com/MengqingCao) | 2025/08 |
-| Peng Yu| [@paulyu12](https://github.com/paulyu12) | 2025/10 |
-| Yizhou Liu| [@yiz-liu](https://github.com/yiz-liu) | 2025/10 |
+| Peng Yu | [@paulyu12](https://github.com/paulyu12) | 2025/10 |
+| Yizhou Liu | [@yiz-liu](https://github.com/yiz-liu) | 2025/10 |
 | Jinqian Wei | [@weijinqian0](https://github.com/weijinqian0) | 2025/10 |
 | Chuanyu Qin | [@nalinaly](https://github.com/nalinaly) | 2025/10 |
-| Jie Wen| [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/12 |
-| Chao Lei| [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
-| JiaXu Liu| [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
-| HeXiang Wang| [@whx-sjtu](https://github.com/whx-sjtu) | 2026/01 |
-| LinFeng Yuan| [@linfeng-yuan](https://github.com/linfeng-yuan) | 2026/05 |
+| Jie Wen | [@zzzzwwjj](https://github.com/zzzzwwjj) | 2025/12 |
+| Chao Lei | [@LCAIZJ](https://github.com/LCAIZJ) | 2025/12 |
+| JiaXu Liu | [@realliujiaxu](https://github.com/realliujiaxu) | 2025/12 |
+| LinFeng Yuan | [@linfeng-yuan](https://github.com/linfeng-yuan) | 2026/05 |
+| Jun Han | [@ningjingbengxiaohai](https://github.com/ningjingbengxiaohai) | 2026/06 |
+| Shaoxu Cheng | [@Tflowers-0129](https://github.com/Tflowers-0129) | 2026/07 |
+| Kunpeng Wang | [@kunpengW-code](https://github.com/kunpengW-code) | 2026/07 |
+| Tian Zeng | [@ZT-AIA](https://github.com/ZT-AIA) | 2026/07 |
+| Guihua Wei | [@weiguihua2](https://github.com/weiguihua2) | 2026/07 |
+| Kai Xiong | [@HF-001](https://github.com/HF-001) | 2026/07 |
+
+## Emeritus Committers
+
+| Name | GitHub ID | Date |
+|:-----------:|:-----:|:-----:|
+| Yi Gan | [@ganyi1996ppo](https://github.com/ganyi1996ppo) | 2026/07 |
+| HeXiang Wang | [@whx-sjtu](https://github.com/whx-sjtu) | 2026/07 |
+| Mengqing Cao | [@MengqingCao](https://github.com/MengqingCao) | 2026/07 |
 
 ## Contributors
-<!-- last_commit: edcae83da32af8e1f1b7b97c7e19e8114e0535a5 -->
+<!-- last_commit: 5cb98caaadeff42b5b62b996e34bb2aaa29d20fd -->
 
 Every release of vLLM Ascend would not have been possible without the following contributors:
 
-Updated on 2026-07-17:
+Updated on 2026-08-16:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
+| 518 | [@DavidJiang9](https://github.com/DavidJiang9) | 2026/08/13 | [c10e1c0](https://github.com/vllm-project/vllm-ascend/commit/c10e1c01d51c533021ae4bc5eeebf784ae36dafc) |
+| 517 | [@hw-zhoutianyang](https://github.com/hw-zhoutianyang) | 2026/08/12 | [6c47fb9](https://github.com/vllm-project/vllm-ascend/commit/6c47fb9e3ac8af04c873fce79318bc2afabf9188) |
+| 516 | [@lrf-vm](https://github.com/lrf-vm) | 2026/08/08 | [462154e](https://github.com/vllm-project/vllm-ascend/commit/462154e6cd99084d81b94fcfdf26b4aed2cac914) |
+| 515 | [@voidvelocity](https://github.com/voidvelocity) | 2026/08/07 | [60eacbe](https://github.com/vllm-project/vllm-ascend/commit/60eacbe8bd20ad9dcd7615896184110e556c0584) |
+| 514 | [@xqchen7](https://github.com/xqchen7) | 2026/08/07 | [7c0f6e6](https://github.com/vllm-project/vllm-ascend/commit/7c0f6e6d8cc3134019ea6ebd71a3dad6733492e5) |
+| 513 | [@Karryking3](https://github.com/Karryking3) | 2026/08/06 | [bb630a6](https://github.com/vllm-project/vllm-ascend/commit/bb630a62a210059ba04041bdb952e3fca22f94df) |
+| 512 | [@ella1107](https://github.com/ella1107) | 2026/07/30 | [71d136c](https://github.com/vllm-project/vllm-ascend/commit/71d136ca26c4692db6b1e5bd07f507b73f09887b) |
+| 511 | [@axx-ty911](https://github.com/axx-ty911) | 2026/07/30 | [7890de8](https://github.com/vllm-project/vllm-ascend/commit/7890de8eb72ff669c4962ff379090a14dc19b21a) |
+| 510 | [@ffggs](https://github.com/ffggs) | 2026/07/29 | [5cf0420](https://github.com/vllm-project/vllm-ascend/commit/5cf0420ab3a4ca5f8ba2a707e4e5c31eef1cc968) |
+| 509 | [@jiaqi-lee](https://github.com/jiaqi-lee) | 2026/07/25 | [5225ae2](https://github.com/vllm-project/vllm-ascend/commit/5225ae20fb09aa41cc3278b294aad23c9dc33f22) |
+| 508 | [@Oranbean258](https://github.com/Oranbean258) | 2026/07/23 | [e6f3f49](https://github.com/vllm-project/vllm-ascend/commit/e6f3f4954602a3d2fc41857e0c61806b9c8840ff) |
+| 507 | [@lyur01](https://github.com/lyur01) | 2026/07/23 | [f9602a1](https://github.com/vllm-project/vllm-ascend/commit/f9602a13c52359fe1b56dc8318436d31f03012ba) |
+| 506 | [@zhangjiale-zjl](https://github.com/zhangjiale-zjl) | 2026/07/23 | [9d03a3a](https://github.com/vllm-project/vllm-ascend/commit/9d03a3a682d196cb534885a7cbdf86ef0b0694aa) |
+| 505 | [@aisong1988](https://github.com/aisong1988) | 2026/07/22 | [c926c21](https://github.com/vllm-project/vllm-ascend/commit/c926c213cbf2ca0c1d13d4bdaea97d39a5748b15) |
+| 504 | [@q664171689](https://github.com/q664171689) | 2026/07/18 | [ebad45e](https://github.com/vllm-project/vllm-ascend/commit/ebad45e3666f8453e045ade27d02b47a7fe1669c) |
+| 503 | [@qijiajin](https://github.com/qijiajin) | 2026/07/18 | [d42948a](https://github.com/vllm-project/vllm-ascend/commit/d42948ac2c1cba80fe30acd0bd61e4991beb58d2) |
+| 502 | [@Wyz-134](https://github.com/Wyz-134) | 2026/07/17 | [9b8423e](https://github.com/vllm-project/vllm-ascend/commit/9b8423e15a836f1b011b61aece5305459f939c32) |
+| 501 | [@zh98530](https://github.com/zh98530) | 2026/07/17 | [a272c88](https://github.com/vllm-project/vllm-ascend/commit/a272c88a5c6560c2ef655b05970a05b895d342e4) |
 | 500 | [@singzhou](https://github.com/singzhou) | 2026/07/15 | [f924703](https://github.com/vllm-project/vllm-ascend/commit/f924703d7d97a90c5d72d58bf32865501b7f87c0) |
 | 499 | [@ZhangwenTaoHW](https://github.com/ZhangwenTaoHW) | 2026/07/13 | [b89a491](https://github.com/vllm-project/vllm-ascend/commit/b89a491644cd02a16a5b17c1a124cec254866559) |
 | 498 | [@zhaochuang001](https://github.com/zhaochuang001) | 2026/07/11 | [7be596c](https://github.com/vllm-project/vllm-ascend/commit/7be596cd3fa93c45a4ef4ff5384d0c852659d83c) |

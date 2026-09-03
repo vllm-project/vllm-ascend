@@ -20,7 +20,7 @@
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -45,14 +45,26 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_sfa_qsfa_packed_head_dim
+from vllm_ascend.attention.utils import (
+    AscendCommonAttentionMetadata,
+    get_sfa_qsfa_packed_head_dim,
+    is_glm5_next_kpool_cache,
+)
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.quantization.utils import enable_fa_quant
-from vllm_ascend.utils import AscendDeviceType, calc_split_factor, enable_sfa, get_ascend_device_type
+from vllm_ascend.utils import (
+    calc_split_factor,
+    enable_sfa,
+    enable_sfa_dcp_replicated_indexer,
+)
+
+if TYPE_CHECKING:
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -64,8 +76,13 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     mamba_specs: dict[str, MambaSpec] = {}
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    sfa_dcp_replicated_indexer_size = (
+        vllm_config.parallel_config.decode_context_parallel_size
+        if enable_sfa_dcp_replicated_indexer(vllm_config)
+        else 1
+    )
 
-    if get_ascend_device_type() == AscendDeviceType.A5:
+    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
         c8_k_cache_dtype = torch.float8_e4m3fn
         c8_k_scale_cache_dtype = torch.float32
     else:
@@ -112,6 +129,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
+            # GLM-5.3-Flash kpool indexer/tail caches keep their own spec.
+            if is_glm5_next_kpool_cache(attn_module):
+                kv_cache_spec[layer_name] = spec
+                continue
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
@@ -127,6 +148,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 scale_dim=1 if cache_sparse_li_c8 else 0,
                 scale_dtype=c8_k_scale_cache_dtype if cache_sparse_li_c8 else torch.int8,
                 cache_sparse_li_c8=cache_sparse_li_c8,
+                sfa_dcp_replicated_indexer_size=sfa_dcp_replicated_indexer_size,
             )
             continue
 
@@ -161,6 +183,7 @@ def build_attn_metadata(
     *,
     attn_groups: list[list[AttentionGroup]],
     num_reqs: int,
+    num_actual_reqs: int | None = None,
     num_tokens: int,
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
@@ -180,6 +203,8 @@ def build_attn_metadata(
     graph_pad_size: int = -1,
     num_actual_tokens: int | None = None,
     num_input_tokens: int | None = None,
+    is_prefilling: torch.Tensor | None = None,
+    pcp_context: "AscendPCPAttentionContext | None" = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
@@ -203,14 +228,11 @@ def build_attn_metadata(
         num_actual_tokens = num_tokens
     if num_input_tokens is None:
         num_input_tokens = num_tokens
+    if num_actual_reqs is None:
+        num_actual_reqs = num_reqs
 
     attn_metadata: dict[str, Any] = {}
-    # DSA metadata is shared by the ratio-specific cache groups for one model
-    # execution. Keep the cache at the batch-builder scope,
-    # so each DSA builder can reuse the split results and SAS metadata produced
-    # by earlier groups in this invocation.
-    prefill_ratio_to_sas_metadata: dict[Any, Any] = {}
-    decode_ratio_to_sas_metadata: dict[Any, Any] = {}
+    # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups
     for i, kv_cache_spec in enumerate(kv_cache_groups):
@@ -223,6 +245,10 @@ def build_attn_metadata(
             model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
             if model_specific_attn_metadata is not None
             else {}
+        )
+        common_is_prefilling = common_attn_metadata_extra_kwargs.pop(
+            "is_prefilling",
+            is_prefilling,
         )
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=query_start_loc_gpu,
@@ -239,43 +265,51 @@ def build_attn_metadata(
             attn_state=attn_state,
             graph_pad_size=graph_pad_size,
             num_input_tokens=num_input_tokens,
+            is_prefilling=common_is_prefilling,
             max_seq_len=max_seq_len,
             causal=group_causal,
+            dcp_local_seq_lens=dcp_local_seq_lens,
             **common_attn_metadata_extra_kwargs,
         )
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            if for_cudagraph_capture:
-                metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
-            else:
-                attn_metadata_extra_kwargs = (
-                    model_specific_attn_metadata.get_extra_attn_kwargs(
-                        attn_metadata_builder,
-                        num_reqs,
-                    )
-                    if model_specific_attn_metadata is not None
-                    else {}
+            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            attn_metadata_extra_kwargs = (
+                model_specific_attn_metadata.get_extra_attn_kwargs(
+                    attn_metadata_builder,
+                    num_reqs,
                 )
-                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
+                if not for_cudagraph_capture and model_specific_attn_metadata is not None
+                else {}
+            )
+            if is_dsa_builder:
+                # DSA cache groups share request-level metadata during replay.
+                attn_metadata_extra_kwargs.update(
+                    num_actual_reqs=num_actual_reqs,
+                    common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                )
+                if pcp_context is not None:
                     attn_metadata_extra_kwargs.update(
-                        num_reqs_actual=num_reqs,
-                        prefill_ratio_to_sas_metadata=prefill_ratio_to_sas_metadata,
-                        decode_ratio_to_sas_metadata=decode_ratio_to_sas_metadata,
-                        common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
-                        block_size=attn_group.kv_cache_spec.block_size,
+                        pcp_context=pcp_context,
+                        pcp_cache_group_idx=i,
                     )
+
+            if for_cudagraph_capture:
+                metadata = attn_metadata_builder.build_for_cudagraph_capture(
+                    common_attn_metadata,
+                    **attn_metadata_extra_kwargs,
+                )
+            else:
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
-                if isinstance(attn_metadata_builder, AscendDSAMetadataBuilder):
-                    # Preserve sharing even if a builder replaces one of the
-                    # dictionaries while constructing its metadata.
-                    prefill_ratio_to_sas_metadata = attn_metadata_builder.prefill_ratio_to_sas_metadata  # type: ignore[assignment]
-                    decode_ratio_to_sas_metadata = attn_metadata_builder.decode_ratio_to_sas_metadata  # type: ignore[assignment]
-                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+            if is_dsa_builder:
+                # Preserve sharing even if a builder replaces one of the
+                # dictionaries while constructing its metadata.
+                common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
@@ -400,7 +434,7 @@ def _view_dsv4_cache(
 
     k_shape = attn_backend.get_kv_cache_shape(
         num_blocks,
-        kv_cache_spec.block_size,
+        kv_cache_spec.storage_block_size,
         kv_cache_spec.num_kv_heads,
         kv_cache_spec.head_size,
     )
@@ -413,16 +447,16 @@ def _view_dsv4_cache(
         scale_dtype = kv_cache_spec.scale_dtype
         scale_shape = attn_backend.get_kv_cache_shape(
             num_blocks,
-            kv_cache_spec.block_size,
+            kv_cache_spec.storage_block_size,
             kv_cache_spec.num_kv_heads,
             scale_dim,
         )
         cache_shapes.append(scale_shape)
         cache_dtypes.append(scale_dtype)
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             full_shape = attn_backend.get_kv_cache_shape(
                 num_blocks,
-                kv_cache_spec.block_size,
+                kv_cache_spec.storage_block_size,
                 kv_cache_spec.num_kv_heads,
                 kv_cache_spec.head_size + scale_dim * get_dtype_size(scale_dtype),
             )
@@ -809,7 +843,7 @@ def _reshape_kv_cache_v2(
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
-            num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+            num_blocks_per_kv_block = kv_cache_spec.storage_block_size // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
                 kernel_num_blocks,
@@ -844,7 +878,11 @@ def _reshape_kv_cache_v2(
 
             if sparse_sfa_c8:
                 raw_k_tensor = raw_cache
-                k_dtype = torch.float8_e4m3fn if get_ascend_device_type() == AscendDeviceType.A5 else torch.int8
+                k_dtype = (
+                    torch.float8_e4m3fn
+                    if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION)
+                    else torch.int8
+                )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
             elif isinstance(raw_cache, tuple):
@@ -881,3 +919,26 @@ def build_attn_metadata_wrapper():
         yield
     finally:
         _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = original_func
+
+
+@contextmanager
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+
+    The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
+    DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
+    speculator path does not forward them. Must run inside
+    ``build_attn_metadata_wrapper()``.
+    """
+    raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
+
+    def build_attn_metadata(*args, **kwargs):
+        kwargs["positions"] = positions[:pad]
+        kwargs["is_prefilling"] = is_prefilling
+        return raw(*args, **kwargs)
+
+    try:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        _BUILD_ATTN_METADATA_MODULE.build_attn_metadata = raw  # restore

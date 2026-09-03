@@ -233,9 +233,12 @@ def _probabilistic_rejection_kernel(
     seed_ptr,
     # [num_logits]
     pos_ptr,
+    # [num_speculative_steps]
+    synthetic_conditional_rates_ptr,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
@@ -268,8 +271,26 @@ def _probabilistic_rejection_kernel(
                 target_argmax = tl.load(
                     target_local_argmax_ptr + logit_idx * target_local_argmax_stride + max_target_block_idx
                 )
-                accepted &= target_argmax == draft_sampled
-                tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
+                if SYNTHETIC_MODE:
+                    # Synthetic acceptance: accept IFF u ~ U(0, 1) < rate.
+                    # Upstream uses tl_rand32(seed, pos, includes_zero=False);
+                    # NPU Triton lacks scalar tl.rand, so reuse the 1-element
+                    # block + reduction pattern from the non-greedy path below.
+                    u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                    u_seed = tl.randint(seed, u_pos)
+                    u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
+                    u = tl.maximum(u, 4.6566127342e-10)
+                    rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    accepted &= u < rate
+                    # -1 placeholder draft tokens can never be accepted.
+                    accepted &= draft_sampled >= 0
+                    # Keep the accepted draft token; store the target argmax
+                    # upon rejection so resampling can be skipped.
+                    token = tl.where(accepted, draft_sampled.to(tl.int64), target_argmax)
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, token)
+                else:
+                    accepted &= target_argmax == draft_sampled
+                    tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
             else:
                 target_logit = tl.load(target_logits_ptr + logit_idx * target_logits_stride + draft_sampled).to(
                     tl.float32
@@ -284,8 +305,19 @@ def _probabilistic_rejection_kernel(
                     PADDED_VOCAB_NUM_BLOCKS,
                 )
                 target_log_prob = target_logit - target_lse
-                # NPU does not support tl_rand64; always accept the draft token.
-                u = tl.full([], 0.0, dtype=tl.float32)
+                # Draw the acceptance threshold u ~ U(0, 1). Upstream uses
+                # tl_rand64/tl_rand32; NPU Triton lacks float64 tl_rand64 and
+                # scalar tl.rand, so generate u from a 1-element block (same
+                # pattern as _npu_gumbel_block_argmax) and clamp away from 0
+                # so that tl.log(u) stays finite.
+                # NPU: cast pos to int32 so philox uses the 32-bit path.
+                # uint64 umulhi is not supported by the Ascend vector core
+                # (matches _npu_gumbel_block_argmax). Position values fit in
+                # int32 in practice.
+                u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
+                u_seed = tl.randint(seed, u_pos)
+                u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
+                u = tl.maximum(u, 4.6566127342e-10)
                 if HAS_DRAFT_LOGITS:
                     draft_logit = tl.load(
                         draft_logits_ptr
@@ -306,9 +338,16 @@ def _probabilistic_rejection_kernel(
                 else:
                     # One-hot draft: q(draft_token) = 1, log_q = 0.
                     draft_log_prob = 0
-                # Probability ratio test: p(x) > u * q(x)
-                # Equivalent log form: log_p(x) > log(u) + log_q(x)
-                accepted &= target_log_prob > tl.log(u) + draft_log_prob
+                if SYNTHETIC_MODE:
+                    # Synthetic acceptance: accept IFF u ~ U(0, 1) < rate.
+                    # The logprob/LSE values above are still needed to
+                    # resample the rejected token.
+                    rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    accepted &= u < rate
+                else:
+                    # Probability ratio test: p(x) > u * q(x)
+                    # Equivalent log form: log_p(x) > log(u) + log_q(x)
+                    accepted &= target_log_prob > tl.log(u) + draft_log_prob
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
@@ -349,13 +388,6 @@ def rejection_sample(
     if use_fp64:
         raise NotImplementedError("FP64 rejection sampling is not supported on NPU.")
 
-    if synthetic_conditional_rates is not None:
-        # Synthetic rejection sampling needs tl_rand64, which NPU Triton does
-        # not support. The greedy fallback below would silently use u=0.0 and
-        # produce wrong acceptance — refuse loudly instead.
-        raise NotImplementedError(
-            "Synthetic rejection sampling is not supported on NPU yet; use rejection_sample_method='standard'."
-        )
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
     has_draft_logits = draft_logits is not None
@@ -400,6 +432,9 @@ def rejection_sample(
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+        # bug for max-with-index reductions is fixed.
+        has_auto_blockify_blacklist_op=True,
     )
 
     # Sample up until the first rejected/bonus token, and store
@@ -435,9 +470,11 @@ def rejection_sample(
         temperature,
         seed,
         pos,
+        synthetic_conditional_rates,
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         num_warps=1,
     )
 
@@ -470,6 +507,9 @@ def rejection_sample(
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+        # bug for max-with-index reductions is fixed.
+        has_auto_blockify_blacklist_op=True,
     )
 
     # Insert the resampled tokens into the output sampled.

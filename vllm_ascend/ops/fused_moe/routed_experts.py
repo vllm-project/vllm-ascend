@@ -30,12 +30,12 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import Un
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
-from vllm_ascend.ops.fused_moe.eplb import record_local_expert_load
+from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
@@ -90,9 +90,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if enable_fused_mc2 == 1 and self.dynamic_eplb:
+            use_megamoe = use_cann_megamoe(get_current_vllm_config())
+            if not use_megamoe:
+                layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+                layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            if use_megamoe or self.dynamic_eplb:
                 layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
                 layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
                 del layer.w13_weight
@@ -120,17 +122,25 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+            if _EXTRA_CTX.use_mega_moe:
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = None
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
+            else:
+                if self.dynamic_eplb and not has_split_weight_lists:
+                    logger.warning_once(
+                        "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
+                        "tensor lists. This may cause accuracy issues or communication hangs."
+                    )
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
         else:
             w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
             w1_scale = None
@@ -228,7 +238,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.n_shared_experts = n_shared_experts
         self.mix_placement = getattr(ascend_config, "mix_placement", False)
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
         self._use_v2_model_runner = bool(vllm_config.use_v2_model_runner)
         self.dynamic_eplb = False
         self.multi_stage = False
@@ -243,15 +252,6 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         if not self._use_v2_model_runner:
             self.init_eplb(n_shared_experts)
         self.return_with_event = False
-
-        if (
-            self.custom_routing_function is None
-            and self.e_score_correction_bias is not None
-            and not vllm_config.model_config.is_deepseek_mla
-        ):
-            self.e_score_correction_bias.data = self.e_score_correction_bias.data.to(
-                dtype=vllm_config.model_config.dtype
-            )
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         try:
@@ -476,12 +476,13 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             )
             topk_ids = torch.cat([topk_ids, shared_expert_ids], dim=1)
             topk_weights = torch.cat([topk_weights, shared_expert_weights], dim=1)
-
-        topk_weights = topk_weights.to(hidden_states.dtype)
-        # This is a naive implementation for experts load balance so as to
-        # avoid accumulating too much tokens on a single rank. It is only
-        # activated when doing profile runs.
-        if enable_force_load_balance:
+        # MXFP4 packs activations as uint8; skip the cast so topk_weights stays
+        # fp32, which is what npu_moe_token_unpermute expects for its `probs` arg.
+        if hidden_states.dtype not in [torch.uint8, torch.float8_e4m3fn]:
+            topk_weights = topk_weights.to(hidden_states.dtype)
+        if get_ascend_config().enable_force_eplb:
+            topk_ids = get_force_eplb_topk(topk_ids, num_logical_experts)
+        elif enable_force_load_balance:
             random_matrix = torch.rand(
                 topk_ids.size(0),
                 num_logical_experts,
@@ -515,8 +516,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         prepare_output = _EXTRA_CTX.moe_comm_method.prepare(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            replace_allreduce=_EXTRA_CTX.flash_comm_v1_enabled,
-            enable_shared_expert_dp=self.enable_shared_expert_dp,
+            # The SP model wrapper already shards and gathers the MoE sequence.
+            replace_allreduce=self.moe_config.is_sequence_parallel,
             quant_type=self.quant_type,
         )
         hidden_states = prepare_output.hidden_states
@@ -547,22 +548,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             self.ascend_pertoken_scale = None
             self.ascend_mc2_mask = None
 
-        if self._use_v2_model_runner and self.router.eplb_state is not None:
-            expert_tokens = fused_experts_results.expert_tokens
-            group_list_type = fused_experts_results.group_list_type
-            assert expert_tokens is not None and group_list_type is not None, (
-                "expert_tokens and group_list_type must be returned when Model Runner V2 EPLB is enabled."
-            )
-            eplb_state = self.router.eplb_state
-            assert eplb_state.expert_load_view is not None
-            record_local_expert_load(
-                expert_tokens=expert_tokens,
-                group_list_type=group_list_type,
-                expert_load_view=eplb_state.expert_load_view,
-                ep_rank=self.moe_config.ep_rank,
-                ep_size=self.moe_config.ep_size,
-            )
-        elif self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
+        if self.dynamic_eplb and _EXTRA_CTX.eplb_heat_collection_status:
             expert_tokens = fused_experts_results.expert_tokens
             group_list_type = fused_experts_results.group_list_type
             assert expert_tokens is not None and group_list_type is not None, (

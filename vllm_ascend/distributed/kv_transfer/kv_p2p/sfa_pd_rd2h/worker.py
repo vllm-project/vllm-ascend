@@ -839,7 +839,9 @@ class SFAPDRD2HProducerWorker:
         """
         if self.kv_send_layer_thread is None:
             return
-        storage_slots = self.layer_storage_slots.get(layer_idx, ())
+        if layer_idx not in self.layer_storage_slots:
+            raise RuntimeError(f"SFA layerwise reuse mapping is missing layer {layer_idx}")
+        storage_slots = self.layer_storage_slots[layer_idx]
         if storage_slots:
             for slot_id in storage_slots:
                 self._wait_for_pd_read_completion(

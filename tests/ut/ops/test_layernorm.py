@@ -4,7 +4,9 @@ import pytest
 import torch
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -62,6 +64,50 @@ def test_RMSNorm_forward(
 
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+def test_RMSNorm_supports_quant_config_without_quant_description(default_vllm_config):
+    default_vllm_config.quant_config = object()
+
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+
+    assert layer.bias is None
+
+
+def test_RMSNorm_creates_bias_from_quant_description(default_vllm_config):
+    quant_config = MagicMock()
+    quant_config.quant_description = {"model.layers.0.input_layernorm.bias": "W8A8"}
+    default_vllm_config.quant_config = quant_config
+
+    layer = RMSNorm(hidden_size=8, eps=1e-05)
+
+    assert layer.bias is not None
+    assert not layer.bias.requires_grad
+
+
+def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
+    layer = FusedRMSNormGated(hidden_size=8, eps=1e-6, activation="sigmoid")
+    x = torch.randn(1, 4, 2, 8)
+    gate = torch.randn(4, 2, 8)
+    residual = torch.randn_like(x)
+    expected = (torch.empty_like(x), torch.empty_like(x))
+
+    with patch("vllm_ascend.ops.layernorm.rms_norm_gated", return_value=expected) as fused_norm_gate:
+        actual = layer(x, gate, residual=residual, prenorm=True, residual_in_fp32=True)
+
+    assert isinstance(layer, AscendFusedRMSNormGated)
+    assert actual is expected
+    fused_norm_gate.assert_called_once_with(
+        x,
+        gate,
+        layer.weight,
+        layer.bias,
+        "sigmoid",
+        residual=residual,
+        eps=1e-6,
+        prenorm=True,
+        residual_in_fp32=True,
+    )
 
 
 @pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")

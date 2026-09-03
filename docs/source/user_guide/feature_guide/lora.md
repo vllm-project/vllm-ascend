@@ -27,4 +27,11 @@ vllm serve meta-llama/Llama-2-7b \
 
 - We have implemented LoRA-related AscendC operators, such as bgmv_shrink, bgmv_expand, sgmv_shrink and sgmv_expand. You can find them under the `csrc/kernels` directory of [vllm-ascend repo](https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels).
 
-- You can enable LoRA with dense or mixture-of-experts (MoE) models now ([PR #10977](https://github.com/vllm-project/vllm-ascend/pull/10977)). However, we haven't supported expert-parallel (EP) or quantization yet when you run MoE models with LoRA.
+LoRA is supported for both dense and mixture-of-experts (MoE) models. The current MoE support status is as follows:
+
+| MoE mode | Tensor parallel (AllGather) | Expert parallel (All-to-All) |
+| --- | --- | --- |
+| Non-quantized | Supported | Supported |
+| W8A8 dynamic quantization | Supported | Supported |
+
+Other MoE quantization methods, Fused MC2, and dynamic EPLB are not supported with LoRA.

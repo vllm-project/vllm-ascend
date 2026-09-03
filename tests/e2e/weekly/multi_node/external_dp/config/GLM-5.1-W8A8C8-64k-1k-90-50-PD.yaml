@@ -6,8 +6,8 @@ npu_per_node: 16
 routing:
   type: "disaggregated_prefill"
   groups:
-    prefiller: [0, 1]
-    decoder: [2, 3]
+    prefiller: [ 0, 1 ]
+    decoder: [ 2, 3 ]
 
 config:
   - node_index: 0
@@ -50,7 +50,6 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "1"
@@ -89,7 +88,7 @@ templates:
       - --max-model-len
       - "133120"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -110,7 +109,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30001",
-        "engine_id": "0",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -153,7 +151,7 @@ templates:
       - --max-model-len
       - "133120"
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -174,7 +172,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30001",
-        "engine_id": "1",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -192,7 +189,6 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -222,16 +218,16 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_fused_mc2":0,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
       - --gpu-memory-utilization
       - "0.92"
       - --async-scheduling
+      - --enable-auto-tool-choice
       - --quantization
       - "ascend"
-      - --enable-auto-tool-choice
       - --tool-call-parser
       - "glm47"
       - --reasoning-parser
@@ -240,7 +236,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "2",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -258,7 +253,6 @@ templates:
       <<: *env_common
       HCCL_BUFFSIZE: "256"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
     server_cmd_template:
       - --host
       - "0.0.0.0"
@@ -288,7 +282,7 @@ templates:
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
       - --additional-config
-      - '{"fuse_muls_add":true,"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_fused_mc2":0,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -306,7 +300,6 @@ templates:
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "30200",
-        "engine_id": "3",
         "kv_connector_extra_config": {
                     "use_ascend_direct": true,
                     "prefill": {
@@ -322,19 +315,18 @@ templates:
 
 
 benchmarks:
-      acc_aime2025:
-        case_type: accuracy
-        dataset_path: vllm-ascend/aime2025
-        request_conf: vllm_api_general_chat
-        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-        max_out_len: 32768
-        batch_size: 32
-        baseline: 90
-        threshold: 10
-        temperature: 1.0
-        top_p: 0.95
-
-      perf:
+    perf_warmup:
+        case_type: performance
+        dataset_path: vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51
+        request_conf: vllm_api_stream_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+        num_prompts: 16
+        max_out_len: 1024
+        batch_size: 4
+        request_rate: 0
+        baseline: 0
+        threshold: 0.97
+    perf:
         case_type: performance
         dataset_path: vllm-ascend/GSM8K-in65536-bs1500-prefix90-glm51
         request_conf: vllm_api_stream_chat

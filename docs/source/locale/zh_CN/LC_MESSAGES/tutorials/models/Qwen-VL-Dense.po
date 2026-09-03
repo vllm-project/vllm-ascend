@@ -234,11 +234,6 @@ msgstr ""
 msgid "#### Table 1: Scenario Overview"
 msgstr "#### 表1：场景概览"
 
-msgid ""
-"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
-"node = 1 Atlas 800 A3 server (64G × 16 NPUs)."
-msgstr "> `*总NPU数` 表示所有节点使用的NPU总数。1个节点 = 1台Atlas 800 A3服务器（64G × 16 NPU）。"
-
 msgid "#### Table 2: Detailed Node Configuration"
 msgstr "#### 表2：详细节点配置"
 
@@ -269,13 +264,6 @@ msgstr ""
 
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题解答"
-
-msgid ""
-"For common environment, installation, and general parameter issues, please "
-"refer to the [Public "
-"FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
-msgstr ""
-"关于常见环境、安装和通用参数问题，请参考[公共FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
 
 msgid ""
 "|Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|"
@@ -326,12 +314,6 @@ msgstr ""
 
 msgid "| dataset  | metric   | mode | vllm-api-general-chat |"
 msgstr "| 数据集  | 指标     | 模式 | vllm-api-general-chat |"
-
-msgid ""
-"Requires 1 card on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or "
-"Atlas 300I DUO:"
-msgstr ""
-"在 Atlas 800I A2 (64G × 8)、Atlas 800 A3 (64G × 16) 或 Atlas 300I DUO 上需要 1 张卡："
 
 msgid ""
 "- `Qwen3-VL-32B-Instruct`: [Download model "
@@ -404,7 +386,7 @@ msgid ""
 "Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"请参阅[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+"请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
 
 msgid "# Qwen-VL-Dense(Qwen3-VL-8B/32B)"
 msgstr "# Qwen-VL-Dense(Qwen3-VL-8B/32B)"
@@ -426,9 +408,6 @@ msgstr ""
 "- "
 "`Qwen3-VL-8B-Instruct`：[下载模型权重](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)"
 
-msgid "Requires 1 card on Ascend950DT series (96G × 8) node."
-msgstr "在Ascend950DT系列（96G × 8）节点上需要1张卡。"
-
 msgid ""
 "- `Qwen3-VL-8B-Instruct-w8a8`(Quantized version): [Download model "
 "weight](https://modelscope.cn/models/Eco-"
@@ -437,11 +416,6 @@ msgstr ""
 "- "
 "`Qwen3-VL-8B-Instruct-w8a8`（量化版本）：[下载模型权重](https://modelscope.cn/models/Eco-"
 "Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8)"
-
-msgid ""
-"Requires 2 cards on Atlas 800I A2 (64G × 8), Atlas 800 A3 (64G × 16), or "
-"Atlas inference products:"
-msgstr "在Atlas 800I A2（64G × 8）、Atlas 800 A3（64G × 16）或Atlas推理产品上需要2张卡："
 
 msgid ""
 "- `Qwen3-VL-32B-Instruct-w8a8`(Quantized version): [Download model "
@@ -457,3 +431,29 @@ msgstr "=== \"Ascend950DT系列\""
 
 msgid "Start the docker image on your each node."
 msgstr "在每个节点上启动docker镜像。"
+
+msgid ""
+"Requires 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or "
+"Atlas 300I DUO:"
+msgstr ""
+"在 Atlas 800I A2（64GB × 8）、Atlas 800 A3（64GB × 16）或 Atlas 300I DUO 上需要 1 张卡："
+
+msgid "Requires 1 card on Ascend950DT series (96GB × 8) node."
+msgstr "在 Ascend950DT 系列（96GB × 8）节点上需要 1 张卡。"
+
+msgid ""
+"Requires 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or "
+"Atlas inference products:"
+msgstr ""
+"在 Atlas 800I A2（64GB × 8）、Atlas 800 A3（64GB × 16）或 Atlas 推理产品上需要 2 张卡："
+
+msgid ""
+"> `*Total NPUs` indicates the total number of NPUs used across all nodes. 1 "
+"node = 1 Atlas 800 A3 server (64GB × 16 NPUs)."
+msgstr ""
+"> `*NPU总数` 表示所有节点上使用的 NPU 总数。1 个节点 = 1 台 Atlas 800 A3 服务器（64GB × 16 个 NPU）。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public FAQs](../../faqs.md)."
+msgstr "对于常见的环境、安装和一般参数问题，请参阅[公共FAQ](../../faqs.md)。"

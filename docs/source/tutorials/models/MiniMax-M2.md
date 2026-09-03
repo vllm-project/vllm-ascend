@@ -10,9 +10,9 @@ This document is written based on the latest vLLM-Ascend version. Both MiniMax-M
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
@@ -32,13 +32,13 @@ It is recommended to download the model weights to a shared directory, such as `
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
@@ -138,7 +138,7 @@ Expected result: The version information is displayed, matching the pulled image
 
 ### 4.2 Source Code Installation
 
-If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
 
 To verify the source installation:
 
@@ -156,7 +156,7 @@ python -c "import vllm_ascend; print(vllm_ascend.__version__)"
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and low-to-medium throughput production scenarios.
 
-**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** If you encounter OOM, HCCL port conflicts, or other startup issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting. For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
 #### A3 (single node)
 
@@ -167,18 +167,15 @@ Notes:
 - If you only care about short-context low latency, you can set `--max-model-len 32768`, `--tensor-parallel-size 4`, and `--data-parallel-size 4`.
 
 ```bash
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export TASK_QUEUE_ENABLE=1
 
-export VLLM_ASCEND_BALANCE_SCHEDULING=0
+export HCCL_BUFFSIZE=1024
+export HCCL_OP_EXPANSION_MODE="AIV"
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --served-model-name "MiniMax-M2.7" \
@@ -187,10 +184,10 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --trust-remote-code \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_cpu_binding":true,
-                          "enable_fused_mc2":true,
-                          "enable_flashcomm1":true,
-                          "weight_nz_mode":true}' \
+    --additional-config '{"scheduler_config":{"enable_balance_scheduling":false},
+                          "enable_cpu_binding":true,
+                          "enable_fused_mc2":1,
+                          "weight_nz_mode":1}' \
     --enable-expert-parallel \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
@@ -208,24 +205,20 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 ```bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
-    --reasoning-parser minimax_m2_append_think \
+    --reasoning-parser minimax_m2_append_think
 ```
 
 #### A2 (single node)
 
 ```bash
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=512
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export TASK_QUEUE_ENABLE=1
+
+export HCCL_BUFFSIZE=512
+export HCCL_OP_EXPANSION_MODE="AIV"
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_INTRA_PCIE_ENABLE=1
-export HCCL_INTRA_ROCE_ENABLE=0
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --served-model-name MiniMax-M2.7 \
@@ -240,8 +233,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --max-num-batched-tokens 32768 \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.85 \
-    --additional-config '{"enable_cpu_binding":true,
-                          "enable_flashcomm1":true}' \
+    --additional-config '{"enable_cpu_binding":true}' \
     --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":16}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/",  "num_speculative_tokens":3}'
 ```
@@ -253,7 +245,7 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 ```bash
     --enable-auto-tool-choice \
     --tool-call-parser minimax_m2 \
-    --reasoning-parser minimax_m2_append_think \
+    --reasoning-parser minimax_m2_append_think
 ```
 
 ### 5.2 Multi-Node PD Separation Deployment
@@ -262,7 +254,7 @@ PD (Prefill-Decode) separation splits the Prefill and Decode phases across diffe
 
 **Hardware**: 2× Atlas 800 A3 (64GB × 16), one for Prefill, one for Decode.
 
-**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
+**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQs](../../faqs.md). For MiniMax-specific PD separation issues, refer to [Chapter 10 FAQ](#10-faq).
 
 First, prepare `launch_online_dp.py` on each node:
 
@@ -274,32 +266,25 @@ Then prepare `run_dp_template.sh` on each node.
 
 ```bash
 unset http_proxy https_proxy ftp_proxy
-
-nic_name="<your_nic_name>"
-local_ip="<your_ip>"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export HCCL_BUFFSIZE=1024
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export PYTHONHASHSEED=0
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
+export HCCL_BUFFSIZE=1024
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
+
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --host 0.0.0.0 \
@@ -319,7 +304,8 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --enforce-eager \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 1}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                        "enable_fused_mc2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -336,32 +322,25 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
 
 ```bash
 unset http_proxy https_proxy ftp_proxy
-
-nic_name="<your_nic_name>"
-local_ip="<your_ip>"
-
-export HCCL_IF_IP=$local_ip
-export GLOO_SOCKET_IFNAME=$nic_name
-export TP_SOCKET_IFNAME=$nic_name
-export HCCL_SOCKET_IFNAME=$nic_name
-
-export HCCL_BUFFSIZE=2048
-export HCCL_OP_EXPANSION_MODE="AIV"
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_NUM_THREADS=1
 echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 sysctl -w vm.swappiness=0
 sysctl -w kernel.numa_balancing=0
 sysctl kernel.sched_migration_cost_ns=50000
-export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-export TASK_QUEUE_ENABLE=1
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=0
-export VLLM_ASCEND_ENABLE_FUSED_MC2=1
-export PYTHONHASHSEED=0
+nic_name="<your_nic_name>"
+local_ip="<your_ip>"
 
+export HCCL_BUFFSIZE=2048
+export HCCL_IF_IP=$local_ip
+export HCCL_OP_EXPANSION_MODE="AIV"
+export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
+
+export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+export GLOO_SOCKET_IFNAME=$nic_name
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export PYTHONHASHSEED=0
 
 vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --host 0.0.0.0 \
@@ -382,7 +361,8 @@ vllm serve /path/to/weight/MiniMax-M2.7-w8a8-QuaRot \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative_config '{"method": "eagle3", "model": "/path/to/weight/Eagle3/", "num_speculative_tokens": 3}' \
-    --additional-config '{"enable_cpu_binding":true}' \
+    --additional-config '{"enable_cpu_binding":true,
+                        "enable_fused_mc2":1}' \
     --kv-transfer-config \
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -586,7 +566,7 @@ The following configurations are validated in internal testing and are categoriz
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 #### 9.2.2 Model-Specific Optimizations
 
@@ -604,15 +584,14 @@ The following optimizations are enabled by default and require no additional con
 
 | Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
 | ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
-| FlashComm v1 | High-concurrency, TP scenarios | `--additional-config '{"enable_flashcomm1": true}'` | Decomposes traditional Allreduce into Reduce-Scatter and All-Gather | Threshold protection: only takes effect when the actual number of tokens exceeds the threshold |
-| Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": true}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
-| Balanced Scheduling | High DP scenarios | `export VLLM_ASCEND_BALANCE_SCHEDULING=1` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`0`). Set to `1` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
+| Fused MC2 | TP ≥ 4 scenarios | `--additional-config '{"enable_fused_mc2": 1}'` | Fuses multiple communication and computation operations | Recommended for A3; not applicable for A2 |
+| Balanced Scheduling | High DP scenarios | `--additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}'` | Enhances scheduling capacity between prefill and decode | Currently disabled by default (`false`). Set to `true` only when concurrency ≈ DP × max-num-seqs. Disable for long-context scenarios |
 | EAGLE3 Speculative Decoding | All scenarios | `--speculative_config '{"method": "eagle3", "model": "/path/to/Eagle3/", "num_speculative_tokens": 3}'` | Uses a draft model to predict future tokens | 1–3 tokens for long context; 3 tokens for short context |
 | jemalloc Preload | All scenarios | `export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2` | Replaces default memory allocator to reduce fragmentation | Ensure jemalloc is installed in the container |
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers MiniMax-M2 (M2.5/M2.7) model-specific issues.
 
 - **Q: Does C8 quantization support EAGLE3 speculative decoding?**
 

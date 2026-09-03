@@ -5,15 +5,11 @@ npu_per_node: 8
 
 env_common: &env_common
   HCCL_OP_EXPANSION_MODE: AIV
-  HCCL_INTRA_PCIE_ENABLE: 1
-  HCCL_INTRA_ROCE_ENABLE: 0
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   OMP_PROC_BIND: false
   OMP_NUM_THREADS: 1
   TASK_QUEUE_ENABLE: 1
   HCCL_BUFFSIZE: 512
-  VLLM_ASCEND_ENABLE_MLAPO: 1
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
   VLLM_USE_MODELSCOPE: true
   SERVER_PORT: 8080
 
@@ -46,6 +42,8 @@ deployment:
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
 
+      --additional-config '{"enable_mlapo":true, "mc2_comm_alg": "hierarchy"}'
+
   - 
     envs:
       <<: *env_common
@@ -75,6 +73,8 @@ deployment:
         --mm-processor-cache-gb 0
         --mm-encoder-tp-mode data
 
+      --additional-config '{"enable_mlapo":true, "mc2_comm_alg": "hierarchy"}'
+
 benchmarks:
   perf:
     case_type: performance
@@ -86,5 +86,5 @@ benchmarks:
     batch_size: 80
     trust_remote_code: True
     request_rate: 0
-    baseline: 1
+    baseline: 1347.100867
     threshold: 0.97

@@ -151,7 +151,6 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         hidden_states = torch.randn(3, self.hidden_size)
 
         mock_forward_context = MagicMock(spec=ForwardContext)
-        mock_forward_context.flash_comm_v1_enabled = False
         mock_get_forward_context.return_value = mock_forward_context
         mock_get_forward_context_2.return_value = mock_forward_context
 
