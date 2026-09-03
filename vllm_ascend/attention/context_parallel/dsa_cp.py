@@ -593,7 +593,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         if is_noncausal:
             assert self.speculative_config is not None
-            # If DSA CP is adapted to v2 DSpark graph mode, there may be issues.
+            # todo: If DSA CP is adapted to v2 DSpark graph mode, there may be issues.
             global_dspark_indices, _ = build_dspark_swa_indices(
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
