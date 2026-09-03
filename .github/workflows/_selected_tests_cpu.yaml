@@ -80,12 +80,11 @@ jobs:
           set -euo pipefail
           if command -v apt-get &> /dev/null; then
             sudo apt-get update
-            sudo apt-get install -y python3-pip python3-venv
+            sudo apt-get install -y python3-pip python3-venv python3-full
           fi
           python3 -m venv $GITHUB_WORKSPACE/venv
-          echo "$GITHUB_WORKSPACE/venv/bin" >> $GITHUB_PATH
+          source $GITHUB_WORKSPACE/venv/bin/activate
           python3 -m pip install --upgrade pip
-          # CPU UT最小依赖，不装triton‑ascend等昇腾私有包
           python3 -m pip install torch pytest pytest-cov
 
       - name: Set PYTHONPATH for source import
@@ -107,7 +106,7 @@ jobs:
         id: parse_groups
         run: |
           set -euo pipefail
-          source ./venv/bin/activate
+          source $GITHUB_WORKSPACE/venv/bin/activate
           python3 - <<'PY'
           import json
           import os
@@ -131,6 +130,7 @@ jobs:
       - name: Run pytest with coverage
         run: |
           set -euo pipefail
+          source $GITHUB_WORKSPACE/venv/bin/activate
           TEST_PATHS="${{ steps.parse_groups.outputs.test_paths }}"
           echo "Running tests: ${TEST_PATHS}"
           python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
