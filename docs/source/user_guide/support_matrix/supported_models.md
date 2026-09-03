@@ -46,6 +46,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Kimi-K2-Thinking    |   🔵    |      |      |       A2/A3       |      |  |  |  |  |  |  |  |  |  |  |  |  |  | [Kimi-K2-Thinking](../../tutorials/models/Kimi-K2-Thinking.md) |
     | DeepSeekOCR2        |   ✅    |      |  ✅ |       A2/A3        |     | ✅ |  |  |  | ✅ |  |  |  |  |  |  |  |  | [DeepSeekOCR2](../../tutorials/models/DeepSeekOCR2.md) |
     | MiniMax-M2.5/2.7    |   🔵    |      |  ✅ |   A2/A3/Ascend950 (Ascend950 experimental) | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | 🟡 | ✅ | ✅ | ✅ | 🟡 | ✅ | 200k | [MiniMax-M2](../../tutorials/models/MiniMax-M2.md) |
+    | Spark-X2.5          |   🔵    | Requires [Spark-plugin](https://github.com/XHToken/Spark-plugin) | ✅ | A2 |  | ✅ | ✅ |  |  |  |  |  |  |  |  | ✅ | ✅ | 131k | [Spark-X2.5](../../tutorials/models/Spark-X2.5.md) |
     | Qwen2.5-Math-RM-72B |   🔵    | vllm-rm, tensor_parallel_size=4, max_model_len=4096 | ✅ | A2 | ✅ | 🟡 | 🟡 | ❌ | 🟡 | ✅ | ✅ | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 🟡 | 4096 | [Qwen2.5-Math-RM-72B](../../tutorials/models/Qwen2.5-Math-RM-72B.md) |
 
 === "Atlas 300I DUO"
