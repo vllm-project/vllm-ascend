@@ -4,6 +4,8 @@ import json
 from unittest.mock import MagicMock
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.envs import VLLM_ENFORCE_STRICT_TOOL_CALLING
+from vllm.parser.parser_manager import ParserManager
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
 
 from vllm_ascend.patch.platform import patch_deepseek_v4_tool_call_parser
@@ -91,6 +93,16 @@ def _tools():
             },
         },
     }
+
+
+def _unified_parser():
+    parser_cls = ParserManager.get_parser(
+        tool_parser_name="deepseek_v4",
+        enable_auto_tools=True,
+        model_name="deepseek-v4-flash",
+    )
+    assert parser_cls is not None
+    return parser_cls(MOCK_TOKENIZER, tools=[_tools()])
 
 
 def test_streaming_deepseek_v4_tool_calls_emit_chunked_arguments():
@@ -349,3 +361,100 @@ def test_registered_parser_is_patch_loaded():
         DeepSeekV4ToolParser.extract_tool_calls_streaming
         is patch_deepseek_v4_tool_call_parser._patched_extract_tool_calls_streaming
     )
+    assert DeepSeekV4ToolParser.supports_required_and_named == (not VLLM_ENFORCE_STRICT_TOOL_CALLING)
+
+
+def test_required_and_named_support_tracks_strict_tool_calling():
+    original = DeepSeekV4ToolParser.supports_required_and_named
+    try:
+        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(True)
+        assert DeepSeekV4ToolParser.supports_required_and_named is False
+
+        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(False)
+        assert DeepSeekV4ToolParser.supports_required_and_named is True
+    finally:
+        DeepSeekV4ToolParser.supports_required_and_named = original
+
+
+def test_required_tool_choice_routes_strict_dsml_to_native_parser():
+    original = DeepSeekV4ToolParser.supports_required_and_named
+    try:
+        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(True)
+        request = ChatCompletionRequest(
+            model="deepseek-v4-flash",
+            messages=[],
+            tools=[_tools()],
+            tool_choice="required",
+        )
+        model_output = _build_tool_call(
+            "plan_trip",
+            {
+                "days": 3,
+                "flexible": False,
+                "cities": ["Beijing"],
+                "notes": "window seat",
+            },
+        )
+
+        tool_calls, content = _unified_parser()._extract_tool_calls(
+            content=model_output,
+            request=request,
+            enable_auto_tools=True,
+        )
+
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "plan_trip"
+        assert json.loads(tool_calls[0].arguments) == {
+            "days": 3,
+            "flexible": False,
+            "cities": ["Beijing"],
+            "notes": "window seat",
+        }
+        assert content is None
+    finally:
+        DeepSeekV4ToolParser.supports_required_and_named = original
+
+
+def test_required_tool_choice_keeps_json_parser_without_strict():
+    original = DeepSeekV4ToolParser.supports_required_and_named
+    try:
+        patch_deepseek_v4_tool_call_parser._configure_required_and_named_support(False)
+        request = ChatCompletionRequest(
+            model="deepseek-v4-flash",
+            messages=[],
+            tools=[_tools()],
+            tool_choice="required",
+        )
+        model_output = json.dumps(
+            [
+                {
+                    "name": "plan_trip",
+                    "parameters": {
+                        "days": 3,
+                        "flexible": False,
+                        "cities": ["Beijing"],
+                        "notes": "window seat",
+                    },
+                }
+            ]
+        )
+
+        tool_calls, content = _unified_parser()._extract_tool_calls(
+            content=model_output,
+            request=request,
+            enable_auto_tools=True,
+        )
+
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "plan_trip"
+        assert json.loads(tool_calls[0].arguments) == {
+            "days": 3,
+            "flexible": False,
+            "cities": ["Beijing"],
+            "notes": "window seat",
+        }
+        assert content is None
+    finally:
+        DeepSeekV4ToolParser.supports_required_and_named = original
