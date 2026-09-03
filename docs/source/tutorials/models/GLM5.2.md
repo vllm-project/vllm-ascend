@@ -1617,9 +1617,9 @@ The tables below provide recommended parameter configurations for different depl
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|Low Latency<br>(64K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, DSA CP|
-|Low Latency<br>(128K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, DSA CP|
-|High Throughput<br>(64K input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp4 tp8, fused MC2, MTP3, max-num-seqs 16, max-model-len 66000, DSA CP|
+|Low Latency<br>(64k input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, DSA CP|
+|Low Latency<br>(128k input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp2 tp16, MTP3, max-num-seqs 8, max-model-len 135000, DSA CP|
+|High Throughput<br>(64k input)|Dual-Node Co-Located (A3), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|32 (A3)|w4a8c8|dp4 tp8, fused MC2, MTP3, max-num-seqs 16, max-model-len 66000, DSA CP|
 |High Throughput|PD Disaggregation (A3), [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)|4 nodes (A3)|w4a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192, MTP1); D: dp32 tp1 (max-num-seqs 32, max-num-batched-tokens 164, MTP5), max-model-len 133120, dedicated P/D nodes, Mooncake KV transfer|
 |Long Context<br>(1M)|PD Disaggregation (A3), [PD Disaggregation 1M Deployment](#523-pd-disaggregation-1m-deployment)|4 nodes (A3)|w4a8c8|P/D: dp4 tp8, DCP8, max-model-len 1040000, Mooncake KV transfer|
 
@@ -1632,9 +1632,9 @@ The tables below provide recommended parameter configurations for different depl
 
 |Scenario|Configuration|NPUs (per node)|TP|DP (per node)|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Spec Num|
 |--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
-|Low Latency 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
-|Low Latency 128K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
-|High Throughput 64K (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|16|8|2|16|8192|66000|3|
+|Low Latency 64k (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
+|Low Latency 128k (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|16|16|1|8|8192|135000|3|
+|High Throughput 64k (A3)|Dual-Node (per node), [Multi-Node Co-Located Deployment](#5112-multi-node-co-located-deployment)|16|8|2|16|8192|66000|3|
 |High Throughput (A3)|PD — Server-P Node, [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)|16|8|2|64|8192|133120|1|
 |High Throughput (A3)|PD — Server-D Node, [Prefill-Decode Disaggregation](#5113-prefill-decode-disaggregation)|16|1|16|32|164|133120|5|
 |Long Context 1M (A3)|PD — Server-P Node, [PD Disaggregation 1M Deployment](#523-pd-disaggregation-1m-deployment)|16|8|2|8|16384|1040000|1|
