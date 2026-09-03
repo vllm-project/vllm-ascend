@@ -37,6 +37,11 @@
   \(\max(p_\tau\,M_b(x)-M_s(x),\,0)/Z\) per block, where \(M_b\) aggregates the
   next draft token's block residual mass and \(M_s\) the accepted prefix's.
 
+  With synthetic acceptance rates (`synthetic_conditional_rates` is not
+  `None`), the per-step acceptance decision in the rejection kernel is drawn
+  from the provided rates instead of the draft/target logits ratio, and the
+  residual resampling above is unchanged.
+
   For sampling requests, `_npu_gumbel_block_argmax` adds Gumbel noise and
   finds the maximum within each vocabulary block:
 
@@ -91,7 +96,7 @@
 | `seed` | Input | Per-request-state random seed | int64 | ND |
 | `num_speculative_steps` | Attribute | Maximum number of speculative tokens per request | int32 | scalar |
 | `use_fp64` | Attribute | Must be `False`; the NPU implementation raises `NotImplementedError` otherwise | bool | scalar |
-| `synthetic_conditional_rates` | Attribute | Must be `None`; synthetic rejection sampling is not implemented on this path | fp32 | ND |
+| `synthetic_conditional_rates` | Input | Per-step synthetic acceptance rates with shape `[num_speculative_steps]`; when non-`None`, the rejection kernel draws acceptance decisions from these rates instead of the draft/target logits. Mutually exclusive with `use_block_verification` | fp32 | ND |
 | `use_block_verification` | Attribute | Selects block verification (Sun et al. 2024, vllm#46781): the rejection kernel accepts the prefix maximizing the joint draft probability, and the residual distribution becomes `max(p_tau * M_b(x) - M_s(x), 0) / Z` with `p_tau` the prefix joint probability; `False` keeps token-wise verification | bool | scalar |
 | `sampled` | Output | Selected tokens with shape `[num_reqs, num_speculative_steps + 1]`; only `sampled[i, :num_sampled[i]]` is valid for request `i` | int64 | ND |
 | `num_sampled` | Output | Number of output tokens per request, including the rejected or bonus token | int32 | ND |
@@ -175,9 +180,9 @@ this repository. The table below documents the internal contract.
   non-negative request-state indices.
 - `pos` is cast to int32 because the Ascend vector-core Philox path does not
   support uint64 multiplication. Positions must fit in int32.
-- `use_fp64=True` and non-`None` `synthetic_conditional_rates` are unsupported
-  and raise `NotImplementedError`. `use_block_verification=True` is currently
-  accepted but has no implementation on this path.
+- `use_fp64=True` raises `NotImplementedError`. `synthetic_conditional_rates`
+  and `use_block_verification` are mutually exclusive: enabling both raises an
+  assertion error.
 - The operator supports dynamic request counts, token counts, and vocabulary
   sizes. `BLOCK_SIZE` and `HAS_DRAFT_LOGITS` are compile-time constants.
 - The operator is inference-only. There is no backward implementation.
