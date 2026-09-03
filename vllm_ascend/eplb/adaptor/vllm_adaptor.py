@@ -97,20 +97,118 @@ class VllmEplbAdaptor:
 
         # Get num_local_experts from first real MoE layer
         first_layer = self.moe_layers[0]
+        eplb_config = get_ascend_config().eplb_config
+        self.global_slots_per_rank = (
+            eplb_config.num_redundant_experts if eplb_config.uses_global_expert_pool else 0
+        )
         self.num_local_experts = first_layer.local_num_experts
+        self.base_num_local_experts = self.num_local_experts
         self.ep_rank = first_layer.ep_rank
+        self.ep_size = first_layer.moe_config.ep_size
 
         self.expert_param_per_layer = dict()
         self.expert_weight_key_per_layer = dict()
         self.init_expert_param_per_layer()
+        if self.global_slots_per_rank:
+            self._init_global_slot_pool(self.global_slots_per_rank)
+            self.num_local_experts += self.global_slots_per_rank
+            self.init_expert_param_per_layer()
+            self._resize_initial_log2phy_maps()
 
-        num_buffer_tensor = self.num_local_experts
+        num_buffer_tensor = 0 if self.global_slots_per_rank else self.num_local_experts
         self.buffer_tensor_list: dict[Any, list[list[Any]]] = dict()
         self.init_buffer_tensor(num_buffer_tensor)
 
         self.log2phy_map_per_layer = dict()
         for local_idx, layer in enumerate(self.moe_layers):
             self.log2phy_map_per_layer[local_idx] = layer.get_log2phy_map()
+
+    def _init_global_slot_pool(self, slots_per_rank: int) -> None:
+        """Allocate one per-rank expert pool shared by every local MoE layer."""
+        first_layer = self.moe_layers[0]
+        first_weight_key = self.expert_weight_key_per_layer[0]
+        if first_weight_key != (QuantType.NONE, False):
+            raise NotImplementedError(
+                "EPLB policy 4 currently supports unquantized weights with fused MC2 disabled only"
+            )
+        weight_names = EPLB_EXPERT_WEIGHT_NAMES[first_weight_key]
+        pool: dict[str, list[torch.Tensor]] = {}
+        for name in weight_names:
+            source = self.param_dict[f"0.{name}"]
+            if len(source) != self.base_num_local_experts:
+                raise ValueError(
+                    f"Unexpected base expert count for {name}: "
+                    f"expected {self.base_num_local_experts}, got {len(source)}"
+                )
+            pool[name] = []
+            for slot_id in range(slots_per_rank):
+                buffer_name = f"_eplb_global_{name}_{slot_id}"
+                first_layer.register_buffer(
+                    buffer_name,
+                    torch.empty_like(source[0]),
+                    persistent=False,
+                )
+                pool[name].append(getattr(first_layer, buffer_name))
+
+        global_redundancy = slots_per_rank * self.ep_size
+        for local_idx, layer in enumerate(self.moe_layers):
+            if self.expert_weight_key_per_layer[local_idx] != first_weight_key:
+                raise ValueError("EPLB policy 4 requires identical expert weight formats across MoE layers")
+            for name in weight_names:
+                values = self.param_dict[f"{local_idx}.{name}"]
+                expected_shape = pool[name][0].shape
+                if values[0].shape != expected_shape:
+                    raise ValueError(f"EPLB policy 4 requires identical {name} shapes across MoE layers")
+                if isinstance(values, list):
+                    values.extend(pool[name])
+                elif torch.is_tensor(values):
+                    setattr(
+                        layer,
+                        f"{name}_list",
+                        [values[expert_id] for expert_id in range(self.base_num_local_experts)] + pool[name],
+                    )
+                else:
+                    raise TypeError(
+                        f"Unsupported EPLB policy 4 expert weight container for {name}: {type(values).__name__}"
+                    )
+
+            layer.moe_config.num_local_experts += slots_per_rank
+            layer.moe_config.num_experts += global_redundancy
+            layer.moe_config.global_redundant_expert_num += global_redundancy
+            layer.global_redundant_expert_num += global_redundancy
+            layer.moe_load = torch.cat(
+                (
+                    layer.moe_load,
+                    torch.zeros(
+                        slots_per_rank,
+                        dtype=layer.moe_load.dtype,
+                        device=layer.moe_load.device,
+                    ),
+                )
+            )
+
+        from vllm_ascend.ops.fused_moe.moe_comm_method import resize_moe_comm_expert_layout
+
+        resize_moe_comm_expert_layout(
+            first_layer.moe_config.num_experts,
+            self.base_num_local_experts + slots_per_rank,
+        )
+        self.global_slot_pool = pool
+
+    def _resize_initial_log2phy_maps(self) -> None:
+        """Account for the shared slots in each rank's physical stride."""
+        expanded_slots = self.base_num_local_experts + self.global_slots_per_rank
+        for layer in self.moe_layers:
+            log2phy_map = layer.get_log2phy_map()
+            if log2phy_map is None:
+                continue
+            rank_ids = torch.div(
+                log2phy_map,
+                self.base_num_local_experts,
+                rounding_mode="floor",
+            )
+            local_ids = torch.remainder(log2phy_map, self.base_num_local_experts)
+            log2phy_map.copy_(rank_ids * expanded_slots + local_ids)
 
     def init_buffer_tensor(self, num_buffer_tensor):
         buffer_tensor_shapes: dict[Any, list[torch.Size]] = dict()

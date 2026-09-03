@@ -118,9 +118,16 @@ def _ascend_FusedMoE(
     # constructed. Propagate Ascend EPLB capacity into the upstream factory so
     # redundant expert slots are present when weights are created and loaded.
     eplb_config = get_ascend_config().eplb_config
-    if eplb_config.dynamic_eplb or eplb_config.expert_map_path is not None:
-        configured_redundancy = eplb_config.num_redundant_experts
+    use_ascend_eplb = eplb_config.dynamic_eplb or eplb_config.expert_map_path is not None
+    if use_ascend_eplb:
+        uses_global_slots = eplb_config.uses_global_expert_pool
+        configured_redundancy = 0 if uses_global_slots else eplb_config.num_redundant_experts
         upstream_redundancy = num_redundant_experts
+        if uses_global_slots and upstream_redundancy:
+            raise ValueError(
+                "EPLB policy 4 owns a cross-layer expert pool and cannot be "
+                "combined with upstream per-layer redundant experts."
+            )
         if configured_redundancy and upstream_redundancy not in (0, configured_redundancy):
             raise ValueError(
                 f"Conflicting EPLB redundant expert counts: vLLM={upstream_redundancy}, Ascend={configured_redundancy}."
@@ -131,7 +138,11 @@ def _ascend_FusedMoE(
     # the legacy Ascend quant-method path until that path also routes solely
     # through the Router.
     hash_indices_table_for_legacy_path = hash_indices_table if hash_indices_table is not None else tid2eid
-    enable_router_eplb = enable_eplb and get_current_vllm_config().use_v2_model_runner
+    # Ascend EPLB owns routing through RoutedExperts.log2phy and updates that
+    # table together with expert weights. Attaching the upstream router state
+    # here would map logical IDs twice and would not follow Ascend D2D updates.
+    # Keep router-side EPLB available only for native vLLM EPLB callers.
+    enable_router_eplb = enable_eplb and not use_ascend_eplb and get_current_vllm_config().use_v2_model_runner
     if router is None:
         router = create_ascend_fused_moe_router(
             top_k=top_k,

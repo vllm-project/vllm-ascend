@@ -489,14 +489,28 @@ class NPUModelRunner(GPUModelRunner):
         if self.dynamic_eplb:
             self.is_eplb_warmuped = False
             self.policy_type = eplb_config.eplb_policy_type
+            if eplb_config.uses_global_expert_pool:
+                if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                    raise ValueError("EPLB policy 4 on a prefill node currently requires eager mode")
+                if self.ascend_config.enable_fused_mc2:
+                    raise ValueError("EPLB policy 4 on a prefill node currently requires fused MC2 to be disabled")
             self.eplb_loader = D2DExpertWeightLoader()
             self.manager = Manager()
             self.shared_dict = self.manager.dict({"expert_map": None, "moe_load": None, "expert_maps": None})
+            policy_config = (
+                {
+                    "num_redundant_experts": eplb_config.num_redundant_experts,
+                    "node_role": eplb_config.eplb_node_role,
+                }
+                if self.policy_type == 4
+                else None
+            )
             self.eplb_process = EplbProcess(
                 shared_dict=self.shared_dict,
                 policy_type=self.policy_type,
                 enable_d2d=True,
                 tp_size=self.parallel_config.tensor_parallel_size,
+                policy_config=policy_config,
             )
             self.process = self.eplb_process._launch_process()
             self.eplb_updator = EplbUpdator(eplb_config, self.eplb_loader, self.eplb_process, self.process)

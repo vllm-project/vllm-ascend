@@ -15,6 +15,9 @@
 # This file is a part of the vllm-ascend project.
 #
 # Todo: Once https://github.com/vllm-project/vllm/issues/22246 is merged in vllm. Remove this updator.
+import time
+from queue import Empty
+
 import numpy
 import torch
 import torch.distributed as dist
@@ -33,6 +36,7 @@ class EplbUpdator:
     def __init__(self, eplb_config, loader: D2DExpertWeightLoader, eplb_process: EplbProcess, process):
         self.eplb_config = eplb_config
         self.multi_stage = eplb_config.eplb_policy_type == 3
+        self.global_slots = eplb_config.num_redundant_experts if eplb_config.uses_global_expert_pool else 0
         self.init_eplb(self.eplb_config.expert_map_path, process)
         self.eplb_loader = loader
         self.eplb_process = eplb_process
@@ -67,6 +71,15 @@ class EplbUpdator:
 
         self.reqs = []
         self.update_info_all = []
+        self.global_update_info = {}
+        self.update_plan_active = False
+        self.awaiting_plan = False
+        self.pending_update_info = None
+        self.global_update_steps = []
+        self.global_pending_step = None
+        self.global_transfer_reqs = []
+        self.global_total_steps = 0
+        self.global_plan_started_at = 0.0
 
         self.cur_iterations: torch.int64 = 0
 
@@ -87,6 +100,15 @@ class EplbUpdator:
 
             self.adaptor.clear_all_moe_loads()
             self.cur_iterations = 0
+            self.update_plan_active = False
+            self.awaiting_plan = False
+            self.pending_update_info = None
+            self.global_update_info = {}
+            self.global_update_steps = []
+            self.global_pending_step = None
+            self.global_transfer_reqs = []
+            self.global_total_steps = 0
+            self.global_plan_started_at = 0.0
 
     def get_update_info_flag(self):
         return self.cur_iterations == (self.expert_heat_collection_interval + self.algorithm_execution_interval - 1)
@@ -103,7 +125,59 @@ class EplbUpdator:
     def wakeup_eplb_worker(self):
         self.eplb_process.planner_q.put(1)
 
+    def _poll_global_update_plan(self) -> None:
+        if self.update_plan_active or not (self.get_update_info_flag() or self.awaiting_plan):
+            return
+
+        planner_state = 1
+        if self.pending_update_info is None:
+            try:
+                self.pending_update_info = self.eplb_process.block_update_q.get_nowait()
+            except Empty:
+                planner_state = 0 if self.process.is_alive() else -1
+
+        readiness = torch.tensor([planner_state], dtype=torch.int32, device=self.device)
+        dist.all_reduce(
+            readiness,
+            op=dist.ReduceOp.MIN,
+            group=self.comm_group.device_group,
+        )
+        global_state = int(readiness.item())
+        if global_state < 0:
+            raise RuntimeError("An EPLB planner exited before publishing an update plan")
+        if global_state == 0:
+            self.awaiting_plan = True
+            return
+
+        if not isinstance(self.pending_update_info, dict):
+            raise RuntimeError("EPLB policy 4 published an invalid update plan")
+        self.global_update_info = self.pending_update_info
+        self.pending_update_info = None
+        self.awaiting_plan = False
+        self.update_plan_active = bool(self.global_update_info.get("changed", False))
+        if self.update_plan_active:
+            self.global_update_steps = list(self.global_update_info.get("steps", []))
+            if not self.global_update_steps:
+                raise RuntimeError("EPLB policy 4 published a changed plan without migration steps")
+            self.global_total_steps = len(self.global_update_steps)
+            self.global_plan_started_at = time.perf_counter()
+
+    def _start_global_update_step(self) -> None:
+        if not self.update_plan_active or self.global_pending_step is not None:
+            return
+        # An eager kernel from the preceding iteration may still read a shared
+        # slot. Drain it before changing maps or writing that slot via HCCL.
+        torch.npu.current_stream().synchronize()
+        self.global_pending_step = self.global_update_steps.pop(0)
+        self.eplb_loader.apply_global_map_updates(self.global_pending_step["deactivate"])
+        self.global_transfer_reqs = self.eplb_loader.start_global_slot_transfer(self.global_pending_step)
+
     def forward_before(self):
+        if self.global_slots:
+            self._poll_global_update_plan()
+            self._start_global_update_step()
+            return
+
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.get_update_info_flag():
             self.update_info_all = self.eplb_process.block_update_q.get()
@@ -132,14 +206,37 @@ class EplbUpdator:
                 self.compute_and_set_moe_load()
                 self.wakeup_eplb_worker()
 
-        if self.update_expert_weight_flag() and self.expert_map_record_path is None:
+        if self.global_slots and self.global_pending_step is not None:
+            self.eplb_loader.finish_global_slot_transfer(
+                self.global_transfer_reqs,
+                self.global_pending_step,
+            )
+            self.global_pending_step = None
+            self.global_transfer_reqs = []
+            if not self.global_update_steps:
+                self.shared_dict["expert_maps"] = torch.tensor(
+                    self.global_update_info["global_maps"], dtype=torch.int32
+                )
+                self.update_plan_active = False
+                if self.rank_id == 0:
+                    logger.info(
+                        "[eplb/global] Migration completed steps=%s elapsed_ms=%.3f",
+                        self.global_total_steps,
+                        (time.perf_counter() - self.global_plan_started_at) * 1000.0,
+                    )
+
+        if not self.global_slots and self.update_expert_weight_flag() and self.expert_map_record_path is None:
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
         # One circle of eplb update includes expert_heat_collection_interval + algorithm_execution_interval
         # + num_moe_layers (for weight update). In expert_heat_collection stage, we only update the counter
         # when eplb_heat_collection_status is True. In later stages, the counter is always updated.
         # TODO(Angazenn): Decouple algorithm execution && weight update with heat collection iterations.
-        if self.cur_iterations >= self.expert_heat_collection_interval - 1 or eplb_heat_collection_status:
+        if (
+            not self.awaiting_plan
+            and not (self.global_slots and self.update_plan_active)
+            and (self.cur_iterations >= self.expert_heat_collection_interval - 1 or eplb_heat_collection_status)
+        ):
             self.update_iteration()
 
     def compute_and_set_moe_load(self):
@@ -156,6 +253,8 @@ class EplbUpdator:
 
     def warm_up_eplb(self):
         logger.info("[eplb/updator] Starting EPLB warm-up, rank=%s, world_size=%s", self.rank_id, self.world_size)
+        if not self.global_slots:
+            self.eplb_loader.initialize_redundant_expert_weights()
         self.shared_dict["expert_maps"] = self.adaptor.get_global_expert_map()
         self.compute_and_set_moe_load()
 

@@ -304,7 +304,8 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             n_shared_experts if self.mix_placement else 0
         )
         allocated_redundancy = self.moe_config.num_experts - self.moe_config.num_logical_experts
-        if eplb_config.num_redundant_experts not in (0, allocated_redundancy):
+        uses_global_slots = eplb_config.uses_global_expert_pool
+        if not uses_global_slots and eplb_config.num_redundant_experts not in (0, allocated_redundancy):
             raise ValueError(
                 "Conflicting EPLB redundant expert counts: "
                 f"allocated={allocated_redundancy}, Ascend={eplb_config.num_redundant_experts}."
@@ -390,6 +391,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     def get_eplb_parameter(self, name: str):
         """Return an expert parameter from the refactored weight owner."""
+        expert_list = getattr(self, f"{name}_list", None)
+        if isinstance(expert_list, list):
+            return expert_list
         return getattr(self, name)
 
     @property

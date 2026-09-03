@@ -121,10 +121,17 @@ class EplbConfig:
     num_redundant_experts: int = 0
     eplb_policy_type: int = 2
     eplb_heat_collection_stage: str = "all"
+    # Policy 4 uses a cross-layer pool on P nodes and conventional per-layer
+    # redundant experts on D nodes.
+    eplb_node_role: Literal["prefill", "decode"] = "prefill"
     # Model Runner V2 only. Restricts which batch phase contributes to the
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
+
+    @property
+    def uses_global_expert_pool(self) -> bool:
+        return self.dynamic_eplb and self.eplb_policy_type == 4 and self.eplb_node_role == "prefill"
 
     @model_validator(mode="after")
     def _validate_config(self):
@@ -146,8 +153,20 @@ class EplbConfig:
                 raise TypeError(f"{key} must be an integer")
             if value < 0:
                 raise ValueError(f"{key} must greater than 0; got {value} instead")
-        if self.eplb_policy_type not in [0, 1, 2, 3]:
-            raise ValueError("eplb_policy_type must in [0, 1, 2, 3]")
+        if self.eplb_policy_type not in [0, 1, 2, 3, 4]:
+            raise ValueError("eplb_policy_type must be one of [0, 1, 2, 3, 4]")
+        if self.eplb_policy_type == 4:
+            if not self.dynamic_eplb:
+                raise ValueError("eplb_policy_type 4 requires dynamic_eplb")
+            if self.num_redundant_experts <= 0:
+                raise ValueError("eplb_policy_type 4 requires a positive num_redundant_experts")
+            if self.eplb_heat_collection_stage == "all":
+                self.eplb_heat_collection_stage = self.eplb_node_role
+            elif self.eplb_heat_collection_stage != self.eplb_node_role:
+                raise ValueError(
+                    "eplb_policy_type 4 requires eplb_heat_collection_stage "
+                    "to match eplb_node_role"
+                )
         if self.dynamic_eplb:
             assert (
                 os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
