@@ -39,7 +39,6 @@ from vllm_ascend.worker.v2 import pp_utils
 from vllm_ascend.worker.v2.pp_utils import (
     add_pp_topk_indices,
     configure_pp_topk_transport,
-    pp_stage_requires_topk_indices,
     restore_pp_topk_indices,
 )
 
@@ -315,10 +314,7 @@ def _deepseek_v2_model_init_with_pp_topk_transport(self, *args, **kwargs):
         ),
         None,
     )
-    configure_pp_topk_transport(
-        self,
-        lambda start_layer: pp_stage_requires_topk_indices(self.config, start_layer),
-    )
+    configure_pp_topk_transport(self)
 
 
 _patched_deepseek_v2_model_init = _deepseek_v2_model_init_with_pp_topk_transport
