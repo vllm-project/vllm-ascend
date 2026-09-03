@@ -360,6 +360,120 @@ def tensor_storage_key(tensor: torch.Tensor) -> int:
             return tensor.data_ptr()
 
 
+def _tensor_memory_span_end(tensor: torch.Tensor) -> int:
+    """Return the exclusive end address touched by a strided tensor view."""
+    if tensor.numel() == 0:
+        return tensor.data_ptr()
+    if any(stride < 0 for stride in tensor.stride()):
+        raise RuntimeError(
+            "Mooncake registration does not support a KV cache tensor "
+            f"with negative strides: shape={tuple(tensor.shape)}, "
+            f"stride={tuple(tensor.stride())}."
+        )
+    span = tensor.element_size() + sum(
+        (size - 1) * stride * tensor.element_size() for size, stride in zip(tensor.shape, tensor.stride())
+    )
+    return tensor.data_ptr() + span
+
+
+def collect_aligned_kv_cache_register_regions(
+    descriptor_tensors: list[tuple[int, list[torch.Tensor]]],
+    alignment: int,
+) -> RegisterRegions:
+    """Collect one Mooncake registration region per physical KV storage.
+
+    ``KVCacheTensor.size`` describes the full backing allocation on current
+    vLLM main. Multiple descriptors can therefore expose different logical
+    views of the same storage. Recover the aligned backing base and de-duplicate
+    it by storage identity. If Ascend materialized private per-layer storages,
+    register the actual strided tensor spans for those storages instead.
+    """
+    if alignment <= 0:
+        raise ValueError(f"alignment must be positive, got {alignment}.")
+
+    regions_by_storage: OrderedDict[int, RegisterRange] = OrderedDict()
+    complete_backing_storages: set[int] = set()
+    private_tensors: list[torch.Tensor] = []
+    logical_tensor_count = 0
+    logical_total_bytes = 0
+
+    for descriptor_size, tensors in descriptor_tensors:
+        if descriptor_size <= 0:
+            raise ValueError(f"KV cache descriptor size must be positive, got {descriptor_size}.")
+        tensors = [tensor for tensor in tensors if tensor.numel() > 0]
+        if not tensors:
+            continue
+
+        logical_tensor_count += len(tensors)
+        logical_total_bytes += sum(tensor.nbytes for tensor in tensors)
+        storage_keys = {tensor_storage_key(tensor) for tensor in tensors}
+
+        if len(storage_keys) == 1:
+            storage_key = next(iter(storage_keys))
+            storage = tensors[0].untyped_storage()
+            aligned_base = (storage_key + alignment - 1) // alignment * alignment
+            backing_end = aligned_base + descriptor_size
+            storage_end = storage_key + storage.nbytes()
+            if backing_end <= storage_end and all(
+                aligned_base <= tensor.data_ptr() and _tensor_memory_span_end(tensor) <= backing_end
+                for tensor in tensors
+            ):
+                region = RegisterRange(aligned_base, backing_end)
+                previous = regions_by_storage.get(storage_key)
+                if previous is not None and previous != region:
+                    raise RuntimeError(
+                        "Inconsistent KV cache backing geometry for one "
+                        f"storage: previous=[{previous.start:#x}, "
+                        f"{previous.end:#x}), current=[{region.start:#x}, "
+                        f"{region.end:#x})."
+                    )
+                regions_by_storage[storage_key] = region
+                complete_backing_storages.add(storage_key)
+                continue
+
+        private_tensors.extend(tensors)
+
+    for tensor in private_tensors:
+        storage = tensor.untyped_storage()
+        storage_key = tensor_storage_key(tensor)
+        aligned_base = (storage_key + alignment - 1) // alignment * alignment
+        tensor_end = _tensor_memory_span_end(tensor)
+        storage_end = storage_key + storage.nbytes()
+        if not (aligned_base <= tensor.data_ptr() and tensor_end <= storage_end):
+            raise RuntimeError(
+                "Unable to recover an aligned private KV layer storage: "
+                f"data_ptr={tensor.data_ptr():#x}, "
+                f"tensor_end={tensor_end:#x}, "
+                f"storage=[{storage_key:#x}, {storage_end:#x})."
+            )
+
+        previous = regions_by_storage.get(storage_key)
+        if storage_key in complete_backing_storages:
+            assert previous is not None
+            if not (previous.start <= tensor.data_ptr() and tensor_end <= previous.end):
+                raise RuntimeError(
+                    "KV cache view exceeds its recovered backing region: "
+                    f"view=[{tensor.data_ptr():#x}, {tensor_end:#x}), "
+                    f"backing=[{previous.start:#x}, {previous.end:#x})."
+                )
+            continue
+
+        regions_by_storage[storage_key] = RegisterRange(
+            aligned_base,
+            max(
+                previous.end if previous is not None else aligned_base,
+                tensor_end,
+            ),
+        )
+
+    return RegisterRegions(
+        ptrs=[region.start for region in regions_by_storage.values()],
+        lengths=[region.end - region.start for region in regions_by_storage.values()],
+        logical_tensor_count=logical_tensor_count,
+        logical_total_bytes=logical_total_bytes,
+    )
+
+
 def collect_storage_merged_register_regions(
     kv_caches: dict[str, Any],
 ) -> RegisterRegions:
