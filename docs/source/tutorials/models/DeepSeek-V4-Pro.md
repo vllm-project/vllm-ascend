@@ -1307,6 +1307,7 @@ Before you start, please:
      }' \
        --additional-config '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "enable_cpu_binding":true, "recompute_scheduler_enable":true}'
    ```
+
 === "A2 series with dspark"
 
 1. Prefill node (4 P nodes share the same script)
@@ -1318,9 +1319,8 @@ Before you start, please:
 	unset http_proxy
 	export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
-	# 自动获取配置（平台自动替换，无需手动修改）
-	nic_name=自动获取
-	local_ip=自动获取
+	nic_name=xxx
+	local_ip=xxx
 
 	export HCCL_IF_IP=$local_ip
 	export GLOO_SOCKET_IFNAME=$nic_name
@@ -1391,9 +1391,8 @@ Before you start, please:
 	unset http_proxy
 	export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
 
-	# 自动获取配置（平台自动替换，无需手动修改）
-	nic_name=自动获取
-	local_ip=自动获取
+	nic_name=xxx
+	local_ip=xxx
 
 	export HCCL_IF_IP=$local_ip
 	export GLOO_SOCKET_IFNAME=$nic_name
