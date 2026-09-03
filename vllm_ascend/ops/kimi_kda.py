@@ -32,6 +32,15 @@ from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 
 _KDA_CHUNK_SIZE = 64
 _PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+_KDA_QKV_PROJECTION_STREAM = None
+
+
+def _kda_qkv_projection_stream() -> torch.npu.Stream:
+    """Return the process-local stream used to overlap the KDA QKV projection."""
+    global _KDA_QKV_PROJECTION_STREAM
+    if _KDA_QKV_PROJECTION_STREAM is None:
+        _KDA_QKV_PROJECTION_STREAM = torch.npu.Stream()
+    return _KDA_QKV_PROJECTION_STREAM
 
 
 def _zero_padded_output(
@@ -149,7 +158,20 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
     ) -> torch.Tensor:
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
-            mixed_qkv = self.in_proj_qkvgfab(hidden_states)[0]
+            # QuaRot splits QKV and gate projections by precision group. Run
+            # the independent QKV GEMM on a side stream so it can overlap the
+            # gate GEMM on the main stream.
+            main_stream = None
+            qkv_projection_stream = None
+            if hidden_states.device.type == "npu":
+                main_stream = torch.npu.current_stream()
+                qkv_projection_stream = _kda_qkv_projection_stream()
+                hidden_states.record_stream(qkv_projection_stream)
+                qkv_projection_stream.wait_stream(main_stream)
+                with torch.npu.stream(qkv_projection_stream):
+                    mixed_qkv = self.in_proj_qkvgfab(hidden_states)[0]
+            else:
+                mixed_qkv = self.in_proj_qkvgfab(hidden_states)[0]
             projected_gfab = self.in_proj_gfab(hidden_states)[0]
             split_sizes = [
                 self.local_projection_size,
@@ -169,6 +191,10 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
+            if qkv_projection_stream is not None:
+                assert main_stream is not None
+                main_stream.wait_stream(qkv_projection_stream)
+                mixed_qkv.record_stream(main_stream)
             self._forward(
                 mixed_qkv=mixed_qkv,
                 g1=g1,
