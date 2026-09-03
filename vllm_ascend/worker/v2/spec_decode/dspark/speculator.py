@@ -94,6 +94,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
+        self._dynamic_update_log_count = 0
         # DSpark changes ``sample_from_anchor`` after DFlash initialization,
         # so initialize the width-dependent anchor indices only now.
         initialize_physical_k_buffers(self)
@@ -132,10 +133,19 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         request_ids = None
         if self.input_batch is not None:
             request_ids = self.input_batch.req_ids[:num_reqs]
-        self.dynamic_spec.update_from_token_probs(
+        selected = self.dynamic_spec.update_from_token_probs(
             confidence,
             request_ids=request_ids,
         )
+        if self._dynamic_update_log_count < 8:
+            logger.warning(
+                "V2 hardware-aware K decision #%d: reqs=%d active_k=%d selected=%s",
+                self._dynamic_update_log_count + 1,
+                num_reqs,
+                active_k,
+                selected.detach().to("cpu").tolist(),
+            )
+            self._dynamic_update_log_count += 1
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)

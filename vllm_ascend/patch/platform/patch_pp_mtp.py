@@ -460,6 +460,15 @@ def _patch_scheduler_update_from_output() -> None:
         lengths = getattr(model_runner_output, "proposal_lengths", None)
         if lengths is None:
             return
+        log_count = getattr(self, "_ascend_proposal_lengths_log_count", 0)
+        if log_count < 8:
+            logger.warning(
+                "V2 hardware-aware K consumed by scheduler #%d: reqs=%d lengths=%s",
+                log_count + 1,
+                len(getattr(model_runner_output, "req_ids", ())),
+                lengths,
+            )
+            self._ascend_proposal_lengths_log_count = log_count + 1
         req_ids = getattr(model_runner_output, "req_ids", ())
         if len(req_ids) != len(lengths):
             logger.warning(

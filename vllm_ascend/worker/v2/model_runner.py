@@ -125,6 +125,7 @@ class NPUModelRunner(GPUModelRunner):
         # hardware-aware DSpark path.  DSpark's own confidence head remains
         # enabled and is consumed by Ascend's scheduler.
         dynamic_config = getattr(self.ascend_config, "dynamic_spec_config", None)
+        self._v2_hardware_k_log_count = 0
         if (
             dynamic_config is not None
             and dynamic_config.method == "dspark"
@@ -235,6 +236,31 @@ class NPUModelRunner(GPUModelRunner):
             assert self.pp_handler is not None
             # Wait until propose() has populated this step's draft tokens.
             self.pp_handler.broadcast_draft_tokens()
+
+        # Publish the policy result after the parent has completed the draft
+        # step.  The scheduler consumes this field for the next iteration.
+        # Keep this in the same override as the PP broadcast so the latter is
+        # not shadowed by a second ``sample_tokens`` definition below.
+        if self.is_last_pp_rank and self.speculator is not None and output is not None:
+            dynamic_spec = getattr(self.speculator, "dynamic_spec", None)
+            input_batch = getattr(self.speculator, "input_batch", None)
+            if dynamic_spec is not None and input_batch is not None:
+                lengths = dynamic_spec.proposal_lengths_for_v2(
+                    input_batch.req_ids[: input_batch.num_reqs],
+                    max_k=self.num_speculative_steps,
+                )
+                if lengths is not None:
+                    model_runner_output = getattr(output, "model_runner_output", output)
+                    # ``patch_pp_mtp`` adds this field on older vLLM checkouts.
+                    setattr(model_runner_output, "proposal_lengths", lengths)
+                    if self._v2_hardware_k_log_count < 8:
+                        logger.warning(
+                            "V2 hardware-aware K publish #%d: reqs=%d lengths=%s",
+                            self._v2_hardware_k_log_count + 1,
+                            len(lengths),
+                            lengths,
+                        )
+                        self._v2_hardware_k_log_count += 1
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
@@ -788,25 +814,6 @@ class NPUModelRunner(GPUModelRunner):
         (``max_num_reqs * decode_query_len``, see StructuredOutputsWorker init).
         """
         return self.max_num_reqs * self.decode_query_len
-
-    @torch.inference_mode()
-    def sample_tokens(self, grammar_output):
-        """Publish V2 hardware-aware K after the draft step completes."""
-
-        output = super().sample_tokens(grammar_output)
-        if self.is_last_pp_rank and self.speculator is not None and output is not None:
-            dynamic_spec = getattr(self.speculator, "dynamic_spec", None)
-            input_batch = getattr(self.speculator, "input_batch", None)
-            if dynamic_spec is not None and input_batch is not None:
-                lengths = dynamic_spec.proposal_lengths_for_v2(
-                    input_batch.req_ids[: input_batch.num_reqs],
-                    max_k=self.num_speculative_steps,
-                )
-                if lengths is not None:
-                    model_runner_output = getattr(output, "model_runner_output", output)
-                    # ``patch_pp_mtp`` adds this field on older vLLM checkouts.
-                    setattr(model_runner_output, "proposal_lengths", lengths)
-        return output
 
     def sample(self, hidden_states, input_batch, grammar_output):
         """Override GPUModelRunner.sample for lmhead TP.
