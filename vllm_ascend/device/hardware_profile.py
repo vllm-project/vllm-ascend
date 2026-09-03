@@ -197,6 +197,7 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
             quantization_backend_family=QuantizationBackendFamily.COMPATIBILITY,
             capabilities=frozenset(
                 {
+                    HardwareCapability.ATB_EXTENSIONS,
                     HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS,
                     HardwareCapability.DISTRIBUTED_COMMUNICATION_ADAPTATION,
                     HardwareCapability.FUSED_MOE_COMPATIBILITY,
