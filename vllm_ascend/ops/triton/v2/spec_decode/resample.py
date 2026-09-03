@@ -345,6 +345,12 @@ def resample(
             raise ValueError("draft_logits cannot be None when has_draft_logits=True")
         if draft_logits.stride(-1) != 1:
             raise ValueError("draft_logits vocabulary dimension must be contiguous")
+        # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
+        # vocab size is larger than the draft's due to padding. Clamp so the
+        # kernels only read the draft logits within their valid range; the
+        # target padding columns are never sampled anyway because their
+        # logits are dominated by real tokens.
+        vocab_size = min(vocab_size, draft_logits.size(-1))
     elif draft_logits is None:
         draft_logits = target_logits.new_empty(1, 1, 1)
 
