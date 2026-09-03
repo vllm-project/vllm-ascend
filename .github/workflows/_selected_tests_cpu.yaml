@@ -67,6 +67,8 @@ jobs:
           repository: vllm-project/vllm
           ref: ${{ inputs.vllm }}
           path: ./vllm-src
+          fetch-depth: 0
+
       - name: Checkout code
         uses: actions/checkout@v4
         with:
