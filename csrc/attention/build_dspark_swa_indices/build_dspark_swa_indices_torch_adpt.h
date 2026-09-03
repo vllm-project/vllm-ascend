@@ -43,6 +43,9 @@ at::Tensor build_dspark_swa_indices(
                 "query_start_loc should be 1D with >= 2 elements");
     TORCH_CHECK(block_table.size(0) >= query_start_loc.size(0) - 1,
                 "block_table rows < num_reqs");
+    TORCH_CHECK(block_table.scalar_type() == at::kInt, "block_table must be int32");
+    TORCH_CHECK(query_start_loc.scalar_type() == at::kInt, "query_start_loc must be int32");
+    TORCH_CHECK(seq_lens.scalar_type() == at::kInt, "seq_lens must be int32");
 
     int64_t num_reqs = query_start_loc.size(0) - 1;
     TORCH_CHECK(num_decode_tokens == num_reqs * num_speculative_tokens,
