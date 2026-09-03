@@ -280,6 +280,53 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_accepts_top_level_enable_npugraph_ex(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {"enable_mlapo": True, "enable_npugraph_ex": False}
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        self.assertFalse(ascend_config.ascend_compilation_config.enable_npugraph_ex)
+        # The user-facing additional_config dict must not be mutated by the hoist.
+        self.assertEqual(
+            test_vllm_config.additional_config,
+            {"enable_mlapo": True, "enable_npugraph_ex": False},
+        )
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_merges_top_level_npugraph_ex_with_nested_subconfig(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "enable_npugraph_ex": False,
+            "ascend_compilation_config": {"fuse_norm_quant": False},
+        }
+
+        ascend_config = init_ascend_config(test_vllm_config)
+
+        ascend_compilation_config = ascend_config.ascend_compilation_config
+        self.assertFalse(ascend_compilation_config.enable_npugraph_ex)
+        self.assertFalse(ascend_compilation_config.fuse_norm_quant)
+        # Nested-only defaults stay untouched.
+        self.assertTrue(ascend_compilation_config.fuse_qknorm_rope)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_rejects_npugraph_ex_in_both_top_level_and_nested(self, mock_fix_incompatible_config):
+        test_vllm_config = VllmConfig()
+        test_vllm_config.additional_config = {
+            "enable_npugraph_ex": False,
+            "ascend_compilation_config": {"enable_npugraph_ex": True},
+        }
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"set it only in additional_config\.ascend_compilation_config\.enable_npugraph_ex",
+        ):
+            init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
         # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
         # out-of-range values are invalid on main.
