@@ -76,11 +76,16 @@ jobs:
           fi
           python3 -m venv $GITHUB_WORKSPACE/venv
           VENV_PY=${GITHUB_WORKSPACE}/venv/bin/python3
-          ${VENV_PY} -m pip install --upgrade pip
-          ${VENV_PY} -m pip install torch pytest pytest-cov
+          VENV_SITE=$(${VENV_PY} -c "import site; print(site.getsitepackages()[0])")
 
-          export VLLM_ASCEND_SKIP_BUILD_EXT=1
-          ${VENV_PY} -m pip install -e .
+          ${VENV_PY} -m pip install --upgrade pip
+          # CPU UT最小公开依赖，不要执行 pip install -e .
+          ${VENV_PY} -m pip install torch pytest pytest-cov pyyaml jsonschema
+
+          echo "$GITHUB_WORKSPACE" > "${VENV_SITE}/vllm_ascend_src.pth"
+        env:
+          VLLM_ASCEND_CPU_ONLY: 1
+          SKIP_TRITON_ASCEND_IMPORT: 1
 
       - name: Set PYTHONPATH for source import
         run: |
@@ -120,6 +125,11 @@ jobs:
           TEST_PATHS="${{ steps.parse_groups.outputs.test_paths }}"
           echo "Running tests: ${TEST_PATHS}"
           ${GITHUB_WORKSPACE}/venv/bin/python3 -m pytest -v --cov=./ --cov‑report=xml:coverage.xml ${TEST_PATHS}
+        env:
+          PYTHONPATH: $GITHUB_WORKSPACE
+          VLLM_ASCEND_CPU_ONLY: 1
+          SKIP_TRITON_ASCEND_IMPORT: 1
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
