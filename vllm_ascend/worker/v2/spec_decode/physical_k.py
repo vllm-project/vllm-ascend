@@ -117,6 +117,7 @@ def physical_k_scope(
     old_query_width = speculator.num_query_per_req
     old_sample_col = getattr(speculator, "sample_col", None)
     old_anchor_idx = getattr(speculator, "_anchor_idx", None)
+    old_confidence_probs = getattr(speculator, "draft_token_confidence_probs", None)
     try:
         speculator.num_speculative_steps = active_k
         speculator.num_query_per_req = query_width(sample_from_anchor, active_k)
@@ -128,6 +129,14 @@ def physical_k_scope(
                 dtype=old_sample_col.dtype,
                 device=old_sample_col.device,
             ).repeat(int(getattr(speculator, "max_num_reqs", 0)))
+        if old_confidence_probs is not None and old_confidence_probs.ndim >= 2:
+            # DSpark's upstream confidence-head path assigns the freshly
+            # computed [num_reqs, K] result to the request buffer.  Keep the
+            # backing allocation at max-K for record_confidences(), but expose
+            # an active-width view while the physical-K scope is running.
+            speculator.draft_token_confidence_probs = old_confidence_probs[
+                :, :active_k
+            ]
         if old_anchor_idx is not None:
             import torch
 
@@ -146,6 +155,8 @@ def physical_k_scope(
         speculator.num_query_per_req = old_query_width
         if old_sample_col is not None:
             speculator.sample_col = old_sample_col
+        if old_confidence_probs is not None:
+            speculator.draft_token_confidence_probs = old_confidence_probs
         if old_anchor_idx is not None:
             speculator._anchor_idx = old_anchor_idx
         speculator._vllm_ascend_active_speculative_steps = max_k

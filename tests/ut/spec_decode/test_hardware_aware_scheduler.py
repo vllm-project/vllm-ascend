@@ -118,6 +118,7 @@ def test_v2_physical_k_scope_updates_query_layout_atomically() -> None:
         max_num_reqs=2,
         sample_from_anchor=True,
         sample_col=torch.arange(5).repeat(2),
+        draft_token_confidence_probs=torch.zeros((2, 5)),
         _anchor_idx=torch.arange(2) * 5,
     )
     batch = SimpleNamespace(num_draft_tokens_per_req=torch.tensor([2, 2]))
@@ -127,11 +128,13 @@ def test_v2_physical_k_scope_updates_query_layout_atomically() -> None:
         assert speculator.num_speculative_steps == 2
         assert speculator.num_query_per_req == 2
         assert speculator.sample_col.tolist() == [0, 1, 0, 1]
+        assert tuple(speculator.draft_token_confidence_probs.shape) == (2, 2)
         assert speculator._anchor_idx.tolist() == [0, 2]
 
     assert speculator.num_speculative_steps == 5
     assert speculator.num_query_per_req == 5
     assert speculator.sample_col.tolist() == [0, 1, 2, 3, 4] * 2
+    assert tuple(speculator.draft_token_confidence_probs.shape) == (2, 5)
     assert speculator._anchor_idx.tolist() == [0, 5]
 
 
