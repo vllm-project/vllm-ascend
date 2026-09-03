@@ -8,8 +8,6 @@ _envs: &envs
   OMP_NUM_THREADS: "1"
   HCCL_BUFFSIZE: "200"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_BALANCE_SCHEDULING: "1"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   SERVER_PORT: "DEFAULT_PORT"
 
 _server_cmd: &server_cmd
@@ -29,7 +27,7 @@ _server_cmd: &server_cmd
   - "ascend"
   - "--enable-chunked-prefill"
   - "--additional-config"
-  - '{"multistream_overlap_shared_expert":true}'
+  - '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
   - "--compilation-config"
   - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
   - "--speculative-config"
@@ -148,7 +146,7 @@ test_cases:
     server_cmd: *server_cmd
     server_cmd_extra:
       - "--max-model-len"
-      - "66600"
+      - "67584"
       - "--max-num-seqs"
       - "8"
       - "--gpu-memory-utilization"

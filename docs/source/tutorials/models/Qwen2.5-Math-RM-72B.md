@@ -2,7 +2,7 @@
 
 ## Introduction
 
-Qwen2.5-Math-RM-72B is a 72-billion parameter reward model designed for mathematical reasoning and evaluation. It is part of Alibaba Cloud's Qwen 2.5 series, specifically optimized for scoring and ranking mathematical problem solutions. The model supports a maximum context window of 128K tokens and delivers enhanced capabilities in mathematical computation, step-by-step reasoning evaluation, and solution quality assessment.
+Qwen2.5-Math-RM-72B is a 72-billion parameter reward model designed for mathematical reasoning and evaluation. It is part of Alibaba Cloud's Qwen 2.5 series, specifically optimized for scoring and ranking mathematical problem solutions. The model supports a maximum context window of 128k tokens and delivers enhanced capabilities in mathematical computation, step-by-step reasoning evaluation, and solution quality assessment.
 
 This document provides a detailed workflow for the complete deployment and verification of the model, including supported features, environment preparation, single-node deployment, functional verification, and performance evaluation.
 
@@ -10,18 +10,18 @@ The `Qwen2.5-Math-RM-72B` model is supported since `vllm-ascend:v0.9.0`.
 
 ## Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
 ### Model Weight
 
 - `Qwen2.5-Math-RM-72B` (BF16 version):
-    - With CPU offloading: requires at least 1 Atlas 910B4 (32G × 1) card or higher
-    - Without CPU offloading: requires at least 4 Atlas 910B4 (32G × 4) cards or higher
-  [Download model weight](https://modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)
+    - With CPU offloading: requires at least 1 Atlas 910B4 (32GB × 1) card or higher
+    - Without CPU offloading: requires at least 4 Atlas 910B4 (32GB × 4) cards or higher
+  [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen2.5-Math-RM-72B)
 
 It is recommended to download the model weights to a local directory (e.g., `./Qwen2.5-Math-RM-72B/`) for quick access during deployment.
 
@@ -31,7 +31,7 @@ You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly.
 
 These versions support multi-NPU deployment, allowing the model to utilize all available NPU devices (e.g., 4 NPUs) for improved performance.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}

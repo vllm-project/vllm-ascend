@@ -60,15 +60,15 @@ Decode DP size. For example, when starting a DP2TP8 Decode service, setting
 offload space. To avoid ambiguity, use `cpu_bytes_to_use_per_rank` for new
 deployments.
 
-`recompute_scheduler_enable` must also be enabled in `additional-config` on
+`scheduler_config.recompute_scheduler_enable` must also be enabled in `additional-config` on
 P/D-disaggregated Decode nodes:
 
 ```bash
---additional-config '{"recompute_scheduler_enable":true}'
+--additional-config '{"scheduler_config":{"recompute_scheduler_enable":true}}'
 ```
 
 ```{note}
-`recompute_scheduler_enable` is only valid in P/D-disaggregated mode
+`scheduler_config.recompute_scheduler_enable` is only valid in P/D-disaggregated mode
 (`kv_role` is `kv_producer` or `kv_consumer`). Do not enable it in PD-mixed
 mode (`kv_role` is `kv_both`).
 ```
@@ -85,10 +85,9 @@ For typical A3 deployments with a large recompute-offload budget, set
 `--shm-size=1024g` when starting the container. The following snippet follows
 the Docker style used by the DeepSeek-V4-Flash tutorial:
 
-```{code-block} bash
-   :substitutions:
+```bash
 
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
 docker run --rm \
     --name vllm-ascend \
     --shm-size=1024g \
@@ -142,7 +141,7 @@ python3 -m vllm.entrypoints.openai.api_server \
     --max-model-len 32768 \
     --block-size 128 \
     --max-num-batched-tokens 4096 \
-    --additional-config '{"recompute_scheduler_enable":true}' \
+    --additional-config '{"scheduler_config":{"recompute_scheduler_enable":true}}' \
     --kv-transfer-config \
     '{
       "kv_connector": "MultiConnector",
@@ -213,7 +212,7 @@ For online serving:
 
 ```bash
 vllm serve /path/to/model \
-    --additional-config '{"recompute_scheduler_enable":true}' \
+    --additional-config '{"scheduler_config":{"recompute_scheduler_enable":true}}' \
     --kv-transfer-config '{
         "kv_connector": "RecomputeCPUOffloadConnector",
         "kv_role": "kv_consumer",
@@ -260,7 +259,7 @@ allocated for the resumed request.
   scheduler.
 * The feature is only intended for Decode nodes in P/D disaggregation. It is not
   supported in PD-mixed or normal non-P/D deployments.
-* Do not enable `recompute_scheduler_enable` in PD-mixed deployments. Without
+* Do not enable `scheduler_config.recompute_scheduler_enable` in PD-mixed deployments. Without
   P/D-disaggregated Decode-side `RecomputeScheduler`, recompute CPU offload is
   not active and vLLM follows the normal recompute path.
 * When running in Docker with a large per-rank offload budget, reserve enough

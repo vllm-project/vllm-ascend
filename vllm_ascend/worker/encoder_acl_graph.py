@@ -27,7 +27,7 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.encoder_cudagraph import BudgetGraphMetadata, EncoderCudaGraphManager
 
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import weak_ref_tensors
 
 # ---------------------------------------------------------------------------
 # Per–encoder-budget ACL graph bookkeeping (ViT FIA tasks)
@@ -133,32 +133,45 @@ def set_encoder_forward_context(
 
 
 def maybe_compute_actual_seq_lengths(
-    num_query_tokens: int,
     cu_seqlens: torch.Tensor,
+    num_query_tokens: int,
+    num_kv_tokens: int,
+    *,
+    cudagraph_mm_encoder: bool = False,
 ) -> tuple[list[int], list[int]]:
-    """Align FIA ``actual_seq_lengths`` for eager, capture, and replay from ``cu_seqlens``.
+    """Convert ``cu_seqlens`` to FIA host ``actual_seq_lengths``.
 
-    Converts the cumulative device tensor to host ``list[int]`` in one step, drops the
-    leading zero format marker, and ensures the terminal endpoint equals ``num_query_tokens``.
+    Drops the leading-zero marker; with ``cudagraph_mm_encoder`` filters endpoints and
+    aligns the terminal to ``num_query_tokens``; when Q≠KV, scales Q endpoints by
+    ``num_kv_tokens // num_query_tokens`` for the KV list.
     """
     flat = cu_seqlens.detach().cpu().view(-1).tolist()
     actual = flat[1:] if flat else flat
 
-    if num_query_tokens <= 0:
-        return [0], [0]
+    if not cudagraph_mm_encoder:
+        pass
+    elif num_query_tokens <= 0:
+        actual = [0]
+    else:
+        filtered: list[int] = []
+        for end in actual:
+            if end <= 0:
+                continue
+            if end > num_query_tokens:
+                break
+            if not filtered or end > filtered[-1]:
+                filtered.append(end)
 
-    filtered: list[int] = []
-    for end in actual:
-        if end <= 0:
-            continue
-        if end > num_query_tokens:
-            break
-        if not filtered or end > filtered[-1]:
-            filtered.append(end)
+        if not filtered or filtered[-1] != num_query_tokens:
+            filtered.append(num_query_tokens)
+        actual = filtered
 
-    if not filtered or filtered[-1] != num_query_tokens:
-        filtered.append(num_query_tokens)
-    return filtered, filtered
+    if num_kv_tokens == num_query_tokens:
+        return actual, actual
+
+    assert num_kv_tokens % num_query_tokens == 0
+    ratio = num_kv_tokens // num_query_tokens
+    return actual, [end * ratio for end in actual]
 
 
 def update_encoder_graph_params(
@@ -205,11 +218,14 @@ def update_encoder_graph_params(
             ) = packed
 
             num_query_tokens = query.shape[0]
+            num_kv_tokens = key.shape[0]
             cu_seqlens_cpu = get_encoder_forward_context().cu_seqlens_cpu
 
             actual_seq_lengths_q, actual_seq_lengths_kv = maybe_compute_actual_seq_lengths(
-                num_query_tokens=num_query_tokens,
-                cu_seqlens=cu_seqlens_cpu,
+                cu_seqlens_cpu,
+                num_query_tokens,
+                num_kv_tokens,
+                cudagraph_mm_encoder=True,
             )
 
             torch.npu.graph_task_update_begin(update_stream, handle)
@@ -263,30 +279,18 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             self.max_frames_per_batch,
         )
 
-        if vllm_version_is("0.23.0"):
-            capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
-                token_budget,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                self.device,
-                self.dtype,
-            )
-        else:
-            capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
-                token_budget,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                self.device,
-                self.dtype,
-                path,
-            )
+        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
+            token_budget,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            self.device,
+            self.dtype,
+            path,
+        )
 
         values = capture_inputs.values
         with torch.inference_mode():
-            if vllm_version_is("0.23.0"):
-                output = self.model.encoder_cudagraph_forward(dict(values))
-            else:
-                output = self.model.encoder_cudagraph_forward(dict(values), path=path)
+            output = self.model.encoder_cudagraph_forward(dict(values), path=path)
             output_buffer = torch.empty_like(output)
 
         graph = torch.npu.NPUGraph()
@@ -295,10 +299,7 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             torch.inference_mode(),
             torch.npu.graph(graph, self.graph_pool),
         ):
-            if vllm_version_is("0.23.0"):
-                output = self.model.encoder_cudagraph_forward(dict(values))
-            else:
-                output = self.model.encoder_cudagraph_forward(dict(values), path=path)
+            output = self.model.encoder_cudagraph_forward(dict(values), path=path)
             output_buffer.copy_(output)
 
         graph_meta = BudgetGraphMetadata(
@@ -309,11 +310,8 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
             input_buffers=values,
             output_buffer=weak_ref_tensors(output_buffer),
         )
-        if vllm_version_is("0.23.0"):
-            self.budget_graphs[token_budget] = graph_meta
-        else:
-            graph_set = self._get_graph_set(path)
-            graph_set[token_budget] = graph_meta
+        graph_set = self._get_graph_set(path)
+        graph_set[token_budget] = graph_meta
 
     def _run_budget_graph(
         self,
@@ -322,33 +320,19 @@ class EncoderAclGraphManager(EncoderCudaGraphManager):
         path: str = "default",
     ) -> torch.Tensor | None:
         num_items = len(self._get_item_specs(mm_kwargs))
-        if vllm_version_is("0.23.0"):
-            if token_budget not in self.budget_graphs:
-                self.graph_misses += num_items
-                return None
-            graph_meta = self.budget_graphs[token_budget]
-        else:
-            graph_set = self._get_graph_set(path)
-            if token_budget not in graph_set:
-                self.graph_misses += num_items
-                return None
-            graph_meta = graph_set[token_budget]
+        graph_set = self._get_graph_set(path)
+        if token_budget not in graph_set:
+            self.graph_misses += num_items
+            return None
+        graph_meta = graph_set[token_budget]
 
-        if vllm_version_is("0.23.0"):
-            replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                mm_kwargs,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-            )
-            buffer_items = ((key, graph_meta.input_buffers[key]) for key in self.config.buffer_keys)
-        else:
-            replay = self.model.prepare_encoder_cudagraph_replay_buffers(
-                mm_kwargs,
-                self.max_batch_size,
-                self.max_frames_per_batch,
-                path,
-            )
-            buffer_items = graph_meta.input_buffers.items()
+        replay = self.model.prepare_encoder_cudagraph_replay_buffers(
+            mm_kwargs,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            path,
+        )
+        buffer_items = graph_meta.input_buffers.items()
 
         for key, buf in buffer_items:
             src = replay.values.get(key)

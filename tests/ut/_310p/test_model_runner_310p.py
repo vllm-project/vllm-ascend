@@ -49,6 +49,8 @@ def test_prepare_inputs_keeps_aclgraph_metadata_on_cpu() -> None:
     assert "self._positions_cpu_buf[:total_num_scheduled_tokens]" in source
     assert "self.seq_lens[:num_reqs].copy_(" in source
     assert "self.optimistic_seq_lens_cpu[:num_reqs]" in source
+    assert "self._sync_num_accepted_tokens(" in source
+    assert "self.input_batch.num_accepted_tokens_cpu[" not in source
 
 
 def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
@@ -73,7 +75,6 @@ def test_model_forward_updates_mtp_full_graph_params_before_replay() -> None:
     forward_context = SimpleNamespace(
         cudagraph_runtime_mode=CUDAGraphMode.FULL,
         capturing=False,
-        flash_comm_v1_enabled=False,
     )
 
     with patch(
@@ -131,7 +132,10 @@ class TestNPUModelRunner310(TestBase):
 
         with (
             patch("vllm_ascend._310p.model_runner_310p.NPUInputBatch") as mock_input_batch,
-            patch("vllm_ascend._310p.model_runner_310p.get_total_cp_world_size", return_value=1),
+            patch(
+                "vllm_ascend._310p.model_runner_310p.get_decode_context_model_parallel_world_size",
+                return_value=1,
+            ),
         ):
             runner.may_reinitialize_input_batch(kv_cache_config)
 

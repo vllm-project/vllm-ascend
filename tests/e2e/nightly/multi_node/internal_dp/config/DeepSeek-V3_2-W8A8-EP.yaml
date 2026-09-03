@@ -30,7 +30,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -52,7 +51,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -75,7 +74,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -98,7 +96,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_sfa_cp":false,"layer_sharding": ["q_b_proj", "o_proj"]}' 
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -119,7 +117,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
       HCCL_BUFFSIZE: 1100
     server_cmd: >
@@ -143,7 +140,7 @@ deployment:
           --max-num-seqs 14
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
+          --additional-config '{"enable_cpu_binding":false,"recompute_scheduler_enable":true,"enable_mlapo":true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -165,7 +162,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: 1
       TASK_QUEUE_ENABLE: 1
       HCCL_BUFFSIZE: 1100
     server_cmd: >
@@ -190,7 +186,7 @@ deployment:
           --max-num-seqs 14
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true}'
+          --additional-config '{"enable_cpu_binding":false,"recompute_scheduler_enable":true,"enable_mlapo":true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config 
@@ -242,7 +238,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 32
     request_rate: 0
-    baseline: 1
+    baseline: 983.2904
     threshold: 0.97
 
   perf_long:
@@ -254,7 +250,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 4
     request_rate: 1
-    baseline: 1
+    baseline: 53.0416
     threshold: 0.97
 
   acc:

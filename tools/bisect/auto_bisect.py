@@ -47,9 +47,10 @@ from tools.bisect.config import (
     TrialResult,
     Verdict,
 )
-from tools.bisect.good_table import GoodTable
+from tools.bisect.good_table import GoodTable, valid_soc
 from tools.bisect.state import BisectState
 from tools.bisect.verdict import evaluate
+from tools.bisect.version_compat import VersionAdaptationError, VersionPolicy, expected_versions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("auto_bisect")
@@ -98,7 +99,7 @@ class Bisector:
                 log_path=str(log_path),
                 note=note,
             )
-        except BuildError as exc:
+        except (BuildError, VersionAdaptationError) as exc:
             result = TrialResult(
                 candidate=candidate,
                 verdict="SKIP",
@@ -152,7 +153,7 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Bad commit could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). Fix the environment "
+                    "e.g. dependency adaptation failed). Fix the environment "
                     "before bisecting; aborting."
                 )
                 return False
@@ -168,7 +169,7 @@ class Bisector:
             if v == "SKIP":
                 logger.error(
                     "Good baseline could not even run the test (environment error, "
-                    "e.g. vllm/vllm-ascend version mismatch). The whole range is "
+                    "e.g. dependency adaptation failed). The whole range is "
                     "likely unrunnable against the installed vllm; fix the "
                     "environment before bisecting; aborting."
                 )
@@ -223,6 +224,18 @@ class Bisector:
 
         candidates = git_ops.candidate_list(self.repo, good.commit, bad.commit)
         logger.info("Search space: %d commits", len(candidates))
+        version_policy = VersionPolicy.between(
+            expected_versions(self.repo, good.commit),
+            expected_versions(self.repo, bad.commit),
+        )
+        self.runner.configure_version_policy(version_policy)
+        if version_policy.enabled:
+            logger.info(
+                "Version adaptation enabled for %s; endpoint versions differ",
+                ", ".join(version_policy.checked_packages),
+            )
+        else:
+            logger.info("Version adaptation disabled; good and bad endpoint versions match")
 
         state = BisectState.load(self.state_path, good=good.commit, bad=bad.commit) or BisectState(
             good=good.commit, bad=bad.commit, hi=len(candidates) - 1
@@ -262,7 +275,10 @@ class Bisector:
         if self.inp.good_commit:
             return self.inp.good_commit
         entry = GoodTable(self.opt.good_table_path).lookup_last_good(
-            name=self.inp.name, config_yaml=self.inp.config_yaml
+            name=self.inp.name,
+            config_yaml=self.inp.config_yaml,
+            soc=self.inp.soc,
+            scene=self.inp.scene,
         )
         if entry is None:
             raise SystemExit(
@@ -294,7 +310,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--name",
         default=None,
-        help="nightly case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
+        help="case name to match the good-table 'name' column (optional; falls back to matching by yaml/path)",
+    )
+    p.add_argument(
+        "--soc",
+        required=True,
+        type=valid_soc,
+        help="hardware generation used to select the matching good-table row",
     )
     p.add_argument("--bad-commit", default=os.getenv("VLLM_ASCEND_REF", "HEAD"))
     p.add_argument("--good-commit", default=None, help="override; else read from good table")
@@ -332,7 +354,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--fail-confirm-retries", type=int, default=1)
     p.add_argument("--no-verify-good", action="store_true")
     p.add_argument("--no-verify-bad", action="store_true")
-    p.add_argument("--trial-timeout-s", type=float, default=5400.0)
+    p.add_argument("--trial-timeout-s", type=float, default=7200.0)
     p.add_argument(
         "--force-initial-build",
         action="store_true",
@@ -391,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
         scene=args.scene,
         config_yaml=args.config_yaml,
         name=args.name,
+        soc=args.soc,
         bad_commit=args.bad_commit,
         config_base_path=args.config_base_path,
         good_commit=args.good_commit,

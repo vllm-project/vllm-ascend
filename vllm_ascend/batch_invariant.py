@@ -78,7 +78,6 @@ def override_envs_for_invariance():
 
     ascend_config = get_ascend_config()
     ascend_config.weight_nz_mode = 0
-    ascend_config.enable_matmul_allreduce = False
 
     os.environ["HCCL_DETERMINISTIC"] = "strict"
     os.environ["LCCL_DETERMINISTIC"] = "1"
@@ -88,8 +87,8 @@ def override_envs_for_invariance():
     torch.use_deterministic_algorithms(True, warn_only=True)
 
     logger.debug(
-        "Batch-invariant env override: weight_nz_mode=0, enable_matmul_allreduce=False, "
-        "HCCL_DETERMINISTIC=strict, LCCL_DETERMINISTIC=1, use_deterministic_algorithms=True",
+        "Batch-invariant env override: weight_nz_mode=0, HCCL_DETERMINISTIC=strict, "
+        "LCCL_DETERMINISTIC=1, use_deterministic_algorithms=True",
     )
 
 
@@ -116,7 +115,6 @@ def enable_batch_invariant_mode():
     if HAS_ASCENDC_BATCH_INVARIANT:
         _batch_invariant_LIB.impl("aten::mm", torch.ops.batch_invariant_ops.npu_mm_batch_invariant, "NPU")
         _batch_invariant_LIB.impl("aten::matmul", torch.ops.batch_invariant_ops.npu_matmul_batch_invariant, "NPU")
-        _batch_invariant_LIB.impl("aten::sum", torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant, "NPU")
         # torch_npu.npu_fused_infer_attention_score is a function of torch_npu, not a torch.ops.Operator,
         # so we need to patch it directly.
         torch_npu.npu_fused_infer_attention_score = (
@@ -126,6 +124,8 @@ def enable_batch_invariant_mode():
         torch_npu.npu_add_rms_norm = add_rms_norm
         # torch.sum can't be replaced by dispatch logic, so we patch it directly.
         torch.sum = reduce_sum
+        # Tensor.sum uses the same batch-invariant reduce_sum implementation.
+        torch.Tensor.sum = reduce_sum
 
     # register triton implementations if ascendc is not available.
     elif HAS_TRITON:

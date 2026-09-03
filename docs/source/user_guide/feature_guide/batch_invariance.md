@@ -3,12 +3,12 @@
 !!! note
 
     Batch invariance is currently in beta. Some features are still under active development.
-    Track progress and planned improvements at <https://github.com/vllm-project/vllm-ascend/issues/5487>
+    Track progress and planned improvements at [tracking issue #5487](https://github.com/vllm-project/vllm-ascend/issues/5487)
 
 !!! note
 
     To install the batch invariance custom operator library, set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend.
-    For installation instructions, see <https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md#set-up-using-python>
+    For installation instructions, see [installing in an existing CANN environment](../../getting_started/installation.md#installation-existing-cann-install).
 
 This document shows how to enable batch invariance in vLLM-Ascend. Batch invariance ensures that the output of a model is deterministic and independent of the batch size or the order of requests in a batch.
 
@@ -28,7 +28,70 @@ We will support Ascend 950 Products and other NPUs in the future.
 
 ## Software Requirements
 
-Batch invariance requires a custom operator library for Atlas A2 and A3 inference products, and users need to set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend to install the batch invariance custom operator library during the installation process.
+Batch invariance requires custom operators for Atlas A2 and A3 inference products. Set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend from source to build and install the required operator packages.
+
+The `batch_invariant_ops` build and installation process consists of two stages as in the [build_batch_invariant_ops.sh](https://github.com/vllm-project/vllm-ascend/blob/main/csrc/build_batch_invariant_ops.sh), which must run in order:
+
+1. Install the operator run package. It provides the device-side batch-invariant operators implemented with AscendC.
+2. Build and install the `batch_invariant_ops` wheel. It provides the PyTorch extension interfaces that invoke the AscendC operators.
+
+!!! note
+
+    A prebuilt vllm-ascend wheel does not include the `csrc` directory or `csrc/build_batch_invariant_ops.sh`, and setting `VLLM_BATCH_INVARIANT=1` while installing that wheel does not rebuild the operators. Manual operator installation requires a matching vllm-ascend source checkout. `<vllm-ascend-source-dir>` in the following commands refers to that checkout, not the wheel's `site-packages` directory.
+
+### Install from source
+
+#### Option 1: Install vllm-ascend and the operator packages together
+
+The environment variable is consumed by the source build. It works with both a regular source installation and an editable source installation when custom kernel compilation is enabled:
+
+```bash
+cd <vllm-ascend-source-dir>
+
+# Regular source installation
+COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
+    pip install . --no-build-isolation
+
+# Editable source installation
+COMPILE_CUSTOM_KERNELS=1 VLLM_BATCH_INVARIANT=1 \
+    pip install -e . --no-build-isolation
+```
+
+#### Option 2: Install the operator packages if vllm-ascend is already installed
+
+Obtain a vllm-ascend source tree that matches the installed package version, then build and install the operator packages from that source tree.
+
+**A2:**
+
+```bash
+cd <vllm-ascend-source-dir>
+bash csrc/build_batch_invariant_ops.sh ascend910b
+```
+
+**A3:**
+
+```bash
+cd <vllm-ascend-source-dir>
+bash csrc/build_batch_invariant_ops.sh ascend910_93
+```
+
+### Use Docker images
+
+The A2 and A3 Docker images build vllm-ascend from source with `VLLM_BATCH_INVARIANT=1`, so the image build installs both the AscendC operator run package and the `batch_invariant_ops` wheel. This build-time environment variable is not retained as a runtime setting. Set `VLLM_BATCH_INVARIANT=1` when starting the server or running offline inference to enable batch invariance.
+
+### Quick Check
+
+After installation, verify the ops are available:
+
+```bash
+python -c "
+import batch_invariant_ops
+import torch
+op = torch.ops.batch_invariant_ops.npu_matmul_batch_invariant
+print(op)
+assert 'npu_matmul_batch_invariant' in str(op)
+"
+```
 
 ## Enabling Batch Invariance
 
@@ -128,7 +191,7 @@ When batch invariance is enabled, vLLM:
 !!! note
 
     The batch invariance attention operators currently do not support
-    `FULL'、'FULL_DECODE_ONLY` cudagraph mode.
+    `FULL`,`FULL_DECODE_ONLY` cudagraph mode.
 
 !!! note
 
@@ -139,7 +202,7 @@ When batch invariance is enabled, vLLM:
 The batch invariance feature is under active development. Planned improvements include:
 
 - Support for additional NPUs series
-- Support `FULL'、'FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
+- Support `FULL`,`FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
 - Expanded model coverage
 - Performance optimizations
 - Additional testing and validation

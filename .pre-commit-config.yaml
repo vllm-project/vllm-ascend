@@ -1,6 +1,6 @@
 default_install_hook_types:
   - pre-commit
-  - commit-msg
+  - prepare-commit-msg
 
 default_stages:
   - pre-commit # Run locally
@@ -22,7 +22,7 @@ repos:
       args: [
         --toml, pyproject.toml,
         '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
-        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter,mata,PARD'
+        '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter,mata,PARD,uSeed,LoadIn'
       ]
       additional_dependencies:
         - tomli
@@ -57,9 +57,15 @@ repos:
   hooks:
   - id: actionlint
     exclude: '.*\.github/workflows/(scripts|configs)/.*\.ya?ml$'
-
+        
 - repo: local
   hooks:
+  - id: gitleaks-offline-scan
+    name: Gitleaks Secret Scan(Local Binary)
+    entry: .github/workflows/scripts/gitleaks.sh
+    language: system
+    pass_filenames: false
+    always_run: true
   - id: shellcheck
     name: Lint shell scripts
     entry: tools/shellcheck.sh
@@ -76,12 +82,13 @@ repos:
     args:
       - -c
       - |
-        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$(git rev-parse --git-path COMMIT_EDITMSG)"; then
-          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$(git rev-parse --git-path COMMIT_EDITMSG)"
+        if ! grep -q "^Signed-off-by: $(git config user.name) <$(git config user.email)>" "$1"; then
+          printf "\nSigned-off-by: $(git config user.name) <$(git config user.email)>\n" >> "$1"
         fi
+      - --
     language: system
     verbose: true
-    stages: [commit-msg]
+    stages: [prepare-commit-msg]
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -93,7 +100,7 @@ repos:
     pass_filenames: false
   - id: python-init
     name: Enforce __init__.py in Python packages
-    entry: python tools/check_python_src_init.py
+    entry: python3 tools/check_python_src_init.py
     language: python
     types: [python]
     pass_filenames: false
@@ -105,23 +112,23 @@ repos:
     pass_filenames: false
   - id: check-forbidden-imports
     name: Check for forbidden imports
-    entry: python tools/check_forbidden_imports.py
+    entry: python3 tools/check_forbidden_imports.py
     language: python
     types: [python]
     additional_dependencies: [regex]
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
-    entry: python tools/check_boolean_context_manager.py
+    entry: python3 tools/check_boolean_context_manager.py
     language: python
     types: [python]
   - id: check-long-functions
     name: Check that new functions over 100 lines have comments
-    entry: python tools/check_long_functions.py
+    entry: python3 tools/check_long_functions.py
     language: system
     types: [python]
   - id: check-symbolic-meta
     name: Check symbolic shapes in meta kernels
-    entry: python tools/check_symbolic_meta.py
+    entry: python3 tools/check_symbolic_meta.py
     language: system
     pass_filenames: false
   # Keep `suggestion` last

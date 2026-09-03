@@ -33,7 +33,6 @@ MOE_MODELS = [
 DATA_PARALLELS = [2]
 TENSOR_PARALLELS = [1]
 PIPELINE_PARALLELS = [2]
-PREFILL_CONTEXT_PARALLELS = [2]
 DIST_EXECUTOR_BACKEND = ["mp", "ray"]
 
 prompts = [
@@ -145,30 +144,5 @@ def test_models_pp2_dp2(model: str, dp_size: int, pp_size: int, distributed_exec
             outputs_0_lst=outputs,
             outputs_1_lst=GOLDEN,
             name_0=f"{model}-dp{dp_size}pp{pp_size}",
-            name_1="GOLDEN",
-        )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("pcp_size", PREFILL_CONTEXT_PARALLELS)
-@pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
-@wait_until_npu_memory_free(target_free_percentage=0.6)
-def test_models_pp2_pcp2(model: str, pcp_size: int, pp_size: int) -> None:
-    with VllmRunner(
-        model,
-        prefill_context_parallel_size=pcp_size,
-        pipeline_parallel_size=pp_size,
-        compilation_config={
-            "cudagraph_mode": "PIECEWISE",
-            "cudagraph_capture_sizes": [1, 2, 4],
-        },
-        gpu_memory_utilization=0.7,
-        enable_expert_parallel=model in MOE_MODELS,
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, 16)
-        check_outputs_equal(
-            outputs_0_lst=outputs,
-            outputs_1_lst=GOLDEN,
-            name_0=f"{model}-pcp{pcp_size}pp{pp_size}",
             name_1="GOLDEN",
         )

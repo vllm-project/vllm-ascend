@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, Mock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant import (
+from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4_flatquant import (
     MAX_SUPPORT_DIM,
     AscendW4A4MXFP4FlatQuantDynamicLinearMethod,
     get_decompose_dim,
@@ -54,13 +54,12 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
             quant_description={"group_size": group_size, "max_supported_tp": max_supported_tp}
         )
         with (
-            patch("vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.ensure_mxfp4_flatquant_linear_available"),
             patch(
-                "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4_flatquant.get_current_vllm_config",
                 return_value=mock_vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.get_tensor_model_parallel_world_size",
+                "vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4_flatquant.get_tensor_model_parallel_world_size",
                 return_value=tp_size,
             ),
         ):
@@ -120,7 +119,7 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
             (self.output_size, self.input_size // self.group_size),
         )
 
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4_flatquant.torch_npu")
     def test_apply(self, mock_torch_npu):
         layer = MagicMock()
         layer.left_trans = torch.randn(32, 32)
@@ -147,7 +146,7 @@ class TestAscendW4A4MXFP4FlatQuantDynamicLinearMethod(TestBase):
         self.assertEqual(call_kwargs["group_sizes"], [1, 1, self.method.group_size])
         self.assertEqual(output.shape, (batch, self.output_size))
 
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4_flatquant.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4_flatquant.torch_npu")
     def test_apply_preserves_input_shape(self, mock_torch_npu):
         layer = MagicMock()
         layer.left_trans = torch.randn(32, 32)

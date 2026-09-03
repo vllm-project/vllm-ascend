@@ -2,7 +2,7 @@
 
 ## Overview
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules—such as embedding, language model head (lm_head), attention output projection (o_proj), and MLP blocks—via the `finegrained_tp_config` parameter.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules—such as embedding, LM head, attention output projection (o_proj), and MLP blocks—via the `finegrained_tp_config` parameter.
 
 This capability supports heterogeneous parallelism strategies within a single model, providing finer control over weight distribution, memory layout, and communication patterns across devices. The feature is compatible with standard dense transformer architectures and integrates seamlessly into vLLM’s serving pipeline.
 
@@ -13,10 +13,10 @@ This capability supports heterogeneous parallelism strategies within a single mo
 Fine-Grained Tensor Parallelism delivers two primary performance advantages through targeted weight sharding:
 
 - **Reduced Per-Device Memory Footprint**:  
-  Fine-grained TP shards large weight matrices (e.g., LM Head, o_proj) across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware—without quantization.
+  Fine-grained TP shards large weight matrices (e.g., LM head, o_proj) across devices, lowering peak memory usage and enabling larger batches or deployment on memory-limited hardware—without quantization.
   
 - **Faster Memory Access in GEMMs**:  
-  In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency—especially for latency-sensitive layers like LM Head and o_proj.
+  In decode-heavy workloads, GEMM performance is often memory-bound. Weight sharding reduces per-device weight fetch volume, cutting DRAM traffic and improving bandwidth efficiency—especially for latency-sensitive layers like LM head and o_proj.
 
 Together, these effects allow practitioners to better balance memory, communication, and compute—particularly in high-concurrency serving scenarios—while maintaining compatibility with standard dense transformer models.
 
@@ -35,11 +35,11 @@ Fine-grained TP is **model-agnostic** and supports all standard dense transforme
 | **embedding** | ✅     | ✅     | ✅      | ✅       | ✅      |
 | **o_proj**    | ❌     | ✅     | ❌      | ❌       | ✅      |
 | **mlp**       | ✅     | ✅     | ✅      | ✅       | ✅      |
-| **LMhead**    | ✅     | ✅     | ✅      | ✅       | ✅      |
+| **LM head**   | ✅     | ✅     | ✅      | ✅       | ✅      |
 
 > ⚠️ Note:  
 >
-> - `o_proj` TP is only supported in Graph mode during Decode, because dummy_run in eager mode will not trigger o_proj.
+> - `o_proj` TP is only supported in Graph mode during Decode, because dummy_run in eager mode will not trigger o_proj. It additionally requires `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) below.
 > - `mlp` TP supports dense models, or dense layers in MoE models. For example, the first three dense layers of DeepSeek-R1.
 
 ### Configuration Limit
@@ -50,6 +50,15 @@ The Fine-Grained TP size for any component must:
 - **Evenly divide the DP size** (i.e., `dp_size % tp_size == 0`) to ensure valid device assignment and communication grouping.
 
 > ⚠️ Violating these constraints will result in runtime errors or undefined behavior.
+
+### Standard Tensor Parallelism Requirement
+
+Fine-grained TP shards the configured layer **across the data-parallel (DP) dimension**, not the standard tensor-parallel (TP) dimension. Its interplay with the standard `tensor_parallel_size` therefore differs per component:
+
+| Component | Behavior with `tensor_parallel_size > 1` |
+|-----------|------------------------------------------|
+| `o_proj` | **Not supported.** The DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension). The two axes no longer align, so a config-time error is raised requiring `tensor_parallel_size == 1`. |
+| `embedding` / LM head / `mlp` | **Supported, but only effective under `tensor_parallel_size == 1`.** All three components are sharded along the fine-grained (DP-realm) group, whose process group is built along the DP axis at a fixed `tp_idx` — orthogonal to the standard TP axis. When `tensor_parallel_size > 1`, the standard TP sharding and the fine-grained sharding operate on different axes of the rank grid and can no longer compose: the fine-grained group's ranks all share the same standard-TP weight shard, so fine-grained TP cannot deliver additional sharding. In other words, these components are designed for the all-DP (`tensor_parallel_size == 1`) decode scenario; under `tensor_parallel_size > 1` the standard TP dimension takes over and the fine-grained configuration does not take effect. |
 
 ---
 

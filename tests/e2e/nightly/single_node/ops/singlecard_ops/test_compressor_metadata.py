@@ -199,6 +199,22 @@ DSV4_FLASH_CASES = [
         block_table=((7,), (8,)),
         expected_slot_mapping=((7, 1),) + _invalid_block_offset_rows(1),
     ),
+    CompressorMetadataCase(
+        name="dsv4_flash_c4_logical_table_crosses_512_raw_tokens",
+        compress_ratio=4,
+        query_start_loc=(0, 8),
+        start_pos=(508,),
+        block_table=((10, 11),),
+        expected_slot_mapping=((10, 127), (11, 0)),
+    ),
+    CompressorMetadataCase(
+        name="dsv4_flash_c128_logical_table_crosses_16384_raw_tokens",
+        compress_ratio=128,
+        query_start_loc=(0, 256),
+        start_pos=(16256,),
+        block_table=((20, 21),),
+        expected_slot_mapping=((20, 127), (21, 0)),
+    ),
     *(
         _case_with_format(case["name"], slot_mapping_format, **{k: v for k, v in case.items() if k != "name"})
         for case in DSV4_FLASH_MIXED_CASES
@@ -207,8 +223,12 @@ DSV4_FLASH_CASES = [
 ]
 
 
-def _make_rope() -> tuple[torch.Tensor, torch.Tensor]:
-    values = torch.arange(ROPE_ROWS * ROPE_DIM, dtype=torch.float32).reshape(ROPE_ROWS, ROPE_DIM)
+def _make_rope(case: CompressorMetadataCase) -> tuple[torch.Tensor, torch.Tensor]:
+    max_position = max(
+        start + case.query_start_loc[idx + 1] - case.query_start_loc[idx] for idx, start in enumerate(case.start_pos)
+    )
+    rope_rows = max(ROPE_ROWS, max_position + 1)
+    values = torch.arange(rope_rows * ROPE_DIM, dtype=torch.float32).reshape(rope_rows, ROPE_DIM)
     return values.to(torch.bfloat16), (values * 0.25).to(torch.bfloat16)
 
 
@@ -283,7 +303,7 @@ def _reference_outputs(
 @pytest.mark.parametrize("case", DSV4_FLASH_CASES, ids=[case.name for case in DSV4_FLASH_CASES])
 def test_compressor_metadata_dsv4_flash_real_metadata(case: CompressorMetadataCase):
     torch.npu.set_device(0)
-    rope_cos, rope_sin = _make_rope()
+    rope_cos, rope_sin = _make_rope(case)
     expected_cos, expected_sin, reference_slot = _reference_outputs(case, rope_cos, rope_sin)
     if case.expected_slot_mapping is None:
         expected_slot = reference_slot

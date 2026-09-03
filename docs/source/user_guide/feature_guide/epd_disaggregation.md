@@ -14,7 +14,7 @@ Ultimately, these architectural patterns maximize inference efficiency by addres
 
 ## Why disaggregated-encoder?
 
-A **disaggregated encoder** runs the vision-encoder stage of a multimodal LLM in a process that is separate from the pre-fill / decoder stage. Deploying these two stages in independent vLLM instances brings three practical benefits:
+A **disaggregated encoder** runs the vision-encoder stage of a multimodal LLM in a process that is separate from the prefill / decoder stage. Deploying these two stages in independent vLLM instances brings three practical benefits:
 
 1. **Independent, fine-grained scaling**  
 
@@ -25,7 +25,7 @@ A **disaggregated encoder** runs the vision-encoder stage of a multimodal LLM in
 2. **Lower time-to-first-token (TTFT)**
 
    * Language-only requests bypass the vision encoder entirely.  
-   * Encoder output is injected only at required attention layers, shortening the pre-fill critical path.  
+   * Encoder output is injected only at required attention layers, shortening the prefill critical path.  
 
 3. **Cross-process reuse and caching of encoder outputs**
 
@@ -56,7 +56,7 @@ The ready-to-run scripts below show the workflow:
 Disaggregated encoding is implemented by running two parts:
 
 * **Encoder instance** – a vLLM instance to perform vision encoding.
-* **Prefill/Decode (PD) instance(s)** – runs language pre-fill and decode.
+* **Prefill/Decode (PD) instance(s)** – runs language prefill and decode.
     * PD can be in either a single normal instance with (E + PD) or in disaggregated instances with (E + P + D)
 
 A connector transfers encoder-cache (EC) embeddings from the encoder instance to the PD instance.  
@@ -68,7 +68,7 @@ All related code is under `vllm/distributed/ec_transfer`.
     * *Scheduler role* – checks cache existence and schedules loads.  
     * *Worker role* – loads the embeddings into memory.
 
-* **EPD Load Balancing Proxy** -
+* **EPD Load Balancing Proxy**
     * *Multi-Path Scheduling Strategy* - dynamically diverts the multimodal request or text requests to the corresponding inference path
     * *Instance-Level Dynamic Load Balancing* -  dispatches multimodal requests based on a least-loaded strategy, using a priority queue to balance the active token workload across instances.
   

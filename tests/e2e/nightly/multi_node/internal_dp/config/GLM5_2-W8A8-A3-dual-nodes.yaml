@@ -9,13 +9,10 @@ env_common: &env_common
   OMP_NUM_THREADS: 1
   HCCL_BUFFSIZE: 200
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_MLAPO: 1
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   VLLM_RPC_TIMEOUT: "600"
   SERVER_PORT: 8080
 
-special_dependencies:
-  transformers: "5.12.0"
 # TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
 
 deployment:
@@ -39,7 +36,7 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --additional-config '{"multistream_overlap_shared_expert":true}'
+      --additional-config '{"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
   -
@@ -64,7 +61,7 @@ deployment:
       --trust-remote-code
       --gpu-memory-utilization 0.95
       --quantization ascend
-      --additional-config '{"multistream_overlap_shared_expert":true}'
+      --additional-config '{"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager":true}'
 benchmarks:
@@ -87,5 +84,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 3
     request_rate: 0
-    baseline: 1
+    baseline: 55.988
     threshold: 0.97

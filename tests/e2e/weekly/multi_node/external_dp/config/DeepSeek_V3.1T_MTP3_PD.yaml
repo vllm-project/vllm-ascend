@@ -47,6 +47,7 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   ASCEND_LOG_DEVICE_FLUSH_TIMEOUT: "0"
@@ -58,11 +59,9 @@ env_common: &env_common
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   TASK_QUEUE_ENABLE: 1
   HCCL_OP_EXPANSION_MODE: "AIV"
   VLLM_USE_V1: "1"
-  ASCEND_BUFFER_POOL: "4:8"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
 
 
@@ -112,7 +111,7 @@ templates:
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -153,7 +152,7 @@ templates:
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp": true}'
+      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -195,7 +194,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"finegrained_tp_config":{"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 
@@ -237,7 +236,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"finegrained_tp_config": {"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert": true}'
+      - '{"finegrained_tp_config":{"lmhead_tensor_parallel_size":8},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 8}, "decode": {"dp_size": 32, "tp_size": 1}}}'
 

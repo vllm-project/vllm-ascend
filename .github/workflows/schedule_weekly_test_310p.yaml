@@ -53,7 +53,31 @@ on:
         required: false
         default: ''
         type: string
-
+      aop_enabled:
+        description: 'Enable AOP hooks (capture / classify / skip-or-process)'
+        required: false
+        default: false
+        type: boolean
+      build_type:
+        description: 'Build type: daily or release.'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - daily
+      base_image_tag:
+        description: 'Base image tag params. Default auto-picks latest image; set a date (YYYYMMDD) to pin it.'
+        required: false
+        default: '{"cann_version":"9.1.0_20260731131545","base_image_date":"auto"}'
+        type: string
+      bisect_good_commit:
+        description: 'explicit good commit for bisect (overrides good_table lookup)'
+      bisect_args_json:
+        description: 'JSON object containing optional bisect parameters'
+        required: false
+        default: '{}'
+        type: string
 permissions:
   contents: read
   pull-requests: read
@@ -129,18 +153,18 @@ jobs:
           } >> $GITHUB_OUTPUT
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout PR code
         if: github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_ref != ''
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           ref: ${{ inputs.vllm_ascend_ref }}
           sparse-checkout: .github/workflows/configs/
           path: ./pr
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
 
@@ -167,10 +191,17 @@ jobs:
     with:
       target: 310p
       vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
+      build_type: ${{ inputs.build_type }}
+      quay_daily_username: ${{ vars.QUAY_DAILY_USERNAME }}
+      cann_version: ${{ fromJSON(inputs.base_image_tag).cann_version }}
+      base_image_date: ${{ fromJSON(inputs.base_image_tag).base_image_date }}
     secrets:
       HW_USERNAME: ${{ secrets.HW_USERNAME }}
       HW_TOKEN: ${{ secrets.HW_TOKEN }}
+      HW_USERNAME_DAILY: ${{ secrets.HW_USERNAME_DAILY }}
+      HW_TOKEN_DAILY: ${{ secrets.HW_TOKEN_DAILY }}
       GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+      QUAY_DAILY_PASSWORD: ${{ secrets.QUAY_DAILY_PASSWORD }}
 
   single-node-tests:
     name: single-node
@@ -188,11 +219,14 @@ jobs:
     uses: ./.github/workflows/_e2e_nightly_single_node.yaml
     with:
       runner: ${{ matrix.test_config.os }}
+      soc_version: 310p
+      test_frequency: weekly
       image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-${{ matrix.vllm_ascend_branch }}-310p'
       tests: ${{ matrix.test_config.tests }}
       config_file_path: ${{ matrix.test_config.config_file_path }}
       config_base_path: tests/e2e/weekly/single_node/configs/
       name: ${{ matrix.test_config.name }}
+      vllm_ascend_branch: ${{ matrix.vllm_ascend_branch }}
       testcase_timeout: 600
       should_run: >-
         ${{
@@ -203,6 +237,18 @@ jobs:
         }}
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
+      aop_single_enabled: ${{ inputs.aop_enabled }}
+      bisect_good_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').good_commit || '' }}
+      bisect_bad_commit: ${{ fromJSON(inputs.bisect_args_json || '{}').bad_commit || 'HEAD' }}
+      bisect_fail_confirm_retries: ${{ fromJSON(inputs.bisect_args_json || '{}').fail_confirm_retries || '' }}
+      bisect_trial_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').trial_timeout || '' }}
+      bisect_barrier_timeout: ${{ fromJSON(inputs.bisect_args_json || '{}').barrier_timeout || '' }}
+      bisect_no_verify_good: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_good || false }}
+      bisect_no_verify_bad: ${{ fromJSON(inputs.bisect_args_json || '{}').no_verify_bad || false }}
+      bisect_force_initial_build: ${{ fromJSON(inputs.bisect_args_json || '{}').force_initial_build || false }}
+      bisect_config_base_path: tests/e2e/weekly/single_node/configs/
+    secrets:
+      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
 
   merge-benchmark-artifacts:
     name: Merge benchmark artifacts into weekly-310p.zip

@@ -5,8 +5,8 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.utils import refresh_all_lora_classes
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
 
 # The platforms that are compatible with the PyTorch-native implementation can
@@ -22,7 +22,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if get_ascend_device_type() == AscendDeviceType._310P or (
+        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
             self.lora_config is not None and self.lora_config.max_lora_rank >= 128
         ):
             from vllm.lora.ops.torch_ops import (
@@ -48,6 +48,25 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+
+    def update_metadata(
+        self,
+        mapping,
+        lora_index_to_id,
+        max_loras,
+        vocab_size,
+        **kwargs,
+    ) -> None:
+        super().update_metadata(
+            mapping,
+            lora_index_to_id,
+            max_loras,
+            vocab_size,
+            **kwargs,
+        )
+        # PunicaWrapperBase computes this only for prefill. Decode must also
+        # choose between the active-LoRA and base-only quantized MoE paths.
+        self.no_lora = not any(lora_id > 0 for lora_id in mapping.index_mapping)
 
     def _shrink_prefill(
         self,

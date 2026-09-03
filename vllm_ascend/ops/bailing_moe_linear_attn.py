@@ -26,13 +26,13 @@ transparently replaced at instantiation time when running on Ascend NPU.
 import torch
 import torch.nn.functional as F
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fla.ops.layernorm_guard import layernorm_fn
 from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import (  # type: ignore[import-not-found]
     clear_linear_attention_cache_for_new_sequences,
     linear_attention_decode,
     linear_attention_prefill_and_mix,
 )
 from vllm.model_executor.models.bailing_moe_linear import BailingMoELinearAttention
+from vllm.third_party.flash_linear_attention.ops.layernorm_guard import layernorm_fn
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 

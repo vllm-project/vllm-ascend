@@ -50,15 +50,11 @@ Based on the above content, we present a brief description of the adaptation pro
 
 ### Quantization Algorithm Adaptation
 
-- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, pertensor/perchannel/pergroup).
+- **Step 1: Algorithm Design**. Define the algorithm ID (e.g., `W4A8_DYNAMIC`), determine supported layers (linear, moe, attention), and design the quantization scheme (static/dynamic, Per-Tensor/Per-Channel/Per-Group).
 - **Step 2: Registration**. Use the `@register_scheme` decorator in `vllm_ascend/quantization/methods/registry.py` to register your quantization scheme class.
 
 ```python
-from vllm_ascend.quantization.methods import register_scheme, AscendLinearScheme, AscendMoEScheme
-
-@register_scheme("W4A8_DYNAMIC", "linear")
-class AscendW4A8DynamicLinearMethod(AscendLinearScheme):
-    ...
+from vllm_ascend.quantization.methods import register_scheme, AscendMoEScheme
 
 @register_scheme("W4A8_DYNAMIC", "moe")
 class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
@@ -105,10 +101,10 @@ vLLM Ascend supports multiple quantization algorithms. The following table provi
 | `W8A16`                  | INT8   | FP16/BF16  | Per-Channel        | Per-Tensor             | Static  | 8-bit weight quantization with 16-bit activation precision, balancing accuracy and performance, suitable for linear layers                                         |
 | `W8A8`                   | INT8   | INT8       | Per-Channel        | Per-Tensor             | Static  | Static activation quantization, suitable for scenarios requiring high precision                                                                                    |
 | `W8A8_DYNAMIC`           | INT8   | INT8       | Per-Channel        | Per-Token              | Dynamic | Dynamic activation quantization with per-token scaling factor calculation                                                                                          |
-| `W4A8_DYNAMIC`           | INT4   | INT8       | Per-Group          | Per-Token              | Dynamic | Supports both direct per-channel quantization to 4-bit and two-step quantization (per-channel to 8-bit then per-group to 4-bit)                                    |
+| `W4A8_DYNAMIC`           | INT4   | INT8       | Per-Channel        | Per-Token              | Dynamic | 4-bit per-channel weight quantization with 8-bit dynamic per-token activation, supporting msModelSlim and LLM-Compressor weight formats for MoE layers           |
 | `W4A4_FLATQUANT_DYNAMIC` | INT4   | INT4       | Per-Channel        | Per-Token              | Dynamic | Uses FlatQuant for activation distribution smoothing before 4-bit dynamic quantization, with additional matrix multiplications for precision preservation          |
 | `W8A8_MIX`               | INT8   | INT8       | Per-Channel        | Per-Tensor/Token       | Mixed   | We support two deployment modes: PD Colocation (dynamic quantization for both P and D) and PD Disaggregation (dynamic-quant P and static-quant D) |
 
 **Static vs Dynamic:** Static quantization uses pre-computed scaling factors with better performance, while dynamic quantization computes scaling factors on-the-fly for each token/activation tensor with higher precision.
 
-**Granularity:** Refers to the scope of scaling factor computation (e.g., per-tensor, per-channel, per-group).
+**Granularity:** Refers to the scope of scaling factor computation (e.g., Per-Tensor, Per-Channel, Per-Group).

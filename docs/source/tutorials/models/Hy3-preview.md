@@ -8,16 +8,16 @@ This guide records the verified vLLM Ascend serving path for Hy3-preview on one 
 
 ## Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
 ### Model Weight
 
 - Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)
-- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
+- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
 - GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)
 
 Download or mount the checkpoint to a path shared by the runtime container, for example `/models/Hy3-preview`.
@@ -68,7 +68,7 @@ You can use our official docker image to run Hy3-preview directly. For Atlas A3 
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 ## Deployment
 
@@ -97,7 +97,7 @@ vllm serve ${MODEL_PATH} \
   --port 8000
 ```
 
-- `--enable-ep-weight-filter` is optional. It skips expert weights that do not belong to the local EP rank during loading, reducing disk and host-memory pressure for very large MoE checkpoints. We recommend keeping it enabled.
+- `--enable-ep-weight-filter` recommended. It skips expert weights that do not belong to the local EP rank during loading, reducing disk and host-memory pressure for very large MoE checkpoints. We recommend keeping it enabled.
 - Tool calling and reasoning are service interfaces declared in the Hy3 README, so it is recommended to pass the corresponding `hy_v3` parsers by default.
 
 ## Functional Verification
@@ -152,8 +152,8 @@ Here are two accuracy evaluation methods.
 
 | dataset | version | metric | mode | vllm-api-general-chat | note |
 |----- | ----- | ----- | ----- | -----| ----- |
-| GSM8K | - | accuracy | gen | 93.07 | 1 Atlas 800 A3 (64G × 16) |
-| C-Eval | - | accuracy | gen | 87.64 | 1 Atlas 800 A3 (64G × 16) |
+| GSM8K | - | accuracy | gen | 93.07 | 1 Atlas A3 (64GB × 16) |
+| C-Eval | - | accuracy | gen | 87.64 | 1 Atlas A3 (64GB × 16) |
 
 ### Using Language Model Evaluation Harness
 
@@ -167,7 +167,7 @@ Refer to [Using AISBench for performance evaluation](../../developer_guide/evalu
 
 ### Using vLLM Benchmark
 
-Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/contributing/) for more details.
+Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 ### Lightweight Online Benchmark
 

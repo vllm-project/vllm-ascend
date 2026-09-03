@@ -18,7 +18,7 @@
 
 
 import torch
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention as _GDNBaseCls
 from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer
@@ -31,17 +31,41 @@ except ImportError:
     IntermediateTensors = None
 from vllm.model_executor.models.qwen3_next import Qwen3NextAttention
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.27.1"):
+    import vllm.model_executor.models.qwen3_next as qwen3_next_module
+    from vllm.model_executor.models.qwen3_next import _all_gather_hidden_and_residual
+
+    def _ascend_all_gather_hidden_and_residual(
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        full_num_tokens: int,
+        hidden_size: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return _all_gather_hidden_and_residual(
+            hidden_states,
+            residual,
+            full_num_tokens,
+            hidden_size,
+        )
+
+    qwen3_next_module._all_gather_hidden_and_residual = _ascend_all_gather_hidden_and_residual
 
 _GDN_PATCH_TARGET = _GDNBaseCls
 
 
+def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
+    """Return whether a Qwen3.5 attention layer exposes multimodal RoPE."""
+    return "qwen3_5" in attention.config.model_type and hasattr(attention.rotary_emb, "mrope_section")
+
+
 class AscendQwen3NextAttention(Qwen3NextAttention):
-    def forward(self, positions: torch.Tensor, output: torch.Tensor, hidden_states: torch.Tensor):
+    def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
         qkv, _ = self.qkv_proj(hidden_states)
-        if "qwen3_5" in self.config.model_type:
+        if _uses_multimodal_rope(self):
             cos_sin = self.rotary_emb.cos_sin_cache[positions]
             if cos_sin.device != qkv.device:
                 cos_sin = cos_sin.to(qkv.device)
@@ -84,7 +108,10 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
 
-        output[:], _ = self.o_proj(attn_output)
+        out, _ = self.o_proj(attn_output)
+        if output is not None:
+            output[:] = out
+        return out
 
 
 class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
@@ -101,30 +128,15 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        if self.layer_idx == 0 and _EXTRA_CTX.flash_comm_v1_enabled:
-            tp_size = get_tensor_model_parallel_world_size()
-            n_out = (hidden_states.shape[0] + tp_size - 1) // tp_size
-            hidden_dim = hidden_states.shape[-1]
-            self_attention_output = torch.empty(
-                (n_out, hidden_dim), dtype=hidden_states.dtype, device=hidden_states.device
-            )
-        else:
-            self_attention_output = torch.empty_like(hidden_states)
-
         if self.layer_type == "linear_attention":
-            self.linear_attn(
-                hidden_states=hidden_states,
-                output=self_attention_output,
-            )
+            hidden_states = self.linear_attn(hidden_states=hidden_states)
         elif self.layer_type == "full_attention":
-            self.self_attn(
+            hidden_states = self.self_attn(
                 hidden_states=hidden_states,
-                output=self_attention_output,
                 positions=positions,
             )
         else:
             raise ValueError("Invalid layer_type")
-        hidden_states = self_attention_output
 
         if self.layer_scale:
             if len(hidden_states.shape) == 2:
@@ -172,7 +184,16 @@ if Qwen3_5MultiTokenPredictor is not None:
         residual = None
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        hidden_states, residual = self.layers[current_step_idx](
+        mtp_layer = self.layers[current_step_idx]
+        if not vllm_version_is("0.27.1") and mtp_layer.use_attn_reduce_scatter_for_moe:
+            # SP chunk before decoder to keep residual shape consistent with
+            # reduced hidden_states after Qwen3NextDecoderLayer's reduce_scatter.
+            from vllm.model_executor.models.utils import sequence_parallel_chunk
+
+            assert hidden_states.shape[0] == positions.shape[-1]
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            assert residual is None
+        hidden_states, residual = mtp_layer(
             positions=positions,
             hidden_states=hidden_states,
             residual=residual,
@@ -186,19 +207,32 @@ if Qwen3_5MultiTokenPredictor is not None:
                 }
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        if vllm_version_is("0.27.1"):
+            if mtp_layer.use_attn_reduce_scatter_for_moe:
+                hidden_states, residual = _all_gather_hidden_and_residual(
+                    hidden_states,
+                    residual,
+                    positions.shape[-1],
+                    self.config.hidden_size,
+                )
+            hidden_states, _ = self.norm(hidden_states, residual)
+            return hidden_states
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
+            if mtp_layer.use_attn_reduce_scatter_for_moe:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[: positions.shape[-1]]
+            return hidden_states
 
     Qwen3_5MultiTokenPredictor.forward = qwen3_5_mtp_forward
 
 
-Qwen3_5DecoderLayer.forward = AscendQwen3_5DecoderLayer.forward
 Qwen3NextAttention.forward = AscendQwen3NextAttention.forward
 _GDN_PATCH_TARGET._split_ba_for_tp = AscendGatedDeltaNetAttention._split_ba_for_tp
 _GDN_PATCH_TARGET.get_state_shape = AscendGatedDeltaNetAttention.get_state_shape
 _GDN_PATCH_TARGET.get_attn_backend = AscendGatedDeltaNetAttention.get_attn_backend
 
-if is_310p():
+if get_current_hardware_profile().supports(HardwareCapability.GDN_COMPATIBILITY):
     from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 
     _GDN_PATCH_TARGET._forward_core = AscendGatedDeltaNetAttention310._forward_core

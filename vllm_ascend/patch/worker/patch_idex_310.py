@@ -1,5 +1,5 @@
-import vllm
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
+from vllm.third_party.flash_linear_attention.ops import index as fla_index
 
 from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 from vllm_ascend._310p.ops.fla.idex import (
@@ -11,9 +11,8 @@ from vllm_ascend.ops.gdn import AscendGatedDeltaNetAttention
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
 from vllm_ascend.utils import is_rc_device
 
-vllm.model_executor.layers.fla.ops.index.prepare_chunk_indices = prepare_chunk_indices_310
-
-vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_offsets_310
+fla_index.prepare_chunk_indices = prepare_chunk_indices_310
+fla_index.prepare_chunk_offsets = prepare_chunk_offsets_310
 
 # 310P: protect tail slot during MTP input_ids shift to avoid GatherV2 corruption
 # caused by the NPU slice-assign writing one element past the intended range
@@ -21,6 +20,10 @@ vllm.model_executor.layers.fla.ops.index.prepare_chunk_offsets = prepare_chunk_o
 AscendSpecDecodeBaseProposer.set_inputs_first_pass = (  # type: ignore[method-assign]
     AscendSpecDecodeBaseProposer310.set_inputs_first_pass
 )
+AscendSpecDecodeBaseProposer._run_merged_draft = (  # type: ignore[method-assign]
+    AscendSpecDecodeBaseProposer310._run_merged_draft
+)
+
 # Patch _warmup_prefill_kernels to no-op on 310P: triton.next_power_of_2 does
 # not exist in the triton version used on 310P CI, and NPU does not use these
 # CUDA warmup kernel anyway.
@@ -33,6 +36,10 @@ QwenGatedDeltaNetAttention.get_state_dtype = AscendGatedDeltaNetAttention310.get
 # 310P: make Qwen GDN use the 310P attention backend, including the
 # MTP ACL graph padding replay fixes provided by gdn_attn_builder_310.py.
 QwenGatedDeltaNetAttention.get_attn_backend = AscendGatedDeltaNetAttention310.get_attn_backend
+
+# Vision pos-embed: 310P images do not install Triton, so upstream
+# ``HAS_TRITON=False`` already selects ``pos_embed_interpolate_native``.
+# No ``fast_pos_embed_interpolate`` rewrite is required.
 
 if is_rc_device():
     from vllm.model_executor.models.qwen3_vl import Qwen3_VisionTransformer

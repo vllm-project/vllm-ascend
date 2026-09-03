@@ -18,8 +18,6 @@ test_cases:
       ASCEND_A3_ENABLE: "1"
       VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--tensor-parallel-size"
@@ -49,7 +47,7 @@ test_cases:
       - "--speculative-config"
       - '{"num_speculative_tokens": 3, "method":"deepseek_mtp", "enforce_eager": true}'
       - "--additional_config"
-      - '{"enable_prefill_mc2": true}'      
+      - '{"enable_prefill_mc2": true,"enable_mlapo":true}'
       - "--reasoning-parser"
       - "glm45"
       - "--tool-call-parser"
@@ -78,5 +76,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 32
         request_rate: 0
-        baseline: 1
+        baseline: 156.6562
         threshold: 0.97

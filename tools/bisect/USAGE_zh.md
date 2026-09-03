@@ -23,30 +23,50 @@
 
 ---
 
-## 三、Good 表(只读,由 nightly 流水线产出)
+## 三、Good 表(只读,由 nightly/weekly 流水线产出)
 
-Good 表就是 nightly 的状态表(CSV),**工具只读不写**。列结构:
+nightly 与 weekly 使用独立的 Good 表:
+
+```text
+/root/.cache/vllm-ascend/<branch>/nightly/good_table.csv
+/root/.cache/vllm-ascend/<branch>/weekly/good_table.csv
+```
+
+工具读取当前流水线对应的表。列结构:
 
 ```csv
-name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,time
+name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,soc,scene,time
 ```
 
 示例:
 
 ```csv
-name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,time
-DeepSeek-R1-0528-W8A8,tests/e2e/nightly/single_node/models/configs/DeepSeek-R1-0528-W8A8.yaml,https://github.com/.../job/80000000001,success,ad7125a431e1...,46356897b4d8...,2026-06-15 03:40:00 +08:00
-DeepSeek-R1-0528-W8A8,tests/e2e/nightly/single_node/models/configs/DeepSeek-R1-0528-W8A8.yaml,https://github.com/.../job/81510428999,failure,ad7125a431e1...,b545857e2983...,2026-06-16 03:46:00 +08:00
+name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,soc,scene,time
+DeepSeek-R1-0528-W8A8,tests/e2e/nightly/single_node/models/configs/DeepSeek-R1-0528-W8A8.yaml,https://github.com/.../job/80000000001,success,ad7125a431e1...,46356897b4d8...,a2,single_node,2026-06-15 03:40:00 +08:00
 ```
 
 工具的查找逻辑:
 
-- 按 `--name`(匹配 `name` 列)或 `--config-yaml`(匹配 `yaml/path` 列,支持文件名或目录后缀)定位行;
+- 对传入的 `--name`、`--config-yaml`、`--soc` 和 `--scene` 逐项匹配;
 - 在所有 `status=success` 的行里取 **`time` 最新**的一条;
-- 用它的 **`vLLM-Ascend Git information`** 作为 good 端点(更新的 failure 行不会干扰)。
+- 用它的 **`vLLM-Ascend Git information`** 作为 good 端点。
 
 用 `--good-table` 指定表路径(或环境变量 `BISECT_GOOD_TABLE`,默认 `/root/.cache/nightly_bisect/good_table.csv`)。
 如果不想依赖表,可用 `--good-commit <sha>` 直接指定 good。
+
+PR 上传后,有权限的用户可在 PR 评论:
+
+```text
+/nightly all --aop_enabled
+/weekly all --aop_enabled
+/weekly <case-name> --aop_enabled
+```
+
+评论命令由默认分支上的 workflow 解析,再把 PR SHA 交给 nightly/weekly workflow
+测试。因此 workflow 自身的改动需合入默认分支后才会生效。
+
+weekly 定时任务在每周日北京时间 10:00 自动触发,无需评论命令;它默认选择
+`all`、测试 `main`,并为支持二分的单机/多机任务启用 AOP。
 
 ---
 
@@ -59,6 +79,7 @@ python -m tools.bisect.auto_bisect \
     --scene single_node \
     --config-yaml DeepSeek-R1-0528-W8A8.yaml \
     --name DeepSeek-R1-0528-W8A8 \
+    --soc a2 \
     --bad-commit HEAD \
     --good-table /path/to/nightly_status.csv
 ```
@@ -78,6 +99,7 @@ python -m tools.bisect.auto_bisect \
 python -m tools.bisect.auto_bisect \
     --scene multi_node \
     --config-yaml Qwen3-235B-W8A8.yaml \
+    --soc a3 \
     --bad-commit "$VLLM_ASCEND_REF" \
     --num-nodes 2 \
     --coord-dir /shared/nightly_bisect/coord
@@ -110,15 +132,21 @@ python -m tools.bisect.auto_bisect \
 
 > bad 端点(==HEAD)因为容器已构建好,默认是 `already built` 直接跳过编译。
 
-### 6.1 vLLM 版本配套检查(自动)
+### 6.1 依赖版本适配(自动)
 
-每切到一个 commit,工具会读取该 commit 的 `.github/vllm-release-tag.commit`(它钉死了这个 commit 配套的 vLLM tag,如 `v0.22.1`),与容器实际 vLLM(优先 `VLLM_VERSION` 环境变量,否则 `vllm.__version__`)比对:
+二分工具从每个 `vllm-ascend` commit 的固定文件读取 nightly 依赖版本:
 
-- **配套**(release 段一致,忽略 `v` 前缀和 dev/local 后缀)→ 正常跑;
-- **不配套**(如 commit 钉 `v0.22.1`、容器是 `0.21.0`)→ 该 commit **直接判 SKIP**,日志写明 `vllm version mismatch: this commit pins ... but the container has ...`,**不再浪费一次 pytest 跑出莫名的 rc=4**;
-- 容器是无法解析的 dev 构建 → 宽松放行(交给 pytest 判定)。
+| 包 | 版本文件 | 读取内容 | 二分时是否切换 |
+|---|---|---|---|
+| vLLM | `.github/vllm-release-tag.commit` | vLLM release tag | 是 |
+| torch-npu | `requirements.txt`(回退 `pyproject.toml`) | `torch-npu` 的版本约束 | 是 |
 
-> 这是为了解决"二分跨过 vLLM 版本变更点时,老 commit 在当前容器里跑不起来"的问题。若某端点因 vLLM 不配套被 SKIP,二分会明确报错中止(见第七节)。
+工具先比较 good 和 bad 两端的 vLLM、torch-npu 版本:
+
+- 两端版本相同:该包后续不再检查;
+- 两端版本不同:每次切换到候选 commit 后读取候选 commit 的版本文件,若运行环境版本不同则先切换依赖,再运行 nightly;
+
+vLLM 切换优先使用配置的 vLLM 源码目录(nightly 默认 `/vllm-workspace/vllm`) checkout 对应 release tag 并重新 editable 安装;找不到源码目录时回退到 pip 安装对应 release。torch-npu 使用 pip 强制重装目标版本。切换失败会将本轮标记为 `SKIP`,不会把环境问题误判成测试失败。
 
 ---
 
@@ -130,10 +158,10 @@ python -m tools.bisect.auto_bisect \
 - 退出码 `0` 但 `benchmark_results/` 里**任一 case 的 json `pass_fail=fail`**(精度/性能未达基线)→ **FAIL**;
 - 退出码 `0` 且无回归 → **PASS**;
 - 退出码 `2/3/4/5` 或超时(收集失败、conftest ImportError、环境问题等)→ **SKIP**;
-- **vLLM 版本不配套**(见 6.1)→ **SKIP**(带明确原因);
+- 依赖版本切换失败(见 6.1)→ **SKIP**(带明确原因);
 - SKIP 不作为二分信号,类似 `git bisect skip`。
 
-端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来 / vLLM 不配套),会**明确报错并中止**而不是给错误结论。
+端点校验:开跑前先确认 bad 复现失败、good 确实通过;若任一端点是 SKIP(环境跑不起来 / 依赖切换失败),会**明确报错并中止**而不是给错误结论。
 
 ---
 
@@ -200,9 +228,9 @@ python -m tools.bisect.auto_bisect \
 
 #### `--good-table`
 
-- **作用**:nightly 状态表 CSV 的路径,工具**只读**它来确定 good 端点。
+- **作用**:当前 nightly/weekly 流水线状态表 CSV 的路径,工具**只读**它来确定 good 端点。
 - **默认**:环境变量 `BISECT_GOOD_TABLE`,再没有则 `/root/.cache/nightly_bisect/good_table.csv`。
-- **逻辑**:按 `--name` 或 `--config-yaml` 定位行 → 在所有 `status=success` 的行里取 `time` 最新的一条 → 用它的 `vLLM-Ascend Git information` 当 good。
+- **逻辑**:匹配所有已传入的用例维度 → 在所有 `status=success` 的行里取 `time` 最新的一条 → 用它的 `vLLM-Ascend Git information` 当 good。
 - **注意**:表里该用例必须**至少有一条 success 行**,否则需改用 `--good-commit`。
 
 #### `--name`
@@ -210,6 +238,11 @@ python -m tools.bisect.auto_bisect \
 - **作用**:用来匹配 Good 表的 `name` 列(比 `yaml/path` 更精确)。
 - **默认**:`None`(不传)→ 退回用 `--config-yaml` 匹配 `yaml/path`。
 - **何时用**:一个 YAML 对应多种 nightly job 名、或 `name` 与文件名不一致时,用它锁定正确的行。
+
+#### `--soc`
+
+- **作用**:按硬件代际过滤 Good 表,避免 A2/A3/310P 的同名用例互相命中。
+- **默认**:`None`;CI workflow 会自动传入。
 
 ### 9.4 编译控制(决定何时 `pip install -e .`)
 

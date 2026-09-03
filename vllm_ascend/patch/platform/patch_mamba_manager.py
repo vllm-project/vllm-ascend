@@ -34,20 +34,18 @@ class AscendMambaManager(MambaManager):
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...]:
-        assert isinstance(kv_cache_spec, MambaSpec), "MambaManager can only be used for mamba groups"
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple([] for _ in range(len(kv_cache_group_ids)))
-        block_size = kv_cache_spec.block_size
-        max_num_blocks = max_length // block_size
-        for i in range(max_num_blocks - 1, -1, -1):
-            if cached_block := block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids):
-                if block_size != alignment_tokens and (i + 1) * block_size % alignment_tokens != 0:
-                    continue
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed.extend([block_pool.null_block] * i)
-                    computed.append(cached)
-                break
-        return computed_blocks
+    ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+        return super().find_longest_cache_hit(
+            block_hashes=block_hashes,
+            max_length=max_length,
+            kv_cache_group_ids=kv_cache_group_ids,
+            block_pool=block_pool,
+            kv_cache_spec=kv_cache_spec,
+            alignment_tokens=alignment_tokens,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=pcp_world_size,
+            drop_eagle_block=drop_eagle_block,
+        )
 
     def get_num_blocks_to_allocate(
         self,
@@ -55,16 +53,22 @@ class AscendMambaManager(MambaManager):
         num_tokens: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         total_computed_tokens: int,
-        num_tokens_main_model: int,
+        num_local_computed_tokens: int | None = None,
+        num_tokens_main_model: int | None = None,
         apply_admission_cap: bool = False,
     ) -> int:
+        if num_tokens_main_model is None:
+            assert num_local_computed_tokens is not None
+            num_tokens_main_model = num_local_computed_tokens
+        local_hit_tokens = len(new_computed_blocks) * self.block_size
         num_new_blocks = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
             new_computed_blocks,
             total_computed_tokens,
+            num_local_computed_tokens,
             num_tokens_main_model,
-            apply_admission_cap,
+            apply_admission_cap=apply_admission_cap,
         )
         # When external KV cache is loaded synchronously with new
         # tokens, allocate_new_computed_blocks() allocates one
@@ -73,7 +77,7 @@ class AscendMambaManager(MambaManager):
         # (External tokens exist when total_computed_tokens exceeds
         # what local prefix-cache hits cover; sync loading when
         # num_tokens_main_model exceeds total_computed_tokens.)
-        has_external_tokens = total_computed_tokens > len(new_computed_blocks) * self.block_size
+        has_external_tokens = total_computed_tokens > local_hit_tokens
         has_new_scheduled_tokens = num_tokens_main_model > total_computed_tokens
         if has_external_tokens and has_new_scheduled_tokens:
             # one more block for external computed tokens

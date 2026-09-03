@@ -38,7 +38,7 @@ msgstr ""
 "运行该模型。请注意，仅 vLLM Ascend 0.9.2rc1 及更高版本支持该模型。"
 
 msgid "## Supported Features"
-msgstr "## 支持的功能"
+msgstr "## 支持的特性"
 
 msgid ""
 "Refer to [supported "
@@ -90,7 +90,7 @@ msgstr "如果您不想像上面那样使用 Docker 镜像，也可以从源码�
 msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
 msgid "## Deployment"
 msgstr "## 部署"

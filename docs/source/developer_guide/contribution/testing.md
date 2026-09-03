@@ -28,7 +28,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
     pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
 
-    # For torch-npu dev version or x86 machine
+    # For TorchNPU dev version or x86 machine
     export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
     # src path
@@ -57,7 +57,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     python3 -m pip install -r requirements-dev.txt
     ```
 
-=== "Single card"
+=== "Single-card"
 
     ```bash
 
@@ -95,7 +95,7 @@ The fastest way to set up a test environment is to use the main branch's contain
     pip install -r requirements-dev.txt
     ```
 
-=== "Multi cards"
+=== "Multi-cards"
 
     ```bash
     # Update the vllm-ascend image
@@ -195,10 +195,10 @@ You can run tests with `pytest` as well. Typical examples:
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/
 
     # Run a certain test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
 
     # Run a certain case in test script
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_camem.py::test_end_to_end
+    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/pull_request/one_card/test_qwen3_0_6b.py::test_dense_default_full_and_piecewise_graph
     ```
 
 === "Multi-card"
@@ -237,9 +237,6 @@ You can run tests with `pytest` as well. Typical examples:
 
     ```bash
     cd /vllm-workspace/vllm-ascend/
-    # run all multi-card op tests on A2
-    VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a2/
-
     # run all multi-card op tests on A3
     VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/nightly/single_node/ops/multicard_ops_a3/
     ```
@@ -255,9 +252,37 @@ For running nightly multi-node model test cases locally, refer to the `Running L
 
 #### E2E test examples
 
-- Offline test example: [`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)
-- Online test example: [`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)
-- Correctness test example: [`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)
+- Offline test example: [`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)
+
+### PR selective testing (CI)
+
+The PR CI workflow ([pr_test.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) does not run the full suite on every PR. It selects tests with a coverage/AST based precision-testing pipeline and routes them to NPU runners. Tests run when the PR has the `ready-precise` label (recommended subset) or the `ready-all` label (full suite).
+
+How tests are selected:
+
+1. `test_selector.py` builds a mapping of test cases to the source lines they cover from historical CI coverage data, then recommends the tests affected by the PR's changed lines (line → function → file granularity fallback).
+2. `select_tests.py` routes each recommended test path to a runner by directory convention (`tests/ut/<module>/` → CPU, `tests/ut/<module>/a2/` → A2, `tests/e2e/pull_request/{one,two,four,eight}_card/` → A3, `_310p` → 310P), balances the load via estimated times, and emits the CI matrix.
+
+Adding a new test requires no configuration change: place the UT file under the
+matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matching
+`tests/e2e/pull_request/<card>` directory, and CI picks it up automatically from
+the test tree. Routing metadata (runner mapping, partitions, estimated times)
+lives in [`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
+
+You can preview locally which runners a set of tests would be routed to:
+
+```bash
+python3 .github/workflows/scripts/select_tests.py \
+  --explicit-e2e-tests tests/e2e/pull_request/one_card/test_qwen3_0_6b.py
+
+# Full suite routing (mirrors the ready-all mode)
+python3 .github/workflows/scripts/select_tests.py --all-tests
+```
+
+For debugging a specific test on CI hardware before requesting a label, see
+[E2E CI Test](./e2e_ci_test.md).
+
+#### E2E test model resource reduction
 
 The CI resource is limited, and you might need to reduce the number of layers of a model. Below is an example of how to generate a reduced layer model:
 

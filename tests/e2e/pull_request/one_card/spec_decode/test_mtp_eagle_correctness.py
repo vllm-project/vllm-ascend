@@ -31,14 +31,26 @@ from tests.e2e.conftest import VllmRunner, cleanup_dist_env_and_memory
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
+MAX_NUM_SEQS = 256
 
 
 @pytest.mark.parametrize("model_name", MODELS)
+@pytest.mark.parametrize(
+    "dynamic_num_speculative_tokens",
+    [
+        pytest.param(None, id="static"),
+        pytest.param(2, id="dynamic"),
+    ],
+)
 @pytest.mark.parametrize("num_speculative_tokens", [3])
 @pytest.mark.parametrize("cudagraph_mode", ["FULL_DECODE_ONLY"])
 @pytest.mark.parametrize("disable_padded_drafter_batch", [False])
 def test_deepseek_mtp(
-    model_name: str, num_speculative_tokens: int, cudagraph_mode: str, disable_padded_drafter_batch: bool
+    model_name: str,
+    dynamic_num_speculative_tokens: int | None,
+    num_speculative_tokens: int,
+    cudagraph_mode: str,
+    disable_padded_drafter_batch: bool,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -50,22 +62,34 @@ def test_deepseek_mtp(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
     """
+    speculative_config = {
+        "method": "mtp",
+        "num_speculative_tokens": num_speculative_tokens,
+        "disable_padded_drafter_batch": disable_padded_drafter_batch,
+    }
+    if dynamic_num_speculative_tokens is not None:
+        speculative_config["num_speculative_tokens_per_batch_size"] = [
+            [1, MAX_NUM_SEQS, dynamic_num_speculative_tokens]
+        ]
+        dynamic_capture_size = len(example_prompts) * (dynamic_num_speculative_tokens + 1)
+        capture_sizes = [dynamic_capture_size, 20]
+        effective_cudagraph_mode = "PIECEWISE"
+    else:
+        capture_sizes = [20]
+        effective_cudagraph_mode = cudagraph_mode
+
     with VllmRunner(
         model_name,
         tensor_parallel_size=1,
-        max_num_seqs=256,
+        max_num_seqs=MAX_NUM_SEQS,
         gpu_memory_utilization=0.7,
         distributed_executor_backend="mp",
         enable_expert_parallel=True,
-        speculative_config={
-            "method": "mtp",
-            "num_speculative_tokens": num_speculative_tokens,
-            "disable_padded_drafter_batch": disable_padded_drafter_batch,
-        },
+        speculative_config=speculative_config,
         max_model_len=2000,
         compilation_config=CompilationConfig(
-            cudagraph_mode=cudagraph_mode,
-            cudagraph_capture_sizes=[20],
+            cudagraph_mode=effective_cudagraph_mode,
+            cudagraph_capture_sizes=capture_sizes,
         ),
     ) as spec_llm:
         sampling_config = SamplingParams(temperature=0, max_tokens=256, ignore_eos=False)

@@ -8,7 +8,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.quantization.methods.w8a8fp8_dynamic import (
+from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import (
     AscendW8A8FP8DynamicFusedMoEMethod,
     AscendW8A8FP8DynamicLinearMethod,
 )
@@ -44,10 +44,10 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
     intermediate_size = 128
 
     @patch("torch.distributed.get_rank")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_mc2_group")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_mc2_group")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
     def setUp(self, mock_ascend, mock_mc2, mock_rank):
-        with patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_current_vllm_config") as mock_vllm:
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config") as mock_vllm:
             mock_vllm.return_value = create_mock_vllm_config()
             mock_ascend.return_value = create_mock_ascend_config()
             mock_mc2.return_value = MagicMock(
@@ -83,9 +83,8 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
             self.assertEqual(param_dict["w13_weight"].shape[0], num_experts)
             self.assertEqual(param_dict["w2_weight"].shape[0], num_experts)
 
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")
-    def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_select_experts, mock_extra_ctx):
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX")
+    def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_extra_ctx):
         tokens = 4
         hidden_size = self.hidden_size
         layer = torch.nn.Module()
@@ -100,31 +99,33 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
         layer.swiglu_limit = 1000000
 
         x = torch.randn(tokens, hidden_size, dtype=torch.float32)
-        router_logits = torch.randn(tokens, self.num_experts, dtype=torch.float32)
         topk_weights = torch.randn(tokens, 2, dtype=torch.float32)
         topk_ids = torch.randint(0, self.num_experts, (tokens, 2), dtype=torch.int64)
         mc2_mask = torch.tensor([1, 0, 1, 0], dtype=torch.bool)
         pertoken_scale = torch.randn(tokens, dtype=torch.float32)
+        layer.activation = "gelu"
+        layer.apply_router_weight_on_input = True
+        layer.ascend_expert_map = None
+        layer.global_redundant_expert_num = 0
+        layer.log2phy = None
+        layer.ascend_mc2_mask = mc2_mask
+        layer.ascend_pertoken_scale = pertoken_scale
+        layer.swiglu_alpha = 1.0
+        layer.swiglu_beta = 0.0
 
-        mock_select_experts.return_value = (topk_weights, topk_ids)
         mock_comm = Mock()
         mock_comm.fused_experts.return_value = torch.randn(tokens, hidden_size, dtype=torch.float32)
         mock_extra_ctx.moe_comm_method = mock_comm
         mock_extra_ctx.moe_comm_type = MoECommType.ALLGATHER
-        self.quant_method.multistream_overlap_gate = False
         self.quant_method.in_dtype = torch.float32
 
         self.quant_method.apply(
             layer=layer,
             x=x,
-            router_logits=router_logits,
-            top_k=2,
-            renormalize=True,
-            num_experts=self.num_experts,
-            activation="gelu",
-            apply_router_weight_on_input=True,
-            mc2_mask=mc2_mask,
-            pertoken_scale=pertoken_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts=None,
+            shared_experts_input=None,
         )
 
         fused_experts_input = mock_comm.fused_experts.call_args.kwargs["fused_experts_input"]

@@ -198,9 +198,9 @@ Required to avoid HcclAllreduce failures caused by the default FFTS+ mode's stre
 export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
-PS:Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
+Because the model has fewer parameters, it doesn’t involve the PD separation scenario.
 
 ### 5.1 Single-Node Online Deployment
 
@@ -211,11 +211,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 **Atlas 800I A2/A3:**
 
 ```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -229,11 +227,10 @@ vllm serve your_model_path \
     --quantization ascend \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --gpu-memory-utilization 0.95 \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
-    --port 8000 
+    --additional-config '{"weight_nz_mode": 2}' \
+    --port 8000
 ```
 
 !!! note
@@ -343,9 +340,9 @@ Expected result: HTTP 200 with a JSON response containing the `choices` field wi
 
 ### Using EvalScope
 
-As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
+As an example, take the `gsm8k` `omni_bench` `bbh` dataset as a test dataset, and run accuracy evaluation of `Qwen3-Omni-30B-A3B-Thinking` in online mode.
 
-1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#2-install-evalscope-using-pip) for `evalscope`installation.
+1. Refer to [Using evalscope](https://docs.vllm.ai/projects/ascend/en/latest/developer_guide/evaluation/using_evalscope.html#2-install-evalscope-using-pip) for `evalscope` installation.
 2. Run `evalscope` to execute the accuracy evaluation.
 
     ```bash
@@ -368,7 +365,7 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
     | Model                       | Dataset    | Metric   | Subset   |   Num |   Score | Cat.0   |
     +=============================+============+==========+==========+=======+=========+=========+
     | Qwen3-Omni-30B-A3B-Thinking | omni_bench | mean_acc | default  |   100 |    0.44 | default |
-    +-----------------------------+------------+----------+----------+-------+---------+---------+ 
+    +-----------------------------+------------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | gsm8k      | mean_acc | main     |   100 |    0.98 | default |
     +-----------------------------+-----------+----------+----------+-------+---------+---------+
     | Qwen3-Omni-30B-A3B-Thinking | bbh        | mean_acc | OVERALL  |   270 |  0.9148 |         |
@@ -377,10 +374,9 @@ As an example, take the `gsm8k` `omnibench` `bbh` dataset as a test dataset, and
 
 ## 8 Performance Evaluation
 
-### Using vLLM Benchmark  
+### Using vLLM Benchmark
 
 Run performance evaluation of `Qwen3-Omni-30B-A3B-Thinking` as an example.
-Refer to vllm benchmark for more details.
 Refer to [vLLM Benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more details.
 
 There are three `vllm bench` subcommands:
@@ -392,8 +388,8 @@ There are three `vllm bench` subcommands:
 Take the `serve` as an example. Run the code as follows.
 
 ```bash
-export VLLM_USE_MODELSCOPE=True
 export MODEL=Qwen/Qwen3-Omni-30B-A3B-Thinking
+export VLLM_USE_MODELSCOPE=True
 python3 -m vllm.entrypoints.openai.api_server --model $MODEL --tensor-parallel-size 2 --swap-space 16 --disable-log-stats --disable-log-request --load-format dummy
 
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
@@ -461,11 +457,9 @@ P99 ITL (ms):                            176.02
 **Low Latency Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -478,10 +472,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -498,11 +491,9 @@ vllm serve your_model_path \
 **High Throughput Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -514,7 +505,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -534,11 +524,9 @@ vllm serve your_model_path \
 **Long Context Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -551,10 +539,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --hf-overrides '{"rope_parameters": {"rope_type":"yarn","factor":4,"original_max_position_embeddings":32768}}'
@@ -573,8 +560,8 @@ vllm serve your_model_path \
 #### 9.2.1 General Tuning Reference
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

@@ -3,6 +3,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
@@ -24,6 +25,26 @@ class RopeDataProxy:
     def __init__(self, data_map, is_cos=True):
         self._data = data_map
         self.idx = 0 if is_cos else 1
+
+    def pad_to(self, target_len: int, dim: int = 0) -> "RopeDataProxy":
+        """
+        Return a new proxy whose underlying tensors are padded to ``target_len`` along ``dim``.
+        """
+        new_data: dict = {}
+        for config_key, groups in self._data.items():
+            new_data[config_key] = {}
+            for group_name, (cos_t, sin_t) in groups.items():
+                pad_size = target_len - cos_t.shape[dim]
+                if pad_size > 0:
+                    ndim = cos_t.ndim
+                    pad = [0] * (2 * ndim)
+                    # F.pad pads from the last dimension backward:
+                    #   (dim_{N-1}_left, dim_{N-1}_right, ..., dim_0_left, dim_0_right)
+                    pad[-(1 + 2 * dim)] = pad_size  # right side of the target dim
+                    cos_t = F.pad(cos_t, pad)
+                    sin_t = F.pad(sin_t, pad)
+                new_data[config_key][group_name] = (cos_t, sin_t)
+        return RopeDataProxy(new_data, is_cos=(self.idx == 0))
 
     def __getitem__(self, index):
         if not isinstance(index, str):

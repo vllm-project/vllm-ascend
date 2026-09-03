@@ -1,14 +1,20 @@
 import numpy as np
 import torch
-from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed import get_dcp_group
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    KVCacheSpecKind,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.utils import CpuGpuBuffer
-from vllm.v1.worker.block_table import _compute_slot_mapping_kernel
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+from vllm_ascend.ops.triton.compute_slot_mapping import (
+    _compute_slot_mapping_kernel,
+    _next_power_of_2,
+)
 
 
 class BlockTable:
@@ -26,37 +32,21 @@ class BlockTable:
         kv_cache_group: KVCacheGroupSpec = None,
     ):
         self.max_num_reqs = max_num_reqs
-        self.pcp_world_size = get_pcp_group().world_size
-        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
         self.dcp_world_size = get_dcp_group().world_size
         self.dcp_rank = get_dcp_group().rank_in_group
-        compress_ratio = 1
-        if (
+        is_mamba_group = (
             kv_cache_group is not None
             and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        ):
-            kv_cache_spec = next(iter(kv_cache_group.kv_cache_spec.kv_cache_specs.values()), None)
-            if kv_cache_spec is not None and hasattr(kv_cache_spec, "compress_ratio"):
-                compress_ratio = kv_cache_spec.compress_ratio
-        if (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and (self.pcp_world_size * self.dcp_world_size > 1)
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        ):
-            max_num_blocks_per_req = max_num_blocks_per_req * self.pcp_world_size * self.dcp_world_size
-        max_num_blocks_per_req = max(cdiv(max_num_blocks_per_req, compress_ratio), 1)
+            and get_kv_cache_spec_kind(kv_cache_group.kv_cache_spec) == KVCacheSpecKind.MAMBA
+        )
+        # The KV cache spec already provides the per-rank table capacity.
+        # Mamba state is replicated across DCP ranks, not sharded then expanded.
         self.max_num_blocks_per_req = max_num_blocks_per_req
         self.max_num_batched_tokens = max_num_batched_tokens
         self.pin_memory = pin_memory
         self.device = device
         self.physical_block_size = block_size
-        self.is_mamba_group = (
-            kv_cache_group is not None
-            and hasattr(kv_cache_group, "kv_cache_spec")
-            and isinstance(kv_cache_group.kv_cache_spec, MambaSpec)
-        )
+        self.is_mamba_group = is_mamba_group
 
         # If kernel_sizes is None or [0], use physical block size (no splitting)
         if kernel_sizes is None or kernel_sizes == [0]:
@@ -92,12 +82,16 @@ class BlockTable:
             logical_table_size = max_num_blocks_per_req
 
         duplicate_size = 1
-        if self.pcp_world_size * self.dcp_world_size > 1:
+        if self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        # MTP slot preparation appends up to num_speculative_tokens - 1
+        # draft positions for every request beyond the scheduler token limit.
+        num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
         self.slot_mapping = self._make_buffer(
-            self.max_num_batched_tokens + 2 * self.pcp_world_size * self.max_num_reqs, dtype=torch.int32
+            self.max_num_batched_tokens + num_mtp_draft_slots,
+            dtype=torch.int32,
         )
 
         self.kernel_sizes = kernel_sizes
@@ -150,30 +144,28 @@ class BlockTable:
         positions: torch.Tensor,
     ) -> None:
         num_tokens = positions.shape[0]
-        total_cp_world_size = self.pcp_world_size * self.dcp_world_size
-        total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
-        if self.dcp_world_size * self.pcp_world_size > 1:
+        total_cp_world_size = self.dcp_world_size
+        total_cp_rank = self.dcp_rank
+        if self.dcp_world_size > 1:
             req_indices = torch.repeat_interleave(
                 torch.arange(num_reqs, dtype=torch.int32, device=query_start_loc.device),
                 query_start_loc[1:] - query_start_loc[:-1],
+                output_size=num_tokens,
             )
-            self._compute_pcp_dcp_slot_mapping(req_indices, positions)
+            self._compute_dcp_slot_mapping(req_indices, positions)
         else:
+            TILE_BLOCK_SIZE = 1024
             kernel_kwargs = {
+                "KV_CACHE_BLOCK_SIZE": self.physical_block_size,
+                "BLOCKS_PER_KV_BLOCK": self.blocks_per_phys_block,
                 "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
                 "TOTAL_CP_RANK": total_cp_rank,
                 "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
                 "PAD_ID": PAD_SLOT_ID,
-                "BLOCK_SIZE": 1024,
+                "TILE_BLOCK_SIZE": TILE_BLOCK_SIZE,
+                "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(TILE_BLOCK_SIZE, self.block_size) + 1),
             }
-            if not vllm_version_is("0.23.0"):
-                # vLLM #40996 split physical KV blocks into kernel blocks in
-                # the slot-mapping kernel. These are required constexprs on
-                # main; the v0.23.0 kernel does not accept them.
-                kernel_kwargs.update(
-                    KV_CACHE_BLOCK_SIZE=self.physical_block_size,
-                    BLOCKS_PER_KV_BLOCK=self.blocks_per_phys_block,
-                )
+
             _compute_slot_mapping_kernel[(num_reqs + 1,)](
                 num_tokens,
                 self.max_num_batched_tokens,
@@ -186,7 +178,11 @@ class BlockTable:
                 **kernel_kwargs,
             )
 
-    def compute_slot_mapping_draft(self, req_indices: np.ndarray, positions: np.ndarray) -> None:
+    def compute_slot_mapping_draft(
+        self,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
+    ) -> None:
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
         # where K is the max_num_blocks_per_req and the block size is 2.
@@ -194,9 +190,21 @@ class BlockTable:
         # here because M (max_model_len) is not necessarily divisible by
         # block_size.
 
-        if self.dcp_world_size * self.pcp_world_size > 1:
-            self._compute_pcp_dcp_slot_mapping(torch.from_numpy(req_indices), torch.from_numpy(positions))
+        if self.dcp_world_size > 1:
+            if not isinstance(req_indices, torch.Tensor):
+                req_indices = torch.from_numpy(req_indices)
+            if not isinstance(positions, torch.Tensor):
+                positions = torch.from_numpy(positions)
+            self._compute_dcp_slot_mapping(req_indices, positions)
         else:
+            if isinstance(req_indices, torch.Tensor):
+                if req_indices.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                req_indices = req_indices.numpy()
+            if isinstance(positions, torch.Tensor):
+                if positions.device.type != "cpu":
+                    raise ValueError("Device tensor inputs are only supported for CP draft slot mapping.")
+                positions = positions.numpy()
             assert self.kernel_sizes is not None
             assert self.block_size == self.kernel_sizes[0]
             # IMPORTANT: In hybrid mode, positions are in logical block space,
@@ -211,34 +219,38 @@ class BlockTable:
                 req_indices * self.max_num_blocks_per_req * self.blocks_per_phys_block + logical_block_idx
             )
 
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
             block_offsets = positions % self.block_size
-            np.add(block_numbers * self.block_size, block_offsets, out=self.slot_mapping.np[: req_indices.shape[0]])
+            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            np.add(
+                block_numbers * self.block_size,
+                block_offsets,
+                out=self.slot_mapping.np[: req_indices.shape[0]],
+            )
             self.slot_mapping.copy_to_gpu(req_indices.shape[0])
 
-    def _compute_pcp_dcp_slot_mapping(
+    def _compute_dcp_slot_mapping(
         self,
         req_indices: torch.Tensor,
         positions: torch.Tensor,
     ) -> None:
         # Note(hc): The DCP implement store kvcache with an interleave
         # style, the kvcache for the token whose token_idx is i is
-        # always stored on the GPU whose dcp_rank equals i % pcp_world_size:
+        # always stored on the GPU whose dcp_rank equals the interleaved shard:
 
         # Use a "virtual block" which equals to world_size * block_size
         # for block_table_indices calculation.
-        # virtual_block_size = self.block_size * self.dcp_world_size * self.pcp_world_size
+        # virtual_block_size = self.block_size * self.dcp_world_size
 
         # IMPORTANT: In hybrid mode, positions are in logical block space,
         # but we need to map them to the correct logical block table indices
         # logical_block_idx = positions // virtual_block_size
 
-        total_cp_world_size = self.dcp_world_size * self.pcp_world_size
+        total_cp_world_size = self.dcp_world_size
         virtual_physical_block_size = self.physical_block_size * total_cp_world_size
         physical_block_idx = positions // virtual_physical_block_size
         virtual_block_offsets = positions % virtual_physical_block_size
 
-        self.current_rank = self.dcp_world_size * self.pcp_rank + self.dcp_rank
+        self.current_rank = self.dcp_rank
         mask = virtual_block_offsets // self.cp_kv_cache_interleave_size % total_cp_world_size == self.current_rank
         local_physical_offsets = (
             virtual_block_offsets
@@ -337,8 +349,8 @@ class MultiGroupBlockTable:
             # (max_model_len//dcp_world_size) tokens in kvcache,
             # so the block_size which used for calc max_num_blocks_per_req
             # must be multiplied by dcp_world_size.
-            total_cp_world_size = get_total_cp_world_size()
-            max_num_blocks = [cdiv(max_model_len, block_size * total_cp_world_size) for block_size in block_sizes]
+            dcp_world_size = get_decode_context_model_parallel_world_size()
+            max_num_blocks = [cdiv(max_model_len, block_size * dcp_world_size) for block_size in block_sizes]
 
         if len(max_num_blocks) != len(block_sizes):
             raise ValueError(
@@ -420,8 +432,8 @@ class MultiGroupBlockTable:
 
     def compute_slot_mapping_draft(
         self,
-        req_indices: np.ndarray,
-        positions: np.ndarray,
+        req_indices: np.ndarray | torch.Tensor,
+        positions: np.ndarray | torch.Tensor,
         positions_compressed_list: list[np.ndarray] | None = None,
         req_indices_compressed_list: list[np.ndarray] | None = None,
     ) -> None:

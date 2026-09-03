@@ -25,22 +25,25 @@ msgid "## Committers"
 msgstr "## 提交者"
 
 msgid ""
-"## Contributors\n"
-"<!-- last_commit: edcae83da32af8e1f1b7b97c7e19e8114e0535a5 -->"
-msgstr ""
-"## 贡献者\n"
-"<!-- last_commit: edcae83da32af8e1f1b7b97c7e19e8114e0535a5 -->"
-
-msgid ""
 "Every release of vLLM Ascend would not have been possible without the "
 "following contributors:"
 msgstr "vLLM Ascend 的每个版本都离不开以下贡献者的支持："
-
-msgid "Updated on 2026-06-24:"
-msgstr "更新于 2026-06-24："
 
 msgid "| Name | GitHub ID | Date |"
 msgstr "| 姓名 | GitHub ID | 日期 |"
 
 msgid "| Number | Contributor | Date | Commit ID |"
 msgstr "| 序号 | 贡献者 | 日期 | 提交ID |"
+
+msgid "## Emeritus Committers"
+msgstr "## 荣誉提交者"
+
+msgid ""
+"## Contributors\n"
+"<!-- last_commit: 5cb98caaadeff42b5b62b996e34bb2aaa29d20fd -->"
+msgstr ""
+"## 贡献者\n"
+"<!-- last_commit: 5cb98caaadeff42b5b62b996e34bb2aaa29d20fd -->"
+
+msgid "Updated on 2026-08-16:"
+msgstr "更新于2026-08-16："

@@ -8,21 +8,22 @@ Enable ShortRequestFirst when:
 
 - request lengths are highly skewed
 - short-request TTFT matters more than strict FCFS ordering
-- the prefill node already runs with the recompute scheduler enabled
+- the service uses the FCFS scheduler, with either synchronous or asynchronous scheduling
 
 Keep it disabled if the workload is mostly uniform, or if FCFS ordering is more important than short-request latency.
 
 ## Configuration
 
-Add `short_request_first_config` to the prefill (P) node's `additional_config` in a PD-disaggregated deployment. Because ShortRequestFirst is wired through the recompute scheduler, keep `recompute_scheduler_enable=true` in the same P-node config:
+Add `short_request_first_config` to `scheduler_config`. It is supported by FCFS synchronous and asynchronous scheduling in ordinary deployments, on PD-disaggregated prefill (P) nodes, and in PD-mixed deployments. It does not require `recompute_scheduler_enable`:
 
 ```json
 {
-  "recompute_scheduler_enable": true,
-  "short_request_first_config": {
-    "enabled": true,
-    "threshold": 256,
-    "long_max_wait_ms": 2000
+  "scheduler_config": {
+    "short_request_first_config": {
+      "enabled": true,
+      "threshold": 256,
+      "long_max_wait_ms": 2000
+    }
   }
 }
 ```
@@ -97,30 +98,19 @@ When this warning appears:
 - increase `short_request_first_config.threshold`
 - or disable `short_request_first_config.enabled`
 
-ShortRequestFirst also emits an aggregate stats log every 5 seconds so queue behavior is visible without adding extra configuration.
+ShortRequestFirst also emits an aggregate stats log every 5s so queue behavior is visible without adding extra configuration.
 
-## Relationship with recompute scheduler
+## Scheduler compatibility
 
-ShortRequestFirst only changes the waiting-queue policy and is wired into the recompute scheduler. With `recompute_scheduler_enable=false`, the normal scheduler path is used and ShortRequestFirst is not activated.
+ShortRequestFirst changes only the waiting-queue policy. It requires FCFS scheduling and supports both synchronous and asynchronous scheduling. It is not supported with batch-job-aware scheduling, profiling-chunk scheduling, or on PD-disaggregated D nodes (`kv_role='kv_consumer'`).
+
+The `additional_config.scheduler_config.enable_balance_scheduling` setting keeps its existing behavior: it controls balance scheduling's cross-DP admission logic. ShortRequestFirst is installed independently of whether balance scheduling is enabled, so the balance-disabled path continues to delegate scheduling to vLLM while using the ShortRequestFirst waiting queue.
 
 ## Minimal examples
-
-P-node `additional_config` example:
-
-```json
-{
-  "recompute_scheduler_enable": true,
-  "short_request_first_config": {
-    "enabled": true,
-    "threshold": 256,
-    "long_max_wait_ms": 2000
-  }
-}
-```
 
 Disable it explicitly:
 
 ```bash
 vllm serve <model> \
-  --additional-config '{"short_request_first_config": {"enabled": false}}'
+  --additional-config '{"scheduler_config": {"short_request_first_config": {"enabled": false}}}'
 ```

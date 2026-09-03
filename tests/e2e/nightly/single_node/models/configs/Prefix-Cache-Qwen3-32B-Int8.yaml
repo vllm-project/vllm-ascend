@@ -28,7 +28,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.9"
       - "--additional-config"
-      - '{"enable_weight_nz_layout": true}'
+      - '{"weight_nz_mode": 1}'
     test_content:
       - "benchmark_comparisons"
     benchmark_comparisons_args:
@@ -56,7 +56,7 @@ test_cases:
         num_prompts: 210
         max_out_len: 1
         batch_size: 48
-        baseline: 1
+        baseline: 3.5855
         threshold: 0.97
       prefix75:
         case_type: performance
@@ -66,5 +66,5 @@ test_cases:
         num_prompts: 210
         max_out_len: 1
         batch_size: 48
-        baseline: 1
+        baseline: 12.8682
         threshold: 0.97

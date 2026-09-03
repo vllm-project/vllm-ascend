@@ -15,6 +15,7 @@
 
 import math
 import os
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -22,6 +23,8 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend import utils
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import REGISTERED_ASCEND_OPS
 
 
@@ -32,7 +35,7 @@ class TestUtils(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
-        utils.enable_dsa_cp_with_layer_shard.cache_clear()
+        utils.enable_dsa_cp.cache_clear()
         utils.enable_dsa_cp_with_o_proj_tp.cache_clear()
 
     def test_nd_to_nz_2d(self):
@@ -131,46 +134,13 @@ class TestUtils(TestBase):
             self.assertEqual(utils.find_hccl_library(), "libhccl.so")
 
     def test_current_stream(self):
-        with mock.patch("torch.npu.current_stream") as mock_current_stream:
-            self.assertEqual(utils.current_stream(), mock_current_stream())
-
-    def test_enable_dsa_cp_with_layer_shard_accepts_kv_producer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertTrue(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_layer_shard_rejects_kv_both(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = mock.MagicMock(
-            kv_role="kv_both", is_kv_producer=True, is_kv_consumer=True
-        )
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_layer_shard_rejects_missing_kv_transfer(self):
-        mock_vllm_config = mock.MagicMock()
-        mock_vllm_config.kv_transfer_config = None
-
-        with (
-            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
-            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
-        ):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
-
-    def test_enable_dsa_cp_with_layer_shard_rejects_when_dsa_cp_disabled(self):
-        with mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=False):
-            self.assertFalse(utils.enable_dsa_cp_with_layer_shard())
+        utils._CURRENT_STREAM = None
+        mock_stream = mock.MagicMock(name="npu_stream")
+        with mock.patch("vllm_ascend.utils.torch.npu.current_stream", return_value=mock_stream) as mock_current_stream:
+            self.assertIs(utils.current_stream(), mock_stream)
+            # Second call must hit the cached stream, not torch.npu.current_stream again.
+            self.assertIs(utils.current_stream(), mock_stream)
+            mock_current_stream.assert_called_once()
 
     def test_enable_dsa_cp_with_o_proj_tp_accepts_missing_kv_transfer(self):
         mock_vllm_config = mock.MagicMock()
@@ -181,6 +151,53 @@ class TestUtils(TestBase):
             mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
         ):
             self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_sp_uses_upstream_parallel_config(self):
+        # Stop any leaked patch("vllm_ascend.utils.enable_sp") from other TestCases.
+        mock.patch.stopall()
+        sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=True,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertTrue(utils.enable_sp(sequence_parallel_config))
+
+        shared_expert_dp_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=True,
+            )
+        )
+        self.assertFalse(utils.enable_sp(shared_expert_dp_config))
+
+        no_sequence_parallel_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                use_sequence_parallel_moe=False,
+                enable_expert_parallel=False,
+            )
+        )
+        self.assertFalse(utils.enable_sp(no_sequence_parallel_config))
+
+    def test_enable_dsa_cp_is_independent_from_moe_sequence_parallel(self):
+        ascend_config = SimpleNamespace(enable_dsa_cp=True)
+
+        with (
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp") as mock_enable_sp,
+        ):
+            self.assertTrue(utils.enable_dsa_cp())
+
+        mock_enable_sp.assert_not_called()
+
+    def test_enable_dsa_cp_reads_validated_ascend_config(self):
+        ascend_config = mock.MagicMock(enable_dsa_cp=False)
+
+        with (
+            mock.patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config),
+            mock.patch("vllm_ascend.utils.enable_sp", return_value=True),
+        ):
+            self.assertFalse(utils.enable_dsa_cp())
 
     def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_both(self):
         mock_vllm_config = mock.MagicMock()
@@ -194,10 +211,22 @@ class TestUtils(TestBase):
         ):
             self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
 
-    def test_enable_dsa_cp_with_o_proj_tp_rejects_single_role_pd(self):
+    def test_enable_dsa_cp_with_o_proj_tp_accepts_kv_producer(self):
         mock_vllm_config = mock.MagicMock()
         mock_vllm_config.kv_transfer_config = mock.MagicMock(
             kv_role="kv_producer", is_kv_producer=True, is_kv_consumer=False
+        )
+
+        with (
+            mock.patch("vllm.config.get_current_vllm_config", return_value=mock_vllm_config),
+            mock.patch("vllm_ascend.utils.enable_dsa_cp", return_value=True),
+        ):
+            self.assertTrue(utils.enable_dsa_cp_with_o_proj_tp())
+
+    def test_enable_dsa_cp_with_o_proj_tp_rejects_kv_consumer(self):
+        mock_vllm_config = mock.MagicMock()
+        mock_vllm_config.kv_transfer_config = mock.MagicMock(
+            kv_role="kv_consumer", is_kv_producer=False, is_kv_consumer=True
         )
 
         with (
@@ -338,7 +367,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -350,7 +381,10 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 0
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -362,7 +396,10 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile",
+                return_value=get_hardware_profile(AscendDeviceType._310P),
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float32)
             result = utils.maybe_trans_nz(weight)
@@ -374,7 +411,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -386,7 +425,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.float16)
             result = utils.maybe_trans_nz(weight)
@@ -398,7 +439,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 2
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.randn(32, 64, dtype=torch.bfloat16)
             result = utils.maybe_trans_nz(weight)
@@ -410,7 +453,9 @@ class TestUtils(TestBase):
         mock_config.weight_nz_mode = 1
         with (
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
-            mock.patch("vllm_ascend.utils.is_310p", return_value=False),
+            mock.patch(
+                "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+            ),
         ):
             weight = torch.zeros(32, 64, dtype=torch.int8)
             result = utils.maybe_trans_nz(weight)
@@ -436,21 +481,25 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer():
     vllm_config.kv_transfer_config.is_kv_consumer = True
     vllm_config.kv_transfer_config.is_kv_producer = False
     ascend_config = mock.MagicMock()
-    ascend_config.recompute_scheduler_enable = True
+    ascend_config.scheduler_config.recompute_scheduler_enable = True
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is True
 
 
 def test_is_rc_device_returns_false_on_non_310p():
     utils._IS_RC_DEVICE = None
-    with mock.patch("vllm_ascend.utils.is_310p", return_value=False):
+    with mock.patch(
+        "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType.A2)
+    ):
         assert utils.is_rc_device() is False
 
 
 def test_is_rc_device_detects_ep_from_lspci():
     utils._IS_RC_DEVICE = None
     with (
-        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
         mock.patch("subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = "00:00.0 accelerators: Huawei Technologies Co., Ltd."
@@ -460,7 +509,9 @@ def test_is_rc_device_detects_ep_from_lspci():
 def test_is_rc_device_detects_rc_from_lspci():
     utils._IS_RC_DEVICE = None
     with (
-        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
         mock.patch("subprocess.run") as mock_run,
     ):
         mock_run.return_value.stdout = "00:00.0 PCI bridge: Huawei Technologies Co., Ltd."
@@ -470,7 +521,9 @@ def test_is_rc_device_detects_rc_from_lspci():
 def test_is_rc_device_defaults_to_ep_when_lspci_unavailable():
     utils._IS_RC_DEVICE = None
     with (
-        mock.patch("vllm_ascend.utils.is_310p", return_value=True),
+        mock.patch(
+            "vllm_ascend.utils.get_current_hardware_profile", return_value=get_hardware_profile(AscendDeviceType._310P)
+        ),
         mock.patch("subprocess.run", side_effect=FileNotFoundError),
     ):
         assert utils.is_rc_device() is False
@@ -482,6 +535,50 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
     vllm_config.kv_transfer_config.is_kv_consumer = True
     vllm_config.kv_transfer_config.is_kv_producer = False
     ascend_config = mock.MagicMock()
-    ascend_config.recompute_scheduler_enable = False
+    ascend_config.scheduler_config.recompute_scheduler_enable = False
     with mock.patch("vllm_ascend.utils.get_ascend_config", return_value=ascend_config):
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
+
+
+def test_check_gdn_layer_supports_kimi_linear_config_property():
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                text_config=KimiLinearConfig(
+                    linear_attn_config={
+                        "kda_layers": [2],
+                        "full_attn_layers": [1],
+                    }
+                )
+            )
+        )
+    )
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_nested_layer_types():
+    hf_config = SimpleNamespace(text_config=SimpleNamespace(layer_types=["linear_attention"]))
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=hf_config))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_supports_qwen3_next_config():
+    from transformers import Qwen3NextConfig
+
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3NextConfig()))
+
+    assert utils.check_gdn_layer(vllm_config) is True
+
+
+def test_check_gdn_layer_returns_false_without_linear_attention():
+    from transformers import Qwen3Config
+
+    # Dense Qwen3 configs, including Qwen3-8B, expose only full-attention
+    # layer types and must not be classified as hybrid GDN models.
+    vllm_config = SimpleNamespace(model_config=SimpleNamespace(hf_config=Qwen3Config()))
+
+    assert utils.check_gdn_layer(vllm_config) is False

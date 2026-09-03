@@ -22,9 +22,15 @@ The following model variants are available. It is recommended to download the mo
 
 | Model                | Hardware Requirement                                                                             | Download                                                                 |
 | -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64G, 1\~2 cards)<br>Atlas 800I A2 (64G, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://huggingface.co/AngelSlim/Qwen3-a3B_eagle3)            |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
+| Eagle3 Draft Model   | NA                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+
+**Quantized Versions for Atlas 300I DUO:**
+
+| Model | Quantization | Hardware Requirement | Download |
+|-------|-------------|---------------------|----------|
+| Qwen3-30B-A3B-w8a8-QuaRot-310  |W8A8 | Atlas 300I DUO (TP2)                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
@@ -120,6 +126,31 @@ You can use the official all-in-one Docker image for Qwen3 MoE models.
         -v /usr/local/sbin:/usr/local/sbin \
         -it -d $IMAGE bash
     ```
+=== "Atlas 300I DUO"
+
+    **Docker Run:**
+
+    ```bash
+
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-310p
+
+    docker run --rm \
+        --name vllm-ascend \
+        --shm-size=1g \
+        --net=host \
+        --device /dev/davinci0 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
 
 !!! tip
     The mounts above are the minimum required for NPU driver access. Add additional `-v` mounts (e.g., model weight paths, datasets) as needed for your environment.
@@ -162,6 +193,14 @@ If you prefer not to use the Docker image, you can build from source. Install vL
    pip install -e .
    ```
 
+!!! note
+
+    For Atlas 300I DUO, source installation may pull in `triton` and `triton-ascend`. Uninstall them before running vLLM-Ascend on Atlas 300I DUO:
+
+    ```bash
+    pip uninstall -y triton-ascend triton
+    ```
+
 **Installation Verification:**
 
 ```bash
@@ -174,9 +213,9 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
@@ -184,34 +223,64 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 > The following command is an example configuration. Adjust the parameters based on your actual scenario.
 
-**Atlas 800I A2/A3:**
+=== "Atlas 800I A2/A3"
 
-```bash
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
-export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    ```bash
+    export HCCL_BUFFSIZE=1024
+    export HCCL_OP_EXPANSION_MODE="AIV"  # not needed on A2
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve your_model_path \
-    --served-model-name qwen3 \
-    --trust-remote-code \
-    --max-num-seqs 100 \
-    --max-model-len 40960 \
-    --max-num-batched-tokens 16384 \
-    --tensor-parallel-size 4 \
-    --enable-expert-parallel \
-    --quantization ascend \
-    --distributed_executor_backend "mp" \
-    --no-enable-prefix-caching \
-    --async-scheduling \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
-    --gpu-memory-utilization 0.95 \
-    --port 8000 \
-    --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "draft_tensor_parallel_size": 1, "num_speculative_tokens": 3}'
-```
+    vllm serve your_model_path \
+        --served-model-name qwen3 \
+        --trust-remote-code \
+        --max-num-seqs 100 \
+        --max-model-len 40960 \
+        --max-num-batched-tokens 16384 \
+        --tensor-parallel-size 4 \
+        --enable-expert-parallel \
+        --quantization ascend \
+        --distributed_executor_backend "mp" \
+        --no-enable-prefix-caching \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+        --additional-config '{"weight_nz_mode": 2}' \
+        --gpu-memory-utilization 0.95 \
+        --port 8000 \
+        --speculative-config '{"method": "eagle3", "model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
+    ```
+
+=== "Atlas 300I DUO"
+
+    ```bash
+    export VLLM_USE_MODELSCOPE=True
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
+
+    vllm serve your_model_path  \
+        --host 127.0.0.1 \
+        --port 8000 \
+        --tensor-parallel-size 2 \
+        --max-num-seqs 32 \
+        --served_model_name qwen3 \
+        --dtype float16 \
+        --quantization ascend \
+        --max-model-len 16384 \
+        --additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false,"enable_npu_graph_ex":false}}' \
+        --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,32]}' \
+        --no-enable-prefix-caching
+    ```
+
+    **Key parameters:**
+
+    - `--tensor-parallel-size 2` maps the model across two Atlas inference devices. Adjust it together with `ASCEND_RT_VISIBLE_DEVICES` according to the available devices and memory.
+    - `--dtype float16` is used for Atlas 300I DUO to match the Atlas inference execution path.
+    - `--max-model-len 16384` is intentionally conservative. On Atlas 300I DUO, large context lengths allocate large attention masks, so do not rely on automatic max-model-len detection.
+    - `--max-num-seqs 16` limits concurrent active requests to reduce KV cache and graph capture pressure on Atlas 300I DUO.
+    - `--gpu-memory-utilization` controls KV cache capacity. Reduce it if startup or runtime requests report OOM.
+    - `--additional-config '{"ascend_compilation_config": {"fuse_norm_quant": false}}'` disables norm-quant fusion for the Atlas 300I DUO serving path.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16]}'` enables decode ACLGraph replay and explicitly limits capture sizes for Atlas 300I DUO.
+    - `--no-enable-prefix-caching` is the default recommendation for this Atlas 300I DUO example to reduce memory pressure.
+    - `--quantization ascend` enables Ascend quantization for the W8A8 model. Remove this option when deploying the BF16 model.
+    - To enable MTP speculative decoding, use --speculative_config '{"method": "mtp", "num_speculative_tokens": 1}'. We recommend setting num_speculative_tokens to 1.
 
 !!! note
 
@@ -420,6 +489,8 @@ vllm bench serve \
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Serve](https://docs.vllm.ai/en/stable/cli/serve/), [vLLM Features](https://docs.vllm.ai/en/stable/features) and [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) for key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -442,16 +513,14 @@ vllm bench serve \
 | Low Latency     | 2 (A3) | 4   | 37364         | 100          | Off       | On  | -            |
 | Long Context    | 2 (A3) | 4   | 131072        | 14           | Off       | On  | YaRN         |
 
-> For detailed parameter descriptions, please refer to the deployment examples in Section 5.
+> For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 **Low Latency Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -464,10 +533,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}'
@@ -484,11 +552,9 @@ vllm serve your_model_path \
 **High Throughput Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -500,7 +566,6 @@ vllm serve your_model_path \
     --tensor-parallel-size 1 \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --additional-config '{"weight_nz_mode": 2}' \
@@ -520,11 +585,9 @@ vllm serve your_model_path \
 **Long Context Configuration:**
 
 ```shell
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_BUFFSIZE=1024
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=1
+export HCCL_OP_EXPANSION_MODE="AIV"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 vllm serve your_model_path \
@@ -537,10 +600,9 @@ vllm serve your_model_path \
     --enable-expert-parallel \
     --distributed_executor_backend "mp" \
     --no-enable-prefix-caching \
-    --async-scheduling \
     --quantization ascend \
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --additional-config '{"enable_flashcomm1": true, "weight_nz_mode": 2}' \
+    --additional-config '{"weight_nz_mode": 2}' \
     --gpu-memory-utilization 0.95 \
     --port 8000 \
     --speculative-config '{"method": "eagle3","model": "your_eagle3_model_path", "num_speculative_tokens": 3}' \
@@ -558,8 +620,8 @@ vllm serve your_model_path \
 ### 9.2 Tuning Guidelines
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This chapter only covers model-specific issues.

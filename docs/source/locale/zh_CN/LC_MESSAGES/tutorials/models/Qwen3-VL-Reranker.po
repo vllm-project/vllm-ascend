@@ -21,9 +21,6 @@ msgstr ""
 msgid "# Qwen3-VL-Reranker"
 msgstr "# Qwen3-VL-Reranker"
 
-msgid "## Introduction"
-msgstr "## 简介"
-
 msgid ""
 "The Qwen3-VL-Embedding and Qwen3-VL-Reranker model series are the latest "
 "additions to the Qwen family, built upon the recently open-sourced and "
@@ -38,22 +35,6 @@ msgstr ""
 "基础模型构建。该系列专为多模态信息检索和跨模态理解而设计，支持文本、图像、截图、视频等多种输入，以及包含这些模态混合的输入。本指南介绍如何使用 vLLM"
 " Ascend 运行该模型。"
 
-msgid "## Supported Features"
-msgstr "## 支持的功能"
-
-msgid ""
-"Refer to [supported "
-"features](../../user_guide/support_matrix/supported_models.md) to get the "
-"model's supported feature matrix."
-msgstr ""
-"请参考[支持的功能](../../user_guide/support_matrix/supported_models.md)获取该模型支持的功能矩阵。"
-
-msgid "## Environment Preparation"
-msgstr "## 环境准备"
-
-msgid "### Model Weight"
-msgstr "### 模型权重"
-
 msgid ""
 "- `Qwen3-VL-Reranker-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-8B)\n"
 "- `Qwen3-VL-Reranker-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Reranker-2B)"
@@ -66,21 +47,6 @@ msgid ""
 "multiple nodes, such as `/root/.cache/`"
 msgstr "建议将模型权重下载到多节点共享目录，例如 `/root/.cache/`"
 
-msgid "### Installation"
-msgstr "### 安装"
-
-msgid ""
-"You can use our official docker image to run `Qwen3-VL-Reranker` series "
-"models."
-msgstr "您可以使用我们的官方 Docker 镜像来运行 `Qwen3-VL-Reranker` 系列模型。"
-
-msgid ""
-"- Start the docker image on your node, refer to [using "
-"docker](../../installation.md#set-up-using-docker)."
-msgstr ""
-"- 在您的节点上启动 Docker 镜像，请参考[使用 Docker](../../installation.md#set-up-using-"
-"docker)。"
-
 msgid ""
 "If you don't want to use the docker image as above, you can also build all "
 "from source:"
@@ -89,16 +55,7 @@ msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所�
 msgid ""
 "- Install `vllm-ascend` from source, refer to "
 "[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../installation.md)。"
-
-msgid "## Deployment"
-msgstr "## 部署"
-
-msgid "Using the Qwen3-VL-Reranker-8B model as an example:"
-msgstr "以 Qwen3-VL-Reranker-8B 模型为例："
-
-msgid "### Chat Template"
-msgstr "### 对话模板"
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
 msgid ""
 "The Qwen3-VL-Reranker model requires a specific chat template for proper "
@@ -113,48 +70,174 @@ msgid ""
 "`./qwen3_vl_reranker.jinja`)."
 msgstr "将此文件保存到您选择的路径（例如 `./qwen3_vl_reranker.jinja`）。"
 
-msgid "### Online Inference"
-msgstr "### 在线推理"
-
-msgid "Start the server with the following command:"
-msgstr "使用以下命令启动服务端："
-
-msgid ""
-"Once your server is started, you can send request with follow examples."
-msgstr "服务端启动后，您可以按照以下示例发送请求。"
-
-msgid "### Offline Inference"
-msgstr "### 离线推理"
-
-msgid ""
-"If you run this script successfully, you will see a list of scores printed "
-"to the console, similar to this:"
-msgstr "如果您成功运行此脚本，您将在控制台看到打印出的分数列表，类似如下："
-
-msgid "For more examples, refer to the vLLM official examples:"
-msgstr "更多示例，请参考 vLLM 官方示例："
-
-msgid ""
-"- [Offline Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_reranker_offline.py)\n"
-"- [Online Vision Embedding Example](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_rerank_api_online.py)"
-msgstr ""
-"- [离线视觉嵌入示例](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_reranker_offline.py)\n"
-"- [在线视觉嵌入示例](https://github.com/vllm-project/vllm/blob/main/examples/pooling/score/vision_rerank_api_online.py)"
-
-msgid "## Performance"
-msgstr "## 性能"
-
-msgid ""
-"Run performance of `Qwen3-VL-Reranker-8B` as an example.\n"
-"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details."
-msgstr ""
-"以 `Qwen3-VL-Reranker-8B` 的性能测试为例。\n"
-"更多详情请参考 [vllm 基准测试](https://docs.vllm.ai/en/latest/benchmarking/cli/)。"
-
 msgid "Take the `serve` as an example. Run the code as follows."
 msgstr "以 `serve` 为例。按如下方式运行代码。"
 
+msgid "## 1 Introduction"
+msgstr "## 1 引言"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker镜像安装"
+
 msgid ""
-"After about several minutes, you can get the performance evaluation result. "
-"With this tutorial, the performance result is:"
-msgstr "大约几分钟后，您将获得性能评估结果。按照本教程，性能结果如下："
+"You can use our official docker image to run `Qwen3-VL-Reranker` model "
+"directly."
+msgstr "您可以使用我们官方的docker镜像直接运行`Qwen3-VL-Reranker`模型。"
+
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using docker](../../installation.md#set-up-using-"
+"docker)."
+msgstr ""
+"根据您的机器类型选择镜像并在节点上启动docker镜像，请参考[使用docker](../../installation.md#set-up-"
+"using-docker)。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3系列\""
+
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动docker镜像。"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2系列\""
+
+msgid "=== \"Atlas 300I DUO\""
+msgstr "=== \"Atlas 300I DUO\""
+
+msgid ""
+"After a successful docker run, you can verify the running container service "
+"by executing the `docker ps` command."
+msgstr "docker运行成功后，您可以通过执行`docker ps`命令来验证正在运行的容器服务。"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"If you want to deploy multi-node environment, you need to set up environment"
+" on each node."
+msgstr "如果您想部署多节点环境，您需要在每个节点上设置环境。"
+
+msgid "### 5.1 Chat Template"
+msgstr "### 5.1 对话模板"
+
+msgid "=== \"A3/A2 series\""
+msgstr "=== \"A3/A2系列\""
+
+msgid "Required  Parameter Descriptions:"
+msgstr "必需参数说明："
+
+msgid ""
+"`--compilation-config` For Atlas 300I DUO, due to limited hardware streams, "
+"the size of cudagraph_capture_sizes is restricted."
+msgstr ""
+"`--compilation-config` 对于Atlas 300I "
+"DUO，由于硬件流数量有限，cudagraph_capture_sizes的大小受到限制。"
+
+msgid "Key Parameter Descriptions:"
+msgstr "关键参数说明："
+
+msgid ""
+"- `--max-model-len` represents the context length, which is the maximum "
+"value of the input plus output for a single request. For Atlas 300I DUO if "
+"automatic parsing resolves to a large context length, allocating this mask "
+"(O(max_model_len^2)) may exceed NPU memory and trigger OOM. Be sure to set "
+"an explicit and conservative value, such as --max-model-len 1024."
+msgstr ""
+"- `--max-model-len`表示上下文长度，即单个请求的输入加输出的最大值。对于Atlas 300I "
+"DUO，如果自动解析得到较大的上下文长度，分配此掩码（O(max_model_len^2)）可能会超出NPU内存并触发OOM。请务必设置一个明确且保守的值，例如"
+"--max-model-len 1024。"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid "Once your server is started, you can verify by follow command:"
+msgstr "服务器启动后，您可以通过以下命令进行验证："
+
+msgid "Service Verification:"
+msgstr "服务验证："
+
+msgid "Expected Result:"
+msgstr "预期结果："
+
+msgid ""
+"The service returns HTTP 200 OK with a JSON response containing the "
+"`relevance_score` field. Example output:"
+msgstr "服务返回HTTP 200 OK，JSON响应中包含`relevance_score`字段。示例输出："
+
+msgid ""
+"For more usage examples, please reference the "
+"[examples](https://github.com/vllm-"
+"project/vllm/tree/main/examples/pooling/score)"
+msgstr ""
+"更多使用示例，请参考[示例](https://github.com/vllm-"
+"project/vllm/tree/main/examples/pooling/score)"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "Here are two accuracy evaluation methods."
+msgstr "这里提供两种精度评估方法。"
+
+msgid "### Using MTEB"
+msgstr "### 使用MTEB"
+
+msgid "1. Refer to [MTEB](https://docs.mteb.org/) for details."
+msgstr "1. 有关详细信息，请参考[MTEB](https://docs.mteb.org/)。"
+
+msgid "2. Run follow code to execute the accuracy evaluation."
+msgstr "2. 运行以下代码来执行精度评估。"
+
+msgid "3. After execution, you can get the result."
+msgstr "3. 执行后，您可以获得结果。"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### Using vLLM Benchmark"
+msgstr "### 使用vLLM基准测试"
+
+msgid ""
+"Run performance of `Qwen3-VL-Reranker-2B` as an example.\n"
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/cli/) for more details."
+msgstr ""
+"以`Qwen3-VL-Reranker-2B`的性能测试为例。\n"
+"有关更多详细信息，请参考[vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/cli/)。"
+
+msgid ""
+"After about several minutes, you can get the performance evaluation result."
+msgstr "大约几分钟后，您可以获得性能评估结果。"
+
+msgid "## 9 FAQ"
+msgstr "## 9 常见问题"
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅[支持特性列表](../../user_guide/support_matrix/supported_models.md)以获取模型的支持特性矩阵。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQs](../../faqs.md) for troubleshooting."
+msgstr "常见问题提示：如果遇到问题，请参阅[公共FAQ](../../faqs.md)进行故障排除。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public FAQs](../../faqs.md)."
+msgstr "对于常见的环境、安装和通用参数问题，请参阅[公共FAQ](../../faqs.md)。"

@@ -1,25 +1,27 @@
 import json
 import os
 import tempfile
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.models.utils import WeightsMapper
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.modelslim_config import (
+from vllm_ascend.quantization.configs.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
+    _make_modelslim_moe_weight_loader,
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, vllm_version_is
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -66,7 +68,7 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertIsInstance(config, AscendModelSlimConfig)
         self.assertEqual(config.quant_description, self.sample_config)
 
-    @patch("torch.npu.is_available")
+    @patch("vllm_ascend.quantization.configs.modelslim_config.torch.npu.is_available")
     def test_override_quantization_method(self, mock_is_available):
         # Test when NPU is available
         mock_is_available.return_value = True
@@ -90,7 +92,9 @@ class TestAscendModelSlimConfig(TestBase):
         linear_layer = MagicMock(spec=LinearBase)
         # Test skipped layer
         with (
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
         ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
@@ -100,8 +104,12 @@ class TestAscendModelSlimConfig(TestBase):
         mock_scheme = MagicMock()
         with (
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
+            ),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()
             ) as mock_ascend_linear,
@@ -116,8 +124,12 @@ class TestAscendModelSlimConfig(TestBase):
         mock_config.model_config.hf_config.model_type = None
         mock_scheme = MagicMock()
         with (
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
+            ),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendKVCacheMethod", return_value=MagicMock()
             ) as mock_ascend_kvcache,
@@ -127,6 +139,78 @@ class TestAscendModelSlimConfig(TestBase):
             self.assertIs(method, None)
             method = self.ascend_config.get_quant_method(attention_layer, "layers.1.attn")
             self.assertIs(method, mock_ascend_kvcache.return_value)
+
+    def test_modelslim_moe_weight_loader_maps_scale_bias_to_scale_path(self):
+        upstream_loader = MagicMock(return_value=True)
+        weight_loader = _make_modelslim_moe_weight_loader(upstream_loader)
+        param = torch.nn.Parameter(torch.empty(1))
+        loaded_weight = torch.empty(1)
+
+        result = weight_loader(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w2_scale_bias",
+            shard_id="w2",
+            expert_id=0,
+            return_success=True,
+        )
+
+        self.assertTrue(result)
+        upstream_loader.assert_called_once_with(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w2_scale",
+            shard_id="w2",
+            expert_id=0,
+            return_success=True,
+        )
+
+    def test_get_quant_method_for_moe_installs_modelslim_weight_loader(self):
+        layer = RoutedExperts.__new__(RoutedExperts)
+        torch.nn.Module.__init__(layer)
+        layer.moe_config = MagicMock()
+        upstream_loader = MagicMock(return_value=True)
+        layer.weight_loader = upstream_loader
+        mock_config = MagicMock()
+        mock_config.model_config.hf_config.model_type = "qwen3_5_moe"
+        mock_scheme = MagicMock()
+
+        with (
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
+            ),
+            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
+            ),
+            patch(
+                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod",
+                return_value=MagicMock(),
+            ) as mock_ascend_fused_moe,
+        ):
+            method = self.ascend_config.get_quant_method(layer, "model.layers.0.mlp.experts")
+
+        self.assertIs(method, mock_ascend_fused_moe.return_value)
+        mock_ascend_fused_moe.assert_called_once_with(mock_scheme, layer.moe_config, None)
+
+        param = torch.nn.Parameter(torch.empty(1))
+        loaded_weight = torch.empty(1)
+        layer.weight_loader(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w13_scale_bias",
+            shard_id="w1",
+            expert_id=0,
+            return_success=True,
+        )
+        upstream_loader.assert_called_once_with(
+            param=param,
+            loaded_weight=loaded_weight,
+            weight_name="model.layers.0.mlp.experts.w13_scale",
+            shard_id="w1",
+            expert_id=0,
+            return_success=True,
+        )
 
     def test_get_quant_method_for_c8_kv_cache_attention(self):
         c8_config = AscendModelSlimConfig(
@@ -143,9 +227,12 @@ class TestAscendModelSlimConfig(TestBase):
         mock_vllm_config_for_kv_c8.kv_transfer_config = None
 
         with (
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_vllm_config),
             patch(
-                "vllm_ascend.quantization.methods.kv_c8.get_current_vllm_config",
+                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                return_value=mock_vllm_config,
+            ),
+            patch(
+                "vllm_ascend.quantization.methods.kv_cache.kv_c8.get_current_vllm_config",
                 return_value=mock_vllm_config_for_kv_c8,
             ),
             patch(
@@ -155,44 +242,9 @@ class TestAscendModelSlimConfig(TestBase):
             method = c8_config.get_quant_method(attention_layer, "model.layers.0.self_attn.attn")
             self.assertIs(method, mock_kvcache.return_value)
             args, _ = mock_kvcache.call_args
-            from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
+            from vllm_ascend.quantization.methods.kv_cache.kv_c8 import AscendC8KVCacheAttentionMethod
 
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
-
-    @pytest.mark.skipif(
-        not vllm_version_is("0.23.0"),
-        reason="Legacy FusedMoE quant method UT is only for vLLM 0.23.0.",
-    )
-    def test_get_quant_method_for_fused_moe(self):
-        fused_moe_layer = MagicMock(spec=FusedMoE)
-        fused_moe_layer.moe = MagicMock(spec=FusedMoEConfig)
-        fused_moe_layer.moe_config = MagicMock(spec=FusedMoEConfig)
-        mock_config = MagicMock()
-        mock_config.model_config.hf_config.model_type = None
-
-        # Test skipped layer
-        with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch(
-                "vllm_ascend.ops.fused_moe.fused_moe.AscendUnquantizedFusedMoEMethod", return_value=MagicMock()
-            ) as mock_ascend_moe,
-        ):
-            method = self.ascend_config.get_quant_method(fused_moe_layer, "moe_layer")
-            self.assertIs(method, mock_ascend_moe.return_value)
-
-        # Test quantized layer
-        mock_scheme = MagicMock()
-        with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
-            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
-            patch(
-                "vllm_ascend.quantization.method_adapters.AscendFusedMoEMethod", return_value=MagicMock()
-            ) as mock_ascend_moe,
-        ):
-            method = self.ascend_config.get_quant_method(fused_moe_layer, "moe_layer")
-            self.assertIs(method, mock_ascend_moe.return_value)
 
     def test_is_layer_skipped_ascend(self):
         # Test non-fused layer that should be quantized
@@ -288,7 +340,8 @@ class TestAscendModelSlimConfig(TestBase):
             error_msg = str(ctx.exception)
             self.assertIn("config.json", error_msg)
 
-    def test_maybe_update_config_non_directory_raises(self):
+    @patch("vllm_ascend.quantization.utils.get_model_file", return_value=None)
+    def test_maybe_update_config_non_directory_raises(self, _mock_get_model_file):
         config = AscendModelSlimConfig()
 
         with self.assertRaises(ValueError) as ctx:
@@ -338,6 +391,109 @@ class TestAscendModelSlimConfig(TestBase):
         self.assertEqual(config.quant_description["model.layers.0.moe.experts.0.gate_proj.weight"], "INT8")
 
 
+class TestGetCacheScaleMapper(TestBase):
+    def test_return_default_mapper(self):
+        # From vllm upstream QuantizationConfig testcase.
+        config = AscendModelSlimConfig({})
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        # deprecated fused kv_scale and bare scales
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.kv_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.k_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        # Qwen3-MoE / llm-compressor fused qkv_proj
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.qkv_proj.k_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.qkv_proj.v_scale"),
+            "model.layers.0.self_attn.attn.v_scale",
+        )
+        # already in vLLM form -> unchanged (idempotent)
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.attn.k_scale"),
+            "model.layers.0.self_attn.attn.k_scale",
+        )
+        # non-kv scales must not be touched
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.k_proj.weight_scale"),
+            "model.layers.0.self_attn.k_proj.weight_scale",
+        )
+        # regular weights untouched
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.q_proj.weight"),
+            "model.layers.0.self_attn.q_proj.weight",
+        )
+
+    def test_c8_kv_cache_type_returns_mapper(self):
+        config = AscendModelSlimConfig({"kv_cache_type": "C8"})
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        # C8 mappings: k_proj -> attn
+        self.assertEqual(
+            mapper._map_name("model.layers.0.k_proj.kv_cache_scale"),
+            "model.layers.0.attn.k_cache_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.k_proj.kv_cache_offset"),
+            "model.layers.0.attn.k_cache_offset",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.v_proj.kv_cache_scale"),
+            "model.layers.0.attn.v_cache_scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.0.v_proj.kv_cache_offset"),
+            "model.layers.0.attn.v_cache_offset",
+        )
+
+    def test_fa_quant_returns_mapper(self):
+        config = AscendModelSlimConfig(
+            {
+                "fa_quant_type": "C8",
+                "layers.1.fa_k.scale": "C8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_k.scale"),
+            "model.layers.1.mla_attn.mla_attn.fa_k.scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_q.scale"),
+            "model.layers.1.mla_attn.mla_attn.fa_q.scale",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.fa_v.offset"),
+            "model.layers.1.mla_attn.mla_attn.fa_v.offset",
+        )
+
+    def test_indexer_quant_returns_mapper(self):
+        config = AscendModelSlimConfig(
+            {
+                "indexer_quant_type": "INT8",
+                "layers.1.indexer.quant_type": "INT8",
+            }
+        )
+        mapper = config.get_cache_scale_mapper()
+        self.assertIsNotNone(mapper)
+        self.assertEqual(
+            mapper._map_name("model.layers.1.indexer.q_rot"),
+            "model.layers.1.mla_attn.mla_attn.indexer.q_rot",
+        )
+        self.assertEqual(
+            mapper._map_name("model.layers.1.indexer.k_rot"),
+            "model.layers.1.mla_attn.mla_attn.indexer.k_rot",
+        )
+
+
 class TestApplyVllmMapper(TestBase):
     def test_apply_mapper_with_populated_quant_description(self):
         config = AscendModelSlimConfig({"old_key.weight": "INT8"})
@@ -349,8 +505,47 @@ class TestApplyVllmMapper(TestBase):
         self.assertEqual(config.quant_description, {"new_key.weight": "INT8"})
         mock_mapper.apply_dict.assert_called_once_with({"old_key.weight": "INT8"})
 
+    def test_apply_mapper_preserves_optional_metadata(self):
+        optional_metadata = {
+            "quarot": {
+                "rotation_map": {
+                    "global_rotation": "optional/quarot.safetensors",
+                }
+            }
+        }
+        config = AscendModelSlimConfig(
+            {
+                "context_proj.weight": "W8A8",
+                "optional": optional_metadata,
+            }
+        )
+        draft_mapper = WeightsMapper(orig_to_new_prefix={"": "model."})
+
+        config.apply_vllm_mapper(draft_mapper)
+
+        self.assertEqual(config.quant_description["model.context_proj.weight"], "W8A8")
+        self.assertEqual(config.quant_description["optional"], optional_metadata)
+        self.assertNotIn("model.optional", config.quant_description)
+        vllm_config = SimpleNamespace(
+            quant_config=config,
+            model_config=SimpleNamespace(model="/target"),
+        )
+        self.assertEqual(
+            get_rotation_path(vllm_config),
+            Path("/target/optional/quarot.safetensors"),
+        )
+
 
 class TestQuantPrefixMapper(TestBase):
+    def test_qwen3_5_text_backbones_use_packed_module_mappings(self):
+        dense_mapping = get_packed_modules_mapping("qwen3_5_text")
+        moe_mapping = get_packed_modules_mapping("qwen3_5_moe_text")
+        self.assertEqual(dense_mapping["qkv_proj"], ["q_proj", "k_proj", "v_proj"])
+        self.assertEqual(
+            moe_mapping["experts"],
+            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        )
+
     def test_lm_head_maps_to_language_model_lm_head_when_quant_key_exists(self):
         config = AscendModelSlimConfig({"language_model.lm_head.weight": "FLOAT"})
 
@@ -428,6 +623,76 @@ class TestQuantPrefixMapper(TestBase):
             with self.subTest(model_type=model_type):
                 self.assertEqual(get_packed_modules_mapping(model_type), expected_mapping)
 
+    def test_kimi_k3_modelslim_resolves_fused_kda_and_moe_types(self):
+        layer_prefix = "language_model.model.layers.1"
+        quant_description = {
+            **{
+                f"{layer_prefix}.self_attn.{name}.weight": "FLOAT"
+                for name in ("q_proj", "k_proj", "v_proj", "g_proj", "f_a_proj", "b_proj")
+            },
+            **{
+                f"{layer_prefix}.block_sparse_moe.experts.0.{name}.weight": "W4A8_DYNAMIC"
+                for name in ("w1", "w2", "w3")
+            },
+        }
+        packed_mapping = get_packed_modules_mapping("kimi_k3")
+
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                f"{layer_prefix}.self_attn.in_proj_qkvgfab",
+                packed_mapping,
+            ),
+            "FLOAT",
+        )
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                f"{layer_prefix}.block_sparse_moe.experts",
+                packed_mapping,
+            ),
+            "W4A8_DYNAMIC",
+        )
+
+    def test_kimi_k3_quarot_splits_mixed_kda_projection(self):
+        attention_prefix = "language_model.model.layers.0.self_attn"
+        quant_description = {
+            **{f"{attention_prefix}.{name}.weight": "W8A8_DYNAMIC" for name in ("q_proj", "k_proj", "v_proj")},
+            **{f"{attention_prefix}.{name}.weight": "FLOAT" for name in ("g_proj", "f_a_proj", "b_proj")},
+        }
+        config = AscendModelSlimConfig(quant_description)
+        fused_prefix = f"{attention_prefix}.in_proj_qkvgfab"
+
+        self.assertTrue(config.uses_kimi_k3_mixed_kda_projection(fused_prefix))
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                f"{attention_prefix}.in_proj_qkv",
+                get_packed_modules_mapping("kimi_k3"),
+            ),
+            "W8A8_DYNAMIC",
+        )
+
+        layer = MagicMock(spec=LinearBase)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.hf_config.model_type = "kimi_linear"
+        with patch(
+            "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+            return_value=mock_vllm_config,
+        ):
+            method = config.get_quant_method(layer, fused_prefix)
+
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
+    def test_glm5_next_packed_modules_mapping_covers_moe_mla_and_kda(self):
+        expected_mapping = {
+            "gate_up_proj": ["gate_proj", "up_proj"],
+            "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+            "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+            "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
+        }
+        self.assertEqual(get_packed_modules_mapping("glm5_next"), expected_mapping)
+
     def test_gemma4_moe_experts_float_shards_are_skipped_together(self):
         quant_description = {
             "language_model.model.layers.0.experts.0.gate_proj.weight": "FLOAT",
@@ -493,7 +758,7 @@ class TestGetKvQuantDtype(TestBase):
 
 
 class TestGetKvQuantSplitFactor(TestBase):
-    @patch("vllm_ascend.quantization.modelslim_config.calc_split_factor")
+    @patch("vllm_ascend.quantization.configs.modelslim_config.calc_split_factor")
     def test_enable_fa_quant_true(self, mock_calc_split_factor):
         mock_calc_split_factor.return_value = 2.0
         config = AscendModelSlimConfig(
@@ -508,7 +773,7 @@ class TestGetKvQuantSplitFactor(TestBase):
         self.assertEqual(result, 2.0)
         mock_calc_split_factor.assert_called_once_with([64, 128])
 
-    @patch("vllm_ascend.quantization.modelslim_config.calc_split_factor")
+    @patch("vllm_ascend.quantization.configs.modelslim_config.calc_split_factor")
     def test_enable_fa_quant_false(self, mock_calc_split_factor):
         mock_calc_split_factor.return_value = 1.0
         config = AscendModelSlimConfig({})

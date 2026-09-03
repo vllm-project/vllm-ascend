@@ -1,6 +1,6 @@
-# Nightly Auto-Bisect
+# Nightly/Weekly Auto-Bisect
 
-Automatically locates the **first bad commit** (and its PR) when a nightly E2E
+Automatically locates the **first bad commit** (and its PR) when a scheduled E2E
 case fails, by binary-searching the `vllm-ascend` history between the last
 known-good commit and the failing commit. It reuses the existing nightly launch
 entries so the bisect reproduces the real nightly environment.
@@ -31,25 +31,64 @@ trigger (case FAIL)
 * **Compile only on C++ changes**: by default (`--native-check per-commit`) a
   rebuild happens only when that commit's own diff touches
   `*.cpp/*.cc/*.cu/*.h/*.hpp/*.cuh`, `csrc/**`, `CMakeLists.txt`, or `setup.py`.
-  Pure `.py`/yaml changes are picked up live by the editable install (vLLM is
-  never touched). `--native-check since-build` widens the check to all changes
-  since the last build (safer across bisect jumps).
+  Pure `.py`/yaml changes are picked up live by the editable install.
+  `--native-check since-build` widens the check to all changes since the last
+  build (safer across bisect jumps).
 * **SKIP semantics**: a flaky/unconfirmed FAIL, a build failure, or a collection
   error (pytest rc 2/3/4/5, e.g. a conftest ImportError) becomes `SKIP` instead
   of a misleading FAIL — like `git bisect skip`.
+* **Dependency adaptation**: the tool reads vLLM from
+  `.github/vllm-release-tag.commit`, torch-npu from `requirements.txt` (with
+  `pyproject.toml` as fallback). If the good and bad endpoints declare the same
+  vLLM and torch-npu versions, no version checks run. If either endpoint
+  version differs, every candidate is adapted before pytest: vLLM is checked
+  out from the configured vLLM source directory (default
+  `/vllm-workspace/vllm`) and torch-npu is reinstalled with pip.
 
-## Status table (good source, read-only)
+## Status tables (good source, read-only)
 
-The good commit is read from the nightly status CSV (produced by the pipeline):
+The good commit is read from the frequency-specific CSV produced by the
+pipeline:
 
 ```csv
-name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,time
+name,yaml/path,link,status,vLLM Git information,vLLM-Ascend Git information,soc,scene,time
 ```
 
-For the requested case (matched by `--name` or by `--config-yaml` against
-`yaml/path`), the good commit is the `vLLM-Ascend Git information` of the most
-recent row whose `status` is `success`. Point `--good-table` at it (or
-`$BISECT_GOOD_TABLE`). See `good_table.sample.csv`.
+Nightly and weekly do not share baselines:
+
+```text
+/root/.cache/vllm-ascend/<branch>/nightly/good_table.csv
+/root/.cache/vllm-ascend/<branch>/weekly/good_table.csv
+```
+
+For the requested case, all supplied dimensions (`--name`, `--config-yaml`,
+`--soc`, and `--scene`) are matched. The good commit is the
+`vLLM-Ascend Git information` of the most recent successful row. Legacy
+seven-column rows remain readable during migration.
+
+## CI triggers
+
+After opening a PR, an authorized contributor can comment:
+
+```text
+/nightly all --aop_enabled
+/weekly all --aop_enabled
+/weekly <case-name> --aop_enabled
+```
+
+The slash-command dispatcher starts the corresponding workflow on `main` and
+passes the PR SHA for the tested code. Consequently, workflow-file changes in a
+PR take effect only after they are merged; the PR's test configuration and code
+are still checked out at the PR SHA.
+
+Weekly workflows are triggered through `workflow_dispatch` by an external
+scheduler. They keep the existing trigger semantics: the caller supplies the
+branch, `request_id`, test scope and `aop_enabled`; the workflows only add the
+good-table dimensions (`test_frequency: weekly` and `soc_version`) so read and
+write paths stay consistent. The A2 accuracy-model workflow uses a different
+runner and is not bisect-capable. Nightly workflows also expose
+`workflow_dispatch` and are started by the existing external/manual dispatch
+path.
 
 ## Usage
 
@@ -60,6 +99,7 @@ python -m tools.bisect.auto_bisect \
     --scene single_node \
     --config-yaml DeepSeek-R1-0528-W8A8.yaml \
     --name DeepSeek-R1-0528-W8A8 \
+    --soc a2 \
     --bad-commit HEAD \
     --good-table /path/to/nightly_status.csv
 ```
@@ -72,12 +112,15 @@ auto-enter the worker loop:
 python -m tools.bisect.auto_bisect \
     --scene multi_node \
     --config-yaml Qwen3-235B-W8A8.yaml \
+    --soc a3 \
     --bad-commit "$VLLM_ASCEND_REF" \
     --num-nodes 2 \
     --coord-dir /shared/nightly_bisect/coord
 ```
 
-Common flags: `--good-commit` (skip the table), `--config-base-path`
+Common flags: `--good-commit` (skip the table), `--soc` (required hardware
+generation for the good-table key),
+`--config-base-path`
 (internal/external DP configs), `--native-check {per-commit,since-build}`,
 `--force-initial-build`, `--fail-confirm-retries`, `--no-verify-good`,
 `--no-verify-bad`, `--trial-timeout-s`. Full reference: see `USAGE_zh.md` §9.

@@ -1,0 +1,77 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_USE_V1: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_BUFFSIZE: "1024"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+
+
+_server_cmd: &server_cmd
+  - "--async-scheduling"
+  - "--tensor-parallel-size"
+  - "2"
+  - "--data-parallel-size"
+  - "4"
+  - "--data-parallel-size-local"
+  - "4"
+  - "--data-parallel-start-rank"
+  - "0"
+  - "--data-parallel-rpc-port"
+  - "2345"
+  - "--max-num-seqs"
+  - "40"
+  - "--max-model-len"
+  - "40960"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--enable-expert-parallel "
+  - "--port"
+  - "$SERVER_PORT"
+  - "--no-enable-prefix-caching"
+  - "--quantization"
+  - "ascend"
+  - "--trust-remote-code"
+  - "--host"
+  - "0.0.0.0"
+  - "--data-parallel-address"
+  - "0.0.0.0"
+
+_benchmarks: &benchmarks
+  acc:
+    case_type: accuracy
+    dataset_path: vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_chat_prompt
+    max_out_len: 65536
+    batch_size: 32
+    baseline: 85
+    threshold: 5
+    temperature: 0.6
+    top_p: 0.95
+    top_k: 20
+    ignore_eos: false
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "vllm_Qwen3_235B_Accuracy_FULL_Graph_GPQA"
+    model: "Eco-Tech/Qwen3-235B-A22B-w8a8-QuaRot"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    benchmarks:
+      <<: *benchmarks
+

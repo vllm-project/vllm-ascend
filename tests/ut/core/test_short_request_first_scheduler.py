@@ -18,8 +18,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
-from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 
@@ -79,10 +78,10 @@ def test_immediate_predicate_routes_to_immediate_queue():
 
 
 def test_dispatch_priority_immediate_then_short_then_long():
-    q = make_queue()
+    q = make_queue(immediate_predicate=lambda request: request.request_id == "imm")
     q.add_request(long_req("l"))
     q.add_request(short_req("s"))
-    q.prepend_request(make_request("imm", 5), force_immediate=True)
+    q.add_request(make_request("imm", 5))
 
     assert q.pop_request().request_id == "imm"
     assert q.pop_request().request_id == "s"
@@ -102,7 +101,6 @@ def test_aged_long_promotes_over_short_after_wait():
         q = make_queue(long_max_wait_ms=100.0)
         q.add_request(long_req("l"))
         q.add_request(short_req("s"))
-        q.begin_step(128)
 
         clock.advance(0.15)
         assert q._select_schedulable_queue() is q._long_queue
@@ -114,43 +112,23 @@ def test_no_aging_when_long_max_wait_is_zero():
         q = make_queue(long_max_wait_ms=0.0)
         q.add_request(long_req("l"))
         q.add_request(short_req("s"))
-        q.begin_step(128)
 
         clock.advance(10.0)
         assert q._select_schedulable_queue() is q._short_queue
 
 
-def test_owns_queue_only_true_for_internal_subqueues():
-    q = make_queue()
-    assert q.owns_queue(q._immediate_queue)
-    assert q.owns_queue(q._short_queue)
-    assert q.owns_queue(q._long_queue)
-    external = create_request_queue(SchedulingPolicy.FCFS)
-    assert not q.owns_queue(external)
-    assert not q.owns_queue(None)
+def test_peek_pins_the_selected_lane_until_pop():
+    clock = FakeClock()
+    with patch("vllm_ascend.core.short_request_first_scheduler.time", clock):
+        q = make_queue(long_max_wait_ms=100.0)
+        q.add_request(long_req("l"))
+        q.add_request(short_req("s"))
 
+        assert q.peek_request().request_id == "s"
+        clock.advance(0.2)
 
-def test_skip_or_requeue_counts_reason():
-    q = make_queue()
-    q.add_request(short_req("s"))
-    q.pop_request_from_queue(
-        q._short_queue,
-        count_as_removal=True,
-        skip_or_requeue_reason="blocked_waiting_status",
-    )
-    assert q._skip_or_requeue_counters["blocked_waiting_status"]["short"] == 1
-    assert q._dispatch_counters["short"] == 0
-
-
-def test_unknown_skip_or_requeue_reason_raises():
-    q = make_queue()
-    q.add_request(short_req("s"))
-    with pytest.raises(ValueError):
-        q.pop_request_from_queue(
-            q._short_queue,
-            count_as_removal=True,
-            skip_or_requeue_reason="bogus",
-        )
+        assert q.pop_request().request_id == "s"
+        assert q.pop_request().request_id == "l"
 
 
 def test_repeated_aged_long_promotions_trigger_warning_and_reset_after_short_dispatch():
@@ -164,18 +142,17 @@ def test_repeated_aged_long_promotions_trigger_warning_and_reset_after_short_dis
         q.add_request(long_req("l1"))
         q.add_request(long_req("l2"))
         q.add_request(short_req("s0"))
-        q.begin_step(128)
 
         clock.advance(0.2)
         for _ in range(3):
             assert q._select_schedulable_queue() is q._long_queue
-            q.pop_request_from_queue(q._long_queue)
+            q.pop_request()
 
         mock_warning_once.assert_called_once()
         assert q._consecutive_aged_long_promotions == 3
 
         assert q._select_schedulable_queue() is q._short_queue
-        q.pop_request_from_queue(q._short_queue)
+        q.pop_request()
         assert q._consecutive_aged_long_promotions == 0
 
 

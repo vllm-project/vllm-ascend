@@ -56,19 +56,15 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_USE_MODELSCOPE: "true"
 
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "1536"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   HCCL_BUFFSIZE: "800"
-  ASCEND_BUFFER_POOL: "4:8"
 
 templates:
   - node_index: 0
@@ -106,7 +102,7 @@ templates:
       - --quantization
       - "ascend"
       - --additional-config
-      - '{"enable_shared_expert_dp": true}'
+      - '{"enable_shared_expert_dp": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
@@ -145,7 +141,7 @@ templates:
       - --quantization
       - "ascend"
       - --additional-config
-      - '{"enable_shared_expert_dp": true}'
+      - '{"enable_shared_expert_dp": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30100", "engine_id": "1", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
@@ -187,7 +183,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
@@ -229,7 +225,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true}'
+      - '{"recompute_scheduler_enable": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true, "prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 

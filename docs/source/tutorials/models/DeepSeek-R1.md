@@ -11,21 +11,21 @@ This document is validated and written based on **vLLM-Ascend v0.13.0**. The cur
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `DeepSeek-R1-W8A8`(Quantized version): require 1 Atlas 800 A3 (64G × 16) nodes or 2 Atlas 800 A2 (64G × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)
+- `DeepSeek-R1-W8A8`(Quantized version): require 1 Atlas 800 A3 (64GB × 16) nodes or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)
 
 It is recommended to download the model weight to the shared directory of multiple nodes.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -33,14 +33,14 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can use our official docker image to run `DeepSeek-R1-W8A8` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -77,10 +77,10 @@ Select an image based on your machine type and start the docker image on your no
 
 === "A2 series"
 
-    Start the docker image on your each node.
+    Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
     docker run --rm \
         --name vllm-ascend \
         --shm-size=1g \
@@ -113,15 +113,15 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-R1-W8A8` can be deployed on 1 Atlas 800 A3 (64G × 16) or 2 Atlas 800 A2 (64G × 8).
+Single-node deployment completes both Prefill and Decode within the same node. The quantized model `DeepSeek-R1-W8A8` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 2 Atlas 800 A2 (64GB × 8).
 
 Startup Command:
 
@@ -140,10 +140,9 @@ export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
 export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
-export VLLM_ASCEND_BALANCE_SCHEDULING=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
   --host 0.0.0.0 \
   --port 8000 \
   --data-parallel-size 4 \
@@ -163,13 +162,13 @@ vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
-- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5K and output length of 1.5K, a value of `16384` is sufficient, however, for precision testing, please set it to at least `35000`.
+- `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `16384` is sufficient, however, for precision testing, please set it to at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -243,11 +242,10 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+    vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8000 \
     --data-parallel-size 4 \
@@ -289,11 +287,10 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve vllm-ascend/DeepSeek-R1-W8A8 \
+    vllm serve vllm-ascend/DeepSeek-R1-W8A8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8000 \
     --headless \
@@ -326,7 +323,7 @@ Key Parameter Descriptions:
 - `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -441,4 +438,4 @@ This solution has been tested and demonstrates excellent performance.
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

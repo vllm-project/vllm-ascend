@@ -17,7 +17,7 @@ ignore-hex = true
 identifier-leading-digits = false
 locale = "en"
 extend-ignore-identifiers-re = [".*Unc.*", ".*_thw",
-    ".*UE8M0.*", ".*(UE4M3|ue4m3).*", ".*eles.*", ".*fo.*", ".*ba.*",
+    ".*(UE8M0|ue8m0).*", ".*(UE4M3|ue4m3).*", ".*eles.*", ".*fo.*", ".*ba.*",
     ".*ot.*", ".*[Tt]h[rR].*",
     # tools/ai_qos.py: align with driver qos_mata_config / original_sdma_mata (not "meta")
     ".*(?i)mata.*"]
@@ -51,6 +51,7 @@ tme = "tme"
 dout = "dout"
 Pn = "Pn"
 arange = "arange"
+ptd = "ptd"
 
 [type.py]
 extend-glob = []

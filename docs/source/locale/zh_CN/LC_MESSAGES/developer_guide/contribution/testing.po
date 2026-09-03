@@ -37,12 +37,6 @@ msgstr "搭建测试环境最快的方式是使用主分支的容器镜像："
 msgid "You can run the unit tests on CPUs with the following steps:"
 msgstr "您可以按照以下步骤在 CPU 上运行单元测试："
 
-msgid "=== \"Single card\""
-msgstr "=== \"单卡\""
-
-msgid "=== \"Multi cards\""
-msgstr "=== \"多卡\""
-
 msgid "## Running tests"
 msgstr "## 运行测试"
 
@@ -107,15 +101,6 @@ msgstr "如需在本地运行夜间多节点模型测试用例，请参考[多�
 
 msgid "#### E2E test examples"
 msgstr "#### 端到端测试示例"
-
-msgid ""
-"- Offline test example: [`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)\n"
-"- Online test example: [`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)\n"
-"- Correctness test example: [`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
-msgstr ""
-"- 离线测试示例：[`tests/e2e/pull_request/one_card/test_camem.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/test_camem.py)\n"
-"- 在线测试示例：[`tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/two_card/aclgraph/test_single_request_aclgraph.py)\n"
-"- 正确性测试示例：[`tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py`](https://github.com/vllm-project/vllm-ascend/blob/main/tests/e2e/pull_request/one_card/aclgraph/test_aclgraph_accuracy.py)"
 
 msgid ""
 "The CI resource is limited, and you might need to reduce the number of "
@@ -185,3 +170,17 @@ msgstr "=== \"单卡\""
 
 msgid "=== \"Multi-card\""
 msgstr "=== \"多卡\""
+
+msgid "=== \"Multi-cards\""
+msgstr "=== \"多卡\""
+
+msgid ""
+"- Offline test example: "
+"[`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)"
+msgstr ""
+"- "
+"离线测试示例：[`tests/e2e/pull_request/one_card/test_qwen3_0_6b.py`](https://github.com/vllm-"
+"project/vllm-"
+"ascend/blob/main/tests/e2e/pull_request/one_card/test_qwen3_0_6b.py)"

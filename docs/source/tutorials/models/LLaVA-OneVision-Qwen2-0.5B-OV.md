@@ -8,9 +8,9 @@ This document shows the main verification steps for the model on vLLM Ascend, in
 
 ## Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -24,7 +24,7 @@ The verified single-card deployment uses one Atlas A2 NPU. It is recommended to 
 
 You can use the official docker image to run `LLaVA-OneVision-Qwen2-0.5B-OV` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node. Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}

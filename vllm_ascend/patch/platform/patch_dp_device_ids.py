@@ -29,44 +29,43 @@
 # offset is out of range and the helper raises ``IndexError`` (wrapped in
 # the user-facing "Error computing device indices for ..." message).
 
-from vllm_ascend.utils import vllm_version_is
+import os
 
-if not vllm_version_is("0.23.0"):
-    import os
+from vllm.platforms import current_platform
+from vllm.v1.engine import utils as _engine_utils
 
-    from vllm.platforms import current_platform
-    from vllm.v1.engine import utils as _engine_utils
+_original_get_physical_gpu_ids = _engine_utils.get_physical_gpu_ids_for_local_dp_rank
 
-    _original_get_physical_gpu_ids = _engine_utils.get_physical_gpu_ids_for_local_dp_rank
 
-    def _patched_get_physical_gpu_ids_for_local_dp_rank(
+def _patched_get_physical_gpu_ids_for_local_dp_rank(
+    device_control_env_var,
+    local_dp_rank,
+    world_size,
+    local_world_size=None,
+    user_assigned_gpu_ids=None,
+):
+    if local_world_size is None:
+        local_world_size = world_size
+
+    # If the caller did not pass --device-ids and the env var has
+    # fewer devices than the full DP range expects, the env var has
+    # already been pre-sharded per rank by the caller. Use it
+    # directly from index 0 instead of applying the DP offset again.
+    if user_assigned_gpu_ids is None and device_control_env_var in os.environ:
+        visible = [d for d in os.environ[device_control_env_var].split(",") if d]
+        if local_dp_rank * world_size + local_world_size > len(visible):
+            return [
+                current_platform.device_control_id_to_physical_device_id(visible[device_id])
+                for device_id in range(local_world_size)
+            ]
+
+    return _original_get_physical_gpu_ids(
         device_control_env_var,
         local_dp_rank,
         world_size,
-        local_world_size=None,
-        user_assigned_gpu_ids=None,
-    ):
-        if local_world_size is None:
-            local_world_size = world_size
+        local_world_size,
+        user_assigned_gpu_ids,
+    )
 
-        # If the caller did not pass --device-ids and the env var has
-        # fewer devices than the full DP range expects, the env var has
-        # already been pre-sharded per rank by the caller. Use it
-        # directly from index 0 instead of applying the DP offset again.
-        if user_assigned_gpu_ids is None and device_control_env_var in os.environ:
-            visible = [d for d in os.environ[device_control_env_var].split(",") if d]
-            if local_dp_rank * world_size + local_world_size > len(visible):
-                return [
-                    current_platform.device_control_id_to_physical_device_id(visible[device_id])
-                    for device_id in range(local_world_size)
-                ]
 
-        return _original_get_physical_gpu_ids(
-            device_control_env_var,
-            local_dp_rank,
-            world_size,
-            local_world_size,
-            user_assigned_gpu_ids,
-        )
-
-    _engine_utils.get_physical_gpu_ids_for_local_dp_rank = _patched_get_physical_gpu_ids_for_local_dp_rank
+_engine_utils.get_physical_gpu_ids_for_local_dp_rank = _patched_get_physical_gpu_ids_for_local_dp_rank

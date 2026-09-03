@@ -13,6 +13,7 @@ def test_base_env_includes_case_and_config_base(tmp_path: Path):
         scene="single_node",
         config_yaml="case.yaml",
         bad_commit="bad",
+        soc="a2",
         config_base_path="configs",
     )
     opt = BisectOptions(repo_dir=tmp_path)
@@ -29,6 +30,7 @@ def test_multi_node_runner_selects_external_dp_test_path(tmp_path: Path):
         scene="multi_node",
         config_yaml="case.yaml",
         bad_commit="bad",
+        soc="a3",
         config_base_path="tests/e2e/nightly/multi_node/external_dp/config",
     )
     opt = BisectOptions(repo_dir=tmp_path)

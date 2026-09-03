@@ -70,7 +70,7 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 /nightly qwen3-vl-32b-instruct-w8a8
 
 # Run on a specific release branch
-/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.23.0
+/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.24.0
 
 # Run all tests on a specific branch
 /nightly all --branch my-feature-branch
@@ -88,7 +88,7 @@ binary bisect for genuine failures. By default, AOP hooks are disabled.
 /nightly all --aop_enabled
 
 # Run specific test with AOP on a release branch
-/nightly test_custom_op --branch releases/v0.23.0 --aop_enabled
+/nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
@@ -107,7 +107,7 @@ Cherry-pick a PR's commits onto a specified target branch and create a new PR. T
 
 ```text
 # Cherry-pick to a release branch
-/cherry-pick releases/v0.23.0
+/cherry-pick releases/v0.24.0
 
 # Cherry-pick to main
 /cherry-pick main
@@ -139,14 +139,39 @@ Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g.,
 
 ### `/rerun`
 
-Re-run all failed workflow runs on the current PR commit. Useful when CI jobs failed due to infrastructure issues.
+Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
+
+Only jobs that did not complete successfully are re-run (failed, cancelled, timed out, or startup-failed). Jobs that already succeeded are left untouched. Runs with `cancelled` / `timed_out` / `startup_failure` conclusions are re-run per remaining job, and runs whose failure also contains cancelled jobs (e.g. a vLLM matrix leg cancelled by fail-fast) are handled the same way. Tests executed through reusable workflows (e.g. `Selected Tests`) are re-run via their caller job and are not duplicated.
 
 **Examples:**
 
 ```text
-# Re-run all failed CI workflows on this PR
+# Re-run failed / cancelled CI jobs on this PR
 /rerun
 ```
+
+### `/cancel`
+
+Force-cancel all workflow runs on the current PR commit. This cancels runs directly triggered on the PR head commit, such as the automatic E2E CI workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., `/e2e`, `/rerun`, `/nightly`) or downstream nightly/weekly workflows are **not** affected, as those run on the `main` branch.
+
+**Scope:**
+
+| Cancelled | Not cancelled |
+|---|---|
+| `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
+| `labeled_doctest.yaml` | `/rerun` command runs |
+| `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
+| `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
+| `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |
+
+**Examples:**
+
+```text
+# Force-cancel all CI runs on this PR
+/cancel
+```
+
+> Note: This uses the `force-cancel` API endpoint, which can cancel runs even when they are in a pending or queued state waiting for runners.
 
 ## Behavior
 
@@ -160,6 +185,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
+| `/cancel` | ✅ | ❌ |
 | `/cherry-pick` | ✅ | ❌ |
 | `/revert` | ✅ | ❌ |
 | `/nightly` | ✅ | ❌ |
@@ -170,6 +196,7 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
+| `/cancel` | PR author, or users with triage+ permission on the repository |
 | `/cherry-pick` | PR author, or users with triage+ permission on the repository |
 | `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |

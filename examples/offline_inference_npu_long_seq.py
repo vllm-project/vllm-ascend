@@ -15,8 +15,7 @@ if __name__ == "__main__":
     parser.add_argument("--bs", type=int, default=1)
     parser.add_argument("--model_path", type=str, default="deepseek-ai/DeepSeek-V2-Lite")
     parser.add_argument("--tp", type=int, default=2)
-    parser.add_argument("--pcp", type=int, default=2)
-    parser.add_argument("--dcp", type=int, default=1)
+    parser.add_argument("--dcp", type=int, default=2)
     parser.add_argument("--iter_times", type=int, default=1)
 
     args = parser.parse_args()
@@ -34,7 +33,6 @@ if __name__ == "__main__":
         trust_remote_code=True,
         enforce_eager=True,
         tensor_parallel_size=args.tp,
-        prefill_context_parallel_size=args.pcp,
         decode_context_parallel_size=args.dcp,
         enable_prefix_caching=False,
         enable_expert_parallel=True,

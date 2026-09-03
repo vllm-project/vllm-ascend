@@ -28,7 +28,7 @@ It is recommended to download the model weight to a local directory, such as `/d
 
 You can use our official docker image to run `Mixtral-8x7B-Instruct-v0.1` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
@@ -65,7 +65,7 @@ docker run --rm \
 
 ### Single-node Deployment
 
-- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64G × 16) or 1 Atlas 800 A2 (64G × 8).
+- `Mixtral-8x7B-Instruct-v0.1` can be deployed on 1 Atlas 800 A3 (64GB × 16) or 1 Atlas 800 A2 (64GB × 8).
 
 Run the following script to execute online inference.
 
@@ -76,14 +76,12 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export VLLM_ASCEND_ENABLE_FLASHCOMM1=1
 ```
 
 ``` bash
 
-vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
+vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" --additional-config '{"enable_mlapo":true}' \
   --tensor-parallel-size 4 \
   --max-model-len 4096 \
   --dtype bfloat16 \
@@ -96,7 +94,7 @@ vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
 **Notice:**
 The parameters are explained as follows:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For testing purposes, a value of `4096` is used here.
 - `--dtype float16` specifies the data type for model weights and computations.
 - `--trust-remote-code` allows loading models with custom code.
@@ -114,7 +112,7 @@ curl http://localhost:8000/v1/chat/completions \
     -d '{
         "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
         "messages": [
-            {"role": "user", "content": "你好，介绍一下你自己"}
+            {"role": "user", "content": "Hello, please introduce yourself."}
         ],
         "max_tokens": 100,
         "temperature": 0.7
@@ -144,12 +142,14 @@ curl http://localhost:8000/v1/chat/completions \
     -d '{
         "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
         "messages": [
-            {"role": "user", "content": "简单解释一下为什么 Mixtral 模型被称为\"混合专家模型\"(MoE)？"}
+            {"role": "user", "content": "Briefly explain why Mixtral is called a \"mixture-of-experts\" (MoE) model."}
         ],
         "max_tokens": 100,
         "temperature": 0.7
     }'
 ```
+
+## Accuracy Evaluation
 
 ### Using AISBench
 
@@ -157,7 +157,7 @@ curl http://localhost:8000/v1/chat/completions \
 
 2. After execution, you can get the result. For reference, Mixtral-8x7B-Instruct-v0.1 typically performs well on various benchmarks including reasoning, comprehension, and instruction following tasks.
 
-## Performance
+## Performance Evaluation
 
 ### Using AISBench
 

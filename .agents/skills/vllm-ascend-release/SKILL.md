@@ -672,7 +672,7 @@ vLLM Ascend v0.18.0rc1版本发布🎉 此版本是针对vLLM v0.18.0系列版�
 
 🥳 本版本新增9位新开发者，感谢社区开发者的持续贡献！
 💥 C8(INT8 KV cache)支持GQA attention模型，同时适配DeepSeek-V3.1 PD分离场景
-💥 DeepSeek模型通过新MLA算子支持A5硬件
+💥 DeepSeek模型通过新MLA算子支持Ascend 950系列产品
 🆕 Flash Comm V1支持VL模型的MLA，解除多模态服务限制
 🆕 支持speculative decoding中target和draft模型使用不同attention backend
 🆕 VL MoE模型支持SP，`sp_threshold`替换为vLLM原生`sp_min_token_num`
@@ -680,7 +680,7 @@ vLLM Ascend v0.18.0rc1版本发布🎉 此版本是针对vLLM v0.18.0系列版�
 🚀 Triton算子重编译优化，提升算子性能
 🚀 Qwen3.5/Qwen3-Next GDN prefill路径优化，预构建chunk metadata减少h2d同步开销
 🚀 FIA prefill context merge路径简化，提升运行时效率
-🐞 torch-npu 和 triton-ascend 依赖版本更新，请参考官方release note
+🐞 TorchNPU 和 triton-ascend 依赖版本更新，请参考官方release note
 🐞 修复PD分离场景decode节点因DP节点shape不对齐导致卡住的问题
 🐞 修复单卡部署多实例显存 OOM 问题
 🐞 修复 DeepSeek v3.1 C8在MTP + full decode + full graph模式下的问题

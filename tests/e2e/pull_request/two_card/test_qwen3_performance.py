@@ -50,7 +50,6 @@ vllm_bench_cases = {
 baseline_throughput = 1514.0  # baseline throughput for Qwen3-8B, measured with num_prompts=500
 
 
-@pytest.mark.skip(reason="Temporarily skipped due to flaky failures, pending investigation.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.asyncio
 async def test_models(model: str) -> None:
@@ -73,7 +72,7 @@ async def test_models(model: str) -> None:
         "--compilation-config",
         '{"cudagraph_mode": "FULL_DECODE_ONLY"}',
         "--additional-config",
-        '{"weight_prefetch_config":{"enabled":true}}',
+        '{"pa_shape_list":[48,64,72,80],"weight_prefetch_config":{"enabled":true}}',
         "--block-size",
         "128",
         "--trust-remote-code",

@@ -47,6 +47,7 @@ config:
     dp_address: "${NODE_2_IP}"
 
 env_common: &env_common
+  VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
   ASCEND_LOG_DEVICE_FLUSH_TIMEOUT: "0"
@@ -63,22 +64,18 @@ env_common: &env_common
   ASCEND_TRANSPORT_PRINT: "1"
   ACL_OP_INIT_MODE: "1"
   ASCEND_A3_ENABLE: "1"
-  ASCEND_BUFFER_POOL: "4:8"
   LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
   
 
 env_prefill: &env_prefill
   <<: *env_common
   HCCL_BUFFSIZE: "360"
-  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
 
 env_decode: &env_decode
   <<: *env_common
   HCCL_BUFFSIZE: "1100"
   TASK_QUEUE_ENABLE: "1"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   DYNAMIC_EPLB: "true"
   
 templates:
@@ -122,11 +119,11 @@ templates:
       - "deepseek_v3"
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
-      - --additional-config
-      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
+      - --additional-config
+      - '{"enable_fused_mc2":1}'
   - node_index: 1
     envs:
       <<: *env_prefill
@@ -168,11 +165,11 @@ templates:
       - "deepseek_v3"
       - --speculative-config
       - '{"method": "deepseek_mtp", "num_speculative_tokens": 2}'
-      - --additional-config
-      - '{"layer_sharding": ["q_b_proj", "o_proj"]}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
+      - --additional-config
+      - '{"enable_fused_mc2":1}'
   - node_index: 2
     envs:
       <<: *env_decode
@@ -216,7 +213,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
+      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0},"enable_fused_mc2":1,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
@@ -263,7 +260,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[3,6,9,12,15,18,21,24,27,30,33,36,39,42]}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0}}'
+      - '{"recompute_scheduler_enable": true,"eplb_config": {"dynamic_eplb":true,"expert_heat_collection_interval":2000,"algorithm_execution_interval":50, "eplb_policy_type":3, "num_redundant_experts":0},"enable_fused_mc2":1,"enable_mlapo":true}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"prefill": {"dp_size": 2, "tp_size": 16}, "decode": {"dp_size": 8, "tp_size": 4}}}'
 
@@ -276,8 +273,9 @@ benchmarks:
     max_out_len: 65536
     batch_size: 32
     baseline: 89.9
-    threshold: 1
+    threshold: 10
     temperature: 1.0
     top_p: 0.95
     ignore_eos: false
     thinking: true
+

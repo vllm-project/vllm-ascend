@@ -114,6 +114,8 @@ def _detect_card_count(rel_path: str) -> int:
             return 2
         if p == "four_card":
             return 4
+        if p == "eight_card":
+            return 8
     return 1
 
 
