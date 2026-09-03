@@ -420,7 +420,9 @@ class CoverageSelector:
                             source_file = self._resolve_source_file(filename)
                             if source_file and source_file.exists():
                                 lines = self._filter_noise_lines(str(source_file), lines)
-                        file_lines_map[filename].update(lines)
+                        # Skip files with no coverage after filtering
+                        if lines:
+                            file_lines_map[filename].update(lines)
 
             normalized_name = self.normalize_test_name(test_case)
             self.test_case_map[normalized_name] = {
