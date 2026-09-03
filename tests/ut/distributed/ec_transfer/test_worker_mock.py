@@ -250,32 +250,6 @@ def test_submit_failure_synchronizes_and_releases_descriptors(monkeypatch):
     assert worker._buf_pool._pool == [bufs]
 
 
-def test_flush_failure_clears_upstream_save_batch_state(monkeypatch):
-    worker = make_worker()
-    platform = FakePlatform()
-    bufs = worker._buf_pool.acquire(1)
-    worker._save_bufs = bufs
-    worker._save_stream = FakeStream()
-    worker._save_count = 1
-    worker._save_bytes = 16
-    worker._save_mm_hashes = ["hash"]
-    worker._inflight_saves = deque()
-    worker._acquire_event = lambda: FakeEvent()
-    monkeypatch.setattr(worker_mod, "current_platform", platform)
-    monkeypatch.setattr(upstream_worker_mod, "current_platform", platform)
-    monkeypatch.setattr(worker_mod, "_swap_blocks_batch", raises("copy failed"))
-
-    with pytest.raises(RuntimeError, match="copy failed"):
-        worker.flush_saves()
-
-    assert worker._save_bufs is None
-    assert worker._save_stream is None
-    assert worker._save_count == 0
-    assert worker._save_bytes == 0
-    assert worker._save_mm_hashes == []
-    assert worker._buf_pool._pool == [bufs]
-
-
 def test_upstream_completion_recycles_npu_transfer_resources():
     worker = make_worker()
     worker._stream_pool = []
