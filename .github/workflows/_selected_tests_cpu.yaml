@@ -82,10 +82,9 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y python3-pip python3-venv
           fi
-          python3 -m venv ./venv
-          source ./venv/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install pytest pytest-cov
+          python3 -m venv $GITHUB_WORKSPACE/venv
+          echo "$GITHUB_WORKSPACE/venv/bin" >> $GITHUB_PATH
+
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
