@@ -5554,6 +5554,15 @@ class NPUModelRunner(GPUModelRunner):
                         dtype, cache_dtype_str = attn_module.impl.dtype, None
                     else:
                         head_size, dtype, cache_dtype_str = spec.head_size, spec.dtype, spec.cache_dtype_str
+                    # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
+                    # evenly divide. Ascend binds KV as block-first views
+                    # and indexes padded pages by runtime block stride, so
+                    # unify_kv_cache_spec_page_size may pad them.
+                    # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride
+                    # on main; pass it only on the legacy lane.
+                    mla_spec_kwargs: dict[str, Any] = {}
+                    if vllm_version_is("0.27.1"):
+                        mla_spec_kwargs["indexes_kv_by_block_stride"] = model_uses_kpool_indexer(self.model_config)
                     kv_cache_spec[layer_name] = AscendMLAAttentionSpec(
                         block_size=spec.block_size,
                         num_kv_heads=spec.num_kv_heads,
@@ -5561,11 +5570,7 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
                         non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
-                        # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
-                        # evenly divide. Ascend binds KV as block-first views
-                        # and indexes padded pages by runtime block stride, so
-                        # unify_kv_cache_spec_page_size may pad them.
-                        indexes_kv_by_block_stride=model_uses_kpool_indexer(self.model_config),
+                        **mla_spec_kwargs,
                     )
                     attn_layer_names.add(layer_name)
 
@@ -5576,7 +5581,7 @@ class NPUModelRunner(GPUModelRunner):
                     if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                         # Indexer/tail pages do not evenly divide the MLA page.
                         # Ascend indexes KV by block stride, so opt in to padding.
-                        if isinstance(spec, AttentionSpec):
+                        if isinstance(spec, AttentionSpec) and vllm_version_is("0.27.1"):
                             spec = replace(spec, indexes_kv_by_block_stride=True)
                         kv_cache_spec[layer_name] = spec
                     continue
