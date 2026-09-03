@@ -54,3 +54,15 @@ def register_model():
     ModelRegistry.register_model(
         "Eagle3LlamaForCausalLM", "vllm_ascend.models.llama_eagle3:AscendEagle3LlamaForCausalLM"
     )
+    ModelRegistry.register_model(
+        "Glm5NextForCausalLM",
+        "vllm_ascend.models.glm5next.model:Glm5NextForCausalLM",
+    )
+    ModelRegistry.register_model(
+        "Glm5NextForConditionalGeneration",
+        "vllm_ascend.models.glm5next.model:Glm5NextForConditionalGeneration",
+    )
+    ModelRegistry.register_model(
+        "Glm5NextMTPModel",
+        "vllm_ascend.models.glm5next.mtp:Glm5NextMTP",
+    )
