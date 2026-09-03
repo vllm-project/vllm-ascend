@@ -559,7 +559,14 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 num_accepted_tokens,
             )
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
-            if num_spec_decodes == 0:
+            # A full CUDAGraph capture represents ordinary 1-token decode
+            # as ``num_decode_draft_tokens_cpu == 0``.  The mask above is
+            # intentionally ``>= 0`` (it is also used for mixed schedules),
+            # so the number of masked requests alone does not tell us whether
+            # this batch has any effective speculative tokens.
+            num_effective_draft_tokens = num_decode_draft_tokens_cpu[spec_sequence_masks_cpu].sum().item()
+            if num_spec_decodes == 0 or num_effective_draft_tokens == 0:
+                num_spec_decodes = 0
                 spec_sequence_masks = None
                 spec_sequence_masks_cpu = None
             else:

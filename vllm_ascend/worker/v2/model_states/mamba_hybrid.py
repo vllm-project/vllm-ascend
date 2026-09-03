@@ -77,6 +77,15 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
                     num_draft_tokens_per_req,
                     -1,
                 )
+                if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > input_batch.num_reqs and spec_decode_mask.all():
+                    padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[input_batch.num_reqs :]
+                    expected_query_len = self.vllm_config.num_speculative_tokens + 1
+                    if np.all(padded_query_lens == expected_query_len):
+                        # Full graph capture represents every padded request as
+                        # a speculative decode request. Keep replay on the same
+                        # pure-spec GDN path so its persistent state metadata is
+                        # refreshed before graph replay.
+                        num_decode_draft_tokens_np[input_batch.num_reqs :] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         model_specific_metadata = MambaHybridAttnMetadata(
