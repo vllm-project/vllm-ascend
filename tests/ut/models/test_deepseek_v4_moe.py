@@ -15,6 +15,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 )
 
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_module
+from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
+    select_deepseek_v4_vision_experts,
+)
 
 
 class _FakeGate(nn.Module):
@@ -113,3 +116,90 @@ def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
 
     with pytest.raises(ValueError, match="hash MoE routing requires input_ids"):
         moe(torch.randn(2, config.hidden_size))
+
+
+def test_deepseek_v4_vision_router_keeps_text_hash_and_applies_bias_vl():
+    router_logits = torch.tensor(
+        [
+            [0.0, 1.0, 2.0, 3.0],
+            [3.0, 2.0, 1.0, 0.0],
+            [0.0, 1.0, 2.0, 3.0],
+        ]
+    )
+    input_ids = torch.tensor([7, 129257, 129259])
+    tid2eid = torch.zeros(32, 2, dtype=torch.long)
+    tid2eid[7] = torch.tensor([1, 3])
+    bias_vl = torch.tensor([0.0, 0.0, 10.0, 0.0])
+
+    weights, expert_ids = select_deepseek_v4_vision_experts(
+        router_logits=router_logits,
+        input_ids=input_ids,
+        tid2eid=tid2eid,
+        bias_vl=bias_vl,
+        text_bias=None,
+        top_k=2,
+        renormalize=True,
+    )
+
+    # In-vocabulary text keeps the checkpoint's deterministic hash route.
+    assert expert_ids[0].tolist() == [1, 3]
+    # All five sentinel ids use the dynamic vision route.
+    assert expert_ids[1].tolist() == [2, 0]
+    assert expert_ids[2].tolist() == [2, 3]
+    assert torch.allclose(weights.sum(dim=-1), torch.ones(3))
+
+
+def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
+    gate = _FakeGate()
+    fused_moe = MagicMock(return_value=_FakeMoERunner(MagicMock()))
+    ep_group = SimpleNamespace(
+        device_group=SimpleNamespace(size=lambda: 1),
+        rank_in_group=0,
+    )
+    config = SimpleNamespace(
+        hidden_act="silu",
+        hidden_size=8,
+        moe_intermediate_size=16,
+        n_routed_experts=4,
+        n_shared_experts=None,
+        norm_topk_prob=True,
+        num_experts_per_tok=2,
+        num_hash_layers=1,
+        routed_scaling_factor=1.5,
+        scoring_func="sqrtsoftplus",
+        swiglu_limit=10.0,
+        vision_n_layers=2,
+        vocab_size=32,
+    )
+    parallel_config = SimpleNamespace(
+        enable_eplb=False,
+        eplb_config=SimpleNamespace(num_redundant_experts=0),
+        use_sequence_parallel_moe=False,
+    )
+
+    monkeypatch.setattr(deepseek_v4_module, "FusedMoEFactory", fused_moe)
+    monkeypatch.setattr(deepseek_v4_module, "ReplicatedLinear", lambda *args, **kwargs: gate)
+    monkeypatch.setattr(deepseek_v4_module, "get_ep_group", lambda: ep_group)
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(
+        deepseek_v4_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mix_placement=False),
+    )
+    monkeypatch.setattr(deepseek_v4_module.rocm_aiter_ops, "is_fused_moe_enabled", lambda: False)
+    monkeypatch.setattr(
+        deepseek_v4_module.rocm_aiter_ops,
+        "is_fusion_moe_shared_experts_enabled",
+        lambda: False,
+    )
+
+    moe = deepseek_v4_module.DeepseekV4MoE(
+        config=config,
+        parallel_config=parallel_config,
+        prefix="model.layers.0.mlp",
+    )
+
+    assert moe.gate.bias_vl.shape == (config.n_routed_experts,)
+    assert fused_moe.call_args.kwargs["bias_vl"] is moe.gate.bias_vl
+    assert fused_moe.call_args.kwargs["e_score_correction_bias"] is None

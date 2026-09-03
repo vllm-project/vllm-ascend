@@ -320,6 +320,15 @@ class DeepseekV4MoE(nn.Module):
             )
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
+        self.gate.bias_vl = None
+        if getattr(config, "vision_n_layers", 0) > 0:
+            self.gate.bias_vl = nn.Parameter(
+                torch.empty(
+                    config.n_routed_experts,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
         if self.hash:
             # Use zeros instead of empty to avoid garbage values causing
             # invalid memory access in dummy mode (--load-format="dummy")
@@ -353,6 +362,8 @@ class DeepseekV4MoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             swiglu_limit=self.swiglu_limit,
             e_score_correction_bias=self.gate.e_score_correction_bias,
+            bias_vl=self.gate.bias_vl,
+            image_sentinel_lo=129257,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
@@ -1123,7 +1134,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ".gate.bias" in name:
+            if ".gate.bias_vl" in name:
+                # The parameter keeps the checkpoint name on Ascend. It is
+                # passed to the hash router as its vision-only correction
+                # bias, while text rows continue to use tid2eid.
+                pass
+            elif ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:

@@ -109,6 +109,15 @@ class TestMultimodalImageTokenIndex:
 
         assert image_token_index == 456
 
+    def test_model_with_multiple_image_sentinels_needs_no_single_index(self):
+        config = SimpleNamespace()
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "AscendDeepseekV4ForConditionalGeneration", config
+        )
+
+        assert image_token_index is None
+
 
 class TestMtpSharesTheTargetLmHead:
     """``_maybe_share_lm_head`` for the MTP branch.

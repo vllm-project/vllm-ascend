@@ -112,6 +112,8 @@ def _ascend_FusedMoE(
     routed_experts_args: dict[str, Any] | None = None,
     hash: Any | None = None,
     tid2eid: torch.Tensor | None = None,
+    bias_vl: torch.Tensor | None = None,
+    image_sentinel_lo: int = 129257,
     **kwargs,
 ):
     # RoutedExperts allocates its parameters before AscendMoERunner is
@@ -147,6 +149,8 @@ def _ascend_FusedMoE(
             num_logical_experts=num_experts,
             hash_indices_table=hash_indices_table,
             tid2eid=hash_indices_table_for_legacy_path,
+            bias_vl=bias_vl,
+            image_sentinel_lo=image_sentinel_lo,
             eplb_state=AscendEplbLayerState() if enable_router_eplb else None,
         )
     routed_experts_args = dict(routed_experts_args) if routed_experts_args is not None else {}
