@@ -84,7 +84,11 @@ jobs:
           fi
           python3 -m venv $GITHUB_WORKSPACE/venv
           echo "$GITHUB_WORKSPACE/venv/bin" >> $GITHUB_PATH
-
+      - name: Install project dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install -e .
+          
       - name: Resolve source snapshot (optional rebase)
         run: |
           set -euo pipefail
