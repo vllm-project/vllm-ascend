@@ -157,10 +157,10 @@ extra:
   rtd_version: !ENV [READTHEDOCS_VERSION, latest]
   docs_lang: !ENV [DOCS_LANG, en]
   # Version substitutions used by macros plugin
-  vllm_version: v0.23.0
-  vllm_ascend_version: v0.23.0
-  pip_vllm_ascend_version: v0.23.0
-  pip_vllm_version: v0.23.0
+  vllm_version: v0.26.0
+  vllm_ascend_version: v0.26.0rc1
+  pip_vllm_ascend_version: v0.26.0rc1
+  pip_vllm_version: v0.26.0
   cann_image_tag: 9.1.0-910b-ubuntu22.04-py3.12
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
@@ -206,6 +206,7 @@ nav:
         - tutorials/models/DeepSeek-V4-Pro.md
         - tutorials/models/DeepSeek-R1.md
         - tutorials/models/DeepSeekOCR2.md
+        - tutorials/models/Gemma4.md
         - tutorials/models/GLM4.x.md
         - tutorials/models/GLM5.md
         - tutorials/models/GLM5.2.md
