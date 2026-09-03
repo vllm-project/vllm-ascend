@@ -8,6 +8,32 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 _BROADCAST_PATCHED = "_vllm_ascend_spec_pp_broadcast_patched"
 
 
+def sync_spec_pp_num_computed_tokens_cpu(runner, scheduler_output) -> None:
+    """Refresh ``num_computed_tokens_cpu`` for MTP with PP.
+
+    MTP reverts ``num_computed_tokens`` on rejection, and only the device value
+    (and therefore the D2H copy issued by ``postprocess_sampled``) sees that
+    revert, so requests that were sampled must read the copy. Requests inside a
+    non-final prefill chunk were not sampled this step: their scheduler-side
+    value is the authoritative one, and a fully prefilling batch does not have
+    to wait on the copy event at all.
+    """
+    req_ids = scheduler_output.scheduled_cached_reqs.req_ids
+    if not req_ids:
+        return
+
+    req_indices = [runner.req_states.req_id_to_index[req_id] for req_id in req_ids]
+    is_prefilling = (
+        runner.req_states.num_computed_tokens_np[req_indices] < runner.req_states.prefill_len.np[req_indices]
+    )
+    if not is_prefilling.all():
+        runner.num_computed_tokens_event.synchronize()
+
+    for req_index, req_is_prefilling in zip(req_indices, is_prefilling, strict=True):
+        source = runner.req_states.num_computed_tokens_np if req_is_prefilling else runner.num_computed_tokens_cpu
+        runner.req_states.num_computed_tokens_cpu[req_index] = source[req_index]
+
+
 def install_spec_pp_token_broadcast(pp_handler, req_states) -> None:
     """Send accepted and next-draft tokens through the same V2 PP slot."""
     if getattr(pp_handler, _BROADCAST_PATCHED, False):
