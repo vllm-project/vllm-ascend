@@ -29,7 +29,6 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
     enable_dcp,
-    enable_pcp,
     enabling_mlapo,
     maybe_save_kv_layer_to_connector,
     notify_kv_cache_written,
@@ -92,8 +91,6 @@ class AscendMLABackend(AttentionBackend):
     def get_builder_cls():
         dcp_enabled = enable_dcp()
         if dcp_enabled:
-            if enable_pcp():
-                raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPMetadataBuilder
 
             return AscendMlaDCPMetadataBuilder
@@ -113,8 +110,6 @@ class AscendMLABackend(AttentionBackend):
     def get_impl_cls() -> type["MLAAttentionImpl"]:
         dcp_enabled = enable_dcp()
         if dcp_enabled:
-            if enable_pcp():
-                raise NotImplementedError("Ascend MRV2 MLA does not support PCP and DCP simultaneously yet.")
             from vllm_ascend.attention.context_parallel.mla_cp import AscendMlaDCPImpl
 
             return AscendMlaDCPImpl
