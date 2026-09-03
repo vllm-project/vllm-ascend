@@ -231,6 +231,20 @@ def build_attn_metadata(
     if num_actual_reqs is None:
         num_actual_reqs = num_reqs
 
+    # The DSpark speculator CUDA-graph capture path (upstream
+    # ``_prepare_dflash_inputs_to_capture``) does not forward rotary positions,
+    # while Ascend backends (DSA/MLA/SFA) need ``positions`` to seed their
+    # static RoPE cos/sin buffers. ``positions`` is consumed only on the host,
+    # while the graph is being captured, to shape those buffers; the captured
+    # graph itself neither reads nor updates the ``positions`` tensor, and the
+    # cos/sin buffers (not ``positions``) are what the attention kernels read.
+    # On every replay the metadata is rebuilt with the real positions (the
+    # DSpark speculator forwards ``input_buffers.positions`` via
+    # ``build_draft_attn_metadata_factory``), which rewrites those buffers, so
+    # the zero values here only ever shape the buffers at capture time.
+    if positions is None:
+        positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
+
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
