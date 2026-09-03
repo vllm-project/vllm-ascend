@@ -259,8 +259,19 @@ class CoverageSelector:
 
             tree = ast.parse(source, filename=filepath)
 
+            TARGET_DECORATORS = {"staticmethod", "classmethod", "property"}
             for node in ast.walk(tree):
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Add decorator lines (only @staticmethod, @classmethod, @property)
+                    for decorator in node.decorator_list:
+                        if isinstance(decorator, ast.Name) and decorator.id in TARGET_DECORATORS:
+                            if hasattr(decorator, "lineno") and decorator.lineno:
+                                def_lines.add(decorator.lineno)
+                                # Handle multi-line decorator expressions
+                                if hasattr(decorator, "end_lineno") and decorator.end_lineno:
+                                    for i in range(decorator.lineno, decorator.end_lineno + 1):
+                                        def_lines.add(i)
+
                     def_lines.add(node.lineno)
 
                     # Bracket counting to find header end
