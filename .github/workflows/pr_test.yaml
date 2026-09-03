@@ -179,14 +179,74 @@ jobs:
             echo "============================"
           done
 
+  run-selected-tests-cpu:
+    needs: pre-commit
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+    uses: ./.github/workflows/_selected_tests_cpu.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: |
+        [
+          {
+            "npu_type":"cpu",
+            "runner_label":"linux-amd64-cpu-8-hk",
+            "test_paths":[
+              "tests/ut/_310p",
+              "tests/ut/_fake_weight",
+              "tests/ut/_tools",
+              "tests/ut/attention",
+              "tests/ut/compilation",
+              "tests/ut/core",
+              "tests/ut/device",
+              "tests/ut/device_allocator",
+              "tests/ut/distributed",
+              "tests/ut/eplb",
+              "tests/ut/helpers",
+              "tests/ut/kv_offload",
+              "tests/ut/lora",
+              "tests/ut/model_executor",
+              "tests/ut/model_loader",
+              "tests/ut/models",
+              "tests/ut/observability",
+              "tests/ut/ops",
+              "tests/ut/patch",
+              "tests/ut/profiler",
+              "tests/ut/quantization",
+              "tests/ut/sample",
+              "tests/ut/simple_kv_offload",
+              "tests/ut/spec_decode",
+              "tests/ut/tools",
+              "tests/ut/worker",
+              "tests/ut/xlite",
+              "tests/ut/test_ascend_config.py",
+              "tests/ut/test_ascend_forward_context.py",
+              "tests/ut/test_batch_invariant.py",
+              "tests/ut/test_compressed_prefix_cache.py",
+              "tests/ut/test_cpu_binding.py",
+              "tests/ut/test_dependency_documentation.py",
+              "tests/ut/test_envs.py",
+              "tests/ut/test_logger.py",
+              "tests/ut/test_meta_registration.py",
+              "tests/ut/test_platform.py",
+              "tests/ut/test_profiling_config.py",
+              "tests/ut/test_utils.py"
+            ]
+          }
+        ]
+
   recommend-tests-from-coverage:
     name: Recommend tests from coverage
     needs: pre-commit
     # Skip the coverage-based recommendation path when the PR opts into the
     # full suite via the ready-all label; select-tests will produce the test
-    # groups in that case. The pre-commit check is explicit so the job can
-    # never be made to run after a failed pre-commit by adding !cancelled().
-    if: ${{ needs.pre-commit.result == 'success' && !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
+    # groups in that case.
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
     runs-on: linux-amd64-cpu-8-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
@@ -282,18 +342,15 @@ jobs:
 
   select-tests:
     needs:
-      - pre-commit
       - recommend-tests-from-coverage
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # !cancelled() is required so this job still runs when recommend-tests-from-coverage
-    # is skipped under ready-all, but not when the workflow itself is cancelled.
-    # The explicit pre-commit success check stops it from running when pre-commit
-    # failed (!cancelled() alone would override the transitive skip). Modes:
+    # is skipped under ready-all, but not when the workflow itself is cancelled. Modes:
     #   recommended - recommend job succeeded with coverage paths
     #   all         - ready-all forced (full selected suite)
     #   none        - recommend job succeeded but produced no paths (no tests)
     # Recommend job failure does not fall back to all; this job fails instead.
-    if: ${{ !cancelled() && needs.pre-commit.result == 'success' }}
+    if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -498,13 +555,42 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
 
-  run-selected-tests:
+  get_latest_real_base_sha:
+    runs-on: ubuntu-latest
+    outputs:
+      real_base_sha: ${{ steps.fetch_main_sha.outputs.sha }}
+    steps:
+      - name: Fetch main branch latest commit hash remotely
+        id: fetch_main_sha
+        run: |
+          MAIN_SHA=$(git ls-remote --heads https://github.com/vllm-project/vllm-ascend.git main | awk '{print $1}')
+          echo "sha=${MAIN_SHA}" >> "$GITHUB_OUTPUT"
+
+  filter-test-groups:
+    needs: [select-tests]
+    if: ${{ !cancelled() && needs.select-tests.result == 'success' }}
+    runs-on: linux-amd64-cpu-8-hk
+    outputs:
+      npu_test_groups: ${{ steps.filter.outputs.npu_test_groups }}
+      cpu_test_groups: ${{ steps.filter.outputs.cpu_test_groups }}
+    steps:
+      - name: Filter test groups split cpu / npu
+        id: filter
+        run: |
+          set -euo pipefail
+          RAW=${{ needs.select-tests.outputs.test_groups }}
+          NPU_GROUPS=$(echo "${RAW}" | jq -c '[ .[] | select(.npu_type != "cpu") ]')
+          CPU_GROUPS=$(echo "${RAW}" | jq -c '[ .[] | select(.npu_type == "cpu") ]')
+          echo "npu_test_groups=${NPU_GROUPS}" >> "${GITHUB_OUTPUT}"
+          echo "cpu_test_groups=${CPU_GROUPS}" >> "${GITHUB_OUTPUT}"
+
+  run-selected-npu-tests:
     needs:
+      - get_latest_real_base_sha
       - pre-commit
       - select-tests
       - ensure-csrc-cache
-    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
+      - filter-test-groups
     if: >-
       ${{
         !cancelled() &&
@@ -526,8 +612,40 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
-      base_sha: ${{ needs.select-tests.outputs.base_sha }}
-      test_groups: ${{ needs.select-tests.outputs.test_groups }}
+      base_sha: ${{ needs.get_latest_real_base_sha.outputs.real_base_sha }}
+      test_groups: ${{ needs.filter-test-groups.outputs.npu_test_groups }}
+    secrets: inherit
+
+  run-selected-dynamic-cpu-tests:
+    needs:
+      - get_latest_real_base_sha
+      - pre-commit
+      - select-tests
+      - ensure-csrc-cache
+      - filter-test-groups
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.pre-commit.result == 'success' &&
+        needs.ensure-csrc-cache.result == 'success' &&
+        (
+          contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
+          contains(github.event.pull_request.labels.*.name, 'ready-all')
+        ) &&
+        needs.select-tests.outputs.has_tests == 'true'
+      }}
+    strategy:
+      fail-fast: false
+      matrix:
+        vllm_version:
+          - ${{ needs.pre-commit.outputs.main_commit }}
+    uses: ./.github/workflows/_selected_tests_cpu.yaml
+    with:
+      vllm: ${{ matrix.vllm_version }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: ${{ needs.filter-test-groups.outputs.cpu_test_groups }}
+    secrets: inherit
 
   run-selected-tests-upstream:
     needs:
@@ -555,11 +673,10 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
+    secrets: inherit
 
   run-selected-tests-a5:
     needs: [pre-commit, select-tests]
-    # !cancelled() overrides transitive skip-propagation from recommend-tests-from-coverage
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
@@ -577,12 +694,14 @@ jobs:
       vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
+      base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups_a5 }}
+    secrets: inherit
 
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
+    needs: [pre-commit, select-tests, filter-test-groups, run-selected-npu-tests, run-selected-dynamic-cpu-tests, run-selected-tests-a5]
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -591,8 +710,6 @@ jobs:
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
-          SELECTION_SOURCE: ${{ needs.select-tests.outputs.source }}
-          MATCHED_MODULES: ${{ needs.select-tests.outputs.matched_modules }}
         run: |
           set -euo pipefail
 
@@ -603,23 +720,17 @@ jobs:
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
-          echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
+          echo "select-tests: ${SELECT_TESTS_RESULT}"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
-          echo "labels: ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
-          if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
-            echo "matched_modules: ${MATCHED_MODULES}"
-          fi
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
-            echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})."
-            echo "::error::This job runs lint / markdownlint / mypy / gitleaks on all files. Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
+            echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
             exit 1
           fi
 
           if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
-            echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})."
-            echo "::error::Open the failed 'select-tests' job above to see which step failed (checkout/rebase, coverage config validation, or test selection). Fix the reported issue and push again."
+            echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})"
             exit 1
           fi
 
@@ -636,23 +747,14 @@ jobs:
           fi
 
           if [ "${HAS_TESTS}" = "true" ]; then
-            TESTS_RESULT="${{ needs.run-selected-tests.result }}"
+            TESTS_RESULT="${{ needs.run-selected-npu-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
-              echo "::error::This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge."
-              if [ -n "${MATCHED_MODULES// /}" ]; then
-                echo "::error::Affected modules: ${MATCHED_MODULES}"
-              fi
-              echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), or 'ready-all' to run the full suite. The workflow reruns automatically once the label is added."
+              echo "::error::Selected tests are required; add the ready-precise or ready-all label"
               exit 1
             fi
             if [ "${TESTS_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})."
-              if [ "${HAS_READY_ALL_LABEL}" = "true" ]; then
-                echo "::error::The 'ready-all' suite failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
-              else
-                echo "::error::The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above. If you believe the failures are unrelated to your change, you may ask a maintainer to switch to 'ready-all' for a broader comparison."
-              fi
+              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
               exit 1
             fi
           fi
@@ -663,11 +765,9 @@ jobs:
             if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
               echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
             elif [ "${TESTS_A5_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})."
-              echo "::error::The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
+              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
               exit 1
             fi
           fi
 
           echo "=== CI Gate: PASSED ==="
-
