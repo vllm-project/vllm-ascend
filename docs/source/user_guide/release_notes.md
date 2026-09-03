@@ -264,8 +264,8 @@ The following features and optimizations are planned for deprecation in a future
 - DeepSeek V4 on A2 or A3 can experience 1-2 second TPOT spikes under high concurrency when varying input shapes trigger Triton kernel recompilation. [#14324](https://github.com/vllm-project/vllm-ascend/issues/14324)
 - DeepSeek V4 Flash and GLM-5.1 SWE benchmark results can vary because of intermittent evaluation failures, including container crashes, timeouts, dependency-download failures, and agent nondeterminism. [#14326](https://github.com/vllm-project/vllm-ascend/issues/14326)
 - DeepSeek-V3.1 large-EP deployments have a reported 3%-5% performance gap from the target performance. [#14327](https://github.com/vllm-project/vllm-ascend/issues/14327)
-- GLM-5.1 on an Ascend 950 single-node mixed P/D deployment can incur excessive P/D transfer overhead for a 64K-input/1K-output workload without a prefix-cache hit. [#14328](https://github.com/vllm-project/vllm-ascend/issues/14328)
-- GLM-5.1 P/D-disaggregated serving with both `sfa_c8` and `li_c8` enabled has a reported performance regression for 64K-input/1K-output workloads. [#14329](https://github.com/vllm-project/vllm-ascend/issues/14329)
+- GLM-5.1 on an Ascend 950 single-node mixed P/D deployment can incur excessive P/D transfer overhead for a 64k-input/1k-output workload without a prefix-cache hit. [#14328](https://github.com/vllm-project/vllm-ascend/issues/14328)
+- GLM-5.1 P/D-disaggregated serving with both `sfa_c8` and `li_c8` enabled has a reported performance regression for 64k-input/1k-output workloads. [#14329](https://github.com/vllm-project/vllm-ascend/issues/14329)
 - In graph mode, `torch.ops._C_ascend.mla_preprocess` and `torch.ops._C_ascend.batch_matmul_transpose` can emit an `rtMemcpy` 107030 error in plog; the reported error does not affect inference. [#14347](https://github.com/vllm-project/vllm-ascend/issues/14347)
 - GLM-5.2-W4A8C8 P/D-disaggregated serving with `enable_sparse_sfa_c8` can show GPQA accuracy fluctuations of approximately 2-3 percentage points across repeated runs. [#14378](https://github.com/vllm-project/vllm-ascend/issues/14378)
 - DeepSeek-V3.1 2P1D throughput has a reported regression of about 15% compared with v0.18.0 in high-throughput deployments. [#12349](https://github.com/vllm-project/vllm-ascend/issues/12349)
@@ -401,7 +401,7 @@ We're excited to announce the release of v0.22.1rc1 for vLLM Ascend. This is the
 - Llama LoRA can still hit an einsum tensor-dimension mismatch on Ascend. [#10577](https://github.com/vllm-project/vllm-ascend/issues/10577)
 - Qwen3.x with PD disaggregation plus MTP can still show precision issues because former KVCache blocks may remain dirty. [#10961](https://github.com/vllm-project/vllm-ascend/issues/10961)
 - In A3 four-machine 2P1D deployments, Kimi-K2.6 can trigger `Error in KVCacheTransferThread. error=unhashable type: 'list'` on the D node under concurrent `terminal-bench2` testing. [#10962](https://github.com/vllm-project/vllm-ascend/issues/10962)
-- With CANN 9.0.0, GLM5.1 1P1D four-machine deployments may hang during 140K-context performance tests, and Kimi-K2.5 with MC2 enabled may hit OOM on single-node A3. [#10963](https://github.com/vllm-project/vllm-ascend/issues/10963)
+- With CANN 9.0.0, GLM5.1 1P1D four-machine deployments may hang during 140k-context performance tests, and Kimi-K2.5 with MC2 enabled may hit OOM on single-node A3. [#10963](https://github.com/vllm-project/vllm-ascend/issues/10963)
 - Multi-level pooling remains an experimental feature and still has known issues, including DeepSeek-V4-Flash startup failures with Layerwise masks and service hangs in some Mooncake SSD scenarios. [#10964](https://github.com/vllm-project/vllm-ascend/issues/10964)
 
 ## v0.21.0rc1 - 2026.06.16
@@ -412,7 +412,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 
 - **DeepSeek-V4 for Ascend 950**: Full end-to-end support for DeepSeek-V4 on Ascend 950, including piecewise graph mode, DSA attention, KV cache management, and MTP. [#9757](https://github.com/vllm-project/vllm-ascend/pull/9757) [#9935](https://github.com/vllm-project/vllm-ascend/pull/9935)
 - **Hybrid & Mamba Align Prefix Cache**: New alignment-based prefix caching mechanism for Hybrid and Mamba architectures, improving cache hit rates across related sequences. [#9533](https://github.com/vllm-project/vllm-ascend/pull/9533)
-- **FULL_AND_PIECEWISE Graph Mode**: Introduced a hybrid graph compilation mode combining full-graph and piecewise strategies. **Requires HDK 25.5.1+ / CANN 8.5.0+** to remove the old stream-budget limitation, enabling up to ~32K graphs on A3 and ~64K on Ascend 950. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572) [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
+- **FULL_AND_PIECEWISE Graph Mode**: Introduced a hybrid graph compilation mode combining full-graph and piecewise strategies. **Requires HDK 25.5.1+ / CANN 8.5.0+** to remove the old stream-budget limitation, enabling up to ~32k graphs on A3 and ~64k on Ascend 950. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572) [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
 - **Python 3.12 Support**: Dockerfiles and setup.py now officially support Python 3.12, and all base images have been upgraded from `py3.11` to `py3.12`. [#9558](https://github.com/vllm-project/vllm-ascend/pull/9558)
 
 ### Features
@@ -421,7 +421,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - Added Hybrid & Mamba Align Prefix Cache for improved prefix cache reuse in Hybrid and Mamba architectures. [#9533](https://github.com/vllm-project/vllm-ascend/pull/9533)
 - Added layerwise KV cache event callbacks for finer per-layer observability and control. [#9468](https://github.com/vllm-project/vllm-ascend/pull/9468)
 - Added GLM4.7-Flash model support with Flash Attention backend. [#9560](https://github.com/vllm-project/vllm-ascend/pull/9560)
-- Added `FULL_AND_PIECEWISE` graph mode, a hybrid compilation strategy mixing full-graph and piecewise approaches. **Requires HDK 25.5.1+ / CANN 8.5.0+** to remove the old stream-budget limitation, enabling significantly more graph captures — approximately 32K on A3 and 64K on Ascend 950. Legacy capture-size pruning has been cleaned up accordingly. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572) [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
+- Added `FULL_AND_PIECEWISE` graph mode, a hybrid compilation strategy mixing full-graph and piecewise approaches. **Requires HDK 25.5.1+ / CANN 8.5.0+** to remove the old stream-budget limitation, enabling significantly more graph captures — approximately 32k on A3 and 64k on Ascend 950. Legacy capture-size pruning has been cleaned up accordingly. [#9572](https://github.com/vllm-project/vllm-ascend/pull/9572) [#9962](https://github.com/vllm-project/vllm-ascend/pull/9962)
 - Added W4A8 MXFP4 quantization support for Ascend 950. [#8265](https://github.com/vllm-project/vllm-ascend/pull/8265)
 - Added MXFP8 FlashCommV3 support on Ascend 950. [#9671](https://github.com/vllm-project/vllm-ascend/pull/9671)
 - Added NZ layout support for W4A8 MoE compressed tensors and C8 quantization (GQA). [#9625](https://github.com/vllm-project/vllm-ascend/pull/9625) [#9721](https://github.com/vllm-project/vllm-ascend/pull/9721)
@@ -540,7 +540,7 @@ We're excited to announce the release of v0.21.0rc1 for vLLM Ascend. This is the
 - GLM5/GLM5.1 W4A8 deployments have known issues in some advanced configurations. CANN 9.0 with MC2 can return inaccurate output, FlashComm can fail during model startup, and MTP weight loading can fail in 1P1D A3 deployments. [#9395](https://github.com/vllm-project/vllm-ascend/issues/9395) [#9658](https://github.com/vllm-project/vllm-ascend/issues/9658) [#9655](https://github.com/vllm-project/vllm-ascend/issues/9655)
 - GLM-5.1 deployments can hit `MoeDistributeDispatchV2`/NPU graph failures when Expert Parallel is used together with FULL graph mode. The reported workaround is to disable Expert Parallel for FULL graph mode, or use PIECEWISE/eager mode. [#9503](https://github.com/vllm-project/vllm-ascend/issues/9503)
 - Qwen3.6-35B-A3B may shut down when MTP/speculative decoding is enabled, with `numAcceptedTokens[0]=4 exceeds varlen segment length=3` reported during shape/dtype processing. [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956)
-- GLM-5.1 can hang on the P node in 200K long-sequence 1P1D agent workloads after long-running service, with `MoeDistributeDispatchV2`/`aclnnMoeDistributeDispatchV4` reporting an AICore timeout. [#9958](https://github.com/vllm-project/vllm-ascend/issues/9958)
+- GLM-5.1 can hang on the P node in 200k long-sequence 1P1D agent workloads after long-running service, with `MoeDistributeDispatchV2`/`aclnnMoeDistributeDispatchV4` reporting an AICore timeout. [#9958](https://github.com/vllm-project/vllm-ascend/issues/9958)
 - GLM5 W4A8 deployments can see a significantly lower speculative decoding acceptance rate when MTP3 is used together with FlashComm. [#9803](https://github.com/vllm-project/vllm-ascend/issues/9803)
 - **DeepSeek-V4 KV Pool**: When enabling KV Pool for DeepSeek-V4, the `--no-disable-hybrid-kv-cache-manager` flag must be added, otherwise the service will OOM at startup. Additionally, KV Pool for DSv4 stores all states for all compression ratio families — storing a sequence of 1M tokens takes approximately 300GB, which is the same behavior as upstream vLLM. [#9975](https://github.com/vllm-project/vllm-ascend/issues/9975)
 
@@ -603,7 +603,7 @@ We're excited to announce the release of v0.20.2rc1 for vLLM Ascend. This is the
 
 - GLM5/GLM5.1 W4A8 deployments have known issues in some advanced configurations. [#9395](https://github.com/vllm-project/vllm-ascend/issues/9395)
 - Qwen3.6-35B-A3B may shut down when MTP/speculative decoding is enabled, with `numAcceptedTokens[0]=4 exceeds varlen segment length=3` reported during shape/dtype processing. [#9956](https://github.com/vllm-project/vllm-ascend/issues/9956)
-- GLM-5.1 can hang on the P node in 200K long-sequence 1P1D agent workloads after long-running service, with `MoeDistributeDispatchV2`/`aclnnMoeDistributeDispatchV4` reporting an AICore timeout. [#9958](https://github.com/vllm-project/vllm-ascend/issues/9958)
+- GLM-5.1 can hang on the P node in 200k long-sequence 1P1D agent workloads after long-running service, with `MoeDistributeDispatchV2`/`aclnnMoeDistributeDispatchV4` reporting an AICore timeout. [#9958](https://github.com/vllm-project/vllm-ascend/issues/9958)
 - GLM5 W4A8 deployments can see a significantly lower speculative decoding acceptance rate when MTP3 is used together with FlashComm. [#9803](https://github.com/vllm-project/vllm-ascend/issues/9803)
 - MiniMax-M2.7 W8A8/QuaRot can show lower-than-expected GPQA accuracy in long-sequence deployments when PCP/DCP is combined with Eagle3 speculative decoding. [#9959](https://github.com/vllm-project/vllm-ascend/issues/9959)
 - KV Pool feature for DeepSeek V4 now faces several known issues affecting user-friendliness and performance, including special startup parameter requirements, special key storing behaviors, etc. For details, please refer to issue [#9975](https://github.com/vllm-project/vllm-ascend/issues/9975).
@@ -1113,7 +1113,7 @@ This is the first release candidate of v0.16.0 for vLLM Ascend. Please follow th
 ### Known Issue
 
 - Currently, for DeepSeek v3.2, PCP & DCP do not yet work with FlashComm1 feature, which may cause serve errors or other unknown errors.
-- In 4-node A3 PD disaggregation deployment with DeepSeek V3.2, the P-Node may hang when benchmarking in high concurrency scenario, e.g., 2K/2K tokens with 512 concurrent requests.
+- In 4-node A3 PD disaggregation deployment with DeepSeek V3.2, the P-Node may hang when benchmarking in high concurrency scenario, e.g., 2k/2k tokens with 512 concurrent requests.
 - MTP with large EP configurations may cause graph capture buffer overflow. This is a bug need to fix in vLLM, now there is a workaround to avoid it: explicitly set `--compilation-config '{"max_cudagraph_capture_size": N}'` where `N = max_concurrency * (1 + num_speculative_tokens)`.
 
 ## v0.15.0rc1 - 2026.02.27
@@ -1313,7 +1313,7 @@ Many custom ops and triton kernels were added in this release to speed up model 
 ### Known Issue
 
 - Due to the upgrade of `transformers` package, some models quantization weight, such as `qwen2.5vl`, `gemma3`, `minimax`, may not work. We'll fix it in the next post release. [#6302](https://github.com/vllm-project/vllm-ascend/issues/6302)
-- The performance of `Qwen3-32B` will not be good with 128K input case, it's suggested to enable pcp&dcp feature for this case. This will be improved in the next CANN release.
+- The performance of `Qwen3-32B` will not be good with 128k input case, it's suggested to enable pcp&dcp feature for this case. This will be improved in the next CANN release.
 - The performance of `Qwen3-235B`, `Qwen3-480B` under prefill-decode scenario and EP=32 scenario is not good as expect. We'll improve it in the next post release.
 - When deploy deepseek3.1 under prefill-decode scenario, please make sure the tp size for decode node is great than 1. `TP=1` doesn't work. This will be fixed in the next CANN release.
 
@@ -2239,7 +2239,7 @@ This is the 1st release candidate of v0.8.5 for vllm-ascend. Please follow the [
 - Adapts for new quant model generated by modelslim [#719](https://github.com/vllm-project/vllm-ascend/pull/719)
 - Initial support on P2P Disaggregated Prefill based on llm_datadist [#694](https://github.com/vllm-project/vllm-ascend/pull/694)
 - Use `/vllm-workspace` as code path and include `.git` in container image to fix issue when start vllm under `/workspace` [#726](https://github.com/vllm-project/vllm-ascend/pull/726)
-- Optimize NPU memory usage to make DeepSeek R1 W8A8 32K model len work. [#728](https://github.com/vllm-project/vllm-ascend/pull/728)
+- Optimize NPU memory usage to make DeepSeek R1 W8A8 32k model len work. [#728](https://github.com/vllm-project/vllm-ascend/pull/728)
 - Fix `PYTHON_INCLUDE_PATH` typo in setup.py [#762](https://github.com/vllm-project/vllm-ascend/pull/762)
 
 ### Others
