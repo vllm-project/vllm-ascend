@@ -26,6 +26,17 @@
   \end{cases}
   $$
 
+  Under block verification (`use_block_verification=True`, Sun et al. 2024),
+  the rejection kernel first picks the rejected position by comparing a uniform
+  draw against a threshold built from the *joint* probability
+  \(p_\tau=\prod_{i\le\tau}q(x_i)\) of the drafted prefix (falling back to the
+  closed-form token-wise ratio when a trailing `-1` placeholder truncates the
+  block), and the target logits entering the residual above are shifted by
+  \(\log p_\tau\) of the accepted prefix, i.e. the residual distribution over
+  the vocabulary becomes
+  \(\max(p_\tau\,M_b(x)-M_s(x),\,0)/Z\) per block, where \(M_b\) aggregates the
+  next draft token's block residual mass and \(M_s\) the accepted prefix's.
+
   For sampling requests, `_npu_gumbel_block_argmax` adds Gumbel noise and
   finds the maximum within each vocabulary block:
 
@@ -81,7 +92,7 @@
 | `num_speculative_steps` | Attribute | Maximum number of speculative tokens per request | int32 | scalar |
 | `use_fp64` | Attribute | Must be `False`; the NPU implementation raises `NotImplementedError` otherwise | bool | scalar |
 | `synthetic_conditional_rates` | Attribute | Must be `None`; synthetic rejection sampling is not implemented on this path | fp32 | ND |
-| `use_block_verification` | Attribute | Accepted for API compatibility but not implemented on the NPU path | bool | scalar |
+| `use_block_verification` | Attribute | Selects block verification (Sun et al. 2024, vllm#46781): the rejection kernel accepts the prefix maximizing the joint draft probability, and the residual distribution becomes `max(p_tau * M_b(x) - M_s(x), 0) / Z` with `p_tau` the prefix joint probability; `False` keeps token-wise verification | bool | scalar |
 | `sampled` | Output | Selected tokens with shape `[num_reqs, num_speculative_steps + 1]`; only `sampled[i, :num_sampled[i]]` is valid for request `i` | int64 | ND |
 | `num_sampled` | Output | Number of output tokens per request, including the rejected or bonus token | int32 | ND |
 
@@ -107,9 +118,11 @@
 | `temp_ptr` | Input | Per-request-state temperature | fp32 | ND |
 | `seed_ptr` | Input | Per-request-state random seed | int64 | ND |
 | `pos_ptr` | Input | Position used as the Philox offset for each logit row | int64 | ND |
+| `cumulative_log_p_ptr` | Input | Log probability of accepting the draft prefix ending at each logit row; only read when `USE_BLOCK_VERIFICATION=True`, `None` otherwise | fp32 | ND |
 | `vocab_size` | Attribute | Runtime vocabulary size | int32 | scalar |
 | `BLOCK_SIZE` | Attribute | Compile-time vocabulary-block width; the wrapper uses 1024 | int32 | scalar |
 | `HAS_DRAFT_LOGITS` | Attribute | Compile-time selector for full draft logits versus a one-hot draft | bool | scalar |
+| `USE_BLOCK_VERIFICATION` | Attribute | Compile-time selector for block verification (Sun et al. 2024): resamples from the residual `max(p_tau * M_b(x) - M_s(x), 0) / Z` instead of the standard residual `max(p(x) - q(x), 0) / Z` | bool | scalar |
 
 ### Triton device function: `_npu_gumbel_block_argmax`
 
@@ -127,11 +140,15 @@ this repository. The table below documents the internal contract.
 | `temp_ptr` | Input | Per-request-state temperature | fp32 | ND |
 | `seeds_ptr` | Input | Per-request-state seed | int64 | ND |
 | `pos_ptr` | Input | Per-logit-row position | int64 | ND |
-| `processed_logits_ptr` | Output | Optional processed-logit buffer written before noise is added; `None` disables the store | fp32 | ND |
-| `processed_logits_stride` | Attribute | Request-state row stride of `processed_logits_ptr` | int32 | scalar |
-| `processed_logits_col_ptr` | Input | Optional scalar column index; `None` selects column zero | int32 | scalar |
+| `logits_cache_ptr` | Output | Optional logits cache written *before* temperature is applied, so the cached value is representable in the cache dtype; consumers reproduce the temperature-applied logits by dividing on load; `None` disables the store | fp32 | ND |
+| `logits_cache_stride_0` | Attribute | Request-state row stride of `logits_cache_ptr` | int32 | scalar |
+| `logits_cache_stride_1` | Attribute | Column stride of `logits_cache_ptr` | int32 | scalar |
+| `logits_cache_col_ptr` | Input | Optional scalar or per-token column index; `None` selects column zero | int32 | scalar |
 | `vocab_size` | Attribute | Runtime vocabulary size used by the optional output layout | int32 | scalar |
+| `IS_DRAFTING` | Attribute | Compile-time flag that offsets the noise salt so draft Gumbel noise stays disjoint from target noise (upstream #54282) | bool | scalar |
 | `APPLY_TEMPERATURE` | Attribute | Compile-time flag that divides logits by temperature before sampling | bool | scalar |
+| `USE_FP64` | Attribute | Compile-time fp64 selector; must be `False` on NPU (fp64 unsupported) | bool | scalar |
+| `PER_TOKEN_COL` | Attribute | Compile-time selector for a per-token column index | bool | scalar |
 | return `value`, `idx` | Output | Maximum score and block-relative argmax | fp32, int32 | scalar |
 
 ## Constraints
