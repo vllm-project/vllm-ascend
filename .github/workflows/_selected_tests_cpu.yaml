@@ -59,12 +59,17 @@ jobs:
       - name: Early exit when no cpu test groups
         shell: bash
         run: |
-          # shellcheck disable=SC2178,SC2128
-          GROUPS="${{ needs.filter-groups.outputs.filtered_test_groups }}"
-          if [[ -z "${GROUPS}" || "${GROUPS}" == "[]" ]]; then
-            echo "INFO: zero cpu test groups matched, skip test execution"
-            exit 0
-          fi
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          raw = os.environ["GROUPS_RAW"]
+          if not raw or raw.strip() == "[]":
+              print("INFO: zero cpu test groups matched, skip test execution")
+              exit(0)
+          PY
+        env:
+          GROUPS_RAW: ${{ needs.filter-groups.outputs.filtered_test_groups }}
       - name: Checkout code
         uses: actions/checkout@v4
         with:
