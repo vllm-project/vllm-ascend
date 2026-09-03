@@ -43,6 +43,7 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -85,6 +86,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
@@ -538,6 +540,7 @@ class MiniMaxM3MLP(nn.Module):
         reduce_results: bool = True,
         intermediate_size: int | None = None,
         prefix: str = "",
+        is_sequence_parallel: bool = False,
     ) -> None:
         super().__init__()
         hidden_size = config.hidden_size
@@ -550,6 +553,7 @@ class MiniMaxM3MLP(nn.Module):
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -558,6 +562,7 @@ class MiniMaxM3MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=is_sequence_parallel,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act == "swigluoai":
@@ -597,6 +602,13 @@ class MiniMaxM3MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.n_shared_experts = getattr(config, "n_shared_experts", 0) or 0
 
+        # Sequence parallelism for the MoE layer. Enabled structurally (no
+        # config/env switch) whenever expert parallel is active on more than
+        # one TP rank, so it only affects MiniMax M3 and is on by default.
+        self.is_sequence_parallel = (
+            parallel_config.enable_expert_parallel and self.tp_size > 1
+        )
+
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
@@ -632,6 +644,7 @@ class MiniMaxM3MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
                 reduce_results=False,
                 intermediate_size=intermediate_size,
+                is_sequence_parallel=self.is_sequence_parallel,
             )
         else:
             self.shared_experts = None
@@ -666,6 +679,7 @@ class MiniMaxM3MoE(nn.Module):
             apply_routed_scale_to_output=True,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
         )
 
         # Ascend dispatch uses this metadata to size the global physical
@@ -682,6 +696,9 @@ class MiniMaxM3MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        if self.is_sequence_parallel:
+            hidden_states = sequence_parallel_chunk(hidden_states)
+
         if self.experts.is_internal_router:
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
@@ -694,6 +711,10 @@ class MiniMaxM3MoE(nn.Module):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
+            final_hidden_states = final_hidden_states[:num_tokens]
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
