@@ -295,6 +295,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         intermediate_tensors=None,
         inputs_embeds=torch.tensor([[1.0]]),
     )
+    assert raw_aux[0].ndim == 2
     torch.testing.assert_close(raw_aux[0], torch.tensor([[11.0]]))
 
 
