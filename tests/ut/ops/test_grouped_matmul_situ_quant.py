@@ -66,6 +66,49 @@ def _bytes(t: torch.Tensor) -> torch.Tensor:
     return t.view(torch.uint8)
 
 
+@pytest.mark.parametrize("use_list", [False, True])
+def test_meta_shape_uses_weight_geometry(use_list: bool):
+    """The canonical N-major scale layout is (E, N, kb, 2)."""
+    kb = (K + 63) // 64
+    x = torch.empty((M_CAP, K), device="meta", dtype=torch.float8_e4m3fn)
+    x_scale = torch.empty((M_CAP, kb, 2), device="meta", dtype=torch.float8_e8m0fnu)
+    group_list = torch.empty((E,), device="meta", dtype=torch.int64)
+
+    if use_list:
+        weight = [
+            torch.empty((N, K // 2), device="meta", dtype=torch.float4_e2m1fn_x2) for _ in range(E)
+        ]
+        weight_scale = [
+            torch.empty((N, kb, 2), device="meta", dtype=torch.float8_e8m0fnu) for _ in range(E)
+        ]
+        op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz.list
+    else:
+        weight = torch.empty((E, N, K // 2), device="meta", dtype=torch.float4_e2m1fn_x2)
+        weight_scale = torch.empty((E, N, kb, 2), device="meta", dtype=torch.float8_e8m0fnu)
+        op = torch.ops._C_ascend.grouped_matmul_situ_quant_weight_nz
+
+    y, y_scale = op(
+        x,
+        weight,
+        weight_scale,
+        None,
+        None,
+        x_scale,
+        None,
+        group_list,
+        1,
+        0,
+        1,
+        1,
+        None,
+        4.0,
+        25.0,
+    )
+
+    assert y.shape == (M_CAP, N // 2)
+    assert y_scale.shape == (M_CAP, (N // 2 + 63) // 64, 2)
+
+
 def _build_empty_case(seed: int = 1234):
     x, xs, w_nd, ws, _ = _build_case(seed)
     gl = torch.zeros(E, dtype=torch.int64, device=DEV)
