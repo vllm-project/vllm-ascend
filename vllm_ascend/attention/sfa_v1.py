@@ -542,7 +542,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     @property
     def runtime_has_indexer(self) -> bool:
-        return self.has_indexer and not self.skip_indexer_pre_process
+        return self.has_indexer and not getattr(self, "skip_indexer_pre_process", False)
 
     @staticmethod
     def update_graph_params(
