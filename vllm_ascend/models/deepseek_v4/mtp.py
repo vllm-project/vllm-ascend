@@ -5,11 +5,17 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
+import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -18,16 +24,17 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
+from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.deepseek_v4.model import (
-    DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
+    DeepseekV4DecoderLayer,
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
+    sp_padding_mask,
 )
 from vllm_ascend.utils import enable_dsa_cp
 
@@ -86,7 +93,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             topk_indices_buffer = None
 
         self.shared_head = SharedHead(config=config, prefix=prefix, quant_config=quant_config)
-        self.mtp_block = DeepseekV2DecoderLayer(
+        self.mtp_block = DeepseekV4DecoderLayer(
             vllm_config,
             prefix,
             config=self.config,
@@ -119,6 +126,14 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         previous_hidden_states = previous_hidden_states.view(-1, self.hc_mult, self.config.hidden_size)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
+        full_num_tokens = positions.shape[0]
+        if self.mtp_block.use_sequence_parallel_moe:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, inputs_embeds)
+            inputs_embeds = sequence_parallel_chunk(inputs_embeds)
+            previous_hidden_states = sequence_parallel_chunk(previous_hidden_states)
+
         hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
 
         hidden_states, residual = self.mtp_block(
@@ -127,6 +142,10 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             residual=None,
             input_ids=None,
         )
+
+        if self.mtp_block.use_sequence_parallel_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
 
         # hidden_states = self.hc_head(hidden_states, self.hc_head_fn,
         #                              self.hc_head_scale, self.hc_head_base)
@@ -227,7 +246,7 @@ class DeepSeekV4MTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 continue
             assert isinstance(layer, DeepSeekMultiTokenPredictorLayer)
             layer = layer.mtp_block
-            assert isinstance(layer, DeepseekV2DecoderLayer)
+            assert isinstance(layer, DeepseekV4DecoderLayer)
             if isinstance(layer.mlp, DeepseekV4MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
