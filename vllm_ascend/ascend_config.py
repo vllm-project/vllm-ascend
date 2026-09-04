@@ -258,6 +258,7 @@ class AscendConfig:
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
             "enable_force_eplb": false,
+            "enable_qwen3_preprocess_on_npu": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -393,6 +394,7 @@ class AscendConfig:
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     enable_force_eplb: bool = False
+    enable_qwen3_preprocess_on_npu: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
