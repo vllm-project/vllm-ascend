@@ -126,6 +126,7 @@ def _load_patch_distributed_module():
         NON_GROUP_MEMBER = non_group_member
 
     torch_distributed.Backend = FakeBackend
+    torch_distributed.ProcessGroup = FakeProcessGroup
     torch_distributed.get_rank = get_rank
     torch_distributed.new_group = new_group
     torch_distributed.destroy_process_group = destroy_process_group
@@ -133,6 +134,7 @@ def _load_patch_distributed_module():
     torch_distributed_c10d.GroupMember = GroupMember
 
     torch_module.Tensor = FakeTensor
+    torch_module.device = MagicMock(return_value="npu-device")
     torch_module.distributed = torch_distributed
     torch_module.equal = lambda lhs, rhs: lhs is rhs
     torch_module.randn = lambda *shape: FakeTensor(shape)
@@ -175,6 +177,8 @@ def _load_patch_distributed_module():
     vllm_ascend_distributed: Any = ModuleType("vllm_ascend.distributed")
     vllm_ascend_device_communicators: Any = ModuleType("vllm_ascend.distributed.device_communicators")
     npu_communicator_module: Any = ModuleType("vllm_ascend.distributed.device_communicators.npu_communicator")
+    vllm_ascend_snapshot: Any = ModuleType("vllm_ascend.snapshot")
+    snapshot_distributed_module: Any = ModuleType("vllm_ascend.snapshot.distributed")
     utils_module: Any = ModuleType("vllm_ascend.utils")
 
     class FakeNPUCommunicator:
@@ -185,12 +189,15 @@ def _load_patch_distributed_module():
             communicator_instances.append(self)
 
     npu_communicator_module.NPUCommunicator = FakeNPUCommunicator
+    snapshot_distributed_module.is_snapshot_hccl_teardown_enabled = MagicMock(return_value=False)
     utils_module.create_hccl_pg_options = MagicMock(return_value=shared_hccl_options)
 
     vllm_ascend_module.patch = vllm_ascend_patch
     vllm_ascend_patch.worker = vllm_ascend_patch_worker
     vllm_ascend_module.distributed = vllm_ascend_distributed
     vllm_ascend_distributed.device_communicators = vllm_ascend_device_communicators
+    vllm_ascend_module.snapshot = vllm_ascend_snapshot
+    vllm_ascend_snapshot.distributed = snapshot_distributed_module
 
     modules = {
         "torch": torch_module,
@@ -206,6 +213,8 @@ def _load_patch_distributed_module():
         "vllm_ascend.distributed": vllm_ascend_distributed,
         "vllm_ascend.distributed.device_communicators": (vllm_ascend_device_communicators),
         "vllm_ascend.distributed.device_communicators.npu_communicator": (npu_communicator_module),
+        "vllm_ascend.snapshot": vllm_ascend_snapshot,
+        "vllm_ascend.snapshot.distributed": snapshot_distributed_module,
         "vllm_ascend.utils": utils_module,
     }
 
@@ -231,6 +240,7 @@ def _load_patch_distributed_module():
             get_rank=get_rank,
             current_device=current_device,
             communicator_instances=communicator_instances,
+            snapshot_distributed_module=snapshot_distributed_module,
             non_group_member=non_group_member,
             Backend=FakeBackend,
             vllm_distributed=vllm_distributed,
@@ -283,6 +293,16 @@ def _calls_with_backend(module_env, backend: str) -> list[dict[str, object]]:
 
 def test_group_coordinator_is_patched(module_env):
     assert module_env.parallel_state_module.GroupCoordinator is module_env.module.GroupCoordinatorPatch
+
+
+def test_abort_hccl_process_group_uses_npu_backend(module_env):
+    process_group = MagicMock()
+    backend = process_group._get_backend.return_value
+
+    module_env.module._abort_hccl_process_group(process_group)
+
+    process_group._get_backend.assert_called_once_with("npu-device")
+    backend.abort_hccl_comm.assert_called_once_with("reinit")
 
 
 def test_same_hccl_group_reuses_device_pg_once(module_env):
@@ -409,6 +429,21 @@ def test_destroy_releases_all_acquired_keys_in_reverse_order(module_env):
     assert not hasattr(group, "cpu_group")
     assert not hasattr(group, "device_group")
     assert group._acquired_hccl_keys == []
+
+
+def test_destroy_aborts_hccl_only_during_snapshot_teardown(module_env):
+    regular_group = _make_group(module_env, group_name="tp")
+    snapshot_group = _make_group(module_env, group_name="world")
+    snapshot_device_group = snapshot_group.device_group
+    abort = MagicMock()
+    module_env.module._abort_hccl_process_group = abort
+
+    regular_group.destroy()
+    abort.assert_not_called()
+
+    module_env.snapshot_distributed_module.is_snapshot_hccl_teardown_enabled.return_value = True
+    snapshot_group.destroy()
+    abort.assert_called_once_with(snapshot_device_group)
 
 
 def test_failed_cpu_group_init_rolls_back_acquired_hccl_keys(module_env):

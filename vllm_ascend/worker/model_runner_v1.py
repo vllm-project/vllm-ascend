@@ -3597,7 +3597,7 @@ class NPUModelRunner(GPUModelRunner):
             self.eplb_loader.set_adator(self.eplb_adaptor)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
-
+    
     def update_eplb_heat_collection_status(self, num_tokens_padded: int):
         if self.eplb_heat_collection_stage == "prefill":
             # collect eplb heat for prefill requests.

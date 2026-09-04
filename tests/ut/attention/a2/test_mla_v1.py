@@ -1671,6 +1671,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.q_proj.deq_scale.data = torch.randn(256 * 64)
         self.impl.q_proj.quant_bias.data = torch.randn(256 * 64)
         self.impl.q_proj.input_scale.data = torch.randn(1)
+        self.impl.q_proj.input_scale.device = torch.device("cpu")
         self.impl.q_proj.input_offset.data = torch.randn(1)
         self.impl.q_a_layernorm = MagicMock()
         self.impl.q_a_layernorm.weight.data = torch.randn(128)
@@ -2082,6 +2083,26 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.W_UV.shape[0], self.impl.num_heads)
         self.assertEqual(self.impl.W_UV.shape[1], self.impl.kv_lora_rank)
         self.assertEqual(self.impl.W_UV.shape[2], self.impl.v_head_dim)
+
+    @patch("torch_npu.npu_format_cast")
+    def test_restore_snapshot_reprocesses_fa_quant_method(self, mock_format_cast):
+        kv_b_proj = MagicMock(spec=LinearBase)
+        kv_b_proj.quant_method = MagicMock(spec=UnquantizedLinearMethod)
+        shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim + self.impl.v_head_dim)
+        kv_b_proj.weight = torch.randn(shape_0, self.impl.kv_lora_rank)
+        mock_format_cast.return_value = kv_b_proj.weight
+        self.impl.kv_b_proj = kv_b_proj
+        self.impl.enable_mlapo = False
+        self.impl.fa_quant_layer = True
+        self.impl.layer_name = "layer"
+        layer = MagicMock()
+        self.impl.vllm_config.compilation_config.static_forward_context = {"layer": layer}
+        self.impl._process_weights_for_fused_fa_quant = MagicMock()
+
+        self.impl.restore_snapshot_derived_state(torch.bfloat16)
+
+        layer.quant_method.process_weights_after_loading.assert_called_once_with(layer)
+        self.impl._process_weights_for_fused_fa_quant.assert_called_once_with()
 
     @patch("torch_npu.npu_format_cast")
     def test_process_weights_after_loading_with_kv_b_proj(self, mock_format_cast):

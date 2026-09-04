@@ -460,11 +460,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
         assert self.num_local_experts > 0, "Expected at least one expert"
         if self.num_local_experts > 1:
-            self.expert_ids_per_ep_rank = torch.tensor(
-                [i % self.num_local_experts for i in range(self.num_experts)],
-                dtype=torch.int32,
-                device=torch.npu.current_device(),
-            )
+            self.expert_ids_per_ep_rank = self._build_expert_ids_per_ep_rank()
 
         local_expert_indices_offset = self.ep_rank * self.num_local_experts
 
@@ -479,6 +475,17 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         local_rank = torch.distributed.get_rank(group=self.ep_group)
         backend = self.ep_group._get_backend(torch.device("npu"))
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+
+    def _build_expert_ids_per_ep_rank(self) -> torch.Tensor:
+        return torch.tensor(
+            [i % self.num_local_experts for i in range(self.num_experts)],
+            dtype=torch.int32,
+            device=torch.npu.current_device(),
+        )
+
+    def reset_snapshot_runtime_state(self) -> None:
+        if self.num_local_experts > 1:
+            self.expert_ids_per_ep_rank = self._build_expert_ids_per_ep_rank()
 
     def token_dispatch(
         self,

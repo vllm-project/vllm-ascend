@@ -13,10 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+from unittest.mock import patch
+
 import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.utils import RESTORE_FLAG_PATH, is_restore
 
 
 class TestAttentionMaskBuilder(TestBase):
@@ -46,3 +50,26 @@ class TestAttentionMaskBuilder(TestBase):
         attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
         attn_mask = attention_mask_builder.get_splitfuse_attn_mask()
         self.assertEqual(attn_mask.shape, (2048, 2048))
+
+    def test_reset_snapshot_runtime_state_clears_caches(self):
+        attention_mask_builder = AttentionMaskBuilder(torch.device("cpu"))
+        attention_mask_builder.get_attn_mask(max_seq_len=8, dtype=torch.float16)
+        attention_mask_builder.get_splitfuse_attn_mask()
+        attention_mask_builder.get_mla_mask(torch.float16)
+
+        attention_mask_builder.reset_snapshot_runtime_state()
+
+        self.assertIsNone(attention_mask_builder.attn_mask_cache)
+        self.assertEqual(attention_mask_builder._seq_len_cached, 0)
+        self.assertIsNone(attention_mask_builder.chunked_prefill_attn_mask)
+        self.assertIsNone(attention_mask_builder.mla_mask)
+
+    def test_is_restore_checks_grusflag(self):
+        with patch.object(os.path, "exists", return_value=False):
+            self.assertFalse(is_restore())
+        with patch.object(
+            os.path,
+            "exists",
+            side_effect=lambda path: path == RESTORE_FLAG_PATH,
+        ):
+            self.assertTrue(is_restore())

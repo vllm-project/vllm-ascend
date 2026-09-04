@@ -185,6 +185,20 @@ class ComplexExpRotaryEmbedding(nn.Module):
             f"rotary_dim{rotary_dim}_max_position_embeddings{max_position_embeddings}_"
             f"base{base}_scaling_factor{scaling_factor}_beta_fast{beta_fast}_beta_slow{beta_slow}"
         )
+        # Persist everything required to rebuild the (device-resident, non
+        # nn.Buffer) cos/sin caches after a snapshot restore. These caches live
+        # in the module-level ``_ROPE_STATE`` global, so they are NOT part of
+        # ``state_dict`` and are never re-materialized by ``restore_model``.
+        self._config_key = config_key
+        self._max_position_embeddings = max_position_embeddings
+        self._base = base
+        self._scaling_factor = scaling_factor
+        self._beta_fast = beta_fast
+        self._beta_slow = beta_slow
+        self._rope_groups = rope_groups
+        self._max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
+        self._speculative_config = vllm_config.speculative_config
+
         _ROPE_STATE.layer_info[layername] = (config_key, rope_groups)
 
         if config_key not in _ROPE_STATE.registry_summary:
@@ -192,29 +206,75 @@ class ComplexExpRotaryEmbedding(nn.Module):
         for grp in rope_groups:
             _ROPE_STATE.registry_summary[config_key].add(grp)
 
-        if config_key not in _ROPE_STATE.full_rope_cache:
+        self._build_cos_sin_cache(force=False)
+
+    @staticmethod
+    def _full_rope_cache_is_valid(config_key: str, device) -> bool:
+        """True iff the cached cos table exists, lives on ``device`` and still
+        holds valid data. ``cos`` at position 0 must be all ones (cos(0)=1); a
+        snapshot restore invalidates the backing device memory (observed as
+        all-zero), so this doubles as a staleness check and lets many layers
+        that share a config skip redundant recomputes."""
+        entry = _ROPE_STATE.full_rope_cache.get(config_key)
+        if entry is None:
+            return False
+        cos = entry[0]
+        if cos.device.type != torch.device(device).type:
+            return False
+        try:
+            return bool(torch.all(cos[0] == 1.0))
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _build_cos_sin_cache(self, force: bool = False) -> None:
+        """(Re)materialize the device-resident cos/sin caches held in the
+        global ``_ROPE_STATE``. When ``force`` is True (snapshot restore) the
+        full cos/sin table is recomputed if the currently cached one is
+        missing or stale (its device memory was invalidated by suspend/resume).
+        The runtime scratch buffers only need to *exist* (they are fully
+        overwritten per-forward before being read), so they are never rebuilt."""
+        config_key = self._config_key
+        rotary_dim = self.rotary_dim
+        device = current_platform.device_type
+
+        need_static = config_key not in _ROPE_STATE.full_rope_cache
+        if force:
+            need_static = not self._full_rope_cache_is_valid(config_key, device)
+
+        if need_static:
+            # ``precompute_freqs_cis`` must build every intermediate tensor on
+            # ``device``. At cold start an ambient default device=npu context
+            # silently placed them on the NPU, but the restore path has no such
+            # context, so they landed on CPU. CPU vs NPU float32 pow/transcendental
+            # results differ at ~1e-7, making the rebuilt cos/sin *not* bit-identical
+            # to cold start; that error is amplified by the dynamic-quant scales and
+            # flips MTP draft acceptance downstream. Passing ``device`` explicitly
+            # makes both paths compute identical values (and also avoids the
+            # CPU/NPU device-mismatch in the einsum below).
             inv_freq = self.precompute_freqs_cis(
-                rotary_dim, max_position_embeddings, max_position_embeddings, base, scaling_factor, beta_fast, beta_slow
-            )
+                rotary_dim,
+                self._max_position_embeddings,
+                self._max_position_embeddings,
+                self._base,
+                self._scaling_factor,
+                self._beta_fast,
+                self._beta_slow,
+                device=device,
+            ).to(device)
             t = torch.arange(
-                max_position_embeddings * scaling_factor,
-                device=current_platform.device_type,
+                self._max_position_embeddings * self._scaling_factor,
+                device=device,
                 dtype=torch.float32,
             )
             freqs = torch.einsum("i,j -> ij", t, inv_freq)
-            cos = freqs.cos().repeat_interleave(2, dim=-1)
-            sin = freqs.sin().repeat_interleave(2, dim=-1)
-            cos = cos.to(current_platform.device_type)
-            sin = sin.to(current_platform.device_type)
-
+            cos = freqs.cos().repeat_interleave(2, dim=-1).to(device)
+            sin = freqs.sin().repeat_interleave(2, dim=-1).to(device)
+            # Assign only after a successful build so a failure never leaves an
+            # empty/half entry (which would surface downstream as ``cos == {}``).
             _ROPE_STATE.full_rope_cache[config_key] = (cos.unsqueeze(1).unsqueeze(1), sin.unsqueeze(1).unsqueeze(1))
 
-        use_eagle = (
-            vllm_config is not None
-            and vllm_config.speculative_config is not None
-            and vllm_config.speculative_config.use_eagle()
-        )
-        num_speculative_tokens = vllm_config.speculative_config.num_speculative_tokens if use_eagle else None
+        use_eagle = self._speculative_config is not None and self._speculative_config.use_eagle()
+        num_speculative_tokens = self._speculative_config.num_speculative_tokens if use_eagle else None
 
         if config_key not in _ROPE_STATE.runtime_buffer:
             _ROPE_STATE.runtime_buffer[config_key] = {}
@@ -222,8 +282,8 @@ class ComplexExpRotaryEmbedding(nn.Module):
                 _ROPE_STATE.spec_runtime_buffer[config_key] = {}
 
         target_device = current_platform.device_type
-        max_batch_size = vllm_config.scheduler_config.max_num_batched_tokens
-        for grp in rope_groups:
+        max_batch_size = self._max_batch_size
+        for grp in self._rope_groups:
             if grp not in _ROPE_STATE.runtime_buffer[config_key]:
                 buf_cos = torch.ones(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
                 buf_sin = torch.zeros(max_batch_size, 1, 1, rotary_dim, dtype=torch.float32, device=target_device)
@@ -239,8 +299,12 @@ class ComplexExpRotaryEmbedding(nn.Module):
                     ]
                     _ROPE_STATE.spec_runtime_buffer[config_key][grp] = (buf_cos, buf_sin)
 
+    def restore_snapshot_derived_state(self, act_dtype: torch.dtype) -> None:
+        """Rebuild the module-level RoPE cache after restore."""
+        self._build_cos_sin_cache(force=True)
+
     @staticmethod
-    def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow):
+    def precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow, device=None):
         def yarn_find_correction_dim(
             num_rotations: int,
             dim: int,
@@ -269,11 +333,11 @@ class ComplexExpRotaryEmbedding(nn.Module):
             if low == high:
                 high += 0.001  # Prevent singularity
 
-            linear_func = (torch.arange(dim, dtype=dtype) - low) / (high - low)
+            linear_func = (torch.arange(dim, dtype=dtype, device=device) - low) / (high - low)
             ramp_func = torch.clamp(linear_func, 0, 1)
             return ramp_func
 
-        pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim)
+        pos_freqs = base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (factor * pos_freqs)
 

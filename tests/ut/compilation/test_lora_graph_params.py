@@ -11,6 +11,7 @@ from vllm.forward_context import BatchDescriptor
 
 from vllm_ascend.compilation import acl_graph
 from vllm_ascend.compilation.acl_graph import (
+    clear_graph_params_for_recapture,
     get_draft_graph_params,
     get_draft_graph_prefill_params,
     get_graph_params,
@@ -139,3 +140,24 @@ def test_sleep_clears_both_base_and_lora_graph_params() -> None:
     for graph_params in params:
         assert graph_params.workspaces[4] is None
         assert graph_params.events[4] == []
+
+
+def test_recapture_clears_all_graph_params_routes() -> None:
+    set_graph_params([4])
+    set_draft_graph_params([4])
+    set_draft_graph_prefill_params([4])
+    params = list(acl_graph.iter_graph_params())
+
+    for graph_params in params:
+        graph_params.events[4].append(object())
+        graph_params.workspaces[4] = torch.empty(1)
+        graph_params.handles[4].append(object())
+        graph_params.attn_params[4].append(object())
+
+    clear_graph_params_for_recapture()
+
+    for graph_params in params:
+        assert graph_params.events[4] == []
+        assert graph_params.workspaces[4] is None
+        assert graph_params.handles[4] == []
+        assert graph_params.attn_params[4] == []

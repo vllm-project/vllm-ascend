@@ -125,3 +125,16 @@ def test_layerwise_reuse_without_sink_keeps_provider_layer_entry_wait():
     connector.wait_for_layer_load("model.layers.7.self_attn")
 
     assert call_order == ["provider", "sibling"]
+
+
+def test_rebuild_kv_transfer_endpoint_forwards_to_supported_sub_connectors():
+    rebuild = MagicMock()
+    connector = object.__new__(AscendMultiConnector)
+    connector._connectors = [
+        SimpleNamespace(rebuild_kv_transfer_endpoint=rebuild),
+        object(),
+    ]
+
+    connector.rebuild_kv_transfer_endpoint("10.0.0.8", "engine-new")
+
+    rebuild.assert_called_once_with("10.0.0.8", "engine-new")

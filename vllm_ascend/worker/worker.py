@@ -20,16 +20,21 @@
 import copy
 import gc
 import logging
+import os
+import time
 from types import NoneType
 from typing import Any
 
 import torch
 import torch.nn as nn
-import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
-from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    get_pcp_group,
+    init_distributed_environment,
+)
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -73,6 +78,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+from vllm_ascend.snapshot.worker_lifecycle import resume_worker, suspend_worker, unlock_worker
 from vllm_ascend.utils import (
     AscendDeviceType,
     check_ascend_device_type,
@@ -96,6 +102,8 @@ torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_grap
 
 
 class NPUWorker(WorkerBase):
+    distributed_init_method: str
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -139,6 +147,13 @@ class NPUWorker(WorkerBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        if vllm_config.snapshot_config is not None:
+            # Worker and EngineCore receive separate config copies. Leave the
+            # first reserved port to workers and the second to EngineCore.
+            ports = self.parallel_config._snapshot_data_parallel_port_list
+            assert ports is not None and len(ports) == 2
+            ports.pop()
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
@@ -189,7 +204,6 @@ class NPUWorker(WorkerBase):
 
     def uninstall_static_kernel(self):
         import fcntl
-        import os
         import subprocess
 
         ascend_home_path = os.environ["ASCEND_HOME_PATH"]
@@ -720,6 +734,21 @@ class NPUWorker(WorkerBase):
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
+    def suspend(self, model_save_path: str | None = None) -> None:
+        suspend_worker(self, model_save_path)
+
+    def device_unlock(self) -> None:
+        unlock_worker(self)
+
+    def resume(
+        self,
+        local_ip: str,
+        data_parallel_master_ip: str,
+        model_path: str | None = None,
+        new_engine_id: str | None = None,
+    ) -> None:
+        resume_worker(self, local_ip, data_parallel_master_ip, model_path, new_engine_id)
+
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
@@ -847,12 +876,6 @@ class NPUWorker(WorkerBase):
             ),
         )
 
-    def _warm_up_atb(self):
-        x = torch.rand((2, 4), dtype=torch.float16).npu()
-        weight = torch.rand((2, 4), dtype=torch.float16).npu()
-        c = torch.rand((4, 4), dtype=torch.float32).npu()
-        torch_npu._npu_matmul_add_fp32(x, weight, c)
-
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
@@ -875,7 +898,6 @@ class NPUWorker(WorkerBase):
         Returns:
             Latency in milliseconds
         """
-        import time
 
         # Clamp to valid range
         num_tokens = min(num_tokens, self.scheduler_config.max_num_batched_tokens)
@@ -1089,7 +1111,11 @@ class NPUWorker(WorkerBase):
         """Initialize the distributed environment."""
         init_batch_invariance()
         init_distributed_environment(
-            self.parallel_config.world_size, self.rank, self.distributed_init_method, self.local_rank, "hccl"
+            self.parallel_config.world_size,
+            self.rank,
+            self.distributed_init_method,
+            self.local_rank,
+            "hccl",
         )
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,

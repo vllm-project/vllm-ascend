@@ -87,6 +87,20 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
 
+    @patch("vllm_ascend.ops.linear.UnquantizedLinearMethod.process_weights_after_loading")
+    @patch("vllm_ascend.ops.linear.maybe_trans_nz", side_effect=lambda tensor: tensor)
+    def test_snapshot_only_persists_precast_weight(self, mock_trans_nz, mock_process):
+        for snapshot_config, persistent in ((None, False), (object(), True)):
+            layer = torch.nn.Linear(2, 2, bias=False)
+            layer.prefix = "gate"
+            layer.precast_fp32_weight = True
+            config = MagicMock(snapshot_config=snapshot_config)
+
+            with patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=config):
+                self.method.process_weights_after_loading(layer)
+
+            self.assertEqual("weight_fp32" in layer._buffers, persistent)
+
 
 class TestAscendRowParallelLinear(BaseLinearTest):
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())

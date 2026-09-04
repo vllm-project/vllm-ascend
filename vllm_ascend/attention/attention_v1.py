@@ -1781,7 +1781,7 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         """Shard per-channel C8 scales/offsets to this TP rank and pre-compute
         BF16 BNSD antiquant tensors for FIA V1 decode fast path.
         """
-        if hasattr(layer, "_c8_scales_prepared"):
+        if hasattr(layer, "_c8_scales_prepared") and not getattr(self, "_snapshot_reprepare_c8_scales", False):
             return
 
         def _shard_and_reshape(raw: torch.Tensor) -> torch.Tensor:
@@ -1811,6 +1811,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         layer._c8_v_aq_scale_nz_bnsd = layer._c8_v_scale.view(nz_bnsd).contiguous()
 
         layer._c8_scales_prepared = True
+        self._snapshot_reprepare_c8_scales = False
+
+    def reset_snapshot_runtime_state(self) -> None:
+        self._snapshot_reprepare_c8_scales = True
 
     def _dequant_paged_kv_to_dense(
         self,
