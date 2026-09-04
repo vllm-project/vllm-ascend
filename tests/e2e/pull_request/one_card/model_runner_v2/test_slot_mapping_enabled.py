@@ -10,7 +10,7 @@ from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import _compute
 @pytest.mark.parametrize("cp_size, cp_rank, expected", [(1, 0, [40, 43, 44, 47]), (2, 1, [-1, 41, -1, 43])])
 @pytest.mark.parametrize("has_enablement", [False, True])
 def test_circular_buffer_slot_mapping_disabled(cp_size, cp_rank, expected, has_enablement):
-    """Disabled state groups must emit PAD without token-indexing their rows."""
+    """PR #53896: disabled state groups emit PAD without token-indexing rows."""
     device = "npu"
     block_tables = [
         torch.tensor([[10, 11]], dtype=torch.int32, device=device),
