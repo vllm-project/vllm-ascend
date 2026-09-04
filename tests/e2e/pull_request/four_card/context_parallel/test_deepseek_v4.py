@@ -123,7 +123,7 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
         MODEL,
         max_model_len=8192,
         max_num_seqs=MAX_NUM_SEQS,
-        max_num_batched_tokens=4096,
+        max_num_batched_tokens=1024,
         dtype="auto",
         tensor_parallel_size=2,
         prefill_context_parallel_size=2,
