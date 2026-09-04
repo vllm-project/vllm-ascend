@@ -30,6 +30,7 @@ from itertools import islice
 
 import torch
 import torch.nn.functional as F
+import vllm.envs as envs
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 from vllm._aiter_ops import rocm_aiter_ops
@@ -40,8 +41,8 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -67,7 +68,6 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
-    sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -78,6 +78,12 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
+from vllm_ascend.models.common.ops.sequence_parallel import (
+    sp_all_gather,
+    sp_padding_mask,
+    sp_reduce_scatter,
+    sp_shard,
+)
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
@@ -96,6 +102,8 @@ from vllm_ascend.worker.v2.pp_utils import (
 from vllm_ascend.worker.v2.pp_utils import (
     make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
 )
+
+sequence_parallel_chunk = sp_shard
 
 
 class AscendDeepseekV4SWACache(VllmDeepseekV4SWACache):
@@ -382,13 +390,6 @@ class DeepseekV4MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # Chunk the hidden states so they aren't replicated across TP ranks.
-        # This avoids duplicate computation in self.experts.
-        # TODO: We can replace the all_reduce at the end of attn with a
-        # reduce_scatter instead of chunking here.
-        if self.is_sequence_parallel:
-            hidden_states = sequence_parallel_chunk(hidden_states)
-
         if self.experts.is_internal_router:
             # In this case, the gate/router runs inside the FusedMoEFactory class
             fused_moe_out = self.experts(
@@ -428,10 +429,7 @@ class DeepseekV4MoE(nn.Module):
         else:
             final_hidden_states = fused_moe_out
 
-        if self.is_sequence_parallel:
-            final_hidden_states = tensor_model_parallel_all_gather(final_hidden_states, 0)
-            final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1 and fused_moe_out_is_tuple:
+        if not self.is_sequence_parallel and self.tp_size > 1 and fused_moe_out_is_tuple:
             # Legacy tuple outputs are reduced here. Tensor outputs from the
             # upstream MoERunner have already gone through its final reduction.
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
@@ -465,6 +463,8 @@ class DeepseekV4Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        reduce_results: bool = True,
+        need_gather_q_kv: bool = False,
     ) -> None:
         super().__init__()
         layer_idx = int(prefix.split(sep=".")[-2])
@@ -530,6 +530,7 @@ class DeepseekV4Attention(nn.Module):
             self.n_groups * config.o_lora_rank,
             self.dim,
             bias=False,
+            reduce_results=reduce_results,
             quant_config=quant_config,
             prefix=f"{prefix}.wo_b",
             return_bias=False,
@@ -648,6 +649,7 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             # prefix=f'{prefix}.attn',
             prefix=f"{prefix}",
+            need_gather_q_kv=need_gather_q_kv,
         )
 
     def forward(
@@ -659,7 +661,7 @@ class DeepseekV4Attention(nn.Module):
         return self.dsa_attn(positions, hidden_states, llama_4_scaling)
 
 
-class DeepseekV2DecoderLayer(nn.Module):
+class DeepseekV4DecoderLayer(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -683,6 +685,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
+        self.use_sequence_parallel_moe = (
+            parallel_config.use_sequence_parallel_moe and parallel_config.pipeline_parallel_size == 1
+        )
+        self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = DeepseekV4Attention
 
@@ -694,6 +700,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             topk_indices_buffer=topk_indices_buffer,
+            reduce_results=not self.use_sequence_parallel_moe,
+            need_gather_q_kv=self.use_sequence_parallel_moe and self.enable_dsa_cp,
         )
 
         self.mlp = DeepseekV4MoE(
@@ -737,17 +745,28 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
         input_ids: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         residual = hidden_states.clone()
+        full_num_tokens = positions.shape[0]
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
+
+        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+            hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
+
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
+
+        if self.use_sequence_parallel_moe and not self.enable_dsa_cp:
+            hidden_states = sp_reduce_scatter(hidden_states)
+
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
+
         residual = hidden_states.clone()
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states, input_ids)
+
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
 
         return hidden_states, residual
@@ -764,6 +783,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         quant_config = vllm_config.quant_config
         self.config = config
         self.device = current_platform.device_type
+        self.use_sequence_parallel_moe = vllm_config.parallel_config.use_sequence_parallel_moe
 
         self.vocab_size = config.vocab_size
         self.is_v32 = hasattr(config, "index_topk")
@@ -793,7 +813,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
+            lambda prefix: DeepseekV4DecoderLayer(vllm_config, prefix, topk_indices_buffer=topk_indices_buffer),
             prefix=f"{prefix}.layers",
         )
 
@@ -887,6 +907,13 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             PPTransportDataType.AUX_HIDDEN_STATES,
         )
 
+        if self.use_sequence_parallel_moe:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
+            hidden_states = sp_shard(hidden_states)
+            input_ids = sp_shard(input_ids)
+
         # Compute llama 4 scaling once per forward pass if enabled
         llama_4_scaling_config = None
         llama_4_scaling: torch.Tensor | None
@@ -910,12 +937,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 input_ids=input_ids,
             )
             if layer.layer_idx + 1 in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states.mean(dim=1))
-
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
-        if self._mtp_hidden_buffer is not None:
-            num_tokens = hidden_states.shape[0]
-            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
+                aux_hidden_state = hidden_states.mean(dim=1)
+                if self.use_sequence_parallel_moe:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[: positions.shape[0]]
+                aux_hidden_states.append(aux_hidden_state)
 
         if not pp_group.is_last_rank:
             intermediate_tensors = IntermediateTensors(
@@ -928,6 +953,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 PPTransportDataType.AUX_HIDDEN_STATES,
                 aux_hidden_states,
             )
+
+        if self.use_sequence_parallel_moe:
+            hidden_states = sp_all_gather(hidden_states)[: positions.shape[0]]
+
+        # Stash pre-hc_head residual for the MTP draft (captured copy_).
+        if self._mtp_hidden_buffer is not None:
+            num_tokens = hidden_states.shape[0]
+            self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
         hidden_states = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
 
@@ -1018,7 +1051,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
             if isinstance(layer, PPMissingLayer):
                 continue
 
-            assert isinstance(layer, DeepseekV2DecoderLayer)
+            assert isinstance(layer, DeepseekV4DecoderLayer)
             if isinstance(layer.mlp, DeepseekV4MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp
