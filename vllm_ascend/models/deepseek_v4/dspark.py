@@ -172,7 +172,17 @@ class DeepseekV4DSparkModel(nn.Module):
             config,
             maybe_prefix(prefix, f"layers.{last_layer_idx}.markov_head"),
         )
-        self.confidence_head = DSparkConfidenceHead(config, maybe_prefix(prefix, "confidence_head"))
+        # Confidence head is optional and only created when the config enables
+        # it; if the checkpoint turns out to ship no ``confidence_head.*``
+        # weights it is dropped again in ``load_weights`` (see
+        # ``DSparkDeepseekV4ForCausalLM.load_weights``). Mirrors upstream so
+        # adaptive verification fails loudly on checkpoints without a head
+        # instead of silently using an uninitialized linear layer.
+        self.confidence_head: DSparkConfidenceHead | None = None
+        if getattr(config, "enable_confidence_head", True):
+            self.confidence_head = DSparkConfidenceHead(
+                config, maybe_prefix(prefix, "confidence_head")
+            )
         hc_dim = self.hc_mult * config.hidden_size
         self.hc_head_fn = nn.Parameter(
             torch.empty(self.hc_mult, hc_dim, dtype=torch.float32),
@@ -428,6 +438,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        loaded_confidence_head = False
 
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -451,6 +462,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
             # Detect whether the checkpoint ships its own embed_tokens / lm_head
             # for the draft model.
             process_eagle_weight(self, name)
+
+            if "confidence_head." in name:
+                loaded_confidence_head = True
 
             # Expert scale parameters use Ascend's ``weight_scale`` convention.
             if name.endswith(".scale"):
@@ -499,6 +513,11 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
+        if self.model.confidence_head is not None and not loaded_confidence_head:
+            # The checkpoint ships no confidence head: drop it so callers
+            # (DSpark speculative decoding / adaptive verification) get a clear
+            # error instead of garbage predictions from an uninitialized layer.
+            self.model.confidence_head = None
         logger.info_once("DSpark draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
@@ -508,6 +527,9 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
             return None
         stage = int(m.group(1))
         rest = m.group(2)
+
+        if rest.startswith("confidence_head.") and self.model.confidence_head is None:
+            return None
 
         if stage == self.model.num_dspark_layers - 1 and rest.startswith("confidence_head."):
             return f"model.{rest}"

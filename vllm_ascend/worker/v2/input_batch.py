@@ -51,6 +51,16 @@ class AscendInputBuffers(InputBuffers):
             device=device,
         )
 
+        # CPU mirror of ``query_start_loc``. Ascend attention metadata builders
+        # are CPU-driven, so under adaptive verification the runner reflects the
+        # device-rewritten layout back here (D2H) every step to keep CPU and
+        # device query lengths consistent.
+        self.query_start_loc_cpu: torch.Tensor = torch.zeros(
+            max_num_reqs + 2,
+            dtype=torch.int32,
+            device="cpu",
+        )
+
         # Create seq_lens_cpu and seq_lens_np.
         # npu's attention backend still needs seq_lens on CPU side.
         self.seq_lens_cpu: torch.Tensor = torch.zeros(
