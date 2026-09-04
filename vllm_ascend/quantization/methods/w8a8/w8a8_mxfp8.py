@@ -29,7 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD, _should_trans_nz, maybe_trans_nz
+from vllm_ascend.utils import FP8_METHOD, maybe_trans_nz, maybe_trans_nz_with_scale
 
 from ..base import (
     AscendLinearScheme,
@@ -348,19 +348,18 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        if _should_trans_nz(layer.w13_weight.data):
-            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
-            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
-            layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data, customize_dtype=torch.float8_e4m3fn)
-            layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data, customize_dtype=torch.float8_e4m3fn)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
-        else:
-            # NZ disabled: keep the pre-NZ non-contiguous transpose layout.
-            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-            layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-            layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        layer.w13_weight.data, layer.w13_weight_scale.data = maybe_trans_nz_with_scale(
+            layer.w13_weight.data,
+            layer.w13_weight_scale.data,
+            transpose_dims=(1, 2),
+            customize_dtype=torch.float8_e4m3fn,
+        )
+        layer.w2_weight.data, layer.w2_weight_scale.data = maybe_trans_nz_with_scale(
+            layer.w2_weight.data,
+            layer.w2_weight_scale.data,
+            transpose_dims=(1, 2),
+            customize_dtype=torch.float8_e4m3fn,
+        )
 
         # Mark as transformed
         layer._mxfp8_transformed = True
