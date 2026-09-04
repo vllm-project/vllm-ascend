@@ -149,10 +149,6 @@ a3:
         config_file_path: GLM-5.1-W8A8C8-A3_198k_function.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 2
-      - name: multi-node-GLM-5.1-W8A8C8-MTP-A3_198k_function_perf
-        config_file_path: GLM-5.1-W8A8C8-A3_198k_function_perf.yaml
-        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
-        size: 2
       - name: multi-node-deepseek-v3.1
         config_file_path: DeepSeek-V3.1-BF16.yaml
         config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
@@ -178,6 +174,12 @@ a3:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
@@ -250,6 +252,9 @@ a3:
   multi_card:
     test_config:
       # pytest-driven tests
+      - name: compressor-metadata-cross-stream
+        os: linux-aarch64-a3-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_compressor_metadata.py
       - name: qwen3-30b-acc
         os: linux-aarch64-nightly-a3-4
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
@@ -294,6 +299,12 @@ a3-560t:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml

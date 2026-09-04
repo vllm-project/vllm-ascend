@@ -15,13 +15,11 @@ from vllm_ascend.attention.mla_v1 import (
     AscendMLAImpl,
     AscendMLAMetadata,
     AscendMLAMetadataBuilder,
-    AscendMLAPCPImpl,
-    AscendMLAPCPMetadata,
-    AscendMLAPCPMetadataBuilder,
     AscendMLAPrefillMetadata,
     ChunkedContextMetadata,
     DecodeMLAPreprocessResult,
     PrefillMLAPreprocessResult,
+    _mla_nope_zero_rope,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.hardware import AscendDeviceType
@@ -54,23 +52,19 @@ class TestAscendMLABackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_get_builder_cls(self, mock_enable_pcp):
-        mock_enable_pcp.return_value = False
+    def test_get_builder_cls(self):
         self.assertEqual(AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder)
-        mock_enable_pcp.return_value = True
-        self.assertIs(AscendMLABackend.get_builder_cls(), AscendMLAPCPMetadataBuilder)
+        self.mock_parallel_config.prefill_context_parallel_size = 2
+        self.assertIs(AscendMLABackend.get_builder_cls(), AscendMLAMetadataBuilder)
 
     def test_get_kv_cache_shape(self):
         result = AscendMLABackend.get_kv_cache_shape(2, 4, 8, 128)
         self.assertEqual(result, (2, 4, 8, 128))
 
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_get_impl_cls(self, mock_enable_pcp):
-        mock_enable_pcp.return_value = False
+    def test_get_impl_cls(self):
         self.assertEqual(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
-        mock_enable_pcp.return_value = True
-        self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAPCPImpl)
+        self.mock_parallel_config.prefill_context_parallel_size = 2
+        self.assertIs(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
 
     def test_get_supported_kernel_block_sizes(self):
         result = AscendMLABackend.get_supported_kernel_block_sizes()
@@ -88,25 +82,29 @@ class TestAscendMLABackend(TestBase):
         impl_cls = AscendMLABackend.get_impl_cls()
         self.assertIsNotNone(impl_cls)
 
-    @patch("vllm_ascend.attention.mla_v1.enable_dcp")
-    @patch("vllm_ascend.attention.mla_v1.enable_pcp")
-    def test_pcp_and_dcp_are_rejected(self, mock_enable_pcp, mock_enable_dcp):
-        mock_enable_dcp.return_value = True
-        mock_enable_pcp.return_value = True
-
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_builder_cls()
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP"):
-            AscendMLABackend.get_impl_cls()
-
 
 def _make_pcp_metadata(
     *,
     num_actual_tokens: int,
     num_decode_tokens: int,
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill,
-) -> AscendMLAPCPMetadata:
-    return AscendMLAPCPMetadata(
+) -> AscendMLAMetadata:
+    num_prefills = int(num_actual_tokens > num_decode_tokens)
+    prefill_metadata = None
+    if num_prefills > 0:
+        prefill_metadata = AscendMLAPrefillMetadata(
+            attn_mask=torch.empty(0),
+            query_lens=torch.empty(0, dtype=torch.int32),
+            seq_lens=[],
+            context_lens=torch.empty(0, dtype=torch.int32),
+            input_positions=torch.empty(0, dtype=torch.int64),
+            query_start_loc=torch.tensor([0], dtype=torch.int32),
+            block_table=torch.empty(0, 0, dtype=torch.int32),
+            max_query_len=0,
+            max_seq_lens=0,
+        )
+
+    return AscendMLAMetadata(
         num_actual_tokens=num_actual_tokens,
         slot_mapping=torch.empty(0, dtype=torch.int64),
         query_start_loc=torch.tensor([0, num_actual_tokens], dtype=torch.int32),
@@ -115,8 +113,9 @@ def _make_pcp_metadata(
         block_tables=torch.zeros(1, 1, dtype=torch.int32),
         num_decodes=int(num_decode_tokens > 0),
         num_decode_tokens=num_decode_tokens,
-        num_prefills=int(num_actual_tokens > num_decode_tokens),
+        num_prefills=num_prefills,
         attn_state=attn_state,
+        prefill=prefill_metadata,
     )
 
 
@@ -125,28 +124,28 @@ def test_mla_pcp_metadata_keeps_expanded_slot_mapping() -> None:
         [5, 10, 11, -1, -1, 20, 21, -1],
         dtype=torch.int64,
     )
-    common_metadata = SimpleNamespace(slot_mapping=expanded_slots)
     metadata = _make_pcp_metadata(
         num_actual_tokens=3,
         num_decode_tokens=1,
         attn_state=AscendAttentionState.PrefillCacheHit,
     )
-    builder = AscendMLAPCPMetadataBuilder.__new__(AscendMLAPCPMetadataBuilder)
+    builder = AscendMLAMetadataBuilder.__new__(AscendMLAMetadataBuilder)
     builder.pcp_size = 2
     builder.pcp_rank = 1
 
-    with patch.object(AscendMLAMetadataBuilder, "build", return_value=metadata):
-        result = builder.build(0, common_metadata)
+    builder._finalize_pcp_metadata(metadata, expanded_slots)
 
-    assert result.slot_mapping is expanded_slots
-    assert result.pcp_local_num_input_tokens == 4
-    assert result.pcp_local_prefill_start == 3
-    assert result.pcp_local_prefill_end == 5
-    assert result.attn_state == AscendAttentionState.ChunkedPrefill
+    assert metadata.slot_mapping is expanded_slots
+    prefill_metadata = metadata.prefill
+    assert prefill_metadata is not None
+    assert prefill_metadata.pcp_local_num_input_tokens == 4
+    assert prefill_metadata.pcp_local_prefill_start == 3
+    assert prefill_metadata.pcp_local_prefill_end == 5
+    assert metadata.attn_state == AscendAttentionState.ChunkedPrefill
 
 
 def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
-    impl = AscendMLAPCPImpl.__new__(AscendMLAPCPImpl)
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
     captured: dict[str, torch.Tensor] = {}
 
     def fake_gather(tensors, slot_mapping, num_decode_tokens):
@@ -159,10 +158,10 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
             slot_mapping,
         )
 
-    def fake_exec_kv_prefill(self, kv, cos, sin, kv_cache, slots):
+    def fake_kv_cache(kv, _weight, cos, _sin, slots, *_args, **_kwargs):
         captured["gathered_kv"] = kv
         captured["cache_slots"] = slots
-        return cos, kv[:, :2]
+        return None, None, cos, kv.view(kv.shape[0], -1)[:, :2]
 
     pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
     metadata = _make_pcp_metadata(num_actual_tokens=3, num_decode_tokens=1)
@@ -170,9 +169,22 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
         [5, 10, 11, -1, -1, 20, 21, -1],
         dtype=torch.int64,
     )
-    metadata.pcp_local_num_input_tokens = 4
-    metadata.pcp_local_prefill_start = 3
-    metadata.pcp_local_prefill_end = 5
+    prefill_metadata = metadata.prefill
+    assert prefill_metadata is not None
+    prefill_metadata.pcp_local_num_input_tokens = 4
+    prefill_metadata.pcp_local_prefill_start = 3
+    prefill_metadata.pcp_local_prefill_end = 5
+    impl.pcp_enabled = True
+    impl.use_mla_rope = True
+    impl.kv_a_layernorm = SimpleNamespace(
+        weight=torch.empty(0),
+        variance_epsilon=1e-6,
+    )
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 2
+    impl.qk_rope_head_dim = 1
+    impl.fa_quant_layer = False
+    impl.support_fp8_attention = False
     kv = torch.arange(9, dtype=torch.float32).view(3, 3)
     cos = torch.tensor([[1.0], [2.0], [1.0]])
     sin = torch.tensor([[3.0], [4.0], [0.0]])
@@ -186,10 +198,9 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
             "vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs",
             side_effect=fake_gather,
         ),
-        patch.object(
-            AscendMLAImpl,
-            "exec_kv_prefill",
-            fake_exec_kv_prefill,
+        patch(
+            "vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache",
+            side_effect=fake_kv_cache,
         ),
     ):
         k_pe, k_nope = impl.exec_kv_prefill(
@@ -201,6 +212,7 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
             attn_metadata=metadata,
         )
 
+    assert impl._get_num_prefill_kv_tokens(metadata) == 3
     expected_slots = torch.tensor([10, 11, -1, 20, 21, -1])
     torch.testing.assert_close(captured["slots"], expected_slots)
     assert captured["local_kv"] is kv
@@ -209,6 +221,62 @@ def test_mla_pcp_prefill_gathers_padded_cache_inputs() -> None:
     torch.testing.assert_close(captured["cache_slots"], expected_slots)
     torch.testing.assert_close(k_pe, cos[:2])
     torch.testing.assert_close(k_nope, kv[:2, :2])
+
+
+def test_mla_pcp_nope_prefill_trims_gathered_outputs() -> None:
+    impl = AscendMLAImpl.__new__(AscendMLAImpl)
+
+    def fake_gather(tensors, slot_mapping, num_decode_tokens):
+        assert num_decode_tokens == 0
+        return (
+            tuple(torch.cat((tensor + 100, tensor), dim=0) for tensor in tensors),
+            slot_mapping,
+        )
+
+    pcp_group = SimpleNamespace(world_size=2, rank_in_group=1)
+    metadata = _make_pcp_metadata(num_actual_tokens=3, num_decode_tokens=1)
+    metadata.slot_mapping = torch.tensor(
+        [5, 10, 11, -1, -1, 20, 21, -1],
+        dtype=torch.int64,
+    )
+    prefill_metadata = metadata.prefill
+    assert prefill_metadata is not None
+    prefill_metadata.pcp_local_num_input_tokens = 4
+    prefill_metadata.pcp_local_prefill_start = 3
+    prefill_metadata.pcp_local_prefill_end = 5
+
+    impl.pcp_enabled = True
+    impl.use_mla_rope = True
+    impl.kv_a_layernorm = object()
+    impl.num_kv_heads = 1
+    impl.kv_lora_rank = 2
+    impl.qk_rope_head_dim = 0
+
+    gathered_k_pe = torch.empty(6, 1, 1, 0)
+    gathered_k_nope = torch.arange(12, dtype=torch.float32).view(6, 1, 1, 2)
+    impl._exec_kv_mla_nope = MagicMock(return_value=(gathered_k_pe, gathered_k_nope))
+
+    with (
+        patch(
+            "vllm_ascend.attention.mla_v1.get_pcp_group",
+            return_value=pcp_group,
+        ),
+        patch(
+            "vllm_ascend.attention.mla_v1._gather_prefill_cache_inputs",
+            side_effect=fake_gather,
+        ),
+    ):
+        k_pe, k_nope = impl.exec_kv_prefill(
+            torch.arange(6, dtype=torch.float32).view(3, 2),
+            torch.empty(3, 0),
+            torch.empty(3, 0),
+            (torch.empty(0), torch.empty(0)),
+            torch.empty(0, dtype=torch.int64),
+            attn_metadata=metadata,
+        )
+
+    assert k_pe.shape == (2, 1, 1, 0)
+    torch.testing.assert_close(k_nope, gathered_k_nope[3:5])
 
 
 class TestDecodeMLAPreprocessResult(TestBase):
@@ -461,6 +529,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_ascend_mla_metadata_builder_default(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
@@ -488,6 +557,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         mock_vllm_config.cache_config.block_size = 16
         mock_vllm_config.scheduler_config.max_num_seqs = 4
         mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.speculative_config = None
 
         for layer_uses_rope in (True, False):
@@ -505,8 +575,46 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
                 self.assertEqual(builder.use_mla_rope, layer_uses_rope)
 
+    def test_zero_rope_cache_only_for_nope_models(self):
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.enable_chunked_prefill = False
+        mock_vllm_config.speculative_config = None
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
+
+        for qk_rope_head_dim, expected in ((64, None), (0, {})):
+            with self.subTest(qk_rope_head_dim=qk_rope_head_dim):
+                mock_vllm_config.model_config.hf_text_config = SimpleNamespace(
+                    qk_rope_head_dim=qk_rope_head_dim,
+                    mla_use_nope=False,
+                )
+                with patch("vllm_ascend.attention.mla_v1.get_ascend_config", return_value=MagicMock()):
+                    builder = AscendMLAMetadataBuilder(None, [], mock_vllm_config, "cpu")
+
+                self.assertEqual(builder.nope_zero_rope_cache, expected)
+
+    def test_mla_nope_zero_rope_reuses_one_buffer_per_shape(self):
+        cache: dict = {}
+        ref = torch.ones(2, 1, 4, 8)
+
+        first = _mla_nope_zero_rope(ref, 64, cache)
+        second = _mla_nope_zero_rope(torch.ones_like(ref), 64, cache)
+
+        self.assertIs(first, second)
+        self.assertEqual(first.shape, (2, 1, 4, 64))
+        self.assertTrue(torch.equal(first, torch.zeros_like(first)))
+        self.assertEqual(len(cache), 1)
+
+        _mla_nope_zero_rope(torch.ones(3, 1, 4, 8), 64, cache)
+        self.assertEqual(len(cache), 2)
+
     def test_ascend_mla_metadata_builder_spec_decode(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
@@ -574,6 +682,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         ascend_config = MagicMock()
 
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
@@ -626,6 +735,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_set_num_actual_tokens(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
@@ -646,6 +756,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_pad_actual_seq_lens_q_mtp_disable_pad(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
@@ -667,6 +778,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_pad_actual_seq_lens_q_mtp_enable_pad(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
@@ -693,6 +805,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_pad_actual_seq_lens_q_mtp_enable_pad_with_padding(self):
         mock_vllm_config = MagicMock()
+        mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.model_config.max_model_len = 1024
         mock_vllm_config.model_config.get_head_size.return_value = 64
         mock_vllm_config.model_config.dtype = torch.float16
@@ -770,6 +883,29 @@ class TestAscendMLAMetadataBuilderBuild(TestBase):
 
     def tearDown(self):
         self.parent_init_patcher.stop()
+
+    @patch("vllm_ascend.attention.mla_v1.get_pcp_group")
+    def test_pcp_mode_is_initialized_from_config(self, mock_get_pcp_group):
+        builder = AscendMLAMetadataBuilder(
+            self.kv_cache_spec,
+            ["layer_0"],
+            self.mock_vllm_config,
+            self.mock_device,
+        )
+        self.assertFalse(builder.pcp_enabled)
+        self.assertIs(builder.metadata_cls, AscendMLAMetadata)
+
+        self.mock_vllm_config.parallel_config.prefill_context_parallel_size = 2
+        mock_get_pcp_group.return_value.rank_in_group = 1
+        pcp_builder = AscendMLAMetadataBuilder(
+            self.kv_cache_spec,
+            ["layer_0"],
+            self.mock_vllm_config,
+            self.mock_device,
+        )
+        self.assertTrue(pcp_builder.pcp_enabled)
+        self.assertIs(pcp_builder.metadata_cls, AscendMLAMetadata)
+        self.assertEqual(pcp_builder.pcp_rank, 1)
 
     @patch("vllm_ascend.attention.mla_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.mla_v1.torch.zeros", wraps=torch.zeros)
@@ -1180,6 +1316,7 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(self.impl.scale, 0.1)
         self.assertEqual(self.impl.num_kv_heads, 8)
         self.assertEqual(self.impl.kv_cache_dtype, "auto")
+        self.assertFalse(self.impl.pcp_enabled)
         self.assertEqual(self.impl.kv_lora_rank, 32)
         self.assertEqual(self.impl.qk_nope_head_dim, 64)
         self.assertEqual(self.impl.qk_rope_head_dim, 32)
@@ -1199,6 +1336,7 @@ class TestAscendMLAImpl(TestBase):
     def test_init_head_padding_for_non_power_of_two(self, mock_get_current_vllm_config):
         """Test head padding computation for num_heads that are not power of 2 (e.g. GLM-4.7-Flash with 20 heads)."""
         mock_get_current_vllm_config.return_value = MagicMock()
+        mock_get_current_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         kwargs = {
             "kv_lora_rank": 32,
             "qk_nope_head_dim": 64,
@@ -1646,6 +1784,7 @@ class TestAscendMLAImpl(TestBase):
     def test_forward_prefill_non_power_of_two_heads(self, mock_fia, mock_device_operator, mock_get_current_vllm_config):
         """Test prefill with non-power-of-2 heads uses concat instead of query_rope/key_rope kwargs."""
         mock_get_current_vllm_config.return_value = MagicMock()
+        mock_get_current_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         num_heads = 20
         kwargs = {
             "kv_lora_rank": 32,
@@ -1991,6 +2130,7 @@ class TestAscendMLAImpl(TestBase):
     ):
         """Test prefill context with non-power-of-2 heads uses concat for query and key."""
         mock_get_current_vllm_config.return_value = MagicMock()
+        mock_get_current_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         num_heads = 20
         kwargs = {
             "kv_lora_rank": 32,
@@ -2317,6 +2457,7 @@ class TestAscendMLAImpl(TestBase):
     ):
         """Test decode with non-power-of-2 heads pads to next power of 2 and slices output."""
         mock_get_current_vllm_config.return_value = MagicMock()
+        mock_get_current_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         num_heads = 20
         kwargs = {
             "kv_lora_rank": 256,
@@ -2393,6 +2534,7 @@ class TestAscendMLAImpl(TestBase):
     ):
         """Test normal decode (BNSD_NBSD) with non-power-of-2 heads pads q and slices output."""
         mock_get_current_vllm_config.return_value = MagicMock()
+        mock_get_current_vllm_config.return_value.parallel_config.prefill_context_parallel_size = 1
         num_heads = 20
         kwargs = {
             "kv_lora_rank": 256,

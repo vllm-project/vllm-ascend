@@ -29,9 +29,9 @@ Test selection is driven by the coverage/AST based precision testing pipeline
   e2e test paths (files or directories) supplied via the ``/e2e`` PR
   comment. Each path is routed directly to the appropriate runner.
 
-- ``--all-tests``: Full-suite mode. Scans ``tests/ut`` and
-  ``tests/e2e/pull_request`` and routes every test file by its directory
-  convention. Used for ready-all runs and scheduled full scans.
+- ``--all-tests``: Full-suite mode. Scans ``tests/ut`` (routed to the CPU
+  runner) and ``tests/e2e/pull_request`` (routed by directory convention).
+  Used for ready-all runs and scheduled full scans.
 
 - ``--curated``: Curated-suite mode. Reads the named test list from
   ``curated_tests:`` in the routing config and routes each path.
@@ -97,14 +97,19 @@ _DEFAULT_KEY: PartitionKey = "cpu-0"
 
 # The coverage-based recommendation emits this batch label (not a real pytest
 # path) to represent the always-on CPU UT suite. Map it to ``tests/ut`` so
-# the ``--test-list-file`` flow runs the CPU UT suite: the directory is
-# scanned with cpu_only=True, i.e. NPU-convention subdirs are skipped and
-# the remaining files route to the CPU runner.
+# the ``--test-list-file`` flow runs the CPU UT suite. All UTs run on CPU.
 CPU_UT_BATCH_ALIAS = "cpu-ut"
 CPU_UT_BATCH_PATH = "tests/ut"
 
 # Full-suite mode roots scanned by --all-tests.
 _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
+
+# When set via --skip-cpu-ut, tests/ut targets are dropped from every selection
+# mode. CPU UTs are executed by the cpu-ut job on every PR; the PR test
+# scheduling path must not reserve a runner for them. Scheduled full-suite
+# coverage runs (schedule_test_coverage.yaml) do NOT pass this flag, so their
+# --all-tests runs keep collecting CPU UT coverage.
+_SKIP_CPU_UT = False
 
 # Generic ``linux-aarch64-a3-N-`` labels are mixed pools of 560T and 752T
 # machines (i.e. random machine class). When accuracy tests are selected (or
@@ -162,11 +167,6 @@ def _resolve_partition(file_path: str) -> PartitionKey | None:
     return None
 
 
-def _route_ut_dir(dir_path: str) -> PartitionKey:
-    result = _resolve_partition(dir_path)
-    return result if result is not None else _DEFAULT_KEY
-
-
 def _route_e2e_dir(dir_path: str) -> PartitionKey | None:
     return _resolve_partition(dir_path)
 
@@ -219,18 +219,12 @@ def _is_test_path(path: str) -> bool:
 def _scan_ut_test_dir(
     dir_path: str,
     groups: dict[PartitionKey, list[str]],
-    cpu_only: bool = False,
 ) -> None:
-    """Scan a UT directory and route tests by directory convention.
+    """Scan a UT directory into the CPU group.
 
-    Walks the directory tree. Each test file is routed individually based on
-    its path — files under convention directories (e.g. ``a2/``, ``a3_2/``)
-    go to the corresponding NPU runner, others go to the CPU group.
-
-    If *cpu_only* is True, files under NPU convention directories are skipped.
-
-    Always emits individual file paths to avoid test pollution when pytest
-    runs a whole directory.
+    All UTs run on CPU, so every test file under ``tests/ut`` is appended to
+    the default CPU partition. Individual file paths are always emitted to
+    avoid test pollution when pytest runs a whole directory.
     """
     path = Path(_pytest_node_file_path(dir_path))
     if not path.exists():
@@ -238,24 +232,13 @@ def _scan_ut_test_dir(
         return
 
     if path.is_file():
-        key = _route_ut_dir(dir_path)
-        if cpu_only and key != _DEFAULT_KEY:
-            print(
-                f"Warning: cpu_only module test {dir_path} routes to NPU runner;"
-                " check test_config.yaml for misconfigured cpu_only tests.",
-                file=sys.stderr,
-            )
-            return
-        groups[key].append(dir_path)
+        groups[_DEFAULT_KEY].append(dir_path)
         return
 
     for f in sorted(path.rglob("test_*.py")):
         if "__pycache__" in f.parts:
             continue
-        key = _route_ut_dir(str(f))
-        if cpu_only and key != _DEFAULT_KEY:
-            continue
-        groups[key].append(str(f))
+        groups[_DEFAULT_KEY].append(str(f))
 
 
 def _scan_e2e_test_dir(
@@ -325,19 +308,19 @@ def _route_explicit_test_target(
     groups: dict[PartitionKey, list[str]],
 ) -> None:
     """Route a single explicit UT/E2E target to the appropriate runner group."""
+    if _SKIP_CPU_UT and (target == CPU_UT_BATCH_ALIAS or _is_ut_path(_pytest_node_file_path(target))):
+        print(
+            f"Warning: Skipping CPU UT target (--skip-cpu-ut is set): {target}",
+            file=sys.stderr,
+        )
+        return
     # The coverage recommender emits "cpu-ut" (the batch label of the
     # default_cpu_ut module) instead of the real pytest path "tests/ut".
     # Map it back so the recommended path runs the same CPU UTs the
-    # diff-based select-tests path selects for default_cpu_ut: tests/ut
-    # scanned with cpu_only=True, i.e. NPU-convention subdirs are skipped
-    # and the remaining files route to the CPU runner.
-    cpu_only = False
+    # diff-based select-tests path selects for default_cpu_ut.
     if target == CPU_UT_BATCH_ALIAS:
         target = CPU_UT_BATCH_PATH
-        file_path = target
-        cpu_only = True
-    else:
-        file_path = _pytest_node_file_path(target)
+    file_path = _pytest_node_file_path(target)
     if not _is_test_path(file_path):
         print(
             f"Warning: Skipping non-test path: {target}",
@@ -354,18 +337,11 @@ def _route_explicit_test_target(
         return
 
     if _is_ut_path(file_path):
+        # All UTs run on CPU, so UT targets always go to the CPU group.
         if "::" in target or path.is_file():
-            key = _route_ut_dir(file_path)
-            if cpu_only and key != _DEFAULT_KEY:
-                print(
-                    f"Warning: cpu_only module test {target} routes to NPU runner;"
-                    " check test_config.yaml for misconfigured cpu_only tests.",
-                    file=sys.stderr,
-                )
-                return
-            groups[key].append(target)
+            groups[_DEFAULT_KEY].append(target)
         else:
-            _scan_ut_test_dir(target, groups, cpu_only=cpu_only)
+            _scan_ut_test_dir(target, groups)
         return
 
     if _is_e2e_path(file_path):
@@ -747,8 +723,8 @@ def main():
     input_group.add_argument(
         "--all-tests",
         action="store_true",
-        help="Run the full test suite: scan tests/ut and tests/e2e/pull_request "
-        "and route every test file by its directory convention",
+        help="Run the full test suite: scan tests/ut (CPU) and "
+        "tests/e2e/pull_request, routing e2e tests by directory convention",
     )
     input_group.add_argument(
         "--curated",
@@ -768,7 +744,17 @@ def main():
         default=None,
         help="Force route all non-CPU tests to an exact label from runner_label.json",
     )
+    parser.add_argument(
+        "--skip-cpu-ut",
+        action="store_true",
+        help="Drop tests/ut targets from every selection mode. Used by the PR "
+        "scheduling path, where CPU UTs run in the cpu-ut job instead of "
+        "on a reserved runner. Scheduled full-suite coverage runs do not pass "
+        "this flag, so --all-tests keeps collecting CPU UT coverage.",
+    )
     args = parser.parse_args()
+    global _SKIP_CPU_UT
+    _SKIP_CPU_UT = args.skip_cpu_ut
     meta = yaml.safe_load(args.config.read_text()) or {}
     runners = _load_runners()
     partition_config = _load_partition_config(meta)
@@ -809,6 +795,12 @@ def main():
     elif args.all_tests:
         matched_modules = ["all"]
         for root in _ALL_TESTS_ROOTS:
+            if _SKIP_CPU_UT and _is_ut_path(root):
+                print(
+                    f"  Skipping {root} (--skip-cpu-ut is set)",
+                    file=sys.stderr,
+                )
+                continue
             path = Path(root)
             if _is_ut_path(root):
                 _scan_ut_test_dir(root, all_groups)

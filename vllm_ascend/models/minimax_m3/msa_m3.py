@@ -169,11 +169,14 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         head_dim: int,
         prefix: str,
         cache_config: CacheConfig | None = None,
+        kv_cache_dtype: str = "auto",
+        kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
-        self.dtype = torch.bfloat16
+        self.dtype = kv_cache_torch_dtype
+        self.kv_cache_dtype = kv_cache_dtype
         self.prefix = prefix
         self.cache_config = cache_config
         compilation_config = get_current_vllm_config().compilation_config
@@ -187,6 +190,7 @@ class AscendMiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
+            cache_dtype_str=self.kv_cache_dtype,
         )
 
     def forward(self) -> None: ...
@@ -397,6 +401,8 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         init_blocks: int = 0,
         local_blocks: int = 0,
         cache_config: CacheConfig | None = None,
+        kv_cache_dtype: str = "auto",
+        kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -411,6 +417,8 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             head_dim=index_head_dim,
             prefix=f"{prefix}.index_cache",
             cache_config=cache_config,
+            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_torch_dtype=kv_cache_torch_dtype,
         )
 
     def _decode_topk_tp_sharded(
@@ -472,10 +480,14 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
     def forward(
         self,
         index_query: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
-            return None, None
+            return None, None, None
         index_md = attn_metadata[self.index_cache.prefix]
         assert isinstance(index_md, AscendMiniMaxM3IndexerMetadata)
         num_tokens = index_md.num_actual_tokens
@@ -485,6 +497,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
 
         decode_topk: torch.Tensor | None = None
         prefill_topk: torch.Tensor | None = None
+        decode_select_num_idx: torch.Tensor | None = None
         if index_md.num_decodes > 0:
             d = index_md.decode
             assert d is not None
@@ -538,7 +551,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                         tp_rank,
                     )
                 else:
-                    decode_topk = minimax_m3_index_decode(
+                    decode_topk, decode_select_num_idx = minimax_m3_index_decode(
                         decode_iq,
                         kv,
                         d.block_table,
@@ -592,7 +605,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                     self.init_blocks,
                     self.local_blocks,
                 )
-        return decode_topk, prefill_topk
+        return decode_topk, prefill_topk, decode_select_num_idx
 
     @staticmethod
     def update_graph_params(
@@ -627,6 +640,8 @@ class AscendMiniMaxM3Indexer(nn.Module):
         init_blocks: int = 0,
         local_blocks: int = 0,
         cache_config: CacheConfig | None = None,
+        kv_cache_dtype: str = "auto",
+        kv_cache_torch_dtype: torch.dtype = torch.bfloat16,
     ) -> None:
         super().__init__()
         self.impl = AscendMiniMaxM3IndexerImpl(
@@ -640,6 +655,8 @@ class AscendMiniMaxM3Indexer(nn.Module):
             init_blocks=init_blocks,
             local_blocks=local_blocks,
             cache_config=cache_config,
+            kv_cache_dtype=kv_cache_dtype,
+            kv_cache_torch_dtype=kv_cache_torch_dtype,
         )
 
     @property
@@ -649,7 +666,11 @@ class AscendMiniMaxM3Indexer(nn.Module):
     def forward(
         self,
         index_query: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[
+        torch.Tensor | None,
+        torch.Tensor | None,
+        torch.Tensor | None,
+    ]:
         return self.impl(index_query)
 
 
@@ -853,13 +874,18 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         self.kv_cache_dtype = kv_cache_dtype
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
+        self._dequant_scale: torch.Tensor | None = None
 
     def forward(
         self,
         layer: AttentionLayer,
         query: torch.Tensor,
         kv_cache: torch.Tensor,
-        topk_idx: tuple[torch.Tensor | None, torch.Tensor | None],
+        topk_idx: tuple[
+            torch.Tensor | None,
+            torch.Tensor | None,
+            torch.Tensor | None,
+        ],
         output: torch.Tensor,
     ) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
@@ -867,7 +893,7 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
             return output
         main_md = attn_metadata[layer.layer_name]
         assert isinstance(main_md, AscendMiniMaxM3SparseMetadata)
-        decode_topk, prefill_topk = topk_idx
+        decode_topk, prefill_topk, decode_select_num_idx = topk_idx
 
         num_decode_tokens = main_md.num_decode_tokens
         num_tokens = main_md.num_actual_tokens
@@ -878,6 +904,12 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
         if main_md.num_decodes > 0:
             d = main_md.decode
             assert d is not None and decode_topk is not None
+            if self.kv_cache_dtype.startswith("fp8") and self._dequant_scale is None:
+                self._dequant_scale = torch.ones(
+                    (1, 1, 1, 1),
+                    dtype=torch.float32,
+                    device=query.device,
+                )
             minimax_m3_sparse_attn_decode(
                 q[:num_decode_tokens],
                 kv_cache,
@@ -889,6 +921,8 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 out[:num_decode_tokens],
                 d.decode_query_len,
                 block_size=self.block_size,
+                select_num_idx=decode_select_num_idx,
+                dequant_scale=self._dequant_scale,
             )
 
         if main_md.num_prefills > 0:
