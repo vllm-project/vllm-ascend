@@ -31,6 +31,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence im
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
+    get_layerwise_protocol,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -70,6 +71,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     get_block_hashes,
     get_group_block_size,
     get_group_cache_family,
+    get_partial_block_index,
     infer_cache_transfer_granularity,
     infer_group_block_sizes,
     infer_group_cache_families,
@@ -154,7 +156,10 @@ class KVPoolWorker:
         self.consumer_is_to_put = extra_config.get("consumer_is_to_put", False)
         self.backend = extra_config.get("backend", "mooncake")
         self.backend_name = self.backend.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        # Resolve the backend's layerwise protocol (if any) once through the
+        # registry; generic code never imports the protocol module by name.
+        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
+        self.use_layerwise_transfer = use_layerwise and self.layerwise_protocol is not None
         kv_cache_groups = kv_cache_config.kv_cache_groups if kv_cache_config is not None else None
         self.use_hybrid = uses_hybrid_kv_cache(vllm_config.scheduler_config, kv_cache_groups)
         self.use_mamba = self._uses_mamba_kv_cache(self.use_hybrid, kv_cache_config)
@@ -373,7 +378,7 @@ class KVPoolWorker:
                         effective_num_layers,
                     )
                     self.num_layers = effective_num_layers
-            if self.use_gva_layerwise:
+            if self.use_layerwise_transfer:
                 self._layerwise_reuse_layout = build_layerwise_reuse_layout(
                     get_layerwise_kv_cache_specs(self.kv_cache_config),
                     base_layers,
@@ -415,7 +420,7 @@ class KVPoolWorker:
         self.layerwise_offload = False
         self.independent_layers: list[int] = []
         self.prefetch_layer_map: dict[int, int] = {}
-        if self.use_gva_layerwise:
+        if self.use_layerwise_transfer:
             if self._layerwise_reuse_layout is None:
                 cache_layout = build_layerwise_cache_layout(
                     self.num_layers,
@@ -457,8 +462,22 @@ class KVPoolWorker:
             )
         return builders
 
-    def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> None:
+    def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> bool:
+        """Accept the MultiConnector composite slot-release waiter.
+
+        Only the layerwise transfer mode has receive threads waiting on an
+        externally supplied slot-release callback, so the gate lives here
+        (at the data-plane consumer) instead of at the connector proxy.
+        """
+        if not self.use_layerwise_transfer:
+            return False
         self.external_slot_release_waiter = waiter
+        # The receive thread snapshots the waiter at construction; if it is
+        # already running, hand the waiter over directly so a late
+        # registration still takes effect.
+        if isinstance(self.kv_recv_thread, KVCacheStoreLayerRecvingThread):
+            self.kv_recv_thread.external_slot_release_waiter = waiter
+        return True
 
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
@@ -470,7 +489,7 @@ class KVPoolWorker:
             self.layer_save_finished_events = [threading.Event() for i in range(self.num_layers)]
             self.sync_save_events = [torch.npu.Event() for i in range(self.num_layers)]
             can_save = self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put
-            if self.use_gva_layerwise and can_save:
+            if self.use_layerwise_transfer and can_save:
                 ready_event_sending = threading.Event()
                 self.kv_send_thread = KVCacheStoreLayerSendingThread(
                     self.m_store,
@@ -508,7 +527,7 @@ class KVPoolWorker:
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
             ready_event = threading.Event()
-            if self.use_gva_layerwise:
+            if self.use_layerwise_transfer:
                 self.kv_recv_thread = KVCacheStoreLayerRecvingThread(
                     self.m_store,
                     self.token_database,
@@ -813,7 +832,7 @@ class KVPoolWorker:
 
         # Initialize store, register buffers, and start transfer threads
         # directly here (like main) — no separate init_backend handshake.
-        if self.use_gva_layerwise:
+        if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
         self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
@@ -991,7 +1010,7 @@ class KVPoolWorker:
                 block_size,
                 self.hash_block_size,
             )
-            partial_block_index = self._get_partial_block_index(
+            partial_block_index = get_partial_block_index(
                 request.target_token_len,
                 block_size,
                 len(group_block_hashes),
@@ -1045,6 +1064,16 @@ class KVPoolWorker:
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
+            if (
+                getattr(self, "use_eagle", False)
+                and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1
+            ):
+                # Full-hit path: the trailing block is recomputed and will be
+                # re-stored by the normal save path, so never skip it here.
+                logger.debug(
+                    "Reqid: %s full-hit tail recompute path, tail block will be re-stored",
+                    request.req_id,
+                )
             group_block_hashes = get_block_hashes(
                 request.block_hashes,
                 block_size,
@@ -1057,7 +1086,7 @@ class KVPoolWorker:
             )
             cached_full_blocks = cached_tokens // block_size
             full_blocks = min(cached_full_blocks, len(group_block_hashes))
-            partial_block_index = self._get_partial_block_index(
+            partial_block_index = get_partial_block_index(
                 cached_tokens,
                 block_size,
                 len(group_block_hashes),
@@ -1094,33 +1123,21 @@ class KVPoolWorker:
                 )
             )
 
-    @staticmethod
-    def _get_partial_block_index(
-        token_count: int,
-        block_size: int,
-        hash_count: int,
-        enabled: bool,
-    ) -> int | None:
-        if not enabled or token_count <= 0:
-            return None
-        full_blocks, remainder = divmod(token_count, block_size)
-        if remainder:
-            return full_blocks
-        if full_blocks > hash_count:
-            return full_blocks - 1
-        return None
-
-    def _make_layerwise_gva_key(self, group_id: int, block_hash_hex: str) -> str:
-        """Generate GVA key for layerwise transfer.
+    def _make_layerwise_full_key(self, group_id: int, block_hash_hex: str) -> str:
+        """Full-block key for the layerwise transfer, built by the
+        backend's protocol module.
 
         Single-group models use the PR #11585 format (model@hash@rank) for
         backward compatibility. Multi-group models include group_id
         (model@group_id@hash@rank) to distinguish groups.
         """
-        if self.num_kv_cache_groups > 1:
-            return f"{self.model_name}@{group_id}@{block_hash_hex}@{self.head_or_tp_rank}"
-        else:
-            return f"{self.model_name}@{block_hash_hex}@{self.head_or_tp_rank}"
+        return self.layerwise_protocol.make_full_key(
+            self.model_name,
+            group_id,
+            block_hash_hex,
+            self.head_or_tp_rank,
+            self.num_kv_cache_groups,
+        )
 
     def _make_layerwise_partial_key(
         self,
@@ -1129,7 +1146,14 @@ class KVPoolWorker:
         block_index: int,
         end_token: int,
     ) -> str:
-        return f"{self.model_name}@partial@{request.req_id}@{group_id}@{block_index}@{end_token}@{self.head_or_tp_rank}"
+        return self.layerwise_protocol.make_partial_key(
+            self.model_name,
+            request.req_id,
+            group_id,
+            block_index,
+            end_token,
+            self.head_or_tp_rank,
+        )
 
     def _refresh_allocated_gvas(self, keys: list[str]) -> None:
         """Drop local GVA entries whose MemCache blobs were evicted."""
@@ -1156,7 +1180,7 @@ class KVPoolWorker:
         (multi-group) or model@hash@head_or_tp_rank (single-group, backward
         compat with PR #11585).
         """
-        if not self.use_gva_layerwise:
+        if not self.use_layerwise_transfer:
             return
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             return
@@ -1197,7 +1221,7 @@ class KVPoolWorker:
                     hit_full_blocks = pool_hit_tokens // effective_block_size
                     save_start_block = max(save_start_block, hit_full_blocks)
                 candidate_keys = [
-                    self._make_layerwise_gva_key(
+                    self._make_layerwise_full_key(
                         group_id,
                         block_hash_to_str(group_block_hashes[block_idx]),
                     )
@@ -1209,7 +1233,7 @@ class KVPoolWorker:
                 self._refresh_allocated_gvas(candidate_keys)
                 # Skip blocks that are still present and readable in MemCache.
                 while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_gva_key(
+                    key = self._make_layerwise_full_key(
                         group_id, block_hash_to_str(group_block_hashes[save_start_block])
                     )
                     if key in self._allocated_gvas:
@@ -1221,7 +1245,7 @@ class KVPoolWorker:
                 new_keys: list[str] = []
                 new_positions: list[int] = []
                 for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
-                    key = self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
+                    key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
                         block_gvas.append(cached)
@@ -1248,7 +1272,7 @@ class KVPoolWorker:
                             self._allocated_gvas[key] = gva
                             all_group_save_keys.append(key)
 
-                partial_block_index = self._get_partial_block_index(
+                partial_block_index = get_partial_block_index(
                     request.target_token_len,
                     effective_block_size,
                     len(group_block_hashes),
@@ -1322,7 +1346,7 @@ class KVPoolWorker:
           1. batch_get_key_info to fetch the GVA (fills block_gvas_np)
           2. batch_add_lease to register the blob locally + acquire a read lease
         """
-        if not self.use_gva_layerwise:
+        if not self.use_layerwise_transfer:
             return
         for request in requests:
             if request.load_spec is None or not request.load_spec.can_load:
@@ -1330,6 +1354,16 @@ class KVPoolWorker:
             cached_tokens = request.load_spec.kvpool_cached_tokens
             if not getattr(self, "use_eagle", False) and request.load_spec.kvpool_store_skip_tokens is not None:
                 cached_tokens = request.load_spec.kvpool_store_skip_tokens
+            if (
+                getattr(self, "use_eagle", False)
+                and request.load_spec.kvpool_cached_tokens == request.target_token_len - 1
+            ):
+                # Full-hit path: the trailing block is recomputed and will be
+                # re-stored by the normal save path, so never skip it here.
+                logger.debug(
+                    "Reqid: %s full-hit tail recompute path, tail block will be re-stored",
+                    request.req_id,
+                )
             block_hashes = request.block_hashes
 
             all_group_load_gvas: list[np.ndarray] = []
@@ -1356,7 +1390,7 @@ class KVPoolWorker:
                     continue
                 full_len = len(block_ids_by_group)
 
-                partial_block_index = self._get_partial_block_index(
+                partial_block_index = get_partial_block_index(
                     cached_tokens,
                     effective_block_size,
                     len(group_block_hashes),
@@ -1372,7 +1406,7 @@ class KVPoolWorker:
                     continue
 
                 keys = [
-                    self._make_layerwise_gva_key(group_id, block_hash_to_str(group_block_hashes[i]))
+                    self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[i]))
                     for i in range(load_start_block, full_blocks)
                 ]
                 block_indices = list(range(load_start_block, full_blocks))
@@ -2177,12 +2211,18 @@ class KVPoolWorker:
         return f"{key[:value_start]}{value}{key[value_end:]}"
 
     def _expand_lookup_keys_by_rank(self, keys: list[str], group_id: int) -> list[str]:
+        # All-rank KV pool lookup currently assumes PCP=1.
         expanded: list[str] = []
+        num_head_or_tp_ranks = self.get_group_tp_size(group_id)
+        # Keep each rank shard's block/layer keys contiguous to match
+        # lookup_scheduler()'s [rank_shard][block] result slicing.
         for pp_rank in range(self.pp_size):
-            for tp_rank in range(self.get_group_tp_size(group_id)):
-                for key in keys:
-                    tp_key = self._replace_key_field(key, "head_or_tp_rank", tp_rank)
-                    expanded.append(self._replace_key_field(tp_key, "pp_rank", pp_rank))
+            for dcp_rank in range(self.dcp_size):
+                for head_or_tp_rank in range(num_head_or_tp_ranks):
+                    for key in keys:
+                        rank_key = self._replace_key_field(key, "dcp", dcp_rank)
+                        rank_key = self._replace_key_field(rank_key, "head_or_tp_rank", head_or_tp_rank)
+                        expanded.append(self._replace_key_field(rank_key, "pp_rank", pp_rank))
         return expanded
 
     def _expand_lookup_key_variants(self, key: str, group_id: int, include_all_ranks: bool) -> list[str]:

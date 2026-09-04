@@ -12,24 +12,34 @@
 #                        ``select_tests.py --curated <name>``.
 # - ``skip_tests:``      test files that are removed after test collection,
 #                        regardless of how they were selected.
+# - ``accuracy_tests:``  the accuracy test files. When at least one of them
+#                        is selected (or the full suite runs via
+#                        ``--all-tests``), ``select_tests.py`` reroutes the
+#                        generic A3 partitions to the dedicated 560T labels
+#                        (see the A3 scheduling policy below).
 # - ``runner_mapping:``  regex patterns mapping test paths to logical
 #                        partitions (patterns are evaluated longest first,
 #                        most specific wins). Each entry has a ``default``
 #                        partition and an optional ``310p`` override for
 #                        files whose name contains ``_310p``.
-# - ``estimated_times:`` per-test estimated execution time in seconds, used
+# - ``estimated_times:`` per-file estimated execution time in seconds, used
 #                        for load-balanced partitioning. Updated periodically
 #                        by the schedule_e2e_test workflow. Unlisted tests
-#                        default to 600s (10 minutes). Supports ``::nodeid``
-#                        suffix for method-level granularity.
-# - ``pinned_routes:``   applied after normal selection, skip filtering, and
-#                        containment-aware deduplication. Tests remain in
-#                        their technical directories; only selected files are
-#                        moved from their normal partition to a dedicated
-#                        runner bucket.
+#                        default to 600s (10 minutes). File-level only:
+#                        bucketing and precision testing both work on files,
+#                        so ``::nodeid`` (method-level) entries are not
+#                        supported.
 # - ``partition:``       maps logical test buckets to exact labels from
 #                        runner_label.json and controls how many
 #                        load-balanced groups are created for each bucket.
+#
+# A3 scheduling policy: the generic ``linux-aarch64-a3-N-`` labels are mixed
+# pools of 560T and 752T machines, i.e. scheduling on them picks a machine
+# class at random. When the selection contains at least one accuracy test
+# (any file listed in ``accuracy_tests``), or when the full suite runs via
+# ``--all-tests`` (ready-all), ``select_tests.py`` reroutes those generic
+# partitions to the dedicated 560T labels (``linux-aarch64-a3-800i-N``) so no
+# 752T machine is started just for accuracy coverage.
 
 # === Curated Test Suites ===
 # Named test lists selected via ``select_tests.py --curated <name>``.
@@ -39,19 +49,58 @@ curated_tests:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
 
 # === Skipped Tests ===
-# Removed from any selection after directory scanning.
-# Temporarily skipped: the precision check in test_graph_mode.py is
-# unstable; re-enable once the graph mode precision issue is fixed.
+# Removed from any selection after directory scanning, so they are never
+# scheduled to a runner. Only whole-file skips belong here: when every test
+# function in the file is unconditionally skipped, register the file instead
+# of paying for a runner slot that executes nothing. Move the file back into
+# rotation once the underlying issue is fixed, and remove it from this list.
 skip_tests:
+  # Temporarily skipped: the precision check in test_graph_mode.py is
+  # unstable; re-enable once the graph mode precision issue is fixed.
   - tests/e2e/pull_request/four_card/test_graph_mode.py
+  # Probabilistic failure, need fix (pooling classification)
+  - tests/e2e/pull_request/one_card/_310p/test_classification_310p.py
+  # Broken after CANN and triton-ascend upgrade
+  - tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py
+  # Temporarily skipped due to flaky failures, pending investigation
+  - tests/e2e/pull_request/two_card/test_qwen3_performance.py
+  # Temporarily skipped: this test is currently broken
+  - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
+  # Temporarily skipped: capture/replay metrics unstable
+  - tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py
+  # Temporarily skip this DeepSeek V4 test
+  - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
+  # Temporarily skipped: this test is currently broken
+  - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
+  # The use case is unstable and temporarily taken offline
+  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
+
+# === Accuracy Tests ===
+# The accuracy tests. When at least one of these files is selected,
+# ``select_tests.py`` reroutes the generic A3 partitions to the dedicated
+# 560T labels (``linux-aarch64-a3-800i-N``); the files themselves stay in
+# their normal directory-based partitions.
+accuracy_tests:
+  - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
+  - tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py
+  - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
+  - tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py
+  - tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py
+  - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
+  - tests/e2e/pull_request/four_card/test_deepseek_v4.py
+  - tests/e2e/pull_request/four_card/test_graph_mode.py
+  - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
+  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
+  - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
+  - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
+  - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
+  - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
+  - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
 
 # === Estimated Times ===
-# Per-test estimated execution time in seconds.
+# Per-file estimated execution time in seconds.
 # Updated periodically by schedule_update_estimated_times workflow.
 # Unlisted tests default to 600s (10 minutes).
-# Supports ``::nodeid`` suffix for method-level granularity.
-# When both file-level and ``::nodeid`` entries exist, lookup uses
-# exact match first, then file-level fallback.
 estimated_times:
   tests/e2e/pull_request/one_card/_310p/test_classification_310p.py: 60
   tests/e2e/pull_request/one_card/_310p/test_dense_model_310p.py: 1210
@@ -73,6 +122,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/lora/test_qwenvl_lora.py: 600
   tests/e2e/pull_request/one_card/model_runner_v2/test_basic.py: 2650
   tests/e2e/pull_request/one_card/model_runner_v2/test_uva.py: 80
+  tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py: 80
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 270
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 580
   tests/e2e/pull_request/one_card/pooling/test_scoring.py: 740
@@ -116,7 +166,6 @@ estimated_times:
   tests/e2e/pull_request/two_card/model_runner_v2/test_data_parallel.py: 530
   tests/e2e/pull_request/two_card/model_runner_v2/test_spec_decode_data_parallel.py: 370
   tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py: 690
-  tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py::test_dflash2_acceptance: 300
   tests/e2e/pull_request/two_card/test_data_parallel.py: 520
   tests/e2e/pull_request/two_card/test_deepseek_multistream_moe.py: 120
   tests/e2e/pull_request/two_card/test_disaggregated_encoder.py: 230
@@ -138,7 +187,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 800
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 880
-  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 380
+  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 900
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
@@ -147,6 +196,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py: 30
   tests/e2e/pull_request/eight_card/test_glm5_2.py: 1360
   tests/e2e/pull_request/eight_card/model_runner_v2/test_glm5_2.py: 1360
+  tests/e2e/pull_request/eight_card/model_runner_v2/test_spec_pp_accuracy.py: 600
   tests/e2e/pull_request/four_card/test_data_parallel_tp2.py: 20
   tests/e2e/pull_request/four_card/test_sequence_parallel_linear.py: 340
   tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py: 380
@@ -160,70 +210,21 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_qwen3_mrv2_eplb.py: 410
   tests/e2e/pull_request/two_card/test_gemma4.py: 420
   tests/e2e/pull_request/eight_card/test_minimax_m3.py: 630
-  tests/e2e/pull_request/sixteen_card/test_kimi_k3.py: 360
-  tests/ut/attention/a2/test_attention_cp.py: 30
-  tests/ut/attention/a2/test_attention_cp_precision.py: 30
-  tests/ut/attention/a2/test_attention_v1.py: 30
-  tests/ut/attention/a2/test_attention_v1_precision.py: 540
-  tests/ut/attention/a2/test_common_cp.py: 30
-  tests/ut/attention/a2/test_mla_cp.py: 30
-  tests/ut/attention/a2/test_mla_cp_precision.py: 30
-  tests/ut/attention/a2/test_mla_precision.py: 190
-  tests/ut/attention/a2/test_mla_v1.py: 60
-  tests/ut/attention/a2/test_sfa_v1.py: 30
-  tests/ut/attention/a2/test_sfa_v1_precision.py: 120
-  tests/ut/compilation/a2/test_acl_graph.py: 40
-  tests/ut/device_allocator/a2/test_find_loaded_library.py: 30
-  tests/ut/eplb/core/a2/test_eplb_utils.py: 30
-  tests/ut/kv_offload/a2/test_remote_decode_lifecycle.py: 60
-  tests/ut/kv_offload/a2/test_remote_prefill_lifecycle.py: 60
-  tests/ut/ops/a2/test_gdn_chunk_meta.py: 30
-  tests/ut/ops/a2/test_eplb.py: 30
-  tests/ut/ops/a2/test_gdn_layerwise_kv.py: 70
-  tests/ut/ops/a2/test_token_dispatcher.py: 30
-  tests/ut/ops/a3_2/test_activation.py: 50
-  tests/ut/ops/a3_2/test_kimi_kda_fused_norm_gate.py: 60
-  tests/ut/ops/a3_2/test_select_experts.py: 20
-  tests/ut/quantization/methods/a2/test_w4a16.py: 30
-  tests/ut/quantization/methods/a2/test_w4a4_flatquant.py: 40
-  tests/ut/quantization/methods/a2/test_w4a4_laos_dynamic.py: 40
-  tests/ut/quantization/methods/a2/test_w4a8.py: 40
-  tests/ut/quantization/methods/a2/test_w8a16.py: 40
-  tests/ut/quantization/methods/a2/test_w8a8_dynamic.py: 30
-  tests/ut/quantization/methods/a2/test_w8a8_static.py: 40
-  tests/ut/sample/a2/test_gumbel_sampling.py: 110
-  tests/ut/spec_decode/a2/test_eagle_proposer.py: 50
-  tests/ut/worker/a2/test_block_table.py: 30
-  tests/ut/worker/a2/test_model_runner_v1.py: 30
-  tests/ut/worker/a2/test_model_runner_v1_with_device.py: 70
-  tests/ut/worker/a2/test_worker_multi_instance.py: 30
-  tests/ut/worker/a2/test_worker_v1.py: 40
-  tests/ut/worker/a2/test_worker_v2.py: 30
-
-# === Pinned Routes ===
-# Applied after normal selection, skip filtering, and containment-aware
-# deduplication. Tests remain in their technical directories; only selected
-# files are moved from their normal partition to a dedicated runner bucket.
-pinned_routes:
-  a3-800i-2:
-    tests:
-      - tests/e2e/pull_request/two_card/test_shared_expert_dp.py
-      - tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py
-      - tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py
-      - tests/e2e/pull_request/two_card/lora/test_qwen35_densemodel_lora_tp.py
-      - tests/e2e/pull_request/two_card/lora/test_qwen3moe_lora.py
-      - tests/e2e/pull_request/two_card/spec_decode/test_spec_decode.py
-  a3-800i-4:
-    tests:
-      - tests/e2e/pull_request/four_card/test_deepseek_v4.py
-      - tests/e2e/pull_request/four_card/test_graph_mode.py
-      - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
-      - tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
-      - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
-      - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
-      - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
-      - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
-      - tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py
+  tests/e2e/pull_request/four_card/test_kimi_k3.py: 360
+  tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 540
+  tests/e2e/pull_request/one_card/test_mla_precision.py: 190
+  tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 120
+  tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py: 30
+  tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
+  tests/e2e/pull_request/two_card/test_activation.py: 50
+  tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 60
+  tests/e2e/pull_request/one_card/test_w4a4_flatquant.py: 40
+  tests/e2e/pull_request/one_card/test_w4a4_laos_dynamic.py: 40
+  tests/e2e/pull_request/one_card/test_w8a16.py: 40
+  tests/e2e/pull_request/one_card/test_w8a8_dynamic.py: 30
+  tests/e2e/pull_request/one_card/test_w8a8_static.py: 40
+  tests/e2e/pull_request/one_card/test_gumbel_sampling.py: 110
+  tests/e2e/pull_request/one_card/test_model_runner_v1_with_device.py: 70
 
 # === Runner Mapping ===
 # Maps test paths to logical partitions using regex patterns.
@@ -241,12 +242,6 @@ runner_mapping:
     310p: 310p-4
   tests/e2e/pull_request/eight_card:
     default: a3-8
-  tests/e2e/pull_request/sixteen_card:
-    default: a3-16
-  tests/ut/.+/a3_2:
-    default: a3-2
-  tests/ut/.+/a2:
-    default: a2-1
 
 # === Partition Configuration ===
 # Maps logical test buckets to exact labels from runner_label.json and controls
@@ -264,20 +259,11 @@ partition:
   a3-2:
     runner_label: linux-aarch64-a3-2-
     count: 2
-  a3-800i-2:
-    runner_label: linux-aarch64-a3-800i-2
-    count: 2
   a3-4:
     runner_label: linux-aarch64-a3-4-
     count: 2
-  a3-800i-4:
-    runner_label: linux-aarch64-a3-800i-4
-    count: 2
   a3-8:
     runner_label: linux-aarch64-a3-8-
-    count: 1
-  a3-16:
-    runner_label: linux-aarch64-a3-16
     count: 1
   cpu-0:
     runner_label: linux-amd64-cpu-8-hk

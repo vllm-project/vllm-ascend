@@ -256,6 +256,7 @@ class VersionAdapter:
                 "--no-input",
                 "--disable-pip-version-check",
             ]
+            install_env = {**os.environ, "VLLM_TARGET_DEVICE": "empty"}
         else:
             command = [
                 "pip",
@@ -264,7 +265,8 @@ class VersionAdapter:
                 "--no-input",
                 "--disable-pip-version-check",
             ]
-        self._run(command, log_file, f"install vllm {expected}")
+            install_env = None
+        self._run(command, log_file, f"install vllm {expected}", env=install_env)
         self._overrides[VLLM_PACKAGE] = expected
         os.environ["VLLM_VERSION"] = expected.lstrip("v")
 
@@ -283,15 +285,20 @@ class VersionAdapter:
         self._overrides[TORCH_NPU_PACKAGE] = expected
 
     @staticmethod
-    def _run(command: list[str], log_file: Path | None, label: str) -> None:
+    def _run(
+        command: list[str],
+        log_file: Path | None,
+        label: str,
+        env: dict[str, str] | None = None,
+    ) -> None:
         logger.info("[version] running: %s", " ".join(command))
         try:
             if log_file is not None:
                 with open(log_file, "a", encoding="utf-8") as out:
-                    proc = subprocess.run(command, stdout=out, stderr=subprocess.STDOUT, text=True)
+                    proc = subprocess.run(command, stdout=out, stderr=subprocess.STDOUT, text=True, env=env)
                 tail = "(see version adaptation log)"
             else:
-                proc = subprocess.run(command, capture_output=True, text=True)
+                proc = subprocess.run(command, capture_output=True, text=True, env=env)
                 tail = (proc.stdout or "")[-2000:]
         except OSError as exc:
             raise VersionAdaptationError(f"Failed to execute command {' '.join(command)}: {exc}") from exc

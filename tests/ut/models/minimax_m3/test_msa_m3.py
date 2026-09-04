@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +18,12 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.models.minimax_m3 import MiniMaxM3SparseAttention
 from vllm_ascend.models.minimax_m3 import msa_m3 as msa_m3_module
-from vllm_ascend.models.minimax_m3.minimax_m3 import _scatter_index_cache
+from vllm_ascend.models.minimax_m3.minimax_m3 import (
+    _cast_for_cache,
+    _resolve_layer_kv_cache_dtype,
+    _resolve_layer_kv_cache_dtypes,
+    _scatter_index_cache,
+)
 from vllm_ascend.models.minimax_m3.msa_m3 import (
     AscendMiniMaxM3IndexerBackend,
     AscendMiniMaxM3IndexerCache,
@@ -45,6 +51,7 @@ from vllm_ascend.models.minimax_m3.ops.msa_m3_npu import (
     _index_score_topk_candidates,
     _minimax_m3_index_decode,
     _minimax_m3_index_score,
+    _minimax_m3_sparse_attn_a5,
     minimax_m3_index_decode,
     minimax_m3_index_prefill,
     minimax_m3_index_tp_block_parallel_decode,
@@ -205,6 +212,87 @@ def test_indexer_cache_uses_sfa_indexer_spec(mock_get_vllm_config: MagicMock) ->
         num_kv_heads=1,
         head_size=128,
     ) == (4, 128, 128)
+
+
+@patch(
+    "vllm_ascend.models.minimax_m3.minimax_m3.kv_cache_dtype_str_to_dtype",
+    return_value=torch.bfloat16,
+)
+def test_m3_kv_cache_dtype_skip_layers_keeps_gqa_bf16_and_msa_fp8(
+    mock_kv_dtype: MagicMock,
+) -> None:
+    cache_config = SimpleNamespace(
+        cache_dtype="fp8",
+        kv_cache_dtype_skip_layers=["0", "1", "2"],
+    )
+    model_config = SimpleNamespace(dtype=torch.bfloat16)
+
+    assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.0.self_attn") == "auto"
+    assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.2.self_attn") == "auto"
+    assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.3.self_attn") == "fp8"
+    assert _resolve_layer_kv_cache_dtype(cache_config, "model.layers.59.self_attn") == "fp8"
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.0.self_attn",
+        model_config,
+    ) == ("auto", torch.bfloat16)
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.2.self_attn",
+        model_config,
+    ) == ("auto", torch.bfloat16)
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.3.self_attn",
+        model_config,
+    ) == ("fp8", torch.float8_e4m3fn)
+    assert _resolve_layer_kv_cache_dtypes(
+        cache_config,
+        "model.layers.59.self_attn",
+        model_config,
+    ) == ("fp8", torch.float8_e4m3fn)
+    assert mock_kv_dtype.call_count == 2
+
+
+def test_m3_fixed_scale_fp8_cache_cast_clamps_e4m3_range() -> None:
+    source = torch.tensor([-500.0, -1.0, 1.0, 500.0], dtype=torch.float32)
+    cache = torch.empty(1, dtype=torch.float8_e4m3fn)
+
+    actual = _cast_for_cache(source, cache)
+
+    assert actual.dtype == torch.float8_e4m3fn
+    assert torch.equal(actual.float(), torch.tensor([-448.0, -1.0, 1.0, 448.0]))
+
+
+@patch("vllm_ascend.models.minimax_m3.msa_m3.get_current_vllm_config")
+def test_m3_indexer_cache_spec_follows_resolved_fp8_dtype(mock_get_vllm_config: MagicMock) -> None:
+    mock_get_vllm_config.return_value = SimpleNamespace(
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
+    index_cache = AscendMiniMaxM3IndexerCache(
+        head_dim=128,
+        prefix="model.layers.3.self_attn.attn.index_cache",
+        kv_cache_dtype="fp8",
+        kv_cache_torch_dtype=torch.float8_e4m3fn,
+    )
+
+    spec = index_cache.get_kv_cache_spec(vllm_config)
+
+    assert spec.dtype == torch.float8_e4m3fn
+    assert spec.cache_dtype_str == "fp8"
+
+
+def test_a5_decode_topk_keeps_fused_postprocess_fast_path() -> None:
+    source_path = Path(msa_m3_module.__file__).with_name("ops") / "msa_m3_triton_a5.py"
+    source = source_path.read_text(encoding="utf-8")
+    decode_source = source[source.index("def minimax_m3_index_decode(") :]
+
+    assert "_decode_index_score_pad_tail_kernel" not in source
+    assert "score = torch.full(" in decode_source
+    assert "_, topk_idx_raw = torch.topk(score, k=topk" in decode_source
+    assert "_index_topk_postprocess_kernel" in decode_source
+    assert "return topk_idx, select_num_idx" in decode_source
 
 
 @patch("vllm_ascend.models.minimax_m3.msa_m3.get_forward_context")
@@ -511,6 +599,7 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
         decode=decode,
     )
     expected = torch.zeros(1, 1, 2, dtype=torch.int32)
+    expected_select_num_idx = torch.ones(1, 1, dtype=torch.int32)
     tp_group = SimpleNamespace(world_size=4, rank_in_group=0)
 
     with (
@@ -531,14 +620,15 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
         patch.object(
             msa_m3_module,
             "minimax_m3_index_decode",
-            return_value=expected,
+            return_value=(expected, expected_select_num_idx),
             create=True,
         ) as mock_decode,
     ):
-        actual, prefill = impl.forward(torch.zeros(1, 4))
+        actual, prefill, select_num_idx = impl.forward(torch.zeros(1, 4))
 
     assert actual is expected
     assert prefill is None
+    assert select_num_idx is expected_select_num_idx
     mock_decode.assert_called_once()
     decode_args = mock_decode.call_args.args
     assert torch.equal(decode_args[0], torch.zeros(1, 1, 4))
@@ -614,10 +704,11 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
             create=True,
         ) as mock_topk,
     ):
-        decode, actual = impl.forward(torch.zeros(1, 4))
+        decode, actual, select_num_idx = impl.forward(torch.zeros(1, 4))
 
     assert decode is None
     assert actual is expected
+    assert select_num_idx is None
     mock_score.assert_called_once()
     score_args = mock_score.call_args.args
     assert torch.equal(score_args[0], torch.zeros(1, 1, 4))
@@ -1393,10 +1484,11 @@ def test_indexer_speculative_decode_uses_tp_block_parallel_path(
         "vllm_ascend.models.minimax_m3.msa_m3.minimax_m3_index_tp_block_parallel_decode",
         return_value=expected,
     ) as mock_tp_block_parallel:
-        actual, prefill = impl.forward(torch.zeros(2, 4))
+        actual, prefill, select_num_idx = impl.forward(torch.zeros(2, 4))
 
     assert actual is expected
     assert prefill is None
+    assert select_num_idx is None
     mock_tp_block_parallel.assert_called_once()
     call_kwargs = mock_tp_block_parallel.call_args.kwargs
     assert mock_tp_block_parallel.call_args.args[2] is decode.tp_score
@@ -1500,12 +1592,13 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     output = torch.zeros_like(query)
     decode_topk = torch.tensor([[0, 1]], dtype=torch.int32)
     prefill_topk = torch.tensor([[2, 3]], dtype=torch.int32)
+    decode_select_num_idx = torch.tensor([[2]], dtype=torch.int32)
 
     result = impl.forward(
         layer,
         query,
         kv_cache,
-        (decode_topk, prefill_topk),
+        (decode_topk, prefill_topk, decode_select_num_idx),
         output,
     )
 
@@ -1514,6 +1607,8 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     mock_sparse_attn_prefill.assert_called_once()
     assert mock_sparse_attn_decode.call_args.args[0].shape == (1, 2, 4)
     assert mock_sparse_attn_decode.call_args.kwargs["block_size"] == 128
+    assert mock_sparse_attn_decode.call_args.kwargs["select_num_idx"] is decode_select_num_idx
+    assert "query_lens" not in mock_sparse_attn_decode.call_args.kwargs
     assert mock_sparse_attn_prefill.call_args.args[0].shape == (2, 2, 4)
 
 
@@ -1559,3 +1654,109 @@ def test_sparse_attn_decode_npu_forwards_runtime_metadata(
     assert kwargs["block_size"] == 128
     assert kwargs["top_k"] == 2
     assert torch.equal(output, torch.ones_like(output))
+
+
+def test_m3_impls_provide_update_graph_params_protocol():
+    """Both M3 impls must satisfy the update_graph_params protocol.
+
+    The implementations are no-ops (replay parameters are refreshed by the
+    metadata builders), but the method must exist so the full-graph
+    parameter-update backend selection treats them uniformly.
+    """
+    from vllm_ascend.models.minimax_m3.msa_m3 import (
+        AscendMiniMaxM3IndexerImpl,
+        AscendMiniMaxM3SparseImpl,
+    )
+
+    for impl_cls in (AscendMiniMaxM3IndexerImpl, AscendMiniMaxM3SparseImpl):
+        method = getattr(impl_cls, "update_graph_params", None)
+        assert callable(method)
+        # Signature parity with AscendAttentionBackendImpl.update_graph_params.
+        params = inspect.signature(method).parameters
+        assert list(params)[:5] == [
+            "update_stream",
+            "forward_context",
+            "num_tokens",
+            "vllm_config",
+            "speculative_config",
+        ]
+        assert params["speculative_config"].default is None
+
+
+@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score", create=True)
+def test_sparse_attn_decode_npu_uses_fp8_inputs_and_reused_scale(
+    mock_sparse_attention_score: MagicMock,
+) -> None:
+    q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]], dtype=torch.bfloat16)
+    kv_cache = torch.zeros(2, 1, 128, 1, 4, dtype=torch.float8_e4m3fn)
+    topk_idx = torch.tensor([[[0]]], dtype=torch.int32)
+    select_num_idx = torch.ones(1, 1, dtype=torch.int32)
+    block_table = torch.zeros(1, 1, dtype=torch.int32)
+    seq_lens = torch.ones(1, dtype=torch.int32)
+    dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32)
+    output = torch.empty_like(q)
+    mock_sparse_attention_score.return_value = torch.ones_like(output)
+
+    minimax_m3_sparse_attn_decode_npu(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        seq_lens,
+        num_kv_heads=1,
+        sm_scale=0.5,
+        output=output,
+        decode_query_len=1,
+        select_num_idx=select_num_idx,
+        dequant_scale=dequant_scale,
+    )
+
+    args = mock_sparse_attention_score.call_args.args
+    kwargs = mock_sparse_attention_score.call_args.kwargs
+    assert args[0].dtype == torch.float8_e4m3fn
+    assert args[1].dtype == torch.float8_e4m3fn
+    assert args[2].dtype == torch.float8_e4m3fn
+    assert kwargs["select_num_idx"] is select_num_idx
+    assert kwargs["actual_seq_lengths"].dtype == torch.int32
+    assert torch.equal(kwargs["actual_seq_lengths"], torch.ones_like(seq_lens))
+    assert kwargs["q_dequant_scale"] is dequant_scale
+    assert kwargs["k_dequant_scale"] is dequant_scale
+    assert kwargs["v_dequant_scale"] is dequant_scale
+    assert kwargs["attention_out_dtype"] == torch.bfloat16
+
+
+@patch.object(torch.ops._C_ascend, "npu_sparse_attention_score_prefill", create=True)
+@patch("vllm_ascend.models.minimax_m3.ops.msa_m3_npu._npu_k2q_csr")
+def test_sparse_attn_prefill_a5_uses_fp8_inputs(
+    mock_k2q_csr: MagicMock,
+    mock_sparse_attention_score_prefill: MagicMock,
+) -> None:
+    q = torch.tensor([[[500.0, -500.0, 1.0, -1.0]]], dtype=torch.bfloat16)
+    kv_cache = torch.zeros(2, 1, 128, 1, 4, dtype=torch.float8_e4m3fn)
+    topk_idx = torch.tensor([[[0]]], dtype=torch.int32)
+    block_table = torch.zeros(1, 1, dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.ones(1, dtype=torch.int32)
+    output = torch.empty_like(q)
+    csr = torch.zeros(1, dtype=torch.int32)
+    mock_k2q_csr.return_value = (csr, csr, csr)
+    mock_sparse_attention_score_prefill.return_value = torch.ones_like(output)
+
+    _minimax_m3_sparse_attn_a5(
+        q,
+        kv_cache,
+        topk_idx,
+        block_table,
+        cu_seqlens_q,
+        seq_lens,
+        num_kv_heads=1,
+        sm_scale=0.5,
+        output=output,
+        block_size=128,
+    )
+
+    args = mock_sparse_attention_score_prefill.call_args.args
+    assert args[0].dtype == torch.float8_e4m3fn
+    assert args[1].dtype == torch.float8_e4m3fn
+    assert args[2].dtype == torch.float8_e4m3fn
+    assert args[11] == 4

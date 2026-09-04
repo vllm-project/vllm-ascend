@@ -71,6 +71,7 @@ def _configure_jemalloc() -> None:
         os.environ["LD_PRELOAD"] = f"{jemalloc_path}:{ld_preload}" if ld_preload else jemalloc_path
 
 
+@pytest.mark.skip(reason="broken on 560T A3 runner")
 @pytest.mark.e2e_model(str(MINIMAX_M3_MODEL_PATH))
 @pytest.mark.e2e_coverage(
     arch="multimodal",

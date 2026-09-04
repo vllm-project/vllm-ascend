@@ -245,11 +245,12 @@ def _run_speculative_decoding(
     example_prompts: Sequence[str] = SPEC_DECODE_PROMPTS,
     max_tokens: int = 1024,
     acceptance_length_rtol: float = ACCEPTANCE_LENGTH_RTOL,
+    is_moe: bool = True,
 ) -> float:
     prompts = list(example_prompts)
     with VllmRunner(
         model_name,
-        enable_expert_parallel=True,
+        enable_expert_parallel=is_moe,
         disable_log_stats=False,
         max_num_seqs=len(prompts),
         speculative_config=speculative_config,
