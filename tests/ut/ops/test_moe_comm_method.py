@@ -258,7 +258,6 @@ class TestMoECommMethod(TestBase):
                 activation="silu",
                 need_trans=False,
                 dynamic_eplb=False,
-                record_before_gmm2=True,
                 quant=MoEQuantParams(),
             )
         )
@@ -274,7 +273,6 @@ class TestMoECommMethod(TestBase):
         mlp_compute_input = mock_unified_apply_mlp.call_args.kwargs["mlp_compute_input"]
         self.assertFalse(mlp_compute_input.fusion)
         self.assertFalse(mlp_compute_input.quant.is_mxfp)
-        self.assertTrue(mlp_compute_input.record_before_gmm2)
 
         # Verify token_combine was called
         mock_td_instance.token_combine.assert_called_once_with(

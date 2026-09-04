@@ -161,10 +161,7 @@ class MoECommMethod(ABC):
             expert_tokens=token_dispatch_output.group_list,
         )
 
-    def _apply_mlp(
-        self,
-        mlp_compute_input: MoEMlpComputeInput,
-    ) -> tuple[torch.Tensor, torch.npu.Event | None]:
+    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> tuple[torch.Tensor, torch.npu.Event | None]:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
     @abstractmethod

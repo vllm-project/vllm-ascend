@@ -62,7 +62,6 @@ def _build_apply_layer():
 def _build_unquantized_method(*, dynamic_eplb: bool = False):
     method = AscendUnquantizedFusedMoEMethod.__new__(AscendUnquantizedFusedMoEMethod)
     method.dynamic_eplb = dynamic_eplb
-    method.record_before_gmm2 = False
     method.tid2eid = None
     method.moe = SimpleNamespace(has_bias=False)
     method._maybe_pad_weight = MagicMock(side_effect=lambda weight: weight)
@@ -1150,11 +1149,11 @@ def test_sp_multistream_down_projection_and_reduce_scatter_wait_for_routed_final
     shared_experts.lora_context = None
     shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY)
     hidden_states = torch.randn(4, 4)
-    shared_gate_up = torch.randn(4, 8)
+    part1_out = torch.randn(4, 8)
     shared_act = torch.randn(4, 4)
     shared_out = torch.randn(4, 4)
     reduced_out = torch.randn(2, 4)
-    shared_experts.part1 = MagicMock(return_value=shared_gate_up)
+    shared_experts.part1 = MagicMock(return_value=part1_out)
     shared_experts.apply_activation = MagicMock(return_value=shared_act)
     shared_experts.part2 = MagicMock(return_value=shared_out)
     shared_experts._gather_sp_input = MagicMock()
@@ -1197,7 +1196,7 @@ def test_sp_multistream_down_projection_and_reduce_scatter_wait_for_routed_final
         event_wait.args == (events.before_combine,) for event_wait in auxiliary_stream.wait_event.call_args_list
     )
     auxiliary_stream.wait_event.assert_any_call(events.before_gmm2)
-    shared_experts.apply_activation.assert_called_once_with(shared_gate_up)
+    shared_experts.apply_activation.assert_called_once_with(part1_out)
     shared_experts.part2.assert_called_once_with(hidden_states, shared_act)
     shared_experts._pad_and_reduce_scatter.assert_called_once_with(shared_out)
     default_stream.wait_stream.assert_called_once_with(auxiliary_stream)
@@ -1216,10 +1215,10 @@ def test_sequence_parallel_sedp_forward_skips_token_comms(monkeypatch):
     shared_experts.lora_context = None
     shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP)
     hidden_states = torch.randn(2, 4)
-    shared_gate_up = torch.randn(2, 8)
+    part1_out = torch.randn(2, 8)
     shared_act = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
-    shared_experts.part1 = MagicMock(return_value=shared_gate_up)
+    shared_experts.part1 = MagicMock(return_value=part1_out)
     shared_experts.apply_activation = MagicMock(return_value=shared_act)
     shared_experts.part2 = MagicMock(return_value=shared_out)
     current_stream = MagicMock()
@@ -1244,7 +1243,7 @@ def test_sequence_parallel_sedp_forward_skips_token_comms(monkeypatch):
     all_gather.assert_not_called()
     reduce_scatter.assert_not_called()
     shared_experts.part1.assert_called_once_with(hidden_states)
-    shared_experts.apply_activation.assert_called_once_with(shared_gate_up)
+    shared_experts.apply_activation.assert_called_once_with(part1_out)
     shared_experts.part2.assert_called_once_with(hidden_states, shared_act)
     assert [event_wait.args[0] for event_wait in current_stream.wait_event.call_args_list] == [
         events.before_routed_experts,
@@ -1264,10 +1263,10 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     shared_experts.quant_type = QuantType.W8A8
     shared_experts.parallel_mode = MagicMock(return_value=SharedExpertParallelMode.SEQUENCE_PARALLEL_SEDP)
     hidden_states = torch.randn(2, 4)
-    shared_gate_up = torch.randn(2, 8)
+    part1_out = torch.randn(2, 8)
     shared_act = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
-    shared_experts.part1 = MagicMock(return_value=shared_gate_up)
+    shared_experts.part1 = MagicMock(return_value=part1_out)
     shared_experts.apply_activation = MagicMock(return_value=shared_act)
     shared_experts.part2 = MagicMock(return_value=shared_out)
     current_stream = MagicMock()
@@ -1291,7 +1290,7 @@ def test_active_shared_expert_lora_uses_dense_wrappers(monkeypatch):
     assert output is shared_out
     dynamic_quant.assert_not_called()
     shared_experts.part1.assert_called_once_with(hidden_states)
-    shared_experts.apply_activation.assert_called_once_with(shared_gate_up)
+    shared_experts.apply_activation.assert_called_once_with(part1_out)
     shared_experts.part2.assert_called_once_with(hidden_states, shared_act)
 
 

@@ -226,7 +226,6 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 w2=w2,
                 group_list=torch.tensor([1, 1]),
                 need_trans=True,
-                record_before_gmm2=True,
             )
 
         self.assertTrue(output is expected)
@@ -273,36 +272,11 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 w2=torch.randn(2, 8, 8),
                 group_list=torch.tensor([1, 1]),
                 need_trans=False,
-                record_before_gmm2=True,
             )
 
         self.assertIs(output, expected)
         self.assertIs(output_evt, before_gmm2_evt)
         self.assertEqual(call_order, ["gmm1", "activation", "record_event", "gmm2"])
-
-    def test_unquant_skips_event_without_multistream_overlap(self):
-        hidden_states = torch.randn(2, 8)
-        stream = MagicMock()
-
-        with (
-            patch(
-                "torch_npu.npu_grouped_matmul",
-                side_effect=[[torch.randn(2, 16)], [torch.randn(2, 8)]],
-                create=True,
-            ),
-            patch("torch_npu.npu_swiglu", return_value=torch.randn(2, 8), create=True),
-            patch("torch.npu.current_stream", return_value=stream),
-        ):
-            _, output_evt = unquant_apply_mlp(
-                hidden_states=hidden_states,
-                w1=torch.randn(2, 8, 16),
-                w2=torch.randn(2, 8, 8),
-                group_list=torch.tensor([1, 1]),
-                need_trans=False,
-            )
-
-        self.assertIsNone(output_evt)
-        stream.record_event.assert_not_called()
 
     def test_request_unquant_path(self):
         hidden_states = torch.randn(2, 8)
@@ -324,7 +298,6 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
             activation="silu",
             need_trans=False,
             dynamic_eplb=False,
-            record_before_gmm2=True,
         )
 
         with (
@@ -337,7 +310,6 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         mock_unquant.assert_called_once()
         self.assertEqual(mock_unquant.call_args.kwargs["activation"], "silu")
         self.assertFalse(mock_unquant.call_args.kwargs["need_trans"])
-        self.assertTrue(mock_unquant.call_args.kwargs["record_before_gmm2"])
         mock_quant.assert_not_called()
 
     def test_request_quant_path(self):

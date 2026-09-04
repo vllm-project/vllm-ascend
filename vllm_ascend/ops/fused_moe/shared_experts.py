@@ -97,8 +97,8 @@ class AscendSharedExperts:
 
         if self.multistream_overlap:
             # Wrap the quant_method's process_weights_after_loading to validate that
-            # splitting shared expert computation into gate_up projection,
-            # activation, and down projection yields identical results to integrated
+            # splitting shared expert computation (gate_up projection, activation,
+            # then down projection) yields identical results to integrated
             # computation after weight loading.
             original_process_weights = quant_method.process_weights_after_loading
 
@@ -127,8 +127,8 @@ class AscendSharedExperts:
         )  # Random input for testing, scoped to [-1, 1]
 
         integrated_out = self.layer(test_input)
-        shared_gate_up = self.part1(test_input)
-        shared_act = self.apply_activation(shared_gate_up)
+        part1_out = self.part1(test_input)
+        shared_act = self.apply_activation(part1_out)
         split_out = self.part2(test_input, shared_act)
 
         if not torch.allclose(integrated_out, split_out):
@@ -396,10 +396,10 @@ class AscendSharedExperts:
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
                 # Execute the gate projection concurrently with dispatch.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
-                shared_gate_up = self.part1(hidden_states)
+                part1_out = self.part1(hidden_states)
                 # Execute activation concurrently with routed GMM2.
                 maybe_wait_event(fused_moe_evts.before_gmm2)
-                shared_act = self.apply_activation(shared_gate_up)
+                shared_act = self.apply_activation(part1_out)
                 # Execute the down projection concurrently with combine.
                 maybe_wait_event(down_projection_ready)
                 shared_out = self.part2(hidden_states, shared_act)
