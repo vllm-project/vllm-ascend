@@ -2284,16 +2284,25 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         PCP preserves the fixed graph token shape, but represents the padded
         local rows as zero-token requests. DSA requires the query offsets to
         cover every decode graph token, so expand the padded query offsets in
-        both the NPU and CPU metadata views. Padded slot mappings are
-        invalidated separately.
+        both the NPU and CPU metadata views. A regular decode has one query
+        token per request, while MTP verification has a fixed K+1 query
+        length. Padded slot mappings are invalidated separately.
 
-        Example: 2 actual requests in a graph batch padded to 4::
+        Regular decode example: 2 actual requests in a graph batch padded to 4::
 
             After PCP partition:
                 query_start_loc = [0, 1, 2, 2, 2]
 
             After DSA restoration:
                 query_start_loc = [0, 1, 2, 3, 4]
+
+        With MTP=1, each request verifies K+1=2 tokens in the same graph::
+
+            After PCP partition:
+                query_start_loc = [0, 2, 4, 4, 4]
+
+            After DSA restoration:
+                query_start_loc = [0, 2, 4, 6, 8]
 
         ``num_actual_reqs`` remains 2, and the two padded slot mappings remain
         invalid.
@@ -2307,30 +2316,33 @@ class AscendDSAPCPMetadataBuilder(dsa_v1.AscendDSAMetadataBuilder):
         is_prefilling = common_attn_metadata.is_prefilling
         if is_prefilling is not None and bool(is_prefilling.any()):
             return common_attn_metadata
-        if common_attn_metadata.num_input_tokens != num_reqs:
-            raise RuntimeError("DSA PCP full-decode graph requires one input token per request.")
+
+        # FULL_DECODE_ONLY uses the same query length for every request.
+        query_len = common_attn_metadata.num_input_tokens // num_reqs
+        padded_offsets = slice(num_actual_reqs + 1, num_reqs + 1)
+        padding_start = (num_actual_reqs + 1) * query_len
+        padding_end = (num_reqs + 1) * query_len
 
         # Expand NPU and CPU query offsets to cover padded graph tokens.
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
         torch.arange(
-            common_attn_metadata.num_actual_tokens + 1,
-            common_attn_metadata.num_input_tokens + 1,
+            padding_start,
+            padding_end,
+            query_len,
             dtype=query_start_loc.dtype,
             device=query_start_loc.device,
-            out=query_start_loc[num_actual_reqs + 1 : num_reqs + 1],
+            out=query_start_loc[padded_offsets],
         )
-        query_start_loc_cpu = torch.empty(
-            num_reqs + 1,
-            dtype=common_attn_metadata.query_start_loc_cpu.dtype,
-        )
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu.new_empty((num_reqs + 1,))
         query_start_loc_cpu[: num_actual_reqs + 1].copy_(
             common_attn_metadata.query_start_loc_cpu[: num_actual_reqs + 1]
         )
         torch.arange(
-            common_attn_metadata.num_actual_tokens + 1,
-            common_attn_metadata.num_input_tokens + 1,
+            padding_start,
+            padding_end,
+            query_len,
             dtype=query_start_loc_cpu.dtype,
-            out=query_start_loc_cpu[num_actual_reqs + 1 : num_reqs + 1],
+            out=query_start_loc_cpu[padded_offsets],
         )
 
         return common_attn_metadata.replace(

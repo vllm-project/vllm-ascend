@@ -1888,6 +1888,30 @@ def test_pcp_metadata_provider_discards_unused_global_tasks():
     builder._global_metadata_builder.take_device_metadata_tasks.assert_called_once_with()
 
 
+def test_pcp_graph_metadata_restores_mtp_query_offsets():
+    common_metadata = MagicMock(spec=AscendCommonAttentionMetadata)
+    common_metadata.num_reqs = 4
+    common_metadata.num_input_tokens = 8
+    common_metadata.is_prefilling = torch.zeros(2, dtype=torch.bool)
+    common_metadata.query_start_loc = torch.tensor(
+        [0, 2, 4, 4, 4],
+        dtype=torch.int32,
+    )
+    common_metadata.query_start_loc_cpu = common_metadata.query_start_loc.clone()
+    common_metadata.replace.return_value = common_metadata
+
+    actual = AscendDSAPCPMetadataBuilder._build_graph_common_attn_metadata(
+        common_metadata,
+        num_actual_reqs=2,
+    )
+
+    assert actual is common_metadata
+    expected_query_start_loc = torch.tensor([0, 2, 4, 6, 8], dtype=torch.int32)
+    replace_kwargs = common_metadata.replace.call_args.kwargs
+    assert torch.equal(replace_kwargs["query_start_loc"], expected_query_start_loc)
+    assert torch.equal(replace_kwargs["query_start_loc_cpu"], expected_query_start_loc)
+
+
 @pytest.mark.parametrize("local_num_actual_tokens", [2, 0], ids=["local_tokens", "empty_rank"])
 def test_pcp_forward_updates_global_caches_before_local_attention(
     local_num_actual_tokens: int,

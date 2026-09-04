@@ -240,7 +240,6 @@ def enable_dcp():
     return parallel_config.decode_context_parallel_size > 1
 
 
-@lru_cache(maxsize=1)
 def enable_pcp():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.prefill_context_parallel_size > 1

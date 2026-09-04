@@ -75,17 +75,6 @@ DSV3_2_SFA_PCP_GOLDENS = [
     "The president of United States isoint054 Rund959arki",
 ]
 
-DSV4_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
-DSV4_PROMPTS = [
-    "Hello, my name is",
-    "What is the meaning of life?",
-]
-DSV4_DSA_PCP_GOLDENS = [
-    "Hello, my name is {name} and I",
-    'What is the meaning of life?",\n    "What is',
-]
-
-
 MTP_PCP_MODEL = "wemaster/deepseek_mtp_main_random_bf16"
 EAGLE3_PCP_TARGET_MODEL = "Qwen/Qwen3-8B"
 EAGLE3_PCP_DRAFT_MODEL = "RedHatAI/Qwen3-8B-speculator.eagle3"
@@ -192,32 +181,6 @@ DSV3_2_SFA_PCP_CASE = AccuracyCase(
     },
 )
 
-DSV4_DSA_PCP_CASE = AccuracyCase(
-    name="dsv4_dsa_pcp_mrv2_full_decode_only",
-    model=DSV4_MODEL,
-    prompts=DSV4_PROMPTS,
-    expected_outputs=DSV4_DSA_PCP_GOLDENS,
-    max_tokens=5,
-    runner_kwargs={
-        "max_model_len": 1024,
-        "max_num_seqs": MAX_NUM_SEQS,
-        "max_num_batched_tokens": 1024,
-        "dtype": "auto",
-        "tensor_parallel_size": 2,
-        "prefill_context_parallel_size": 2,
-        "enable_expert_parallel": True,
-        "gpu_memory_utilization": 0.9,
-        "block_size": 128,
-        "quantization": "ascend",
-        "tokenizer_mode": "deepseek_v4",
-        "compilation_config": FULL_DECODE_GRAPH,
-        "additional_config": {
-            "enable_dsa_cp": False,
-            "enable_prefill_mc2": True,
-        },
-    },
-)
-
 
 @patch.dict(
     os.environ,
@@ -258,32 +221,6 @@ def test_dsv3_2_sfa_dcp_tp2_dcp2_model_runner_v2_accuracy() -> None:
 def test_dsv3_2_sfa_pcp_model_runner_v2_graph_accuracy() -> None:
     """Guard MRV2 SFA PCP full-decode-only graph accuracy."""
     _run_accuracy_case(DSV3_2_SFA_PCP_CASE)
-
-
-@pytest.mark.e2e_model(DSV4_MODEL)
-@pytest.mark.e2e_coverage(
-    arch="moe",
-    feature="dsa_pcp",
-    parallel="TP,EP,PCP",
-    deploy="pd_mix",
-    hardware="A3",
-    quantization="W4A8",
-    graph_mode="full_decode_only",
-)
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_BATCH_INVARIANT": "1",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "HCCL_BUFFSIZE": "2560",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-    },
-)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv4_dsa_pcp_model_runner_v2_graph_accuracy() -> None:
-    """Guard MRV2 DSA PCP full-decode-only graph accuracy."""
-    _run_accuracy_case(DSV4_DSA_PCP_CASE)
 
 
 def _run_pcp_spec_decode(

@@ -91,6 +91,7 @@ accuracy_tests:
   - tests/e2e/pull_request/four_card/test_graph_mode.py
   - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
   - tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
+  - tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_qwen3_next.py
@@ -187,7 +188,8 @@ estimated_times:
   tests/e2e/pull_request/four_card/_310p/test_moe_model_310p.py: 800
   tests/e2e/pull_request/four_card/_310p/test_vl_model_310p.py: 370
   tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py: 880
-  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 900
+  tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py: 590
+  tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py: 310
   tests/e2e/pull_request/four_card/context_parallel/test_prefix_caching_cp.py: 210
   tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py: 520
   tests/e2e/pull_request/four_card/rlhf/consistency/test_batch_invariant_tp4.py: 210
