@@ -4,6 +4,13 @@ from vllm.config.speculative import SpeculativeConfig
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa: F401
 
 
+def test_ascend_speculative_config_field_defaults_to_false():
+    field_name = "skip_parallel_drafting_seq_lens_override"
+
+    assert SpeculativeConfig.__dataclass_fields__[field_name].default is False
+    assert SpeculativeConfig.__pydantic_fields__[field_name].default is False
+
+
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
     config = Qwen3Config(
         architectures=["DSparkDraftModel"],
