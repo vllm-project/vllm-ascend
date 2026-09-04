@@ -84,5 +84,6 @@ class TokenDispatcherWithAllGather310(TokenDispatcherWithAllGather):
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
+                combine_topk_weights_dtype=token_dispatch_input.combine_topk_weights_dtype,
             ),
         )

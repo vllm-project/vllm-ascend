@@ -153,6 +153,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
             w2=torch.randn(1, 8, 4),
             quant_type=QuantType.NONE,
             dynamic_eplb=False,
+            combine_topk_weights_dtype=torch.bfloat16,
         )
         routed_topk_ids = torch.tensor([[3], [2]], dtype=torch.int32)
 
@@ -166,6 +167,7 @@ class TestMoERuntimeArgs(unittest.TestCase):
         self.assertIs(token_dispatch_input.routing, fused_experts_input.routing)
         self.assertIs(token_dispatch_input.quant, fused_experts_input.quant)
         self.assertIs(token_dispatch_input.topk_ids, routed_topk_ids)
+        self.assertEqual(token_dispatch_input.combine_topk_weights_dtype, torch.bfloat16)
 
     def test_build_fused_experts_input_requires_primitive_mxfp_params_for_mxfp_quant(self):
         for quant_type in (QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP):

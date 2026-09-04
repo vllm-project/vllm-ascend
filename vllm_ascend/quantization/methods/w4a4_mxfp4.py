@@ -225,14 +225,12 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
             random_matrix = torch.rand(topk_ids.size(0), num_logical_experts, device=topk_ids.device)
             topk_ids = torch.argsort(random_matrix, dim=1)[:, : topk_ids.size(1)].to(topk_ids.dtype)
 
-        if x.dtype not in [torch.uint8]:
-            topk_weights = topk_weights.to(x.dtype)
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
+                combine_topk_weights_dtype=None if x.dtype == torch.uint8 else x.dtype,
                 topk_ids=topk_ids,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
