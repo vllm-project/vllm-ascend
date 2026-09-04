@@ -23,6 +23,8 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+from vllm.v1.metrics.stats import RequestSpecDecodeMetrics
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend.core.recompute_scheduler import (
@@ -88,6 +90,81 @@ def test_recompute_notification_precedes_regular_output():
     assert output.finish_reason == FinishReason.STOP
     assert output.stop_reason == "recomputed"
     assert outputs[0][1].request_id == "regular-request"
+
+
+def test_update_from_output_returns_per_request_spec_decode_metrics():
+    scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
+    scheduler.defer_block_free = False
+    scheduler.perf_metrics = None
+    scheduler.log_stats = False
+    scheduler.num_sampled_tokens_per_step = 1
+    scheduler.spec_decode_metrics_level = "detailed"
+    scheduler.enable_return_routed_experts = False
+    scheduler.connector = None
+    scheduler.grammar_compile_error_reqs = []
+    scheduler.recompute_kv_load_failures = True
+    scheduler.finished_req_ids_dict = None
+    scheduler.structured_output_manager = MagicMock()
+    scheduler.structured_output_manager.should_advance.return_value = False
+    scheduler.kv_cache_manager = MagicMock()
+    scheduler.kv_cache_manager.take_events.return_value = None
+    scheduler.kv_cache_manager.estimate_cached_tokens.return_value = 0
+    scheduler.kv_event_publisher = MagicMock()
+    scheduler.make_stats = MagicMock(return_value=None)
+    scheduler._handle_stopped_request = MagicMock(return_value=False)
+
+    request = Request(
+        request_id="spec-request",
+        prompt_token_ids=[1],
+        sampling_params=SamplingParams(max_tokens=4),
+        pooling_params=None,
+    )
+    request.status = RequestStatus.RUNNING
+    request.num_in_flight_tokens = 4
+    request.num_computed_tokens = 1
+    request.spec_decode_metrics = RequestSpecDecodeMetrics.new(3)
+    scheduler.requests = {request.request_id: request}
+    scheduler.running = [request]
+    scheduler.waiting = MagicMock()
+    scheduler.skipped_waiting = MagicMock()
+
+    def finish_request(req, token_ids, *, is_stale):
+        req.status = RequestStatus.FINISHED_LENGTH_CAPPED
+        return token_ids, True
+
+    scheduler._update_request_with_output = MagicMock(side_effect=finish_request)
+
+    scheduler_output = SimpleNamespace(
+        recomputed_reqs=None,
+        num_scheduled_tokens={request.request_id: 4},
+        total_num_scheduled_tokens=4,
+        scheduled_spec_decode_tokens={request.request_id: [11, 12, 13]},
+        num_invalid_spec_tokens={request.request_id: 1},
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[11, 12, 99]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    outputs = scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    output = outputs[0].outputs[0]
+    assert output.spec_decode_metrics is request.spec_decode_metrics
+    assert output.spec_decode_metrics.to_dict() == {
+        "mean_acceptance_length": 3.0,
+        "draft_acceptance_rate": 1.0,
+        "acceptance_histogram": [0, 0, 1, 0],
+        "num_spec_steps": 1,
+        "num_accepted_draft_tokens": 2,
+        "num_draft_tokens": 2,
+        "num_spec_tokens": 3,
+        "per_step_accepted": [2],
+        "per_step_drafted": [2],
+    }
 
 
 def test_finish_recomputed_request_uses_normal_abort_cleanup():

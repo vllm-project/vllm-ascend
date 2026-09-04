@@ -38,6 +38,26 @@ All speculative decoding methods are configured through the `speculative_config`
 - **`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size for the draft model. Can only be `1` or the same as the target model's tensor parallel size.
 - **`disable_padded_drafter_batch`** (bool, default: `False`): Disable input padding for speculative decoding. If set to `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. **Note:** Only effective with `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and `extract_hidden_states` methods.
 
+### Per-request metrics
+
+For online serving, `--per-request-spec-decode-metrics` adds speculative-decoding
+statistics to each single-sequence OpenAI API response. The supported levels are
+`none` (default), `summary`, and `detailed`:
+
+```shell
+vllm serve Qwen/Qwen3-0.6B \
+  --speculative-config '{"method":"ngram","num_speculative_tokens":3,"prompt_lookup_min":1,"prompt_lookup_max":4}' \
+  --per-request-spec-decode-metrics detailed
+```
+
+The result is returned under `metrics.speculative_decoding`. Summary mode reports
+the mean acceptance length, draft acceptance rate, acceptance histogram, and
+aggregate draft/accepted-token counts. Detailed mode additionally reports the
+drafted and accepted token count for every verification step. For streaming
+responses, set `stream_options.include_usage=true`; the metrics are included in
+the final usage chunk. Metrics are not returned for requests with multiple output
+sequences (`n > 1`).
+
 **Offline inference** — pass `speculative_config` as a Python dict to `LLM()`:
 
 ```python
