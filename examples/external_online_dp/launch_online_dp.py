@@ -14,8 +14,8 @@ def parse_args():
     parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
     parser.add_argument("--dp-rpc-port", type=str, default=12345, help="Port for data parallel master node.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
-    parser.add_argument("--dp-deploy-role", type=str, default="mixed", help="Deploy role of current dp: mixed, prefill, decode.")
-    parser.add_argument("--local-dp-start-rank", type=int, default=0, help="Starting rank for current dp on local device.")
+    parser.add_argument("--dp-deploy-role", type=str, default="mixed", help="Deploy role: mixed, prefill, decode.")
+    parser.add_argument("--local-dp-start-rank", type=int, default=0, help="Starting rank on local device.")
     return parser.parse_args()
 
 
@@ -62,7 +62,8 @@ if __name__ == "__main__":
     for i in range(dp_size_local):
         dp_rank = dp_rank_start + i
         vllm_engine_port = vllm_start_port + i
-        visible_devices = ",".join(str(x) for x in range(local_dp_start_rank + i * tp_size, local_dp_start_rank + (i + 1) * tp_size))
+        visible_devices = ",".join(str(x) for x in range(
+            local_dp_start_rank + i * tp_size, local_dp_start_rank + (i + 1) * tp_size))
         process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
         processes.append(process)
         process.start()
