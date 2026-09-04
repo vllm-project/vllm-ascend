@@ -286,7 +286,6 @@ class ACLGraphWrapper:
 
         return entry.output
 
-
     def _updatable_graph_replay(
         self,
         forward_context,
@@ -302,6 +301,7 @@ class ACLGraphWrapper:
         else:
             graph.replay()
             graph.update(self.update_stream, resolved_tasks)
+
 
 def weak_ref_workspaces(params):
     if params is None:
@@ -321,14 +321,7 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
-
-    print("AscendAttentionBackend", AscendAttentionBackend)
-    if isinstance(attn_backend, AscendAttentionBackend):
-        print(292)
-        return
-
     if issubclass(attn_backend, AscendAttentionBackend):
-        print(296)
         return
 
     if vllm_version_is("0.27.1"):

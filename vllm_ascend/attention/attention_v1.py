@@ -50,7 +50,6 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     using_paged_attention,
 )
-
 from vllm_ascend.compilation.updatable_graph import (
     get_capture_resource,
     register_task,
