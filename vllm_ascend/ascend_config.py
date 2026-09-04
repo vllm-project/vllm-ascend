@@ -529,7 +529,7 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
-        #TODO: delete the deprecated flashcomm option when upstream SP is ready.
+        # TODO: delete the deprecated flashcomm option when upstream SP is ready.
         flashcomm_explicitly_enabled = (
             bool(vc.additional_config.get("enable_flashcomm1", False))
             or int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) != 0
@@ -538,16 +538,14 @@ class AscendConfig:
         # so users only need `enable_dsa_cp=true` in additional_config.
         if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
             logger.info_once("DSA-CP is enabled. Auto-enabling FlashComm .")
-            flashcomm_enabled = True
-            
-        if not flashcomm_enabled:
+
+        if not flashcomm_explicitly_enabled and not self.enable_dsa_cp:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         else:
             logger.info_once("FlashComm1 is enabled. ")
-
 
         if self.enable_dsa_cp:
             tp_size = vc.parallel_config.tensor_parallel_size
