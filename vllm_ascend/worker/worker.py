@@ -40,7 +40,8 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import Handle, _groups, get_pp_group, get_tp_group
+from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
@@ -1155,6 +1156,20 @@ class NPUWorker(WorkerBase):
         )
         init_ascend_model_parallel(self.parallel_config)
         ensure_ec_transfer_initialized(self.vllm_config)
+        self._apply_cpu_distributed_timeout()
+
+    def _apply_cpu_distributed_timeout(self) -> None:
+        # Apply the user-configured CPU (gloo) distributed timeout only after
+        # all process groups exist: passing it at group creation would make the
+        # group-creation barrier itself abort on slow multi-rank startup.
+        timeout = get_cpu_distributed_timeout_or_none()
+        if timeout is None:
+            return
+        for group_ref in _groups.values():
+            group = group_ref()
+            cpu_group = getattr(group, "cpu_group", None) if group is not None else None
+            if cpu_group is not None:
+                cpu_group.set_timeout(timeout)
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
