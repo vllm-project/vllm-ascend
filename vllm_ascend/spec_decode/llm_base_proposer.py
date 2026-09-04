@@ -596,7 +596,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._run_merged_draft,
                 self.vllm_config,
                 runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,
+                use_eagle=self.use_eagle,draft
                 enable_enpu=self.enable_enpu,
             )
 
@@ -611,6 +611,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 {
                     "actual_seq_lengths": metadata.actual_seq_lengths_q,
                     "actual_seq_lengths_kv": metadata.seq_lens_list,
+                    "block_table": metadata.block_tables,
                 }
             )
         return update_params

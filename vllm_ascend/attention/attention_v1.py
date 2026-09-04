@@ -519,19 +519,21 @@ class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
 class FIAParamProvider:
     layer_name: str | None
     sliding_window: int | None
+    is_draft_model: bool = False
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
-        if self.sliding_window:
+
+        if self.is_draft_model or not self.sliding_window:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
+                "block_table": metadata.block_tables,
             }
         else:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": metadata.block_tables,
             }
 
 
@@ -587,7 +589,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
-        self.using_paged_attention = False
 
     def get_sinks(self):
         return self.sinks
@@ -892,7 +893,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "workspace": workspace,
                 "out": [output_view, softmax_lse],
             },
-            FIAParamProvider(self._layer_name, self.sliding_window),
+            FIAParamProvider(
+                self._layer_name, 
+                self.sliding_window,
+                _EXTRA_CTX.is_draft_model
+            ),
         )
         return output, num_tokens
 
