@@ -522,6 +522,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher.start()
 
         mock_ascend_config = MagicMock()
+        mock_ascend_config.c8_reshape_optim_enabled = False
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_shared_expert_dp = False
         self.ascend_config_patcher = patch(
