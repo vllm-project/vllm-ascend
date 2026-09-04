@@ -116,10 +116,11 @@ class AscendAttentionBackend(AttentionBackend):
     @classmethod
     def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
         """Describe Ascend GQA's two dense K/V planes to the core planner."""
-        if spec.head_size_v != spec.head_size:
+        head_size_v = getattr(spec, "head_size_v", spec.head_size)
+        if head_size_v != spec.head_size:
             raise NotImplementedError(
                 "Ascend's standardized GQA layout currently requires equal "
-                f"K/V head sizes, got {spec.head_size} and {spec.head_size_v}."
+                f"K/V head sizes, got {spec.head_size} and {head_size_v}."
             )
         plane_size_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
         return replace(
