@@ -454,6 +454,72 @@ class TestGetCacheScaleMapper(TestBase):
             "model.layers.0.attn.v_cache_offset",
         )
 
+    def test_mxfp_c8_maps_qwen3_moe_static_v_cache_scale(self):
+        config = AscendModelSlimConfig({"kv_cache_type": "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL"})
+        mapper = config.get_cache_scale_mapper()
+
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.v_proj.kv_cache_scale"),
+            "model.layers.0.self_attn.attn.v_cache_scale",
+        )
+        # K is dynamically quantized for this scheme and has no static
+        # parameter registered by the attention method.
+        self.assertEqual(
+            mapper._map_name("model.layers.0.self_attn.k_proj.kv_cache_scale"),
+            "model.layers.0.self_attn.k_proj.kv_cache_scale",
+        )
+
+    def test_mxfp_c8_enabled_by_per_layer_quant_type(self):
+        # Newer ModelSlim checkpoints drop the model-wide kv_cache_type and
+        # state the recipe per layer instead; only full-attention layers of a
+        # hybrid model carry one.
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.3.self_attn.quant_type": "QK_MXFP8_DYNAMIC_V_MXFP8_PER_CHANNEL",
+                "model.layers.0.linear_attn.quant_type": "W8A8_DYNAMIC",
+            }
+        )
+        self.assertTrue(config.enable_mxfp_c8_quant)
+        mapper = config.get_cache_scale_mapper()
+        self.assertEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+            "model.layers.3.self_attn.attn.v_cache_scale",
+        )
+
+    def test_mxfp_c8_stands_fa_quant_down(self):
+        # Both recipes declared for the same layer: MXFP8 has to win, or the
+        # FAKQuant regex renames fa_v.scale into an MLA submodule a dense model
+        # does not have and the scale is silently dropped.
+        config = AscendModelSlimConfig(
+            {
+                "kv_cache_type": "K_DYNAMIC_V_STATIC_MXFP8_PER_CHANNEL",
+                "fa_quant_type": "FAKQuant",
+                "model.layers.3.self_attn.fa_k.scale": "FAKQuant",
+            }
+        )
+        self.assertTrue(config.enable_mxfp_c8_quant)
+        self.assertFalse(config.enable_fa_quant)
+
+        mapper = config.get_cache_scale_mapper()
+        self.assertEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_v.scale"),
+            "model.layers.3.self_attn.attn.v_cache_scale",
+        )
+        # K is quantized dynamically here, so its checkpoint scale has no
+        # parameter to land on and must be declared ignorable instead.
+        self.assertEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_k.scale"),
+            "model.layers.3.self_attn.fa_k.scale",
+        )
+        # The V offset does have a parameter: MXFP8 is symmetric, and loading
+        # the offset is how that gets checked instead of assumed.
+        self.assertEqual(
+            mapper._map_name("model.layers.3.self_attn.fa_v.offset"),
+            "model.layers.3.self_attn.attn.v_cache_offset",
+        )
+        for suffix in (".fa_k.scale", ".fa_q.scale", ".fa_k.offset"):
+            self.assertIn(suffix, config._ignore_unexpected_suffixes)
+
     def test_fa_quant_returns_mapper(self):
         config = AscendModelSlimConfig(
             {

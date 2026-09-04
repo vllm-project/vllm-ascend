@@ -20,6 +20,11 @@ def _quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
         # this degenerates to the plain contiguous narrow.
         if loaded_weight.dim() != 1:
             loaded_weight = loaded_weight.flatten()
+        if loaded_weight.numel() < param.numel() and param.numel() % loaded_weight.numel() == 0:
+            # Some ModelSlim recipes store a single set of per-channel scales
+            # shared by every KV head instead of one set per head. Tile it out
+            # to this rank's head count; the narrow below is then a no-op.
+            loaded_weight = loaded_weight.repeat(param.numel() // loaded_weight.numel())
         if loaded_weight.numel() != param.numel():
             tp_rank = get_tensor_model_parallel_rank()
             tp_size = get_tensor_model_parallel_world_size()
@@ -89,12 +94,31 @@ class AscendC8MXFPKVCacheAttentionMethod(AscendAttentionScheme):
             requires_grad=False,
         )
         layer.register_parameter("v_cache_scale", weight_param)
+        # Some ModelSlim recipes emit a V offset next to the scale, borrowed
+        # from the affine FAKQuant template. MXFP8 per-channel is symmetric and
+        # the operator takes no offset, so the only correct value is zero --
+        # register it to check that, rather than dropping it unread.
+        offset_param = torch.nn.Parameter(
+            torch.zeros((hidden_size,), dtype=torch.float32),
+            requires_grad=False,
+        )
+        layer.register_parameter("v_cache_offset", offset_param)
         # When loading weights, segment them according to TP
         weight_param.weight_loader = _quant_weight_loader
+        offset_param.weight_loader = _quant_weight_loader
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         vllm_config = get_current_vllm_config()
         target_dtype = vllm_config.model_config.dtype
+        offset = layer.v_cache_offset.data
+        if bool(offset.any()):
+            raise RuntimeError(
+                "[vllm-ascend/MXFP8_PER_CHANNEL] V cache offset is non-zero "
+                f"(min={float(offset.min())} max={float(offset.max())}), but the MXFP8 "
+                "per-channel scheme and the QuantFlashAttn operator are both symmetric. "
+                "This checkpoint was calibrated with an affine V quantizer and cannot be "
+                "served by this scheme."
+            )
         raw = layer.v_cache_scale.data
         # A minmax calibrator emits 0 for a channel whose absmax was 0, and
         # 2^-127 there would make the quantization reciprocal 2^127 -- any
