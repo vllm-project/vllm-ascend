@@ -57,11 +57,6 @@ msgstr "构建完成后，使用以下命令运行"
 msgid "### Manual Installation"
 msgstr "### 手动安装"
 
-msgid ""
-"Assuming your working directory is ```/workspace``` and vllm/vllm-ascend "
-"have already been installed."
-msgstr "假设您的工作目录为 ```/workspace```，并且已安装 vllm/vllm-ascend。"
-
 msgid "1. Install LMCache Repo"
 msgstr "1. 安装 LMCache 仓库"
 
@@ -84,3 +79,8 @@ msgstr "#### 在线服务"
 
 msgid "#### Offline"
 msgstr "#### 离线模式"
+
+msgid ""
+"Assuming your working directory is `/workspace` and vllm/vllm-ascend have "
+"already been installed."
+msgstr "假设你的工作目录是 `/workspace`，并且已经安装了 vllm/vllm-ascend。"
