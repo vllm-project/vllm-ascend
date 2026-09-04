@@ -90,6 +90,8 @@ from vllm_ascend.utils import (
     extract_dsv4_layer_index,
     get_ascend_device_type,
     get_dsv4_compress_ratio,
+    olora_tp_enable,
+    oproj_tp_enable,
 )
 
 
@@ -651,6 +653,10 @@ class Compressor(nn.Module):
             return_bias=False,
         )
 
+        # The custom compressor op consumes ND weights directly.
+        self.wkv.skip_weight_nz_conversion = True
+        self.wgate.skip_weight_nz_conversion = True
+
         # Compressor kernel only accepts FP32 norm_weight.
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=torch.float32)
 
@@ -790,6 +796,12 @@ class DeepseekV4Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wo_a",
             return_bias=False,
+        )
+        # DSA paths that bypass the Linear method use
+        # npu_transpose_batchmatmul, whose weight must remain ND on non-A5
+        # devices.
+        self.wo_a.skip_weight_nz_conversion = get_ascend_device_type() != AscendDeviceType.A5 and (
+            oproj_tp_enable() or not olora_tp_enable()
         )
         self.wo_b = RowParallelLinear(
             self.n_groups * config.o_lora_rank,
