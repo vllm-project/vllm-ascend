@@ -17,21 +17,21 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "scatter_nd_update_common.h"
 
-namespace ScatterNdUpdateV2 {
+namespace ScatterNdUpdate {
 
-template<bool isSort, typename IndicesT = int>
+template <bool isSort, typename IndicesT = int>
 class LinearIndexKernel {
 public:
     __aicore__ inline LinearIndexKernel() = delete;
-    __aicore__ inline LinearIndexKernel(
-        GM_ADDR indices, GM_ADDR workSpace, const ScatterNdUpdateV2TilingData& tiling, TPipe& pipe)
+    __aicore__ inline LinearIndexKernel(GM_ADDR indices, GM_ADDR workSpace,
+                                        const ScatterNdUpdateSkArch22TilingData& tiling, TPipe& pipe)
     {
         InitParams(tiling);
         InitBuffers(pipe);
         SetGmAddr(indices, workSpace, tiling);
     }
 
-    __aicore__ inline void InitParams(const ScatterNdUpdateV2TilingData& tiling)
+    __aicore__ inline void InitParams(const ScatterNdUpdateSkArch22TilingData& tiling)
     {
         blockIdx_ = GetBlockIdx();
         frontCoreNum_ = tiling.linearIndexTiling.frontCoreNum;
@@ -52,7 +52,7 @@ public:
         indicesMask_ = tiling.linearIndexTiling.indicesMask;
     }
 
-    template<bool isInt64, bool needSort>
+    template <bool isInt64, bool needSort>
     __aicore__ inline void InitBuffersUnified()
     {
         uint64_t offset = 0;
@@ -99,18 +99,19 @@ public:
         }
     }
 
-    __aicore__ inline void SetGmAddr(GM_ADDR indices, GM_ADDR workSpace, const ScatterNdUpdateV2TilingData& tiling)
+    __aicore__ inline void SetGmAddr(GM_ADDR indices, GM_ADDR workSpace, const ScatterNdUpdateSkArch22TilingData& tiling)
     {
-        indiceAddrOffset_ =
-            blockIdx_ < tiling.linearIndexTiling.frontCoreNum ?
-                tiling.linearIndexTiling.frontBlockNum * blockLength_ * blockIdx_ :
-                tiling.linearIndexTiling.frontCoreNum * tiling.linearIndexTiling.frontBlockNum * blockLength_ +
-                    (blockIdx_ - tiling.linearIndexTiling.frontCoreNum) * tiling.linearIndexTiling.tailBlockNum *
-                        blockLength_;
+        indiceAddrOffset_ = blockIdx_ < tiling.linearIndexTiling.frontCoreNum ?
+                                tiling.linearIndexTiling.frontBlockNum * blockLength_ * blockIdx_ :
+                                tiling.linearIndexTiling.frontCoreNum * tiling.linearIndexTiling.frontBlockNum *
+                                        blockLength_ +
+                                    (blockIdx_ - tiling.linearIndexTiling.frontCoreNum) *
+                                        tiling.linearIndexTiling.tailBlockNum * blockLength_;
 
         sortedIndicesGm_.SetGlobalBuffer((__gm__ int*)workSpace + indiceAddrOffset_);
         if constexpr (isSort) {
-            posIndicesGm_.SetGlobalBuffer((__gm__ int*)workSpace + tiling.linearIndexTiling.sortWorkspace + indiceAddrOffset_);
+            posIndicesGm_.SetGlobalBuffer((__gm__ int*)workSpace + tiling.linearIndexTiling.sortWorkspace +
+                                          indiceAddrOffset_);
         }
         if constexpr (std::is_same_v<IndicesT, int64_t>) {
             indicesGmInt64_.SetGlobalBuffer((__gm__ int64_t*)indices + indiceAddrOffset_ * indexDim_);
@@ -125,8 +126,9 @@ public:
             for (uint64_t i = 0; i < computeNum_; i++) {
                 ProcessOneWithSort(i, false);
             }
-            uint64_t lastActiveCore = (blockNum_ == 0) ? 0 :
-                (tailCoreNum_ == 0 ? frontCoreNum_ - 1 : frontCoreNum_ + tailCoreNum_ - 1);
+            uint64_t lastActiveCore = (blockNum_ == 0) ?
+                                          0 :
+                                          (tailCoreNum_ == 0 ? frontCoreNum_ - 1 : frontCoreNum_ + tailCoreNum_ - 1);
             if (blockIdx_ == lastActiveCore && blockRemainLength_ != 0) {
                 ProcessOneWithSort(computeNum_, true);
             }
@@ -134,8 +136,9 @@ public:
             for (uint64_t i = 0; i < computeNum_; i++) {
                 ProcessOne(i, false);
             }
-            uint64_t lastActiveCore = (blockNum_ == 0) ? 0 :
-                (tailCoreNum_ == 0 ? frontCoreNum_ - 1 : frontCoreNum_ + tailCoreNum_ - 1);
+            uint64_t lastActiveCore = (blockNum_ == 0) ?
+                                          0 :
+                                          (tailCoreNum_ == 0 ? frontCoreNum_ - 1 : frontCoreNum_ + tailCoreNum_ - 1);
             if (blockIdx_ == lastActiveCore && blockRemainLength_ != 0) {
                 ProcessOne(computeNum_, true);
             }
@@ -191,25 +194,8 @@ public:
     __aicore__ inline void Compute4LinearIndex(uint64_t process, bool isTail)
     {
         uint64_t computeRow = isTail ? blockRemainLength_ : blockLength_;
-        int32_t malValue = indexDim_ * sizeof(int);
-        Duplicate<int>(indicesLocal, 0, computeRow);
-        CreateVecIndex(rangeLocal, (int)0, computeRow);
-        PipeBarrier<PIPE_V>();
-        Muls(rangeLocal, rangeLocal, malValue, computeRow);
-        PipeBarrier<PIPE_V>();
-        for (int i = 0; i < indexDim_; ++i) {
-            if (i != 0) {
-                Adds(rangeLocal, rangeLocal, (int)(sizeof(int)), computeRow);
-                PipeBarrier<PIPE_V>();
-            }
-            LocalTensor<uint32_t> rangeLocalCasted = rangeLocal.ReinterpretCast<uint32_t>();
-            Gather(addTmpLocal, indicesOriginLocal, rangeLocalCasted, (uint32_t)0, (uint32_t)computeRow);
-            PipeBarrier<PIPE_V>();
-            Muls(addTmpLocal, addTmpLocal, (int)indicesMask_[i], computeRow);
-            PipeBarrier<PIPE_V>();
-            Add(indicesLocal, indicesLocal, addTmpLocal, computeRow);
-            PipeBarrier<PIPE_V>();
-        }
+        ComputeLinearIndexFromIndices(indicesLocal, indicesOriginLocal, addTmpLocal, rangeLocal, indicesMask_,
+                                      indexDim_, computeRow);
         if constexpr (!isSort) {
             PipeVToMte3();
         }
@@ -231,9 +217,11 @@ public:
             // 对齐处理：不足32的部分设为-1
             Duplicate<int>(rangeLocal, -1, (uint32_t)ALIGNED_BLOCK_NUM);
             PipeBarrier<PIPE_V>();
-            Cast(rangeLocal, indicesLocalFp32[ALIGNED_BLOCK_NUM * repeatId], RoundMode::CAST_ROUND, (uint32_t)repeatRemain);
+            Cast(rangeLocal, indicesLocalFp32[ALIGNED_BLOCK_NUM * repeatId], RoundMode::CAST_ROUND,
+                 (uint32_t)repeatRemain);
             PipeBarrier<PIPE_V>();
-            Cast(indicesLocalFp32[ALIGNED_BLOCK_NUM * repeatId], rangeLocal, RoundMode::CAST_ROUND, (uint32_t)ALIGNED_BLOCK_NUM);
+            Cast(indicesLocalFp32[ALIGNED_BLOCK_NUM * repeatId], rangeLocal, RoundMode::CAST_ROUND,
+                 (uint32_t)ALIGNED_BLOCK_NUM);
             PipeBarrier<PIPE_V>();
         }
         Duplicate<int>(posIdxLocal, -1, computeRowAligned);
@@ -297,4 +285,4 @@ private:
     uint64_t indiceAddrOffset_;
 };
 
-} // namespace ScatterNdUpdateV2
+} // namespace ScatterNdUpdate

@@ -287,7 +287,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         flat = idx_cache.view(-1, self.idx_head_dim)
         # Scatter ND update ignores indices outside the cache bounds, so graph
         # padding slots set to -1 do not write into the last cache row.
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(
             flat,
             index_meta.slot_mapping[:num_tokens].view(-1, 1),
             index_key[:num_tokens].to(flat.dtype),

@@ -17,22 +17,21 @@
 #include "kernel_tiling/kernel_tiling.h"
 #include "scatter_nd_update_common.h"
 
-namespace ScatterNdUpdateV2 {
+namespace ScatterNdUpdate {
 
-template<typename T>
+template <typename T, bool isViewStride0 = false>
 class LargeIndexKernel {
 public:
     __aicore__ inline LargeIndexKernel() = delete;
-    __aicore__ inline LargeIndexKernel(
-        GM_ADDR indices, GM_ADDR updates, GM_ADDR output,
-        const ScatterNdUpdateV2TilingData& tiling, TPipe& pipe)
+    __aicore__ inline LargeIndexKernel(GM_ADDR indices, GM_ADDR updates, GM_ADDR output,
+                                       const ScatterNdUpdateSkArch22TilingData& tiling, TPipe& pipe)
     {
         InitParams(tiling);
         InitBuffers(pipe);
         SetGmAddr(indices, updates, output, tiling);
     }
 
-    __aicore__ inline void InitParams(const ScatterNdUpdateV2TilingData& tiling)
+    __aicore__ inline void InitParams(const ScatterNdUpdateSkArch22TilingData& tiling)
     {
         blockIdx_ = GetBlockIdx();
 
@@ -57,6 +56,9 @@ public:
         for (uint64_t i = 0; i < indexDim_; ++i) {
             indicesMask_[i] = tiling.linearIndexTiling.indicesMask[i];
         }
+
+        varStride0Elements_ = tiling.viewTiling.varStride0Elements;
+        firstDimStrideRows_ = tiling.viewTiling.firstDimStrideRows;
     }
 
     __aicore__ inline void InitBuffers(TPipe& pipe)
@@ -72,7 +74,7 @@ public:
     }
 
     __aicore__ inline void SetGmAddr(GM_ADDR indices, GM_ADDR updates, GM_ADDR output,
-                                      const ScatterNdUpdateV2TilingData& tiling)
+                                     const ScatterNdUpdateSkArch22TilingData& tiling)
     {
         indicesGmInt64_.SetGlobalBuffer((__gm__ int64_t*)indices);
         updatesGm_.SetGlobalBuffer((__gm__ T*)updates);
@@ -134,7 +136,9 @@ public:
             DataCopyPad(updateLocal, updatesGm_[gmOffset], updateCopyParams, padParams);
             PipeMte2ToS();
 
-            uint64_t outOffset = static_cast<uint64_t>(linearIndex) + tileIdx * scatterTileLength_;
+            uint64_t outOffset = ResolveOutOffset<isViewStride0>(static_cast<uint64_t>(linearIndex), scatterLength_,
+                                                                 firstDimStrideRows_, varStride0Elements_,
+                                                                 tileIdx * scatterTileLength_);
             DataCopyExtParams outParams{1, static_cast<uint32_t>(tileLength * sizeof(T)), 0, 0, 0};
             DataCopyPad(outputGm_[outOffset], updateLocal, outParams);
             PipeMte3ToS();
@@ -170,6 +174,8 @@ private:
     uint64_t scatterTileNum_;
     uint64_t scatterTileLength_;
     uint64_t scatterTileTail_;
+    uint64_t varStride0Elements_;
+    uint64_t firstDimStrideRows_;
 };
 
-} // namespace ScatterNdUpdateV2
+} // namespace ScatterNdUpdate
