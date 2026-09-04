@@ -251,7 +251,7 @@ def test_token_dispatcher_with_all_gather_quant(
         token_dispatch_output=token_dispatch_output,
         use_fusion_ops=False,
     )
-    expert_output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+    expert_output, _ = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
     combined_output = dispatcher.token_combine(
         hidden_states=expert_output, combine_metadata=combine_metadata, bias=None
     )

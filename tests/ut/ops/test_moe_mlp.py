@@ -211,6 +211,9 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         expected = torch.randn(2, 8)
         w1 = torch.randn(2, 8, 16)
         w2 = torch.randn(2, 8, 8)
+        before_gmm2_evt = MagicMock()
+        stream = MagicMock()
+        stream.record_event.return_value = before_gmm2_evt
 
         with (
             patch(
@@ -223,8 +226,9 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 return_value=gate_up_out,
                 create=True,
             ),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
         ):
-            output, _ = unquant_apply_mlp(
+            output, output_evt = unquant_apply_mlp(
                 hidden_states=hidden_states,
                 w1=w1,
                 w2=w2,
@@ -233,11 +237,54 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
             )
 
         self.assertTrue(output is expected)
+        self.assertIs(output_evt, before_gmm2_evt)
+        stream.record_event.assert_called_once_with()
         first_call, second_call = mock_grouped_matmul.call_args_list
         self.assertEqual(len(first_call.kwargs["weight"]), 1)
         self.assertEqual(len(second_call.kwargs["weight"]), 1)
         self.assertEqual(first_call.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
         self.assertEqual(second_call.kwargs["weight"][0].shape, torch.Size([2, 8, 8]))
+
+    def test_unquant_records_event_between_activation_and_gmm2(self):
+        hidden_states = torch.randn(2, 8)
+        gate_up_out = torch.randn(2, 16)
+        shared_act = torch.randn(2, 8)
+        expected = torch.randn(2, 8)
+        before_gmm2_evt = MagicMock()
+        call_order: list[str] = []
+
+        def grouped_matmul(*args, **kwargs):
+            stage = "gmm1" if not call_order else "gmm2"
+            call_order.append(stage)
+            return [gate_up_out if stage == "gmm1" else expected]
+
+        def activation(_hidden_states):
+            call_order.append("activation")
+            return shared_act
+
+        stream = MagicMock()
+
+        def record_event():
+            call_order.append("record_event")
+            return before_gmm2_evt
+
+        stream.record_event.side_effect = record_event
+        with (
+            patch("torch_npu.npu_grouped_matmul", side_effect=grouped_matmul, create=True),
+            patch("torch_npu.npu_swiglu", side_effect=activation, create=True),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
+        ):
+            output, output_evt = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=torch.randn(2, 8, 16),
+                w2=torch.randn(2, 8, 8),
+                group_list=torch.tensor([1, 1]),
+                need_trans=False,
+            )
+
+        self.assertIs(output, expected)
+        self.assertIs(output_evt, before_gmm2_evt)
+        self.assertEqual(call_order, ["gmm1", "activation", "record_event", "gmm2"])
 
     def test_request_unquant_path(self):
         hidden_states = torch.randn(2, 8)
