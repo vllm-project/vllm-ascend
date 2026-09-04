@@ -158,7 +158,7 @@ DSV3_2_SFA_DCP_CASE = AccuracyCase(
         "block_size": 128,
         "quantization": "ascend",
         "compilation_config": FULL_DECODE_GRAPH,
-        "attention_config.indexer_kv_dtype": "int8",
+        "attention_config": {"indexer_kv_dtype": "fp8"},
         "additional_config": {
             "enable_dsa_cp": False,
         },
@@ -208,7 +208,7 @@ DSV4_DSA_PCP_CASE = AccuracyCase(
         "enable_expert_parallel": True,
         "gpu_memory_utilization": 0.9,
         "block_size": 128,
-        "attention_config.indexer_kv_dtype": "int8"
+        "attention_config": {"indexer_kv_dtype": "fp8"},
         "quantization": "ascend",
         "tokenizer_mode": "deepseek_v4",
         "compilation_config": FULL_DECODE_GRAPH,

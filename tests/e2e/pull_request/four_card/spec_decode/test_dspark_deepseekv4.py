@@ -89,7 +89,7 @@ def test_deepseek_v4_dspark_acceptance_tp4(
         runner_kwargs={
             "tensor_parallel_size": 4,
             "max_model_len": 4096,
-            "attention_config.indexer_kv_dtype": "int8",
+            "attention_config": {"indexer_kv_dtype": "fp8"},
             "compilation_config": CompilationConfig(cudagraph_mode="FULL_DECODE_ONLY"),
             "additional_config": additional_config,
         },
