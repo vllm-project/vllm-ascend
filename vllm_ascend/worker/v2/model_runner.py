@@ -269,6 +269,7 @@ class NPUModelRunner(GPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ):
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
@@ -285,6 +286,7 @@ class NPUModelRunner(GPUModelRunner):
             skip_attn_for_dummy_run=skip_attn_for_dummy_run,
             is_profile=is_profile,
             context_len=context_len,
+            valid_dummy_state_slots=valid_dummy_state_slots,
         )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()

@@ -253,6 +253,7 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
     get_kv_cache_compression_ratio,
+    get_storage_block_size,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
@@ -932,7 +933,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
-                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                mamba_state_copy_funcs=self._get_ascend_mamba_state_copy_funcs(),
             )
         else:
             self.num_accepted_tokens.copy_to_cpu(num_reqs)
@@ -948,6 +949,12 @@ class NPUModelRunner(GPUModelRunner):
                 )
         assert self.num_accepted_tokens_event is not None
         self.num_accepted_tokens_event.record()
+
+    def _get_ascend_mamba_state_copy_funcs(self):
+        """Bridge the copy-func tuple-to-mapping contract from vLLM #53896."""
+        if vllm_version_is("0.27.1"):
+            return self.model.get_mamba_state_copy_func()
+        return self._get_mamba_state_copy_funcs()
 
     def _sync_num_accepted_tokens(self, num_reqs: int, has_prev_mapping: bool) -> None:
         """Publish accepted counts in current request order after the D2H event."""
@@ -2340,7 +2347,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.input_batch,
                         self.requests,
                         self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
+                        self._get_ascend_mamba_state_copy_funcs(),
                         preprocess_bufs,
                     )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1
@@ -5009,7 +5016,7 @@ class NPUModelRunner(GPUModelRunner):
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
                     kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        num_blocks, current_kv_cache_spec.storage_block_size,
+                        num_blocks, get_storage_block_size(current_kv_cache_spec),
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size)
                     kv_cache_shape_list = [kv_cache_shape]
@@ -5040,13 +5047,13 @@ class NPUModelRunner(GPUModelRunner):
                     if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
                         indexer_k_shape = kv_cache_shape
                         indexer_scale_shape = attn_backend.get_kv_cache_shape(
-                                                num_blocks, current_kv_cache_spec.storage_block_size,
+                                                num_blocks, get_storage_block_size(current_kv_cache_spec),
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim
                                                 )
                         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
                             indexer_full_shape = attn_backend.get_kv_cache_shape(
-                                num_blocks, current_kv_cache_spec.storage_block_size,
+                                num_blocks, get_storage_block_size(current_kv_cache_spec),
                                 current_kv_cache_spec.num_kv_heads,
                                 current_kv_cache_spec.head_size
                                 + current_kv_cache_spec.scale_dim

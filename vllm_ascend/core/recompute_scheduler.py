@@ -64,6 +64,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -1009,6 +1010,14 @@ class RecomputeScheduler(Scheduler):
                 block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
                 boundary_state_offloads=boundary_state_offloads,
             )
+        pending_partial_tail_offloads = None
+        if vllm_version_is("0.28.0"):
+            if (
+                self.connector is not None
+                and self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.is_kv_producer
+            ):
+                pending_partial_tail_offloads = self.kv_cache_manager.take_partial_tail_offloads() or None
 
         pending_kv_cache_block_copies = None
         take_kv_cache_block_copies = getattr(self.kv_cache_manager, "take_kv_cache_block_copies", None)
@@ -1062,6 +1071,8 @@ class RecomputeScheduler(Scheduler):
             if callable(get_manager_metadata):
                 scheduler_output_kwargs["ec_manager_metadata"] = get_manager_metadata()
         scheduler_output = RecomputeSchedulerOutput(**scheduler_output_kwargs)
+        if vllm_version_is("0.28.0"):
+            scheduler_output.partial_tail_offloads = pending_partial_tail_offloads
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store

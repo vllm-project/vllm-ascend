@@ -1,7 +1,12 @@
+from collections.abc import Sequence
+
 import torch
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
+from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
+
+from vllm_ascend.utils import vllm_version_is
 
 
 # Without this patch, it will raise an exception when initialize kv_cache.
@@ -11,6 +16,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    kv_cache_groups: Sequence[KVCacheGroupSpec] | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -36,15 +42,20 @@ def bind_kv_cache(
     for layer_name in kv_caches:
         index2name[extract_layer_index(layer_name, num_attn_module)].append(layer_name)
 
+    ordered_layer_names: list[str] = []
     for layer_index in sorted(index2name.keys()):
         layer_names = index2name[layer_index]
         # remove some codes for the typical case of encoder-decoder model, e.g., bart.
         for layer_name in layer_names:
             runner_kv_caches.append(kv_caches[layer_name])
+            ordered_layer_names.append(layer_name)
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
+
+    if not vllm_version_is("0.27.1"):
+        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
 utils.bind_kv_cache = bind_kv_cache
