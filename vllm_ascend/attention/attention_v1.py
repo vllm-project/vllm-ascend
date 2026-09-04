@@ -252,9 +252,10 @@ class AscendMetadata:
 
     # Per-step scratch for C8-MXFP (QFA) layers. The builder creates one
     # AscendMetadata per step shared by all attention layers, so the QFA
-    # metadata operator output and the int8 causal mask are computed once per
-    # step (per decode/prefill subset) instead of once per layer. Keys:
-    # "decode" / "prefill" -> QFA metadata tensor, "attn_mask_int8" -> Tensor.
+    # metadata operator output is computed once per step instead of once
+    # per layer. Key: "step" -> QFA metadata tensor. Only used on the eager
+    # path -- graph capture bypasses the cache so the metadata op executes
+    # inside the captured region.
     qfa_metadata_cache: dict = field(default_factory=dict)
 
 
@@ -2777,20 +2778,6 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
         if self.vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("C8_MXFP v1 does not support PD disaggregation (kv_transfer) yet.")
-        if _EXTRA_CTX.capturing:
-            # Graph capture is handled natively by npugraph_ex (the backend
-            # this vLLM build uses for FULL graphs -- confirmed in the
-            # on-device capture stack): it captures the ALLOCATING QFA
-            # wrapper directly (internal at::empty lands in the graph pool),
-            # and the ops-transformer golden tests exercise exactly this
-            # (GRAPH_PATH=7: torch.compile(backend="npugraph_ex") with the
-            # metadata op called inline in forward). The requirements on our
-            # side are only graph-safety of the surrounding Python: no host
-            # syncs (scatter uses the device-side mask pattern) and no
-            # Python-side refresh of tensors the captured region consumes
-            # (replay never re-runs Python; the per-step lengths are derived
-            # in-graph from the runner's persistent buffers instead).
-            pass
         if kv_cache is None or len(kv_cache) < 4:
             raise RuntimeError(
                 "C8_MXFP attention requires a (k, v, k_scale, v_scale) KV cache "
