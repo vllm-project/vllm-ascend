@@ -51,8 +51,8 @@
 
 ## Test Cases
 
-Covered by the penalties pipeline test, which compares `vllm_ascend.sample.penalties.apply_all_penalties` (this kernel plus `apply_all_penalties_kernel`) against vllm's `apply_all_penalties`. Shapes follow the penalties inference path (`num_seqs = 1/8/32/128`, Qwen-style `vocab_size = 151936` and `5120`, prompt/output lengths including empty and all-padding). Unified elementwise tolerances: `rtol = atol = 1e-3` for fp16, `1e-2` for bf16.
+Dedicated kernel test compares `get_token_bin_counts_and_mask_triton` against a PyTorch `scatter_add_` reference (`torch.equal` on int32 counts and bool mask). Shapes follow the penalties inference path: Qwen-style `vocab_size = 151936` and `5120`, prompt/output lengths including empty, all-padding, and `seq_len = 257` (tail past `SEQ_BLOCK = 256`).
 
 ```bash
-pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_apply_penalties_triton.py
+pytest -sv tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_token_bin_counts_and_mask.py
 ```
