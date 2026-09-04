@@ -1390,7 +1390,7 @@ def adaptive_verification_gate_wrapper(model_runner):
                 max_total_logits=max_total_logits,
             )
         try:
-            manager = original_factory(
+            original_factory(
                 enable_adaptive_verification=enable_adaptive_verification,
                 attn_groups=attn_groups,
                 attn_cg_support=attn_cg_support,
@@ -1409,15 +1409,23 @@ def adaptive_verification_gate_wrapper(model_runner):
                 "gate for Ascend; decode runs through PIECEWISE graphs: %s",
                 exc,
             )
-            manager = None
-        if manager is None:
-            manager = make_piecewise_manager(
-                req_states,
-                query_start_loc,
-                num_bonus_tokens,
-                max_total_logits=max_total_logits,
-            )
-        return manager
+
+        # The upstream factory can return a manager even when the Ascend graph
+        # wrapper has redirected decode to PIECEWISE.  That manager prices the
+        # drafter only from ``full_cudagraph`` samples, which leaves an empty
+        # draft curve on Ascend and fails with "could not profile step costs".
+        # Keep upstream validation above, but always use the Ascend manager so
+        # both drafter and target curves are built from the PIECEWISE samples.
+        logger.info(
+            "Using Ascend PIECEWISE adaptive-verification manager for "
+            "confidence-scheduled DSpark."
+        )
+        return make_piecewise_manager(
+            req_states,
+            query_start_loc,
+            num_bonus_tokens,
+            max_total_logits=max_total_logits,
+        )
 
     try:
         vllm_model_runner.maybe_create_adaptive_verification_manager = relaxed_factory
