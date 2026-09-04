@@ -11,10 +11,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
-from vllm_ascend.ops.triton.compute_slot_mapping import (
-    _compute_slot_mapping_kernel,
-    _next_power_of_2,
-)
+from vllm_ascend.ops.triton.compute_slot_mapping import compute_slot_mapping
 
 
 class BlockTable:
@@ -154,19 +151,8 @@ class BlockTable:
             )
             self._compute_dcp_slot_mapping(req_indices, positions)
         else:
-            TILE_BLOCK_SIZE = 1024
-            kernel_kwargs = {
-                "KV_CACHE_BLOCK_SIZE": self.physical_block_size,
-                "BLOCKS_PER_KV_BLOCK": self.blocks_per_phys_block,
-                "TOTAL_CP_WORLD_SIZE": total_cp_world_size,
-                "TOTAL_CP_RANK": total_cp_rank,
-                "CP_KV_CACHE_INTERLEAVE_SIZE": self.cp_kv_cache_interleave_size,
-                "PAD_ID": PAD_SLOT_ID,
-                "TILE_BLOCK_SIZE": TILE_BLOCK_SIZE,
-                "BLOCK_TABLE_WINDOW_SIZE": _next_power_of_2(cdiv(TILE_BLOCK_SIZE, self.block_size) + 1),
-            }
-
-            _compute_slot_mapping_kernel[(num_reqs + 1,)](
+            compute_slot_mapping(
+                num_reqs,
                 num_tokens,
                 self.max_num_batched_tokens,
                 query_start_loc,
@@ -175,7 +161,12 @@ class BlockTable:
                 self.block_table.gpu.stride(0),
                 self.block_size,
                 self.slot_mapping.gpu,
-                **kernel_kwargs,
+                kv_cache_block_size=self.physical_block_size,
+                blocks_per_kv_block=self.blocks_per_phys_block,
+                total_cp_world_size=total_cp_world_size,
+                total_cp_rank=total_cp_rank,
+                cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                pad_id=PAD_SLOT_ID,
             )
 
     def compute_slot_mapping_draft(
