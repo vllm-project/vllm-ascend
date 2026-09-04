@@ -7,13 +7,13 @@
 
 Kimi K3 is a native multimodal Mixture-of-Experts (MoE) model. Its language backbone combines Kimi Delta Attention (KDA) with periodic Gated Multi-head Latent Attention (MLA), and uses Stable LatentMoE for expert computation. The model also integrates a MoonViT vision encoder and supports text, image understanding, reasoning, and tool calling.
 
-This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, multi-node deployment on Atlas 800 A3 and Atlas 800 A2, functional verification, and AISBench evaluation.
+This document will show the main verification steps of the model, including supported features, feature configuration, environment preparation, multi-node deployment on Atlas 800 A3, Atlas 800 A2, and Atlas 950DT, functional verification, and AISBench evaluation.
 
 This document is validated and written based on **vLLM-Ascend 0.26.0rc**.
 
 The current release includes a subset of the Kimi K3 optimization features that have been validated for this version. To provide a reproducible and supportable baseline, this guide uses fixed deployment configurations instead of exposing every tunable optimization.
 
-These configurations position Kimi K3 for native multimodal inference, reasoning and tool calling, and multi-node mixed Prefill/Decode or PD separation deployments on Atlas 800 A3 and A2. Additional optimization features and configuration guidance will be added in later releases after validation.
+These configurations position Kimi K3 for native multimodal inference, reasoning and tool calling, and multi-node mixed Prefill/Decode or PD separation deployments on Atlas 800 A3, A2, and Atlas 950DT. Additional optimization features and configuration guidance will be added in later releases after validation.
 
 ## 2 Supported Features
 
@@ -32,6 +32,8 @@ Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/K
 | 4 × Atlas 800 A3 (64G × 16)  | Mixed Prefill/Decode deployment            | DP4/TP16/EP64             |
 | 8 × Atlas 800 A3 (64G × 16)  | Four Prefill nodes and four Decode nodes   | DP4/TP16/PP1 on each side |
 | 8 × Atlas 800 A2 (64G × 8)   | Mixed Prefill/Decode deployment            | DP8/TP8/EP64              |
+| 4 × Atlas 950DT (8 devices)   | Mixed Prefill/Decode deployment            | DP4/TP8/EP32              |
+| 8 × Atlas 950DT (8 devices)   | Four Prefill nodes and four Decode nodes   | DP4/TP8/PP1 on each side  |
 
 The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
 
@@ -169,6 +171,72 @@ Select an image based on your host operating system and start it on every node. 
 
         ```bash
         export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-openeuler
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+
+    After a successful `docker run`, verify the container with `docker ps`.
+
+=== "Atlas 950DT"
+
+    Kimi K3 is validated on Atlas 950DT with eight devices per node.
+
+    === "Ubuntu"
+
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a5
+        docker run --rm \
+            --name vllm-ascend \
+            --shm-size=1g \
+            --net=host \
+            --privileged=true \
+            --device /dev/davinci0 \
+            --device /dev/davinci1 \
+            --device /dev/davinci2 \
+            --device /dev/davinci3 \
+            --device /dev/davinci4 \
+            --device /dev/davinci5 \
+            --device /dev/davinci6 \
+            --device /dev/davinci7 \
+            --device /dev/davinci_manager \
+            --device /dev/devmm_svm \
+            --device /dev/hisi_hdc \
+            -v /usr/local/dcmi:/usr/local/dcmi \
+            -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+            -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+            -v /etc/ascend_install.info:/etc/ascend_install.info \
+            -v /root/.cache:/root/.cache \
+            -it $IMAGE bash
+        ```
+
+    === "openEuler"
+
+        ```bash
+        export IMAGE=quay.io/ascend/vllm-ascend:kimi-k3-a5-openeuler
         docker run --rm \
             --name vllm-ascend \
             --shm-size=1g \
@@ -548,16 +616,202 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
     Do not set `HCCL_OP_EXPANSION_MODE=AIV` for this baseline. Start Node 0 first, then start Nodes 1 through 7 as soon as possible. If a worker exits immediately, verify that Node 0 is running, all nodes use the same RPC port, `--data-parallel-address` resolves to Node 0, and every worker has a unique DP start rank.
 
+=== "Atlas 950DT (four-node)"
+
+    The validated mixed deployment uses four Atlas 950DT nodes with eight devices per node. vLLM data parallelism spans the four nodes, each node runs one DP rank, and tensor parallelism uses all eight devices in the node. The resulting topology is DP4/TP8/EP32.
+
+    The Atlas 950DT feature set and service options are the same as A3, except that Atlas 950DT uses TP8 and exposes eight devices per node. Leave `HCCL_OP_EXPANSION_MODE` unset for this mixed Prefill/Decode deployment.
+
+    Before starting the service:
+
+    - Replace the model path, local IP address, network interface, service port, and DP RPC port with values from the target environment.
+    - `NIC_NAME` must be the interface that owns `LOCAL_IP`.
+    - Start Node 0 first. The `NODE0_IP` configured on Nodes 1 through 3 must equal `LOCAL_IP` on Node 0.
+    - Assign `--data-parallel-start-rank` values `1`, `2`, and `3` to Nodes 1, 2, and 3 respectively.
+
+    === "Node 0"
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<NODE0_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
+
+        export HCCL_BUFFSIZE=800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+        SPECULATIVE_CONFIG="$(
+          printf \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          "$DRAFT_MODEL_PATH"
+        )"
+
+        vllm serve $MODEL_PATH \
+            --served-model-name kimi-k3 \
+            --port $PORT \
+            --allowed-local-media-path / \
+            --trust-remote-code \
+            --tensor-parallel-size 8 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-address $LOCAL_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-num-seqs 16 \
+            --max-model-len 131072 \
+            --max-num-batched-tokens 24576 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config "$SPECULATIVE_CONFIG" \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --mm-processor-cache-gb 0 \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
+            --mm-encoder-tp-mode data \
+            --limit-mm-per-prompt '{"vision_chunk": 2}' \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --tokenizer-mode kimi_k3
+        ```
+
+    === "Nodes 1-3"
+
+        Run this command on every worker node. Set `LOCAL_IP` and `NIC_NAME` to the current node and set `DP_START_RANK` to `1`, `2`, or `3`.
+
+        ```shell
+        # Values that must be adapted to the target environment.
+        export MODEL_PATH=<KIMI_K3_MODEL_PATH>
+        export LOCAL_IP=<WORKER_LOCAL_IP>
+        export NODE0_IP=<NODE0_LOCAL_IP>
+        export NIC_NAME=<WORKER_NIC_NAME>
+        export PORT=<SERVICE_PORT>
+        export RPC_PORT=<DP_RPC_PORT>
+        export DP_START_RANK=<1_OR_2_OR_3>
+        export DRAFT_MODEL_PATH=<KIMI_K3_DSPARK_MODEL_PATH>
+
+        export HCCL_BUFFSIZE=800
+        export HCCL_IF_IP=$LOCAL_IP
+        export HCCL_SOCKET_IFNAME=$NIC_NAME
+        export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+        export GLOO_SOCKET_IFNAME=$NIC_NAME
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
+        SPECULATIVE_CONFIG="$(
+          printf \
+          '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":8,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+          "$DRAFT_MODEL_PATH"
+        )"
+
+        vllm serve $MODEL_PATH \
+            --headless \
+            --served-model-name kimi-k3 \
+            --port $PORT \
+            --allowed-local-media-path / \
+            --trust-remote-code \
+            --tensor-parallel-size 8 \
+            --data-parallel-size 4 \
+            --data-parallel-size-local 1 \
+            --data-parallel-start-rank $DP_START_RANK \
+            --data-parallel-address $NODE0_IP \
+            --data-parallel-rpc-port $RPC_PORT \
+            --enable-prefix-caching \
+            --enable-expert-parallel \
+            --max-num-seqs 16 \
+            --max-model-len 131072 \
+            --max-num-batched-tokens 24576 \
+            --gpu-memory-utilization 0.9 \
+            --speculative-config "$SPECULATIVE_CONFIG" \
+            --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+            --mm-processor-cache-gb 0 \
+            --additional-config '{"enable_cpu_binding":true, "enable_flashcomm1":true}' \
+            --mm-encoder-tp-mode data \
+            --limit-mm-per-prompt '{"vision_chunk": 2}' \
+            --enable-auto-tool-choice \
+            --reasoning-parser kimi_k3 \
+            --tool-call-parser kimi_k3 \
+            --tokenizer-mode kimi_k3
+        ```
+
+    The following values differ between the master and worker nodes:
+
+    | Setting                       | Node 0         | Nodes 1-3         | Description                                            |
+    | ----------------------------- | -------------- | ----------------- | ------------------------------------------------------ |
+    | `LOCAL_IP`                    | Node 0 IP      | Current worker IP | Each node uses its own IP address.                     |
+    | `NODE0_IP`                    | Not required   | Node 0 IP         | Workers use this address to join the DP group.         |
+    | `--headless`                  | Omitted        | Enabled           | Workers do not expose the API endpoint.                |
+    | `--data-parallel-address`     | `$LOCAL_IP`    | `$NODE0_IP`       | Always resolves to Node 0.                             |
+    | `--data-parallel-start-rank`  | `0` by default | `1`, `2`, or `3`  | Every node must own a unique DP rank.                  |
+
+    Key deployment parameters:
+
+    | Parameter                                   | Description                                                      |
+    | ------------------------------------------- | ---------------------------------------------------------------- |
+    | `--tensor-parallel-size 8`                  | Uses all eight devices in one Atlas 950DT node for tensor parallelism. |
+    | `--data-parallel-size 4`                    | Creates four global DP ranks across four nodes.                  |
+    | `--data-parallel-size-local 1`              | Runs one DP rank on the current node.                            |
+    | `--data-parallel-start-rank`                | Selects the global starting DP rank for a worker node.           |
+    | `--data-parallel-rpc-port`                  | Must be identical and reachable on every node.                   |
+    | `--enable-expert-parallel`                  | Enables expert parallelism for the MoE layers.                   |
+    | `--max-model-len 131072`                    | Sets the maximum combined input and output length.               |
+    | `--max-num-seqs 16`                         | Sets the maximum active sequences for each DP group.             |
+    | `--max-num-batched-tokens 24576`            | Controls the scheduler token budget.                             |
+    | `--enable-prefix-caching`                   | Enables automatic prefix caching.                                |
+    | `--compilation-config`                      | Uses `FULL_DECODE_ONLY` ACL Graph replay.                        |
+    | `--tokenizer-mode kimi_k3`                  | Uses the Kimi K3 tokenizer mode.                                 |
+    | `--additional-config`                       | Enables Ascend CPU binding and FlashComm1.                        |
+    | `HCCL_IF_IP` and socket interface variables | Bind HCCL and Gloo communication to the selected interface.      |
+
+    !!! note
+        Serving a 1M-token context requires at least eight Atlas 950DT nodes. Change the following parameters on every node:
+
+        | Parameter                  | Four-node default | Eight-node (1M context) |
+        | -------------------------- | ----------------- | ----------------------- |
+        | `--data-parallel-size`     | `4`               | `8`                     |
+        | `--max-model-len`          | `131072`          | `1048576`               |
+        | `--max-num-batched-tokens` | `24576`           | `8192`                  |
+
+        Run the worker command on Nodes 1 through 7 and assign each node a unique `--data-parallel-start-rank` from `1` through `7`.
+
+    If a worker exits immediately, confirm that Node 0 is already running, `--data-parallel-address` resolves to Node 0, and every worker uses a unique `--data-parallel-start-rank`.
+
+    Verify the service through Node 0:
+
+    ```shell
+    curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [{
+                "role": "user",
+                "content": [{
+                    "type": "text",
+                    "text": "The future of AI is"
+                }]
+            }],
+            "max_tokens": 1024,
+            "temperature": 1.0,
+            "top_p": 0.95
+        }'
+    ```
+
+    The service should return HTTP 200 and a `choices` field containing generated text.
+
 ### 5.2 Eight-Node PD Separation Deployment
 
-The validated PD separation topology uses eight Atlas 800 A3 (64G × 16) nodes: four Prefill nodes and four Decode nodes. Both sides use DP4/TP16/PP1.
+The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. A3 uses DP4/TP16/PP1 on each side, while Atlas 950DT uses DP4/TP8/PP1 on each side.
 
 Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
-!!! note
-    On Atlas 800 A3, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command. Decode uses AIV; explicitly set `HCCL_OP_EXPANSION_MODE=AIV` in the Decode command.
+On Atlas 800 A3 and Atlas 950DT, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command. Decode uses AIV; explicitly set `HCCL_OP_EXPANSION_MODE=AIV` in the Decode command.
 
-This deployment supports DSpark speculative decoding. Configure the same `Inferact/Kimi-K3-DSpark` draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses TP16, greedy drafting, and seven speculative tokens.
+This deployment supports DSpark speculative decoding. Configure the same `Inferact/Kimi-K3-DSpark` draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses draft TP16 on A3 or draft TP8 on Atlas 950DT, greedy drafting, and seven speculative tokens. The seventh argument of the engine template is the tensor-parallel size: `16` for A3 and `8` for Atlas 950DT.
 
 #### 5.2.1 Create the engine templates
 
@@ -587,7 +841,7 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
 
     SPECULATIVE_CONFIG="$(
       printf \
-      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
       "$DRAFT_MODEL_PATH"
     )"
 
@@ -634,11 +888,11 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
                 "kv_connector_extra_config": {
                     "prefill": {
                         "dp_size": 4,
-                        "tp_size": 16
+                        "tp_size": '"$7"'
                     },
                     "decode": {
                         "dp_size": 4,
-                        "tp_size": 16
+                        "tp_size": '"$7"'
                    }
                 }
               }
@@ -673,7 +927,7 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
 
     SPECULATIVE_CONFIG="$(
       printf \
-      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":16,"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
+      '{"method":"dspark","model":"%s","num_speculative_tokens":7,"draft_tensor_parallel_size":'"$7"',"max_model_len":4096,"draft_sample_method":"greedy","enforce_eager":true}' \
       "$DRAFT_MODEL_PATH"
     )"
 
@@ -715,11 +969,11 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
           "kv_connector_extra_config": {
             "prefill": {
                 "dp_size": 4,
-                "tp_size": 16
+                "tp_size": '"$7"'
             },
             "decode": {
                 "dp_size": 4,
-                "tp_size": 16
+                "tp_size": '"$7"'
             }
           }
         }'
@@ -727,19 +981,35 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
 
 #### 5.2.2 Start the engines
 
-Deploy `launch_online_dp.py` and the corresponding engine template on every node. The following example starts one local DP rank in a DP4/TP16/PP1 group:
+Deploy `launch_online_dp.py` and the corresponding engine template on every node. Pass `0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15` as the template's first argument on A3 and `0,1,2,3,4,5,6,7` on Atlas 950DT.
 
-```shell
-python launch_online_dp.py \
-    --dp-size 4 \
-    --tp-size 16 \
-    --pp-size 1 \
-    --dp-size-local 1 \
-    --dp-rank-start <LOCAL_DP_RANK> \
-    --dp-address <PD_MASTER_IP> \
-    --dp-rpc-port <DP_RPC_PORT> \
-    --vllm-start-port <VLLM_START_PORT>
-```
+=== "Atlas 800 A3"
+
+    ```shell
+    python launch_online_dp.py \
+        --dp-size 4 \
+        --tp-size 16 \
+        --pp-size 1 \
+        --dp-size-local 1 \
+        --dp-rank-start <LOCAL_DP_RANK> \
+        --dp-address <PD_MASTER_IP> \
+        --dp-rpc-port <DP_RPC_PORT> \
+        --vllm-start-port <VLLM_START_PORT>
+    ```
+
+=== "Atlas 950DT"
+
+    ```shell
+    python launch_online_dp.py \
+        --dp-size 4 \
+        --tp-size 8 \
+        --pp-size 1 \
+        --dp-size-local 1 \
+        --dp-rank-start <LOCAL_DP_RANK> \
+        --dp-address <PD_MASTER_IP> \
+        --dp-rpc-port <DP_RPC_PORT> \
+        --vllm-start-port <VLLM_START_PORT>
+    ```
 
 Use ranks `0` through `3` for each four-node side. Configure independent master addresses, RPC ports, and vLLM port ranges for the Prefill and Decode groups.
 
@@ -751,7 +1021,7 @@ Key PD settings:
 | ---------------------------- | ---------------------------- | ------------------------------------------------------- |
 | Topology                     | 4P4D                         | Four Prefill and four Decode nodes.                     |
 | `--dp-size`                  | `4`                          | Four DP ranks on each side.                             |
-| `--tp-size`                  | `16`                         | Uses all 16 NPUs in a node.                             |
+| `--tp-size`                  | `16` on A3; `8` on Atlas 950DT | Uses all devices in a node.                           |
 | `--pp-size`                  | `1`                          | One pipeline stage per engine.                          |
 | `--dp-size-local`            | `1`                          | One DP rank per node.                                   |
 | `KV_PORT`                    | `36000` for P, `36200` for D | Separates producer and consumer KV traffic.             |
@@ -818,9 +1088,46 @@ Key PD settings:
 
     Production traffic should normally omit this header so that requests remain balanced across all DP ranks. The request is always sent to the Node 0 API endpoint, even when a worker rank is selected.
 
+=== "Atlas 950DT"
+
+    After an Atlas 950DT mixed or PD service is ready, send a multimodal request to the API endpoint:
+
+    ```shell
+    curl http://<NODE0_LOCAL_IP>:<SERVICE_PORT>/v1/chat/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "kimi-k3",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "<IMAGE_URL_OR_DATA_URL>"}
+                    },
+                    {
+                        "type": "text",
+                        "text": "Describe the image."
+                    }
+                ]
+            }],
+            "max_tokens": 1024,
+            "temperature": 1.0,
+            "top_p": 0.95
+        }'
+    ```
+
+    The service should return HTTP 200 and a `choices` field containing the image description. The current implementation supports image inputs but does not support video inputs.
+
 ## 7 Accuracy Evaluation
 
 Here is one accuracy evaluation method for Kimi K3.
+
+| dataset | version | metric | mode | vllm-api-general-chat | note |
+| ----- | ----- | ----- | ----- | ----- | ----- |
+| GPQA | - | accuracy | gen | 92.42 | 8 Atlas 800 A3 (64GB × 16) |
+| OCRBench | - | accuracy | gen | 0.88 | 8 Atlas 800 A3 (64GB × 16) |
+| GPQA | - | accuracy | gen | 93.5 | 1 Atlas 950DT |
+| OCRBench | - | accuracy | gen | 0.891 | 1 Atlas 950DT |
 
 ### Using AISBench
 

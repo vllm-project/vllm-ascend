@@ -120,6 +120,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |-----------------|----------|--------|------|------|------|---------|-------|------|------|--------|-------|--------|--------|-------|-------|--------|----------|---------|----------|-----|
     |Qwen3.5-397B-A17B|✅        |       |✅    | Ascend 950DT |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|1010000|| [Qwen3.5-397B-A17B](../../tutorials/models/Qwen3.5-397B-A17B.md) |
     |Qwen3.6-27B      |✅        |       |✅    | Ascend 950 Products |✅|✅|✅||✅|✅|✅||✅|✅|✅|✅|✅|262144|| [Qwen3.5-27B / Qwen3.6-27B](../../tutorials/models/Qwen3.5-27B-Qwen3.6-27B.md) |
+|Kimi-K3          |🔵        |W4A8; DSpark; FULL_DECODE_ONLY||Atlas 950DT|||✅||✅||✅||✅|✅|✅||✅|131072||[Kimi-K3](../../tutorials/models/Kimi-K3.md)|
 
 === "A2/A3"
 
@@ -132,7 +133,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     | Qwen3.6-35B-A3B | 🔵 |  | ✅ | A2/A3 | ✅ | ✅ | ✅ |  | 🔵 | ✅ | ✅ |  | ✅ | ✅ | ❌ | ✅ | ✅ | 262144 | [Qwen3.6-35B-A3B](../../tutorials/models/Qwen3.6-35B-A3B.md) |
     | Qwen3-Omni-30B-A3B-Thinking | 🔵 |  |  | A2/A3 |  |  |  |  |  |  | ✅ |  | ✅ |  |  |  |  |  | [Qwen3-Omni-30B-A3B-Thinking](../../tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md) |
     | Kimi-K2.5/Kimi-K2.6 | ✅ |  |  | A2/A3 |  | ✅ | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | ✅ | ✅ | ✅ | ✅ | 262144 | [Kimi-K2.5](../../tutorials/models/Kimi-K2.5.md)/[Kimi-K2.6](../../tutorials/models/Kimi-K2.6.md) |
-    | Kimi-K3 | 🔵 | W4A8; DSpark; FULL_DECODE_ONLY |  | A3 |  |  | ✅ |  | ✅ |  | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 131072 |  | [Kimi-K3](../../tutorials/models/Kimi-K3.md) |
+    | Kimi-K3 | 🔵 | W4A8; DSpark; FULL_DECODE_ONLY |  | A3 |  |  | ✅ |  | ✅ |  | ✅ |  | ✅ | ✅ | ✅ |  | ✅ | 131072 | [Kimi-K3](../../tutorials/models/Kimi-K3.md) |
 
 === "Atlas inference products"
 
