@@ -308,8 +308,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
     vllm serve /path/to/GLM-5.3-Flash-w8a8 \
-        --host 0.0.0.0 \
-        --port 8077 \
+        --headless \
         --max-model-len 133120 \
         --data-parallel-size 2 \
         --data-parallel-size-local 1 \
@@ -328,8 +327,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --gpu-memory-utilization 0.85 \
         --speculative-config '{"num_speculative_tokens":2,"method":"deepseek_mtp","enforce_eager":true}' \
-        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,96,128,256,384]}' \
-        --api-server-count 1
+        --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY","cudagraph_capture_sizes":[1,2,4,8,16,32,64,96,128,256,384]}'
     ```
 
 #### Key Parameter Descriptions
@@ -341,6 +339,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 - `--data-parallel-rank`: DP rank of the current node. Node 0 uses `0`, node 1 uses `1`.
 - `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.
 - `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.
+- `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0.
 
 ## 6 Functional Verification
 
