@@ -102,7 +102,7 @@ def _get_config_bool(configs: tuple[Any, ...], attr: str) -> bool:
 def _is_mtp_layer(hf_config: Any, layer_name: str | None) -> bool:
     layer_name = layer_name or ""
     num_hidden_layers = getattr(hf_config, "num_hidden_layers", None)
-    if num_hidden_layers is None:
+    if not isinstance(num_hidden_layers, int):
         return False
     if ".mtp." in f".{layer_name}.":
         return True
