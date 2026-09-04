@@ -50,6 +50,8 @@ constexpr int16_t SHR_NUM_FOR_BF16 = 7;
 constexpr uint16_t FP8_E4M3_MAX_EXP = 0x0400;
 constexpr uint16_t FP8_E5M2_MAX_EXP = 0x0780;
 constexpr uint16_t BF16_EXP_BIAS = 0x7f00;
+constexpr float FP8_E4M3FN_MAX_VALUE = 448.0f;
+constexpr float FP8_E4M3FN_MIN_VALUE = -448.0f;
 constexpr int64_t OUT_ELE_NUM_ONE_BLK = 64;
 constexpr int64_t QUANT_ONCE_NUM = 256;
 constexpr int64_t X_ONCE_NUM = 512;
@@ -204,12 +206,16 @@ __aicore__ inline void ComputeDataF8Last(__ubuf__ T* srcAddr, __ubuf__ uint16_t*
         AscendC::MicroAPI::RegTensor<T> vdExp0, vdExp1;
         AscendC::MicroAPI::RegTensor<float> vdExp0FP32Zero, vdExp0FP32One;
         AscendC::MicroAPI::RegTensor<float> vdExp1FP32Zero, vdExp1FP32One;
+        AscendC::MicroAPI::RegTensor<float> fp8MaxFinite, fp8MinFinite;
+        AscendC::MicroAPI::MaskReg aboveMax, belowMin;
         AscendC::MicroAPI::RegTensor<U> vdExp0FP8Zero, vdExp0FP8One;
         AscendC::MicroAPI::RegTensor<U> vdExp1FP8Zero, vdExp1FP8One;
         AscendC::MicroAPI::MaskReg
             maskAll = AscendC::MicroAPI::CreateMask<uint16_t, AscendC::MicroAPI::MaskPattern::ALL>();
         AscendC::MicroAPI::MaskReg
             maskAllB8 = AscendC::MicroAPI::CreateMask<uint8_t, AscendC::MicroAPI::MaskPattern::ALL>();
+        AscendC::MicroAPI::Duplicate(fp8MaxFinite, FP8_E4M3FN_MAX_VALUE);
+        AscendC::MicroAPI::Duplicate(fp8MinFinite, FP8_E4M3FN_MIN_VALUE);
         for (uint16_t i = 0; i < loopNum; i++) {
             AscendC::MicroAPI::DataCopy<T, AscendC::MicroAPI::PostLiteral::POST_MODE_UPDATE,
                                         AscendC::MicroAPI::LoadDist::DIST_DINTLV_B16>(vdExp0, vdExp1, srcAddr,
@@ -224,6 +230,29 @@ __aicore__ inline void ComputeDataF8Last(__ubuf__ T* srcAddr, __ubuf__ uint16_t*
             AscendC::MicroAPI::Cast<float, T, CAST_ONE>(vdExp0FP32One, vdExp0, maskAll);
             AscendC::MicroAPI::Cast<float, T, CAST_ZERO>(vdExp1FP32Zero, vdExp1, maskAll);
             AscendC::MicroAPI::Cast<float, T, CAST_ONE>(vdExp1FP32One, vdExp1, maskAll);
+
+            // Clamp values outside the finite E4M3FN range before casting.
+            // Ordered comparisons leave upstream NaNs unchanged.
+            AscendC::MicroAPI::Compare<float, CMPMODE::GT>(aboveMax, vdExp0FP32Zero, fp8MaxFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp0FP32Zero, fp8MaxFinite, vdExp0FP32Zero, aboveMax);
+            AscendC::MicroAPI::Compare<float, CMPMODE::LT>(belowMin, vdExp0FP32Zero, fp8MinFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp0FP32Zero, fp8MinFinite, vdExp0FP32Zero, belowMin);
+
+            AscendC::MicroAPI::Compare<float, CMPMODE::GT>(aboveMax, vdExp0FP32One, fp8MaxFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp0FP32One, fp8MaxFinite, vdExp0FP32One, aboveMax);
+            AscendC::MicroAPI::Compare<float, CMPMODE::LT>(belowMin, vdExp0FP32One, fp8MinFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp0FP32One, fp8MinFinite, vdExp0FP32One, belowMin);
+
+            AscendC::MicroAPI::Compare<float, CMPMODE::GT>(aboveMax, vdExp1FP32Zero, fp8MaxFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp1FP32Zero, fp8MaxFinite, vdExp1FP32Zero, aboveMax);
+            AscendC::MicroAPI::Compare<float, CMPMODE::LT>(belowMin, vdExp1FP32Zero, fp8MinFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp1FP32Zero, fp8MinFinite, vdExp1FP32Zero, belowMin);
+
+            AscendC::MicroAPI::Compare<float, CMPMODE::GT>(aboveMax, vdExp1FP32One, fp8MaxFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp1FP32One, fp8MaxFinite, vdExp1FP32One, aboveMax);
+            AscendC::MicroAPI::Compare<float, CMPMODE::LT>(belowMin, vdExp1FP32One, fp8MinFinite, maskAll);
+            AscendC::MicroAPI::Select<float>(vdExp1FP32One, fp8MinFinite, vdExp1FP32One, belowMin);
+
             AscendC::MicroAPI::Cast<U, float, CAST_32_TO_80>(vdExp0FP8Zero, vdExp0FP32Zero, maskAll);
             AscendC::MicroAPI::Cast<U, float, CAST_32_TO_82>(vdExp0FP8One, vdExp0FP32One, maskAll);
             AscendC::MicroAPI::Cast<U, float, CAST_32_TO_81>(vdExp1FP8Zero, vdExp1FP32Zero, maskAll);
