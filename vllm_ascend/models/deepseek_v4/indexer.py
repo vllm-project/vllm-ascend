@@ -46,6 +46,7 @@ from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -190,6 +191,7 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
+        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
         topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
             query=query,
             key=key_cache,

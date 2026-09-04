@@ -151,6 +151,14 @@ class TestAscendFp8Config(TestBase):
                 "block-fp8",
             )
 
+    def test_glm53_flash_kda_layer_stays_unquantized(self):
+        # Official zai-org/GLM-5.3-Flash lists KDA projections in
+        # modules_to_not_convert; they have no weight_scale_inv.
+        kda_name = "model.layers.0.self_attn.q_proj"
+        config = self.build_config(ignored_layers=[kda_name])
+        method = config.get_quant_method(MagicMock(spec=LinearBase), kda_name)
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
     def test_ignored_moe_falls_back_to_unquantized(self):
         config = self.build_config(ignored_layers=["model.layers.0.mlp.experts"])
         moe_layer = MagicMock(spec=RoutedExperts)
