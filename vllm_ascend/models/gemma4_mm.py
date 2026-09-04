@@ -79,6 +79,8 @@ class AscendGemma4ForConditionalGeneration(Gemma4ForConditionalGeneration):
         self.multimodal_config = multimodal_config
         self.model_dtype = vllm_config.model_config.dtype
         self.vllm_config = vllm_config
+        lora_config = vllm_config.lora_config
+        self._enable_mm_lora = bool(lora_config is not None and lora_config.enable_tower_connector_lora)
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
