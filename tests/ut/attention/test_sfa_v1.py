@@ -922,16 +922,59 @@ class TestAscendSFAImpl(TestBase):
         self.assertTrue(result.is_contiguous())
 
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_full_visible_rr_table_exact_sparse_count_boundary(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.enable_sfa_full_visible_index_bypass = True
+        AscendSFAImpl._full_visible_index_tables.clear()
+        impl = self._full_visible_impl()
+        metadata = SimpleNamespace(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            block_size=SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE,
+            seq_lens_cpu=torch.tensor([SFA_INDEXER_SPARSE_COUNT]),
+            num_actual_tokens=SFA_INDEXER_SPARSE_COUNT,
+        )
+
+        result = impl._get_full_visible_topk_indices(metadata, SFA_INDEXER_SPARSE_COUNT, torch.device("cpu"))
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.shape, (SFA_INDEXER_SPARSE_COUNT, 1, SFA_INDEXER_SPARSE_COUNT))
+        self.assertEqual(result.dtype, torch.int32)
+        self.assertTrue(torch.all(result[0, 0, 129:] == -1))
+        self.assertEqual(set(result[-1, 0].tolist()), set(range(SFA_INDEXER_SPARSE_COUNT)))
+        self.assertTrue(torch.all(result[-1, 0] >= 0))
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    def test_full_visible_bypass_cache_hit_new_content_over_sparse_count_falls_back(self, mock_get_ascend_config):
+        mock_get_ascend_config.return_value.enable_sfa_full_visible_index_bypass = True
+        impl = self._full_visible_impl()
+
+        # Cached context + new content, total visible KV is over sparse_count.
+        metadata = SimpleNamespace(
+            attn_state=AscendAttentionState.PrefillCacheHit,
+            block_size=SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE,
+            seq_lens_cpu=torch.tensor([3073]),
+            num_actual_tokens=2049,
+        )
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 2049, torch.device("cpu")))
+
+        # Pure new content over sparse_count (no cache-hit context).
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        metadata.seq_lens_cpu = torch.tensor([SFA_INDEXER_SPARSE_COUNT + 1])
+        metadata.num_actual_tokens = SFA_INDEXER_SPARSE_COUNT + 1
+        self.assertIsNone(
+            impl._get_full_visible_topk_indices(metadata, SFA_INDEXER_SPARSE_COUNT + 1, torch.device("cpu"))
+        )
+
+    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_full_visible_bypass_falls_back(self, mock_get_ascend_config):
         mock_get_ascend_config.return_value.enable_sfa_full_visible_index_bypass = True
         impl = self._full_visible_impl()
         metadata = SimpleNamespace(
             attn_state=AscendAttentionState.PrefillNoCache,
             block_size=SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE,
-            seq_lens_cpu=torch.tensor([2049]),
+            seq_lens_cpu=torch.tensor([64]),
             num_actual_tokens=64,
         )
-        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
 
         metadata.seq_lens_cpu = torch.tensor([64, 64])
         self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
@@ -940,8 +983,12 @@ class TestAscendSFAImpl(TestBase):
         metadata.num_actual_tokens = 63
         self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
 
-        impl.allow_short_prefill_indexer_scoring_skip = False
         metadata.num_actual_tokens = 64
+        metadata.seq_lens_cpu = torch.tensor([32])
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
+
+        metadata.seq_lens_cpu = torch.tensor([64])
+        impl.allow_short_prefill_indexer_scoring_skip = False
         self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
 
         impl.allow_short_prefill_indexer_scoring_skip = True
@@ -949,19 +996,46 @@ class TestAscendSFAImpl(TestBase):
         self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
 
         impl.enable_sparse_sfa_c8 = False
-        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        impl.enable_sparse_li_c8 = True
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
+
+        impl.enable_sparse_li_c8 = False
+        impl.skip_topk = True
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
+
+        impl.skip_topk = False
+        impl.has_indexer = False
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
+
+        impl.has_indexer = True
+        metadata.attn_state = AscendAttentionState.DecodeOnly
         self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
 
         metadata.attn_state = AscendAttentionState.PrefillNoCache
         metadata.block_size = 64
         self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
 
+        metadata.block_size = SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("meta")))
+
+        metadata.seq_lens_cpu = None
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
+
+        metadata.seq_lens_cpu = torch.tensor([64])
+        impl._full_visible_index_table = None
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
+
+        mock_get_ascend_config.return_value.enable_sfa_full_visible_index_bypass = False
+        impl._full_visible_index_table = AscendSFAImpl._get_or_create_full_visible_index_table(torch.device("cpu"))
+        self.assertIsNone(impl._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
+
+        mock_get_ascend_config.return_value.enable_sfa_full_visible_index_bypass = True
+
         class DerivedSFAImpl(AscendSFAImpl):
             pass
 
         derived = DerivedSFAImpl.__new__(DerivedSFAImpl)
         derived.__dict__.update(impl.__dict__)
-        metadata.block_size = SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE
         self.assertIsNone(derived._get_full_visible_topk_indices(metadata, 64, torch.device("cpu")))
 
     # ============ process_weights_after_loading ============
