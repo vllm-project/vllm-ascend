@@ -144,7 +144,11 @@ def test_topk_topp_forward_and_apply_helpers():
     with (
         patch("vllm_ascend.sample.sampler.get_ascend_config", return_value=cfg),
         patch("vllm_ascend.sample.sampler.get_tp_group", return_value=_tp_group()),
-        patch("vllm_ascend.sample.sampler.torch_npu.npu_top_k_top_p", side_effect=lambda values, k, p: values),
+        patch(
+            "vllm_ascend.sample.sampler.torch_npu.npu_top_k_top_p",
+            side_effect=lambda values, k, p: values,
+            create=True,
+        ),
     ):
         gathered_vals, gathered_idx = _apply_top_k_top_p_pytorch(logits.clone(), None, None)
         assert gathered_vals.shape[0] == 2
