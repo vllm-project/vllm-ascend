@@ -16,6 +16,7 @@ from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -35,6 +36,34 @@ from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+def test_build_draft_attn_metadata_forwards_ascend_context(monkeypatch):
+    captured_kwargs = {}
+
+    def raw_build_attn_metadata(*_args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return "metadata"
+
+    monkeypatch.setattr(
+        attn_utils._BUILD_ATTN_METADATA_MODULE,
+        "build_attn_metadata",
+        raw_build_attn_metadata,
+    )
+    positions = torch.arange(8, dtype=torch.int32)
+    is_prefilling = torch.tensor([False, False])
+
+    with attn_utils.build_draft_attn_metadata_factory(
+        positions,
+        pad=5,
+        is_prefilling=is_prefilling,
+    ):
+        metadata = attn_utils._BUILD_ATTN_METADATA_MODULE.build_attn_metadata()
+
+    assert metadata == "metadata"
+    torch.testing.assert_close(captured_kwargs["positions"], positions[:5])
+    assert captured_kwargs["is_prefilling"] is is_prefilling
+    assert captured_kwargs["attn_state"] is AscendAttentionState.SpecDecoding
 
 
 @pytest.mark.parametrize(
