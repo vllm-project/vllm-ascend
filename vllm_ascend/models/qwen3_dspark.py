@@ -4,6 +4,7 @@ from pathlib import Path
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
@@ -150,8 +151,8 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                             f"{sorted(loaded_parameters)}"
                         )
 
-        if rotation_weight is not None:
-            if not includes_embed_tokens:
+        if not includes_embed_tokens:
+            if rotation_weight is not None:
                 load_quarot_target_layer(
                     self.model.embed_tokens,
                     self.target_model_path,
@@ -160,14 +161,27 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     "draft embed_tokens.weight",
                 )
                 self.has_own_embed_tokens = True
-            if not includes_lm_head:
+            elif get_pp_group().world_size > 1:
+                # The draft is loaded only on the last PP rank, where the
+                # target's embedding may be a PPMissingLayer. Keep the draft's
+                # own embedding and load it from the target checkpoint when the
+                # draft checkpoint does not ship one.
                 load_quarot_target_layer(
-                    self.lm_head,
+                    self.model.embed_tokens,
                     self.target_model_path,
-                    TARGET_LM_HEAD_WEIGHT_NAMES,
-                    rotation_weight,
-                    "draft lm_head.weight",
+                    TARGET_EMBED_WEIGHT_NAMES,
+                    None,
+                    "draft embed_tokens.weight",
                 )
-                self.has_own_lm_head = True
+                self.has_own_embed_tokens = True
+        if rotation_weight is not None and not includes_lm_head:
+            load_quarot_target_layer(
+                self.lm_head,
+                self.target_model_path,
+                TARGET_LM_HEAD_WEIGHT_NAMES,
+                rotation_weight,
+                "draft lm_head.weight",
+            )
+            self.has_own_lm_head = True
 
         return result
