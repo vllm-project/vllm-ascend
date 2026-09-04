@@ -431,14 +431,18 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
                 topk_weights=topk_weights,
                 expanded_row_idx=expanded_row_idx,
                 restore_shape=restore_shape,
+                is_mxfp=token_dispatch_input.quant.is_mxfp,
             ),
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
+        topk_weights = combine_metadata.topk_weights
+        if not combine_metadata.is_mxfp:
+            topk_weights = topk_weights.to(hidden_states.dtype)
         final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=combine_metadata.expanded_row_idx,
-            probs=combine_metadata.topk_weights,
+            probs=topk_weights,
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
@@ -553,6 +557,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
                 reversed_global_input_permutation_mapping=reversed_global_input_permutation_mapping,
                 hidden_shape=hidden_shape,
                 hidden_shape_before_permute=hidden_shape_before_permute,
+                is_mxfp=token_dispatch_input.quant.is_mxfp,
             ),
         )
 
@@ -728,10 +733,13 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         combine_metadata: MoEAllToAllCombineMetadata,
     ) -> torch.Tensor:
         # Unpermutation 1: AlltoAll output to output
+        topk_weights = combine_metadata.topk_weights
+        if not combine_metadata.is_mxfp:
+            topk_weights = topk_weights.to(permutated_local_input_tokens.dtype)
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,
             sorted_indices=combine_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
-            probs=combine_metadata.topk_weights,
+            probs=topk_weights,
             restore_shape=combine_metadata.hidden_shape_before_permute,
         )
         output = output.view(combine_metadata.hidden_shape)
