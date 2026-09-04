@@ -192,6 +192,33 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
+    def test_explicit_capture_sizes_must_align_spec_decode_and_sp(self):
+        for capture_sizes, expected_tp_size in (([48, 96], 1), ([16, 32], 16)):
+            with self.subTest(capture_sizes=capture_sizes):
+                runner = self._build_runner()
+                compilation_config = SimpleNamespace(
+                    pass_config=SimpleNamespace(enable_sp=True),
+                    cudagraph_capture_sizes=capture_sizes,
+                    resolve_cudagraph_mode_and_sizes=MagicMock(return_value=CUDAGraphMode.FULL_DECODE_ONLY),
+                )
+                runner.compilation_config = compilation_config
+                runner.vllm_config.compilation_config = compilation_config
+                runner.parallel_config = SimpleNamespace(tensor_parallel_size=16)
+                runner.uniform_decode_query_len = 6
+                runner.kv_cache_config = SimpleNamespace()
+                runner.max_num_reqs = 16
+                runner.cudagraph_dispatcher = MagicMock()
+                runner.cudagraph_dispatcher.get_capture_descs.return_value = []
+                runner.speculative_config = None
+                runner.drafter = None
+                runner.use_aclgraph = False
+
+                with patch("vllm_ascend.worker.model_runner_v1.enable_sp", return_value=True):
+                    runner._check_and_update_cudagraph_mode([], [])
+
+                call_kwargs = compilation_config.resolve_cudagraph_mode_and_sizes.call_args.kwargs
+                self.assertEqual(call_kwargs["tensor_parallel_size"], expected_tp_size)
+
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False

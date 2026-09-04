@@ -26,6 +26,7 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import pytest
 import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
 import vllm_ascend.spec_decode.dspark_proposer as dspark_proposer_module
@@ -833,6 +834,75 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
             call.kwargs["kernel_block_size"]
             for call in create_builders.call_args_list
         ] == [128, 64]
+
+    def test_mixed_target_and_gqa_group_creates_one_draft_attention_group(
+        self, monkeypatch
+    ):
+        page_size = 488448
+        target_layer = "language_model.model.layers.3.self_attn.attn"
+        draft_layers = [
+            f"model.layers.{layer_idx}.self_attn.attn"
+            for layer_idx in range(93, 98)
+        ]
+        target_spec = MLAAttentionSpec(
+            block_size=384,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+        )
+        draft_spec = FullAttentionSpec(
+            block_size=384,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.bfloat16,
+            page_size_padded=page_size,
+        )
+        mixed_spec = UniformTypeKVCacheSpecs.from_specs(
+            {
+                target_layer: target_spec,
+                **{layer_name: draft_spec for layer_name in draft_layers},
+            }
+        )
+        assert mixed_spec is not None
+
+        backend = MagicMock()
+        backend.full_cls_name.return_value = "fake.gqa.backend"
+        layers = {}
+        for layer_name in draft_layers:
+            layer = MagicMock()
+            layer.get_attn_backend.return_value = backend
+            layers[layer_name] = layer
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.get_layers_from_vllm_config",
+            lambda *args, **kwargs: layers,
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: set(draft_layers)
+        )
+        proposer.max_query_tokens = 16
+        proposer.max_num_tokens = 32
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=[target_layer, *draft_layers],
+                    kv_cache_spec=mixed_spec,
+                )
+            ]
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(
+                kv_cache_config,
+                kernel_block_sizes=[128],
+            )
+
+        assert len(proposer.draft_attn_groups) == 1
+        assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_layers)
+        assert proposer.draft_attn_groups[0].kv_cache_group_id == 0
+        assert proposer._layer_group_idx == [0] * 5
 
     def test_k3_initialization_enables_rope_on_mla_builders(self, monkeypatch):
         class FakeK3Config:

@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
     SlidingWindowManager,
 )
@@ -28,6 +30,8 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 )
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
+    _get_kimi_k3_gqa_mixed_kv_cache_groups,
+    _get_kv_cache_config_deepseek_v4,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 
@@ -100,16 +104,47 @@ def _make_vllm_config(
     enable_prefix_caching: bool,
     dcp: int,
     block_size: int = 16,
+    mamba_cache_mode: str = "none",
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
+            mamba_cache_mode=mamba_cache_mode,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
         ),
     )
+
+
+def _make_kimi_k3_gqa_kv_cache_specs(page_size: int = 488448) -> dict:
+    target_mla_spec = MLAAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.bfloat16,
+        page_size_padded=page_size,
+    )
+    draft_gqa_spec = FullAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+        page_size_padded=page_size,
+    )
+    mamba_spec = MambaSpec(
+        block_size=384,
+        shapes=((10, 2304), (6, 128, 128)),
+        dtypes=(torch.bfloat16, torch.float32),
+        page_size_padded=page_size,
+        mamba_cache_mode="align",
+        num_speculative_blocks=7,
+    )
+    specs = {f"language_model.model.layers.{layer_idx}.self_attn.attn": target_mla_spec for layer_idx in range(24)}
+    specs.update({f"model.layers.{layer_idx}.self_attn.attn": draft_gqa_spec for layer_idx in range(93, 98)})
+    specs.update({f"language_model.model.layers.{layer_idx}.self_attn": mamba_spec for layer_idx in range(69)})
+    return specs
 
 
 def _make_coordinator_for_effective_block_size(
@@ -459,3 +494,104 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
     )
     assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"
+
+
+def test_kimi_k3_gqa_uses_four_mixed_kv_groups_and_five_builders() -> None:
+    groups = _get_kimi_k3_gqa_mixed_kv_cache_groups(_make_kimi_k3_gqa_kv_cache_specs())
+
+    assert groups is not None
+    assert [len(group.layer_names) for group in groups] == [29, 23, 23, 23]
+    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in groups)
+
+    mixed_specs = groups[0].kv_cache_spec.kv_cache_specs
+    assert sum(isinstance(spec, MLAAttentionSpec) for spec in mixed_specs.values()) == 24
+    assert (
+        sum(
+            isinstance(spec, FullAttentionSpec) and not isinstance(spec, MLAAttentionSpec)
+            for spec in mixed_specs.values()
+        )
+        == 5
+    )
+
+    # The model runner keys builders by backend and exact inner spec. The
+    # mixed attention group contributes MLA + GQA, and each Mamba group one.
+    metadata_builder_count = sum(
+        len({type(spec) for spec in group.kv_cache_spec.kv_cache_specs.values()}) for group in groups
+    )
+    assert metadata_builder_count == 5
+
+
+def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> None:
+    groups = _get_kimi_k3_gqa_mixed_kv_cache_groups(_make_kimi_k3_gqa_kv_cache_specs())
+    assert groups is not None
+    worker_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+
+    assert worker_config.has_mamba_layers
+    assert worker_config.needs_kv_cache_zeroing
+    assert (
+        groups[1].kv_cache_spec.max_num_blocks_per_req(
+            _make_vllm_config(
+                enable_prefix_caching=True,
+                dcp=1,
+                block_size=384,
+                mamba_cache_mode="align",
+            ),
+            3840,
+        )
+        == 17
+    )
+
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+    assert isinstance(scheduler_config.kv_cache_groups[0].kv_cache_spec, MLAAttentionSpec)
+    assert all(isinstance(group.kv_cache_spec, MambaSpec) for group in scheduler_config.kv_cache_groups[1:])
+    assert scheduler_config.needs_kv_cache_zeroing
+
+
+def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> None:
+    groups = _get_kimi_k3_gqa_mixed_kv_cache_groups(_make_kimi_k3_gqa_kv_cache_specs())
+    assert groups is not None
+    page_size = 488448
+    expected_num_blocks = 100
+    available_memory = page_size * 29 * expected_num_blocks
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, num_blocks: num_blocks,
+    )
+
+    num_blocks, tensors = _get_kv_cache_config_deepseek_v4(
+        SimpleNamespace(),
+        groups,
+        available_memory,
+    )
+
+    assert num_blocks == expected_num_blocks
+    assert len(tensors) == 29
+    assert [len(tensor.shared_by) for tensor in tensors] == [4] * 23 + [1] * 6
+    assert all(tensor.size == page_size * expected_num_blocks for tensor in tensors)
+    assert sum(tensor.size for tensor in tensors) == available_memory
+
+
+def test_kimi_k3_gqa_mixed_grouping_falls_back_on_partial_signature() -> None:
+    specs = _make_kimi_k3_gqa_kv_cache_specs()
+    draft_layer = "model.layers.93.self_attn.attn"
+    specs[draft_layer] = replace(specs[draft_layer], non_causal=True)
+
+    assert _get_kimi_k3_gqa_mixed_kv_cache_groups(specs) is None
+
+
+def test_kimi_k3_gqa_mixed_grouping_accepts_derived_page_size() -> None:
+    groups = _get_kimi_k3_gqa_mixed_kv_cache_groups(_make_kimi_k3_gqa_kv_cache_specs(page_size=976896))
+    assert groups is not None
+    assert all(spec.page_size_bytes == 976896 for spec in groups[0].kv_cache_spec.kv_cache_specs.values())
+
+
+def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unaligned_pages() -> None:
+    specs = _make_kimi_k3_gqa_kv_cache_specs()
+    draft_layer = "model.layers.93.self_attn.attn"
+    specs[draft_layer] = replace(specs[draft_layer], page_size_padded=98304)
+
+    assert _get_kimi_k3_gqa_mixed_kv_cache_groups(specs) is None

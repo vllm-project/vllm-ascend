@@ -141,7 +141,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -3776,10 +3775,7 @@ class NPUModelRunner(GPUModelRunner):
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
         self.use_hybrid_blocks = len(self.attn_groups) > 1
-        # NOTE: Currently, we determine whether we need `num_accepted_tokens` through `MambaSpec`.
-        self.need_accepted_tokens = any(
-            [isinstance(attn_group[0].kv_cache_spec, MambaSpec) for attn_group in self.attn_groups]
-        )
+        self.need_accepted_tokens = kv_cache_config.has_mamba_layers
 
         self.may_reinitialize_input_batch(kv_cache_config)
         if self.sparse_kv_offload_enabled:
@@ -4652,21 +4648,15 @@ class NPUModelRunner(GPUModelRunner):
 
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
-            max_num_blocks_per_req = cdiv(
-                max_model_len,
-                block_sizes[i] * get_decode_context_model_parallel_world_size(),
+            max_num_blocks.append(
+                kv_cache_group.kv_cache_spec.max_num_blocks_per_req(
+                    self.vllm_config,
+                    max_model_len,
+                )
             )
-            if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
-                mamba_blocks_per_req = (
-                    max_num_blocks_per_req if self.cache_config.enable_prefix_caching else 1
-                ) 
-
-                max_num_blocks_per_req = max(max_num_blocks_per_req, mamba_blocks_per_req)
-                max_num_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
-            max_num_blocks.append(max_num_blocks_per_req)
 
         if (block_sizes != [self.cache_config.block_size]
                 or self.kernel_block_sizes != [[self.cache_config.block_size]]
@@ -4963,12 +4953,33 @@ class NPUModelRunner(GPUModelRunner):
                     min_cg_attn_backend = attn_backend.__name__
 
         with update_pass_config(self):
+            tensor_parallel_size = self.parallel_config.tensor_parallel_size
+            resolver_tensor_parallel_size = tensor_parallel_size
+            if (
+                self.compilation_config.pass_config.enable_sp
+                and self.uniform_decode_query_len > 1
+                and tensor_parallel_size > 1
+            ):
+                graph_alignment = math.lcm(
+                    self.uniform_decode_query_len,
+                    tensor_parallel_size,
+                )
+                capture_sizes = self.compilation_config.cudagraph_capture_sizes
+                # Explicit sizes aligned to both speculative steps and SP do
+                # not need the resolver's second TP adjustment.
+                if (
+                    graph_alignment
+                    > max(self.uniform_decode_query_len, tensor_parallel_size)
+                    and capture_sizes
+                    and all(size % graph_alignment == 0 for size in capture_sizes)
+                ):
+                    resolver_tensor_parallel_size = 1
             cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
                 min_cg_support=min_cg_support,
                 min_cg_attn_backend=min_cg_attn_backend,
                 uniform_decode_query_len=self.uniform_decode_query_len,
                 use_v2_model_runner=False,
-                tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+                tensor_parallel_size=resolver_tensor_parallel_size,
                 kv_cache_config=self.kv_cache_config,
                 max_num_reqs=self.max_num_reqs,
             )

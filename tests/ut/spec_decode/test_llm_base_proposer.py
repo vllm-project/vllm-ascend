@@ -198,6 +198,30 @@ class TestQuaRotDraftBoundaries:
         torch.testing.assert_close(context_proj.weight, expected)
         torch.testing.assert_close(proposer._quarot_rotation, rotation)
 
+    def test_qwen3_dspark_keeps_fc_and_still_loads_rotation(self, monkeypatch):
+        proposer = self._make_proposer()
+        rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]], dtype=torch.float32)
+        fc = nn.Linear(10, 2, bias=False)
+        initial_weight = torch.arange(1.0, 21.0).reshape(2, 10)
+        fc.weight.data.copy_(initial_weight)
+
+        class FakeQwen3DSpark:
+            pass
+
+        fake_model = FakeQwen3DSpark()
+        fake_model.model = SimpleNamespace(fc=fc)
+        proposer.model = fake_model
+        monkeypatch.setattr(proposer, "_load_quarot_rotation", lambda _: rotation)
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.llm_base_proposer.Qwen3DSparkForCausalLM",
+            FakeQwen3DSpark,
+        )
+
+        proposer._maybe_anti_rotate_fc()
+
+        torch.testing.assert_close(fc.weight, initial_weight)
+        torch.testing.assert_close(proposer._quarot_rotation, rotation)
+
     def test_copies_unrotated_shared_weight_without_mutating_target(self):
         proposer = self._make_proposer()
         proposer._quarot_rotation = torch.tensor([[0.0, 1.0], [-1.0, 0.0]])
