@@ -309,6 +309,17 @@ def test_mooncake_two_npu_workers_store_and_retrieve(tmp_path, monkeypatch) -> N
     if not torch.npu.is_available() or torch.npu.device_count() < 2:
         pytest.skip("Two NPUs are required for the multi-NPU IPC round trip")
 
+    from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.kv_cache.pool.backend.mooncake import (
+        supports_location_registration,
+    )
+
+    if not supports_location_registration():
+        pytest.skip(
+            "mooncake-transfer-engine-npu>=0.3.12.post1 with register_memory(address, size, location) "
+            "is required; the loaded mooncake engine is older (often the CANN-bundled engine.so "
+            "shadowing the pip package)"
+        )
+
     context = multiprocessing.get_context("spawn")
     endpoint_connection, endpoint_child_connection = context.Pipe()
     observation_connections = {}

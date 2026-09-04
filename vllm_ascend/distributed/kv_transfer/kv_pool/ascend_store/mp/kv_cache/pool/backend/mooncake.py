@@ -34,6 +34,22 @@ def _mooncake_register_version_error(exc: TypeError) -> RuntimeError:
     )
 
 
+def supports_location_registration() -> bool:
+    """Whether the loaded mooncake binding accepts the location argument.
+
+    pybind11 docstrings enumerate the supported overloads, so the legacy
+    two-argument register_memory binding is distinguishable without touching
+    the engine. Lets tests skip on images that ship an older engine (often
+    the CANN-bundled engine.so shadowing the pip-installed package).
+    """
+    try:
+        from mooncake.engine import TransferEngine  # type: ignore
+    except Exception:
+        return False
+    doc = getattr(TransferEngine.register_memory, "__doc__", "") or ""
+    return "location" in doc or "arg2" in doc
+
+
 class MPMooncakeBackend(MooncakeBackend):
     """Own the Mooncake buffer registration for one MP Worker service."""
 
