@@ -128,7 +128,7 @@ It is recommended to download the model weight to the shared directory of multip
     export OMP_NUM_THREADS=1
     export TASK_QUEUE_ENABLE=1
 
-    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
+    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8 \
       --host 0.0.0.0 \
       --port 8011 \
       --data-parallel-size 1 \
@@ -180,7 +180,7 @@ It is recommended to download the model weight to the shared directory of multip
     export OMP_NUM_THREADS=10
     export TASK_QUEUE_ENABLE=1
 
-    vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
+    vllm serve Eco-Tech/GLM-5.3-Flash-w8a8   \
       --host 0.0.0.0 \
       --port 8077 \
       --max-model-len 133120  \
