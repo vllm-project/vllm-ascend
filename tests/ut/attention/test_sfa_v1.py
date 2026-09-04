@@ -886,6 +886,47 @@ class TestAscendSFAImpl(TestBase):
         self.impl.kv_b_proj = layer
         return layer
 
+    def test_indexer_selected_score_flag_is_forwarded(self):
+        self.impl.has_indexer = True
+        self.impl.n_head = 1
+        self.impl.head_dim = 128
+        self.impl.qk_rope_head_dim = 64
+        self.impl.is_rope_neox_style = True
+        self.impl.enable_sparse_li_c8 = False
+        self.impl.use_torch_npu_lightning_indexer = False
+        self.impl.wk_weights_proj = MagicMock(return_value=(torch.ones((1, 129), dtype=torch.bfloat16), None))
+        self.impl.wq_b = MagicMock(return_value=(torch.ones((1, 128), dtype=torch.bfloat16), None))
+        expected_indices = torch.zeros((1, 1, 2048), dtype=torch.int32)
+        expected_scores = torch.ones((1, 1, 2048), dtype=torch.bfloat16)
+
+        with (
+            patch("vllm_ascend.attention.sfa_v1.HAS_TRITON", False),
+            patch(
+                "vllm_ascend.attention.sfa_v1.torch_npu.npu_rotary_mul",
+                side_effect=lambda value, *_: value,
+                create=True,
+            ),
+            patch(
+                "vllm_ascend.attention.sfa_v1.DeviceOperator.indexer_select_post_process",
+                return_value=(expected_indices, expected_scores),
+            ) as mock_adaptor,
+        ):
+            result = self.impl.indexer_select_post_process(
+                x=torch.ones((1, 1), dtype=torch.bfloat16),
+                q_c=torch.ones((1, 1), dtype=torch.bfloat16),
+                kv_cache=(torch.empty(0),),
+                attn_metadata=MagicMock(),
+                cos=torch.empty(0),
+                sin=torch.empty(0),
+                actual_seq_lengths_query=torch.tensor([1], dtype=torch.int32),
+                actual_seq_lengths_key=torch.tensor([1], dtype=torch.int32),
+                return_selected_scores=True,
+            )
+
+        self.assertIs(result[0], expected_indices)
+        self.assertIs(result[1], expected_scores)
+        self.assertIs(mock_adaptor.call_args.kwargs["return_selected_scores"], True)
+
     # ============ process_weights_after_loading ============
 
     @patch("vllm_ascend.attention.sfa_v1.maybe_trans_nz")

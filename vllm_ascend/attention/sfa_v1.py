@@ -1170,7 +1170,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         actual_seq_lengths_query: torch.Tensor,
         actual_seq_lengths_key: torch.Tensor,
-    ):
+        *,
+        return_selected_scores: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if not self.has_indexer:
             raise RuntimeError(
                 f"indexer_select_post_process should not be called when indexer is None. layer_name={self.layer_name}."
@@ -1242,6 +1244,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             actual_seq_lengths_key,
             self.enable_sparse_li_c8,
             self.use_torch_npu_lightning_indexer,
+            return_selected_scores=return_selected_scores,
         )
 
     def _get_indexcache_topk_indices(self, num_tokens: int) -> torch.Tensor:

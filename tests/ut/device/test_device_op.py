@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
@@ -182,3 +183,150 @@ def test_a5_npu_flash_attention_uses_python_sequence_lengths():
     assert call_kwargs["actual_seq_qlen"] == [2, 5]
     assert all(isinstance(seq_len, int) for seq_len in call_kwargs["actual_seq_qlen"])
     assert call_kwargs["actual_seq_kvlen"] is call_kwargs["actual_seq_qlen"]
+
+
+def _make_lightning_indexer_inputs(*, use_torch_npu: bool = False):
+    sfa_impl = SimpleNamespace(
+        kv_cache_indexer_k_idx=0,
+        kv_cache_indexer_scale_idx=1,
+        enable_sparse_sfa_c8=False,
+        use_torch_npu_lightning_indexer=use_torch_npu,
+    )
+    return {
+        "sfa_impl": sfa_impl,
+        "q_li": object(),
+        "q_li_scale": None,
+        "q_li_shape_ori": None,
+        "weights": object(),
+        "kv_cache": (object(), object()),
+        "attn_metadata": SimpleNamespace(block_table=object()),
+        "actual_seq_lengths_query": object(),
+        "actual_seq_lengths_key": object(),
+        "enable_sparse_li_c8": False,
+        "use_torch_npu_lightning_indexer": use_torch_npu,
+    }
+
+
+def test_base_lightning_indexer_default_keeps_index_only_contract():
+    inputs = _make_lightning_indexer_inputs()
+    expected_indices = object()
+    unused_scores = object()
+
+    with mock.patch.object(
+        torch.ops._C_ascend,
+        "npu_lightning_indexer",
+        create=True,
+        return_value=(expected_indices, unused_scores),
+    ) as mock_indexer:
+        result = BaseDeviceAdaptor.indexer_select_post_process(**inputs)
+
+    assert result is expected_indices
+    assert "return_value" not in mock_indexer.call_args.kwargs
+
+
+def test_base_custom_lightning_indexer_exposes_selected_scores_when_requested():
+    inputs = _make_lightning_indexer_inputs()
+    expected_indices = object()
+    expected_scores = object()
+
+    with mock.patch.object(
+        torch.ops._C_ascend,
+        "npu_lightning_indexer",
+        create=True,
+        return_value=(expected_indices, expected_scores),
+    ) as mock_indexer:
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            **inputs,
+            return_selected_scores=True,
+        )
+
+    assert result == (expected_indices, expected_scores)
+    assert mock_indexer.call_args.kwargs["return_value"] is True
+
+
+def test_base_torch_npu_lightning_indexer_exposes_selected_scores_when_requested():
+    inputs = _make_lightning_indexer_inputs(use_torch_npu=True)
+    expected_indices = object()
+    expected_scores = object()
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
+        return_value=(expected_indices, expected_scores),
+        create=True,
+    ) as mock_indexer:
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            **inputs,
+            return_selected_scores=True,
+        )
+
+    assert result == (expected_indices, expected_scores)
+    assert mock_indexer.call_args.kwargs["return_value"] is True
+
+
+def test_base_quantized_lightning_indexer_rejects_selected_score_request():
+    inputs = _make_lightning_indexer_inputs()
+    inputs.update(
+        q_li_scale=object(),
+        q_li_shape_ori=(1, 1, 128),
+        kv_cache=(object(), object(), object(), object()),
+        enable_sparse_li_c8=True,
+    )
+
+    with (
+        mock.patch.object(
+            torch.ops._C_ascend,
+            "npu_lightning_indexer_quant",
+            create=True,
+        ) as mock_indexer,
+        pytest.raises(NotImplementedError, match="quantized lightning indexer"),
+    ):
+        BaseDeviceAdaptor.indexer_select_post_process(
+            **inputs,
+            return_selected_scores=True,
+        )
+
+    mock_indexer.assert_not_called()
+
+
+def test_a5_lightning_indexer_exposes_selected_scores_when_requested():
+    inputs = _make_lightning_indexer_inputs(use_torch_npu=True)
+    expected_indices = object()
+    expected_scores = object()
+
+    with mock.patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
+        return_value=(expected_indices, expected_scores),
+        create=True,
+    ) as mock_indexer:
+        result = A5DeviceAdaptor.indexer_select_post_process(
+            **inputs,
+            return_selected_scores=True,
+        )
+
+    assert result == (expected_indices, expected_scores)
+    assert mock_indexer.call_args.kwargs["return_value"] is True
+
+
+def test_a5_quantized_lightning_indexer_rejects_selected_score_request():
+    inputs = _make_lightning_indexer_inputs(use_torch_npu=True)
+    inputs.update(
+        q_li=mock.Mock(),
+        q_li_scale=mock.Mock(),
+        q_li_shape_ori=(1, 1, 128),
+        kv_cache=(object(), mock.Mock()),
+        enable_sparse_li_c8=True,
+    )
+
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_quant_lightning_indexer",
+            create=True,
+        ) as mock_indexer,
+        pytest.raises(NotImplementedError, match="quantized lightning indexer"),
+    ):
+        A5DeviceAdaptor.indexer_select_post_process(
+            **inputs,
+            return_selected_scores=True,
+        )
+
+    mock_indexer.assert_not_called()
