@@ -222,10 +222,34 @@ Once your server is started, you can query the model with input prompts:
 curl http://<node0_ip>:<port>/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "glm",#todo
+        "model": "glm-53-flash",
         "prompt": "The future of AI is",
         "max_completion_tokens": 50,
     }'
+```
+
+Expected Result:
+The expected result of this request is a JSON payload containing the model’s generated text in a text_completion format.
+
+```json
+{
+  "id": "cmpl-123abc",
+  "object": "text_completion",
+  "created": 1725444000,
+  "model": "glm",
+  "choices": [
+    {
+      "text": " incredibly promising, with rapid advancements in machine learning and autonomous systems.",
+      "index": 0,
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 5,
+    "completion_tokens": 15,
+    "total_tokens": 20
+  }
+}
 ```
 
 ## 7 Accuracy Evaluation
