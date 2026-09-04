@@ -64,15 +64,16 @@ def _flatten_state_indices(
         return ssm_state_indices[:total_tokens].to(torch.int32).contiguous()
 
     num_seqs = (cu_seqlens[1:] - cu_seqlens[:-1]).shape[0]
-    seq_lens = cu_seqlens[1 : num_seqs + 1] - cu_seqlens[:num_seqs]
-    ssm_state_indices = ssm_state_indices[:num_seqs]
+    q_per_seq = ssm_state_indices.shape[1]
 
     # Uniform spec-decode ACL graph uses fixed q_len per request; reshape avoids
-    # NPU masked_select which breaks stream capture (aclnnMaskedSelect / 107027).
-    if _EXTRA_CTX.capturing or (seq_lens.numel() > 0 and torch.all(seq_lens == seq_lens[0])):
-        q_per_seq = ssm_state_indices.shape[1]
-        flat = ssm_state_indices[:, :q_per_seq].reshape(-1)
+    # NPU masked_select and seq_lens scalar reads which break stream capture.
+    if _EXTRA_CTX.capturing or total_tokens == num_seqs * q_per_seq:
+        flat = ssm_state_indices[:num_seqs, :q_per_seq].reshape(-1)
         return flat[:total_tokens].to(torch.int32).contiguous()
+
+    seq_lens = cu_seqlens[1 : num_seqs + 1] - cu_seqlens[:num_seqs]
+    ssm_state_indices = ssm_state_indices[:num_seqs]
 
     # Eager mixed batches with variable seq_lens: compact on CPU, copy back async.
     ssm_cpu = ssm_state_indices.cpu()

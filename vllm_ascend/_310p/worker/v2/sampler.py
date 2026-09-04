@@ -8,14 +8,30 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 
 
+class _GreedySamplingStates:
+    """Minimal sampling state for greedy MTP rejection on 310P."""
+
+    def __init__(self, max_num_reqs: int, device: torch.device) -> None:
+        self.temperature = SimpleNamespace(gpu=torch.zeros(max_num_reqs, dtype=torch.float32, device=device))
+        self.seeds = SimpleNamespace(gpu=torch.zeros(max_num_reqs, dtype=torch.int64, device=device))
+
+    def max_num_logprobs(self, idx_mapping_np) -> int:
+        del idx_mapping_np
+        return 0
+
+
 class Ascend310PSampler:
     """Triton-free sampler for 310P MRV2."""
 
     # TODO: Refactor this sampler to register 310P implementations through
     # Triton Dispatcher after vLLM RFC #45133 lands.
 
-    def __init__(self) -> None:
+    def __init__(self, max_num_reqs: int, device: torch.device) -> None:
         self.penalties_state = SimpleNamespace(output_bin_counts=None)
+        self.sampling_states = _GreedySamplingStates(max_num_reqs, device)
+        self.use_fp64_gumbel = False
+        self.logprobs_mode = "raw_logprobs"
+        self.compute_nans = False
 
     def add_request(
         self,

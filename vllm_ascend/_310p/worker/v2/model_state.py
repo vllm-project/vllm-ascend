@@ -20,6 +20,7 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
+from .rejection_sampler import RejectionSampler310V2
 from .sampler import Ascend310PSampler
 
 
@@ -119,7 +120,14 @@ class _Ascend310PModelStateMixin:
 
     def custom_sampler(self, sampler):
         del sampler
-        return Ascend310PSampler(), None
+        base_sampler = Ascend310PSampler(self.max_num_reqs, self.device)
+        vllm_config = getattr(self, "vllm_config", None)
+        spec_config = None if vllm_config is None else vllm_config.speculative_config
+        if spec_config is None:
+            return base_sampler, None
+        if spec_config.method != "mtp":
+            raise NotImplementedError(f"310P MRv2 only supports MTP speculative decoding, got {spec_config.method!r}.")
+        return base_sampler, RejectionSampler310V2(base_sampler, spec_config, self.device)
 
 
 class Ascend310PModelState(_Ascend310PModelStateMixin, AscendModelState):
@@ -172,6 +180,8 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         )
         self._capture_seq_lens_by_ptr = {}
         self._replace_310p_rope_state(encoder_cache)
+        self._align_postprocess_block_tables: tuple[torch.Tensor, ...] | None = None
+        self._align_postprocess_kv_cache_config: KVCacheConfig | None = None
 
     def preprocess_state(
         self,
@@ -222,6 +232,9 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         if reset_indices.numel() > 0:
             DeviceOperator.index_fill(self.num_accepted_tokens_gpu, 0, reset_indices, 1)
 
+        self._align_postprocess_block_tables = block_tables
+        self._align_postprocess_kv_cache_config = kv_cache_config
+
         self._precopy_mamba_align_torch(
             input_batch=input_batch,
             block_tables=block_tables,
@@ -249,7 +262,7 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                 continue
             src_col = int(self._mamba_src_col_gpu[req_idx].item())
             dst_col = int(self._mamba_state_idx_gpu[req_idx].item())
-            if src_col < 0 or dst_col < 0 or src_col == dst_col:
+            if src_col < 0 or src_col == dst_col:
                 continue
             token_bias = int(self._mamba_src_off_gpu[req_idx].item())
             for group_id in mamba_group_ids:
@@ -272,6 +285,64 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                         )
                         dst_state.copy_(src_state.clone())
 
+    def _postprocess_mamba_align_v2_torch(
+        self,
+        idx_mapping: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        block_tables: tuple[torch.Tensor, ...],
+        kv_cache_config: KVCacheConfig,
+        num_reqs: int,
+    ) -> None:
+        """MRv2 align postprocess without Triton (``PRECOMPUTED_NEW_COMPUTED`` path).
+
+        Mirrors ``MambaSpecDecodeGPUContext.run_fused_postprocess_align`` and the
+        MRv1 310P CPU fallback in ``patch_mamba_utils``.
+        """
+        from vllm_ascend.patch.worker.patch_mamba_utils import _tensor_view_from_data_ptr
+
+        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+        block_size = int(mamba_spec.block_size)
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        copy_funcs = self.model.get_mamba_state_copy_func()
+
+        for batch_i in range(num_reqs):
+            req_idx = int(idx_mapping[batch_i].item())
+            if req_idx < 0:
+                continue
+            num_accepted = int(self.num_accepted_tokens_gpu[req_idx].item())
+            src_block_idx = int(self._mamba_state_idx_gpu[req_idx].item())
+            new_num_computed = int(num_computed_tokens[req_idx].item())
+            num_tokens_running_state = new_num_computed - num_accepted + 1
+            aligned_new_computed = new_num_computed // block_size * block_size
+            if aligned_new_computed < num_tokens_running_state:
+                continue
+
+            accept_token_bias = aligned_new_computed - num_tokens_running_state
+            dest_block_idx = aligned_new_computed // block_size - 1
+            if src_block_idx == dest_block_idx:
+                self.num_accepted_tokens_gpu[req_idx] = 1
+                if accept_token_bias == 0:
+                    continue
+
+            for group_id in mamba_group_ids:
+                block_ids = block_tables[group_id][batch_i].detach().to("cpu").tolist()
+                while block_ids and block_ids[-1] < 0:
+                    block_ids.pop()
+                if not block_ids or src_block_idx >= len(block_ids) or dest_block_idx >= len(block_ids):
+                    continue
+                dest_block_id = block_ids[dest_block_idx]
+                layer_names = kv_cache_config.kv_cache_groups[group_id].layer_names
+                for layer_name in layer_names:
+                    attention = forward_context[layer_name]
+                    kv_caches = attention.kv_cache
+                    for state, state_copy_func in zip(kv_caches, copy_funcs):
+                        copy_spec = state_copy_func(state, block_ids, src_block_idx, accept_token_bias + 1)
+                        src_state = _tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)
+                        dst_state = _tensor_view_from_data_ptr(
+                            state, state[dest_block_id].data_ptr(), copy_spec.num_elements
+                        )
+                        dst_state.copy_(src_state.clone())
+
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,
@@ -281,8 +352,6 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         # Upstream uses Triton scatter kernels. On 310P the decorated kernel is
         # unusable; keep the op Triton-free via NPU indexing. Filter padding
         # ``-1`` indices: ``index_fill_`` treats ``-1`` as the last slot.
-        del num_computed_tokens
-
         valid = idx_mapping >= 0
         valid_indices = idx_mapping.masked_select(valid).to(dtype=torch.long)
         if valid_indices.numel() == 0:
@@ -290,7 +359,23 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
 
         if isinstance(num_sampled, int):
             DeviceOperator.index_fill(self.num_accepted_tokens_gpu, 0, valid_indices, max(num_sampled, 1))
+        else:
+            accepted = torch.clamp(num_sampled.masked_select(valid), min=1).to(self.num_accepted_tokens_gpu.dtype)
+            self.num_accepted_tokens_gpu.index_copy_(0, valid_indices, accepted)
+
+        if (
+            not getattr(self, "_align_mode", False)
+            or num_computed_tokens is None
+            or self._align_postprocess_block_tables is None
+            or self._align_postprocess_kv_cache_config is None
+        ):
             return
 
-        accepted = torch.clamp(num_sampled.masked_select(valid), min=1).to(self.num_accepted_tokens_gpu.dtype)
-        self.num_accepted_tokens_gpu.index_copy_(0, valid_indices, accepted)
+        num_reqs = idx_mapping.shape[0]
+        self._postprocess_mamba_align_v2_torch(
+            idx_mapping=idx_mapping,
+            num_computed_tokens=num_computed_tokens,
+            block_tables=self._align_postprocess_block_tables,
+            kv_cache_config=self._align_postprocess_kv_cache_config,
+            num_reqs=num_reqs,
+        )
