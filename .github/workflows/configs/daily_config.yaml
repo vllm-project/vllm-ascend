@@ -23,34 +23,30 @@
 # -----------------------------------------------------------------------
 
 daily:
-  # --- A2: nightly high-freq subset (pytest-driven, runs on a2b3-1) ---
-  # Curated from nightly high-frequency failure cases.
-  # Source: tests/e2e/nightly/single_node/ops/singlecard_ops/. Fast (<2 min each).
+  # --- A2: nightly high‑freq subset (pytest‑driven, runs on a2b3‑1) ---
   a2_nightly_hf:
     - name: Qwen3.5-27B-w8a8-A2
       os: linux-aarch64-a2b3-2
       config_file_path: Qwen3.5-27B-w8a8-A2.yaml
       changed_files:
-        - "tests/**"
-        - "vllm_ascend/**"
+        - tests/
+        - vllm_ascend/
     - name: a2-nightly-hf
       os: linux-aarch64-a2b3-1
       changed_files:
         - tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
-        - tests/e2e/nightly/single_node/ops/singlecard_ops/**
-        - vllm_ascend/**
+        - vllm_ascend/
       tests: >-
         tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
 
-  # --- A3: nightly high-freq subset (pytest-driven, runs on a3-2) ---
-  # Curated from nightly high-frequency failure cases.
-  # Source: tests/e2e/nightly/single_node/ops/multicard_ops_a3/. Fast (<2 min each).
+  # --- A3: nightly high‑freq subset (pytest‑driven, runs on a3‑2) ---
   a3_nightly_hf:
     - name: a3-nightly-hf
       os: linux-aarch64-a3-2
       changed_files:
-        - tests/e2e/nightly/single_node/ops/multicard_ops_a3/**
-        - vllm_ascend/**
+        - tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
+        - tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
+        - vllm_ascend/
       tests: >-
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
         tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
