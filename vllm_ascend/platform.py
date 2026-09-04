@@ -211,11 +211,17 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """
-        Get the total memory of the NPU device in bytes.
-        DO NOT IMPLEMENT: Implementing it calls get_device_name() in advance and initializes torch_npu too early.
-        torch_npu allows global initialization only once; duplicate initialization causes errors.
+        Get the total memory of an initialized NPU device in bytes.
+
+        vLLM may query this method while resolving argument defaults, before
+        the worker initializes torch_npu. Keep the existing early-startup
+        behavior in that case, but allow runtime features such as StartPlan
+        to fingerprint an already initialized device safely.
         """
-        raise NotImplementedError
+        if not hasattr(torch, "npu") or not torch.npu.is_initialized():
+            raise NotImplementedError("NPU total memory is unavailable before torch_npu initialization")
+        _, total_memory = torch.npu.mem_get_info(device_id)
+        return total_memory
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
