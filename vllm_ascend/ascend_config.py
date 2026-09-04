@@ -545,7 +545,13 @@ class AscendConfig:
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         else:
-            logger.info_once("FlashComm1 is enabled. ")
+            if not vc.parallel_config.use_sequence_parallel_moe and flashcomm_explicitly_enabled:
+                logger.warning_once(
+                    "FlashComm1 is enabled, but the current config does not support sequence-parallel MoE. "
+                    "Disabling FlashComm1."
+                )
+            else:
+                logger.info_once("FlashComm1 is enabled. ")
 
         if self.enable_dsa_cp:
             tp_size = vc.parallel_config.tensor_parallel_size
@@ -580,6 +586,11 @@ class AscendConfig:
         has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
             vc.model_config.hf_text_config, "index_topk"
         )
+        if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
+            logger.warning_once(
+                "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. "
+                "Disabling DSA-CP."
+            )
         self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
 
         # Sequence-parallel max_num_batched_tokens divisibility writeback
