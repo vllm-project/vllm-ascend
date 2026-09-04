@@ -94,6 +94,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Enable the A5 Kimi K3 W4A8MXFP GMM+SiTU fused operator. Unset/0 disables it;
     # 1 enables it. This is process-static and requires restart; not sensitive.
     "VLLM_ASCEND_ENABLE_GMM_SITU_QUANT": lambda: _binary_env("VLLM_ASCEND_ENABLE_GMM_SITU_QUANT", "0"),
+    # Log tensor metadata at the GMM1 -> SiTU quant -> GMM2 boundaries for
+    # comparing the split and fused execution paths. No tensor data is copied.
+    "VLLM_ASCEND_GMM_SITU_QUANT_DUMP_SHAPES": lambda: _binary_env(
+        "VLLM_ASCEND_GMM_SITU_QUANT_DUMP_SHAPES", "0"
+    ),
 }
 
 # end-env-vars-definition

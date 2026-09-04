@@ -18,6 +18,7 @@
 import torch
 import torch_npu
 from torch.nn.functional import pad
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.triton_utils import HAS_TRITON
 
@@ -43,6 +44,27 @@ ASCEND_DEVICE_TYPE = get_ascend_device_type()
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
 ENABLE_GMM_SITU_QUANT = bool(envs.VLLM_ASCEND_ENABLE_GMM_SITU_QUANT)
+GMM_SITU_QUANT_DUMP_SHAPES = bool(envs.VLLM_ASCEND_GMM_SITU_QUANT_DUMP_SHAPES)
+
+
+def _tensor_shape_summary(value: object) -> str:
+    if isinstance(value, torch.Tensor):
+        return (
+            f"shape={tuple(value.shape)},dtype={value.dtype},"
+            f"stride={tuple(value.stride())},contiguous={value.is_contiguous()}"
+        )
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return f"{type(value).__name__}[0]"
+        return f"{type(value).__name__}[{len(value)}](first={_tensor_shape_summary(value[0])})"
+    return repr(value)
+
+
+def _dump_gmm_situ_shapes(path: str, stage: str, **values: object) -> None:
+    if not GMM_SITU_QUANT_DUMP_SHAPES:
+        return
+    summary = " ".join(f"{name}=({_tensor_shape_summary(value)})" for name, value in values.items())
+    logger.info("[GMSQ-SHAPE] path=%s stage=%s %s", path, stage, summary)
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb, activation=None):
@@ -270,6 +292,17 @@ def _w4a8_situ_apply_mlp(
         bias2 = w2_scale_bias
         output_dtype = torch.bfloat16
 
+    shape_dump_path = "fused/ON" if ENABLE_GMM_SITU_QUANT else "split/OFF"
+    _dump_gmm_situ_shapes(
+        shape_dump_path,
+        "gmm1_input",
+        x=hidden_states,
+        x_scale=pertoken_scale,
+        weight=w1,
+        weight_scale=w1_scale,
+        group_list=group_list,
+    )
+
     if ENABLE_GMM_SITU_QUANT:
         if not gmsq.is_available():
             raise RuntimeError("GMM-SiTU quant wrapper is unavailable")
@@ -331,6 +364,22 @@ def _w4a8_situ_apply_mlp(
                 activate_left=True,
                 quant_mode="dynamic",
             )
+
+    _dump_gmm_situ_shapes(
+        shape_dump_path,
+        "situ_quant_output",
+        y=hidden_states,
+        y_scale=situ_out_scale,
+    )
+    _dump_gmm_situ_shapes(
+        shape_dump_path,
+        "gmm2_input",
+        x=hidden_states,
+        per_token_scale=situ_out_scale,
+        weight=w2,
+        weight_scale=w2_scale,
+        group_list=group_list,
+    )
 
     before_gmm2_evt = torch.npu.current_stream().record_event()
     hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
@@ -742,6 +791,16 @@ def quant_apply_mlp(
                             "output_dtype": torch.bfloat16,
                         }
                     )
+            if is_situ_activation:
+                _dump_gmm_situ_shapes(
+                    "split/OFF",
+                    "gmm1_input",
+                    x=hidden_states,
+                    x_scale=pertoken_scale,
+                    weight=w1,
+                    weight_scale=scale,
+                    group_list=group_list,
+                )
             hidden_states = torch_npu.npu_grouped_matmul(**gmm1_kwargs)[0]
             if quantized_hidden_states is not None:
                 dispose_tensor(quantized_hidden_states)
@@ -814,6 +873,22 @@ def quant_apply_mlp(
             else:
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        if is_situ_activation:
+            _dump_gmm_situ_shapes(
+                "split/OFF",
+                "situ_quant_output",
+                y=hidden_states,
+                y_scale=swiglu_out_scale,
+            )
+            _dump_gmm_situ_shapes(
+                "split/OFF",
+                "gmm2_input",
+                x=hidden_states,
+                per_token_scale=swiglu_out_scale,
+                weight=w2,
+                weight_scale=w2_scale,
+                group_list=group_list,
+            )
         before_gmm2_evt = torch.npu.current_stream().record_event()
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
