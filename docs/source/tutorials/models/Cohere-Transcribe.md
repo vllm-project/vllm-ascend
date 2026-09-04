@@ -31,7 +31,8 @@ The BF16 model can be deployed with one Atlas A2 64 GB NPU. Download the model w
 
 - GitCode mirror (03-2026): [weixin_62994174/CohereLabs_cohere-transcribe-03-2026](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)
 - Hugging Face: [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) or [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026)
-- ModelScope: [CohereLabs/cohere-transcribe-03-2026](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026)
+- AtomGit: [CohereLabs/cohere-transcribe-03-2026](https://ai.atomgit.com/hf_mirrors/CohereLabs/cohere-transcribe-03-2026)
+- ModelScope: [CohereLabs/cohere-transcribe-03-2026](https://www.modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026)
 
 Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
 

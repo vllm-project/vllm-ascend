@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
+- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [AtomGit](https://ai.atomgit.com/Eco-Tech/Kimi-K2.5-W4A8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
 - `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.

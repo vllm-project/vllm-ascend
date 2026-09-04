@@ -20,8 +20,8 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 require 1 Atlas 800 A3 (64GB × 16) node:
 
-- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8)
-- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [Download model weight](https://modelscope.cn/models/Eco-Tech/InternVL3_5-241B-A28B-w8a8)
+- `InternVL3_5-38B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [AtomGit](https://ai.atomgit.com/Eco-Tech/InternVL3_5-38B-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/InternVL3_5-38B-w8a8)
+- `InternVL3_5-241B-A28B-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node [AtomGit](https://ai.atomgit.com/Eco-Tech/InternVL3_5-241B-A28B-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/InternVL3_5-241B-A28B-w8a8)
 
 ## 4 Installation
 
