@@ -29,7 +29,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
 from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
-from vllm_ascend.utils import FP8_METHOD
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ, FP8_METHOD
 
 from ..base import (
     AscendLinearScheme,
@@ -346,10 +346,12 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -390,6 +392,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             """Helper to restore a single MoE weight and its scale using safe memory copies."""
             # --- 1. Restore Weight ---
             weight_tensor = getattr(layer, weight_key)
+            weight_tensor.data = torch_npu.npu_format_cast(weight_tensor.data, ACL_FORMAT_FRACTAL_ND)
             target_weight = weight_tensor.data.transpose(1, 2).contiguous()
             weight_tensor.data = weight_tensor.data.transpose(1, 2)
             weight_tensor.data.copy_(target_weight)
@@ -399,7 +402,7 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             orig_scale_shape = orig_shapes[scale_key]
 
             target_scale = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape).contiguous()
-            scale_tensor.data = scale_tensor.data.transpose(1, 2).view(orig_scale_shape)
+            scale_tensor.data = scale_tensor.data.transpose(1, 2).reshape(orig_scale_shape)
             scale_tensor.data.copy_(target_scale)
 
         _restore("w13_weight", "w13_weight_scale")
