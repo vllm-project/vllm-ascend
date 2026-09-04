@@ -57,6 +57,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
+        attention_config.indexer_kv_dtype="int8",
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },
@@ -110,6 +111,7 @@ def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
+        attention_config.indexer_kv_dtype="int8",
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
         },

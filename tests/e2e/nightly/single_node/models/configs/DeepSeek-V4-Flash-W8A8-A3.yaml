@@ -47,6 +47,8 @@ test_cases:
       - "$SERVER_PORT"
       - "--block-size"
       - "128"
+      - "--attention_config.indexer_kv_dtype"
+      - "int8"
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
       - "--async-scheduling"

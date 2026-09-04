@@ -79,6 +79,7 @@ def test_deepseek_v4_mtp_full_decode_only():
         compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         disable_log_stats=False,
         async_scheduling=True,
+        attention_config.indexer_kv_dtype="int8",
         speculative_config={
             "num_speculative_tokens": num_speculative_tokens,
             "method": "mtp",
