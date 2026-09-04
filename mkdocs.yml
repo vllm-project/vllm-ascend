@@ -279,6 +279,7 @@ nav:
         - user_guide/configuration/encoder_cache_manager.md
     - Feature Guide:
         - user_guide/feature_guide/index.md
+        - user_guide/feature_guide/trace_replay.md
         - user_guide/feature_guide/graph_mode.md
         - user_guide/feature_guide/cpu_binding.md
         - user_guide/feature_guide/Ai_QoS_introduction_en.md
