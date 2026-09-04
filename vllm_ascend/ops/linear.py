@@ -96,7 +96,7 @@ class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
             new_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
-            # keep the captured graph's weight reference to the updated weight 
+            # keep the captured graph's weight reference to the updated weight
             # during RL weight updates.
             update_tensor_inplace(layer, "weight_fp32", new_fp32)
         if "conv1d" not in layer.prefix:
