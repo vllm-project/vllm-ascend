@@ -38,7 +38,8 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.attention_v1 import AscendMetadata
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.utils import using_paged_attention
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.compilation.updatable_graph import (
@@ -173,10 +174,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
-
+        attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
-        sample_meta = next(iter(attn_metadata.values()), None)
-        if isinstance(sample_meta, AscendMetadata):
+        
+        if use_updatable_graph(attn_backend, num_tokens, self.vllm_config):
             return self._updatable_graph_replay(desc, attn_metadata)
         else:
             self.update_stream.wait_stream(torch.npu.current_stream())
@@ -204,7 +205,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 attn_backend,
@@ -261,6 +261,18 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 lora_capture_hook=lora_capture_hook,
                 progress_bar_desc=progress_bar_desc,
             )
+
+
+def use_updatable_graph(attn_backend, num_tokens, vllm_config) -> bool:
+    if(
+        attn_backend is not None
+        and issubclass(attn_backend, AscendAttentionBackend)
+        and attn_backend.get_sinks() is None
+        and using_paged_attention(num_tokens, vllm_config, attn_backend.get_head_size())
+    ):
+        return True
+    else:
+        return False
 
 
 class ModelWithContext(nn.Module):
