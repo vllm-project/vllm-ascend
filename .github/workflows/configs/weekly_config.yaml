@@ -273,7 +273,11 @@ a3:
       - name: DeepSeek-V4-Flash-Memcache-PD-perf
         config_file_path: DeepSeek-V4-Flash-Memcache-PD-perf.yaml
         config_base_path: tests/e2e/weekly/multi_node/external_dp/config
+<<<<<<< HEAD
 >>>>>>> 1d83002f4 (Add DeepSeek configuration to weekly_config.yaml)
+=======
+>>>>>>> b82e1e566 (Add DeepSeek configuration to weekly_config.yaml)
+>>>>>>> 265d8ed35 (Add DeepSeek configuration to weekly_config.yaml)
         size: 2
   single_node:
     test_config:
