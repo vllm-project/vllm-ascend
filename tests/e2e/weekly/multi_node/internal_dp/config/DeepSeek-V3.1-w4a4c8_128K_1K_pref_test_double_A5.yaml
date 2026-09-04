@@ -1,0 +1,81 @@
+test_name: "DeepSeek_V31_W8A8C8_A5_double_128K1K_pref_test_01"
+model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+num_nodes: 2
+npu_per_node: 8
+env_common: &env_common
+  HCCL_BUFFSIZE: "2048"
+  HCCL_CONNECT_TIMEOUT: "600"
+  HCCL_EXEC_TIMEOUT: "600"
+  HCCL_ALGO: "level0:fullmesh"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
+  #VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: 8004
+
+deployment:
+  - envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve /root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --max-model-len 135000
+      --max-num-batched-tokens 16384
+      --gpu-memory-utilization 0.9
+      --data-parallel-size 2
+      --tensor-parallel-size 8
+      --data-parallel-size-local 1
+      --data-parallel-start-rank 0
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13389
+      --enable-expert-parallel
+      --async-scheduling
+      --max-num-seqs 96
+      --no-enable-prefix-caching
+      --trust-remote-code
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+      --quantization ascend
+      --additional-config '{"enable_cpu_binding" : "True", "multistream_overlap_shared_expert":true,"enable_shared_expert_dp":false}'
+  -
+    envs:
+      <<: *env_common
+    server_cmd: >
+      vllm serve /root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4
+      --host 0.0.0.0
+      --port $SERVER_PORT
+      --headless
+      --max-model-len 135000
+      --max-num-batched-tokens 16384
+      --gpu-memory-utilization 0.9
+      --data-parallel-size 2
+      --tensor-parallel-size 8
+      --data-parallel-size-local 1
+      --data-parallel-start-rank 1
+      --data-parallel-address $LOCAL_IP
+      --data-parallel-rpc-port 13389
+      --enable-expert-parallel
+      --async-scheduling
+      --max-num-seqs 96
+      --no-enable-prefix-caching
+      --trust-remote-code
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      --speculative-config '{"num_speculative_tokens": 3, "method":"deepseek_mtp"}'
+      --quantization ascend
+      --additional-config '{"enable_cpu_binding" : "True", "multistream_overlap_shared_expert":true,"enable_shared_expert_dp":false}'
+benchmarks:
+  perf_128k:
+    case_type: performance
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_in3500_bs400_dsv3.1_w4a8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 4
+    max_out_len: 1024
+    batch_size: 1
+    temperature: 0.0
+    ignore_eos: true
+    request_rate: 0
+    baseline: 14.9632
+    threshold: 0.97
