@@ -274,6 +274,7 @@ class AscendDSAReqMetadata:
     full_compress_sin: torch.Tensor = None
     full_compress_cos: torch.Tensor = None
     start_pos: torch.Tensor | None = None
+    seqused: torch.Tensor | None = None
     num_actual_reqs: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
@@ -326,6 +327,20 @@ class AscendDSALayerMetadata:
 def _require_req_metadata(metadata: AscendDSAMetadata) -> AscendDSAReqMetadata:
     assert metadata.req_metadata is not None
     return metadata.req_metadata
+
+
+def _update_compressor_seqused(
+    buffer: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_reqs: int,
+    num_actual_reqs: int | None,
+) -> torch.Tensor:
+    """Update the stable per-batch compressor token-count buffer."""
+    num_actual_reqs = num_reqs if num_actual_reqs is None else min(num_actual_reqs, num_reqs)
+    buffer[:num_reqs].fill_(0)
+    if num_actual_reqs > 0:
+        buffer[:num_actual_reqs].copy_(query_start_loc[1 : num_actual_reqs + 1] - query_start_loc[:num_actual_reqs])
+    return buffer[:num_reqs]
 
 
 def get_dspark_sparse_sas_window(vllm_config: Any) -> tuple[int, int]:
@@ -423,6 +438,8 @@ def build_vision_bidirectional_swa_indices(
         raise ValueError("max_image_tokens must be positive for vision SWA")
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
+    if int(query_lens.sum().item()) != num_tokens:
+        raise ValueError("Vision SWA must contain one query position per token")
     req_ids = torch.repeat_interleave(
         torch.arange(
             query_lens.shape[0],
@@ -448,6 +465,10 @@ def build_vision_bidirectional_swa_indices(
                     f"Image span exceeds vision_max_n_token: span=[{span_start}, {span_end}], max={max_image_tokens}"
                 )
             in_span = (req_ids == req_idx) & (positions >= span_start) & (positions <= span_end)
+            if bool(in_span.any().item()) and span_end >= int(seq_lens[req_idx].item()):
+                raise ValueError(
+                    "Image spans must be scheduled in a single prefill chunk before bidirectional attention is built"
+                )
             start_positions = torch.where(
                 in_span,
                 torch.minimum(
@@ -553,6 +574,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.hadamard = None
         self._init_hadamard(layer_names)
         self.start_pos_prefill: torch.Tensor = torch.zeros(
+            scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
+        )
+        self.compressor_seqused: torch.Tensor = torch.zeros(
             scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
         )
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
@@ -909,6 +933,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             if num_actual_reqs < num_reqs:
                 self.start_pos_prefill[num_actual_reqs:num_reqs].fill_(0)
                 self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
+        compressor_seqused = _update_compressor_seqused(
+            self.compressor_seqused,
+            query_start_loc,
+            num_reqs,
+            num_actual_reqs,
+        )
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
@@ -951,14 +981,13 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             else 0
         )
         if has_prefill and max_image_tokens > 0 and mm_ranges:
-            actual_reqs = num_reqs if num_actual_reqs is None else num_actual_reqs
             vision_swa_indices, _ = build_vision_bidirectional_swa_indices(
-                block_table=self.block_table[:actual_reqs],
+                block_table=self.block_table[:num_actual_reqs],
                 window_size=self.model_config.hf_config.sliding_window,
                 max_image_tokens=max_image_tokens,
                 block_size=self.storage_block_size,
-                query_start_loc=query_start_loc[: actual_reqs + 1],
-                seq_lens=seq_lens[:actual_reqs],
+                query_start_loc=query_start_loc[: num_actual_reqs + 1],
+                seq_lens=seq_lens[:num_actual_reqs],
                 mm_prefix_ranges=mm_ranges,
                 num_tokens=self.num_actual_tokens,
             )
@@ -1055,6 +1084,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             full_compress_sin=full_compress_sin,
             full_compress_cos=full_compress_cos,
             start_pos=self.start_pos_prefill[:num_reqs],
+            seqused=compressor_seqused,
             num_actual_reqs=num_actual_reqs,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
@@ -2050,10 +2080,11 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         if swa_req_metadata.vision_swa_indices is not None:
             attn_kwargs["ori_sparse_indices"] = swa_req_metadata.vision_swa_indices
 
-        if self.compress_ratio <= 1:
+        if swa_req_metadata.vision_swa_indices is None:
             if swa_req_metadata.dspark_swa_indices is not None:
                 attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
-        else:
+
+        if self.compress_ratio > 1:
             assert compressor_metadata is not None
             attn_kwargs.update(
                 cmp_kv=compress_kv_cache,

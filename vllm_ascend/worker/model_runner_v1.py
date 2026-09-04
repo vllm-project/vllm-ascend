@@ -853,6 +853,21 @@ class NPUModelRunner(GPUModelRunner):
         self._track_tmp_encoder_cache_refs(scheduler_output)
         return sampling_metadata
 
+    def _should_skip_compiled_for_encoder_input(self, scheduler_output: "SchedulerOutput") -> bool:
+        if scheduler_output.scheduled_encoder_inputs:
+            return True
+        for req_id in scheduler_output.num_scheduled_tokens:
+            req_state = self.requests.get(req_id)
+            if req_state is None or not req_state.mm_features:
+                continue
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            if (
+                self.input_batch.num_computed_tokens_cpu[req_idx]
+                < self.input_batch.num_prompt_tokens[req_idx]
+            ):
+                return True
+        return False
+
     def _update_states_after_model_execute(
         self, output_token_ids: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> None:
@@ -2150,7 +2165,7 @@ class NPUModelRunner(GPUModelRunner):
                         # returns True. before returning early here we call
                         # dummy run to ensure coordinate_batch_across_dp
                         # is called into to avoid out of sync issues.
-                        self._dummy_run(1)
+                        self._dummy_run(1, num_actual_reqs=0)
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2355,15 +2370,9 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        # Encoder-decoder models and raw-token multimodal models can only
-        # compile pure decode steps where no encoder inputs are present. The
-        # DeepSeek-V4 vision router needs raw sentinel ids during image
-        # prefill, so keep that pass eager.
-        num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
-        has_encoder_input = num_encoder_reqs > 0 and (
-            self.model_config.is_encoder_decoder
-            or self.model_config.requires_raw_input_tokens
-        )
+        # Encoder inputs and multimodal prompt embeddings are not safe to feed
+        # through the compiled backbone. Pure text and decode remain compiled.
+        skip_compiled = self._should_skip_compiled_for_encoder_input(scheduler_output)
 
         # Run forward pass
         defer_kv_connector_finalize = self.speculative_config is not None and (
@@ -2382,7 +2391,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
-                skip_compiled=has_encoder_input,
+                skip_compiled=skip_compiled,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
@@ -3132,6 +3141,7 @@ class NPUModelRunner(GPUModelRunner):
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_descriptor: BatchDescriptor | None = None,
+        num_actual_reqs: int | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -3250,11 +3260,11 @@ class NPUModelRunner(GPUModelRunner):
                 "mm_prefix_span_leading_pad_modulus",
                 4 if getattr(hf_text_config, "vision_n_layers", 0) > 0 else 0,
             )
-            for req_id in self.input_batch.req_ids:
+            for req_id in self.input_batch.req_ids[:num_reqs]:
                 image_doc_ranges = []
                 req_state = self.requests[req_id]
-                for mm_feature in req_state.mm_features:
-                    if mm_feature.modality == "audio":
+                for mm_feature in req_state.mm_features or ():
+                    if mm_feature.modality not in ("image", "video"):
                         continue
                     pos_info = mm_feature.mm_position
                     if span_pad_modulus:
@@ -3356,7 +3366,7 @@ class NPUModelRunner(GPUModelRunner):
                 if for_cudagraph_capture:
                     common_ratio_to_sas_metadata = {}
                 extra_attn_metadata_args = dict(
-                    num_actual_reqs=num_reqs,
+                    num_actual_reqs=num_reqs if num_actual_reqs is None else min(num_actual_reqs, num_reqs),
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
                     full_graph_mode=cudagraph_runtime_mode == CUDAGraphMode.FULL,
                 )
@@ -3447,15 +3457,6 @@ class NPUModelRunner(GPUModelRunner):
                     cm,
                     common_ratio_to_sas_metadata,
                 )
-        if req_doc_ranges is not None:
-            if isinstance(attn_metadata, list):
-                for ub_metadata in attn_metadata:
-                    for _metadata in ub_metadata.values():
-                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
-            else:
-                for _metadata in attn_metadata.values():
-                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
-
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
         ):
@@ -3502,6 +3503,7 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        num_actual_reqs: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3681,6 +3683,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
+                    num_actual_reqs=num_actual_reqs,
                 )
         with self.maybe_dummy_run_with_lora(
             self.lora_config,

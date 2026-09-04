@@ -80,6 +80,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import get_dsv4_attn_kv_dtype
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 from vllm_ascend.models.deepseek_v4.indexer import DeepseekV4Indexer
+from vllm_ascend.models.deepseek_v4.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 from vllm_ascend.ops.dsa import AscendDeepseekSparseAttention, DSAModules
 from vllm_ascend.ops.rope_dsv4 import ComplexExpRotaryEmbedding
 from vllm_ascend.ops.triton.mul_add import muls_add_triton
@@ -363,7 +364,7 @@ class DeepseekV4MoE(nn.Module):
             swiglu_limit=self.swiglu_limit,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             bias_vl=self.gate.bias_vl,
-            image_sentinel_lo=129257,
+            image_sentinel_lo=IMAGE_SENTINEL_BASE_ID,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,

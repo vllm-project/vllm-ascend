@@ -234,7 +234,7 @@ class Compressor(nn.Module):
             compress_cos.view(-1, compress_cos.shape[-1]),
             state_block_table=state_metadata.block_table,
             cu_seqlens=compressor_metadata.query_start_loc,
-            seqused=None,
+            seqused=getattr(compressor_metadata, "seqused", None),
             start_pos=compressor_metadata.start_pos,
             rope_head_dim=self.rope_head_dim,
             cmp_ratio=self.compress_ratio,

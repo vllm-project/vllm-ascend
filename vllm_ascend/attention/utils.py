@@ -330,6 +330,15 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             block_table_tensor=self.block_table_tensor,
             slot_mapping=self.slot_mapping,
             causal=self.causal,
+            mm_req_doc_ranges=(
+                {
+                    req_idx: doc_ranges
+                    for req_idx, doc_ranges in self.mm_req_doc_ranges.items()
+                    if req_idx < num_actual_reqs
+                }
+                if self.mm_req_doc_ranges is not None
+                else None
+            ),
             actual_seq_lengths_q=self.actual_seq_lengths_q[:num_actual_tokens],
             positions=self.positions,
             positions_cpu=self.positions_cpu,
