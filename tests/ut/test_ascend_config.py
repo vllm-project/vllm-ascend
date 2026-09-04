@@ -534,6 +534,10 @@ class TestAscendConfig(TestBase):
                 )
                 test_vllm_config.additional_config = {
                     "enable_shared_expert_dp": enable_shared_expert_dp,
+                    # Keep the explicitly assigned all2all_backend: without an
+                    # explicit flashcomm switch, derive_and_validate forces
+                    # flashinfer_all2allv and would clobber the SP setup above.
+                    "enable_flashcomm1": True,
                 }
 
                 ascend_config = init_ascend_config(test_vllm_config)

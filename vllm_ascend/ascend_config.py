@@ -543,10 +543,7 @@ class AscendConfig:
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once(
-                "FlashComm1 is enabled, but the current config does not support sequence-parallel MoE. "
-                "Disabling FlashComm1."
-            )
+            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
         else:
             logger.info_once("FlashComm1 is enabled.")
 
@@ -559,8 +556,7 @@ class AscendConfig:
         )
         if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
             logger.warning_once(
-                "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. "
-                "Disabling DSA-CP."
+                "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. Disabling DSA-CP."
             )
         self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
 
