@@ -305,6 +305,75 @@ def _make_dsa_metadata_groups():
     return layer_names, specs, calls, attn_groups, kv_cache_config
 
 
+def _build_metadata_with_positions(
+    positions: torch.Tensor | None,
+    *,
+    for_cudagraph_capture: bool,
+):
+    _, _, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
+    attn_utils.build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=2,
+        num_tokens=4,
+        query_start_loc_gpu=torch.tensor([0, 2, 4], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2, 4], dtype=torch.int32),
+        max_query_len=2,
+        seq_lens=torch.tensor([2, 2], dtype=torch.int32),
+        max_seq_len=4,
+        block_tables=(
+            torch.zeros((2, 1), dtype=torch.int32),
+            torch.zeros((2, 1), dtype=torch.int32),
+        ),
+        slot_mappings=torch.zeros((2, 4), dtype=torch.int32),
+        kv_cache_config=kv_cache_config,
+        seq_lens_np=np.array([2, 2], dtype=np.int32),
+        positions=positions,
+        for_cudagraph_capture=for_cudagraph_capture,
+    )
+    return calls
+
+
+def test_build_attn_metadata_synthesizes_positions_for_cudagraph_capture():
+    calls = _build_metadata_with_positions(
+        None,
+        for_cudagraph_capture=True,
+    )
+
+    assert len(calls) == 2
+    capture_positions = calls[0]["common_attn_metadata"].positions
+    assert capture_positions is not None
+    assert capture_positions.shape == (4,)
+    assert capture_positions.dtype == torch.int64
+    assert capture_positions.device == torch.device("cpu")
+    assert torch.equal(capture_positions, torch.zeros(4, dtype=torch.int64))
+    assert calls[1]["common_attn_metadata"].positions is capture_positions
+
+
+def test_build_attn_metadata_rejects_missing_positions_outside_capture():
+    with pytest.raises(
+        ValueError,
+        match="positions must be provided to build_attn_metadata outside CUDA-graph capture",
+    ):
+        _build_metadata_with_positions(
+            None,
+            for_cudagraph_capture=False,
+        )
+
+
+@pytest.mark.parametrize("for_cudagraph_capture", [False, True])
+def test_build_attn_metadata_preserves_explicit_positions(
+    for_cudagraph_capture,
+):
+    positions = torch.arange(4, dtype=torch.int32)
+    calls = _build_metadata_with_positions(
+        positions,
+        for_cudagraph_capture=for_cudagraph_capture,
+    )
+
+    assert len(calls) == 2
+    assert all(call["common_attn_metadata"].positions is positions for call in calls)
+
+
 def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
     spec = AscendMLAAttentionSpec(
         block_size=128,

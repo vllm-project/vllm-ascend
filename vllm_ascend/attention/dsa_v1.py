@@ -443,6 +443,21 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 )
                 for _ in range(spec_token_num)
             ]
+            # Fixed per-builder buffer for DSpark SWA indices so its address
+            # stays stable across async ACL-graph replays. Without this,
+            # build_dspark_swa_indices returns a fresh local tensor each draft
+            # step that is freed before the graph executes -> the captured
+            # attention op reads dangling/reused memory, corrupts the draft
+            # attention, and drives the DSpark acceptance rate to 0.
+            # Mirrors spec_sas_metadata / spec_slot_mapping.
+            _dspark_index_width = _aligned_dspark_index_width(
+                self.model_config.hf_config.sliding_window, spec_token_num
+            )
+            self.spec_dspark_swa_indices = torch.zeros(
+                (scheduler_config.max_num_batched_tokens, 1, _dspark_index_width),
+                dtype=torch.int32,
+                device=self.device,
+            )
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -842,6 +857,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.num_decode_tokens,
             )
             dspark_swa_indices = dspark_swa_indices[: self.num_decode_tokens]
+            # Copy into the persistent buffer so the graph's captured pointer
+            # always reads this step's freshly computed indices. The slice
+            # bounds the read to num_decode_tokens rows, so rows past it are
+            # never consumed by the attention op.
+            self.spec_dspark_swa_indices[: self.num_decode_tokens] = dspark_swa_indices
+            dspark_swa_indices = self.spec_dspark_swa_indices[: self.num_decode_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
             cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(

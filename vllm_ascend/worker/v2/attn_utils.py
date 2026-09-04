@@ -231,6 +231,15 @@ def build_attn_metadata(
     if num_actual_reqs is None:
         num_actual_reqs = num_reqs
 
+    # The DSpark speculator CUDA-graph capture path does not forward rotary
+    # positions, while Ascend attention backends need them to initialize
+    # static RoPE buffers. Runtime metadata refreshes those buffers with real
+    # positions before replay, so zeros are only capture-time placeholders.
+    if positions is None:
+        if not for_cudagraph_capture:
+            raise ValueError("positions must be provided to build_attn_metadata outside CUDA-graph capture.")
+        positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
+
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
