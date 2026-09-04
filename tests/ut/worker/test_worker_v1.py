@@ -770,11 +770,7 @@ class TestNPUWorker(TestBase):
             worker.execute_dummy_batch()
 
             # Verify call
-            mock_model_runner._dummy_run.assert_called_once_with(
-                mock_uniform_decode_query_len,
-                uniform_decode=True,
-                skip_gdn_state_update=True,
-            )
+            mock_model_runner._dummy_run.assert_called_once_with(mock_uniform_decode_query_len, uniform_decode=True)
 
     @patch("vllm_ascend.worker.worker.plan_sparse_kv_offload_memory")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
