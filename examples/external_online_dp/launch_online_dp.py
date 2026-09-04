@@ -62,8 +62,9 @@ if __name__ == "__main__":
     for i in range(dp_size_local):
         dp_rank = dp_rank_start + i
         vllm_engine_port = vllm_start_port + i
-        visible_devices = ",".join(str(x) for x in range(
-            local_dp_start_rank + i * tp_size, local_dp_start_rank + (i + 1) * tp_size))
+        visible_devices = ",".join(
+            str(x) for x in range(local_dp_start_rank + i * tp_size, local_dp_start_rank + (i + 1) * tp_size)
+        )
         process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
         processes.append(process)
         process.start()
