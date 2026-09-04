@@ -19,11 +19,13 @@ def _make_active_pages() -> KVPPActivePages:
 
 
 def _make_transport(group_rank: int, copy_pages_op=None):
-    return MemFabricMTEKVPPTransport(
+    transport = MemFabricMTEKVPPTransport(
         SimpleNamespace(rank_in_group=group_rank, world_size=2),
         10,
         copy_pages_op=copy_pages_op or (lambda *args: None),
     )
+    transport._staging_shm_id = 31
+    return transport
 
 
 def _install_transfer_regions(transport):
@@ -61,6 +63,12 @@ def test_mte_02_bundle_staging_regions_are_disjoint():
     # indexer occupies [240, 320).
     assert offsets_by_bundle[("main", "indexer")] == {"main": (0, 160), "indexer": (240,)}
 
+    transport._staging_region_offsets_by_cache_bundle = offsets_by_bundle
+    plan = transport._build_device_transfer_plans((("main", "indexer"),))[("main", "indexer")]
+    assert plan.page_strides.tolist() == [32, 64, 16]
+    assert plan.page_lengths.tolist() == [16, 8, 8]
+    assert plan.staging_region_offsets.tolist() == [0, 160, 240]
+
 
 def test_mte_03_owner_pushes_to_peer_and_consumer_receives_locally(monkeypatch):
     class FakeEvent:
@@ -74,26 +82,23 @@ def test_mte_03_owner_pushes_to_peer_and_consumer_receives_locally(monkeypatch):
     calls = []
 
     def record_copy_pages(
-        base_tensor,
-        physical_page_ids,
-        valid_page_mask,
-        staging_page_indices,
-        page_stride_bytes,
-        page_length_bytes,
-        staging_region_offset_bytes,
-        staging_base_address,
-        staging_is_source,
-        staging_group_rank,
+        anchor,
+        local_offsets,
+        staging_offsets,
+        lengths,
+        staging_base,
+        source_rank,
+        destination_rank,
         shm_id,
     ):
         calls.append(
             (
-                page_stride_bytes,
-                page_length_bytes,
-                staging_region_offset_bytes,
-                staging_is_source,
-                staging_group_rank,
-                staging_base_address,
+                local_offsets.tolist(),
+                staging_offsets.tolist(),
+                lengths.tolist(),
+                source_rank,
+                destination_rank,
+                staging_base,
             )
         )
 
@@ -105,12 +110,33 @@ def test_mte_03_owner_pushes_to_peer_and_consumer_receives_locally(monkeypatch):
         MTEStagingRegion(9000, 320, 1),
     ]
     owner._staging_region_offsets_by_cache_bundle = owner._build_staging_region_offsets((("main", "indexer"),), 10)
+    owner._device_transfer_plans_by_cache_bundle = owner._build_device_transfer_plans((("main", "indexer"),))
 
     owner.copy_active_pages_to_staging(("main", "indexer"), _make_active_pages(), SimpleNamespace())
+    owner_plan = owner._device_transfer_plans_by_cache_bundle[("main", "indexer")]
+    base_offsets = owner_plan.local_base_offsets.tolist()
     assert calls == [
-        (32, 16, 0, False, 1, 9000),
-        (64, 8, 160, False, 1, 9000),
-        (16, 8, 240, False, 1, 9000),
+        (
+            [
+                base_offsets[0] + 64,
+                base_offsets[0] + 64,
+                base_offsets[0] + 224,
+                base_offsets[0] + 320,
+                base_offsets[1] + 128,
+                base_offsets[1] + 128,
+                base_offsets[1] + 448,
+                base_offsets[1] + 640,
+                base_offsets[2] + 32,
+                base_offsets[2] + 32,
+                base_offsets[2] + 112,
+                base_offsets[2] + 160,
+            ],
+            [0, 0, 16, 16, 160, 160, 168, 168, 240, 240, 248, 248],
+            [16, 0, 16, 0, 8, 0, 8, 0, 8, 0, 8, 0],
+            -1,
+            1,
+            9000,
+        )
     ]
 
     calls.clear()
@@ -124,10 +150,31 @@ def test_mte_03_owner_pushes_to_peer_and_consumer_receives_locally(monkeypatch):
     consumer._staging_region_offsets_by_cache_bundle = consumer._build_staging_region_offsets(
         (("main", "indexer"),), 10
     )
+    consumer._device_transfer_plans_by_cache_bundle = consumer._build_device_transfer_plans((("main", "indexer"),))
 
     consumer.copy_active_pages_from_staging(("main", "indexer"), _make_active_pages(), SimpleNamespace())
+    consumer_plan = consumer._device_transfer_plans_by_cache_bundle[("main", "indexer")]
+    base_offsets = consumer_plan.local_base_offsets.tolist()
     assert calls == [
-        (32, 16, 0, True, 1, 9000),
-        (64, 8, 160, True, 1, 9000),
-        (16, 8, 240, True, 1, 9000),
+        (
+            [
+                base_offsets[0] + 64,
+                base_offsets[0] + 64,
+                base_offsets[0] + 224,
+                base_offsets[0] + 320,
+                base_offsets[1] + 128,
+                base_offsets[1] + 128,
+                base_offsets[1] + 448,
+                base_offsets[1] + 640,
+                base_offsets[2] + 32,
+                base_offsets[2] + 32,
+                base_offsets[2] + 112,
+                base_offsets[2] + 160,
+            ],
+            [0, 0, 16, 16, 160, 160, 168, 168, 240, 240, 248, 248],
+            [16, 0, 16, 0, 8, 0, 8, 0, 8, 0, 8, 0],
+            1,
+            -1,
+            9000,
+        )
     ]

@@ -256,74 +256,113 @@ void swap_blocks_batch(const torch::Tensor& src_ptrs,
 }
 
 #ifdef VLLM_ASCEND_ENABLE_MEMFABRIC_MTE
-void kvpp_mte_copy(const torch::Tensor& base_tensor,
-                   const torch::Tensor& physical_page_ids,
-                   const torch::Tensor& valid_page_mask,
-                   const torch::Tensor& staging_page_indices,
-                   int64_t page_stride_bytes,
-                   int64_t page_length_bytes,
-                   int64_t staging_region_offset_bytes,
-                   int64_t staging_base_address,
-                   bool staging_is_source,
-                   int64_t staging_group_rank,
+namespace {
+// MemFabric GVA is a raw device address rather than an aclTensor allocation.
+// Keep the ACLNN-style two phases, but launch the AscendC data plane directly
+// in phase two so the GVA is passed to the kernel without address rebinding.
+struct KvppMteCopyExecutor {
+    void* local_base;
+    void* local_offsets;
+    void* staging_offsets;
+    void* lengths;
+    uint64_t descriptor_count;
+    void* staging_base;
+    int32_t source_rank;
+    int32_t destination_rank;
+    uint32_t shm_id;
+};
+
+aclError aclnnKvppMteCopyGetWorkspaceSize(
+    const torch::Tensor& anchor, const torch::Tensor& local_offsets,
+    const torch::Tensor& staging_offsets, const torch::Tensor& lengths,
+    int64_t staging_base, int64_t source_rank, int64_t destination_rank,
+    int64_t shm_id, uint64_t* workspace_size,
+    KvppMteCopyExecutor* executor)
+{
+    *workspace_size = 0;
+    *executor = KvppMteCopyExecutor{
+        anchor.data_ptr(), local_offsets.data_ptr<int64_t>(),
+        staging_offsets.data_ptr<int64_t>(), lengths.data_ptr<int64_t>(),
+        static_cast<uint64_t>(local_offsets.numel()),
+        reinterpret_cast<void*>(staging_base),
+        static_cast<int32_t>(source_rank),
+        static_cast<int32_t>(destination_rank),
+        static_cast<uint32_t>(shm_id)};
+    return ACL_SUCCESS;
+}
+
+aclError aclnnKvppMteCopy(void* workspace, uint64_t workspace_size,
+                          const KvppMteCopyExecutor* executor,
+                          aclrtStream stream)
+{
+    (void)workspace;
+    (void)workspace_size;
+    kvpp_mte_batch_copy_pages_impl(
+        stream, executor->local_base, executor->local_offsets,
+        executor->staging_offsets, executor->lengths,
+        executor->descriptor_count, executor->staging_base,
+        executor->source_rank, executor->destination_rank,
+        executor->shm_id);
+    return ACL_SUCCESS;
+}
+}  // namespace
+
+void kvpp_mte_copy(const torch::Tensor& anchor,
+                   const torch::Tensor& local_offsets,
+                   const torch::Tensor& staging_offsets,
+                   const torch::Tensor& lengths,
+                   int64_t staging_base,
+                   int64_t source_rank,
+                   int64_t destination_rank,
                    int64_t shm_id)
 {
-    TORCH_CHECK(base_tensor.is_privateuseone(),
-                "base_tensor must be an NPU tensor");
-    TORCH_CHECK(physical_page_ids.is_privateuseone() &&
-                    valid_page_mask.is_privateuseone() &&
-                    staging_page_indices.is_privateuseone(),
-                "KVPP active-page tensors must be NPU tensors");
-    TORCH_CHECK(physical_page_ids.device() == base_tensor.device() &&
-                    valid_page_mask.device() == base_tensor.device() &&
-                    staging_page_indices.device() == base_tensor.device(),
-                "KVPP active-page tensors and base_tensor must share one NPU device");
-    TORCH_CHECK(physical_page_ids.dtype() == torch::kInt64,
-                "physical_page_ids must be int64");
-    TORCH_CHECK(valid_page_mask.dtype() == torch::kBool,
-                "valid_page_mask must be bool");
-    TORCH_CHECK(staging_page_indices.dtype() == torch::kInt64,
-                "staging_page_indices must be int64");
-    TORCH_CHECK(physical_page_ids.dim() == 1 &&
-                    valid_page_mask.dim() == 1 &&
-                    staging_page_indices.dim() == 1,
-                "KVPP active-page tensors must be one-dimensional");
-    const int64_t page_descriptor_count = physical_page_ids.numel();
-    TORCH_CHECK(valid_page_mask.numel() == page_descriptor_count &&
-                    staging_page_indices.numel() == page_descriptor_count,
-                "KVPP active-page tensor lengths must match");
-    TORCH_CHECK(physical_page_ids.is_contiguous() &&
-                    valid_page_mask.is_contiguous() &&
-                    staging_page_indices.is_contiguous(),
-                "KVPP active-page tensors must be contiguous");
-    TORCH_CHECK(page_stride_bytes > 0,
-                "page_stride_bytes must be positive");
-    TORCH_CHECK(page_length_bytes > 0,
-                "page_length_bytes must be positive");
-    TORCH_CHECK(staging_region_offset_bytes >= 0,
-                "staging_region_offset_bytes must be non-negative");
-    TORCH_CHECK(staging_base_address > 0,
-                "staging_base_address must be positive");
-    TORCH_CHECK(staging_group_rank >= 0,
-                "staging_group_rank must be non-negative");
-
-    const c10_npu::OptionalNPUGuard npu_guard(base_tensor.device());
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
-    if (page_descriptor_count != 0) {
-        kvpp_mte_batch_copy_pages_impl(
-            stream, base_tensor.data_ptr(),
-            physical_page_ids.data_ptr<int64_t>(),
-            valid_page_mask.data_ptr<bool>(),
-            staging_page_indices.data_ptr<int64_t>(),
-            static_cast<uint64_t>(page_descriptor_count),
-            static_cast<uint64_t>(page_stride_bytes),
-            static_cast<uint64_t>(page_length_bytes),
-            static_cast<uint64_t>(staging_region_offset_bytes),
-            reinterpret_cast<void*>(staging_base_address),
-            staging_is_source,
-            static_cast<int32_t>(staging_group_rank),
-            static_cast<uint32_t>(shm_id));
+    TORCH_CHECK(anchor.is_privateuseone(), "anchor must be an NPU tensor");
+    TORCH_CHECK(local_offsets.is_privateuseone() &&
+                    staging_offsets.is_privateuseone() &&
+                    lengths.is_privateuseone(),
+                "KVPP MTE descriptors must be NPU tensors");
+    TORCH_CHECK(local_offsets.device() == anchor.device() &&
+                    staging_offsets.device() == anchor.device() &&
+                    lengths.device() == anchor.device(),
+                "KVPP MTE descriptors and anchor must share one NPU device");
+    TORCH_CHECK(local_offsets.dtype() == torch::kInt64 &&
+                    staging_offsets.dtype() == torch::kInt64 &&
+                    lengths.dtype() == torch::kInt64,
+                "KVPP MTE descriptors must be int64");
+    TORCH_CHECK(local_offsets.dim() == 1 && staging_offsets.dim() == 1 &&
+                    lengths.dim() == 1,
+                "KVPP MTE descriptors must be one-dimensional");
+    const int64_t descriptor_count = local_offsets.numel();
+    TORCH_CHECK(staging_offsets.numel() == descriptor_count &&
+                    lengths.numel() == descriptor_count,
+                "KVPP MTE descriptor lengths must match");
+    TORCH_CHECK(local_offsets.is_contiguous() &&
+                    staging_offsets.is_contiguous() &&
+                    lengths.is_contiguous(),
+                "KVPP MTE descriptors must be contiguous");
+    TORCH_CHECK(staging_base > 0, "staging_base must be positive");
+    TORCH_CHECK(source_rank >= -1 && destination_rank >= -1 &&
+                    ((source_rank >= 0) != (destination_rank >= 0)),
+                "exactly one KVPP MTE endpoint must be SHM staging");
+    TORCH_CHECK(shm_id >= 0 && shm_id < 64,
+                "KVPP MTE shm_id must be in [0, 64)");
+    if (descriptor_count == 0) {
+        return;
     }
+
+    const c10_npu::OptionalNPUGuard npu_guard(anchor.device());
+    uint64_t workspace_size = 0;
+    KvppMteCopyExecutor executor{};
+    aclError status = aclnnKvppMteCopyGetWorkspaceSize(
+        anchor, local_offsets, staging_offsets, lengths, staging_base,
+        source_rank, destination_rank, shm_id, &workspace_size, &executor);
+    TORCH_CHECK(status == ACL_SUCCESS,
+                "aclnnKvppMteCopyGetWorkspaceSize failed: ", status);
+
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    status = aclnnKvppMteCopy(
+        nullptr, workspace_size, &executor, stream);
+    TORCH_CHECK(status == ACL_SUCCESS, "aclnnKvppMteCopy failed: ", status);
 }
 #endif
 
@@ -2101,11 +2140,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
 #ifdef VLLM_ASCEND_ENABLE_MEMFABRIC_MTE
     ops.def(
-        "kvpp_mte_copy(Tensor base_tensor, Tensor physical_page_ids, "
-        "Tensor valid_page_mask, Tensor staging_page_indices, "
-        "int page_stride_bytes, int page_length_bytes, "
-        "int staging_region_offset_bytes, int staging_base_address, "
-        "bool staging_is_source, int staging_group_rank, int shm_id) -> ()");
+        "kvpp_mte_copy(Tensor(a!) anchor, Tensor local_offsets, "
+        "Tensor staging_offsets, Tensor lengths, int staging_base, "
+        "int source_rank, int destination_rank, int shm_id) -> ()");
     ops.impl("kvpp_mte_copy", torch::kPrivateUse1,
              &vllm_ascend::kvpp_mte_copy);
 #endif

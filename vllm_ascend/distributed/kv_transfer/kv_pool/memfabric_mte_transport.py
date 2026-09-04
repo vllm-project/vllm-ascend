@@ -74,6 +74,17 @@ class _MTETransferRegion:
     page_length_bytes: int
 
 
+@dataclass(frozen=True)
+class _MTEDeviceTransferPlan:
+    """Static device metadata shared by every transfer of one cache bundle."""
+
+    anchor: torch.Tensor
+    local_base_offsets: torch.Tensor
+    page_strides: torch.Tensor
+    page_lengths: torch.Tensor
+    staging_region_offsets: torch.Tensor
+
+
 class MemFabricMTEKVPPTransport:
     """Move active physical pages through bounded symmetric MTE staging."""
 
@@ -94,6 +105,7 @@ class MemFabricMTEKVPPTransport:
         self._staging_regions_by_rank: list[MTEStagingRegion] = []
         self._transfer_regions_by_cache: dict[str, tuple[_MTETransferRegion, ...]] = {}
         self._staging_region_offsets_by_cache_bundle: dict[tuple[str, ...], dict[str, tuple[int, ...]]] = {}
+        self._device_transfer_plans_by_cache_bundle: dict[tuple[str, ...], _MTEDeviceTransferPlan] = {}
         self._staging_shm_id: int
 
     def initialize_transport(
@@ -131,6 +143,7 @@ class MemFabricMTEKVPPTransport:
             cache_bundles,
             max_active_pages,
         )
+        self._device_transfer_plans_by_cache_bundle = self._build_device_transfer_plans(cache_bundles)
 
         logger.info(
             "KVPP MemFabric MTE initialized: rank=%d, gva=%#x, staging_capacity_bytes=%d, shm_id=%d, store_url=%s",
@@ -276,6 +289,83 @@ class MemFabricMTEKVPPTransport:
             offsets_by_cache_bundle[cache_names] = offsets_by_cache
         return offsets_by_cache_bundle
 
+    def _build_device_transfer_plans(
+        self,
+        cache_bundles: tuple[tuple[str, ...], ...],
+    ) -> dict[tuple[str, ...], _MTEDeviceTransferPlan]:
+        """Materialize all address/layout data that is invariant across forwards."""
+        plans: dict[tuple[str, ...], _MTEDeviceTransferPlan] = {}
+        for cache_names in cache_bundles:
+            if cache_names in plans:
+                continue
+
+            regions: list[_MTETransferRegion] = []
+            staging_offsets: list[int] = []
+            offsets_by_cache = self._staging_region_offsets_by_cache_bundle[cache_names]
+            for cache_name in cache_names:
+                cache_regions = self._transfer_regions_by_cache[cache_name]
+                regions.extend(cache_regions)
+                staging_offsets.extend(offsets_by_cache[cache_name])
+            if not regions:
+                raise ValueError("KVPP MTE cache bundle cannot be empty.")
+
+            anchor = regions[0].base_tensor
+            if any(region.base_tensor.device != anchor.device for region in regions):
+                raise RuntimeError("KVPP MTE cache bundle tensors must share one device.")
+            anchor_address = anchor.data_ptr()
+            plans[cache_names] = _MTEDeviceTransferPlan(
+                anchor=anchor,
+                local_base_offsets=torch.tensor(
+                    [region.base_tensor.data_ptr() - anchor_address for region in regions],
+                    dtype=torch.int64,
+                    device=anchor.device,
+                ),
+                page_strides=torch.tensor(
+                    [region.page_stride_bytes for region in regions],
+                    dtype=torch.int64,
+                    device=anchor.device,
+                ),
+                page_lengths=torch.tensor(
+                    [region.page_length_bytes for region in regions],
+                    dtype=torch.int64,
+                    device=anchor.device,
+                ),
+                staging_region_offsets=torch.tensor(
+                    staging_offsets,
+                    dtype=torch.int64,
+                    device=anchor.device,
+                ),
+            )
+        return plans
+
+    def _build_active_page_descriptors(
+        self,
+        cache_names: tuple[str, ...],
+        active_pages: KVPPActivePages,
+    ) -> tuple[_MTEDeviceTransferPlan, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Combine cached layout metadata with this forward's active pages."""
+        plan = self._device_transfer_plans_by_cache_bundle[cache_names]
+        page_ids = active_pages.physical_page_ids.to(dtype=torch.int64)
+        staging_page_indices = active_pages.staging_page_indices.to(dtype=torch.int64)
+        valid_page_mask = active_pages.valid_page_mask
+        if (
+            page_ids.device != plan.anchor.device
+            or staging_page_indices.device != plan.anchor.device
+            or valid_page_mask.device != plan.anchor.device
+        ):
+            raise RuntimeError("KVPP MTE active pages and transfer plan must share one device.")
+
+        local_offsets = (plan.local_base_offsets[:, None] + page_ids[None, :] * plan.page_strides[:, None]).flatten()
+        staging_offsets = (
+            plan.staging_region_offsets[:, None] + staging_page_indices[None, :] * plan.page_lengths[:, None]
+        ).flatten()
+        lengths = torch.where(
+            valid_page_mask[None, :],
+            plan.page_lengths[:, None],
+            torch.zeros((), dtype=torch.int64, device=plan.anchor.device),
+        ).flatten()
+        return plan, local_offsets, staging_offsets, lengths
+
     def copy_active_pages_to_staging(
         self,
         cache_names: tuple[str, ...],
@@ -286,28 +376,23 @@ class MemFabricMTEKVPPTransport:
             raise RuntimeError("KVPP MTE transport was not initialized.")
 
         copy_pages_op = cast(Callable[..., None], self._copy_pages_op)
-        staging_region_offsets = self._staging_region_offsets_by_cache_bundle[cache_names]
+        plan, local_offsets, staging_offsets, lengths = self._build_active_page_descriptors(
+            cache_names,
+            active_pages,
+        )
         for peer_staging_region in self._staging_regions_by_rank:
             if peer_staging_region.kvpp_group_rank == self._kvpp_group.rank_in_group:
                 continue
-            for cache_name in cache_names:
-                for transfer_region, staging_region_offset_bytes in zip(
-                    self._transfer_regions_by_cache[cache_name],
-                    staging_region_offsets[cache_name],
-                ):
-                    copy_pages_op(
-                        transfer_region.base_tensor,
-                        active_pages.physical_page_ids,
-                        active_pages.valid_page_mask,
-                        active_pages.staging_page_indices,
-                        transfer_region.page_stride_bytes,
-                        transfer_region.page_length_bytes,
-                        staging_region_offset_bytes,
-                        peer_staging_region.base_address,
-                        False,
-                        peer_staging_region.kvpp_group_rank,
-                        self._staging_shm_id,
-                    )
+            copy_pages_op(
+                plan.anchor,
+                local_offsets,
+                staging_offsets,
+                lengths,
+                peer_staging_region.base_address,
+                -1,
+                peer_staging_region.kvpp_group_rank,
+                self._staging_shm_id,
+            )
         completion_event = torch.npu.Event()
         completion_event.record(stream)
         return completion_event
@@ -322,25 +407,20 @@ class MemFabricMTEKVPPTransport:
             raise RuntimeError("KVPP MTE transport was not initialized.")
 
         copy_pages_op = cast(Callable[..., None], self._copy_pages_op)
-        staging_region_offsets = self._staging_region_offsets_by_cache_bundle[cache_names]
-        for cache_name in cache_names:
-            for transfer_region, staging_region_offset_bytes in zip(
-                self._transfer_regions_by_cache[cache_name],
-                staging_region_offsets[cache_name],
-            ):
-                copy_pages_op(
-                    transfer_region.base_tensor,
-                    active_pages.physical_page_ids,
-                    active_pages.valid_page_mask,
-                    active_pages.staging_page_indices,
-                    transfer_region.page_stride_bytes,
-                    transfer_region.page_length_bytes,
-                    staging_region_offset_bytes,
-                    self._local_staging_region.base_address,
-                    True,
-                    self._local_staging_region.kvpp_group_rank,
-                    self._staging_shm_id,
-                )
+        plan, local_offsets, staging_offsets, lengths = self._build_active_page_descriptors(
+            cache_names,
+            active_pages,
+        )
+        copy_pages_op(
+            plan.anchor,
+            local_offsets,
+            staging_offsets,
+            lengths,
+            self._local_staging_region.base_address,
+            self._local_staging_region.kvpp_group_rank,
+            -1,
+            self._staging_shm_id,
+        )
         completion_event = torch.npu.Event()
         completion_event.record(stream)
         return completion_event
