@@ -24,14 +24,17 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
-- `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
-- `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
-- `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4).
-- `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8).
+|  Weight Version                                                          | Hardware Requirements | Download Links |
+|--------------------------------------------------------------------------|-----------------------|----------------|
+| `DeepSeek-V3.1`(BF16 version)                                            |                       | [Modelscope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1) \| [HuggingFace]() |
+| `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp)          |                       | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot) \| [HuggingFace]() |
+| `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp) |                       | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot) \| [HuggingFace]() |
+| `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp)             |                       | [Modelscope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4) \| [HuggingFace]() |
+| `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp)             |                       | [Modelscope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8) \| [HuggingFace]() |
+
 - `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md). You can use this method to quantize the model.
 
-It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -183,6 +186,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
     --host 0.0.0.0 \
     --port 8015 \
@@ -226,7 +230,8 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
     --host 0.0.0.0 \
     --port 8015 \
@@ -340,7 +345,8 @@ Run the following scripts on two nodes respectively.
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
@@ -393,6 +399,7 @@ Run the following scripts on two nodes respectively.
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
+    # Ensure the model path matches the directory recorded during download
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
@@ -523,7 +530,7 @@ Parameter descriptions:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -597,7 +604,7 @@ Parameter descriptions:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -670,7 +677,8 @@ Parameter descriptions:
         export VLLM_USE_V1=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -744,6 +752,7 @@ Parameter descriptions:
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
             --host 0.0.0.0 \
             --port $2 \
@@ -809,6 +818,7 @@ Parameter descriptions:
         export DYNAMIC_EPLB="true"
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/  \
         --host 0.0.0.0 \
         --port $2 \
@@ -871,7 +881,8 @@ Parameter descriptions:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+         
+        # Ensure the model path matches the directory recorded during download
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
         --host 0.0.0.0 \
         --port $2 \

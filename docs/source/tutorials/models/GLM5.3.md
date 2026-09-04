@@ -24,7 +24,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5.3-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64G × 32).[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8).
+|  Weight Version          | Hardware Requirements                                         | Download Links |
+|--------------------------|---------------------------------------------------------------|----------------|
+|  `GLM-5.3-w8a8c8`        | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 32) | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8) \| [HuggingFace]() |
+
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`

@@ -18,15 +18,14 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-**Qwen3.5-27B**
-
-- `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B)
-- `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
-
-- `Qwen3.6-27B` (BF16 version): requires 1 Ascend 950DT(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B)
-- `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
-- `Qwen3.6-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8)
- `Qwen3.6-27B-w8a8-310p`(Quantized version): requires 1 Atlas 300I DUO. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `Qwen3.5-27B` (BF16 version) | 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO | [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B) \| [HuggingFace]() |
+| `Qwen3.5-27B-w8a8` (Quantized version) | 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp) \| [HuggingFace]() |
+| `Qwen3.6-27B` (BF16 version) | 1 Ascend 950DT(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO | [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B) \| [HuggingFace]() |
+| `Qwen3.6-27B-w8a8` (Quantized version) | 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8) \| [HuggingFace]() |
+| `Qwen3.6-27B-w8a8-mxfp8` (Quantized version) | 1 Ascend950DT series (96GB × 8) node | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8) \| [HuggingFace]() |
+| `Qwen3.6-27B-w8a8-310p`(Quantized version) | 1 Atlas 300I DUO | [Modelscope](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P) \| [HuggingFace]() |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 

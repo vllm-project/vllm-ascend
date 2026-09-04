@@ -18,7 +18,9 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Ascend 910B 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU. Download the model weights from [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B).
+|  Weight Version    | Hardware Requirements                                            | Download Links |
+|--------------------|------------------------------------------------------------------|----------------|
+| BF16               | one Ascend 910B 64 GB NPU or one Ascend Atlas 300I DUO 48 GB NPU | [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3-ASR-1.7B) \| [HuggingFace]() |
 
 Download the weights to a directory that is accessible from the deployment environment. For multi-node deployments, use a shared directory; for example, `/root/.cache/`.
 

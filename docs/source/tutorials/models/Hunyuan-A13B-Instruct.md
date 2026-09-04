@@ -10,6 +10,10 @@ Hunyuan-A13B-Instruct is a fine-grained hybrid expert model (MoE) developed by T
 
 - `Hunyuan-A13B-Instruct`(BF16 version): [Download model weight](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-Instruct).
 
+|  Weight Version                       | Hardware Requirements | Download Links |
+|---------------------------------------|-----------------------|----------------|
+| `Hunyuan-A13B-Instruct`(BF16 version) |                       | [Modelscope](https://www.modelscope.cn/models/Tencent-Hunyuan/Hunyuan-A13B-Instruct) \| [HuggingFace]() |
+
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
 ### Installation

@@ -22,21 +22,12 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-Requires 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO:
-
-- `Qwen3-VL-8B-Instruct`: [Download model weight](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct)
-
-Requires 1 card on Ascend950DT series (96GB × 8) node.
-
-- `Qwen3-VL-8B-Instruct-w8a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8)
-
-Requires 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products:
-
-- `Qwen3-VL-32B-Instruct`: [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct)
-
-Requires 1 card on Ascend950DT series (96GB × 8) node.
-
-- `Qwen3-VL-32B-Instruct-w8a8`(Quantized version): [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8)
+|  Weight Version                                 | Hardware Requirements                                                                     | Download Links |
+|-------------------------------------------------|-------------------------------------------------------------------------------------------|----------------|
+| `Qwen3-VL-8B-Instruct`                          | 1 card on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas 300I DUO           | [Modelscope](https://modelscope.cn/models/Qwen/Qwen3-VL-8B-Instruct) \| [HuggingFace]() |
+| `Qwen3-VL-8B-Instruct-w8a8`(Quantized version)  | 1 card on Ascend950DT series (96GB × 8) node                                              | [Modelscope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-8B-Instruct-w8a8-mxfp8) \| [HuggingFace]() |
+| `Qwen3-VL-32B-Instruct`                         | 2 cards on Atlas 800I A2 (64GB × 8), Atlas 800 A3 (64GB × 16), or Atlas inference products| [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-32B-Instruct) \| [HuggingFace]() |
+| `Qwen3-VL-32B-Instruct-w8a8`(Quantized version) | 1 card on Ascend950DT series (96GB × 8) node                                              | [Modelscope](https://modelscope.cn/models/Eco-Tech/Qwen3-VL-32B-Instruct-w8a8-mxfp8) \| [HuggingFace]() |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 

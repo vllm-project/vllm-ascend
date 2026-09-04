@@ -16,8 +16,10 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.2-Exp-W8A8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8)
-- `DeepSeek-V3.2-w8a8` (Quantized version): requires **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes**. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/)
+|  Weight Version                              | Hardware Requirements                                                      | Download Links |
+|----------------------------------------------|----------------------------------------------------------------------------|----------------|
+| `DeepSeek-V3.2-Exp-W8A8` (Quantized version) | **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes** | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [HuggingFace]() |
+|  `DeepSeek-V3.2-w8a8` (Quantized version)    | **1 Atlas 800 A3 (64GB × 16) node** or **2 Atlas 800 A2 (64GB × 8) nodes** | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \| [HuggingFace]() |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 

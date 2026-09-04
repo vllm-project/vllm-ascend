@@ -18,8 +18,11 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 ### 3.1 Model Weight
 
-The `MiniMax-M3` BF16 model requires 16 × 64 GB NPU chips. [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
-We also provide `W8A8` quant model requires at least 8 x 64G NPU chips. [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626)
+|  Weight Version    | Hardware Requirements              | Download Links |
+|--------------------|------------------------------------|----------------|
+| `MiniMax-M3`(BF16) | requires 16 × 64 GB NPU chips      | [Modelscope](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3) \| [HuggingFace]() |
+| `MiniMax-M3-W8A8`  | requires at least 8 x 64G NPU chips| [Modelscope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626) \| [HuggingFace]() |
+
 It is recommended to place the model weight in a shared cache directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)

@@ -14,7 +14,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `gpt-oss-120b`(bf16 version): require 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://huggingface.co/unsloth/gpt-oss-120b-BF16)
+|  Weight Version              | Hardware Requirements                                               | Download Links |
+|------------------------------|---------------------------------------------------------------------|----------------|
+| `gpt-oss-120b`(bf16 version) | 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes | [Modelscope]() \| [HuggingFace](https://huggingface.co/unsloth/gpt-oss-120b-BF16) |
 
 ### Installation
 

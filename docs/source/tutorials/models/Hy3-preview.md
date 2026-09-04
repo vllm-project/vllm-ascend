@@ -16,9 +16,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)
-- ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
-- GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)
+|  Weight Version | Hardware Requirements     | Download Links                           |
+|-----------------|---------------------------|----------------|
+| Hy3-preview     |                           | [Modelscope](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview) \| [HuggingFace](https://huggingface.co/tencent/Hy3-preview) \| [GitCode](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview) |
 
 Download or mount the checkpoint to a path shared by the runtime container, for example `/models/Hy3-preview`.
 

@@ -20,11 +20,11 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 The following model variants are available. It is recommended to download the model weight to a shared directory accessible to all nodes.
 
-| Model                | Hardware Requirement                                                                             | Download                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
-| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Download](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B)          |
-| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards)                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) |
-| Eagle3 Draft Model   | NA                                                                                               | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310)            |
+| Model                | Hardware Requirement                                                 | Download                                                                 |
+| -------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| Qwen3-30B-A3B (BF16) | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3-30B-A3B) \| [HuggingFace]()      |
+| Qwen3-30B-A3B-W8A8   | Atlas 800I A3 (64GB, 1\~2 cards)<br>Atlas 800I A2 (64GB, 2\~4 cards) | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8) \| [HuggingFace]()|
+| Eagle3 Draft Model   | NA                                                                   | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-30B-A3B-w8a8-QuaRot-310) \| [HuggingFace]()         |
 
 **Quantized Versions for Atlas 300I DUO:**
 

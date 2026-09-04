@@ -45,8 +45,8 @@ The features below are the ones enabled by the verified deployment commands in [
 
 | Model | Weight |
 | --- | --- |
-| Hy4-preview | <https://huggingface.co/tencent/Hy4-preview> |
-| Hy4-preview-w8a8 | <https://www.modelscope.cn/models/Eco-Tech/Hy4-preview-w8a8> |
+| Hy4-preview | [Modelscope]() \| [HuggingFace](https://huggingface.co/tencent/Hy4-preview) |
+| Hy4-preview-w8a8 | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Hy4-preview-w8a8) \| [HuggingFace]() |
 
 This document uses the quantized [Hy4-preview-w8a8](https://www.modelscope.cn/models/Eco-Tech/Hy4-preview-w8a8) weights, which are about 762 GB. Download the weights to the local disk.
 

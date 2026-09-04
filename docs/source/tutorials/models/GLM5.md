@@ -20,12 +20,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
-- `GLM-5-w4a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
-- `GLM-5-w8a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
-- `GLM-5.1`(BF16 version): [Download model weight](https://huggingface.co/zai-org/GLM-5.1).
-- `GLM-5.1-w4a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
-- `GLM-5.1-w8a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8).
+|  Weight Version                   | Hardware Requirements      | Download Links |
+|-----------------------------------|----------------------------|----------------|
+| `GLM-5`(BF16 version)             | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node | [Modelscope](https://www.modelscope.cn/models/ZhipuAI/GLM-5) |
+| `GLM-5-w4a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8) |
+| `GLM-5-w8a8`(Quantized version)   | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8) |
+| `GLM-5.1`(BF16 version)           | 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64GB × 8) node | [HuggingFace](https://huggingface.co/zai-org/GLM-5.1) |
+| `GLM-5.1-w4a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8) |
+| `GLM-5.1-w8a8`(Quantized version) | 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node | [modelers](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 

@@ -27,11 +27,11 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 
 ### 3.1 Model Weight
 
-The BF16 model can be deployed with one Atlas A2 64 GB NPU. Download the model weights from any of the following sources:
+Download the model weights from any of the following sources:
 
-- GitCode mirror (03-2026): [weixin_62994174/CohereLabs_cohere-transcribe-03-2026](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)
-- Hugging Face: [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) or [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026)
-- ModelScope: [CohereLabs/cohere-transcribe-03-2026](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026)
+|  Weight Version | Hardware Requirements  | Download Links |
+|-----------------|------------------------|----------------|
+| BF16            | one Atlas A2 64 GB NPU | [Modelscope](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026) \| [HuggingFace9(03-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) \| [HuggingFace(07-2026)](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) \| [GitCode mirror (03-2026)](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)|
 
 Note that the model repository ships custom modeling code, so `--trust-remote-code` is required when serving.
 

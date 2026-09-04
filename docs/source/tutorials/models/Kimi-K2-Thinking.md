@@ -18,7 +18,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
+|  Weight Version               | Hardware Requirements           | Download Links |
+|-------------------------------|---------------------------------|----------------|
+| `Kimi-K2-Thinking` (bfloat16) | 1 Atlas 800 A3 (64GB × 16) node | [Modelscope](https://www.modelscope.cn/models/moonshotai/Kimi-K2-Thinking) \| [HuggingFace](https://huggingface.co/moonshotai/Kimi-K2-Thinking) |
 
 It is recommended to download the model weight to the shared directory, such as `/mnt/sfs_turbo/.cache/`.
 

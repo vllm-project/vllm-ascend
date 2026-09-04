@@ -12,8 +12,10 @@ Refer to [Supported Features List](../../user_guide/support_matrix/supported_mod
 
 ### 3.1 Model Weight
 
-- `Qwen3-VL-Embedding-8B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B)
-- `Qwen3-VL-Embedding-2B` [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B)
+|  Weight Version         | Hardware Requirements | Download Links |
+|-------------------------|-----------------------|----------------|
+| `Qwen3-VL-Embedding-8B` |                       | [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-8B) \| [HuggingFace]() |
+| `Qwen3-VL-Embedding-2B` |                       | [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3-VL-Embedding-2B) \| [HuggingFace]() |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 

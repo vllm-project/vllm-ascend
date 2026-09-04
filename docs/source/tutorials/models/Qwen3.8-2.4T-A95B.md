@@ -30,12 +30,11 @@ configuration details.
 
 The following model weights are available:
 
-- `Qwen3.8-2.4T-A95B` (FP16/BF16): approximately 4.89 TB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B).
-- `Qwen3.8-2.4T-A95B-w8a8`: approximately 2.33 TiB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8).
-- `Qwen3.8-2.4T-A95B-w4a8`: approximately 1.21 TiB of storage and weight
-  memory. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8).
+|  Weight Version                 | Hardware Requirements                               | Download Links |
+|---------------------------------|-----------------------------------------------------|----------------|
+| `Qwen3.8-2.4T-A95B` (FP16/BF16) | approximately 4.89 TB of storage and weight memory  | [Modelscope](https://www.modelscope.cn/models/Qwen/Qwen3.8-2.4T-A95B) \| [HuggingFace]() |
+| `Qwen3.8-2.4T-A95B-w8a8`        | approximately 2.33 TiB of storage and weight memory | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w8a8) \| [HuggingFace]() |
+| `Qwen3.8-2.4T-A95B-w4a8`        | approximately 1.21 TiB of storage and weight memory | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-2.4T-A95B-w4a8) \| [HuggingFace]() |
 
 This guide includes the following validated deployment configurations:
 
