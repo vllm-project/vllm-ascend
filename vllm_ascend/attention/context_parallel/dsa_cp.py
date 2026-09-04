@@ -1,5 +1,5 @@
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, TypeVar
 
 import torch
@@ -76,6 +76,7 @@ class DSACPMetadata:
     num_tokens_pad: int
     local_sin: torch.Tensor = None
     local_cos: torch.Tensor = None
+    local_sin_neg: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -1643,10 +1644,15 @@ class AscendDSACPImpl(DSAAttentionImpl):
         req_metadata = attn_metadata.req_metadata
         cp_metadata = req_metadata.cp_metadata
         num_tokens = local_attn_output.shape[0]
+        local_sin = cp_metadata.local_sin[layer_name]
+        sin_neg = cp_metadata.local_sin_neg.get(id(local_sin))
+        if sin_neg is None:
+            sin_neg = -local_sin
+            cp_metadata.local_sin_neg[id(local_sin)] = sin_neg
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
-            -cp_metadata.local_sin[layer_name],
+            sin_neg,
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
