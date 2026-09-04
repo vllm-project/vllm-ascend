@@ -17,6 +17,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 ### Model Weight
 
 - Hugging Face: [tencent/Hy3-preview](https://huggingface.co/tencent/Hy3-preview)
+- AtomGit: [Tencent-Hunyuan/Hy3-preview](https://ai.atomgit.com/tencent_hunyuan/Hy3-preview)
 - ModelScope: [Tencent-Hunyuan/Hy3-preview](https://www.modelscope.cn/models/Tencent-Hunyuan/Hy3-preview)
 - GitCode: [tencent_hunyuan/Hy3-preview](https://ai.gitcode.com/tencent_hunyuan/Hy3-preview)
 

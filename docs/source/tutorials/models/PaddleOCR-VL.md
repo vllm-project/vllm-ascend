@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `PaddleOCR-VL-0.9B`: [PaddleOCR-VL-0.9B](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)
+- `PaddleOCR-VL-0.9B`: [AtomGit](https://ai.atomgit.com/paddlepaddle/PaddleOCR-VL) / [ModelScope](https://www.modelscope.cn/models/PaddlePaddle/PaddleOCR-VL)
 
 It is recommended to download the model weights to the cache directory and set `VLLM_USE_MODELSCOPE=True` to load the model automatically. If you have downloaded the weights to a local directory, update the `MODEL_PATH` variable in the deployment script accordingly.
 

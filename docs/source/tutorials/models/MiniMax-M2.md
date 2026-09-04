@@ -23,9 +23,9 @@ The following model weights and EAGLE3 weights are available on ModelScope. Sear
 | Model | Description | Recommended Hardware | Source |
 |-------|-------------|---------------------|--------|
 | `MiniMax-M2.7-w8a8-QuaRot` | M2.7 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.7-w8a8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8-QuaRot) |
-| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.5-w8a8-QuaRot](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |
+| `MiniMax-M2.5-w8a8-QuaRot` | M2.5 W8A8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [AtomGit](https://ai.atomgit.com/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M2.5-w8a8-QuaRot) |
 | `MiniMax-M2.7-w8a8c8-QuaRot` | M2.7 W8A8C8 quantized version | 1× Atlas 800 A3 (64GB × 16) or 1× Atlas 800I A2 (64GB × 8) | [MiniMax-M2.7-w8a8c8-QuaRot](https://www.modelscope.ai/models/vllm-ascend/MiniMax-M2.7-w8a8c8-QuaRot) |
-| `EAGLE3` (M2.7) | M2.7 speculative decoding head model | Matches the base model node count | [MiniMax-M2.7-eagle-model](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
+| `EAGLE3` (M2.7) | M2.7 speculative decoding head model | Matches the base model node count | [AtomGit](https://ai.atomgit.com/Eco-Tech/MiniMax-M2.7-eagle-model-short) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M2.7-eagle-model-short) |
 | `EAGLE3` (M2.5) | M2.5 speculative decoding head model | Matches the base model node count | [MiniMax-M2.5-eagle-model](https://www.modelscope.cn/models/vllm-ascend/MiniMax-M2.5-eagle-model-0318) |
 
 It is recommended to download the model weights to a shared directory, such as `/root/.cache/`.
