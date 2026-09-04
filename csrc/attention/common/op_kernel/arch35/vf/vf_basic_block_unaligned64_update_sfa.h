@@ -16,6 +16,7 @@
 #define VF_BASIC_BLOCK_ALIGNED64_UPDATE_SFA_H
 
 #include "vf_basic_block_utils.h"
+#include "vf_basic_block_unaligned64_common_sfa.h"
 
 using namespace regbaseutil;
 
@@ -36,15 +37,6 @@ __simd_vf__ void ProcessVec1UpdateImpl64VF(
     AscendC::MicroAPI::RegTensor<float> vreg_cur_max;
     AscendC::MicroAPI::RegTensor<float> vreg_exp;
     AscendC::MicroAPI::RegTensor<float> vreg_exp_sum;
-
-    // bfloat16_t
-    AscendC::MicroAPI::RegTensor<bfloat16_t> vreg_exp_bf16;
-    AscendC::MicroAPI::RegTensor<bfloat16_t> vreg_dst_even_bf16;
-    AscendC::MicroAPI::RegTensor<bfloat16_t> vreg_dst_odd_bf16;
-    // half
-    AscendC::MicroAPI::RegTensor<half> vreg_exp_fp16;
-    AscendC::MicroAPI::RegTensor<half> vreg_dst_even_fp16;
-    AscendC::MicroAPI::RegTensor<half> vreg_dst_odd_fp16;
 
     AscendC::MicroAPI::UnalignRegForStore ureg_max;
     AscendC::MicroAPI::UnalignRegForStore ureg_exp_sum;
@@ -86,26 +78,10 @@ __simd_vf__ void ProcessVec1UpdateImpl64VF(
         AscendC::MicroAPI::ExpSub(vreg_exp, vreg_input_x, vreg_max_brc, preg_ori_src_n);
 
         // x_sum = sum(x_exp, axis=-1, keepdims=True)
-        AscendC::MicroAPI::Reduce<MicroAPI::ReduceType::SUM, float, float, MicroAPI::MaskMergeMode::ZEROING>(
-            vreg_exp_sum, vreg_exp, preg_ori_src_n);
-        AscendC::MicroAPI::StoreUnAlign<float, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-            ((__ubuf__ T *&)tmpExpSumUb), vreg_exp_sum, ureg_exp_sum, 1);
-
-        if constexpr (IsSameType<T2, bfloat16_t>::value) {
-            AscendC::MicroAPI::Cast<T2, T, castTraitZero>(vreg_exp_bf16, vreg_exp, preg_all_b16);
-            AscendC::MicroAPI::DeInterleave(vreg_dst_even_bf16, vreg_dst_odd_bf16,
-                vreg_exp_bf16, vreg_exp_bf16);
-            AscendC::MicroAPI::StoreAlign<T2, MicroAPI::DataCopyMode::DATA_BLOCK_COPY,
-                MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                ((__ubuf__ T2 *&)expUb), vreg_dst_even_bf16, blockStride, repeatStride, preg_src_n_b16);
-        } else if constexpr (IsSameType<T2, half>::value) {
-            AscendC::MicroAPI::Cast<T2, T, castTraitZero>(vreg_exp_fp16, vreg_exp, preg_all_b16);
-            AscendC::MicroAPI::DeInterleave(vreg_dst_even_fp16, vreg_dst_odd_fp16,
-                vreg_exp_fp16, vreg_exp_fp16);
-            AscendC::MicroAPI::StoreAlign<T2, MicroAPI::DataCopyMode::DATA_BLOCK_COPY,
-                MicroAPI::PostLiteral::POST_MODE_UPDATE>(
-                ((__ubuf__ T2 *&)expUb), vreg_dst_even_fp16, blockStride, repeatStride, preg_src_n_b16);
-        }
+        ExpSumReduceStore64<T>(vreg_exp_sum, vreg_exp, ureg_exp_sum, tmpExpSumUb, preg_ori_src_n);
+      
+        CastStoreExp64<T, T2>(vreg_exp, expUb, blockStride, repeatStride,
+            preg_all_b16, preg_src_n_b16);
     }
     AscendC::MicroAPI::StoreUnAlignPost<float, MicroAPI::PostLiteral::POST_MODE_UPDATE>(
         ((__ubuf__ T *&)tmpExpSumUb), ureg_exp_sum, 0);

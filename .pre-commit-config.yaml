@@ -21,7 +21,7 @@ repos:
     - id: codespell
       args: [
         --toml, pyproject.toml,
-        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml',
+        '--skip', 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**,typos.toml,csrc/attention/common/**,csrc/attention/fused_infer_attention_score/**,csrc/attention/incre_flash_attention/**,csrc/attention/prompt_flash_attention/**',
         '-L', 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,ArchType,AND,ND,tbe,copyin,alog,outter,mata,PARD'
       ]
       additional_dependencies:

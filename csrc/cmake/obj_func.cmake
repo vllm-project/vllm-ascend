@@ -481,6 +481,8 @@ function(add_opapi_modules)
       PRIVATE
       ${OPAPI_INCLUDE}
       ${OPAPI_UT_DEPEND_INC}
+      $<BUILD_INTERFACE:${ASCEND_AUTOGEN_DIR}>
+      $<BUILD_INTERFACE:${ASCEND_AUTOGEN_DIR}/inner>
       $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include>
       $<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/aclnn>
       $<$<BOOL:${BUILD_OPEN_PROJECT}>:$<BUILD_INTERFACE:${ASCEND_CANN_PACKAGE_PATH}/include/experiment/metadef/common/util>>

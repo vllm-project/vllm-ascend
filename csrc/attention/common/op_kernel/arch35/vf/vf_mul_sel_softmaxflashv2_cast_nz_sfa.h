@@ -146,19 +146,56 @@ __aicore__ inline void SFAUpdateExpSumAndExpMax(
 }
 
 template <typename T>
-__simd_vf__ inline void DuplicateSumWithR0VF(__ubuf__ T * sumUb, const T R0, uint32_t m) {
+__simd_vf__ inline void InitSoftmaxFromSinksVF(__ubuf__ T * sumUb, __ubuf__ T * maxUb, __ubuf__ T * sinksUb,
+    uint32_t sinksOffset, const T R0, uint32_t m)
+{
+    AscendC::MicroAPI::RegTensor<T> vreg_sinks;
     AscendC::MicroAPI::RegTensor<T> vreg_sum;
     AscendC::MicroAPI::MaskReg preg_m = AscendC::MicroAPI::UpdateMask<T>(m);
-    AscendC::MicroAPI::UnalignRegForStore ureg;
+    AscendC::MicroAPI::UnalignRegForLoad ureg;
+    auto srcUbT = sinksUb + sinksOffset;
+    AscendC::MicroAPI::LoadUnAlignPre(ureg, srcUbT);
+    AscendC::MicroAPI::LoadUnAlign(vreg_sinks, ureg, srcUbT);
+    AscendC::MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM_B32>(maxUb, vreg_sinks, preg_m);
     AscendC::MicroAPI::Duplicate<T, MicroAPI::MaskMergeMode::ZEROING, T>(vreg_sum, R0, preg_m);
     AscendC::MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM_B32>(sumUb, vreg_sum, preg_m);
 }
 
 template <typename T>
-__aicore__ inline void DuplicateSumWithR0(const LocalTensor<T>& sumTensor, const T R0, uint32_t m)
+__aicore__ inline void InitSoftmaxFromSinks(const LocalTensor<T>& sumTensor, const LocalTensor<T>& maxTensor,
+    const LocalTensor<T>& sinksTensor, uint32_t sinksOffset, const T R0, uint32_t m)
 {
     __ubuf__ T * sumUb = (__ubuf__ T*)sumTensor.GetPhyAddr();
-    DuplicateSumWithR0VF<T>(sumUb, R0, m);
+    __ubuf__ T * maxUb = (__ubuf__ T*)maxTensor.GetPhyAddr();
+    __ubuf__ T * sinksUb = (__ubuf__ T*)sinksTensor.GetPhyAddr();
+    InitSoftmaxFromSinksVF<T>(sumUb, maxUb, sinksUb, sinksOffset, R0, m);
+}
+
+template <typename T>
+__simd_vf__ inline void ComputeLseVF(__ubuf__ T * outLseUb, __ubuf__ T * sumUb,
+    __ubuf__ T * maxUb, uint32_t m)
+{
+    AscendC::MicroAPI::RegTensor<T> vreg_outLse;
+    AscendC::MicroAPI::RegTensor<T> vreg_sum;
+    AscendC::MicroAPI::RegTensor<T> vreg_max;
+    AscendC::MicroAPI::RegTensor<T> vreg_tmp;
+    AscendC::MicroAPI::MaskReg preg_m = AscendC::MicroAPI::UpdateMask<T>(m);
+    AscendC::MicroAPI::LoadAlign(vreg_sum, sumUb);
+    AscendC::MicroAPI::LoadAlign(vreg_max, maxUb);
+    AscendC::MicroAPI::UnalignRegForStore ureg;
+    AscendC::MicroAPI::Log<T, MaskMergeMode::ZEROING>(vreg_tmp, vreg_sum, preg_m);
+    AscendC::MicroAPI::Add(vreg_outLse, vreg_tmp, vreg_max, preg_m);
+    AscendC::MicroAPI::StoreAlign<T, MicroAPI::StoreDist::DIST_NORM>(outLseUb, vreg_outLse, preg_m);
+}
+
+template <typename T>
+__aicore__ inline void ComputeLse(const LocalTensor<T>& outLseTensor, const LocalTensor<T>& sumTensor,
+    const LocalTensor<T>& maxTensor, uint32_t m)
+{
+    __ubuf__ T * outLseUb = (__ubuf__ T*)outLseTensor.GetPhyAddr();
+    __ubuf__ T * sumUb = (__ubuf__ T*)sumTensor.GetPhyAddr();
+    __ubuf__ T * maxUb = (__ubuf__ T*)maxTensor.GetPhyAddr();
+    ComputeLseVF<T>(outLseUb, sumUb, maxUb, m);
 }
 } // namespace
 #endif // MUL_SEL_SOFTMAX_FLASH_V2_CAST_NZ_SFA_INTERFACE_H

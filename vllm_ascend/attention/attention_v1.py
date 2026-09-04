@@ -62,7 +62,7 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.memcache_comm_fence import record_attention_compute_start
-from vllm_ascend.utils import is_950, weak_ref_tensors
+from vllm_ascend.utils import enable_custom_op, is_950, weak_ref_tensors
 
 # default max value of sliding window size
 SWA_INT_MAX = 2147483647
@@ -1311,24 +1311,62 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode = 4
             else:
                 sparse_mode = 3
-            attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
-                query,
-                key.contiguous(),
-                value.contiguous(),
-                num_query_heads=self.num_heads,
-                num_key_value_heads=self.num_kv_heads,
-                input_layout="TND",
-                pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
-                next_tokens=0,
-                atten_mask=attn_metadata.attn_mask,
-                sparse_mode=sparse_mode,
-                softmax_scale=self.scale,
-                block_table=block_table,
-                block_size=block_size,
-                actual_seq_qlen=actual_seq_qlen,
-                actual_seq_kvlen=actual_seq_lengths_kv,
-                learnable_sink=self.sinks,
+            # CANN 9.1's stock FIA rejects a first-axis-strided PA cache. The
+            # migrated vllm-ascend binding and OPP preserve the view descriptor;
+            # stock CANN keeps the contiguous fallback for both PA and non-PA.
+            use_vllm_fia = (
+                enable_custom_op()
+                and block_table is not None
+                and hasattr(torch.ops._C_ascend, "npu_fused_infer_attention_score_v2")
             )
+            if use_vllm_fia:
+                # The custom binding takes int[] attributes. Decode metadata may
+                # still hold these two arrays as CPU tensors.
+                custom_actual_seq_qlen = (
+                    actual_seq_qlen.tolist() if isinstance(actual_seq_qlen, torch.Tensor) else actual_seq_qlen
+                )
+                custom_actual_seq_kvlen = (
+                    actual_seq_lengths_kv.tolist()
+                    if isinstance(actual_seq_lengths_kv, torch.Tensor)
+                    else actual_seq_lengths_kv
+                )
+                attn_output, _ = torch.ops._C_ascend.npu_fused_infer_attention_score_v2(
+                    query,
+                    key,
+                    value,
+                    atten_mask=attn_metadata.attn_mask,
+                    learnable_sink=self.sinks,
+                    num_query_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+                    next_tokens=0,
+                    sparse_mode=sparse_mode,
+                    softmax_scale=self.scale,
+                    block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_qlen=custom_actual_seq_qlen,
+                    actual_seq_kvlen=custom_actual_seq_kvlen,
+                )
+            else:
+                attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(
+                    query,
+                    key.contiguous(),
+                    value.contiguous(),
+                    num_query_heads=self.num_heads,
+                    num_key_value_heads=self.num_kv_heads,
+                    input_layout="TND",
+                    pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
+                    next_tokens=0,
+                    atten_mask=attn_metadata.attn_mask,
+                    sparse_mode=sparse_mode,
+                    softmax_scale=self.scale,
+                    block_table=block_table,
+                    block_size=block_size,
+                    actual_seq_qlen=actual_seq_qlen,
+                    actual_seq_kvlen=actual_seq_lengths_kv,
+                    learnable_sink=self.sinks,
+                )
         else:
             if not attn_metadata.causal:
                 attn_output, _ = torch_npu.npu_fused_infer_attention_score(

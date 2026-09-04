@@ -64,6 +64,8 @@ struct BufferInfo{
             return HardEvent::M_FIX;
         } else if constexpr (Type == BufferType::C2) {
             return HardEvent::MTE1_M;
+        } else if constexpr (Type == BufferType::GM) {
+            return HardEvent::MTE2_S;
         }
     }
 
@@ -78,6 +80,8 @@ struct BufferInfo{
             return HardEvent::FIX_M;
         } else if constexpr (Type == BufferType::C2) {
             return HardEvent::M_MTE1;
+        } else if constexpr (Type == BufferType::GM) {
+            return HardEvent::S_MTE2;
         }
     }
 
@@ -197,6 +201,12 @@ public:
                 return c2pEventId_; // 消费者通知生产者已完成消费
             }
         }
+    }
+
+    __aicore__ inline void SetCrossCoreID(uint32_t id0, uint32_t id1)
+    {
+        id0_ = id0;
+        id1_ = id1;
     }
 
     template<bool isReuse = false>
