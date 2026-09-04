@@ -37,7 +37,7 @@ msgid ""
 "This document describes the supported features, environment preparation, "
 "single-node deployment, functional verification, and evaluation workflow for"
 " Qwen3-ASR-1.7B on Ascend NPUs."
-msgstr "本文档描述了 Qwen3-ASR-1.7B 在昇腾 NPU 上支持的特性、环境准备、单节点部署、功能验证及评估流程。"
+msgstr "本文档描述了 Qwen3-ASR-1.7B 在升腾 NPU 上支持的特性、环境准备、单节点部署、功能验证及评估流程。"
 
 msgid ""
 "Qwen3-ASR-1.7B was introduced with upstream vLLM v0.19.0. Use a vLLM-Ascend "
@@ -100,12 +100,6 @@ msgstr "预期结果：`docker ps` 列出状态为 `Up` 的容器，`pip show` �
 
 msgid "### 4.2 Source Code Installation"
 msgstr "### 4.2 源码安装"
-
-msgid ""
-"f you prefer to build from source instead of using the Docker image, install"
-" vLLM-Ascend following the [Installation Guide](../../installation.md)."
-msgstr ""
-"如果您希望从源码构建而非使用 Docker 镜像，请按照[安装指南](../../installation.md)安装 vLLM-Ascend。"
 
 msgid "To verify the source installation:"
 msgstr "验证源码安装："
@@ -277,3 +271,11 @@ msgid ""
 "[Public FAQs](../../faqs.md). This section covers model- and hardware-"
 "specific guidance."
 msgstr "对于常见的环境、安装和通用参数问题，请参阅[公共FAQ](../../faqs.md)。本节涵盖模型和硬件特定的指导。"
+
+msgid ""
+"f you prefer to build from source instead of using the Docker image, install"
+" vLLM-Ascend following the [Installation "
+"Guide](../../getting_started/installation.md)."
+msgstr ""
+"如果您更倾向于从源码构建而不是使用Docker镜像，请按照[安装指南](../../getting_started/installation.md)安装vLLM-"
+"Ascend。"

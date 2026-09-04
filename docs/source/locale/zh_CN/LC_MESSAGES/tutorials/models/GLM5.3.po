@@ -1,0 +1,368 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-04 04:28+0000\n"
+"PO-Revision-Date: 2026-09-04 04:28+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# GLM-5.3 (Experimental)"
+msgstr "# GLM-5.3（实验性）"
+
+msgid "## 1 Introduction"
+msgstr "## 1 引言"
+
+msgid ""
+"[GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) uses the same base model "
+"as GLM-5.2 — every gain comes from post-training. Compared with GLM-5.2, it "
+"is much better at complex coding and long-horizon tasks."
+msgstr ""
+"[GLM-5.3](https://huggingface.co/zai-org/GLM-5.3) 使用与 GLM-5.2 "
+"相同的基础模型——所有性能提升均来自后训练。与 GLM-5.2 相比，它在复杂编码和长周期任务上表现更佳。"
+
+msgid ""
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, multi-"
+"node deployment, accuracy and performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、多节点部署、精度和性能评估。"
+
+msgid "**Current status and constraints**"
+msgstr "**当前状态与限制**"
+
+msgid ""
+"- GLM-5.3 has only been tested on the official Docker image `quay.io/ascend/vllm-ascend:v0.23.0-a3` and `quay.io/ascend/vllm-ascend:v0.23.0` **only on multi-node co-located scenario**.\n"
+"    - The features listed in [Supported Features](#2-supported-features) are only those enabled by the verified deployment commands in this document, and do **not** imply that all features are supported for GLM-5.3. This is an early-access version; performance optimization and reliability validation are still in progress (see [Declaration](#10-declaration)).\n"
+"    - All the scripts below is based on **v0.23.0**, so some params are not supported in main code. If you are using the main branch of vllm-Ascend, please make sure to check it."
+msgstr ""
+"- GLM-5.3 仅在官方 Docker 镜像 `quay.io/ascend/vllm-ascend:v0.23.0-a3` 和 `quay.io/ascend/vllm-ascend:v0.23.0` 上进行了测试，**且仅在多节点共置场景下**。\n"
+"    - [支持的特性](#2-supported-features) 中列出的特性仅为本文档中已验证的部署命令所启用的特性，**并不**意味着 GLM-5.3 支持所有特性。这是一个早期访问版本；性能优化和可靠性验证仍在进行中（参见[声明](#10-declaration)）。\n"
+"    - 以下所有脚本基于 **v0.23.0**，因此部分参数在主代码中不受支持。如果您使用的是 vllm-Ascend 的 main 分支，请务必进行确认。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅[支持的特性列表](../../user_guide/support_matrix/supported_models.md)以获取该模型的支持特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)以获取特性的配置方法。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid ""
+"- `GLM-5.3-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node or 4 Atlas 800 A2 (64G × 32).[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8).\n"
+"- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly."
+msgstr ""
+"- `GLM-5.3-w8a8c8`：需要 2 个 Atlas 800 A3（128GB × 8）节点或 4 个 Atlas 800 A2（64G × 32）。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-w8a8c8)。\n"
+"- 您可以使用 [msmodelslim](https://gitcode.com/Ascend/msmodelslim) 直接对模型进行量化。"
+
+msgid ""
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多个节点的共享目录中，例如 `/root/.cache/`"
+
+msgid "### 3.2 Verify Multi-node Communication (Optional)"
+msgstr "### 3.2 验证多节点通信（可选）"
+
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
+"environment](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
+msgstr ""
+"如果您想部署多节点环境，需要按照[验证多节点通信环境](../../getting_started/installation.md#installation-"
+"multi-node-interconnect)中的说明验证多节点通信。"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid "- You can use our official docker image to run GLM-5.3 directly."
+msgstr "- 您可以使用我们的官方 Docker 镜像直接运行 GLM-5.3。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3 系列\""
+
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动 Docker 镜像。"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
+
+msgid "Start the docker image on each of your nodes."
+msgstr "在您的每个节点上启动 Docker 镜像。"
+
+msgid ""
+"If you want to deploy multi-node environment, you need to set up environment"
+" on each node."
+msgstr "如果您想部署多节点环境，需要在每个节点上配置环境。"
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"If you don't want to use the docker image as above, you can also build all "
+"from source:"
+msgstr "如果您不想使用上述 Docker 镜像，也可以从源码构建所有组件："
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr ""
+"- 从源码安装 `vllm-ascend`，请参阅[安装指南](../../getting_started/installation.md)。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid ""
+"The deployment scenarios validated for this release are organized by context"
+" window size (below 1M), hardware (Atlas 800 A3 / A2), and deployment mode "
+"(multi-node co-located). All startup scripts below are the verified "
+"reference commands; key parameters are explained after each scenario."
+msgstr ""
+"本次发布已验证的部署场景按上下文窗口大小（1M 以下）、硬件（Atlas 800 A3 / "
+"A2）和部署模式（多节点共置）进行组织。以下所有启动脚本均为已验证的参考命令；每个场景后会对关键参数进行说明。"
+
+msgid ""
+"- The scripts below is tested on **v0.23.0**, some params may have changed "
+"in main branch."
+msgstr "- 以下脚本在 **v0.23.0** 上进行了测试，部分参数在 main 分支中可能已更改。"
+
+msgid "### 5.1 Multi-node Deployment"
+msgstr "### 5.1 多节点部署"
+
+msgid ""
+"If you want to deploy multi-node environment, you need to verify multi-node "
+"communication according to [verify multi-node communication "
+"environment](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
+msgstr ""
+"如果您想部署多节点环境，需要按照[验证多节点通信环境](../../getting_started/installation.md#installation-"
+"multi-node-interconnect)中的说明验证多节点通信。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, Refer to [Public "
+"FAQs](../../faqs.md)."
+msgstr "常见问题提示：如果遇到问题，请参阅[公共 FAQ](../../faqs.md)。"
+
+msgid "#### 5.1.1 Context Below 1M"
+msgstr "#### 5.1.1 上下文低于 1M"
+
+msgid ""
+"=== \"A3 series\"\n"
+"    -  `GLM-5.3-w8a8c8`: can be deployed on 2 Atlas 800 A3 (64GB × 16)."
+msgstr ""
+"=== \"A3 系列\"\n"
+"    -  `GLM-5.3-w8a8c8`：可部署在 2 个 Atlas 800 A3（64GB × 16）上。"
+
+msgid "Run the following scripts on two nodes respectively."
+msgstr "分别在两个节点上运行以下脚本。"
+
+msgid "**node 0**"
+msgstr "**节点 0**"
+
+msgid "**node 1**"
+msgstr "**节点 1**"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
+
+msgid "- `GLM-5.3-w8a8c8`: can be deployed on 4 Atlas 800 A2 (64GB × 32)."
+msgstr "- `GLM-5.3-w8a8c8`：可部署在 4 个 Atlas 800 A2（64GB × 32）上。"
+
+msgid "Run the following scripts on four nodes respectively."
+msgstr "分别在四个节点上运行以下脚本。"
+
+msgid "**node 0**"
+msgstr "**节点 0**"
+
+msgid "**node 1-3**"
+msgstr "**节点 1-3**"
+
+msgid "Key Parameter Descriptions:"
+msgstr "关键参数说明："
+
+msgid ""
+"Only the key parameters specific to this model/scenario are described below."
+" max-model-len and max-num-seqs need to be set according to the actual usage"
+" scenario."
+msgstr "以下仅描述针对该模型/场景的关键参数。max-model-len 和 max-num-seqs 需要根据实际使用场景进行设置。"
+
+msgid "**Multi-node network and data parallel configuration:**"
+msgstr "**多节点网络和数据并行配置：**"
+
+msgid ""
+"- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.\n"
+"- `--data-parallel-size 8`: Total number of data parallel ranks across all nodes (4 ranks per node in this scenario).\n"
+"- `--data-parallel-size-local 4`: Number of data parallel ranks on the current node.\n"
+"- `--data-parallel-start-rank`: Starting rank offset for data parallel ranks on this node. Node 0 uses `0`, node 1 uses `4`.\n"
+"- `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.\n"
+"- `--data-parallel-rpc-port 12980`: RPC port for data parallel master communication. Must be the same across all nodes.\n"
+"- `--headless`: Indicates a non-master node (used on node 1-3). Do not use on node 0."
+msgstr ""
+"- `HCCL_IF_IP`、`GLOO_SOCKET_IFNAME`、`TP_SOCKET_IFNAME`、`HCCL_SOCKET_IFNAME`：多节点通信的网络接口配置。将 `nic_name` 设置为网络接口名称（通过 `ifconfig` 获取），将 `local_ip` 设置为当前节点的 IP 地址。每个节点上都必须正确配置这些参数，多节点通信才能成功。\n"
+"- `--data-parallel-size 8`：所有节点上的数据并行 rank 总数（本场景中每个节点 4 个 rank）。\n"
+"- `--data-parallel-size-local 4`：当前节点上的数据并行 rank 数量。\n"
+"- `--data-parallel-start-rank`：当前节点上数据并行 rank 的起始偏移量。节点 0 使用 `0`，节点 1 使用 `4`。\n"
+"- `--data-parallel-address`：数据并行主节点（节点 0）的 IP 地址。必须与主节点的 `local_ip` 一致。\n"
+"- `--data-parallel-rpc-port 12980`：数据并行主节点通信的 RPC 端口。所有节点上必须保持一致。\n"
+"- `--headless`：表示非主节点（在节点 1-3 上使用）。不要在节点 0 上使用。"
+
+msgid "**A2-specific environment variables:**"
+msgstr "**A2 特有的环境变量：**"
+
+msgid ""
+"- `CPU_AFFINITY_CONF=1`: Enables CPU core affinity binding for worker processes.\n"
+"- `ACL_OP_INIT_MODE=1`: ACL operator initialization mode to speed up operator compilation.\n"
+"- `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`: Timeout settings for multi-node startup and model execution on the slower A2 platform. Increase them if the engine fails to become ready in time."
+msgstr ""
+"- `CPU_AFFINITY_CONF=1`：为工作进程启用CPU核心亲和性绑定。\n"
+"- `ACL_OP_INIT_MODE=1`：ACL算子初始化模式，用于加速算子编译。\n"
+"- `VLLM_RPC_TIMEOUT=360000` / `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000` / `HCCL_EXEC_TIMEOUT=200` / `HCCL_CONNECT_TIMEOUT=120` / `VLLM_ENGINE_READY_TIMEOUT_S=1200`：在较慢的A2平台上，用于多节点启动和模型执行的超时设置。如果引擎未能及时就绪，请增大这些值。"
+
+msgid ""
+"**Notice:**\n"
+"This scenario enables `additional_config.enable_fused_mc2=1` (fused `dispatch_ffn_combine`/`mega_moe` operators). Fused MC2 conflicts with `multistream_overlap_shared_expert` — the two optimizations must not be enabled at the same time (the runtime forcibly disables `multistream_overlap_shared_expert` when fused MC2 is on)."
+msgstr ""
+"**注意：**\n"
+"此场景启用了 `additional_config.enable_fused_mc2=1`（融合的 `dispatch_ffn_combine`/`mega_moe` 算子）。融合MC2与 `multistream_overlap_shared_expert` 存在冲突——这两种优化不能同时启用（当融合MC2开启时，运行时将强制禁用 `multistream_overlap_shared_expert`）。"
+
+msgid "#### 5.1.2 1M Context Deployment"
+msgstr "#### 5.1.2 1M上下文部署"
+
+msgid ""
+"The 1M context scenarios have not yet tested for `GLM-5.3`. If you want to "
+"deploy, please refer to scripts in [GLM-5.2 1M Context "
+"Deployment](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-"
+"deployment)."
+msgstr ""
+"`GLM-5.3` 尚未测试1M上下文场景。如需部署，请参考 [GLM-5.2 "
+"1M上下文部署](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#m-context-"
+"deployment) 中的脚本。"
+
+msgid "### 5.2 Prefill-Decode Disaggregation"
+msgstr "### 5.2 预填充-解码分离"
+
+msgid ""
+"Prefill-Decode disaggregation scenarios have not yet tested for `GLM-5.3`. "
+"If you want to deploy prefill-decode disaggregation, you can refer to "
+"scripts in [GLM-5.2 Prefill-Decode "
+"Disaggregation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#prefill-"
+"decode-disaggregation)."
+msgstr ""
+"`GLM-5.3` 尚未测试预填充-解码分离场景。如需部署预填充-解码分离，可参考 [GLM-5.2 预填充-"
+"解码分离](https://docs.vllm.ai/projects/ascend/en/v0.23.0/tutorials/models/GLM5.2.html#prefill-"
+"decode-disaggregation) 中的脚本。"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+msgid "Expected result should be have this:"
+msgstr "预期结果应如下所示："
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用AISBench"
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"1. 详细信息请参考 "
+"[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+msgid ""
+"2. After execution, you can get the result. Here are the results of "
+"`GLM-5.3-w8a8c8` in `vllm-ascend:v0.23.0` for reference only."
+msgstr "2. 执行后，您可以获得结果。以下是 `vllm-ascend:v0.23.0` 中 `GLM-5.3-w8a8c8` 的结果，仅供参考。"
+
+msgid "| dataset | model | hardware | metric | mode | vllm-api-general-chat |"
+msgstr ""
+"| dataset | model | hardware | metric | mode | vllm-api-general-chat |"
+
+msgid "| GPQA Diamond | GLM-5.3-w8a8c8 | A3 | accuracy | gen | 92.42 |"
+msgstr "| GPQA Diamond | GLM-5.3-w8a8c8 | A3 | accuracy | gen | 92.42 |"
+
+msgid "| GPQA Diamond | GLM-5.3-w8a8c8 | A2 | accuracy | gen | 90.40 |"
+msgstr "| GPQA Diamond | GLM-5.3-w8a8c8 | A2 | accuracy | gen | 90.40 |"
+
+msgid "### 7.2 Using Language Model Evaluation Harness"
+msgstr "### 7.2 使用语言模型评估工具"
+
+msgid "Not tested yet."
+msgstr "尚未测试。"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用AISBench"
+
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"详细信息请参考 "
+"[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用vLLM基准测试"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr "更多详细信息请参考 [vllm基准测试](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid "## 9 FAQ"
+msgstr "## 9 常见问题"
+
+msgid "- **Q: How to enable function calling for GLM-5.3?**"
+msgstr "- **问：如何为GLM-5.3启用函数调用？**"
+
+msgid "A: Please add following configurations in vLLM startup command"
+msgstr "答：请在vLLM启动命令中添加以下配置"
+
+msgid "## 10 Declaration"
+msgstr "## 10 声明"
+
+msgid ""
+"- The current version is only for early experience, and performance optimization is still in progress.\n"
+"- The service reliability has not been fully validated, and it is not recommended for direct use in production environments."
+msgstr ""
+"- 当前版本仅用于早期体验，性能优化仍在进行中。\n"
+"- 服务可靠性尚未完全验证，不建议直接用于生产环境。"
