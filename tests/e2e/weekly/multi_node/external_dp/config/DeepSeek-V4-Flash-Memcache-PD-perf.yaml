@@ -1,0 +1,203 @@
+# Memcache Pooling + DeepSeek V4 Flash Performance Testing
+test_name: "DeepSeek-V4-Flash-Memcache-PD-perf"
+model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
+num_nodes: 2
+npu_per_node: 16
+
+env_common: &env_common
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "120"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTHONHASHSEED: "0"
+  SERVER_PORT: "${PORT}"
+  LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2"
+  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [0]
+    decoder: [1]
+
+kv_pool:
+  type: memcache
+  meta_service_port: 5000
+  config_store_port: 6000
+  config:
+    meta:
+      ock.mmc.log_level: error
+    local:
+      ock.mmc.log_level: error
+      ock.mmc.local_service.world_size: 256
+      ock.mmc.local_service.protocol: device_sdma
+      ock.mmc.local_service.dram.size: 10GB
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12332
+    dp_size: 4
+    dp_size_local: 4
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12332
+    dp_size: 16
+    dp_size_local: 16
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+ 
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "2560"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "1500"
+  HCCL_CONNECT_TIMEOUT: "1200"
+  VLLM_ASCEND_APPLY_DSV4_PATCH: "1"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - $SERVER_PORT
+      - "--data-parallel-size"
+      - "${DP_SIZE}"
+      - "--data-parallel-rank"
+      - "${DP_RANK}"
+      - "--data-parallel-address"
+      - "${DP_ADDRESS}"
+      - "--data-parallel-rpc-port"
+      - "${DP_RPC_PORT}"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE}"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "16"
+      - "--no-disable-hybrid-kv-cache-manager"
+      - "--enable-prefix-caching"
+      - "--model-loader-extra-config"
+      - '{"enable_multithread_load": true, "num_threads": 128}'
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 1,"method": "mtp"}'
+      - "--trust-remote-code"
+      - "--block-size"
+      - "32"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--quantization"
+      - "ascend"
+      - "--enforce-eager"
+      - "--additional-config"
+      - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true, "enable_dsa_cp": true}'
+      - "--kv-transfer-config"
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "memcache"}}]}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - $SERVER_PORT
+      - "--data-parallel-size"
+      - "${DP_SIZE}"
+      - "--data-parallel-rank"
+      - "${DP_RANK}"
+      - "--data-parallel-address"
+      - "${DP_ADDRESS}"
+      - "--data-parallel-rpc-port"
+      - "${DP_RPC_PORT}"
+      - "--tensor-parallel-size"
+      - "${TP_SIZE}"
+      - "--enable-expert-parallel"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "1048576"
+      - "--max-num-batched-tokens"
+      - "240"
+      - "--max-num-seqs"
+      - "60"
+      - "--block-size"
+      - "32"
+      - "--no-disable-hybrid-kv-cache-manager"
+      - "--no-enable-prefix-caching"
+      - "--trust-remote-code"
+      - "--tokenizer-mode"
+      - "deepseek_v4"
+      - "--model-loader-extra-config"
+      - '{"enable_multithread_load": true, "num_threads": 128}'
+      - "--tool-call-parser"
+      - "deepseek_v4"
+      - "--enable-auto-tool-choice"
+      - "--reasoning-parser"
+      - "deepseek_v4"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--compilation-config"
+      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+      - "--quantization"
+      - "ascend"
+      - "--speculative-config"
+      - '{"num_speculative_tokens": 3,"method": "mtp"}'
+      - "--additional-config"
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "enable_cpu_binding":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable":true}'
+      - "--kv-transfer-config"
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "memcache"}}]}}'
+
+benchmarks:
+  perf_1:
+    case_type: performance
+    dataset_path_local: vllm-ascend/GSM8K_prefix90_in131072_bs512_ds_prefix
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1024
+    batch_size: 128
+    request_rate: 2.5
+    baseline: 100
+    threshold: 0.97
+  perf_2:
+    case_type: performance
+    dataset_path_local: vllm-ascend/GSM8K_prefix90_in131072_bs512_ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 512
+    max_out_len: 1024
+    batch_size: 128
+    request_rate: 2.5
+    baseline: 1539.8682
+    threshold: 0.97
