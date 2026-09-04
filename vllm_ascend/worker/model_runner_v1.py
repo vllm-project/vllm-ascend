@@ -2150,7 +2150,7 @@ class NPUModelRunner(GPUModelRunner):
                         # returns True. before returning early here we call
                         # dummy run to ensure coordinate_batch_across_dp
                         # is called into to avoid out of sync issues.
-                        self._dummy_run(1)
+                        self._dummy_run(1, skip_gdn_state_update=True)
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -3125,6 +3125,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        skip_gdn_state_update: bool = False,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         batch_descriptor: BatchDescriptor | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
@@ -3294,6 +3295,36 @@ class NPUModelRunner(GPUModelRunner):
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
+            is_gdn_noop = skip_gdn_state_update and isinstance(
+                builder,
+                GDNAttentionMetadataBuilder,
+            )
+            if is_gdn_noop:
+                # Dummy-run callers coalesce this; fall back to the unpadded
+                # batch size instead of asserting in the execute path.
+                gdn_num_reqs = (
+                    num_reqs if num_reqs_padded is None else num_reqs_padded
+                )
+                # Idle DP dummy: keep captured GDN tensor ranks for graph
+                # replay/collectives. num_actual_tokens=0 is the kernel no-op
+                # (ops slice mixed_qkv[:0]); query_start_loc is a zero-filled
+                # prefix sized to the graph, not a real token schedule.
+                common_attn_metadata = replace(
+                    common_attn_metadata,
+                    query_start_loc=self.gdn_query_start_loc.gpu[
+                        : gdn_num_reqs + 1
+                    ],
+                    query_start_loc_cpu=self.gdn_query_start_loc.cpu[
+                        : gdn_num_reqs + 1
+                    ],
+                    num_actual_tokens=0,
+                    max_query_len=0,
+                    is_prefilling=(
+                        torch.zeros_like(common_attn_metadata.is_prefilling)
+                        if common_attn_metadata.is_prefilling is not None
+                        else None
+                    ),
+                )
             device_metadata_provider = (
                 self.device_metadata_providers.get(id(builder))
                 if self.device_metadata_providers is not None
@@ -3304,7 +3335,11 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+            if (
+                use_spec_decode
+                and isinstance(builder, GDNAttentionMetadataBuilder)
+                and not is_gdn_noop
+            ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
@@ -3472,6 +3507,7 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        skip_gdn_state_update: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3610,7 +3646,12 @@ class NPUModelRunner(GPUModelRunner):
                 self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
                 self.query_start_loc.copy_to_gpu()
                 if self._has_gdn:
-                    self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
+                    if skip_gdn_state_update:
+                        self.gdn_query_start_loc.np.fill(0)
+                    else:
+                        self.gdn_query_start_loc.np[
+                            1 : num_reqs_padded + 1
+                        ] = cum_num_tokens
                     self.gdn_query_start_loc.copy_to_gpu()
 
                 if not profile_cpp:
@@ -3651,6 +3692,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
+                    skip_gdn_state_update=skip_gdn_state_update,
                 )
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
