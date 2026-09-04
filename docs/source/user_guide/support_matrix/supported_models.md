@@ -106,6 +106,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
     |-------|---------|------|--------------------|-----|------|
     | Qwen3-Embedding | 🔵 | FP16 | Atlas 300I DUO |🟡| [Qwen3_Embedding](../../tutorials/models/Qwen3-Embedding.md) |
     | Qwen3-VL-Embedding | 🔵 | FP16 | Atlas 300I DUO |🔵| [Qwen3_VL_Embedding](../../tutorials/models/Qwen3-VL-Embedding.md) |
+    | SigLIP2 | ✅ | FP16; text/image embedding | Atlas 300I DUO |🔵| [SigLIP2](../../tutorials/models/SigLIP2.md) |
     | Qwen3-Reranker  | 🔵 | FP16 | Atlas 300I DUO |🟡| [Qwen3_Reranker](../../tutorials/models/Qwen3-Reranker.md) |
     | Qwen3-VL-Reranker | 🔵 | FP16 | Atlas 300I DUO |🔵| [Qwen3_VL_Reranker](../../tutorials/models/Qwen3-VL-Reranker.md) |
     | XLM-RoBERTa-based | 🔵 | FP16; embedding and scoring | Atlas 300I DUO |🟡| |

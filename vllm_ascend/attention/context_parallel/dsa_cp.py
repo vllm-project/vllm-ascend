@@ -593,6 +593,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
         if is_noncausal:
             assert self.speculative_config is not None
+            # todo: If DSA CP is adapted to v2 DSpark graph mode, there may be issues.
             global_dspark_indices, _ = build_dspark_swa_indices(
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
@@ -1351,9 +1352,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and get_current_hardware_profile().supports(
-            HardwareCapability.DSA_O_PROJ_TP
-        )
+        # Device-independent: the selected linear method validates whether
+        # its tensors support TP/full-weight switching.
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
         self._o_proj_tp_weight_switch_enabled = False
 
         self.eps = kwargs["eps"]

@@ -1,5 +1,5 @@
 test_name: "GLM-5.2-W8A8C8-3.5k-1.5k-0-20"
-model: "Eco-Tech/GLM-5.2-W8A8C8"
+model: "Eco-Tech/GLM-5.2-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
 
