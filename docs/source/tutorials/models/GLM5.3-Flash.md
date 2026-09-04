@@ -17,7 +17,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 ### 3.1 Model Weight
 
 - `GLM-5.3-Flash-w8a8 (Ascend950DT mxfp8 Quantized)`: requires 1 Ascend950DT (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
-- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
+- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
@@ -32,7 +32,7 @@ It is recommended to download the model weight to the shared directory of multip
     Start the docker image on each node.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a5
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a5-openeuler
     export NAME=vllm-ascend
 
     docker run --rm \
@@ -72,7 +72,7 @@ It is recommended to download the model weight to the shared directory of multip
 
     ```shell
 
-    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+    export IMAGE=quay.io/ascend/vllm-ascend:glm-5.3-flash-a3
     export NAME=vllm-ascend
 
     # Run the container using the defined variables
