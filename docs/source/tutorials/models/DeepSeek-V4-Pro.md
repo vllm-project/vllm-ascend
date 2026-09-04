@@ -1586,6 +1586,7 @@ The service returns HTTP 200 OK with a JSON response containing the `choices` fi
 | GPQA | - | accuracy | gen | 91.41 | 0831 official W4A8 weight with DSpark enabled |
 | GPQA | - | accuracy | gen | 89.90 | 2 Atlas 800 A3 (128GB × 8) |
 | GSM8K | - | accuracy | gen | 96.21 | 2 Atlas 800 A3 (128GB × 8) |
+| GPQA | - | accuracy | gen | 92.93 | A2 1P1D DSpark w4a8 |
 
 ## 8 Performance Evaluation
 
