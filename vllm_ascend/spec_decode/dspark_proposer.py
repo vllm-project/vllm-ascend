@@ -8,11 +8,14 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
+from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import get_dcp_local_seq_lens
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
+from vllm_ascend.attention.utils import AscendDCPMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.transformers_utils.configs.kimi_k3 import (
@@ -324,6 +327,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                 batch_size=batch_size,
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                total_cp_world_size=self.dcp_size,
+                current_cp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=(
+                    self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+                ),
+                PAD_ID=PADDING_SLOT_ID,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
@@ -359,7 +368,29 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        long_seq_args = None
+        if self.dcp_size > 1:
+            seq_lens_cpu = cad.seq_lens.cpu()
+            cad.seq_lens_cpu = seq_lens_cpu
+            if cad._seq_lens_cpu is not None:
+                cad._seq_lens_cpu = seq_lens_cpu
+            cad.max_seq_len = int(seq_lens_cpu.max().item())
+            local_seq_lens = get_dcp_local_seq_lens(
+                seq_lens_cpu,
+                self.dcp_size,
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            )
+            cad.context_parallel_metadata = AscendDCPMetadata(
+                num_computed_tokens_of_dcp=local_seq_lens.numpy(),
+                query_lens_cpu=torch.full(
+                    (batch_size,), self.num_query_per_req, dtype=torch.int32
+                ),
+                max_query_len=self.num_query_per_req,
+                dcp_mtp_attn_mask=None,
+            )
+            long_seq_args = (None, None)
+
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
 
     @torch.inference_mode()
     def dummy_run(
