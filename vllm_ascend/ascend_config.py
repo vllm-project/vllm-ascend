@@ -527,7 +527,7 @@ class AscendConfig:
         )
         # TODO: delete the deprecated flashcomm option when upstream SP is ready.
         flashcomm_explicitly_enabled = (
-            bool(vc.additional_config.get("enable_flashcomm1", False))
+            bool((vc.additional_config or {}).get("enable_flashcomm1", False))
             or int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) != 0
         )
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on

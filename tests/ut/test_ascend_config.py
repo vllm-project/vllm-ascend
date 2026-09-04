@@ -1099,6 +1099,98 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(enable_dsa_cp())
 
     @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_enabled_keeps_sp_when_conditions_met(self, mock_fix):
+        """Case 1: flashcomm on + SP conditions met -> SP stays on."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_flashcomm1": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
+            self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
+            self.assertTrue(enable_sp(vc))
+            self.assertFalse(config.enable_dsa_cp)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_disabled_forces_sp_off_when_conditions_met(self, mock_fix):
+        """Case 2: flashcomm off + SP conditions met -> SP still forced off."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {}
+
+            init_ascend_config(vc)
+
+            self.assertEqual(vc.parallel_config.all2all_backend, "flashinfer_all2allv")
+            self.assertFalse(enable_sp(vc))
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_enabled_auto_keeps_sp_when_conditions_met(self, mock_fix):
+        """Case 3: dsa_cp on + SP conditions met (+indexer) -> SP auto-kept, dsa stays on."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.model_config = SimpleNamespace(
+                is_moe=False,
+                hf_text_config=SimpleNamespace(index_topk=2048),
+                hf_config=SimpleNamespace(),
+                enforce_eager=True,
+                architectures=[],
+            )
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_dsa_cp": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
+            self.assertTrue(enable_sp(vc))
+            self.assertTrue(config.enable_dsa_cp)
+            self.assertTrue(enable_dsa_cp())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_enabled_auto_disabled_when_sp_conditions_not_met(self, mock_fix):
+        """Case 4: dsa_cp on + SP conditions NOT met (tp=1) -> dsa auto-disabled."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.model_config = SimpleNamespace(
+                is_moe=False,
+                hf_text_config=SimpleNamespace(index_topk=2048),
+                hf_config=SimpleNamespace(),
+                enforce_eager=True,
+                architectures=[],
+            )
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 1
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_dsa_cp": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertFalse(vc.parallel_config.use_sequence_parallel_moe)
+            self.assertFalse(enable_sp(vc))
+            self.assertFalse(config.enable_dsa_cp)
+            self.assertFalse(enable_dsa_cp())
+
+    @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
     @patch("vllm_ascend.utils.enable_sp", return_value=True)
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
