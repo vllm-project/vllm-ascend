@@ -1,5 +1,126 @@
 # Release Notes
 
+## v0.26.0rc1 - 2026.09.03
+
+This is the first release candidate of v0.26.0 for vLLM Ascend, aligned with upstream vLLM v0.26.0. This release is a model‑restricted version. Fully validated models include Kimi K3, GLM‑5.2, DeepSeek V4 Flash 0731, DeepSeek V4 Pro 0813. Availability is not guaranteed for other models. For the full test report, see: [v0.26.0rc1 Test Conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.26.0rc/tests/vllm_ascend_v0.26.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to get started.
+
+### Highlights
+
+- **Kimi K3 on Ascend**: Added end-to-end Kimi K3 support, including MLA DSpark speculative decoding, no-RoPE MLAPO on Ascend 950, fused QKV projections, fused norm gate and attention residual, and projector rotation. [#12950](https://github.com/vllm-project/vllm-ascend/pull/12950) [#13277](https://github.com/vllm-project/vllm-ascend/pull/13277) [#13507](https://github.com/vllm-project/vllm-ascend/pull/13507) [#13989](https://github.com/vllm-project/vllm-ascend/pull/13989) [#13509](https://github.com/vllm-project/vllm-ascend/pull/13509) [#14231](https://github.com/vllm-project/vllm-ascend/pull/14231)
+- **GLM-5.2 / DeepSeek V4 Flash 0731 / DeepSeek V4 Pro 0813 accuracy and performance**: Resolved GLM-5.2 DSpark acceptance regressions and DeepSeek V4 Flash-0731 / Pro-0813 accuracy issues (reasoning-effort alignment, routed SwiGLU limit, and frontend behavior), and reused DSV4 compressor metadata across layers for better performance. [#12262](https://github.com/vllm-project/vllm-ascend/pull/12262) [#13531](https://github.com/vllm-project/vllm-ascend/pull/13531) [#13993](https://github.com/vllm-project/vllm-ascend/pull/13993) [#14074](https://github.com/vllm-project/vllm-ascend/pull/14074) [#14397](https://github.com/vllm-project/vllm-ascend/pull/14397) [#14624](https://github.com/vllm-project/vllm-ascend/pull/14624) [#14994](https://github.com/vllm-project/vllm-ascend/pull/14994)
+- **DeepSeek V4 DSpark**: Refactored DSv4 DSpark speculative decoding with aligned SP handling and QuaRot weight support for Qwen3 DSpark. [#11431](https://github.com/vllm-project/vllm-ascend/pull/11431) [#12662](https://github.com/vllm-project/vllm-ascend/pull/12662)
+- **Sparse-attention context parallelism**: Added SFA DCP with a replicated indexer, compact KV gather, and C8 support. Enabled P/D disaggregation for DCP with replicate-indexer. [#11443](https://github.com/vllm-project/vllm-ascend/pull/11443) [#11870](https://github.com/vllm-project/vllm-ascend/pull/11870) [#11980](https://github.com/vllm-project/vllm-ascend/pull/11980) [#11696](https://github.com/vllm-project/vllm-ascend/pull/11696)
+- **Deprecation cleanup**: Removed layer sharding, FlashComm2, multistream overlap gate, dynamic-batch SLO, weight prefetch, matmul all-reduce fusions, and kv offload in KV Pool to streamline the codebase. [#11953](https://github.com/vllm-project/vllm-ascend/pull/11953) [#12117](https://github.com/vllm-project/vllm-ascend/pull/12117) [#11956](https://github.com/vllm-project/vllm-ascend/pull/11956) [#11933](https://github.com/vllm-project/vllm-ascend/pull/11933) [#11949](https://github.com/vllm-project/vllm-ascend/pull/11949) [#12119](https://github.com/vllm-project/vllm-ascend/pull/12119) [#11904](https://github.com/vllm-project/vllm-ascend/pull/11904)
+
+### Features
+
+- Added LoRA with unquantized MoE models and AlltoAll + EP + LoRA support. [#10977](https://github.com/vllm-project/vllm-ascend/pull/10977) [#12451](https://github.com/vllm-project/vllm-ascend/pull/12451)
+- Added Gemma4 E2B and E4B model support with graph execution on A2/A3 and ModelSlim quantization. [#11536](https://github.com/vllm-project/vllm-ascend/pull/11536) [#11575](https://github.com/vllm-project/vllm-ascend/pull/11575) [#11791](https://github.com/vllm-project/vllm-ascend/pull/11791)
+- Added Step3.5/3.7 Flash support for Ascend 950. [#10556](https://github.com/vllm-project/vllm-ascend/pull/10556)
+- Added KV sliding window for Eagle3 and DFlash. [#10023](https://github.com/vllm-project/vllm-ascend/pull/10023)
+- Added ShortRequestFirst scheduling and batch job aware scheduler. [#11576](https://github.com/vllm-project/vllm-ascend/pull/11576) [#12240](https://github.com/vllm-project/vllm-ascend/pull/12240) [#12719](https://github.com/vllm-project/vllm-ascend/pull/12719)
+- Added NZ static buffers for prefetch offload. [#11945](https://github.com/vllm-project/vllm-ascend/pull/11945)
+- Added update config and reload weights to NPU Worker. [#10126](https://github.com/vllm-project/vllm-ascend/pull/10126)
+- Added SFA C8 support: unified packed KV cache layout on A3, and DCP replicated indexer for sparse‑attention paths. [#11228](https://github.com/vllm-project/vllm-ascend/pull/11228) [#11870](https://github.com/vllm-project/vllm-ascend/pull/11870)
+
+### Hardware and Operator Support
+
+- Expanded Ascend 950 supports: MXFP quant for token dispatch, and CPU binding with topo clusters. [#11614](https://github.com/vllm-project/vllm-ascend/pull/11614) [#11717](https://github.com/vllm-project/vllm-ascend/pull/11717)
+- Expanded Atlas 300I DUO support: disabled npugraph_ex by default, added Qwen3.5-Dense documentation, and fixed 310P spec decoding accuracy. [#10874](https://github.com/vllm-project/vllm-ascend/pull/10874) [#12077](https://github.com/vllm-project/vllm-ascend/pull/12077) [#11918](https://github.com/vllm-project/vllm-ascend/pull/11918)
+- Added operator supports: KV quant sparse flash attention, and Triton SwiGLuStep kernel (replaced AscendC‑based fused_gdn_gating). [#11626](https://github.com/vllm-project/vllm-ascend/pull/11626) [#11467](https://github.com/vllm-project/vllm-ascend/pull/11467) [#12035](https://github.com/vllm-project/vllm-ascend/pull/12035)
+
+### Performance
+
+Unless stated otherwise, these optimizations are selected automatically for the targeted path and need no additional configuration.
+
+- Optimized PCP FA restore and output merge to reduce overhead. [#11586](https://github.com/vllm-project/vllm-ascend/pull/11586)
+- Vectorized local sequence-length computation in SFA metadata to remove per-request NPU-to-CPU synchronization. [#11762](https://github.com/vllm-project/vllm-ascend/pull/11762)
+- Avoided H2D synchronization in context-parallel speculative-proposer metadata. [#11496](https://github.com/vllm-project/vllm-ascend/pull/11496)
+- Optimized DSA-CP local token metadata with a fused Triton kernel and caching. [#12193](https://github.com/vllm-project/vllm-ascend/pull/12193)
+- Split mixed ChunkedPrefill into separate decode and prefill attention calls. [#11948](https://github.com/vllm-project/vllm-ascend/pull/11948)
+- Optimized AscendStore key construction and miss-path handling. [#12814](https://github.com/vllm-project/vllm-ascend/pull/12814)
+- Removed D2H sync in QLIMetadata builder for DSA-CP. [#12536](https://github.com/vllm-project/vllm-ascend/pull/12536)
+- Bound Mooncake receiver threads to KV cache device. [#12126](https://github.com/vllm-project/vllm-ascend/pull/12126)
+- Sharded DeepSeek V4 DSpark main projection across TP ranks for better parallelism. [#15144](https://github.com/vllm-project/vllm-ascend/pull/15144)
+- Reused DeepSeek V4 compressor metadata across layers to avoid redundant computation. [#14994](https://github.com/vllm-project/vllm-ascend/pull/14994)
+
+### Dependencies
+
+- **Upstream vLLM**: v0.26.0.
+- **Python**: >= 3.10, < 3.13.
+- **CANN**: 9.1.0.
+- **PyTorch / torch_npu**: 2.10.0 / 2.10.0.post4.
+- **Triton Ascend**: 3.2.2 for A2, A3, and Ascend 950; Triton Ascend is not supported on Atlas 300I DUO.
+- **Mooncake**: 0.3.11.post1 in the release images.
+
+### Deprecation and Breaking Changes
+
+- Removed layer sharding. [#11953](https://github.com/vllm-project/vllm-ascend/pull/11953)
+- Removed FlashComm2 optimization techniques. [#12117](https://github.com/vllm-project/vllm-ascend/pull/12117)
+- Removed multistream overlap gate. [#11956](https://github.com/vllm-project/vllm-ascend/pull/11956)
+- Removed dynamic-batch SLO. [#11933](https://github.com/vllm-project/vllm-ascend/pull/11933)
+- Removed weight prefetch config. [#11949](https://github.com/vllm-project/vllm-ascend/pull/11949)
+- Removed matmul all-reduce and matmul all-reduce RMSNorm fusions. [#12119](https://github.com/vllm-project/vllm-ascend/pull/12119)
+- Removed KV offload in KV Pool. [#11904](https://github.com/vllm-project/vllm-ascend/pull/11904)
+- Removed `dp_allreduce_on_npu` additional config option. [#12496](https://github.com/vllm-project/vllm-ascend/pull/12496)
+- Removed PCP from MRV1; use MRV2 for prefill context parallelism. [#12592](https://github.com/vllm-project/vllm-ascend/pull/12592)
+- Removed custom top-k top-p AscendC implementation in favor of CANN operator. [#12232](https://github.com/vllm-project/vllm-ascend/pull/12232)
+- Refactored hamming ops and removed sparse action. [#12049](https://github.com/vllm-project/vllm-ascend/pull/12049)
+- Deprecated `ASCEND_BUFFER_POOL` environment variable; use `ASCEND_ENABLE_USE_FABRIC_MEM=1` or `HCCL_INTRA_ROCE_ENABLE=1`. [#13856](https://github.com/vllm-project/vllm-ascend/pull/13856)
+
+### Ready to Deprecate
+
+The following features are deprecated or subject to change:
+
+- Added deprecation warnings for W4A8 linear, W4A8 MoE per-group, and W8A8 PDMix MoE quantization. These quantization paths will be removed in a future release. [#13850](https://github.com/vllm-project/vllm-ascend/pull/13850)
+- The `mega_moe_max_tokens` and `enable_fused_mc2` configurations in `additional-config` will be moved into a new dedicated dict for centralized maintenance in the next release.
+- DeepSeek-V3, DeepSeek-V3.1, and DeepSeek-R1 model support will be removed in v0.28.0.
+- The `reduce sampling` feature is experimental and will be deprecated in future releases. We will follow the upstream vLLM community for the `batch-sharded sampling` feature.
+
+### Documentation
+
+- Added Kimi-K3 deployment guide on Ascend. [#14125](https://github.com/vllm-project/vllm-ascend/pull/14125)
+- Refreshed DeepSeek-V4, GLM-5.2, Kimi-K2.x, and Gemma4 model deployment guides. [#11525](https://github.com/vllm-project/vllm-ascend/pull/11525) [#11534](https://github.com/vllm-project/vllm-ascend/pull/11534) [#11055](https://github.com/vllm-project/vllm-ascend/pull/11055)
+- Added KV Pool and Memcache SSD cache configuration guides. [#12600](https://github.com/vllm-project/vllm-ascend/pull/12600) [#12670](https://github.com/vllm-project/vllm-ascend/pull/12670)
+- Added RLHF LoRA HTTP API example and e2e RLHF async pause/resume example. [#14672](https://github.com/vllm-project/vllm-ascend/pull/14672) [#12300](https://github.com/vllm-project/vllm-ascend/pull/12300)
+
+### Stability and Bug Fixes
+
+- Fixed GDN state and graph-dispatch accuracy regressions across P/D, PCP, MTP, and DCP. [#11195](https://github.com/vllm-project/vllm-ascend/pull/11195) [#11893](https://github.com/vllm-project/vllm-ascend/pull/11893) [#12027](https://github.com/vllm-project/vllm-ascend/pull/12027)
+- Fixed Qwen3.5 PCP + chunked prefill accuracy and small-chunk problems. [#11508](https://github.com/vllm-project/vllm-ascend/pull/11508) [#11807](https://github.com/vllm-project/vllm-ascend/pull/11807)
+- Fixed DeepSeek V4 MXFP routing precision and W4A16MXFP communication accuracy. [#11663](https://github.com/vllm-project/vllm-ascend/pull/11663) [#12585](https://github.com/vllm-project/vllm-ascend/pull/12585)
+- Fixed KV-transfer ordering, Mooncake grouping, and AscendStore hash/lease handling. [#11887](https://github.com/vllm-project/vllm-ascend/pull/11887) [#12252](https://github.com/vllm-project/vllm-ascend/pull/12252) [#12012](https://github.com/vllm-project/vllm-ascend/pull/12012)
+- Fixed DCP/DP service hangs and restricted recompute scheduler to decode nodes. [#12036](https://github.com/vllm-project/vllm-ascend/pull/12036) [#11265](https://github.com/vllm-project/vllm-ascend/pull/11265) [#11537](https://github.com/vllm-project/vllm-ascend/pull/11537)
+- Fixed 310P spec decoding accuracy, SDMA errors, and memory calculation. [#11918](https://github.com/vllm-project/vllm-ascend/pull/11918) [#11678](https://github.com/vllm-project/vllm-ascend/pull/11678) [#11959](https://github.com/vllm-project/vllm-ascend/pull/11959)
+- Fixed DSpark multi-DP bugs and SP handling. [#12612](https://github.com/vllm-project/vllm-ascend/pull/12612) [#12777](https://github.com/vllm-project/vllm-ascend/pull/12777)
+- Fixed GLM-5.2 DSpark W8A8 eager acceptance. [#12262](https://github.com/vllm-project/vllm-ascend/pull/12262)
+- Fixed fused_infer_attention contiguous errors in MLA-CP and GQA paths. [#11986](https://github.com/vllm-project/vllm-ascend/pull/11986) [#12025](https://github.com/vllm-project/vllm-ascend/pull/12025)
+- Fixed DSA-CP invalid local sequence lengths for graph padding. [#12840](https://github.com/vllm-project/vllm-ascend/pull/12840)
+- Fixed invalid GVA handling in layerwise KV Pool. [#12705](https://github.com/vllm-project/vllm-ascend/pull/12705)
+- Fixed AllGather MoE finalize order with DP and PCP. [#11921](https://github.com/vllm-project/vllm-ascend/pull/11921)
+- Fixed batch invariance not taking effect. [#11818](https://github.com/vllm-project/vllm-ascend/pull/11818)
+- Fixed Qwen3.x KV cache binding for multiple layers. [#11470](https://github.com/vllm-project/vllm-ascend/pull/11470)
+- Fixed spec decode rejection sampling length-1 bug in Triton. [#11458](https://github.com/vllm-project/vllm-ascend/pull/11458)
+- Fixed CPU binding device mapping. [#15518](https://github.com/vllm-project/vllm-ascend/pull/15518)
+- Backported structured output fixes for vLLM 0.26. [#15433](https://github.com/vllm-project/vllm-ascend/pull/15433)
+- Invalidated dummy slots before attention metadata build. [#15409](https://github.com/vllm-project/vllm-ascend/pull/15409)
+- Skipped generate_mtp_attention_mask_for_decode with sparse attention to avoid hostbound. [#15130](https://github.com/vllm-project/vllm-ascend/pull/15130)
+- Selected DeepSeek V4 effort mapping by checkpoint config. [#14952](https://github.com/vllm-project/vllm-ascend/pull/14952)
+
+### Known Issues
+
+- Kimi K3 DSpark speculative decoding has a low draft acceptance rate for long input sequences, reducing the expected performance benefit. [#15237](https://github.com/vllm-project/vllm-ascend/issues/15237)
+- DeepSeek-V4-Flash may show a performance regression for 128K-input/1K-output workloads when pooling is enabled, especially for single-prefix requests. [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649)
+- Qwen3-32B W8A8/QuaRot may show a small performance regression in PD-disaggregated or pooling-enabled scenarios on v0.26.0rc. [#15295](https://github.com/vllm-project/vllm-ascend/issues/15295)
+- DeepSeek-V3.1 may hang or fail during PD-disaggregated serving and high-concurrency PD-mixed inference. These scenarios are outside the supported export-model scope. [#14911](https://github.com/vllm-project/vllm-ascend/issues/14911)
+- Qwen3-235B-A22B W8A8 and Qwen3-235B W4A8 may show lower performance than the baseline in some A3 PD-mixed aclgraph scenarios. [#15296](https://github.com/vllm-project/vllm-ascend/issues/15296)
+- GLM5.1-W4A4C8-mxfp4 may show a performance regression on Ascend 950 due to CPU-binding and load-balancing effects. [#15268](https://github.com/vllm-project/vllm-ascend/issues/15268)
+- Qwen3.6-27B DFlash with mixed sliding-window and full attention requires the V2 model runner. [#15650](https://github.com/vllm-project/vllm-ascend/issues/15650)
+- DeepSeek-V3.2-W8A8 may show a partial performance regression in A3 single-node mixed deployment. [#15651](https://github.com/vllm-project/vllm-ascend/issues/15651)
+- DeepSeek-V4 sleep mode with `sleep_mode_extra_cleanup` may fail to recover after wakeup. Sleep mode is mainly intended for training scenarios. [#15648](https://github.com/vllm-project/vllm-ascend/issues/15648)
+- KV pooling may cause a small single-prefix performance regression in some long-context workloads, including DeepSeek-V4-Flash 128K-1K and Qwen3-32B A2 PD-mixed scenarios. Investigation is ongoing. [#15649](https://github.com/vllm-project/vllm-ascend/issues/15649) [#15295](https://github.com/vllm-project/vllm-ascend/issues/15295) [#12234](https://github.com/vllm-project/vllm-ascend/issues/12234)
+- MiniMax-M2.7 W8A8 shows a performance regression in the A3 single-node scenario. The 128K-input/1K-output double-node result also fell below the baseline threshold, but more samples are needed to determine whether it is a persistent regression or normal performance variation. [#15658](https://github.com/vllm-project/vllm-ascend/issues/15658)
+
 ## v0.23.0 - 2026.08.16
 
 We're excited to announce the official vLLM Ascend v0.23.0 release, aligned with upstream vLLM v0.23.0. This note summarizes the cumulative user-facing changes since the previous official release, v0.18.0, including the v0.19.1rc1, v0.20.2rc1, v0.21.0rc1, v0.22.1rc1, and v0.23.0rc1 development cycles. Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.23.0/) to get started.
