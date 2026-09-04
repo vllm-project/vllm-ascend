@@ -1,0 +1,44 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-04 01:11+0000\n"
+"PO-Revision-Date: 2026-09-04 01:11+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid ""
+"The following Qwen3-0.6B example has been validated using the default model "
+"loading configuration."
+msgstr "以下Qwen3-0.6B示例已使用默认模型加载配置进行验证。"
+
+msgid ""
+"In the container terminal, create `example.py` with the following code:"
+msgstr "在容器终端中，使用以下代码创建`example.py`："
+
+msgid "Run the example:"
+msgstr "运行示例："
+
+msgid ""
+"The following output shows that vLLM has successfully detected the Ascend "
+"platform:"
+msgstr "以下输出显示vLLM已成功检测到Ascend平台："
+
+msgid "The following output shows the generated results:"
+msgstr "以下输出显示生成的结果："
+
+msgid ""
+"The following messages show the process exiting after offline inference and "
+"do not affect the inference results:"
+msgstr "以下消息显示离线推理后进程退出，不影响推理结果："

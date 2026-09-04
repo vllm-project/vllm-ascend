@@ -56,11 +56,6 @@ msgstr "### 4.1 Docker 镜像安装"
 msgid "You can use our official docker image to run InternVL3_5 directly."
 msgstr "您可以直接使用我们的官方 Docker 镜像来运行 InternVL3_5。"
 
-msgid ""
-"To verify the successful installation of the environment, please refer to "
-"[installation](../../installation.md)."
-msgstr "要验证环境是否安装成功，请参考[安装指南](../../installation.md)。"
-
 msgid "### 4.2 Source Code Installation"
 msgstr "### 4.2 源码安装"
 
@@ -68,11 +63,6 @@ msgid ""
 "In addition, if you don't want to use the docker image as above, you can "
 "also build all from source:"
 msgstr "此外，如果您不想使用上述 Docker 镜像，也可以从源码构建所有内容："
-
-msgid ""
-"- Install `vllm-ascend` from source, refer to "
-"[installation](../../installation.md)."
-msgstr "- 从源码安装 `vllm-ascend`，请参考[安装指南](../../installation.md)。"
 
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
@@ -257,3 +247,13 @@ msgid ""
 "- Common Issues Tip: If you encounter issues, refer to [Public "
 "FAQs](../../faqs.md)."
 msgstr "- 常见问题提示：如果遇到问题，请参阅[公共FAQ](../../faqs.md)。"
+
+msgid ""
+"To verify the successful installation of the environment, please refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "要验证环境是否安装成功，请参考[安装](../../getting_started/installation.md)。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"

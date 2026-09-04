@@ -176,11 +176,6 @@ msgid ""
 "If deploying a multi-node environment, set up the environment on each node."
 msgstr "如果部署多节点环境，请在每个节点上设置环境。"
 
-msgid ""
-"For more details, please refer to the [Installation "
-"Guide](../../installation.md)."
-msgstr "更多详情，请参考[安装指南](../../installation.md)。"
-
 msgid "### 5.1 Single-Node Online Deployment"
 msgstr "### 5.1 单节点在线部署"
 
@@ -423,13 +418,6 @@ msgstr ""
 msgid "### 9.2 Tuning Guidelines"
 msgstr "### 9.2 调优指南"
 
-msgid ""
-"Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for tuning methods.\n"
-"Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions."
-msgstr ""
-"请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。\n"
-"请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
-
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
 
@@ -627,3 +615,8 @@ msgid ""
 "refer to the [Public FAQs](../../faqs.md). This chapter only covers model-"
 "specific issues."
 msgstr "对于常见的环境、安装和一般参数问题，请参阅 [公共FAQ](../../faqs.md)。本章仅涵盖模型特定问题。"
+
+msgid ""
+"For more details, please refer to the [Installation "
+"Guide](../../getting_started/installation.md)."
+msgstr "更多详情请参阅[安装指南](../../getting_started/installation.md)。"

@@ -1,0 +1,39 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-04 01:11+0000\n"
+"PO-Revision-Date: 2026-09-04 01:11+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "??? tip \"If image downloads are slow\""
+msgstr "??? tip \"如果镜像下载速度较慢\""
+
+msgid ""
+"vLLM Ascend images are downloaded from `quay.io` by default. If direct "
+"access is slow, use one of the following registry mirrors to accelerate the "
+"download."
+msgstr "vLLM Ascend 镜像默认从 `quay.io` 下载。如果直接访问速度较慢，可以使用以下任一镜像源来加速下载。"
+
+msgid "For example, the original image address is:"
+msgstr "例如，原始镜像地址为："
+
+msgid "You can replace it with:"
+msgstr "您可以将其替换为："
+
+msgid ""
+"Replace only the registry prefix and preserve the complete original image "
+"tag, including suffixes such as `-a3`, `-310p`, `-950dt`, and `-openeuler`."
+msgstr "仅替换镜像仓库前缀，并保留完整的原始镜像标签，包括 `-a3`、`-310p`、`-950dt` 和 `-openeuler` 等后缀。"

@@ -1,0 +1,43 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-04 01:11+0000\n"
+"PO-Revision-Date: 2026-09-04 01:11+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Getting Started"
+msgstr "# 快速开始"
+
+msgid ""
+"Welcome to the vLLM Ascend plugin. This section guides you from environment "
+"setup to your first inference workload."
+msgstr "欢迎使用 vLLM Ascend 插件。本节将引导您从环境搭建到运行第一个推理任务。"
+
+msgid "## Quick Navigation"
+msgstr "## 快速导航"
+
+msgid ""
+"- [Quick Start](quick_start.md): Run your first model using a prebuilt image.\n"
+"- [Installation Guide](installation.md): Set up the driver, CANN, Python, Docker, and source installation environments.\n"
+"- [Model Tutorials](../tutorials/models/index.md): Find deployment instructions for specific models.\n"
+"- [Feature Tutorials](../tutorials/features/index.md): Learn about advanced features such as PD disaggregation and context parallelism.\n"
+"- [FAQ](../faqs.md): Troubleshoot common deployment and runtime issues."
+msgstr ""
+"- [快速开始](quick_start.md)：使用预构建镜像运行您的第一个模型。\n"
+"- [安装指南](installation.md)：配置驱动、CANN、Python、Docker 和源码安装环境。\n"
+"- [模型教程](../tutorials/models/index.md)：查找特定模型的部署说明。\n"
+"- [特性教程](../tutorials/features/index.md)：了解 PD 分离和上下文并行等高级特性。\n"
+"- [常见问题](../faqs.md)：排查常见的部署和运行时问题。"
