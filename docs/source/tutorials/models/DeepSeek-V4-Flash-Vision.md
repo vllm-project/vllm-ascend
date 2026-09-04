@@ -20,9 +20,9 @@ for the complete support matrix and the
 [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
 The configuration in this guide has been validated with W8A8 weights,
-TP4/DP4/EP16, automatic prefix caching, and `FULL_DECODE_ONLY` ACL Graph on 16
-Ascend A3 NPUs. BF16 serving, DSA context parallelism, FlashComm1, and
-Prefill-Decode disaggregation are not covered by this guide.
+TP4/DP4/EP16, automatic prefix caching, and `FULL_DECODE_ONLY` ACL Graph on one
+Atlas 800 A3 server (128GB × 8 NPUs). BF16 serving, DSA context parallelism,
+FlashComm1, and Prefill-Decode disaggregation are not covered by this guide.
 
 ## 3 Prerequisites
 
@@ -30,7 +30,7 @@ Prefill-Decode disaggregation are not covered by this guide.
 
 | Model | Download | Hardware requirements |
 | --- | --- | --- |
-| DeepSeek-V4-Flash-Vision-Exp-w8a8-QuaRot | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-Vision-Exp-w8a8-QuaRot) | One Atlas 800 A3 server with 16 visible NPUs |
+| DeepSeek-V4-Flash-Vision-Exp-w8a8-QuaRot | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-Vision-Exp-w8a8-QuaRot) | One Atlas 800 A3 server (128GB × 8 NPUs) |
 | DeepSeek-V4-Flash-Vision-Exp | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) | Original model weights; use the ModelScope W8A8 QuaRot checkpoint for the deployment in this guide |
 
 The launch command below uses the public Ascend W8A8 QuaRot checkpoint from
@@ -55,9 +55,9 @@ This guide supports only the Atlas A3 series. Follow the
 [prebuilt image installation guide](../../getting_started/installation.md#installation-prebuilt-image)
 or build the `main` branch with `Dockerfile.a3`.
 
-Expose all 16 NPUs to the container and mount the model directory at the same
-absolute path used by the serving command. Verify the installed packages before
-starting the service:
+Expose all 16 logical devices of the 8 NPUs to the container and mount the model
+directory at the same absolute path used by the serving command. Verify the
+installed packages before starting the service:
 
 ```shell
 python -m pip show vllm vllm-ascend
@@ -99,8 +99,8 @@ vllm serve "$MODEL_PATH" \
 Key parameters:
 
 - `--data-parallel-size 4` and `--tensor-parallel-size 4` consume all 16
-  visible NPUs. `--enable-expert-parallel` distributes MoE experts across the
-  ranks.
+  visible logical devices backed by the server's 8 NPUs.
+  `--enable-expert-parallel` distributes MoE experts across the ranks.
 - `--max-model-len 130000` limits the combined input and output length of one
   request. Reduce it if the service cannot allocate enough KV cache.
 - `--max-num-seqs 32` is the maximum number of sequences scheduled by each DP
@@ -189,8 +189,8 @@ lengths, request concurrency, TTFT, TPOT, ITL, and throughput.
 The values in Section 5.1 are the validated starting point, not globally
 optimal settings. Tune `--max-num-seqs`, `--max-num-batched-tokens`, and
 `--gpu-memory-utilization` together for the target image sizes and sequence
-lengths. Keep the 16-NPU TP4/DP4/EP topology and `--block-size 32` until an
-alternative configuration has been validated.
+lengths. Keep the single-node A3 TP4/DP4/EP topology and `--block-size 32`
+until an alternative configuration has been validated.
 
 Refer to the
 [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
@@ -198,7 +198,8 @@ for general tuning methods.
 
 ## 10 Limitations
 
-- Only single-node colocated serving on 16 Atlas A3 NPUs is documented.
+- Only single-node colocated serving on one Atlas 800 A3 server
+  (128GB × 8 NPUs) is documented.
 - Prefill-Decode disaggregation, DSA context parallelism, and FlashComm1 are
   not supported in the documented configuration.
 - BF16 full-model validation and production performance qualification are not
