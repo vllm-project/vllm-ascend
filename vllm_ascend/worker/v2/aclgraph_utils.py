@@ -23,10 +23,11 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -38,8 +39,13 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.utils import using_paged_attention
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.compilation.updatable_graph import (
+    ContextSource,
+    UpdatableGraph,
+)
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -168,8 +174,14 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         num_tokens = desc.num_tokens
         logger.info_once("run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
-        self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
+        attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
+        attn_metadata = self.model_runner.model_state.attn_metadata
+
+        if use_updatable_graph(attn_backend, num_tokens, self.vllm_config):
+            return self._updatable_graph_replay(desc, attn_metadata)
+        else:
+            self.update_stream.wait_stream(torch.npu.current_stream())
+            ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
         # calculate num_tokens_across_dp.
@@ -183,7 +195,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         with (
             set_current_vllm_config(self.vllm_config),
             set_forward_context(
-                self.model_runner.model_state.attn_metadata,
+                attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=desc.cg_mode,
@@ -193,7 +205,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             ),
         ):
             forward_context = get_forward_context()
-            attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 attn_backend,
@@ -203,6 +214,15 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 self.vllm_config,
                 self.model_runner.speculative_config,
             )
+        return ret
+
+    def _updatable_graph_replay(self, desc, attn_metadata):
+        graph = self.graphs[desc]
+        assert isinstance(graph, UpdatableGraph)
+        resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
+        self.update_stream.wait_stream(torch.npu.current_stream())
+        ret = super().run_fullgraph(desc)
+        graph.update(self.update_stream, resolved_tasks)
         return ret
 
     def capture(
@@ -241,6 +261,23 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 lora_capture_hook=lora_capture_hook,
                 progress_bar_desc=progress_bar_desc,
             )
+
+
+def use_updatable_graph(attn_backend, num_tokens, vllm_config) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)  
+    first_layer = next(iter(attn_layers.values()))  
+    sinks, head_size = first_layer.impl.get_update_condition() 
+
+    if (
+        attn_backend is not None
+        and issubclass(attn_backend, AscendAttentionBackend)
+        and not sinks
+        and not using_paged_attention(num_tokens, vllm_config, head_size)
+    ):
+        return True
+    else:
+        return False
 
 
 class ModelWithContext(nn.Module):
@@ -287,6 +324,9 @@ class ModelWithContext(nn.Module):
 
     def map_draft_to_target(self, draft_ids: torch.Tensor):
         return self.original_model.map_draft_to_target(draft_ids)
+
+    def embed_input_ids(self, input_ids: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        return self.original_model.embed_input_ids(input_ids, *args, **kwargs)
 
 
 @contextmanager

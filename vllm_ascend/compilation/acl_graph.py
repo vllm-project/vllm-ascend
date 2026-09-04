@@ -15,14 +15,21 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.utils import using_paged_attention
 
 from ..utils import vllm_version_is, weak_ref_tensors
+from .updatable_graph import (
+    ContextSource,
+    SharedSource,
+    UpdatableGraph,
+)
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -91,6 +98,7 @@ class ACLGraphWrapper:
         *,
         use_eagle: bool = False,
         enable_enpu: bool = False,
+        update_stream: torch.npu.Stream | None = None,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -114,7 +122,21 @@ class ACLGraphWrapper:
         self.concrete_aclgraph_entries: dict[BatchDescriptor, ACLGraphEntry] = {}
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
+        self.update_stream = update_stream
+        self.attn_backend = None
+        self.has_sinks = False
+        self.head_size = False
+        self.draft_attn_metadata_updates: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
+
+    def set_update_stream(self, update_stream):
+        self.update_stream = update_stream
+
+    def set_attn_backend(self, attn_backend):
+        self.attn_backend = attn_backend
+
+    def set_draft_attn_metadata_updates(self, update_params: list[dict[str, Any]]):
+        self.draft_attn_metadata_updates = update_params
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -162,7 +184,7 @@ class ACLGraphWrapper:
 
             input_addresses = [x.data_ptr() for x in args if isinstance(x, torch.Tensor)]
             entry.input_addresses = input_addresses
-            aclgraph = torch.npu.NPUGraph()
+            aclgraph = UpdatableGraph()
 
             with ExitStack() as stack:
                 if self.aclgraph_options.gc_disable:
@@ -263,8 +285,32 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        entry.aclgraph.replay()
+        if use_updatable_graph(
+            self.runtime_mode,
+            self.attn_backend,
+            batch_descriptor.num_tokens,
+            self.vllm_config,
+        ):
+            self._updatable_graph_replay(forward_context, entry.aclgraph)
+        else:
+            entry.aclgraph.replay()
         return entry.output
+
+    def _updatable_graph_replay(
+        self,
+        forward_context,
+        graph: UpdatableGraph,
+    ):
+        if _EXTRA_CTX.is_draft_model:
+            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_attn_metadata_updates))
+        else:
+            resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
+        if self.enable_enpu:
+            graph.update(self.update_stream, resolved_tasks)
+            graph.replay()
+        else:
+            graph.replay()
+            graph.update(self.update_stream, resolved_tasks)
 
 
 def weak_ref_workspaces(params):
@@ -276,6 +322,28 @@ def weak_ref_workspaces(params):
         params.workspaces[num_tokens] = weak_ref_tensors(params.workspaces[num_tokens])
 
 
+def use_updatable_graph(
+    runtime_mode,
+    attn_backend,
+    num_tokens,
+    vllm_config,
+) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)  
+    first_layer = next(iter(attn_layers.values()))  
+    sinks, head_size = first_layer.impl.get_update_condition() 
+    if (
+        runtime_mode == CUDAGraphMode.FULL
+        and attn_backend is not None
+        and issubclass(attn_backend, AscendAttentionBackend)
+        and not sinks
+        and not using_paged_attention(num_tokens, vllm_config, head_size)
+    ):
+        return True
+    else:
+        return False
+
+
 def update_full_graph_params(
     attn_backend,
     update_stream,
@@ -285,6 +353,9 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
+    if use_updatable_graph(CUDAGraphMode.FULL, attn_backend, num_tokens, vllm_config):
+        return
+
     if vllm_version_is("0.27.1"):
         impl_cls = attn_backend.get_impl_cls()
         impl_cls.update_graph_params(
