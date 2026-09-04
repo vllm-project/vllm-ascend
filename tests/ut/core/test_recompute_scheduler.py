@@ -926,7 +926,9 @@ def test_schedule_admits_waiting_lora_request():
 def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields():
     _, scheduler = _create_live_recompute_scheduler()
     scheduler.need_mamba_block_aligned_split = True
-    scheduler._mamba_block_aligned_split = MagicMock(side_effect=lambda _request, num_new_tokens, *args, **kwargs: num_new_tokens)
+    scheduler._mamba_block_aligned_split = MagicMock(
+        side_effect=lambda _request, num_new_tokens, *args, **kwargs: num_new_tokens
+    )
     scheduler.use_v2_model_runner = True
     scheduler.dynamic_sd_lookup = {1: 2}
     scheduler.observability_config = SimpleNamespace(enable_logging_iteration_details=True)

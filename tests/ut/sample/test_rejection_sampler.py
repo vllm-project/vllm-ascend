@@ -996,9 +996,10 @@ def test_ascend_rejection_sampler_methods():
         patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
         patch.object(Sampler, "apply_penalties", return_value=logits) as fallback,
     ):
-        assert AscendRejectionSampler.apply_penalties(
-            logits, SimpleNamespace(no_penalties=False), None, None, []
-        ) is logits
+        assert (
+            AscendRejectionSampler.apply_penalties(logits, SimpleNamespace(no_penalties=False), None, None, [])
+            is logits
+        )
         fallback.assert_called_once()
     with (
         patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", True),
@@ -1115,9 +1116,7 @@ def test_ascend_rejection_sampler_methods():
 def test_rejection_sample_constraint_and_helper_paths():
     with _pin_memory_stack():
         logits = torch.tensor([[0.1, 0.9], [0.8, 0.2]])
-        greedy_meta = SimpleNamespace(
-            all_greedy=True, all_random=False, temperature=torch.tensor([0.0]), generators={}
-        )
+        greedy_meta = SimpleNamespace(all_greedy=True, all_random=False, temperature=torch.tensor([0.0]), generators={})
         random_meta = SimpleNamespace(
             all_greedy=False,
             all_random=True,
@@ -1187,11 +1186,14 @@ def test_rejection_sample_constraint_and_helper_paths():
             ),
         ):
             assert run_sample().shape[0] == 1
-            assert run_sample(
-                sampling_metadata=mixed_meta,
-                target_logits_or_tuple=(logits.clone(), indices.clone()),
-                draft_probs=draft_probs.clone(),
-            ).shape[0] == 1
+            assert (
+                run_sample(
+                    sampling_metadata=mixed_meta,
+                    target_logits_or_tuple=(logits.clone(), indices.clone()),
+                    draft_probs=draft_probs.clone(),
+                ).shape[0]
+                == 1
+            )
 
         with (
             patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
@@ -1201,17 +1203,23 @@ def test_rejection_sample_constraint_and_helper_paths():
                 return_value=_ascend_cfg(entropy_verify=True),
             ),
         ):
-            assert run_sample(
-                sampling_metadata=random_meta,
-                target_logits_or_tuple=(logits.clone(), indices.clone()),
-                draft_probs=draft_probs.clone(),
-                ori_target_logits=logits.clone(),
-            ).shape[0] == 1
-            assert run_sample(
-                sampling_metadata=random_meta,
-                target_logits_or_tuple=logits.clone(),
-                draft_probs=local_draft_probs.clone(),
-            ).shape[0] == 1
+            assert (
+                run_sample(
+                    sampling_metadata=random_meta,
+                    target_logits_or_tuple=(logits.clone(), indices.clone()),
+                    draft_probs=draft_probs.clone(),
+                    ori_target_logits=logits.clone(),
+                ).shape[0]
+                == 1
+            )
+            assert (
+                run_sample(
+                    sampling_metadata=random_meta,
+                    target_logits_or_tuple=logits.clone(),
+                    draft_probs=local_draft_probs.clone(),
+                ).shape[0]
+                == 1
+            )
 
         block_logits = torch.tensor([[0.1, 0.9], [0.2, 0.8], [0.3, 0.7]])
         block_ids = torch.tensor([1, 0, 1], dtype=torch.int32)
