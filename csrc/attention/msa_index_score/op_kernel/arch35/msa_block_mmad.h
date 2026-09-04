@@ -10,14 +10,18 @@
 
 /*!
  * \file msa_block_mmad.h
- * \brief Q 驻留 L1 + K L1 pingpong + L0C 双缓冲的 BlockMmad。
+ * \brief Atlas A5 BlockMmad：Q 驻留 + K pingpong；C_to_UB 时 L0C Fixpipe dual-dst → AIV UB。
  *
  * 基于 Catlass FullLoadA：同一 M-tile 只搬一次 Q；相邻 K page 的 FIXPIPE 与 Cube 重叠。
- * Atlas A2 L0C=128KB，两块 128x128 fp32 C 各 64KB。ENABLE_UNIT_FLAG 保持 false。
+ * Atlas A5：计算路径照搬 A2；L0C=256KB，两块 128x128 fp32 C 各 64KB。
+ * C_to_UB：int8 dual-dst 写 fp32。非量化 dual-dst 禁止 quantPre!=NoQuant（CANN 断言）；
+ * 改为两次 dualDstCtl=0 + subBlockId 的 F322F16，写出 packed [M/2,128] fp16（对齐 FA）。
  */
 
-#ifndef MSA_BLOCK_MMAD_H
-#define MSA_BLOCK_MMAD_H
+#ifndef MSA_BLOCK_MMAD_ARCH35_H
+#define MSA_BLOCK_MMAD_ARCH35_H
+
+#include <type_traits>
 
 #include "catlass/msa_catlass.hpp"
 #include "catlass/arch/msa_arch.hpp"
@@ -31,6 +35,7 @@
 #include "catlass/gemm/tile/msa_tile_mmad.hpp"
 
 #include "../msa_index_score_common.h"
+#include "../arch22/msa_index_score_task.h"
 
 namespace MsaIndexScoreNs {
 
@@ -38,7 +43,7 @@ template <class AType_, class BType_, class CType_, uint32_t STAGES_IN = MSA_L1B
           bool USE_UNIT_FLAG_ = false>
 class MsaBlockMmad {
 public:
-    using ArchTag = Catlass::Arch::AtlasA2;
+    using ArchTag = Catlass::Arch::AtlasA5;
     using ElementA = typename AType_::Element;
     using LayoutA = typename AType_::Layout;
     using ElementB = typename BType_::Element;
@@ -64,8 +69,9 @@ public:
     using L1BAlignHelper = Catlass::Gemm::helper::L1AlignHelper<ElementB, LayoutB>;
 
     // K (B) 的 L1 流水级数。非量化 3 级：fixpipe 减半（fp16 S）后 MTE2 的逐页延迟
-    // 会成为新的关键路径，加深一级让 MTE2 提前两页预取。
-    // A2/A3 int8 双槽 scratch 后同样 3 级：AIC 消费 slot[i] 时 AIV 只写 slot[i^1]。
+    // （~390ns，L2 命中）会成为新的关键路径，加深一级让 MTE2 提前两页预取。
+    // int8 保持 2 级：K 源是每 stile 复用的 per-core scratch，AIV 下一 stile 的 cast
+    // 会重写该区，更深的预取与 cast 重写产生竞态（实测 STAGES=3 下 int8 崩溃）。
     // L1 占用：A 32KB + 3×32KB B = 128KB / 512KB。
     static constexpr uint32_t STAGES = STAGES_IN;
     // 非量化路径开 unit flag：mmad 与 fixpipe 的依赖交给硬件互锁，省掉每页
@@ -256,7 +262,9 @@ public:
         }
 
         LayoutC layoutBlock = layoutC.GetTileLayout(actualShape.GetCoordMN());
-        if constexpr (USE_UNIT_FLAG) {
+        if (storeToUb_) {
+            StoreToUb(actualShape);
+        } else if constexpr (USE_UNIT_FLAG) {
             copyL0CToGm_(gmC, l0CTensorList_[l0CListId_], layoutBlock, layoutInL0C, 0b11);
         } else {
             AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventList_[l0CListId_]);
@@ -267,7 +275,83 @@ public:
         l0CListId_ = (l0CListId_ + 1 < L0C_STAGES) ? (l0CListId_ + 1) : 0;
     }
 
+    /// L0C → 配对 AIV UB（dualDstCtl=1，按 M 对半）。ubC 已是 pingpong slot 起点。
+    __aicore__ inline void ComputeToUb(const AscendC::GlobalTensor<ElementA> &gmA, const LayoutA &layoutA,
+                                       const AscendC::GlobalTensor<ElementB> &gmB, const LayoutB &layoutB,
+                                       const AscendC::LocalTensor<float> &ubC, const Catlass::GemmCoord &actualShape,
+                                       bool needLoadL1)
+    {
+        storeToUb_ = true;
+        ubC_ = ubC;
+        AscendC::GlobalTensor<ElementC> dummyGm;
+        const LayoutC dummyLayout(actualShape.m(), actualShape.n(), actualShape.n());
+        operator()(gmA, layoutA, gmB, layoutB, dummyGm, dummyLayout, actualShape, needLoadL1);
+        storeToUb_ = false;
+    }
+
 private:
+    static constexpr AscendC::FixpipeConfig MSA_CFG_ROW_MAJOR_UB = {AscendC::CO2Layout::ROW_MAJOR, true};
+
+    __aicore__ inline void StoreToUb(const Catlass::GemmCoord &actualShape)
+    {
+        const uint32_t mEven = (actualShape.m() + 1U) & ~1U;
+        const uint32_t nAlign = (actualShape.n() + 7U) & ~7U;
+        const uint32_t mRound = RoundUp<L1AAlignHelper::M_ALIGNED>(actualShape.m());
+        if constexpr (!USE_UNIT_FLAG) {
+            AscendC::SetFlag<AscendC::HardEvent::M_FIX>(l0CEventList_[l0CListId_]);
+            AscendC::WaitFlag<AscendC::HardEvent::M_FIX>(l0CEventList_[l0CListId_]);
+        }
+        if constexpr (sizeof(ElementC) == 2) {
+            uint32_t m0 = 0;
+            uint32_t m1 = 0;
+            MsaC2UbHalfSplit(actualShape.m(), m0, m1);
+            auto ubH = ubC_.template ReinterpretCast<half>();
+            AscendC::FixpipeParamsC310<AscendC::CO2Layout::ROW_MAJOR> fp;
+            fp.srcStride = mRound;
+            fp.dualDstCtl = 0;
+            fp.quantPre = QuantMode_t::F322F16;
+            fp.nSize = nAlign;
+            fp.dstStride = nAlign;
+            fp.params.ndNum = 1;
+            fp.params.srcNdStride = 0;
+            fp.params.dstNdStride = 0;
+            if (m0 > 0U) {
+                fp.mSize = m0;
+                fp.subBlockId = false;
+                AscendC::Fixpipe<half, float, MSA_CFG_ROW_MAJOR_UB>(ubH, l0CTensorList_[l0CListId_], fp);
+            }
+            if (m1 > 0U) {
+                fp.mSize = m1;
+                fp.subBlockId = true;
+                AscendC::Fixpipe<half, float, MSA_CFG_ROW_MAJOR_UB>(ubH, l0CTensorList_[l0CListId_][m0 * 16U], fp);
+            }
+        } else {
+            // 950 L0C→UB：nSize 上限 64。ndNum=2 用 panel 布局（QLI）：每 AIV 先 [M/2,64]
+            // 再紧接第二块 [M/2,64]，总 32KB ping。
+            constexpr uint32_t N_PER_ND = 64;
+            const uint32_t rowsPerAiv = mEven / MSA_AIV_PER_AIC;
+            AscendC::FixpipeParamsC310<AscendC::CO2Layout::ROW_MAJOR> fp;
+            fp.mSize = mEven;
+            fp.srcStride = mRound;
+            fp.dstStride = N_PER_ND;
+            fp.dualDstCtl = 1;
+            fp.quantPre = QuantMode_t::NoQuant;
+            fp.nSize = N_PER_ND;
+            fp.params.ndNum = (nAlign > N_PER_ND) ? (nAlign / N_PER_ND) : 1;
+            if (fp.params.ndNum > 1) {
+                fp.params.srcNdStride = ((mEven + 15U) / 16U) * N_PER_ND;
+                fp.params.dstNdStride = rowsPerAiv * N_PER_ND;
+            } else {
+                fp.nSize = nAlign;
+                fp.params.srcNdStride = 0;
+                fp.params.dstNdStride = 0;
+            }
+            AscendC::Fixpipe<float, float, MSA_CFG_ROW_MAJOR_UB>(ubC_, l0CTensorList_[l0CListId_], fp);
+        }
+        if constexpr (!USE_UNIT_FLAG) {
+            AscendC::SetFlag<AscendC::HardEvent::FIX_M>(l0CEventList_[l0CListId_]);
+        }
+    }
     AscendC::LocalTensor<ElementA> l1ATensor_;
     AscendC::LocalTensor<ElementB> l1BTensorList_[STAGES];
     AscendC::LocalTensor<ElementA> l0ATensorList_[STAGES];
@@ -287,8 +371,10 @@ private:
     CopyL1ToL0A copyL1ToL0A_;
     CopyL1ToL0B copyL1ToL0B_;
     CopyL0CToGm copyL0CToGm_;
+    bool storeToUb_{false};
+    AscendC::LocalTensor<float> ubC_;
 };
 
 } // namespace MsaIndexScoreNs
 
-#endif // MSA_BLOCK_MMAD_H
+#endif // MSA_BLOCK_MMAD_ARCH35_H

@@ -55,9 +55,11 @@ from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-_USE_ASCENDC_INDEX_SCORE = get_ascend_device_type() != AscendDeviceType.A5
+# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel, so A5
+# shares the AscendC scoring path with A2/A3.
+_USE_ASCENDC_INDEX_SCORE = True
 
-if not _USE_ASCENDC_INDEX_SCORE:
+if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
         minimax_m3_index_decode,
         minimax_m3_index_score,

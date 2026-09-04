@@ -540,16 +540,17 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_a5_index_decode_uses_a5_triton_without_tp_block_sharding() -> None:
+def test_a5_index_score_uses_ascendc_with_triton_fallback_available() -> None:
     module_source = inspect.getsource(msa_m3_module)
-    a5_branch_start = module_source.index("if not _USE_ASCENDC_INDEX_SCORE:")
+    a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
     a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE is True
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
-    assert "get_ascend_device_type() != AscendDeviceType.A5" in module_source
+    assert "_USE_ASCENDC_INDEX_SCORE = True" in module_source
     with patch(
         "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
         return_value=AscendDeviceType.A5,
@@ -943,6 +944,52 @@ def test_ascendc_index_score_forwards_metadata_operands() -> None:
     assert kwargs["atten_mask"] is causal_mask
     assert "init_blocks" not in kwargs
     assert "local_blocks" not in kwargs
+
+
+def test_ascendc_index_score_casts_query_to_fp8_cache_dtype() -> None:
+    idx_q = torch.ones(1, 2, 128, dtype=torch.bfloat16)
+    index_key_cache = torch.zeros(4, 128, 128, dtype=torch.float8_e4m3fn)
+    block_table = torch.tensor([[0, 1, 2, 3]], dtype=torch.int32)
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+    seq_lens = torch.tensor([129], dtype=torch.int32)
+    start_loc = torch.tensor([1], dtype=torch.int32)
+    expected = torch.zeros(2, 1, 4)
+
+    with patch(
+        "vllm_ascend.models.minimax_m3.ops.msa_m3_npu.torch.ops._C_ascend.npu_msa_index_score",
+        return_value=expected,
+        create=True,
+    ) as mock_index_score:
+        actual = _minimax_m3_index_score(
+            idx_q,
+            index_key_cache,
+            block_table,
+            cu_seqlens_q,
+            seq_lens,
+            start_loc,
+            None,
+        )
+
+    assert actual is expected
+    args, kwargs = mock_index_score.call_args
+    assert args[0].dtype == torch.float8_e4m3fn
+    assert args[1].dtype == torch.float8_e4m3fn
+    assert "scale" not in kwargs
+
+
+def test_bundled_ascendc_index_score_registers_a5_fp8_kernel() -> None:
+    repo_root = Path(msa_m3_module.__file__).parents[3]
+    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
+    op_def = (op_root / "op_host" / "msa_index_score_def.cpp").read_text(encoding="utf-8")
+    kernel = (op_root / "op_kernel" / "msa_index_score.cpp").read_text(encoding="utf-8")
+    adapter = (op_root / "msa_index_score_torch_adpt.h").read_text(encoding="utf-8")
+    build_script = (repo_root / "csrc" / "build_aclnn.sh").read_text(encoding="utf-8")
+    a5_build_branch = build_script.split('elif [[ "$SOC_VERSION" =~ ^ascend950 ]]', 1)[1].split("else", 1)[0]
+
+    assert 'AddConfig("ascend950"' in op_def
+    assert "MSA_TILING_KEY_FP8_E4M3FN" in kernel
+    assert "at::kFloat8_e4m3fn" in adapter
+    assert '"msa_index_score"' in a5_build_branch
 
 
 def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:

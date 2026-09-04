@@ -28,9 +28,26 @@
 
 namespace MsaIndexScoreNs {
 
-__aicore__ inline uint32_t MsaCeilDiv(uint32_t a, uint32_t b) { return (a + b - 1) / b; }
+__aicore__ inline uint32_t MsaCeilDiv(uint32_t a, uint32_t b)
+{
+    return (a + b - 1) / b;
+}
 
-__aicore__ inline uint32_t MsaMinU32(uint32_t a, uint32_t b) { return a < b ? a : b; }
+// C2UB 非量化 F322F16 单目标：两次 Fixpipe 的 mSize 切分（每段偶数），AIV 必须相同。
+__aicore__ inline void MsaC2UbHalfSplit(uint32_t mActual, uint32_t &m0, uint32_t &m1)
+{
+    const uint32_t mEven = (mActual + 1U) & ~1U;
+    m0 = mEven / 2U;
+    if ((m0 & 1U) != 0U) {
+        m0 += 1U;
+    }
+    m1 = mEven - m0;
+}
+
+__aicore__ inline uint32_t MsaMinU32(uint32_t a, uint32_t b)
+{
+    return a < b ? a : b;
+}
 
 __aicore__ inline int32_t MsaClampI32(int32_t v, int32_t lo, int32_t hi)
 {
@@ -95,7 +112,10 @@ public:
         Reset();
     }
 
-    __aicore__ inline uint32_t TotalTasks() const { return totalTasks_; }
+    __aicore__ inline uint32_t TotalTasks() const
+    {
+        return totalTasks_;
+    }
 
     __aicore__ inline void Reset()
     {
@@ -135,17 +155,17 @@ public:
         task.mStart = (taskIdx - taskBase_) * MSA_ROW_TILE_M;
         task.mActual = MsaMinU32(MSA_ROW_TILE_M, curRows_ - task.mStart);
         // Cube L0A fractal 为 MSA_M_ALIGN 行。整请求不足对齐宽度时保持原样（L0 已覆盖）；
-        // 否则把末尾短 tile 向前重叠到 MSA_M_ALIGN 行，避免 mActual∈(0,16) 的 int8 路径出错。
+        // 否则把末尾短 tile 向前重叠到 MSA_M_ALIGN 行，避免 mActual ∈ (0,16) 的 int8 路径出错。
         if (task.mActual > 0U && task.mActual < MSA_M_ALIGN && task.mStart >= MSA_M_ALIGN) {
             task.mStart -= (MSA_M_ALIGN - task.mActual);
             task.mActual = MSA_M_ALIGN;
         }
         task.globalRowBase = cuQStart_ * numQHeads_ + task.mStart;
 
-        const uint32_t tokenLo = task.mStart / numQHeads_;
-        const uint32_t tokenHi = (task.mStart + task.mActual - 1) / numQHeads_;
-        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tokenHi));
-        const int32_t visibleKeyEndLo = VisibleKeyEndOf(static_cast<int32_t>(tokenLo));
+        const uint32_t tLo = task.mStart / numQHeads_;
+        const uint32_t tHi = (task.mStart + task.mActual - 1) / numQHeads_;
+        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tHi));
+        const int32_t visibleKeyEndLo = VisibleKeyEndOf(static_cast<int32_t>(tLo));
 
         uint32_t visibleEndBlk = MsaCeilDiv(static_cast<uint32_t>(visibleKeyEndHi), MSA_BLOCK_SIZE);
         visibleEndBlk = MsaMinU32(visibleEndBlk, maxBlocksPerBatch_);
