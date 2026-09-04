@@ -165,10 +165,13 @@ ge::graphStatus CompressorTiling::SetPageAttentionInfo()
 {
     pageAttentionParams_->blockNum = context_->stateCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_0);
     pageAttentionParams_->blockSize = context_->stateCache.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1);
-    if (static_cast<uint8_t>(*context_->cacheMode) == static_cast<uint8_t>(CACHE_MODE::CONTINUOUS)) {
-        pageAttentionParams_->maxBlockNumPerBatch =
-            context_->stateBlockTable.shape->GetStorageShape().GetDim(COMPRESSOR_DIM_INDEX_1);
-    }
+    // Both CONTINUOUS and CYCLE use a 2-D block table. In CYCLE mode this is
+    // the row stride; only the first ceil(coff * ratio / blockSize) entries
+    // contain the persistent tail ring.
+    const auto &blockTableShape = context_->stateBlockTable.shape->GetStorageShape();
+    pageAttentionParams_->maxBlockNumPerBatch = blockTableShape.GetDimNum() == 1 ?
+                                                    1 :
+                                                    blockTableShape.GetDim(COMPRESSOR_DIM_INDEX_1);
 
     return ge::GRAPH_SUCCESS;
 }
@@ -836,11 +839,22 @@ ge::graphStatus CompressorTiling::CheckFeature() const
         OP_LOGE(context_->opName, "blockSize should not be less than 1, but got %u", pageAttentionParams_->blockSize),
         return ge::GRAPH_FAILED);
     if (static_cast<uint8_t>(*context_->cacheMode) == static_cast<uint8_t>(CACHE_MODE::CYCLE)) {
-        OP_CHECK_IF(pageAttentionParams_->blockNum < baseParams_->batchSize,
+        const uint32_t tailTokens = coff * baseParams_->cmpRatio;
+        const uint32_t ringBlocks =
+            (tailTokens + pageAttentionParams_->blockSize - 1) / pageAttentionParams_->blockSize;
+        OP_CHECK_IF(pageAttentionParams_->maxBlockNumPerBatch < ringBlocks,
                     OP_LOGE(context_->opName,
-                            "when cacheMode is %u, blockNum should not be less than batchSize(%u), but got %u",
-                            static_cast<uint8_t>(CACHE_MODE::CYCLE), baseParams_->batchSize,
-                            pageAttentionParams_->blockSize),
+                            "when cacheMode is %u, block-table row width should not be less than ringBlocks(%u), "
+                            "but got %u",
+                            static_cast<uint8_t>(CACHE_MODE::CYCLE), ringBlocks,
+                            pageAttentionParams_->maxBlockNumPerBatch),
+                    return ge::GRAPH_FAILED);
+        OP_CHECK_IF(pageAttentionParams_->blockNum < baseParams_->batchSize * ringBlocks,
+                    OP_LOGE(context_->opName,
+                            "when cacheMode is %u, blockNum should not be less than batchSize(%u) * "
+                            "ringBlocks(%u), but got %u",
+                            static_cast<uint8_t>(CACHE_MODE::CYCLE), baseParams_->batchSize, ringBlocks,
+                            pageAttentionParams_->blockNum),
                     return ge::GRAPH_FAILED);
     }
     return ge::GRAPH_SUCCESS;
