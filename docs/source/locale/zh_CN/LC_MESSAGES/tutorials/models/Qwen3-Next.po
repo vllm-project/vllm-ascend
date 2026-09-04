@@ -330,7 +330,7 @@ msgid ""
 "Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed "
 "feature descriptions."
 msgstr ""
-"有关详细的功能描述，请参阅[功能矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
+"有关详细的功能描述，请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)。"
 
 msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
 msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"

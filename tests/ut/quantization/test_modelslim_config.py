@@ -13,7 +13,6 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.utils import WeightsMapper
 
 from tests.ut.base import TestBase
-from vllm_ascend.models.llama_eagle3 import get_rotation_path
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.configs.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
@@ -22,7 +21,7 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
 
 
 class TestAscendModelSlimConfig(TestBase):

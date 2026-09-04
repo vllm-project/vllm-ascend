@@ -31,7 +31,6 @@ DSPARK_MAIN_MODEL = ["UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test"]
 MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
 
-@pytest.mark.skip("Temporarily skip this DeepSeek V4 test.")
 @pytest.mark.e2e_model(MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",

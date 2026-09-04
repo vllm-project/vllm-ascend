@@ -665,6 +665,27 @@ def get_block_hashes(
     return _LazyGroupedBlockHashList(block_hashes, group_block_size // hash_block_size)
 
 
+def get_partial_block_index(
+    token_count: int,
+    block_size: int,
+    hash_count: int,
+    enabled: bool,
+) -> int | None:
+    """Index of the trailing partial block to transfer, if any.
+
+    Returns None when disabled, when the request carries no tokens, or when
+    the token count aligns exactly with completed hash blocks.
+    """
+    if not enabled or token_count <= 0:
+        return None
+    full_blocks, remainder = divmod(token_count, block_size)
+    if remainder:
+        return full_blocks
+    if full_blocks > hash_count:
+        return full_blocks - 1
+    return None
+
+
 class _LazyGroupedBlockHashList(Sequence[BlockHash | str]):
     def __init__(self, block_hashes: Sequence[BlockHash | str], scale_factor: int) -> None:
         self._block_hashes = block_hashes
