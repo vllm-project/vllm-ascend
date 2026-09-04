@@ -186,6 +186,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
+        assert self.prefill_cudagraph_manager is not None
+        assert self.decode_cudagraph_manager is not None
         # The Ascend graph managers are patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
         # They need this speculator to update full-graph params, so set it here.
@@ -551,6 +553,42 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             decode_metadata.seq_lens_list = seq_lens_list
             decode_metadata.actual_seq_lengths_q = query_lens_list
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
+
+    def build_fia_params(
+        self,
+        num_reqs_padded: int,
+        is_draft_model_prefill: bool,
+    ) -> list[dict[str, Any]]:
+        if is_draft_model_prefill:
+            metadata = next(
+                metadata
+                for layer_name, metadata in self.model_state.attn_metadata.items()
+                if layer_name in self.draft_attn_layer_names
+            )
+            return [
+                {
+                    "actual_seq_lengths": metadata.query_start_loc,
+                    "actual_seq_lengths_kv": metadata.seq_lens,
+                }
+            ]
+
+        assert self.input_batch is not None
+        num_reqs = self.input_batch.num_reqs
+        query_start_loc = list(range(1, num_reqs_padded + 1))
+        fia_params: list[dict[str, Any]] = []
+        for step in range(1, self.num_speculative_steps):
+            seq_lens = [
+                min(int(seq_len) + step, self.max_model_len)
+                for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+            ]
+            seq_lens.extend([0] * (num_reqs_padded - num_reqs))
+            fia_params.append(
+                {
+                    "actual_seq_lengths": query_start_loc,
+                    "actual_seq_lengths_kv": seq_lens,
+                }
+            )
+        return fia_params
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
         # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`
