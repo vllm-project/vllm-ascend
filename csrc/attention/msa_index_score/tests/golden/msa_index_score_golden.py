@@ -18,6 +18,9 @@
 - local_mask：由 start_loc（query 所在逻辑 block）+ init/local_blocks 强制高分
 """
 
+from dataclasses import dataclass
+from typing import Optional
+
 import numpy as np
 
 NEG_INF = np.float32(-3.4028234663852886e38)
@@ -28,6 +31,24 @@ SPARSE_MODE_DEFAULT = 0
 SPARSE_MODE_RIGHT_DOWN = 3
 DEFAULT_INIT_BLOCKS = 0
 DEFAULT_LOCAL_BLOCKS = 1
+DEFAULT_BLOCK_SIZE = 128
+
+
+@dataclass
+class MsaIndexScoreGoldenInputs:
+    """msa_index_score_golden 的具名入参（tensor + attr）。"""
+
+    query: np.ndarray
+    key: np.ndarray
+    block_table: Optional[np.ndarray]
+    actual_seq_qlen: np.ndarray
+    actual_seq_klen: np.ndarray
+    start_loc: np.ndarray
+    sparse_mode: int = SPARSE_MODE_RIGHT_DOWN
+    block_size: int = DEFAULT_BLOCK_SIZE
+    scale: Optional[np.ndarray] = None
+    init_blocks: int = DEFAULT_INIT_BLOCKS
+    local_blocks: int = DEFAULT_LOCAL_BLOCKS
 
 
 def round_up(value, align):
@@ -40,31 +61,32 @@ def _visible_key_end(sparse_mode, actual_seq_klen, q_len, t_off):
     return int(actual_seq_klen)
 
 
-def msa_index_score_golden(
-    query,
-    key,
-    block_table,
-    actual_seq_qlen,
-    actual_seq_klen,
-    start_loc,
-    sparse_mode=SPARSE_MODE_RIGHT_DOWN,
-    block_size=128,
-    scale=None,
-    init_blocks=DEFAULT_INIT_BLOCKS,
-    local_blocks=DEFAULT_LOCAL_BLOCKS,
-):
+def msa_index_score_golden(inputs):
     """计算 MSA index block score。
 
     Args:
-        query:       [T1, N1, D]
-        key:         PA BBND [NP, P, N2, D]、BNBD [NP, N2, P, D]，或 TND [T2, N2, D]
-        block_table: PA [B, MB]；TND 为 None
-        actual_seq_qlen:    [B+1]
-        actual_seq_klen:    PA [B]；TND 前缀和 [B+1]
-        start_loc:   [B]，当前 query 所在逻辑 block 索引（local_mask）
-        sparse_mode: 0 或 3
-        scale:       int8 时 PA [NP, N2, P] 或 TND [T2, N2]；非量化为 None
+        inputs: MsaIndexScoreGoldenInputs
+            query:       [T1, N1, D]
+            key:         PA BBND [NP, P, N2, D]、BNBD [NP, N2, P, D]，或 TND [T2, N2, D]
+            block_table: PA [B, MB]；TND 为 None
+            actual_seq_qlen:    [B+1]
+            actual_seq_klen:    PA [B]；TND 前缀和 [B+1]
+            start_loc:   [B]，当前 query 所在逻辑 block 索引（local_mask）
+            sparse_mode: 0 或 3
+            scale:       int8 时 PA [NP, N2, P] 或 TND [T2, N2]；非量化为 None
     """
+    query = inputs.query
+    key = inputs.key
+    block_table = inputs.block_table
+    actual_seq_qlen = inputs.actual_seq_qlen
+    actual_seq_klen = inputs.actual_seq_klen
+    start_loc = inputs.start_loc
+    sparse_mode = inputs.sparse_mode
+    block_size = inputs.block_size
+    scale = inputs.scale
+    init_blocks = inputs.init_blocks
+    local_blocks = inputs.local_blocks
+
     total_q, num_q_heads, head_dim = query.shape
     is_tnd = key.ndim == 3
     if is_tnd:
@@ -75,11 +97,13 @@ def msa_index_score_golden(
             blocks = (kv + block_size - 1) // block_size
             if blocks > max_blocks:
                 max_blocks = blocks
+        num_kv_heads = key.shape[1]
         k = key.astype(np.float32)[:, 0, :]
     else:
         batch = len(actual_seq_klen)
         max_blocks = block_table.shape[1]
         is_bnbd = key.shape[2] == block_size and key.shape[1] != block_size
+        num_kv_heads = key.shape[1] if is_bnbd else key.shape[2]
         if is_bnbd:
             k = key.astype(np.float32)[:, 0, :, :]
         else:
