@@ -403,20 +403,19 @@ def build_dspark_swa_indices(
         indices_output.copy_(per_token_slots)
         per_token_slots = indices_output
 
-    return per_token_slots, per_token_lens
-    if buffer is None:
-        return per_token_slots, per_token_lens
+    if buffer is not None:
+        # Copy the freshly built indices into the caller-provided buffer and hand
+        # back a zero-copy view of it: ACL graph capture freezes tensor addresses,
+        # so the DSA operator must read from the stable buffer at replay instead of
+        # a freshly allocated tensor.
+        num_rows = per_token_slots.shape[0]
+        assert num_rows <= buffer.shape[0], (
+            f"dspark_swa_indices needs {num_rows} rows but `buffer` only has {buffer.shape[0]}"
+        )
+        buffer[:num_rows].copy_(per_token_slots)
+        per_token_slots = buffer[:num_rows]
 
-    # Copy the freshly built indices into the caller-provided buffer and hand
-    # back a zero-copy view of it: ACL graph capture freezes tensor addresses,
-    # so the DSA operator must read from the stable buffer at replay instead of
-    # a freshly allocated tensor.
-    num_rows = per_token_slots.shape[0]
-    assert num_rows <= buffer.shape[0], (
-        f"dspark_swa_indices needs {num_rows} rows but `buffer` only has {buffer.shape[0]}"
-    )
-    buffer[:num_rows].copy_(per_token_slots)
-    return buffer[:num_rows], per_token_lens
+    return per_token_slots, per_token_lens
 
 
 class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
@@ -1089,7 +1088,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc,
                 seq_lens,
                 self.num_actual_tokens,
-                buffer=self.dspark_swa_indices_buffer,
             )
             if self._device_metadata_enabled and not has_prefill:
                 if self.dspark_swa_indices_buffer is None:
