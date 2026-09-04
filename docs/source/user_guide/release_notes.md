@@ -2,7 +2,7 @@
 
 ## v0.26.0rc1 - 2026.09.03
 
-This is the first release candidate of v0.26.0 for vLLM Ascend, aligned with upstream vLLM v0.26.0. This release is a model‑restricted version. Fully validated models include Kimi K3, GLM‑5.2, DeepSeek V4 Flash 0731, DeepSeek V4 Pro 0813. Availability is not guaranteed for other models. For the full test report, see: [v0.26.0rc1 Test Conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.26.0rc/tests/vllm_ascend_v0.26.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/latest) to get started.
+This is the first release candidate of v0.26.0 for vLLM Ascend, aligned with upstream vLLM v0.26.0. This release is a model‑restricted version. Fully validated models include Kimi K3, GLM‑5.2, DeepSeek V4 Flash 0731, DeepSeek V4 Pro 0813. Availability is not guaranteed for other models. For the full test report, see: [v0.26.0rc1 Test Conclusion](https://github.com/vllm-project/vllm-ascend/blob/releases/v0.26.0rc/tests/vllm_ascend_v0.26.0rc1_test_conclusion.md). Please follow the [official documentation](https://docs.vllm.ai/projects/ascend/en/v0.26.0rc1/) to get started.
 
 ### Highlights
 
