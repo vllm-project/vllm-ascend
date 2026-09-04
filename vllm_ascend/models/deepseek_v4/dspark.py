@@ -14,13 +14,16 @@ from collections.abc import Iterable
 import regex as re
 import torch
 import torch.nn as nn
+import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -32,16 +35,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
-from vllm.model_executor.models.utils import (
-    PPMissingLayer,
-    maybe_prefix,
-    process_eagle_weight,
-)
+from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
 
 from vllm_ascend.models.deepseek_v4.model import (
-    DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
+    DeepseekV4DecoderLayer,
     DeepseekV4MoE,
+    sequence_parallel_chunk,
+    sp_padding_mask,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.utils import enable_dsa_cp
@@ -136,7 +137,7 @@ class DeepseekV4DSparkModel(nn.Module):
         )
         self.layers = nn.ModuleDict(
             {
-                str(self.mtp_start_layer_idx + idx): DeepseekV2DecoderLayer(
+                str(self.mtp_start_layer_idx + idx): DeepseekV4DecoderLayer(
                     vllm_config,
                     prefix=f"mtp.{idx}",
                     is_draft_layer=True,
@@ -146,6 +147,7 @@ class DeepseekV4DSparkModel(nn.Module):
         )
 
         first_layer = self.layers[str(self.mtp_start_layer_idx)]
+        self.use_sequence_parallel_moe = first_layer.use_sequence_parallel_moe
 
         _model_quant_cfg = getattr(config, "quantization_config", None)
         _main_proj_qconfig = (
@@ -261,6 +263,14 @@ class DeepseekV4DSparkModel(nn.Module):
         positions: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
+        full_num_tokens = positions.shape[0]
+        if self.use_sequence_parallel_moe:
+            if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+                forward_context = get_forward_context()
+                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
+            hidden_states = sequence_parallel_chunk(hidden_states)
+            input_ids = sequence_parallel_chunk(input_ids)
+
         residual = None
         for layer in self.layers.values():
             hidden_states, residual = layer(
@@ -270,6 +280,9 @@ class DeepseekV4DSparkModel(nn.Module):
                 llama_4_scaling=None,
                 input_ids=input_ids,
             )
+        if self.use_sequence_parallel_moe:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+            hidden_states = hidden_states[:full_num_tokens]
         head_hidden = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         return head_hidden
 
@@ -341,7 +354,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
             if isinstance(layer, PPMissingLayer):
                 continue
 
-            assert isinstance(layer, DeepseekV2DecoderLayer)
+            assert isinstance(layer, DeepseekV4DecoderLayer)
             if isinstance(layer.mlp, DeepseekV4MoE):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.mlp

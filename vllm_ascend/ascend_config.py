@@ -535,6 +535,13 @@ class AscendConfig:
         )
         self.enable_dsa_cp = self.enable_dsa_cp and has_indexer
 
+        # TODO: support PP with dsacp. DSA-CP currently requires a
+        # single-stage pipeline; resolve here while vllm_config is
+        # explicitly available so runtime enable_dsa_cp() stays a pure
+        # validated-config read (independent from SP and free from vLLM's
+        # temporary config context).
+        self.enable_dsa_cp = self.enable_dsa_cp and vc.parallel_config.pipeline_parallel_size == 1
+
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):
             tp_pcp_size = vc.parallel_config.tensor_parallel_size * vc.parallel_config.prefill_context_parallel_size

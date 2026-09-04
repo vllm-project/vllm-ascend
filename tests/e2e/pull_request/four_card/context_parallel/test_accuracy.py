@@ -69,6 +69,7 @@ DEEPSEEK_V4_PROMPTS = [
 ]
 
 DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", 'What is the meaning of life?",\n    "What is']
+DEEPSEEK_V4_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
 
 @dataclass(frozen=True)
@@ -151,7 +152,7 @@ FULL_FEATURE_MODEL_CASES = [
     ),
     AccuracyCase(
         name="deepseek_v4_w4a8_dsa_cp_full_features",
-        model="gdydems/DeepSeek-V4-Flash-w4a8-mtp",
+        model=DEEPSEEK_V4_MODEL,
         prompts=DEEPSEEK_V4_PROMPTS,
         expected_outputs=DEEPSEEK_V4_GOLDEN,
         max_tokens=5,
@@ -176,6 +177,57 @@ FULL_FEATURE_MODEL_CASES = [
         },
     ),
 ]
+
+
+@pytest.mark.e2e_model(DEEPSEEK_V4_MODEL)
+@pytest.mark.e2e_coverage(
+    arch="moe",
+    feature="dsa_cp",
+    parallel="TP,EP",
+    deploy="pd_mix",
+    hardware="A3",
+    quantization="W4A8",
+    graph_mode="eager",
+)
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_deepseek_v4_dsa_cp_prefill_decode_accuracy() -> None:
+    prompt_lengths = [1, 3, 4095, 4096, 4097]
+    generated_tokens: dict[bool, list[int]] = {}
+
+    for enable_dsa_cp in (False, True):
+        mode_tokens = []
+        with VllmRunner(
+            DEEPSEEK_V4_MODEL,
+            max_model_len=8192,
+            max_num_seqs=16,
+            max_num_batched_tokens=8192,
+            dtype="auto",
+            tensor_parallel_size=4,
+            enable_expert_parallel=True,
+            gpu_memory_utilization=0.9,
+            quantization="ascend",
+            tokenizer_mode="deepseek_v4",
+            block_size=128,
+            enforce_eager=True,
+            additional_config={"enable_dsa_cp": enable_dsa_cp},
+        ) as runner:
+            for prompt_length in prompt_lengths:
+                prompt_tokens = [(index % 1000) + 100 for index in range(prompt_length)]
+                output_ids, _ = runner.generate_greedy([prompt_tokens], max_tokens=1)[0]
+                assert output_ids[:prompt_length] == prompt_tokens
+                assert len(output_ids) == prompt_length + 1
+                mode_tokens.append(output_ids[-1])
+        generated_tokens[enable_dsa_cp] = mode_tokens
+
+    assert generated_tokens[True] == generated_tokens[False]
 
 
 @patch.dict(
