@@ -89,6 +89,7 @@ def _build_mxfp_params(
     mxfp_scale_dtype: torch.dtype | None = None,
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
+    mxfp_group_size: int | None = None,
 ) -> _stage_params.MoEMxfpParams | None:
     if quant_type not in [QuantType.W8A8MXFP, QuantType.W4A4MXFP, QuantType.W4A8MXFP, QuantType.W4A16MXFP]:
         return None
@@ -101,6 +102,7 @@ def _build_mxfp_params(
             mxfp_scale_dtype,
             mxfp_per_token_scale_dtype,
             mxfp_use_bf16,
+            mxfp_group_size,
         )
     )
     if not has_explicit_mxfp_args:
@@ -112,6 +114,7 @@ def _build_mxfp_params(
         scale_dtype=mxfp_scale_dtype,
         per_token_scale_dtype=mxfp_per_token_scale_dtype,
         use_bf16=True if mxfp_use_bf16 is None else mxfp_use_bf16,
+        group_size=mxfp_group_size,
     )
 
 
@@ -140,6 +143,7 @@ def build_fused_experts_input(
     mxfp_scale_dtype: torch.dtype | None = None,
     mxfp_per_token_scale_dtype: torch.dtype | None = None,
     mxfp_use_bf16: bool | None = None,
+    mxfp_group_size: int | None = None,
     is_per_channel_weight: bool = False,
     w1_scale: list[torch.Tensor] | torch.Tensor | None = None,
     w2_scale: list[torch.Tensor] | torch.Tensor | None = None,
@@ -199,6 +203,7 @@ def build_fused_experts_input(
                 mxfp_scale_dtype=mxfp_scale_dtype,
                 mxfp_per_token_scale_dtype=mxfp_per_token_scale_dtype,
                 mxfp_use_bf16=mxfp_use_bf16,
+                mxfp_group_size=mxfp_group_size,
             ),
             is_per_channel_weight=is_per_channel_weight,
         ),

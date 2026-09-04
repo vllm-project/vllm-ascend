@@ -26,10 +26,16 @@ from vllm_ascend.ascend_config import (
     SchedulerConfig,
     ShortRequestFirstConfig,
     clear_ascend_config,
+    compute_mega_moe_buffer_tokens_per_rank,
     get_ascend_config,
     init_ascend_config,
 )
 from vllm_ascend.utils import clear_enable_sp, enable_sp, shared_expert_dp_enabled
+
+
+def test_compute_a5_mega_moe_buffer_tokens_per_rank():
+    assert compute_mega_moe_buffer_tokens_per_rank(65536, 4096, 32) == 2048
+    assert compute_mega_moe_buffer_tokens_per_rank(65536, 512, 32) == 512
 
 
 class TestAscendConfig(TestBase):

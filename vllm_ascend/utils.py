@@ -1145,6 +1145,7 @@ def _compute_potential_max_tokens(vllm_config) -> int:
 # both the skip-allreduce decision and the o_proj static-exchange buffer sizing, so
 # neither path recomputes it.
 _potential_max_tokens: int | None = None
+_MIN_NONEMPTY_MOE_BATCH_TOKENS = 1
 
 
 def set_potential_max_tokens(vllm_config) -> None:
@@ -1166,12 +1167,12 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
 
     Skipping is applicable for all dense models and for moe models only on ranks
     that act as KV consumers. We skip the DP all-reduce when either:
-    - Both the prefill and decode communication methods are MC2 (or FUSED_MC2), or
+    - MegaMoE cannot be selected and both prefill and decode use regular MC2, or
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
-    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
-    uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
+    a non-zero global_bs and must NOT receive mc2_mask. A5 MegaMoE requires
+    uniform token counts across ranks, so that FUSED_MC2 path cannot skip.
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
@@ -1198,12 +1199,24 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
         return False
 
     from vllm_ascend.ascend_forward_context import (
+        is_a5_mega_moe_capability_resolved,
         select_moe_comm_method,
         use_cann_megamoe,
     )
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
     scheduler_config = vllm_config.scheduler_config
+    minimum_batch_comm_method = select_moe_comm_method(
+        _MIN_NONEMPTY_MOE_BATCH_TOKENS,
+        vllm_config,
+        is_draft_model=is_draft_model,
+    )
+    if get_ascend_device_type() == AscendDeviceType.A5 and ascend_config.enable_fused_mc2 == 1:
+        if minimum_batch_comm_method == MoECommType.FUSED_MC2:
+            return False
+        if not is_a5_mega_moe_capability_resolved(vllm_config):
+            return False
+
     # potential_max_tokens is read from the set/get global (computed once in init).
     decode_comm_method = select_moe_comm_method(get_potential_max_tokens(), vllm_config, is_draft_model=is_draft_model)
     # For prefill, use the scheduler's max_num_batched_tokens for a single batch.

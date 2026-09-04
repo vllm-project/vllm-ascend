@@ -36,7 +36,12 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import (
+    _EXTRA_CTX,
+    MoECommType,
+    cache_a5_mega_moe_capability,
+    use_cann_megamoe,
+)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
@@ -49,6 +54,8 @@ from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
+    AscendDeviceType,
+    get_ascend_device_type,
     maybe_trans_nz,
     npu_stream_switch,
     shared_expert_dp_enabled,
@@ -384,6 +391,16 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             )
 
         self.quant_type = self._get_quant_type()
+        vllm_config = get_current_vllm_config()
+        quant_method = getattr(self._quant_method, "quant_method", self._quant_method)
+        if get_ascend_device_type() == AscendDeviceType.A5 and get_ascend_config().enable_fused_mc2 == 1:
+            cache_a5_mega_moe_capability(
+                vllm_config,
+                quant_type=self.quant_type,
+                activation=self.activation,
+                group_size=getattr(quant_method, "group_size", None),
+                layer_name=self.layer_name,
+            )
 
         self.moe_config.tp_group = get_tp_group()
         self.moe_config.dp_group = get_dp_group()
@@ -395,8 +412,6 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         self._shared_experts = shared_experts
 
         self.enable_npugraph_ex_static_kernel = ascend_config.ascend_compilation_config.enable_static_kernel
-
-        vllm_config = get_current_vllm_config()
 
         if (
             self.custom_routing_function is None
@@ -586,6 +601,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         if method is not None:
             quant_type = getattr(method, "quant_type", QuantType.NONE)
 
+        logger.debug_once(
+            "MoE runner quant type resolved: runner=%s, quant_method=%s, inner_method=%s, quant_type=%s.",
+            type(self).__name__,
+            type(self._quant_method).__name__,
+            type(method).__name__ if method is not None else None,
+            quant_type,
+        )
         return quant_type
 
     @property

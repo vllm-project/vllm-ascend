@@ -1,6 +1,7 @@
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -10,8 +11,16 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ascend_config import _CANN_OPS_TRANSFORMER_AVAILABLE, get_ascend_config, is_megamoe_supported_by_config
+from vllm_ascend.ascend_config import (
+    _CANN_OPS_TRANSFORMER_AVAILABLE,
+    compute_mega_moe_buffer_tokens_per_rank,
+    get_ascend_config,
+    is_megamoe_supported_by_config,
+)
+from vllm_ascend.ops.activation import SituActivationConfig
+from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     AscendDeviceType,
     enable_sp,
@@ -29,10 +38,23 @@ class MoECommType(Enum):
     FUSED_MC2 = 3
 
 
+@dataclass(frozen=True, slots=True)
+class A5MegaMoECapability:
+    """Resolved runtime contract used to select the A5 MegaMoE backend."""
+
+    quant_type: QuantType
+    activation: str | MoEActivation | SituActivationConfig
+    group_size: int | None
+    is_draft_model: bool = False
+
+
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+_A5_MEGA_MOE_GROUP_SIZE = 32
+_A5_MEGA_MOE_SUPPORTED_QUANTS = frozenset({QuantType.W4A8MXFP})
+_A5_MEGA_MOE_CAPABILITY_ATTR = "_ascend_a5_mega_moe_capability"
 
 
 def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
@@ -97,6 +119,67 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     )
 
 
+def cache_a5_mega_moe_capability(
+    vllm_config: VllmConfig | None,
+    *,
+    quant_type: QuantType,
+    activation: str | MoEActivation | SituActivationConfig,
+    group_size: int | None,
+    layer_name: str,
+) -> None:
+    """Cache the resolved MoE contract on its owning config object."""
+    if vllm_config is None:
+        logger.debug_once(
+            "A5 MegaMoE capability cache skipped for %s: missing VllmConfig.",
+            layer_name,
+        )
+        return
+
+    capability = A5MegaMoECapability(
+        quant_type=quant_type,
+        activation=activation,
+        group_size=group_size,
+    )
+    cached = getattr(vllm_config, _A5_MEGA_MOE_CAPABILITY_ATTR, None)
+    if cached is False:
+        return
+    if isinstance(cached, A5MegaMoECapability) and cached != capability:
+        logger.warning_once(
+            "A5 MegaMoE is disabled because routed MoE layers resolved to "
+            "different runtime capabilities: first=%s, layer=%s, current=%s.",
+            cached,
+            layer_name,
+            capability,
+        )
+        capability_to_cache: A5MegaMoECapability | bool = False
+    else:
+        capability_to_cache = capability
+
+    try:
+        setattr(vllm_config, _A5_MEGA_MOE_CAPABILITY_ATTR, capability_to_cache)
+    except (AttributeError, TypeError):
+        logger.warning_once(
+            "A5 MegaMoE capability could not be cached on VllmConfig; the "
+            "backend will remain disabled unless the model instance exposes it."
+        )
+        return
+
+    if capability_to_cache is not False:
+        logger.info_once(
+            "A5 MegaMoE runtime capability resolved from %s: quant_type=%s, activation=%s, group_size=%s.",
+            layer_name,
+            quant_type,
+            activation,
+            group_size,
+        )
+
+
+def is_a5_mega_moe_capability_resolved(vllm_config: VllmConfig) -> bool:
+    """Return whether runtime MoE capability caching has completed."""
+    config_dict = getattr(vllm_config, "__dict__", {})
+    return _A5_MEGA_MOE_CAPABILITY_ATTR in config_dict
+
+
 @contextmanager
 def set_ascend_forward_context(
     attn_metadata: Any,
@@ -142,6 +225,7 @@ def set_ascend_forward_context(
             max_num_tokens,
             vllm_config,
             is_draft_model=is_draft_model,
+            model_instance=model_instance,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -299,6 +383,49 @@ def get_mc2_tokens_capacity():
     return _mc2_tokens_capacity
 
 
+def get_a5_mega_moe_buffer_tokens_per_rank(
+    vllm_config: VllmConfig,
+    mc2_tokens_capacity: int | None = None,
+) -> int:
+    """Resolve the A5 MegaMoE input capacity for the current PD role."""
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_prefill_producer = kv_role == "kv_producer" or bool(
+        getattr(kv_transfer_config, "is_kv_producer", False)
+        and not getattr(kv_transfer_config, "is_kv_consumer", False)
+    )
+    if is_prefill_producer:
+        execution_tokens_per_rank = vllm_config.scheduler_config.max_num_batched_tokens
+        capacity_source = "scheduler.max_num_batched_tokens"
+    else:
+        if mc2_tokens_capacity is None:
+            mc2_tokens_capacity = get_mc2_tokens_capacity()
+        if mc2_tokens_capacity is None:
+            raise RuntimeError("MC2 token capacity must be initialized before using A5 MegaMoE.")
+        execution_tokens_per_rank = mc2_tokens_capacity
+        capacity_source = "mc2_tokens_capacity"
+
+    ascend_config = get_ascend_config()
+    expert_parallel_size = get_ep_group().world_size
+    buffer_tokens_per_rank = compute_mega_moe_buffer_tokens_per_rank(
+        ascend_config.mega_moe_max_tokens,
+        execution_tokens_per_rank,
+        expert_parallel_size,
+    )
+    logger.debug(
+        "A5 MegaMoE buffer capacity resolved: global_limit=%s, "
+        "configured_per_rank=%s, source=%s, execution_per_rank=%s, "
+        "ep_size=%s, buffer_per_rank=%s.",
+        ascend_config.mega_moe_max_tokens,
+        ascend_config.mega_moe_max_tokens // expert_parallel_size,
+        capacity_source,
+        execution_tokens_per_rank,
+        expert_parallel_size,
+        buffer_tokens_per_rank,
+    )
+    return buffer_tokens_per_rank
+
+
 def get_dispatch_v2_tokens_capacity():
     return _dispatch_v2_tokens_capacity
 
@@ -428,10 +555,106 @@ def _select_a3_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
+def _get_nested_attr(root: Any, path: tuple[str, ...]) -> Any:
+    value = root
+    for name in path:
+        value = getattr(value, name, None)
+        if value is None:
+            return None
+    return value
+
+
+def _get_a5_capability_from_model_instance(
+    model_instance: torch.nn.Module | None,
+) -> A5MegaMoECapability | None:
+    if model_instance is None:
+        return None
+
+    layer_paths = (
+        ("model", "layers"),
+        ("language_model", "model", "layers"),
+        ("language_model", "layers"),
+        ("layers",),
+    )
+    layers = next(
+        (resolved for path in layer_paths if (resolved := _get_nested_attr(model_instance, path)) is not None),
+        None,
+    )
+    if layers is None:
+        return None
+
+    for layer in layers:
+        mlp = getattr(layer, "mlp", None)
+        block_sparse_moe = getattr(layer, "block_sparse_moe", None)
+        candidates = (
+            mlp,
+            getattr(mlp, "experts", None),
+            block_sparse_moe,
+            getattr(block_sparse_moe, "experts", None),
+        )
+        for candidate in candidates:
+            quant_type = getattr(candidate, "quant_type", None)
+            if not isinstance(quant_type, QuantType):
+                continue
+            activation = getattr(candidate, "activation", None)
+            if not isinstance(activation, (str, MoEActivation, SituActivationConfig)):
+                continue
+            quant_method = getattr(candidate, "_quant_method", None)
+            quant_scheme = getattr(quant_method, "quant_method", quant_method)
+            group_size = getattr(quant_scheme, "group_size", None)
+            return A5MegaMoECapability(
+                quant_type=quant_type,
+                activation=activation,
+                group_size=group_size,
+            )
+    return None
+
+
+def _get_a5_mega_moe_capability(
+    vllm_config: VllmConfig,
+    model_instance: torch.nn.Module | None,
+    *,
+    is_draft_model: bool,
+) -> A5MegaMoECapability | None:
+    cached = getattr(vllm_config, _A5_MEGA_MOE_CAPABILITY_ATTR, None)
+    if isinstance(cached, A5MegaMoECapability):
+        return replace(cached, is_draft_model=is_draft_model)
+    if cached is False:
+        return None
+
+    capability = _get_a5_capability_from_model_instance(model_instance)
+    if capability is None:
+        return None
+    cache_a5_mega_moe_capability(
+        vllm_config,
+        quant_type=capability.quant_type,
+        activation=capability.activation,
+        group_size=capability.group_size,
+        layer_name="model_instance",
+    )
+    cached = getattr(vllm_config, _A5_MEGA_MOE_CAPABILITY_ATTR, None)
+    if not isinstance(cached, A5MegaMoECapability):
+        return None
+    return replace(cached, is_draft_model=is_draft_model)
+
+
+def _is_a5_mega_moe_supported_activation(
+    activation: str | MoEActivation | SituActivationConfig,
+) -> bool:
+    if isinstance(activation, SituActivationConfig):
+        return True
+    activation_name = activation if isinstance(activation, str) else activation.value
+    if not isinstance(activation_name, str):
+        activation_name = activation.name
+    normalized = activation_name.lower().removeprefix("moeactivation.")
+    return normalized in {"silu", "swiglu"}
+
+
 def _select_a5_moe_comm_method(
-    num_tokens: int,
+    num_tokens: int | None,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
+    capability: A5MegaMoECapability | None,
 ) -> MoECommType:
     num_experts_per_tok = getattr(
         vllm_config.model_config.hf_text_config,
@@ -439,6 +662,49 @@ def _select_a5_moe_comm_method(
         getattr(vllm_config.model_config.hf_text_config, "top_k_experts", 1),
     )
     world_size = vllm_config.parallel_config.world_size_across_dp
+    ascend_config = get_ascend_config()
+    eplb_config = ascend_config.eplb_config
+    buffer_tokens_per_rank = (
+        get_a5_mega_moe_buffer_tokens_per_rank(vllm_config, mc2_tokens_capacity)
+        if ascend_config.enable_fused_mc2 == 1
+        else 0
+    )
+    within_capacity = num_tokens is None or num_tokens <= buffer_tokens_per_rank
+    supported_quant = capability is not None and capability.quant_type in _A5_MEGA_MOE_SUPPORTED_QUANTS
+    supported_activation = capability is not None and _is_a5_mega_moe_supported_activation(capability.activation)
+    supported_group_size = capability is not None and capability.group_size == _A5_MEGA_MOE_GROUP_SIZE
+    supported_eplb = not eplb_config.dynamic_eplb and eplb_config.num_redundant_experts == 0
+    supported_placement = not ascend_config.mix_placement
+    supported_model_role = capability is not None and not capability.is_draft_model
+    use_a5_mega_moe = (
+        ascend_config.enable_fused_mc2 == 1
+        and world_size > 1
+        and within_capacity
+        and supported_quant
+        and supported_activation
+        and supported_group_size
+        and supported_eplb
+        and supported_placement
+        and supported_model_role
+    )
+    logger.debug(
+        "A5 MegaMoE selection: enabled=%s, tokens=%s, capacity=%s, ep_size=%s, "
+        "capability=%s, quant_ok=%s, activation_ok=%s, group_size_ok=%s, "
+        "eplb_ok=%s, placement_ok=%s, model_role_ok=%s.",
+        use_a5_mega_moe,
+        num_tokens,
+        buffer_tokens_per_rank,
+        world_size,
+        capability,
+        supported_quant,
+        supported_activation,
+        supported_group_size,
+        supported_eplb,
+        supported_placement,
+        supported_model_role,
+    )
+    if use_a5_mega_moe:
+        return MoECommType.FUSED_MC2
     if (num_tokens is None or num_tokens <= mc2_tokens_capacity) and world_size > 1:
         return MoECommType.MC2
     if world_size <= num_experts_per_tok:
@@ -447,9 +713,10 @@ def _select_a5_moe_comm_method(
 
 
 def select_moe_comm_method(
-    num_tokens: int,
+    num_tokens: int | None,
     vllm_config: VllmConfig,
     is_draft_model: bool = False,
+    model_instance: torch.nn.Module | None = None,
 ) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
@@ -462,14 +729,16 @@ def select_moe_comm_method(
        group size is small enough; otherwise use MC2 within capacity or
        all-to-all.
     5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+    6. On A5 with expert parallel, prefer MegaMoE for a supported runtime
+       capability. Otherwise use MC2 within capacity, then all-gather or
+       all-to-all according to EP size.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
         is_draft_model (bool): Whether the model runs in MTP mode.
+        model_instance (torch.nn.Module | None): Optional model instance used
+            to resolve the instantiated MoE quantization and activation.
 
     Raises:
         ValueError: If the soc version is unsupported.
@@ -501,14 +770,23 @@ def select_moe_comm_method(
             is_draft_model=is_draft_model,
         )
     elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
+        moe_comm_type = _select_a5_moe_comm_method(
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+            _get_a5_mega_moe_capability(
+                vllm_config,
+                model_instance,
+                is_draft_model=is_draft_model,
+            ),
+        )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
 
     else:
         raise ValueError(f"Unsupported soc_version: {soc_version}")
     logger.debug(
-        "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        "MoE comm method selected: soc=%s, method=%s, num_tokens=%s, mc2_capacity=%s",
         soc_version,
         moe_comm_type,
         num_tokens,
