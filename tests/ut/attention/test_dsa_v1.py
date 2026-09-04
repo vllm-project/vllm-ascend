@@ -21,7 +21,6 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.v1.attention.backend import AttentionCGSupport
 
 from vllm_ascend.attention.context_parallel.dsa_cp import (
     AscendDSACPImpl,
@@ -55,7 +54,6 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
 )
 from vllm_ascend.worker.v2.pcp_manager import (
-    AscendPCPAttentionContext,
     AscendPCPManager,
 )
 
