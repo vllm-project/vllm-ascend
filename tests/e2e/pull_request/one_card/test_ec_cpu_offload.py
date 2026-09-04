@@ -69,19 +69,7 @@ def _assert_mmaps_removed(paths: set[Path]) -> None:
         time.sleep(0.1)
 
 
-@pytest.mark.e2e_model("Qwen/Qwen2.5-VL-7B-Instruct")
-@pytest.mark.e2e_coverage(
-    arch="multimodal",
-    feature="cpu_offloading",
-    parallel="TP",
-    deploy="pd_mix",
-    hardware="A2",
-    quantization="BF16",
-    graph_mode="eager",
-)
-@patch.dict(os.environ, {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"})
-@wait_until_npu_memory_free()
-def test_ec_cpu_offloading() -> None:
+def _run_ec_cpu_offloading() -> None:
     image = ImageAsset("cherry_blossom").pil_image.convert("RGB")
     prompt = qwen_prompt(["Describe this image briefly."])[0]
     ec_transfer_config = ECTransferConfig(
@@ -107,3 +95,24 @@ def test_ec_cpu_offloading() -> None:
         assert created_mmaps, "ECCPUConnector did not create an EC mmap file"
 
     _assert_mmaps_removed(created_mmaps)
+
+
+@pytest.mark.e2e_model("Qwen/Qwen2.5-VL-7B-Instruct")
+@pytest.mark.e2e_coverage(
+    arch="multimodal",
+    feature="cpu_offloading",
+    parallel="TP",
+    deploy="pd_mix",
+    hardware="A2",
+    quantization="BF16",
+    graph_mode="eager",
+)
+@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
+@wait_until_npu_memory_free()
+def test_ec_cpu_offloading(use_v2_model_runner: bool) -> None:
+    env = {
+        "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+    }
+    with patch.dict(os.environ, env):
+        _run_ec_cpu_offloading()

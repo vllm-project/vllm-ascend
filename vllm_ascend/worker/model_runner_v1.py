@@ -2185,9 +2185,14 @@ class NPUModelRunner(GPUModelRunner):
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                 if (scheduler_output.total_num_scheduled_tokens <= 0
                         or not tokens or sum(tokens) == 0):
-                    if not has_kv_transfer_group():
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+                    output = EMPTY_MODEL_RUNNER_OUTPUT
+                    if has_kv_transfer_group():
+                        output = self.kv_connector_no_forward(
+                            scheduler_output, self.vllm_config
+                        )
+                    return self.ec_connector_no_forward(
+                        scheduler_output, self.encoder_cache, output
+                    )
                 self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
