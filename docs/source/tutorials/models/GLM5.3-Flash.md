@@ -229,26 +229,27 @@ curl http://<node0_ip>:<port>/v1/completions \
 ```
 
 Expected Result:
-The expected result of this request is a JSON payload containing the model’s generated text in a text_completion format.
+
+The service returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, along with usage statistics:
 
 ```json
 {
-  "id": "cmpl-123abc",
-  "object": "text_completion",
-  "created": 1725444000,
-  "model": "glm",
-  "choices": [
-    {
-      "text": " incredibly promising, with rapid advancements in machine learning and autonomous systems.",
-      "index": 0,
-      "finish_reason": "stop"
+    "id": "cmpl-123abc",
+    "object": "text_completion",
+    "created": 1725444000,
+    "model": "glm-53-flash",
+    "choices": [
+        {
+            "text": " incredibly promising, with rapid advancements in machine learning and autonomous systems.",
+            "index": 0,
+            "finish_reason": "stop"
+        }
+    ],
+    "usage": {
+        "prompt_tokens": 5,
+        "completion_tokens": 15,
+        "total_tokens": 20
     }
-  ],
-  "usage": {
-    "prompt_tokens": 5,
-    "completion_tokens": 15,
-    "total_tokens": 20
-  }
 }
 ```
 
