@@ -354,7 +354,7 @@ class TestUtils(TestBase):
     def test_maybe_trans_nz(self, mock_npu_format_cast):
         from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
-        mock_npu_format_cast.side_effect = lambda weight, fmt: weight
+        mock_npu_format_cast.side_effect = lambda weight, fmt, **kwargs: weight
 
         def assert_nz_cast(weight):
             mock_npu_format_cast.assert_called_once()
@@ -470,7 +470,7 @@ class TestUtils(TestBase):
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
-            weight = torch.randn(32, 64, dtype=torch.float8_e4m3fn)
+            weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
             self.assertIs(result, weight)
             mock_npu_format_cast.assert_called_once()
@@ -485,7 +485,7 @@ class TestUtils(TestBase):
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
-            weight = torch.randn(32, 64, dtype=torch.float8_e4m3fn)
+            weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(weight, input_dtype=torch_npu.float4_e2m1fn_x2)
             self.assertIs(result, weight)
             mock_npu_format_cast.assert_called_once()
@@ -500,7 +500,7 @@ class TestUtils(TestBase):
             mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
             mock.patch("vllm_ascend.utils.is_310p", return_value=False),
         ):
-            weight = torch.randn(32, 64, dtype=torch.float8_e4m3fn)
+            weight = torch.empty(32, 64, dtype=torch.float8_e4m3fn)
             result = utils.maybe_trans_nz(
                 weight,
                 customize_dtype=torch.float8_e4m3fn,
@@ -524,6 +524,50 @@ class TestUtils(TestBase):
             result = utils.maybe_trans_nz(weight, customize_dtype=torch.float8_e4m3fn)
             self.assertIs(result, weight)
             mock_npu_format_cast.assert_not_called()
+
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_maybe_trans_nz_with_scale(self, mock_npu_format_cast):
+        from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz_with_scale
+
+        mock_npu_format_cast.side_effect = lambda weight, fmt, **kwargs: weight
+
+        def run(nz_mode):
+            mock_config = mock.MagicMock()
+            mock_config.weight_nz_mode = nz_mode
+            with (
+                mock.patch("vllm_ascend.utils.get_ascend_config", return_value=mock_config),
+                mock.patch(
+                    "vllm_ascend.utils.get_current_hardware_profile",
+                    return_value=get_hardware_profile(AscendDeviceType.A2),
+                ),
+            ):
+                weight = torch.randn(4, 8, dtype=torch.float16)
+                scale = torch.randn(4, 4, 2, dtype=torch.float16)
+                return maybe_trans_nz_with_scale(
+                    weight,
+                    scale,
+                    transpose_dims=(0, 1),
+                    customize_dtype=torch.float8_e4m3fn,
+                    input_dtype=torch_npu.float4_e2m1fn_x2,
+                )
+
+        # NZ disabled: keep non-contiguous layout, no cast.
+        w, s = run(0)
+        self.assertEqual(w.shape, (8, 4))
+        self.assertFalse(w.is_contiguous())
+        self.assertFalse(s.is_contiguous())
+        mock_npu_format_cast.assert_not_called()
+
+        # NZ enabled: contiguous + cast with dtype hints.
+        mock_npu_format_cast.reset_mock()
+        w, s = run(2)
+        self.assertTrue(w.is_contiguous())
+        self.assertTrue(s.is_contiguous())
+        mock_npu_format_cast.assert_called_once()
+        args, kwargs = mock_npu_format_cast.call_args
+        self.assertEqual(args[1], ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(kwargs["customize_dtype"], torch.float8_e4m3fn)
+        self.assertEqual(kwargs["input_dtype"], torch_npu.float4_e2m1fn_x2)
 
 
 def test_is_pd_decode_recompute_scheduler_enabled_without_config():
