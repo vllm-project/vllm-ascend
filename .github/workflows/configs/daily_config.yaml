@@ -36,6 +36,7 @@ daily:
       changed_files:
         - tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
         - vllm_ascend/
+        - .github/workflows/configs/daily_config.yaml
       tests: >-
         tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
 
