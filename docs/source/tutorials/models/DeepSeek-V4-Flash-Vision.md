@@ -30,16 +30,17 @@ Prefill-Decode disaggregation are not covered by this guide.
 
 | Model | Download | Hardware requirements |
 | --- | --- | --- |
-| DeepSeek-V4-Flash-Vision-Exp | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) | One Atlas 800 A3 server with 16 visible NPUs |
+| DeepSeek-V4-Flash-Vision-Exp-w8a8-QuaRot | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Flash-Vision-Exp-w8a8-QuaRot) | One Atlas 800 A3 server with 16 visible NPUs |
+| DeepSeek-V4-Flash-Vision-Exp | [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash-Vision-Exp) | Original model weights; use the ModelScope W8A8 QuaRot checkpoint for the deployment in this guide |
 
-The launch command below requires an Ascend W8A8 checkpoint derived from the
-official model. The checkpoint must include the ModelSlim quantization
-description and all multimodal `bias_vl` tensors. The official ModelScope
-W8A8 checkpoint is not available at the time of writing.
+The launch command below uses the public Ascend W8A8 QuaRot checkpoint from
+ModelScope. The checkpoint includes the ModelSlim quantization description and
+the multimodal `bias_vl` tensors required by vLLM Ascend.
 
 Download or prepare the checkpoint in a directory of your choice and record
 the absolute path. The examples use `<YOUR_MODEL_PATH>`; replace it with that
-path, for example `/data/weights/DeepSeek-V4-Flash-Vision-Exp-w8a8`.
+path, for example
+`/data/weights/DeepSeek-V4-Flash-Vision-Exp-w8a8-QuaRot`.
 
 ### 3.2 Software
 
