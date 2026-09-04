@@ -590,6 +590,10 @@ class NPUModelRunner(GPUModelRunner):
         self._pending_encoder_cache_copies: deque[
             tuple[torch.Tensor, torch.npu.Event]
         ] = deque()
+        # Pinned staging tensors kept alive until their async H2D completes.
+        self._pending_h2d_staging: deque[
+            tuple[torch.Tensor, torch.npu.Event]
+        ] = deque()
 
         self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
         self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
@@ -1595,6 +1599,25 @@ class NPUModelRunner(GPUModelRunner):
         input_ids = self.input_ids.gpu[:num_forward_tokens]
         input_ids.masked_fill_(input_ids == PLACEHOLDER_TOKEN_ID, 0)
 
+    def _async_h2d_from_numpy(self, data: np.ndarray) -> torch.Tensor:
+        """Async CPU-to-NPU copy that keeps the pinned staging tensor alive.
+
+        torch_npu's host allocator returns freed pinned blocks to the pool
+        immediately, so a temporary pinned tensor can be reallocated and
+        overwritten before its non_blocking H2D executes. Hold each staging
+        tensor with a completion event and reclaim both lazily via the
+        non-blocking Event.query().
+        """
+        while self._pending_h2d_staging and self._pending_h2d_staging[0][1].query():
+            self._pending_h2d_staging.popleft()
+
+        source = torch.from_numpy(data).pin_memory()
+        npu_value = source.to(self.device, non_blocking=True)
+        copy_done = torch.npu.Event()
+        copy_done.record(torch.npu.current_stream())
+        self._pending_h2d_staging.append((source, copy_done))
+        return npu_value
+
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
@@ -1641,11 +1664,11 @@ class NPUModelRunner(GPUModelRunner):
         target_logits_indices += arange
 
         # TODO: Optimize the CPU -> NPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).pin_memory().to(self.device, non_blocking=True)
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).pin_memory().to(self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).pin_memory().to(self.device, non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).pin_memory().to(self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).pin_memory().to(self.device, non_blocking=True)
+        cu_num_draft_tokens = self._async_h2d_from_numpy(cu_num_draft_tokens)
+        cu_num_sampled_tokens = self._async_h2d_from_numpy(cu_num_sampled_tokens)
+        logits_indices = self._async_h2d_from_numpy(logits_indices)
+        target_logits_indices = self._async_h2d_from_numpy(target_logits_indices)
+        bonus_logits_indices = self._async_h2d_from_numpy(bonus_logits_indices)
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]

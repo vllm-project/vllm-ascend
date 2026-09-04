@@ -1273,6 +1273,62 @@ class TestNPUModelRunnerScoreEncoderCache(unittest.TestCase):
         self.assertNotIn("image", runner.tmp_encoder_cache)
 
 
+class TestNPUModelRunnerAsyncH2DStaging(unittest.TestCase):
+    @staticmethod
+    def _build_runner():
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.device = "npu"
+        runner._pending_h2d_staging = deque()
+        return runner
+
+    def test_async_h2d_from_numpy_keeps_pinned_source_until_event_completes(self):
+        runner = self._build_runner()
+        sources = [MagicMock() for _ in range(3)]
+        npu_values = [MagicMock() for _ in range(3)]
+        events = [MagicMock() for _ in range(3)]
+        for source, npu_value in zip(sources, npu_values):
+            source.pin_memory.return_value = source
+            source.to.return_value = npu_value
+        fake_npu = SimpleNamespace(
+            Event=MagicMock(side_effect=events),
+            current_stream=MagicMock(),
+        )
+
+        with (
+            patch.object(torch, "from_numpy", MagicMock(side_effect=sources)),
+            patch.object(torch, "npu", fake_npu, create=True),
+        ):
+            out = runner._async_h2d_from_numpy(np.array([0, 1, 2], dtype=np.int32))
+
+            self.assertIs(out, npu_values[0])
+            sources[0].pin_memory.assert_called_once()
+            sources[0].to.assert_called_once_with("npu", non_blocking=True)
+            self.assertEqual(
+                runner._pending_h2d_staging, [(sources[0], events[0])]
+            )
+            events[0].record.assert_called_once_with(
+                fake_npu.current_stream.return_value
+            )
+
+            # Unfinished staging tensors are retained across calls.
+            events[0].query.return_value = False
+            runner._async_h2d_from_numpy(np.array([3], dtype=np.int32))
+            self.assertEqual(
+                runner._pending_h2d_staging,
+                [(sources[0], events[0]), (sources[1], events[1])],
+            )
+
+            # Only the finished head entry is reclaimed; later unfinished
+            # entries survive the lazy front-only sweep.
+            events[0].query.return_value = True
+            events[1].query.return_value = False
+            runner._async_h2d_from_numpy(np.array([4], dtype=np.int32))
+            self.assertEqual(
+                runner._pending_h2d_staging,
+                [(sources[1], events[1]), (sources[2], events[2])],
+            )
+
+
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -1387,6 +1443,8 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         scheduler_output = SimpleNamespace(
             scheduled_spec_decode_tokens={"req0": [-1, -1, -1]},
         )
+        # CPU-only environment: bypass the NPU async H2D staging path.
+        runner._async_h2d_from_numpy = torch.from_numpy
 
         spec_decode_metadata = runner._calc_spec_decode_metadata(
             num_draft_tokens=np.array([3], dtype=np.int32),
