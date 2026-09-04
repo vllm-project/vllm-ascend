@@ -12,13 +12,9 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
-from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
-    DFlashSpeculator,
-)
+from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 
-from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import (
-    prepare_dflash_inputs_triton,
-)
+from vllm_ascend.ops.triton.v2.spec_decode.prepare_dflash_inputs import prepare_dflash_inputs_triton
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 
@@ -155,8 +151,17 @@ if vllm_version_is("0.27.1"):
     prepare_dflash_inputs = prepare_dflash_inputs_triton
 
 else:
+    # Main-to-main compatibility only. Upstream extended prepare_dflash_inputs
+    # for DSpark + DCP in vllm-project/vllm#52188. vLLM-Ascend has not adapted
+    # those semantics yet, so keep using the existing Ascend DFlash behavior.
+    logger.warning(
+        "The upstream prepare_dflash_inputs ABI includes DSpark + DCP support "
+        "introduced by vllm-project/vllm#52188, which is not adapted in "
+        "vLLM-Ascend yet. Falling back to the existing Ascend DFlash "
+        "implementation; cp_rank, cp_size and cp_interleave are ignored."
+    )
 
-    def _prepare_dflash_inputs_triton_unsupported(
+    def _prepare_dflash_inputs_main_compat(
         input_buffers: InputBuffers,
         query_slot_mapping: torch.Tensor,
         context_positions: torch.Tensor,
@@ -174,9 +179,9 @@ else:
         input_temperature: torch.Tensor,
         input_seeds: torch.Tensor,
         block_table: torch.Tensor,
-        block_size: int,  # newly added
-        cp_rank: int,  # newly added
-        cp_size: int,  # newly added
+        block_size: int,
+        cp_rank: int,
+        cp_size: int,
         cp_interleave: int,
         parallel_drafting_token_id: int,
         num_query_per_req: int,
@@ -186,12 +191,34 @@ else:
         max_model_len: int,
         sample_from_anchor: bool = False,
     ) -> None:
-        # The current Ascend DFlash implementation targets the vLLM 0.27.1 ABI.
-        # Upstream changed prepare_dflash_inputs for DSpark + DCP support in
-        # vllm-project/vllm#52188. Adapt the new ABI if this scenario is needed
-        # by vLLM-Ascend in the future.
-        raise NotImplementedError(
-            "The current Ascend DFlash implementation supports only the vLLM 0.27.1 prepare_dflash_inputs ABI."
+        # cp_rank/cp_size/cp_interleave are intentionally ignored until
+        # DSpark + DCP is adapted in vLLM-Ascend.
+        prepare_dflash_inputs_triton(
+            input_buffers,
+            query_slot_mapping,
+            context_positions,
+            context_slot_mapping,
+            sample_indices,
+            sample_pos,
+            sample_idx_mapping,
+            temperature,
+            seeds,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            input_temperature,
+            input_seeds,
+            block_table,
+            block_size,
+            parallel_drafting_token_id,
+            num_query_per_req,
+            num_speculative_steps,
+            max_num_reqs,
+            max_num_tokens,
+            max_model_len,
+            sample_from_anchor,
         )
 
-    prepare_dflash_inputs = _prepare_dflash_inputs_triton_unsupported
+    prepare_dflash_inputs = _prepare_dflash_inputs_main_compat
