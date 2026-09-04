@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
@@ -99,6 +100,15 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
                 scale_alg=self.dynamic_mx_quant_scale_alg,
             )
             output_dtype = x.dtype
+
+        # MiniMax-M3 sequence-parallel QKV only: the activation quantise runs on
+        # the token shard, so gather the fp8 activations (and per-token scales)
+        # to the full-token layout before the quantised matmul.
+        # ``is_sequence_parallel`` is only ever set on the MiniMax QKV
+        # quant_method, so other models using this method are unaffected.
+        if getattr(self, "is_sequence_parallel", False):
+            quantized_x = tensor_model_parallel_all_gather(quantized_x.contiguous(), 0)
+            pertoken_scale = tensor_model_parallel_all_gather(pertoken_scale.contiguous(), 0)
 
         if bias is not None and bias.dtype != torch.float32:
             bias = bias.to(torch.float32)
