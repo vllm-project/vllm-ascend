@@ -2,7 +2,7 @@ name: Cancel runs on PR close
 # pull_request_target is required so OBS secrets are available for fork PRs.
 # The upload job only checks out the merge commit on the base repository.
 on:
-  pull_request_target:
+  pull_request:
     types: [closed]
 
 permissions:
