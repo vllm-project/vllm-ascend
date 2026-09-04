@@ -76,6 +76,10 @@ class MoETokenDispatcher(ABC, Generic[TMoECombineMetadata]):
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
 
+    def resize_expert_layout(self, num_experts: int, num_local_experts: int) -> None:
+        """Update cached physical expert dimensions after weight loading."""
+        self.num_experts = int(num_experts)
+
     @property
     def ep_group(self):
         """Get expert model parallel group."""
@@ -337,6 +341,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
         )
 
+    def resize_expert_layout(self, num_experts: int, num_local_experts: int) -> None:
+        super().resize_expert_layout(num_experts, num_local_experts)
+        self.num_experts_local = int(num_local_experts)
+
     def token_dispatch(
         self,
         token_dispatch_input: MoETokenDispatchInput,
@@ -443,9 +451,23 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.num_local_experts = kwargs.get("num_local_experts", 0)
+        self._set_expert_layout(self.num_experts, kwargs.get("num_local_experts", 0))
+
+        # TODO: Try local_rank = ep_group.rank_in_group
+        local_rank = torch.distributed.get_rank(group=self.ep_group)
+        backend = self.ep_group._get_backend(torch.device("npu"))
+        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
+
+    def resize_expert_layout(self, num_experts: int, num_local_experts: int) -> None:
+        super().resize_expert_layout(num_experts, num_local_experts)
+        self._set_expert_layout(num_experts, num_local_experts)
+
+    def _set_expert_layout(self, num_experts: int, num_local_experts: int) -> None:
+        self.num_experts = int(num_experts)
+        self.num_local_experts = int(num_local_experts)
 
         assert self.num_local_experts > 0, "Expected at least one expert"
+        self.expert_ids_per_ep_rank = None
         if self.num_local_experts > 1:
             self.expert_ids_per_ep_rank = torch.tensor(
                 [i % self.num_local_experts for i in range(self.num_experts)],
@@ -461,11 +483,6 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
             assert self.local_expert_indices[i] == self.local_expert_indices[i + 1] - 1, (
                 "local_expert_indices must be continuous"
             )
-
-        # TODO: Try local_rank = ep_group.rank_in_group
-        local_rank = torch.distributed.get_rank(group=self.ep_group)
-        backend = self.ep_group._get_backend(torch.device("npu"))
-        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
 
     def token_dispatch(
         self,

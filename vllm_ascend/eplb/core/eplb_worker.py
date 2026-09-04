@@ -33,17 +33,26 @@ class EplbWorker:
         policy_type,
         enable_d2d: bool = True,
         tp_size: int | None = None,
+        policy_config: dict | None = None,
     ):
         self.policy_type = policy_type
-        self.policy = PolicyFactory.generate_policy(policy_type)
+        self.policy = PolicyFactory.generate_policy(policy_type, policy_config)
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
         self.tp_size = tp_size
         self.rank_id = get_ep_group().rank_in_group
         self.multi_stage = policy_type == 3
+        self.uses_global_expert_pool = (
+            policy_type == 4 and (policy_config or {}).get("node_role", "prefill") == "prefill"
+        )
 
     def do_update(self):
+        if self.uses_global_expert_pool:
+            torch.set_num_threads(1)
+            from vllm_ascend.eplb.core.eplb_global_worker import do_global_slot_update
+
+            return do_global_slot_update(self)
         # put data in to queue
         # in process self.policy.generate_policy()
         # get epxert table && tensor
@@ -341,12 +350,14 @@ class EplbProcess:
         policy_type: int = 0,
         enable_d2d: bool = True,
         tp_size: int | None = None,
+        policy_config: dict | None = None,
     ):
         """
         Args:
             shared_dict: Cross-process shared dict returned by Manager().dict()
             policy_type: Integer passed to PolicyFactory.generate_policy
             enable_d2d: Whether to enable D2D loading
+            policy_config: Optional constructor arguments for the selected policy
         """
         self.shared_dict = shared_dict
         self.policy_type = policy_type
@@ -360,6 +371,7 @@ class EplbProcess:
             self.policy_type,
             self.enable_d2d,
             tp_size=tp_size,
+            policy_config=policy_config,
         )
 
     def worker_process(self, planner_q, block_update_q):
@@ -386,11 +398,7 @@ class EplbProcess:
 
                 packed_update_info = self.worker.do_update()
 
-                while True:
-                    if not block_update_q.empty():
-                        continue
-                    block_update_q.put(packed_update_info)
-                    break
+                block_update_q.put(packed_update_info)
 
             except Exception as e:
                 logger.warning(
