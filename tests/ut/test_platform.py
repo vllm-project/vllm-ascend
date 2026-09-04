@@ -644,6 +644,27 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(self.platform.get_device_name(device_id), device_name)
         mock_get_device_name.assert_called_once_with(0)
 
+    def test_get_device_total_memory_before_npu_init(self):
+        mock_npu = MagicMock()
+        mock_npu.is_initialized.return_value = False
+        with (
+            patch.object(torch, "npu", mock_npu, create=True),
+            pytest.raises(NotImplementedError),
+        ):
+            self.platform.get_device_total_memory(device_id=0)
+        mock_npu.is_initialized.assert_called_once_with()
+        mock_npu.mem_get_info.assert_not_called()
+
+    def test_get_device_total_memory_after_npu_init(self):
+        mock_npu = MagicMock()
+        mock_npu.is_initialized.return_value = True
+        mock_npu.mem_get_info.return_value = (8 << 30, 16 << 30)
+        with patch.object(torch, "npu", mock_npu, create=True):
+            total_memory = self.platform.get_device_total_memory(device_id=1)
+        self.assertEqual(total_memory, 16 << 30)
+        mock_npu.is_initialized.assert_called_once_with()
+        mock_npu.mem_get_info.assert_called_once_with(1)
+
     @patch("vllm_ascend.platform.torch.npu.get_device_properties")
     def test_get_device_uuid(self, mock_get_device_properties):
         device_id = 0
@@ -662,6 +683,7 @@ class TestNPUPlatform(TestBase):
     def test_set_additional_forward_context_v2_includes_required_moe_fields(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
         dummy_comm_method = object()
 
         with (
@@ -683,6 +705,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertFalse(kwargs["in_profile_run"])
         self.assertEqual(kwargs["padded_num_tokens"], 8)
+        self.assertEqual(kwargs["max_tokens_across_pcp"], 5)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
 

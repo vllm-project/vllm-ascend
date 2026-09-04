@@ -26,7 +26,6 @@ class HardwareCapability(Enum):
     COMPATIBILITY_OP_IMPLEMENTATIONS = auto()
     DISTRIBUTED_COMMUNICATION_ADAPTATION = auto()
     DSA_C128_STATE_SMALL_BLOCK_SIZES = auto()
-    DSA_O_PROJ_TP = auto()
     DSV4_COMPRESSED_CACHE = auto()
     DYNAMIC_MX_QUANT_FUSION = auto()
     DYNAMIC_MX_QUANT_SCALE_ALG_ONE = auto()
@@ -226,7 +225,6 @@ _HARDWARE_PROFILES: Mapping[AscendDeviceType, HardwareProfile] = MappingProxyTyp
                     HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
                     HardwareCapability.CLUSTER_CPU_TOPOLOGY,
                     HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
-                    HardwareCapability.DSA_O_PROJ_TP,
                     HardwareCapability.DSV4_COMPRESSED_CACHE,
                     HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
                     HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,

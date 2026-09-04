@@ -211,11 +211,17 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """
-        Get the total memory of the NPU device in bytes.
-        DO NOT IMPLEMENT: Implementing it calls get_device_name() in advance and initializes torch_npu too early.
-        torch_npu allows global initialization only once; duplicate initialization causes errors.
+        Get the total memory of an initialized NPU device in bytes.
+
+        vLLM may query this method while resolving argument defaults, before
+        the worker initializes torch_npu. Keep the existing early-startup
+        behavior in that case, but allow runtime features such as StartPlan
+        to fingerprint an already initialized device safely.
         """
-        raise NotImplementedError
+        if not hasattr(torch, "npu") or not torch.npu.is_initialized():
+            raise NotImplementedError("NPU total memory is unavailable before torch_npu initialization")
+        _, total_memory = torch.npu.mem_get_info(device_id)
+        return total_memory
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
@@ -295,6 +301,15 @@ class NPUPlatform(Platform):
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch(is_global_patch=True)
+
+        # Registration imports vLLM's model config converter and therefore must
+        # happen after the global patch package has finished importing. Keeping
+        # it out of patch module scope also makes multiprocessing spawn safe.
+        from vllm_ascend.patch.platform.patch_deepseek_v4_vision import (
+            register_deepseek_v4_vision_config_convertor,
+        )
+
+        register_deepseek_v4_vision_config_convertor()
 
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
@@ -574,6 +589,8 @@ class NPUPlatform(Platform):
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        max_tokens_across_pcp = num_tokens if pcp_size > 1 else 0
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
@@ -608,6 +625,7 @@ class NPUPlatform(Platform):
             "num_tokens": num_tokens,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
+            "max_tokens_across_pcp": max_tokens_across_pcp,
             "mc2_mask": mc2_mask,
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,

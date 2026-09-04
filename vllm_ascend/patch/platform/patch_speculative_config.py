@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
 
@@ -37,11 +39,46 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
     return hf_config
 
 
+def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
+    """Restore the DSpark draft architecture after VL config conversion.
+
+    DeepSeek-V4-Vision uses the same checkpoint for the target and DSpark
+    drafter.  vLLM first rewrites that checkpoint to ``DSparkDraftModel``, but
+    rebuilding ``model_arch_config`` with multimodal detection can restore the
+    top-level ``*ForConditionalGeneration`` architecture.  The drafter would
+    then instantiate a second full VL target and register duplicate attention
+    layer names.  Update both config representations without re-running the
+    multimodal architecture conversion.
+    """
+    hf_config = getattr(draft_model_config, "hf_config", None)
+    if (
+        hf_config is None
+        or getattr(hf_config, "model_type", None) != "deepseek_v4"
+        or getattr(hf_config, "dspark_target_layer_ids", None) is None
+    ):
+        return
+
+    hf_config.update({"architectures": ["DSparkDraftModel"]})
+    draft_model_config.model_arch_config = replace(
+        draft_model_config.model_arch_config,
+        architectures=["DSparkDraftModel"],
+        model_type="deepseek_v4",
+        is_mm_prefix_lm=False,
+    )
+    model_info, architecture = draft_model_config.registry.inspect_model_cls(
+        draft_model_config.architectures,
+        draft_model_config,
+    )
+    draft_model_config._model_info = model_info
+    draft_model_config._architecture = architecture
+
+
 def _dspark_post_init(self):
     _orig_post_init(self)
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        _normalize_deepseek_v4_dspark_draft(draft_model_config)
         # deepseek v4 dspark
         if getattr(draft_hf_config, "ptd_token_id", None) is None:  # type: ignore
             draft_hf_config.ptd_token_id = getattr(draft_hf_config, "dspark_noise_token_id", None)  # type: ignore

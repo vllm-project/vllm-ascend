@@ -39,19 +39,6 @@ RUN yum update -y && \
     python3 -m pip install mooncake-transfer-engine-npu==${MOONCAKE_TAG} --extra-index-url ${MOONCAKE_INDEX_URL} && \
     rm -rf /var/cache/yum/*
 
-# Upgrade CANN ops package to 9.2.0
-ARG TARGETPLATFORM
-RUN ARCH=$(case "${TARGETPLATFORM}" in \
-        "linux/amd64") echo "x86_64" ;; \
-        "linux/arm64") echo "aarch64" ;; \
-        *) echo "Unsupported TARGETPLATFORM: ${TARGETPLATFORM}" && exit 1 ;; \
-    esac) && \
-    CANN_OPS_URL=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.2.T3/Ascend-cann-910b-ops_9.2.0-beta.2_linux-${ARCH}.run && \
-    wget --quiet --header="Referer: https://www.hiascend.com/" ${CANN_OPS_URL} -O ~/Ascend-cann-ops-9.2.0.run && \
-    chmod +x ~/Ascend-cann-ops-9.2.0.run && \
-    ~/Ascend-cann-ops-9.2.0.run --quiet --install --install-for-all && \
-    rm -f ~/Ascend-cann-ops-9.2.0.run
-
 # Install modelscope (for fast download) and ray (for multinode)
 RUN pip config set global.index-url ${PIP_INDEX_URL} && \
     if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi && \
