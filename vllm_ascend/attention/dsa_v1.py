@@ -348,18 +348,18 @@ def build_dspark_swa_indices(
     seq_lens: torch.Tensor,
     num_decode_tokens: int | None = None,
     index_width: int | None = None,
-    indices_output: torch.Tensor | None = None,
-    buffer: torch.Tensor | None = None,
+    indices_buffer: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
     whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
 
-    When ``buffer`` is given, the per-token slots are copied into its leading
-    rows and the returned tensor is a slice view of ``buffer``. This keeps the
-    address stable across async ACL-graph replays, where the DSA operator
-    captures ``ori_sparse_indices``'s data pointer at capture time.
+    When ``indices_buffer`` is given, the per-token slots are copied into its
+    leading rows (its capacity must cover the number of rows produced) and the
+    returned tensor is a zero-copy slice view of it. This keeps the address
+    stable across async ACL-graph replays, where the DSA operator captures
+    ``ori_sparse_indices``'s data pointer at capture time.
     """
     if index_width is None:
         index_width = _aligned_dspark_index_width(window_size, num_speculative_tokens)
@@ -394,26 +394,25 @@ def build_dspark_swa_indices(
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
     per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
 
-    if indices_output is not None:
-        if indices_output.shape != per_token_slots.shape:
-            raise ValueError(
-                "DSpark SWA indices output shape does not match active metadata: "
-                f"output={tuple(indices_output.shape)}, active={tuple(per_token_slots.shape)}"
-            )
-        indices_output.copy_(per_token_slots)
-        per_token_slots = indices_output
-
-    if buffer is not None:
+    if indices_buffer is not None:
         # Copy the freshly built indices into the caller-provided buffer and hand
         # back a zero-copy view of it: ACL graph capture freezes tensor addresses,
         # so the DSA operator must read from the stable buffer at replay instead of
         # a freshly allocated tensor.
         num_rows = per_token_slots.shape[0]
-        assert num_rows <= buffer.shape[0], (
-            f"dspark_swa_indices needs {num_rows} rows but `buffer` only has {buffer.shape[0]}"
-        )
-        buffer[:num_rows].copy_(per_token_slots)
-        per_token_slots = buffer[:num_rows]
+        if (
+            indices_buffer.ndim != per_token_slots.ndim
+            or indices_buffer.shape[1:] != per_token_slots.shape[1:]
+            or indices_buffer.shape[0] < num_rows
+        ):
+            raise ValueError(
+                "DSpark SWA indices buffer cannot hold the active metadata: "
+                f"buffer={tuple(indices_buffer.shape)}, "
+                f"active={tuple(per_token_slots.shape)}"
+            )
+        slot_view = indices_buffer[:num_rows]
+        slot_view.copy_(per_token_slots)
+        per_token_slots = slot_view
 
     return per_token_slots, per_token_lens
 
@@ -876,7 +875,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc[: self.num_decodes + 1],
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
-                buffer=self.dspark_swa_indices_buffer,
+                indices_buffer=self.dspark_swa_indices_buffer,
             )
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
@@ -1102,7 +1101,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 dspark_swa_indices = self.dspark_swa_indices_buffer[: self.num_actual_tokens]
                 build_dspark_swa = lambda: build_dspark_swa_indices(
                     *dspark_swa_args,
-                    indices_output=dspark_swa_indices,
+                    indices_buffer=dspark_swa_indices,
                 )
             else:
                 dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
