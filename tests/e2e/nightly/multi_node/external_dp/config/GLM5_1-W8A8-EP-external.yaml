@@ -1,3 +1,4 @@
+#此用例作为template.md 样例
 test_name: "multi-node-glm-5.1-w8a8-ep-external-dp"
 model: "Eco-Tech/GLM-5.1-w8a8"
 num_nodes: 4
