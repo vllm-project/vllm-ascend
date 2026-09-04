@@ -251,7 +251,7 @@ def _start_server(
     bind_url: str = _DEFAULT_URL,
     worker_hits: dict[tuple[int, int], int] | None = None,
 ) -> tuple[mp.process.BaseProcess, str]:
-    context = mp.get_context("spawn")
+    context = mp.get_context("fork")
     parent_conn, child_conn = context.Pipe()
     process = context.Process(target=_run_server, args=(bind_url, child_conn, worker_hits or {(0, 0): 16}))
     process.start()
@@ -272,7 +272,7 @@ def _start_server(
 
 
 def _start_affinity_server():
-    context = mp.get_context("spawn")
+    context = mp.get_context("fork")
     parent_conn, child_conn = context.Pipe()
     started_events = [context.Event(), context.Event()]
     release_events = [context.Event(), context.Event()]

@@ -49,7 +49,7 @@ _REQUESTS_PER_WORKER = 16
 
 
 def _start_server(target):
-    context = mp.get_context("spawn")
+    context = mp.get_context("fork")
     parent_conn, child_conn = context.Pipe()
     process = context.Process(target=target, args=(child_conn,))
     process.start()
@@ -752,7 +752,7 @@ def test_server_close_returns_false_after_request_deadline() -> None:
 
 def test_multiple_worker_processes_receive_their_own_responses():
     server_process, server_conn, endpoint = _start_server(_run_server)
-    context = mp.get_context("spawn")
+    context = mp.get_context("fork")
     start_event = context.Event()
     worker_processes = []
     worker_conns = []
