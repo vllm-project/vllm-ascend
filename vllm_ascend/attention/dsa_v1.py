@@ -1,4 +1,5 @@
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
@@ -58,6 +59,8 @@ BUILD_METADATA_STEP_DECODE = 1
 
 _DSV4_DSA_OVERLAP_STREAM = None
 CompressorMetadataOutput = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+CompressorForwardOutput = tuple[torch.Tensor, torch.Tensor]
+CompressorOverlapOutput = tuple[CompressorForwardOutput, torch.npu.Event]
 _COMPRESSOR_METADATA_CACHE_KEY = "dsv4_compressor_metadata_cache"
 
 
@@ -1666,6 +1669,41 @@ class AscendDSAImpl(DSAAttentionImpl):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         return get_or_compute_compressor_metadata(metadata, self.compress_ratio)
 
+    def _forward_compressor(
+        self,
+        hidden_states: torch.Tensor,
+        state_cache: torch.Tensor,
+        compressor_metadata: AscendDSAPrefillMetadata | AscendDSADecodeMetadata,
+        compressor_state_metadata: AscendDSAPrefillMetadata | AscendDSADecodeMetadata,
+        actual_seq_lengths_query: torch.Tensor,
+        start_pos: torch.Tensor,
+    ) -> CompressorForwardOutput:
+        coff = 2 if self.compressor_overlap else 1
+        compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
+            compressor_metadata,
+        )
+        compressed_kv = torch.ops._C_ascend.compressor(
+            hidden_states,
+            self.compressor_wkv.weight,
+            self.compressor_wgate.weight,
+            state_cache.squeeze(-2),
+            self.compressor_ape,
+            self.compressor_norm.weight,
+            compress_sin.view(-1, compress_sin.shape[-1]),
+            compress_cos.view(-1, compress_cos.shape[-1]),
+            state_block_table=compressor_state_metadata.block_table,
+            cu_seqlens=actual_seq_lengths_query,
+            seqused=None,
+            start_pos=start_pos,
+            rope_head_dim=self.rope_head_dim,
+            cmp_ratio=self.compress_ratio,
+            coff=coff,
+            norm_eps=self.compressor_norm_eps,
+            rotary_mode=2,
+            cache_mode=1,
+        )
+        return compressed_kv, compress_slot_mapping
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         # Attention impls are not walked by vllm's process_weights_after_loading
         # dispatcher (only LinearMethodBase subclasses are). OTP buffers are
@@ -1876,14 +1914,23 @@ class AscendDSAImpl(DSAAttentionImpl):
 
         return output_padded
 
-    def _mla_prolog_multistream(self, hidden_states, cos, sin, swa_kv_cache, slot_mapping, is_prefill=False):
+    def _mla_prolog_multistream(
+        self,
+        hidden_states,
+        cos,
+        sin,
+        swa_kv_cache,
+        slot_mapping,
+        is_prefill=False,
+        tail_overlap_fn: Callable[[], CompressorForwardOutput] | None = None,
+    ):
         """3-block multi-stream: 3-stage CV parallel + serial tail
 
         Block partition (V: Vector, C: Cube, AIV: AI Vector):
           Part1: q_quant[V] -> q_a_down[C]  ||  kv_quant[V]
           Part2: q_norm[V] + q_b_quant[V]  ||  kv_matmul[C]
           Part3: q_b_matmul[C]             ||  kv_norm[V] + rope[V] + scatter[AIV]
-          Tail:  q_rms[V] + rope[V] (wait for auxiliary stream to complete)
+          Tail:  q_rms[V] + rope[V]  ||  optional compressor metadata + compressor
 
         Each stream's data is self-contained; no cross-stream sync is needed between blocks.
         Only the tail wait_stream ensures scatter is complete.
@@ -1959,8 +2006,18 @@ class AscendDSAImpl(DSAAttentionImpl):
         else:
             q = self.cv_wq_b.matmul(q_b_quant, q_b_scale).unflatten(-1, (self.n_local_heads, self.head_dim))
 
-        # Serial tail: wait for auxiliary stream then execute q_rms[V] + rope[V]
+        # Join the Q and SWA-KV branches, then reuse the auxiliary stream for
+        # independent tail work while q_rms[V] + rope[V] run on the main stream.
         main_stream.wait_stream(aux_stream)
+
+        tail_overlap_output: CompressorOverlapOutput | None = None
+        if tail_overlap_fn is not None:
+            e_tail_start = main_stream.record_event()
+            with npu_stream_switch(aux_stream, enabled=True):
+                torch.npu.current_stream().wait_event(e_tail_start)
+                overlap_result = tail_overlap_fn()
+                e_tail_overlap_done = torch.npu.current_stream().record_event()
+            tail_overlap_output = overlap_result, e_tail_overlap_done
 
         q = DeviceOperator.apply_dsa_q_rms(q, self.eps, self.q_norm_without_weight)
         torch.ops._C_ascend.inplace_partial_rotary_mul(
@@ -1971,7 +2028,7 @@ class AscendDSAImpl(DSAAttentionImpl):
             partial_slice=[self.nope_head_dim, self.head_dim],
         )
 
-        return q, qr, qr_pertoken_scale
+        return q, qr, qr_pertoken_scale, tail_overlap_output
 
     def _forward_prefill(
         self,
@@ -2011,12 +2068,39 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
         ori_win_right = 0 if swa_prefill_metadata.ori_win_right is None else swa_prefill_metadata.ori_win_right
 
+        compressor_prefill_metadata = None
+        compressor_state_prefill_metadata = None
+        compressor_tail_fn = None
+        if self.compress_ratio > 1:
+            compressor_prefill_metadata = _require_prefill_metadata(compressor_attn_metadata)
+            compressor_state_prefill_metadata = _require_prefill_metadata(compressor_kv_state_metadata)
+            if self.multistream_dsv4_dsa_overlap:
+
+                def compressor_tail_fn() -> CompressorForwardOutput:
+                    assert compressor_prefill_metadata is not None
+                    assert compressor_state_prefill_metadata is not None
+                    return self._forward_compressor(
+                        hidden_states,
+                        state_cache,
+                        compressor_prefill_metadata,
+                        compressor_state_prefill_metadata,
+                        actual_seq_lengths_query,
+                        common_prefill_metadata.start_pos,
+                    )
+
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
-            q, qr, _ = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache, swa_prefill_metadata.slot_mapping, is_prefill=True
+            q, qr, _, compressor_overlap_output = self._mla_prolog_multistream(
+                hidden_states,
+                cos,
+                sin,
+                swa_kv_cache,
+                swa_prefill_metadata.slot_mapping,
+                is_prefill=True,
+                tail_overlap_fn=compressor_tail_fn,
             )
         else:
+            compressor_overlap_output = None
             # mlaprolog
             share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
             if share_hs_quant:
@@ -2113,8 +2197,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             )[0]
 
         if self.compress_ratio > 1:
-            compressor_prefill_metadata = _require_prefill_metadata(compressor_attn_metadata)
-            compressor_state_prefill_metadata = _require_prefill_metadata(compressor_kv_state_metadata)
+            assert compressor_prefill_metadata is not None
+            assert compressor_state_prefill_metadata is not None
             compress_topk_idxs = None
             # Only call indexer_select_qli when compress_ratio == 4 (requires 5 elements in attn_metadata)
             if self.compress_ratio == 4:
@@ -2151,36 +2235,22 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
 
-            coff = 2 if self.compressor_overlap else 1
-            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
-                compressor_prefill_metadata,
-            )
-
-            # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
-                hidden_states,
-                self.compressor_wkv.weight,
-                self.compressor_wgate.weight,
-                state_cache.squeeze(-2),
-                self.compressor_ape,
-                self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
-                state_block_table=compressor_state_prefill_metadata.block_table,
-                cu_seqlens=actual_seq_lengths_query,
-                seqused=None,
-                start_pos=common_prefill_metadata.start_pos,
-                rope_head_dim=self.rope_head_dim,
-                cmp_ratio=self.compress_ratio,
-                coff=coff,
-                norm_eps=self.compressor_norm_eps,
-                rotary_mode=2,
-                cache_mode=1,
-            )
+            if compressor_overlap_output is not None:
+                (compressed_kv, compress_slot_mapping), compressor_done = compressor_overlap_output
+                torch.npu.current_stream().wait_event(compressor_done)
+            else:
+                compressed_kv, compress_slot_mapping = self._forward_compressor(
+                    hidden_states,
+                    state_cache,
+                    compressor_prefill_metadata,
+                    compressor_state_prefill_metadata,
+                    actual_seq_lengths_query,
+                    common_prefill_metadata.start_pos,
+                )
 
             # For multistream_dsv4_dsa_overlap with compress_ratio=4:
             # aux_stream: indexer_weights_proj (parallel with main q_quant + kv_scatter)
-            # main stream: compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
+            # main stream: wait/use compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 main_stream = torch.npu.current_stream()
                 aux_stream = dsv4_dsa_overlap_stream()
@@ -2324,12 +2394,39 @@ class AscendDSAImpl(DSAAttentionImpl):
         )
         ori_win_right = 0 if swa_decode_metadata.ori_win_right is None else swa_decode_metadata.ori_win_right
 
+        compressor_decode_metadata = None
+        compressor_state_decode_metadata = None
+        compressor_tail_fn = None
+        if self.compress_ratio > 1:
+            compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
+            compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
+            if self.multistream_dsv4_dsa_overlap:
+
+                def compressor_tail_fn() -> CompressorForwardOutput:
+                    assert compressor_decode_metadata is not None
+                    assert compressor_state_decode_metadata is not None
+                    return self._forward_compressor(
+                        hidden_states,
+                        state_cache,
+                        compressor_decode_metadata,
+                        compressor_state_decode_metadata,
+                        actual_seq_lengths_query,
+                        common_decode_metadata.start_pos,
+                    )
+
         if self.multistream_dsv4_dsa_overlap:
             # mla prolog: q + kv dual-stream parallel
-            q, qr, qr_pertoken_scale = self._mla_prolog_multistream(
-                hidden_states, cos, sin, swa_kv_cache, swa_decode_metadata.slot_mapping, is_prefill=False
+            q, qr, qr_pertoken_scale, compressor_overlap_output = self._mla_prolog_multistream(
+                hidden_states,
+                cos,
+                sin,
+                swa_kv_cache,
+                swa_decode_metadata.slot_mapping,
+                is_prefill=False,
+                tail_overlap_fn=compressor_tail_fn,
             )
         else:
+            compressor_overlap_output = None
             # Share one dynamic-quant of hidden_states between wq_a (main stream)
             # and wkv (attention stream) when both sides are W8A8 dynamic.
             share_hs_quant = _is_w8a8_dynamic(self.wq_a) and _is_w8a8_dynamic(self.wkv)
@@ -2414,8 +2511,8 @@ class AscendDSAImpl(DSAAttentionImpl):
             DeviceOperator.dsa_kv_compress_scatter(swa_kv_cache, kv, swa_decode_metadata.slot_mapping)
 
         if self.compress_ratio > 1:
-            compressor_decode_metadata = _require_decode_metadata(compressor_attn_metadata)
-            compressor_state_decode_metadata = _require_decode_metadata(compressor_kv_state_metadata)
+            assert compressor_decode_metadata is not None
+            assert compressor_state_decode_metadata is not None
             compress_topk_idxs = None
             if self.compress_ratio == 4:
                 # IndexCache: decode segment occupies buffer[:num_decode_tokens]
@@ -2449,36 +2546,22 @@ class AscendDSAImpl(DSAAttentionImpl):
                             qr_pertoken_scale=qr_pertoken_scale,
                         )
 
-            coff = 2 if self.compressor_overlap else 1
-            compress_cos, compress_sin, compress_slot_mapping = self._compute_compressor_metadata(
-                compressor_decode_metadata,
-            )
-
-            # Inline compressor + scatter (c128, c4 non-dual)
-            compressed_kv = torch.ops._C_ascend.compressor(
-                hidden_states,
-                self.compressor_wkv.weight,
-                self.compressor_wgate.weight,
-                state_cache.squeeze(-2),
-                self.compressor_ape,
-                self.compressor_norm.weight,
-                compress_sin.view(-1, compress_sin.shape[-1]),
-                compress_cos.view(-1, compress_cos.shape[-1]),
-                state_block_table=compressor_state_decode_metadata.block_table,
-                cu_seqlens=actual_seq_lengths_query,
-                seqused=None,
-                start_pos=common_decode_metadata.start_pos,
-                rope_head_dim=self.rope_head_dim,
-                cmp_ratio=self.compress_ratio,
-                coff=coff,
-                norm_eps=self.compressor_norm_eps,
-                rotary_mode=2,
-                cache_mode=1,
-            )
+            if compressor_overlap_output is not None:
+                (compressed_kv, compress_slot_mapping), compressor_done = compressor_overlap_output
+                torch.npu.current_stream().wait_event(compressor_done)
+            else:
+                compressed_kv, compress_slot_mapping = self._forward_compressor(
+                    hidden_states,
+                    state_cache,
+                    compressor_decode_metadata,
+                    compressor_state_decode_metadata,
+                    actual_seq_lengths_query,
+                    common_decode_metadata.start_pos,
+                )
 
             # For multistream_dsv4_dsa_overlap with compress_ratio=4:
             # aux_stream: indexer_weights_proj (parallel with main q_quant + kv_scatter)
-            # main stream: compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
+            # main stream: wait/use compressed_kv -> q_quant -> kv_scatter -> wait aux_stream -> lightning_indexer
             if self.multistream_dsv4_dsa_overlap and self.compress_ratio == 4 and not self.skip_topk:
                 main_stream = torch.npu.current_stream()
                 aux_stream = dsv4_dsa_overlap_stream()
@@ -2555,6 +2638,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 **extra_attn_kwargs,
             )[0]
         elif self.compress_ratio == 4:
+            assert compressor_decode_metadata is not None
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
@@ -2577,6 +2661,7 @@ class AscendDSAImpl(DSAAttentionImpl):
                 **extra_attn_kwargs,
             )[0]
         else:
+            assert compressor_decode_metadata is not None
             attn_output = attn_op(
                 q,
                 ori_kv=swa_kv_cache,
