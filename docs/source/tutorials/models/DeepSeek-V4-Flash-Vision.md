@@ -44,27 +44,75 @@ path, for example
 
 ### 3.2 Software
 
-Use a vLLM Ascend `main` image built after DeepSeek-V4-Flash-Vision-Exp support
-was merged, together with the vLLM revision recorded in
-`.github/vllm-main-verified.commit`. Mixing other vLLM and vLLM Ascend
-revisions is not supported.
+Use the published A3 image, which contains matching vLLM and vLLM Ascend
+revisions:
+
+```text
+quay.io/ascend/vllm-ascend:DeepSeek-V4-Flash-Vision-Exp-a3
+```
+
+Do not replace either package inside the container independently. Mixing other
+vLLM and vLLM Ascend revisions is not supported.
 
 ## 4 Installation
 
-This guide supports only the Atlas A3 series. Follow the
-[prebuilt image installation guide](../../getting_started/installation.md#installation-prebuilt-image)
-or build the `main` branch with `Dockerfile.a3`.
+This guide supports only the Atlas A3 series. Pull the published image and
+start the container as follows. The A3 server has 8 NPUs, exposed as 16 logical
+devices (`davinci0` through `davinci15`) in the container.
 
-Expose all 16 logical devices of the 8 NPUs to the container and mount the model
-directory at the same absolute path used by the serving command. Verify the
-installed packages before starting the service:
+```shell
+export IMAGE=quay.io/ascend/vllm-ascend:DeepSeek-V4-Flash-Vision-Exp-a3
+export MODEL_ROOT="/data/weights"
+
+docker pull "$IMAGE"
+
+docker run --rm -it \
+  --name dsv4-vision \
+  --net=host \
+  --shm-size=512g \
+  --privileged=true \
+  --device /dev/davinci0 \
+  --device /dev/davinci1 \
+  --device /dev/davinci2 \
+  --device /dev/davinci3 \
+  --device /dev/davinci4 \
+  --device /dev/davinci5 \
+  --device /dev/davinci6 \
+  --device /dev/davinci7 \
+  --device /dev/davinci8 \
+  --device /dev/davinci9 \
+  --device /dev/davinci10 \
+  --device /dev/davinci11 \
+  --device /dev/davinci12 \
+  --device /dev/davinci13 \
+  --device /dev/davinci14 \
+  --device /dev/davinci15 \
+  --device /dev/davinci_manager \
+  --device /dev/devmm_svm \
+  --device /dev/hisi_hdc \
+  -v /usr/local/dcmi:/usr/local/dcmi \
+  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+  -v /etc/ascend_install.info:/etc/ascend_install.info \
+  -v /etc/hccn.conf:/etc/hccn.conf \
+  -v "$MODEL_ROOT:$MODEL_ROOT" \
+  "$IMAGE" bash
+```
+
+Change `MODEL_ROOT` if the checkpoint is stored elsewhere. Keep the same
+absolute model path inside and outside the container. Verify the installed
+packages after entering the container:
 
 ```shell
 python -m pip show vllm vllm-ascend
 ```
 
-Both packages must be present, and their revisions must match the selected
-vLLM Ascend `main` checkout.
+Both packages must be present. To build from source instead, follow the
+[software environment installation guide](../../getting_started/installation.md#installation-software-environment)
+and build the `main` branch with `Dockerfile.a3` and the matching vLLM revision
+from `.github/vllm-main-verified.commit`.
 
 ## 5 Online Service Deployment
 
