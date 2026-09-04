@@ -29,7 +29,7 @@ The following hardware and software stack is validated together for this release
     | Layer | Component | Validated version / requirement | Role |
     | --- | --- | --- | --- |
     | Runtime environment | Python | `{{ release_image_python_version }}` | Python version used by the validated release image |
-    | Host enablement | Ascend HDK | 26.0.RC1 | Driver and firmware requirements for the selected CANN release |
+    | Host enablement | Ascend HDK | `{{ release_hdk_version }}` | Driver and firmware requirements for the selected CANN release |
     | Ascend runtime | CANN Toolkit + Ops | `{{ release_cann_version }}` | Ascend user-space runtime, including the CANN Toolkit and hardware-specific Ops packages |
     | Ascend runtime | NNAL | `{{ release_nnal_version }}` | Provides `libatb.so` and ATB runtime capabilities |
     | Framework | PyTorch | `{{ release_pytorch_version }}` | Tensor framework used by vLLM |
@@ -133,7 +133,7 @@ Before building vLLM Ascend, explicitly set the build target and disable automat
 
 ???+ tip "Enable batch invariance"
 
-    To enable batch invariance, set `VLLM_BATCH_INVARIANT=1` before building vLLM Ascend so that the custom operator library for batch invariance is installed during installation. For usage instructions, see [Batch Invariance](../user_guide/feature_guide/batch_invariance.md).
+    Batch invariance requires the `batch_invariant_ops` wheel. Set `VLLM_BATCH_INVARIANT=1` before building vLLM Ascend to build and install the wheel as part of the installation flow. For usage instructions, see [Batch Invariance](../user_guide/feature_guide/batch_invariance.md).
 
 ```bash
 export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"

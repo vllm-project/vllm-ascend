@@ -17,10 +17,13 @@ import json
 import os
 import subprocess
 import sys
+from importlib.util import find_spec as real_find_spec
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import KVTransferConfig
+from vllm.config import VllmConfig as _VllmConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import (
@@ -45,6 +48,24 @@ from vllm_ascend.ascend_config import (
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.utils import clear_enable_sp, enable_dsa_cp, enable_sp, shared_expert_dp_enabled
+
+
+def VllmConfig(*args: Any, **kwargs: Any) -> _VllmConfig:
+    """Build a test config with the model metadata required by AscendConfig."""
+    config = _VllmConfig(*args, **kwargs)
+    if config.model_config is None:
+        config.model_config = SimpleNamespace(
+            is_moe=False,
+            is_deepseek_mla=False,
+            use_mla=False,
+            enforce_eager=True,
+            architectures=[],
+            hf_text_config=SimpleNamespace(),
+            get_total_num_kv_heads=lambda: 0,
+            get_num_experts=lambda: 0,
+            get_hidden_size=lambda: 0,
+        )
+    return config
 
 
 def test_config_modules_do_not_load_vllm_config():
@@ -107,6 +128,7 @@ class TestAscendConfig(TestBase):
         is_deepseek_mla: bool = False,
     ):
         return SimpleNamespace(
+            is_moe=False,
             is_deepseek_mla=is_deepseek_mla,
             use_mla=is_deepseek_mla,
             enforce_eager=True,
@@ -189,6 +211,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.multistream_overlap_shared_expert)
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -230,15 +253,19 @@ class TestAscendConfig(TestBase):
                 "fusion_ops_gmmswigluquant": False,
             },
             "multistream_overlap_shared_expert": True,
+            "enable_force_eplb": True,
             "eplb_config": {"num_redundant_experts": 2},
             "refresh": True,
             "enable_kv_nz": False,
             "xlite_graph_config": {"enabled": False, "full_mode": True},
             "finegrained_tp_config": {"lmhead_tensor_parallel_size": "0"},
+            "mega_moe_max_tokens": 32768,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
+        self.assertTrue(ascend_config.enable_force_eplb)
+        self.assertEqual(ascend_config.mega_moe_max_tokens, 32768)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
@@ -250,6 +277,24 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_fusion_config.fusion_ops_gmmswigluquant)
         self.assertTrue(ascend_config.xlite_graph_config.full_mode)
         self.assertEqual(ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size, 0)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_validates_mega_moe_max_tokens(self, mock_fix_incompatible_config):
+        # NOTE: pydantic coerces numeric strings (e.g. "65536") to int, so only
+        # out-of-range values are invalid on main.
+        invalid_values = [0, -1]
+
+        for invalid_value in invalid_values:
+            clear_ascend_config()
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"mega_moe_max_tokens": invalid_value}
+
+            with (
+                self.subTest(invalid_value=invalid_value),
+                self.assertRaisesRegex(ValueError, "mega_moe_max_tokens must be"),
+            ):
+                init_ascend_config(test_vllm_config)
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1035,6 +1080,7 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
         supported_vc = VllmConfig()
         supported_vc.model_config = SimpleNamespace(
+            is_moe=False,
             hf_text_config=SimpleNamespace(index_topk=2048),
             hf_config=SimpleNamespace(),
             enforce_eager=True,
@@ -1132,7 +1178,12 @@ class TestTopLevelSwitchTypeValidation(TestBase):
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_enable_kv_nz_uses_vllm_config_preconditions(self, mock_fix, mock_sparse):
         vc = VllmConfig()
-        vc.model_config = SimpleNamespace(is_deepseek_mla=True, architectures=[], enforce_eager=True)
+        vc.model_config = SimpleNamespace(
+            is_moe=False,
+            is_deepseek_mla=True,
+            architectures=[],
+            enforce_eager=True,
+        )
         vc.kv_transfer_config = SimpleNamespace(is_kv_consumer=True)
         vc.additional_config = {"enable_kv_nz": "true"}
 
@@ -1189,5 +1240,30 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         # only _NON_USER_INPUT_KEYS is stripped, so typos reach pydantic and are rejected.
         vc = VllmConfig()
         vc.additional_config = {"unknown_option": True}
-        with self.assertRaises(ValueError):
+        with (
+            patch("vllm_ascend.ascend_config.importlib.util.find_spec", return_value=None),
+            self.assertRaises(ValueError),
+        ):
             init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.ascend_config.logger.warning")
+    @patch(
+        "vllm_ascend.ascend_config.importlib.util.find_spec",
+        side_effect=lambda name, *args, **kwargs: (
+            object() if name == "vllm_omni" else real_find_spec(name, *args, **kwargs)
+        ),
+    )
+    def test_omni_additional_config_warns_and_is_preserved(self, _mock_find_spec, mock_warning):
+        vllm_config = VllmConfig()
+        vllm_config.additional_config = {"vllm_omni_option": True}
+
+        init_ascend_config(vllm_config)
+
+        self.assertIs(vllm_config.additional_config["vllm_omni_option"], True)
+        mock_warning.assert_any_call(
+            "The following additional_config keys are invalid for vLLM-Ascend: %s. "
+            "They may be used by vLLM-Omni or another project. "
+            "Please remove them if they are not needed for your use case.",
+            ["vllm_omni_option"],
+        )

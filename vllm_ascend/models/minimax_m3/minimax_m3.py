@@ -81,6 +81,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -107,6 +108,57 @@ from vllm_ascend.models.minimax_m3.msa_m3 import (
     _use_fused_qkv_indexer,
 )
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.worker.v2.pp_utils import (
+    PPTransportDataType,
+    add_pp_transport_tensors,
+    get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
+)
+
+_FP8_E4M3_MAX = 448.0
+
+
+def _resolve_layer_kv_cache_dtype(
+    cache_config: CacheConfig | None,
+    prefix: str,
+) -> str:
+    """Resolve the per-layer KV dtype using vLLM's skip-layer semantics."""
+    if cache_config is None:
+        return "auto"
+
+    kv_cache_dtype = cache_config.cache_dtype
+    skip_layers = getattr(cache_config, "kv_cache_dtype_skip_layers", None)
+    if skip_layers and str(extract_layer_index(prefix)) in skip_layers:
+        kv_cache_dtype = "auto"
+    return kv_cache_dtype
+
+
+def _resolve_layer_kv_cache_dtypes(
+    cache_config: CacheConfig | None,
+    prefix: str,
+    model_config: ModelConfig,
+) -> tuple[str, torch.dtype]:
+    """Resolve MiniMax-M3's semantic and physical per-layer KV dtypes."""
+    kv_cache_dtype = _resolve_layer_kv_cache_dtype(cache_config, prefix)
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        # vLLM represents generic FP8 KV storage as uint8. MiniMax-M3's
+        # fixed-scale sparse-attention and indexer paths consume native E4M3
+        # tensors, so preserve that physical dtype at the cache-spec boundary.
+        kv_cache_torch_dtype = torch.float8_e4m3fn
+    else:
+        kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(kv_cache_dtype, model_config)
+    return kv_cache_dtype, kv_cache_torch_dtype
+
+
+def _cast_for_cache(tensor: torch.Tensor, cache: torch.Tensor) -> torch.Tensor:
+    """Cast fixed-scale MiniMax-M3 KV values to the physical cache dtype."""
+    if tensor.dtype == cache.dtype:
+        return tensor
+    if cache.dtype == torch.float8_e4m3fn:
+        tensor = tensor.clamp(min=-_FP8_E4M3_MAX, max=_FP8_E4M3_MAX)
+    return tensor.to(cache.dtype)
 
 
 def _scatter_index_cache(
@@ -252,8 +304,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         self.layer_name = f"{prefix}.attn"
-        self.kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "auto"
-        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(self.kv_cache_dtype, vllm_config.model_config)
+        self.kv_cache_dtype, self.kv_cache_torch_dtype = _resolve_layer_kv_cache_dtypes(
+            cache_config,
+            prefix,
+            vllm_config.model_config,
+        )
         self.attn_backend = AscendMiniMaxM3SparseBackend
         self.impl = AscendMiniMaxM3SparseImpl(
             self.num_heads,
@@ -277,6 +332,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             init_blocks=sparse_cfg.get("sparse_init_block", 0),
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             cache_config=cache_config,
+            kv_cache_dtype=self.kv_cache_dtype,
+            kv_cache_torch_dtype=self.kv_cache_torch_dtype,
         )
 
         compilation_config = vllm_config.compilation_config
@@ -318,6 +375,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         num_tokens = main_meta.num_actual_tokens
         k_insert = key[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
         v_insert = value[:num_tokens].view(-1, self.num_kv_heads, self.head_dim)
+        k_insert = _cast_for_cache(k_insert, key_cache)
+        v_insert = _cast_for_cache(v_insert, value_cache)
         DeviceOperator.reshape_and_cache(
             k_insert,
             v_insert,
@@ -385,7 +444,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             )
 
         index_q, index_k = self._index_qk_norm(index_q, index_k)
-        index_q, index_k = self.rotary_emb(positions, index_q, index_k)
+        if self.indexer.index_cache.dtype == torch.float8_e4m3fn:
+            index_q, index_k = self.rotary_emb(
+                positions,
+                index_q,
+                index_k,
+                out_dtype=torch.float8_e4m3fn,
+            )
+        else:
+            index_q, index_k = self.rotary_emb(positions, index_q, index_k)
 
         return q, k, v, index_q, index_k
 
@@ -948,8 +1015,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
+        self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(
+            self,
+            make_empty_intermediate_tensors_factory(["hidden_states", "residual"], config.hidden_size),
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -962,24 +1030,38 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
-        if get_pp_group().is_first_rank:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
+            aux_hidden_states: list[torch.Tensor] = []
+            self._maybe_add_hidden_state(aux_hidden_states, 0, hidden_states, residual)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+            aux_hidden_states = get_pp_transport_tensors(
+                intermediate_tensors,
+                PPTransportDataType.AUX_HIDDEN_STATES,
+            )
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
             self._maybe_add_hidden_state(aux_hidden_states, idx + 1, hidden_states, residual)
 
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+        if not pp_group.is_last_rank:
+            intermediate_tensors = IntermediateTensors({"hidden_states": hidden_states, "residual": residual})
+            return add_pp_transport_tensors(
+                intermediate_tensors,
+                PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
+            )
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:

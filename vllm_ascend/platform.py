@@ -220,9 +220,24 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         use_compress = getattr(attn_selector_config, "use_compress", False)
-        key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
+        use_mla = attn_selector_config.use_mla
+        use_sparse = attn_selector_config.use_sparse
+        # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
+        try:
+            from vllm.config import get_current_vllm_config
+            from vllm_ascend.utils import enable_sfa
 
-        if _validate_fa3_backend(key, attn_selector_config):
+            if use_sparse and not enable_sfa(get_current_vllm_config()):
+                use_sparse = False
+        except Exception:
+            pass
+        key = (use_mla, use_sparse)
+        backend_key = (*key, use_compress)
+
+        if attn_selector_config.use_pcp and attn_selector_config.use_dcp:
+            raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
+
+        if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
         backend_map = {
@@ -244,7 +259,19 @@ class NPUPlatform(Platform):
         if get_current_hardware_profile().attention_backend_family is AttentionBackendFamily.COMPATIBILITY:
             return compatibility_backend_map.get(key, compatibility_backend_map[(False, False)])
 
-        return backend_map[(attn_selector_config.use_mla, attn_selector_config.use_sparse, use_compress)]
+        if attn_selector_config.use_pcp:
+            pcp_backend_map = {
+                (True, False, False): "vllm_ascend.attention.mla_v1.AscendMLABackend",
+                (False, False, False): "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
+                (True, True, False): "vllm_ascend.attention.sfa_v1.AscendSFABackend",
+                (True, False, True): "vllm_ascend.attention.dsa_v1.AscendDSABackend",
+            }
+            pcp_backend = pcp_backend_map.get(backend_key)
+            if pcp_backend is None:
+                raise NotImplementedError(f"Ascend MRV2 PCP does not support attention backend {backend_key}.")
+            return pcp_backend
+
+        return backend_map[backend_key]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -547,6 +574,8 @@ class NPUPlatform(Platform):
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        max_tokens_across_pcp = num_tokens if pcp_size > 1 else 0
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
@@ -581,6 +610,7 @@ class NPUPlatform(Platform):
             "num_tokens": num_tokens,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
+            "max_tokens_across_pcp": max_tokens_across_pcp,
             "mc2_mask": mc2_mask,
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,
@@ -1031,7 +1061,12 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
         )
 
     if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        vllm_config.cache_config.cache_dtype = str(model_config.dtype).replace("torch.", "")
+        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
+
+        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
+            vllm_config.cache_config.cache_dtype,
+            str(model_config.dtype).replace("torch.", ""),
+        )
 
     # Update compilation mode in some cases
     enforce_eager = getattr(model_config, "enforce_eager", False)
@@ -1106,11 +1141,15 @@ def _setup_compile_backend(
     # current max / size inputs after the mode adjustments above).
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
-    # Upstream MoE SP shards tokens before the MoE runner, independent shared-
-    # expert DP shards them inside AscendSharedExperts, and DSA-CP shards Q at
-    # its attention boundary. All three layouts require TP-aligned graph gears
-    # so every captured graph has a stable local token shape. Keep the layout
-    # constraint separate from the feature switches so none enables another.
+    additional_config = vllm_config.additional_config or {}
+    if (
+        not additional_config.get("enable_flashcomm1", False)
+        and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
+    ):
+        vllm_config.parallel_config.all2all_backend = (
+            "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
+        )
+        logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
     requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
@@ -1196,8 +1235,14 @@ def _setup_worker_and_scheduler(
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
         additional_config = vllm_config.additional_config or {}
-        if ("enable_flashcomm1" not in additional_config) and (not os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1")):
-            parallel_config.all2all_backend = "flashinfer_all2allv"  # a trikky way to disable SP moe.
+        if (
+            not additional_config.get("enable_flashcomm1", False)
+            and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
+        ):
+            parallel_config.all2all_backend = (
+                "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
+            )
+            logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         hardware_profile = get_current_hardware_profile()
         if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(
             HardwareCapability.STANDARD_WORKER_PATCHES

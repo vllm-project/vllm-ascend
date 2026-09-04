@@ -69,8 +69,8 @@ from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_gva_layerwise_config,
     get_layerwise_physical_layer_index,
+    get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     plan_sparse_kv_offload_memory,
@@ -598,7 +598,7 @@ class NPUWorker(WorkerBase):
         )
         self.available_kv_cache_memory_bytes = self.requested_memory - profile_result.non_kv_cache_memory
 
-        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             memory_info = getattr(self, "_gva_layerwise_memory_info", None)
             if memory_info is None:
@@ -827,7 +827,10 @@ class NPUWorker(WorkerBase):
         # worker process before migratepages/taskset run.
         if get_ascend_config().enable_cpu_binding:
             try:
-                bind_cpus(self.local_rank)
+                bind_cpus(
+                    self.local_rank,
+                    npu_id=current_platform.device_id_to_physical_device_id(self.local_rank),
+                )
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
 
@@ -981,7 +984,7 @@ class NPUWorker(WorkerBase):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
-        extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
+        extra_config = get_layerwise_reuse_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(
                 kv_cache_spec,
@@ -1020,16 +1023,18 @@ class NPUWorker(WorkerBase):
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the
-        # narrower Eagle3 condition for MRV1, where zeroing was introduced only
-        # for the multi-step speculative-decode reuse issue.
+        # narrower Mamba + Eagle3 condition for MRV1, where zeroing was
+        # introduced only to prevent a recycled Mamba block from exposing stale
+        # values when reused by full attention during multi-step speculation.
         speculative_config = self.vllm_config.speculative_config
-        needs_mrv1_eagle_zeroing = (
-            speculative_config is not None
+        needs_mrv1_mamba_eagle_zeroing = (
+            kv_cache_config.has_mamba_layers
+            and speculative_config is not None
             and speculative_config.method == "eagle3"
             and speculative_config.num_speculative_tokens > 1
         )
         should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            self.use_v2_model_runner or needs_mrv1_eagle_zeroing
+            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
         )
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.

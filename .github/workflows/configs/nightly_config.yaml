@@ -177,6 +177,12 @@ a3:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
@@ -226,29 +232,32 @@ a3:
         os: linux-aarch64-nightly-a3-16
         config_file_path: Minimax_m2.7_w8a8_A3.yaml
       - name: Qwen3_32b_w8a8_ml_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
       - name: Deepseek_R1_W8A8_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Deepseek_R1_W8A8_A3.yaml
       - name: Qwen3.8-27B-w8a8-A3
-        os: linux-aarch64-a3-2
+        os: linux-aarch64-nightly-a3-2
         config_file_path: Qwen3.8-27B-w8a8-A3.yaml
       - name: Qwq_32b_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwq_32b_A3.yaml
       - name: Qwen3_32b_W8A8_wl_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
       - name: Deepseek_R1_W8A8_Reasoning_output_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
       - name: qwen_3_6_27b_w8a8_A3
-        os: linux-aarch64-a3-16
+        os: linux-aarch64-nightly-a3-16
         config_file_path: qwen_3_6_27b_w8a8_A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
+      - name: compressor-metadata-cross-stream
+        os: linux-aarch64-a3-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_compressor_metadata.py
       - name: qwen3-30b-acc
         os: linux-aarch64-nightly-a3-4
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
@@ -288,42 +297,17 @@ a3:
         testcase_timeout: 240
 
 a3-560t:
-  multi_node:
-    test_config:
-      - name: multi-node-deepseek-v3.2-W8A8-EP
-        config_file_path: DeepSeek-V3_2-W8A8-EP.yaml
-        size: 4
-      - name: multi-node-deepseek-v3.1
-        config_file_path: DeepSeek-V3.1-BF16.yaml
-        size: 2
-      - name: multi-node-GLM-5.2-w8a8-A3
-        config_file_path: GLM5_2-W8A8-A3-dual-nodes.yaml
-        size: 2
-  double_node:
-    test_config:
-      - name: multi-node-qwen3-dp
-        config_file_path: Qwen3-235B-A22B.yaml
-        size: 2
-      - name: multi-node-GLM-5.1-w8a8-A3
-        config_file_path: GLM5_1-W8A8-A3-dual-nodes.yaml
-        size: 2
-      - name: multi-node-dpsk3.2-2node
-        config_file_path: DeepSeek-V3_2-W8A8-A3-dual-nodes.yaml
-        size: 2
-      - name: multi-node-qwen-disagg-pd
-        config_file_path: Qwen3-235B-disagg-pd.yaml
-        size: 2
-      - name: multi-node-qwen-vl-disagg-pd
-        config_file_path: Qwen3-VL-235B-disagg-pd.yaml
-        size: 2
-      - name: multi-node-qwenw8a8-2node-eplb
-        config_file_path: Qwen3-235B-W8A8-EPLB.yaml
-        size: 2
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml

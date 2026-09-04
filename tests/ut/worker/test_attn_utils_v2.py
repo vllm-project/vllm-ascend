@@ -1,10 +1,12 @@
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -22,7 +24,10 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSASWABackend,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
@@ -30,6 +35,55 @@ from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+@pytest.mark.parametrize(
+    ("replicated_indexer", "expected_size"),
+    [(False, 1), (True, 4)],
+)
+def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_indexer, expected_size):
+    layer_name = "model.layers.0.self_attn.indexer.k_cache"
+    indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
+    torch.nn.Module.__init__(indexer_module)
+    monkeypatch.setattr(
+        indexer_module,
+        "get_kv_cache_spec",
+        lambda _config: object(),
+    )
+
+    vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(decode_context_parallel_size=4),
+        cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+        model_config=SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_text_config=SimpleNamespace(index_head_dim=128),
+        ),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_layers_from_vllm_config",
+        lambda *_args, **_kwargs: {layer_name: indexer_module},
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "enable_sfa_dcp_replicated_indexer",
+        lambda _config: replicated_indexer,
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A2),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_ascend_config",
+        lambda: SimpleNamespace(is_sparse_li_c8_layer=lambda _layer_name: False),
+    )
+
+    spec = attn_utils.get_kv_cache_spec(vllm_config)[layer_name]
+
+    assert isinstance(spec, AscendSFAIndexerCacheSpec)
+    assert spec.sfa_dcp_replicated_indexer_size == expected_size
 
 
 @pytest.mark.parametrize(
@@ -69,6 +123,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         cache_config=cache_config,
         kv_transfer_config=None,
         quant_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
     cache_layer = deepseek_v4_indexer.AscendDeepseekV4IndexerCache.__new__(
@@ -83,13 +138,13 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 
     monkeypatch.setattr(
         deepseek_v4_indexer,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
     monkeypatch.setattr(
         attn_utils,
-        "get_ascend_device_type",
-        lambda: device_type,
+        "get_current_hardware_profile",
+        lambda: get_hardware_profile(device_type),
     )
     monkeypatch.setattr(
         attn_utils,
@@ -171,6 +226,18 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
     def __init__(self, calls: list[dict[str, Any]]):
         self.calls = calls
+        self.for_cudagraph_capture = False
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata,
+        **kwargs,
+    ):
+        self.for_cudagraph_capture = True
+        return super().build_for_cudagraph_capture(
+            common_attn_metadata,
+            **kwargs,
+        )
 
     def build(
         self,
@@ -184,6 +251,10 @@ class _RecordingDSAMetadataBuilder(AscendDSAMetadataBuilder):
         call = {
             "common_attn_metadata": common_attn_metadata,
             "common_ratio_to_sas_metadata": self.common_ratio_to_sas_metadata,
+            "for_cudagraph_capture": self.for_cudagraph_capture,
+            "num_actual_reqs": kwargs["num_actual_reqs"],
+            "pcp_context": kwargs.get("pcp_context"),
+            "pcp_cache_group_idx": kwargs.get("pcp_cache_group_idx"),
         }
         assert "block_size" not in kwargs
         self.calls.append(call)
@@ -306,16 +377,25 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
 
 
 @pytest.mark.parametrize(
-    ("caller", "cudagraph_mode", "expected_input_tokens"),
+    (
+        "caller",
+        "cudagraph_mode",
+        "for_capture",
+        "pcp_size",
+        "expected_input_tokens",
+    ),
     [
-        ("default", None, 5),
-        ("model_state", CUDAGraphMode.NONE, 5),
-        ("model_state", CUDAGraphMode.FULL, 8),
+        ("default", None, False, 1, 5),
+        ("model_state", CUDAGraphMode.NONE, False, 1, 5),
+        ("model_state", CUDAGraphMode.FULL, False, 1, 8),
+        ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
     ],
 )
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     caller,
     cudagraph_mode,
+    for_capture,
+    pcp_size,
     expected_input_tokens,
 ):
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
@@ -324,6 +404,18 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         torch.zeros((4, 1), dtype=torch.int32),
     )
     slot_mappings = torch.zeros((2, 8), dtype=torch.int32)
+    dcp_local_seq_lens = torch.tensor(
+        [2, 1, 0, 0],
+        dtype=torch.int32,
+    )
+    pcp_context = object() if caller == "pcp_capture" else None
+    pcp_manager = (
+        SimpleNamespace(
+            build_attention_context=MagicMock(return_value=pcp_context),
+        )
+        if pcp_context is not None
+        else None
+    )
 
     if caller == "default":
         metadata = attn_utils.build_attn_metadata(
@@ -340,11 +432,17 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             kv_cache_config=kv_cache_config,
             seq_lens_np=np.array([2, 3], dtype=np.int32),
             positions=torch.arange(5, dtype=torch.int32),
+            dcp_local_seq_lens=dcp_local_seq_lens[:2],
         )
     else:
         model_state = AscendModelState.__new__(AscendModelState)
         model_state.max_model_len = 8
-        model_state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+        model_state.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=pcp_size,
+            ),
+        )
+        model_state.pcp_manager = pcp_manager
         input_batch = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
@@ -356,7 +454,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
             is_prefilling_np=np.array([True, True, False, False]),
-            dcp_local_seq_lens=None,
+            dcp_local_seq_lens=dcp_local_seq_lens,
             positions=torch.arange(8, dtype=torch.int32),
             attn_state=None,
         )
@@ -367,6 +465,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             slot_mappings=slot_mappings,
             attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
+            for_capture=for_capture,
         )
 
     assert set(metadata) == set(layer_names)
@@ -375,14 +474,25 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         common_metadata = call["common_attn_metadata"]
         assert common_metadata.num_actual_tokens == 5
         assert common_metadata.num_input_tokens == expected_input_tokens
+        assert call["for_cudagraph_capture"] is for_capture
+        assert call["num_actual_reqs"] == 2
+        assert call["pcp_context"] is pcp_context
         if caller != "default":
             assert torch.equal(
                 common_metadata.is_prefilling,
                 torch.tensor([True, True, False, False]),
             )
+        expected_dcp_local_seq_lens = dcp_local_seq_lens[:2] if caller == "default" else dcp_local_seq_lens
+        torch.testing.assert_close(common_metadata.dcp_local_seq_lens, expected_dcp_local_seq_lens)
     cache_name = "common_ratio_to_sas_metadata"
     assert calls[0][cache_name] is calls[1][cache_name]
     assert calls[1][cache_name]["first_group"] is True
+    if pcp_context is not None:
+        assert [call["pcp_cache_group_idx"] for call in calls] == [0, 1]
+        assert pcp_manager is not None
+        pcp_manager.build_attention_context.assert_called_once_with()
+    else:
+        assert all(call["pcp_cache_group_idx"] is None for call in calls)
 
 
 class _PrefillStateBuilder:

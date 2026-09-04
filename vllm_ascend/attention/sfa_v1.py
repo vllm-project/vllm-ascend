@@ -10,7 +10,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadataBuilder
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
     AttentionBackend,  # type: ignore
@@ -23,8 +22,8 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
+    MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
@@ -566,8 +565,13 @@ class AscendSFAImpl(MLAAttentionImpl):
         pass
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        # NOTE: We currently do not support quant kv_b_proj.
-        assert isinstance(self.kv_b_proj.quant_method, UnquantizedLinearMethod)
+        # kv_b_proj is absorbed into W_UK/W_UV below and then disposed, so it never runs a
+        # matmul. What matters is that whichever quant method owns it left a dense weight
+        # behind; a quantized one would have replaced it with a layout we cannot split.
+        assert self.kv_b_proj.weight.dtype == act_dtype, (
+            f"SFA absorbs kv_b_proj and needs it dense in {act_dtype}, "
+            f"got {self.kv_b_proj.weight.dtype} from {type(self.kv_b_proj.quant_method).__name__}"
+        )
         # NOTE: Weight will be reshaped next, we need to revert and transpose it.
         kv_b_proj_weight = torch_npu.npu_format_cast(self.kv_b_proj.weight.data, ACL_FORMAT_FRACTAL_ND).T
         assert kv_b_proj_weight.shape == (

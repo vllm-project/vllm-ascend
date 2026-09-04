@@ -62,7 +62,8 @@ patch(
     "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pcp_group", return_value=_mock_pcp_group
 ).start()
 patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
-patch("torch.npu.set_device").start()
+# Do not permanently patch torch.npu.set_device here — the executor-binding
+# tests need to install a side_effect on the live set_device callable.
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
@@ -314,6 +315,53 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
 
 class TestMooncakeTransferGroups(unittest.TestCase):
+    def test_glm_sfa_indexer_uses_independent_metadata_layer(self):
+        mla_layer = "model.layers.3.self_attn.attn"
+        sfa_layer = "model.layers.3.self_attn.indexer.k_cache"
+        mtp_layer = "model.layers.60.mtp.attn"
+        mla_spec = MLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=512,
+            dtype=torch.bfloat16,
+        )
+        sfa_spec = AscendSFAIndexerCacheSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            sfa_dcp_replicated_indexer_size=8,
+        )
+        layer_specs = {
+            sfa_layer: sfa_spec,
+            mla_layer: mla_spec,
+            mtp_layer: mla_spec,
+        }
+        uniform_spec = UniformTypeKVCacheSpecs(
+            block_size=128,
+            kv_cache_specs=layer_specs,
+        )
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = MockVllmConfig()
+        worker.total_layers = 60
+        worker.kv_cache_config = MockKVCacheConfig(
+            kv_cache_groups=[
+                MockKVCacheGroup(
+                    layer_names=list(layer_specs),
+                    kv_cache_spec=uniform_spec,
+                )
+            ]
+        )
+        worker._layer_specs = dict(layer_specs)
+
+        kv_group2layeridx = worker._build_kv_group2layeridx()
+
+        self.assertEqual(len(kv_group2layeridx), 2)
+        self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec_type"], "AscendSFAIndexerCacheSpec")
+        self.assertEqual(kv_group2layeridx[0][1], [123])
+        self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec_type"], "MLAAttentionSpec")
+        self.assertEqual(kv_group2layeridx[1][1], [3, 60])
+
     def test_m3_index_spec_is_preserved_and_splits_transfer_group(self):
         main_layer = "model.layers.3.attn"
         index_layer = f"{main_layer}.index_cache"
@@ -381,16 +429,16 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         self.assertEqual(kv_group2layeridx[0][0]["kv_cache_spec_type"], "FullAttentionSpec")
         self.assertEqual(kv_group2layeridx[0][1], [3])
         self.assertEqual(kv_group2layeridx[1][0]["kv_cache_spec_type"], "AscendSFAIndexerCacheSpec")
-        self.assertEqual(kv_group2layeridx[1][1], [63])
+        self.assertEqual(kv_group2layeridx[1][1], [123])
 
     def test_m3_index_uses_its_own_block_scale_and_non_mla_routing(self):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.vllm_config = MockVllmConfig()
         worker.vllm_config.model_config.is_deepseek_mla = False
         worker.num_key_value_heads = 4
-        worker.block_size_scale = [[] for _ in range(64)]
+        worker.block_size_scale = [[] for _ in range(124)]
         worker.block_size_scale[3] = [2]
-        worker.block_size_scale[63] = [1]
+        worker.block_size_scale[123] = [1]
         index_group = {
             "kv_cache_spec_type": "AscendSFAIndexerCacheSpec",
             "kv_cache_group_id": 0,
@@ -404,13 +452,13 @@ class TestMooncakeTransferGroups(unittest.TestCase):
             "layer_names": ["model.layers.3.attn"],
         }
 
-        self.assertEqual(worker._get_kernel_block_scale([63]), 1)
+        self.assertEqual(worker._get_kernel_block_scale([123]), 1)
         self.assertFalse(worker._group_use_mla_rank_routing(index_group))
         self.assertTrue(worker._group_skip_kv_reformat(index_group))
         self.assertEqual(worker._get_attention_group_num_key_value_heads(index_group), 4)
         self.assertTrue(
             transfer_groups_need_independent_block_ids(
-                {0: (main_group, [3]), 1: (index_group, [63])},
+                {0: (main_group, [3]), 1: (index_group, [123])},
                 worker.block_size_scale,
             )
         )
@@ -803,8 +851,9 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         self.assertEqual(result, {"req1", "req2"})
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
-        expected_device = torch.device("npu:5")
-        kv_cache = MagicMock(device=expected_device)
+        expected_device_index = 5
+        # Prefer an int device index so CPU UTs do not depend on torch.device("npu:N").
+        kv_cache = MagicMock(device=expected_device_index)
         worker_events: defaultdict[int, list[tuple[str, int | str]]] = defaultdict(list)
         events_lock = threading.Lock()
         both_workers_started = threading.Event()
@@ -815,7 +864,10 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             with events_lock:
                 worker_events[threading.get_ident()].append(("set_device", cast(int, device_index)))
 
-        with patch("torch.npu.set_device", side_effect=record_set_device):
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.torch.npu.set_device",
+            side_effect=record_set_device,
+        ):
             thread = KVCacheRecvingThread(
                 tp_rank=1,
                 tp_size=4,
@@ -862,7 +914,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
         handled_worker_events = [events for events in worker_events.values() if any(e == "handle" for e, _ in events)]
         self.assertEqual(len(handled_worker_events), 2)
         for events in handled_worker_events:
-            self.assertEqual(events[0], ("set_device", expected_device.index))
+            self.assertEqual(events[0], ("set_device", expected_device_index))
             self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
@@ -1111,6 +1163,56 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertIsInstance(call_args[3], list)
         self.assertEqual(len(call_args[1]), len(call_args[2]))
         self.assertEqual(len(call_args[1]), len(call_args[3]))
+        mock_get_meta.assert_not_called()
+
+    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
+    def test_transfer_sfa_metadata_plane_uses_cache_spec_type(self, mock_get_meta):
+        metadata_layer_idx = self.thread.index_cache_plane_base + 3
+        metadata_size = metadata_layer_idx + 1
+        local_base_addrs: list[list[int]] = [[] for _ in range(metadata_size)]
+        remote_base_addrs: list[list[int]] = [[] for _ in range(metadata_size)]
+        block_lens: list[list[int]] = [[] for _ in range(metadata_size)]
+        block_strides: list[list[int]] = [[] for _ in range(metadata_size)]
+        remote_block_strides: list[list[int]] = [[] for _ in range(metadata_size)]
+        block_size_scale: list[list[int]] = [[] for _ in range(metadata_size)]
+        local_base_addrs[metadata_layer_idx] = [0x2000]
+        remote_base_addrs[metadata_layer_idx] = [0x4000]
+        block_lens[metadata_layer_idx] = [2048]
+        block_strides[metadata_layer_idx] = [2048]
+        remote_block_strides[metadata_layer_idx] = [2048]
+        block_size_scale[metadata_layer_idx] = [1]
+
+        self.thread.kv_caches_base_addr["local_engine"][5555] = local_base_addrs
+        self.thread.kv_caches_base_addr["remote_engine"] = {6666: remote_base_addrs}
+        self.thread.block_len_per_addr = block_lens
+        self.thread.block_stride_per_addr = block_strides
+        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = remote_block_strides
+        self.thread.block_size_scale = block_size_scale
+
+        for layer_name in (
+            "model.layers.3.attn.index_cache",
+            "model.layers.3.self_attn.indexer.k_cache",
+        ):
+            with self.subTest(layer_name=layer_name):
+                self.thread.kv_group2layeridx = {
+                    0: (
+                        {
+                            "kv_cache_spec_type": "AscendSFAIndexerCacheSpec",
+                            "layer_names": [layer_name],
+                        },
+                        [metadata_layer_idx],
+                    )
+                }
+                self.thread._transfer_kv_cache_all_groups(self.test_req)
+
+                self.engine.batch_transfer_sync_read.assert_called_once_with(
+                    "localhost:7777",
+                    [0x2000 + 2048],
+                    [0x4000 + 3 * 2048],
+                    [2 * 2048],
+                )
+                self.engine.batch_transfer_sync_read.reset_mock()
+
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
@@ -3516,6 +3618,82 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(len(ports), 1)
         self.assertEqual(local_ids, [([70, 71, 72, 73], [80, 81, 82, 83])])
         self.assertEqual(remote_ids, [([50, 51, 52, 53], [60, 61, 62, 63])])
+
+    def test_issue_13934_dcp_split_transfer_groups_use_kv_cache_group_id(self):
+        """DCP metadata is cache-group indexed, not transfer-group indexed."""
+        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+        worker._is_hma_required = True
+        worker.use_mla = True
+        worker.use_sparse = False
+        worker.num_key_value_heads = 1
+        worker.tp_size = 8
+        worker.tp_rank = 5
+        worker.pcp_size = 1
+        worker.dcp_size = 8
+        worker.pcp_rank = 0
+        worker.dcp_rank = 5
+        worker._decode_tp_size = 8
+        worker._prefill_tp_size = 8
+        worker._prefill_pp_size = 1
+        worker.block_size = 128
+        worker.side_channel_port = 5000
+        worker.handshake_port = worker.side_channel_port + worker.tp_rank
+        worker.local_remote_block_port_mapping = {}
+        worker.remote_port_send_num = {}
+        worker.block_size_scale = [[1], [], [8]]
+        # GLM-5.2 exposes more than one Mooncake transfer group for one KV
+        # cache manager group. SFA and MLA belong to transformer layer 0 but
+        # use independent physical metadata layers with scales 8 and 1.
+        worker.kv_group2layeridx = {
+            0: (
+                {
+                    "kv_cache_spec_type": "AscendSFAIndexerCacheSpec",
+                    "kv_cache_group_id": 0,
+                },
+                [2],
+            ),
+            1: (
+                {
+                    "kv_cache_spec_type": "MLAAttentionSpec",
+                    "kv_cache_group_id": 0,
+                },
+                [0],
+            ),
+        }
+
+        remote_blocks = list(range(1, 27))
+        local_blocks = list(range(101, 127))
+        remote_mapping = {
+            str(offset): {
+                "host": f"host-{offset}",
+                "engine_id": f"engine-{offset}",
+                "handshake_port": 31000 + offset,
+            }
+            for offset in range(8)
+        }
+        meta = types.SimpleNamespace(
+            remote_pcp_size=1,
+            remote_dcp_size=8,
+            remote_ptp_size=8,
+            remote_port=31000,
+            remote_block_ids=(remote_blocks,),
+            local_block_ids=(local_blocks,),
+            num_external_tokens=26262,
+            num_prompt_blocks=206,
+            num_computed_tokens=0,
+            remote_engine_id="issue-13934-prefill",
+            remote_host="localhost",
+            remote_multi_nodes_meta_mapping=remote_mapping,
+            remote_block_size=128,
+        )
+
+        ports, local_ids, remote_ids = worker._get_kv_split_metadata("issue-13934", cast(ReqMeta, meta))
+
+        self.assertEqual(ports, [[31005]])
+        expanded_local_blocks = [kernel for block in local_blocks for kernel in range(block * 8, block * 8 + 8)]
+        expanded_remote_blocks = [kernel for block in remote_blocks for kernel in range(block * 8, block * 8 + 8)]
+        self.assertEqual(local_ids, [(expanded_local_blocks, local_blocks)])
+        self.assertEqual(remote_ids, [(expanded_remote_blocks, remote_blocks)])
 
     def test_get_tp_num_need_pulls(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())

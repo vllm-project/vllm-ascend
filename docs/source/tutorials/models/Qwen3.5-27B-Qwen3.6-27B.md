@@ -23,11 +23,10 @@ Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for
 - `Qwen3.5-27B` (BF16 version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.5-27B)
 - `Qwen3.5-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.5-27B-w8a8-mtp)
 
-**Qwen3.6-27B**
-
 - `Qwen3.6-27B` (BF16 version): requires 1 Ascend 950DT(96GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.6-27B)
-- `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node or Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
+- `Qwen3.6-27B-w8a8` (Quantized version): requires 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8)
 - `Qwen3.6-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8)
+ `Qwen3.6-27B-w8a8-310p`(Quantized version): requires 1 Atlas 300I DUO. [Download model weight](https://modelscope.cn/models/Eco-Tech/Qwen3.6-27B-W8A8-310P)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -233,20 +232,14 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
+        export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
         export VLLM_USE_MODELSCOPE=True
-        # To reduce memory fragmentation and avoid out of memory
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
         export HCCL_BUFFSIZE=512
-        # Whether OpenMP threads are bound to specific CPU cores
-        export OMP_PROC_BIND=false
-        # Number of OpenMP threads available for parallel regions
-        export OMP_NUM_THREADS=1
-        # Enables the Ascend task queue for asynchronous operator dispatch
-        export TASK_QUEUE_ENABLE=1
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        # To reduce memory fragmentation and avoid out of memory
+        # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.5-27B-w8a8-mtp) or a local directory path
-        export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
@@ -274,20 +267,14 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
+        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-310p
         export VLLM_USE_MODELSCOPE=True
-        # To reduce memory fragmentation and avoid out of memory
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
         export HCCL_BUFFSIZE=512
-        # Whether OpenMP threads are bound to specific CPU cores
-        export OMP_PROC_BIND=false
-        # Number of OpenMP threads available for parallel regions
-        export OMP_NUM_THREADS=1
-        # Enables the Ascend task queue for asynchronous operator dispatch
-        export TASK_QUEUE_ENABLE=1
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        # To reduce memory fragmentation and avoid out of memory
+        # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
-        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
@@ -336,14 +323,14 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
+        export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
         export VLLM_USE_MODELSCOPE=True
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.5-27B-w8a8-mtp) or a local directory path
-        export MODEL_PATH=Eco-Tech/Qwen3.5-27B-w8a8-mtp
 
         vllm serve $MODEL_PATH \
             --host 127.0.0.1 \
-            --port 1025 \
+            --port 8080 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.5 \
             --max-num-seqs 128 \
@@ -353,7 +340,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --mamba-ssm-cache-dtype float16 \
             --dtype float16 \
             --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
             --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
         ```
 
@@ -364,14 +351,14 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
+        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
         export VLLM_USE_MODELSCOPE=True
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8) or a local directory path
-        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8
 
         vllm serve $MODEL_PATH \
             --host 127.0.0.1 \
-            --port 1025 \
+            --port 8080 \
             --tensor-parallel-size 4 \
             --served-model-name qwen3.6 \
             --max-num-seqs 128 \
@@ -381,7 +368,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
             --mamba-ssm-cache-dtype float16 \
             --dtype float16 \
             --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
-            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,8]}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
             --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
         ```
 
@@ -396,7 +383,7 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
     - `--speculative-config` uses `qwen3_5_mtp` for both `Qwen3.5-27B` and `Qwen3.6-27B` because they share the same MTP head design. On Atlas 300I DUO, it is recommended to set `num_speculative_tokens` to `1`.
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
-        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
+        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`). With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
     - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
 
 === "Ascend950DT series"
@@ -410,20 +397,14 @@ Both `Qwen3.5-27B` and `Qwen3.6-27B` share the same MTP head design, so the `qwe
         ```bash
         #!/bin/sh
         # Load model from ModelScope to speed up download
+        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-mxfp8
         export VLLM_USE_MODELSCOPE=True
-        # To reduce memory fragmentation and avoid out of memory
-        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-        # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
         export HCCL_BUFFSIZE=512
-        # Whether OpenMP threads are bound to specific CPU cores
-        export OMP_PROC_BIND=false
-        # Number of OpenMP threads available for parallel regions
-        export OMP_NUM_THREADS=1
-        # Enables the Ascend task queue for asynchronous operator dispatch
-        export TASK_QUEUE_ENABLE=1
+        export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+        # To reduce memory fragmentation and avoid out of memory
+        # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.6-27B-w8a8-mxfp8) or a local directory path
-        export MODEL_PATH=Eco-Tech/Qwen3.6-27B-w8a8-mxfp8
 
         vllm serve $MODEL_PATH \
             --host 0.0.0.0 \
@@ -526,24 +507,20 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     nic_name="xxx"
     local_ip="192.xx.xx.1"
 
+    export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # [Optional] jemalloc
     # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
     # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=1024
-    export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
       --host 0.0.0.0 \
@@ -590,24 +567,20 @@ To run the vllm-ascend Prefill-Decode Disaggregation service, you need to:
     nic_name="xxx"
     local_ip="192.xx.xx.2"
 
+    export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=$local_ip
-    export GLOO_SOCKET_IFNAME=$nic_name
-    export TP_SOCKET_IFNAME=$nic_name
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=$nic_name
+    export ASCEND_RT_VISIBLE_DEVICES=$1
+    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
+    export GLOO_SOCKET_IFNAME=$nic_name
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     # [Optional] jemalloc
     # jemalloc is for better performance, if `libjemalloc.so` is installed on your machine, you can turn it on.
     # export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 
-    export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-    export HCCL_BUFFSIZE=1024
-    export ASCEND_RT_VISIBLE_DEVICES=$1
 
     vllm serve Eco-Tech/Qwen3.5-27B-w8a8-mtp \
       --host 0.0.0.0 \

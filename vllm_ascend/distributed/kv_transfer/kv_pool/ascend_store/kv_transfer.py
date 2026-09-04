@@ -1319,7 +1319,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
-        """Pre-compute shared block data for all layers (GVA path)."""
+        """Pre-compute shared block data for all layers."""
         if self.group_builders is not None:
             builder = self.group_builders[task.group_id]
         else:
@@ -1329,6 +1329,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, transfer_tasks: list[LayerTransferTask]
     ):
+        # Layerwise threads only run when the worker-side
+        # use_layerwise_transfer gate is on; every store call below sits on
+        # the Backend ABC, so the thread stays backend-agnostic.
         if len(transfer_tasks) == 0:
             self.request_queue.task_done()
             return
@@ -1457,7 +1460,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             )
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
-        """Pre-compute shared block data for all layers (GVA path)."""
+        """Pre-compute shared block data for all layers."""
         if self.group_builders is not None:
             builder = self.group_builders[task.group_id]
         else:
@@ -1481,6 +1484,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
+        # Layerwise threads only run when the worker-side
+        # use_layerwise_transfer gate is on; every store call below sits on
+        # the Backend ABC, so the thread stays backend-agnostic.
         wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id
