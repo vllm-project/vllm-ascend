@@ -31,6 +31,67 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
+    def test_dp_padding_keeps_real_scheduled_token_count(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(
+            max_num_batched_tokens=8,
+            max_num_seqs=8,
+        )
+        runner.dynamic_eplb = False
+        runner.dcp_size = 1
+        runner.speculative_config = None
+        runner._has_gdn = False
+
+        num_tokens_across_dp = torch.zeros(2, dtype=torch.int32)
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=8, num_reqs=8),
+                None,
+                num_tokens_across_dp,
+                None,
+            )
+        )
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner.synchronize_input_prep = MagicMock(return_value=nullcontext())
+
+        def build_cumsum(num_scheduled_tokens, _arange_out):
+            np.testing.assert_array_equal(
+                num_scheduled_tokens,
+                np.ones(7, dtype=np.int32),
+            )
+            return np.cumsum(num_scheduled_tokens)
+
+        runner._get_cumsum_and_arange = MagicMock(side_effect=build_cumsum)
+        runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
+        runner.seq_lens = MagicMock()
+        runner.query_pos = SimpleNamespace(np=np.zeros(8, dtype=np.int32))
+        runner.query_start_loc = SimpleNamespace(
+            np=np.zeros(9, dtype=np.int32),
+            copy_to_gpu=MagicMock(),
+        )
+
+        def check_padded_query_start_loc(*_args, **_kwargs):
+            np.testing.assert_array_equal(
+                runner.query_start_loc.np,
+                np.array([0, 1, 2, 3, 4, 5, 6, 7, 7], dtype=np.int32),
+            )
+            raise RuntimeError("metadata checked")
+
+        runner._pad_query_start_loc_for_fia = MagicMock(side_effect=check_padded_query_start_loc)
+
+        with self.assertRaisesRegex(RuntimeError, "metadata checked"):
+            runner._dummy_run(
+                7,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            )
+
+        torch.testing.assert_close(
+            num_tokens_across_dp,
+            torch.full_like(num_tokens_across_dp, 8),
+        )
+
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.uniform_decode_query_len = 1
