@@ -26,7 +26,10 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
+    DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED,
+    DSPARK_AUX_HIDDEN_FORMAT_RAW,
     AscendDSparkSpeculator,
 )
 
@@ -98,3 +101,107 @@ class TestLoadDraftModel:
         monkeypatch.setattr(_ROT_MATRIX, _no_call)
         draft = _spec(_bf16_config()).load_draft_model(MagicMock(), set())
         assert torch.equal(draft.model.fc.weight.data, captured["before"])
+
+    def test_configures_capture_before_loading_draft(self, monkeypatch):
+        events = []
+        target = SimpleNamespace(
+            set_dspark_aux_capture_materialized=lambda enabled: events.append(
+                ("capture", enabled)
+            )
+        )
+
+        def _load(self, target_model, target_attn_layer_names):
+            events.append(("load", None))
+            return _fake_draft()
+
+        monkeypatch.setattr(DSparkSpeculator, "load_draft_model", _load)
+        monkeypatch.setattr(_ROT_MATRIX, _no_call)
+        spec = _spec(_bf16_config())
+        spec.draft_model_config = SimpleNamespace(
+            hf_config=SimpleNamespace(
+                dspark_aux_hidden_state_format=DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
+            )
+        )
+
+        spec.load_draft_model(target, set())
+
+        assert events == [("capture", True), ("load", None)]
+
+
+class TestAuxHiddenStateFormatContract:
+    def test_qwen3_gqa_draft_declares_materialized_format(self):
+        assert (
+            AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format
+            == DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
+        )
+
+    @pytest.mark.parametrize(
+        ("aux_hidden_format", "expected_materialized"),
+        [
+            (DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED, True),
+            (DSPARK_AUX_HIDDEN_FORMAT_RAW, False),
+        ],
+    )
+    def test_configures_target_capture_mode(
+        self,
+        aux_hidden_format,
+        expected_materialized,
+    ):
+        set_capture_mode = MagicMock()
+        target = SimpleNamespace(
+            set_dspark_aux_capture_materialized=set_capture_mode,
+        )
+        draft = SimpleNamespace(
+            dspark_aux_hidden_state_format=aux_hidden_format,
+        )
+
+        actual = AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
+            target,
+            draft,
+        )
+
+        assert actual == aux_hidden_format
+        set_capture_mode.assert_called_once_with(expected_materialized)
+
+    @pytest.mark.parametrize(
+        "config",
+        [
+            SimpleNamespace(architectures=["Qwen3DSparkModel"]),
+            SimpleNamespace(architectures=["DSparkDraftModel"], model_type="qwen3"),
+            SimpleNamespace(model_type="qwen3"),
+        ],
+    )
+    def test_qwen3_config_declares_materialized(self, config):
+        set_capture_mode = MagicMock()
+        target = SimpleNamespace(
+            set_dspark_aux_capture_materialized=set_capture_mode,
+        )
+
+        actual = AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
+            target,
+            config,
+        )
+
+        assert actual == DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
+        set_capture_mode.assert_called_once_with(True)
+
+    def test_undeclared_format_preserves_existing_target_behavior(self):
+        set_capture_mode = MagicMock()
+        target = SimpleNamespace(
+            set_dspark_aux_capture_materialized=set_capture_mode,
+        )
+
+        actual = AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
+            target,
+            SimpleNamespace(),
+        )
+
+        assert actual is None
+        set_capture_mode.assert_not_called()
+
+    def test_rejects_unknown_format(self):
+        with pytest.raises(ValueError, match="Unsupported DSpark auxiliary"):
+            AscendDSparkSpeculator._configure_target_aux_hidden_state_format(
+                SimpleNamespace(),
+                SimpleNamespace(dspark_aux_hidden_state_format="unknown"),
+            )

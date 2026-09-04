@@ -4,6 +4,7 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -16,6 +17,45 @@ from vllm_ascend.models.kimi_k3 import (
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [("0", 896), ("16", 16)],
+)
+def test_kimi_expert_reduction_count(monkeypatch, requested, expected):
+    monkeypatch.setattr(
+        kimi_k3.envs_ascend,
+        "VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS",
+        requested,
+    )
+    assert kimi_k3._get_kimi_k3_num_loaded_experts(896, 8, 16) == expected
+
+
+@pytest.mark.parametrize("requested", ["bad", "7", "15", "897"])
+def test_kimi_expert_reduction_rejects_invalid_counts(monkeypatch, requested):
+    monkeypatch.setattr(
+        kimi_k3.envs_ascend,
+        "VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS",
+        requested,
+    )
+    with pytest.raises(ValueError, match="MAX_LOADED_EXPERTS"):
+        kimi_k3._get_kimi_k3_num_loaded_experts(896, 8, 16)
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        ("model.layers.1.block_sparse_moe.experts.15.gate_proj.weight", 15),
+        (
+            "language_model.model.layers.2.block_sparse_moe.experts.16.down_proj.weight",
+            16,
+        ),
+        ("model.layers.1.block_sparse_moe.gate.weight", None),
+    ],
+)
+def test_kimi_expert_id_parsing(name, expected):
+    assert kimi_k3._get_expert_id_from_weight_name(name) == expected
 
 
 def test_ascend_attn_res_matches_canonical_k3_math():

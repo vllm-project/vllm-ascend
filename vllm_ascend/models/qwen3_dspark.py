@@ -69,6 +69,10 @@ class DSparkConfidenceHead(nn.Module):
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
+    # Qwen3 GQA DSpark consumes the materialized input to each selected
+    # target layer instead of Kimi K3's raw/prefix-sum residual stream.
+    dspark_aux_hidden_state_format = "materialized"
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 

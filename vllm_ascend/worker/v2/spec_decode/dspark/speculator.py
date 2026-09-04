@@ -20,6 +20,7 @@ from typing import Any, cast
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -37,6 +38,15 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_draft_attn_metadata_factory,
 )
 
+logger = init_logger(__name__)
+
+DSPARK_AUX_HIDDEN_FORMAT_RAW = "raw"
+DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED = "materialized"
+_VALID_DSPARK_AUX_HIDDEN_FORMATS = {
+    DSPARK_AUX_HIDDEN_FORMAT_RAW,
+    DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED,
+}
+
 
 class AscendDSparkSpeculator(DSparkSpeculator):
     _speculator_name = "DSpark"
@@ -50,7 +60,21 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
+        draft_model_config = getattr(self, "draft_model_config", None)
+        draft_hf_config = getattr(draft_model_config, "hf_config", None)
+        configured_format = self._configure_target_aux_hidden_state_format(
+            target_model,
+            draft_hf_config,
+        )
         model = super().load_draft_model(target_model, target_attn_layer_names)
+        model_format = getattr(model, "dspark_aux_hidden_state_format", None)
+        if configured_format is None:
+            self._configure_target_aux_hidden_state_format(target_model, model)
+        elif model_format is not None and model_format != configured_format:
+            raise ValueError(
+                "DSpark auxiliary hidden-state format mismatch between config "
+                f"({configured_format!r}) and model ({model_format!r})."
+            )
         # Upstream load_dspark_model overrides the drafter's quant_config with
         # get_draft_quant_config (None for a bf16 drafter), so the drafter's
         # __init__ derives rotation_path=None and its fc projection is loaded
@@ -64,6 +88,63 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             with torch.no_grad():
                 fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
         return model
+
+    @staticmethod
+    def _configure_target_aux_hidden_state_format(
+        target_model: torch.nn.Module,
+        format_provider: Any,
+    ) -> str | None:
+        """Apply a draft-declared auxiliary-hidden-state representation."""
+        aux_hidden_format = getattr(
+            format_provider,
+            "dspark_aux_hidden_state_format",
+            None,
+        )
+        if aux_hidden_format is None:
+            architectures = getattr(format_provider, "architectures", ()) or ()
+            model_type = getattr(format_provider, "model_type", None)
+            if model_type == "qwen3" or (
+                "Qwen3DSparkModel" in architectures
+                or "DSparkDraftModel" in architectures
+            ):
+                aux_hidden_format = DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
+        if aux_hidden_format is None:
+            return None
+        if aux_hidden_format not in _VALID_DSPARK_AUX_HIDDEN_FORMATS:
+            raise ValueError(
+                "Unsupported DSpark auxiliary hidden-state format "
+                f"{aux_hidden_format!r}; expected one of "
+                f"{sorted(_VALID_DSPARK_AUX_HIDDEN_FORMATS)}."
+            )
+
+        set_capture_mode = getattr(
+            target_model,
+            "set_dspark_aux_capture_materialized",
+            None,
+        )
+        if set_capture_mode is None:
+            get_language_model = getattr(target_model, "get_language_model", None)
+            if callable(get_language_model):
+                set_capture_mode = getattr(
+                    get_language_model(),
+                    "set_dspark_aux_capture_materialized",
+                    None,
+                )
+        if set_capture_mode is None:
+            raise RuntimeError(
+                "DSpark auxiliary hidden-state format "
+                f"{aux_hidden_format!r} was resolved, but target model "
+                f"{type(target_model).__name__} has no capture-mode setter."
+            )
+
+        materialized = aux_hidden_format == DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
+        set_capture_mode(materialized)
+        logger.info(
+            "DSpark auxiliary hidden-state contract: draft=%s, target_capture=%s.",
+            aux_hidden_format,
+            "materialized" if materialized else "raw",
+        )
+        return aux_hidden_format
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
