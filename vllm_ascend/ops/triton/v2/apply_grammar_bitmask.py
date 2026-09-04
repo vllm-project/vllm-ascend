@@ -29,10 +29,12 @@ def _apply_grammar_bitmask_kernel_impl(
     logits_ptr,
     logits_stride,
     logits_indices_ptr,
+    cu_num_logits_ptr,
     bitmask_ptr,
     bitmask_stride,
     vocab_size,
     total_tasks,
+    MASK_STRIDE: tl.constexpr,
     NUM_PROGRAMS: tl.constexpr,
     NUM_VOCAB_BLOCKS: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -49,7 +51,17 @@ def _apply_grammar_bitmask_kernel_impl(
     for task_id in tl.range(task_start, task_end):
         bitmask_idx = task_id // NUM_VOCAB_BLOCKS
         block_id = task_id - bitmask_idx * NUM_VOCAB_BLOCKS
-        logits_idx = tl.load(logits_indices_ptr + bitmask_idx)
+        # The mapping is keyed by (request, position) rather than the absolute
+        # logit index: adaptive verification finalizes per-request logit
+        # offsets on device, so the kernel resolves the logits row from the
+        # GPU cu_num_logits and skips positions trimmed by the draft budget.
+        mapping_idx = tl.load(logits_indices_ptr + bitmask_idx)
+        req_idx = mapping_idx // MASK_STRIDE
+        position_idx = mapping_idx - req_idx * MASK_STRIDE
+        logits_start = tl.load(cu_num_logits_ptr + req_idx)
+        num_req_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - logits_start
+        logits_idx = logits_start + position_idx
+        position_is_active = position_idx < num_req_logits
 
         bitmask_offset = block_id * (BLOCK_SIZE // 32) + tl.arange(0, BLOCK_SIZE // 32)
         packed_bitmask = tl.load(
@@ -64,7 +76,7 @@ def _apply_grammar_bitmask_kernel_impl(
         tl.store(
             logits_ptr + logits_idx * logits_stride + block_offset,
             -float("inf"),
-            mask=blocked & (block_offset < vocab_size),
+            mask=position_is_active & blocked & (block_offset < vocab_size),
         )
 
 
@@ -82,9 +94,11 @@ class _ApplyGrammarBitmaskKernelLauncher:
             logits_ptr,
             logits_stride,
             logits_indices_ptr,
+            cu_num_logits_ptr,
             bitmask_ptr,
             bitmask_stride,
             vocab_size,
+            MASK_STRIDE,
             BLOCK_SIZE,
         ):
             # Disable MULTIBUFFER to better utilize the UB buffer, which gives
@@ -94,10 +108,12 @@ class _ApplyGrammarBitmaskKernelLauncher:
                 logits_ptr,
                 logits_stride,
                 logits_indices_ptr,
+                cu_num_logits_ptr,
                 bitmask_ptr,
                 bitmask_stride,
                 vocab_size,
                 total_tasks,
+                MASK_STRIDE=MASK_STRIDE,
                 NUM_PROGRAMS=num_programs,
                 NUM_VOCAB_BLOCKS=num_vocab_blocks,
                 BLOCK_SIZE=BLOCK_SIZE,
