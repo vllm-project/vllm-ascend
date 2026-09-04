@@ -64,7 +64,7 @@ if not vllm_version_is("0.27.1"):
     from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import ascend_init_kv_cache_override, build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -262,9 +262,16 @@ class NPUModelRunner(GPUModelRunner):
             self.pp_handler.broadcast_draft_tokens()
         return output
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig, is_profiling: bool = False) -> None:
         with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
-            super().initialize_kv_cache(kv_cache_config)
+            if vllm_version_is("0.27.1"):
+                super().initialize_kv_cache(kv_cache_config)
+            else:
+                # Newer vLLM resolves the KV cache through the standardized
+                # layout; install the Ascend allocation/reshape path for the
+                # runner-scoped init_kv_cache call.
+                with ascend_init_kv_cache_override(lambda: self.attn_groups):
+                    super().initialize_kv_cache(kv_cache_config, is_profiling)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
                 self.pcp_manager.vllm_config = self.vllm_config

@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata 
     RecomputeCPUOffloadMetadata,
     RecomputeCPUOffloadWorkerMetadata,
 )
+from vllm_ascend.utils import kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -153,18 +154,33 @@ class RecomputeCPUOffloadScheduler:
         assert gpu_config.kv_cache_tensors
         gpu_kv_cache_tensors = []
         for t in gpu_config.kv_cache_tensors:
-            if t.shared_by:
+            if kv_cache_tensor_layers(t):
                 gpu_kv_cache_tensors.append(t)
         gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
-        cpu_tensors = [
-            KVCacheTensor(
-                size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
-            )
-            for t in gpu_kv_cache_tensors
-        ]
+        cpu_tensors = []
+        for t in gpu_kv_cache_tensors:
+            if vllm_version_is("0.27.1"):
+                cpu_tensors.append(
+                    KVCacheTensor(
+                        size=t.size // num_gpu_blocks * num_cpu_blocks,
+                        shared_by=list(kv_cache_tensor_layers(t)),  # type: ignore[call-arg]
+                    )
+                )
+            else:
+                # Standardized layout: the per-block strides stay unchanged
+                # (a CPU block holds the same page bytes); the layer stride,
+                # backing size, and region offsets scale with the block count.
+                cpu_tensors.append(
+                    KVCacheTensor(
+                        size=t.size * num_cpu_blocks // num_gpu_blocks,
+                        layers=list(kv_cache_tensor_layers(t)),
+                        layer_stride=max(1, t.layer_stride * num_cpu_blocks // num_gpu_blocks),
+                        block_stride=t.block_stride,
+                        offset=t.offset * num_cpu_blocks // num_gpu_blocks,
+                    )
+                )
         return KVCacheConfigCls(
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,

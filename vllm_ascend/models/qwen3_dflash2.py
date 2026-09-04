@@ -224,6 +224,10 @@ class CandidateSelector(nn.Module):
 
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
+    # Upstream builds layers via this class attribute; the module-global swap
+    # below is the fallback for release lanes without decoder_layer_cls.
+    decoder_layer_cls = DFlash2Qwen3DecoderLayer
+
     def __init__(
         self,
         *,
@@ -233,8 +237,6 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
     ) -> None:
         import vllm.model_executor.models.qwen3_dflash as dflash_mod
 
-        # Upstream PR 52816 adds decoder_layer_cls; until that pin lands, swap
-        # the parent ctor's global so it builds DFlash2 layers.
         original_layer = dflash_mod.DFlashQwen3DecoderLayer
         dflash_mod.DFlashQwen3DecoderLayer = DFlash2Qwen3DecoderLayer
         try:
@@ -268,6 +270,9 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     # Share the target LM head so compute_candidates can top-k the full vocab.
     has_own_lm_head = False
+    # Upstream builds the draft model via this class attribute; the
+    # module-global swap below is the fallback for release lanes without it.
+    model_cls = DFlash2Qwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         import vllm.model_executor.models.qwen3_dflash as dflash_mod

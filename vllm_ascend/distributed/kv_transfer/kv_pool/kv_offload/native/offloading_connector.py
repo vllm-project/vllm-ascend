@@ -11,9 +11,6 @@ from dataclasses import replace
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    is_kv_cache_tensor_packed,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
@@ -31,6 +28,18 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
 )
+
+from vllm_ascend.utils import kv_cache_tensor_layers
+
+
+def _is_kv_cache_tensor_packed(kv_cache_tensor) -> bool:
+    """Whether the descriptor's blocks are strided rather than page-contiguous.
+
+    Upstream v0.27.1 shipped this as ``is_kv_cache_tensor_packed`` in
+    ``offloading.config`` and removed it with the packed-layout concept; on
+    the standardized layout every tensor carries an explicit ``block_stride``.
+    """
+    return bool(kv_cache_tensor.block_stride)
 
 
 def _make_int8_block_view(
@@ -190,9 +199,9 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 
         num_blocks = kv_cache_config.num_blocks
         layer_is_packed = {
-            layer_name: is_kv_cache_tensor_packed(kv_tensor)
+            layer_name: _is_kv_cache_tensor_packed(kv_tensor)
             for kv_tensor in kv_cache_config.kv_cache_tensors
-            for layer_name in kv_tensor.shared_by
+            for layer_name in kv_cache_tensor_layers(kv_tensor)
         }
 
         canonical_tensors: list[CanonicalKVCacheTensor] = []

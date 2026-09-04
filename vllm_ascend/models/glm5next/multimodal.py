@@ -43,6 +43,8 @@ from vllm.models.common.ops import fused_q_kv_rmsnorm
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class Glm5NextVisionPatchEmbed(nn.Module):
     def __init__(
@@ -697,11 +699,15 @@ class Glm5NextMultiModalProcessor(Glm4vMultiModalProcessor):
     the replacement content and the placeholder scan validates against
     exactly that."""
 
-    def _hf_processor_applies_updates(
-        self,
-        prompt_text: str,
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-    ) -> bool:
-        return False
+    if vllm_version_is("0.27.1"):
+        # This hook was removed upstream along with the text component of
+        # ProcessorInputs; on main vLLM always applies prompt updates itself
+        # (the renderer_applies_updates ClassVar was removed upstream too).
+        def _hf_processor_applies_updates(
+            self,
+            prompt_text: str,
+            mm_items: MultiModalDataItems,
+            hf_processor_mm_kwargs: Mapping[str, object],
+            tokenization_kwargs: Mapping[str, object],
+        ) -> bool:
+            return False

@@ -1509,6 +1509,29 @@ def kv_cache_spec_uses_sparse_sfa_c8(kv_cache_spec) -> bool:
     )
 
 
+def kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
+    """Layer names of a ``KVCacheTensor`` across vLLM versions.
+
+    vLLM 0.27.1 stores them in ``shared_by``; the standardized KV cache layout
+    on newer versions renamed the field to ``layers``.
+    """
+    if vllm_version_is("0.27.1"):
+        return kv_cache_tensor.shared_by
+    return kv_cache_tensor.layers
+
+
+def kv_cache_tensor_compress_ratio(kv_cache_spec) -> int:
+    """Compression ratio of a KV cache spec across vLLM versions.
+
+    vLLM 0.27.1 carries it in ``compress_ratio``; newer versions express the
+    same quantity as ``tokens_per_state``.
+    """
+    compress_ratio = getattr(kv_cache_spec, "compress_ratio", None)
+    if compress_ratio is not None:
+        return compress_ratio
+    return int(getattr(kv_cache_spec, "tokens_per_state", 1))
+
+
 def is_hidden_state_cache_spec(spec) -> bool:
     """Whether ``spec`` marks an ``extract_hidden_states`` cache-only layer."""
     from vllm.v1.kv_cache_interface import HiddenStateCacheSpec

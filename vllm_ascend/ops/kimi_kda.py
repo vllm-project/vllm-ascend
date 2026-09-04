@@ -538,7 +538,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             return
 
         assert isinstance(attn_metadata_raw, dict)
-        attn_metadata = attn_metadata_raw[self.prefix]
+        attn_metadata = attn_metadata_raw.get(self.prefix)
+        if attn_metadata is None:
+            # Upstream contract: the attention-metadata dict may not carry
+            # this layer's prefix (e.g. runs with no KDA metadata built).
+            return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
         num_actual_tokens = attn_metadata.num_actual_tokens

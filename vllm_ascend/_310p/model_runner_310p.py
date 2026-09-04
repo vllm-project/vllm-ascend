@@ -57,7 +57,9 @@ from vllm_ascend.spec_decode.utils import (
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
     is_rc_device,
+    kv_cache_tensor_layers,
     lmhead_tp_enable,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -733,17 +735,26 @@ class NPUModelRunner310(NPUModelRunner):
                 layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
         # Allocate kv cache buffers according to the kv_cache_config and kv_cache_spec
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
+            if vllm_version_is("0.27.1"):
+                # One allocation per tensor, shared by all its layers.
+                tensor_layer_units: list[tuple[str, int]] = [
+                    (name, kv_cache_tensor.size) for name in kv_cache_tensor_layers(kv_cache_tensor)
+                ]
+            else:
+                # Standardized layout: layer ``i`` owns the region at
+                # ``offset + i * layer_stride`` bytes; 310P allocates typed
+                # K/V tensors per layer, sized from the region's block count.
+                tensor_layer_units = [(name, kv_cache_tensor.layer_stride) for name in kv_cache_tensor.layers]
+            for layer_name, unit_size in tensor_layer_units:
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 if "linear_attn" in layer_name and layer_name not in kv_cache:
                     cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(cache_spec, MambaSpec)
-                    assert kv_cache_tensor.size % cache_spec.page_size_bytes == 0
-                    num_blocks = kv_cache_tensor.size // cache_spec.page_size_bytes
+                    assert unit_size % cache_spec.page_size_bytes == 0
+                    num_blocks = unit_size // cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                    raw_tensor = torch.zeros(unit_size, dtype=torch.int8, device=self.device)
                     state_tensors = []
                     target_idx = 0
                     start_idx = 0
@@ -753,14 +764,12 @@ class NPUModelRunner310(NPUModelRunner):
                         tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
                         start_idx = target_idx
                         state_tensors.append(tensor)
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        if "linear_attn" in layer_name_inner:
-                            kv_cache[layer_name_inner] = state_tensors
+                    kv_cache[layer_name] = state_tensors
                 elif "attn" in layer_name and layer_name not in kv_cache:
                     kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(kv_cache_spec, AttentionSpec)
-                    assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
-                    num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                    assert unit_size % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = unit_size // kv_cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
                     # Page attention operation on 310P limits block_size * head_size <= 128 * 128
                     supported_sizes = [
@@ -790,10 +799,7 @@ class NPUModelRunner310(NPUModelRunner):
                     v_cache = torch_npu.empty_with_format(
                         size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
                     )
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            kv_cache[layer_name_inner] = (k_cache, v_cache)
+                    kv_cache[layer_name] = (k_cache, v_cache)
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:

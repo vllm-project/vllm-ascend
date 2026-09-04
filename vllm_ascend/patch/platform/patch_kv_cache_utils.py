@@ -22,8 +22,21 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
+
+
+def _uniform_page_sizes(uniform_spec: UniformTypeKVCacheSpecs) -> list[int]:
+    """Distinct page sizes across the layers of one UniformType group.
+
+    Upstream removed ``UniformTypeKVCacheSpecs.get_page_sizes``; this local
+    helper provides the same values for Ascend's DeepSeek V4 grouping.
+    """
+    return sorted({spec.page_size_bytes for spec in uniform_spec.kv_cache_specs.values()})
+
+
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 
@@ -265,10 +278,10 @@ def _get_kv_cache_groups_uniform_groups(
     # Possibly padding layer tuples for this.
     # Additionally, we also pad KV blocks in each SWA layer, to align the page size
     # with the corresponding layer in the full-MLA group.
-    all_page_sizes = full_mla_spec.get_page_sizes()
+    all_page_sizes = _uniform_page_sizes(full_mla_spec)
     swa_mla_groups = []
     for sm_spec in swa_mla_specs:
-        sm_page_sizes = sm_spec.get_page_sizes()
+        sm_page_sizes = _uniform_page_sizes(sm_spec)
         layers_per_size: dict[int, list[str]] = defaultdict(list)
         assert max(sm_page_sizes) <= max(all_page_sizes)
 
@@ -330,7 +343,7 @@ def _get_kv_cache_config_deepseek_v4(
     """
     full_mla_spec = kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
+    page_sizes = _uniform_page_sizes(full_mla_spec)
     layer_tuple_page_bytes = sum(page_sizes)
 
     # Pre-bucket each group's layers by page_size (registration order within
@@ -367,9 +380,11 @@ def _get_kv_cache_config_deepseek_v4(
                 bucket = b.get(ps)
                 if bucket is not None and tuple_idx < len(bucket):
                     shared_by.append(bucket[tuple_idx])
-            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=shared_by))
+            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=shared_by))  # type: ignore[call-arg]
     for i in range(len(mtp_layer_names)):
-        kv_cache_tensors.append(KVCacheTensor(size=mtp_page_size * num_blocks, shared_by=[mtp_layer_names[i]]))
+        kv_cache_tensors.append(
+            KVCacheTensor(size=mtp_page_size * num_blocks, shared_by=[mtp_layer_names[i]])  # type: ignore[call-arg]
+        )
 
     return num_blocks, kv_cache_tensors
 
@@ -381,7 +396,12 @@ vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cac
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
 # get_kv_cache_config_from_groups now calls _get_kv_cache_config_packed directly, bypassing
 # the alias patch above. Patch the canonical name so Ascend's non-packed layout is used.
-vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
+# (Newer vLLM removed _get_kv_cache_config_packed entirely; the DeepSeek V4 tensor
+# planning below only runs on the v0.27.1 lane.)
+if vllm_version_is("0.27.1"):
+    vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = (  # type: ignore[attr-defined]
+        _get_kv_cache_config_deepseek_v4
+    )
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )

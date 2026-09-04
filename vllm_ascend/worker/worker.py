@@ -87,6 +87,7 @@ from vllm_ascend.utils import (
     enable_sp,
     register_ascend_customop,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -490,9 +491,19 @@ class NPUWorker(WorkerBase):
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:
             logger.warning("npu model runner v2 is in developing, some features doesn't work for now.")
-            from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+            if not vllm_version_is("0.27.1") and self.vllm_config.is_mm_encoder_only:
+                # Newer vLLM moved encoder-only handling out of GPUModelRunner
+                # into a dedicated runner subclass (upstream gpu_worker applies
+                # the same selection for its own runner construction).
+                from vllm.v1.worker.mm_encoder_model_runner import (  # type: ignore[import-not-found]
+                    MMEncoderModelRunner,
+                )
 
-            self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
+                self.model_runner = MMEncoderModelRunner(self.vllm_config, self.device)
+            else:
+                from vllm_ascend.worker.v2.model_runner import NPUModelRunner as NPUModelRunnerV2
+
+                self.model_runner = NPUModelRunnerV2(self.vllm_config, self.device)
         else:
             self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 

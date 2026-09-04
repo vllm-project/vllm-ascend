@@ -32,6 +32,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.cpu_test
 
@@ -238,7 +239,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        compress_ratio=4,
+        **({"compress_ratio": 4} if vllm_version_is("0.27.1") else {"tokens_per_state": 4}),
         model_version="deepseek_v4",
     )
     full_spec = FullAttentionSpec(
@@ -287,7 +288,8 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         request_b.block_hashes,
         max_cache_hit_length=logical_block_size,
     )
-    hit_blocks, hit_length, _ = hit_result
+    # 0.27.1 returns (blocks, length); main appends num_uncached tokens.
+    hit_blocks, hit_length = hit_result[0], hit_result[1]
 
     assert hit_length == 0
     assert hit_blocks == ([], [])
@@ -368,10 +370,12 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
         block_size=block_size,
     )
 
-    hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(
+    hit_result = coordinator.find_longest_cache_hit(
         request.block_hashes,
         max_cache_hit_length=len(request.prompt_token_ids),
     )
+    # 0.27.1 returns (blocks, length); main appends num_uncached tokens.
+    hit_blocks, hit_length = hit_result[0], hit_result[1]
 
     assert hit_length == 6
     assert [len(blocks) for blocks in hit_blocks] == [2, 1, 2]

@@ -3,12 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheTensor,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
-)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheTensor, MambaSpec, UniformTypeKVCacheSpecs
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
@@ -18,6 +13,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_la
     get_layerwise_physical_layer_index,
     get_layerwise_reuse_config,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_full_attention_spec(
@@ -51,6 +47,10 @@ def _make_vllm_config(num_layers: int, num_shared_buffers: int):
     )
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="layerwise tensor merge is disabled on the standardized KV cache layout",
+)
 def test_no_reuse_skips_topology_validation():
     spec = MambaSpec(
         block_size=2,
@@ -81,6 +81,10 @@ def test_no_reuse_skips_topology_validation():
     assert kv_cache_config.kv_cache_tensors == original_tensors
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="layerwise tensor merge is disabled on the standardized KV cache layout",
+)
 def test_base_layers_are_merged_into_shared_slots():
     original_tensors = [KVCacheTensor(size=16, shared_by=[f"model.layers.{layer}.self_attn"]) for layer in range(6)]
     layer_names = [tensor.shared_by[0] for tensor in original_tensors]
@@ -202,6 +206,10 @@ def test_reuse_config_is_scoped_to_layerwise_protocol_connector():
     assert get_layerwise_reuse_config(not_opted_in) is None
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="layerwise tensor merge is disabled on the standardized KV cache layout",
+)
 def test_incompatible_cache_specs_use_separate_slots():
     layer_names = [f"model.layers.{layer}.self_attn" for layer in range(4)]
     first_spec = _make_full_attention_spec()
@@ -233,6 +241,10 @@ def test_incompatible_cache_specs_use_separate_slots():
     ]
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="layerwise tensor merge is disabled on the standardized KV cache layout",
+)
 def test_partial_layout_skips_tensor_merge():
     layer_names = [
         "model.layers.0.self_attn",
@@ -389,6 +401,10 @@ def test_ambiguous_multi_spec_layer_is_rejected():
         )
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="layerwise tensor merge is disabled on the standardized KV cache layout",
+)
 def test_multi_group_sfa_descriptors_are_merged_by_main_component():
     main_names = [
         *(f"model.layers.{layer}.self_attn.attn" for layer in range(4)),
@@ -468,6 +484,10 @@ def _make_sfa_indexer_spec() -> AscendSFAIndexerCacheSpec:
     )
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="layerwise tensor merge is disabled on the standardized KV cache layout",
+)
 def test_component_sharing_merges_main_across_a_and_b_layers():
     # GLM5.2/SFA: A-class layers own main + indexer, B-class layers own main only. Every
     # main spec is identical, so one buffer's main tensor is shared by all layers in the
@@ -544,6 +564,10 @@ def test_non_attention_cache_spec_is_rejected():
         )
 
 
+@pytest.mark.skipif(
+    not vllm_version_is("0.27.1"),
+    reason="layerwise tensor merge is disabled on the standardized KV cache layout",
+)
 def test_packed_cache_tensor_descriptors_are_rejected():
     layer_names = [
         "model.layers.0.self_attn",

@@ -60,8 +60,8 @@ class XliteModelRunner(NPUModelRunner):
         finally:
             self.model = self.runner_model  # type: ignore[assignment]
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        super().initialize_kv_cache(kv_cache_config)
+    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig, is_profiling: bool = False) -> None:
+        super().initialize_kv_cache(kv_cache_config, is_profiling)
         self.runner_model.register_kv_caches(self.kv_caches)  # type: ignore[arg-type]
 
     def _should_build_dummy_attn_metadata(
