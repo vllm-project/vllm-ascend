@@ -112,6 +112,9 @@ def _make_draft_vllm_config(
     if speculative_config is None or speculative_config.draft_model_config is None:
         raise ValueError("speculative_config.draft_model_config must be set")
 
+    draft_model_config = speculative_config.draft_model_config
+    if not isinstance(draft_model_config.hf_overrides, dict):
+        draft_model_config.hf_overrides = {}
     draft_quant_config = get_draft_quant_config(vllm_config)
 
     # inject packed and ignored modules to the quantization config of draft model
@@ -134,7 +137,7 @@ def _make_draft_vllm_config(
 
     draft_vllm_config = replace(
         vllm_config,
-        model_config=speculative_config.draft_model_config,
+        model_config=draft_model_config,
     )
     # VllmConfig post-init derives the target quant config, so restore the
     # independently resolved draft quant config after replacement.
@@ -356,6 +359,7 @@ class Qwen4ExpMTP(nn.Module, SupportsPP, Qwen4ExpMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.gate_up_proj", "experts.down_proj"],
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
         "input_mix_weight_down_block_inject": [
