@@ -2968,7 +2968,7 @@ class NPUModelRunner(GPUModelRunner):
         forward_context = get_forward_context()
         assert forward_context is not None
         if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            self.model.set_update_condition(self.attn_backend, self._has_sinks, self.model_config.get_head_size())
+            self.model.set_attn_backend(self.attn_backend)
 
         model_inputs: dict[str, Any] = {
             "input_ids": input_ids,

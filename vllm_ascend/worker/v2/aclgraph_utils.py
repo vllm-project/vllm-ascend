@@ -23,8 +23,8 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.compilation import CUDAGraphMode, get_layers_from_vllm_config
+from vllm.config import VllmConfig, set_current_vllm_config, get_layers_from_vllm_config
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase

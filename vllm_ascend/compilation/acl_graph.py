@@ -15,9 +15,10 @@ import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphOptions
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
-from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -131,10 +132,8 @@ class ACLGraphWrapper:
     def set_update_stream(self, update_stream):
         self.update_stream = update_stream
 
-    def set_update_condition(self, attn_backend, has_sinks, head_size):
+    def set_attn_backend(self, attn_backend):
         self.attn_backend = attn_backend
-        self.has_sinks = has_sinks
-        self.head_size = head_size
 
     def set_draft_attn_metadata_updates(self, update_params: list[dict[str, Any]]):
         self.draft_attn_metadata_updates = update_params
@@ -289,8 +288,6 @@ class ACLGraphWrapper:
         if use_updatable_graph(
             self.runtime_mode,
             self.attn_backend,
-            self.has_sinks,
-            self.head_size,
             batch_descriptor.num_tokens,
             self.vllm_config,
         ):
@@ -328,17 +325,18 @@ def weak_ref_workspaces(params):
 def use_updatable_graph(
     runtime_mode,
     attn_backend,
-    has_sinks,
-    head_size,
     num_tokens,
     vllm_config,
 ) -> bool:
     from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)  
+    first_layer = next(iter(attn_layers.values()))  
+    sinks, head_size = first_layer.impl.get_update_condition() 
     if (
         runtime_mode == CUDAGraphMode.FULL
         and attn_backend is not None
         and issubclass(attn_backend, AscendAttentionBackend)
-        and not has_sinks
+        and not sinks
         and not using_paged_attention(num_tokens, vllm_config, head_size)
     ):
         return True
