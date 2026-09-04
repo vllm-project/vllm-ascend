@@ -100,6 +100,10 @@ class AscendBlockTables(BlockTables):
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
+        if vllm_version_is("0.27.1"):
+            slot_mapping_enabled = None
+        else:
+            slot_mapping_enabled = self.slot_mapping_enabled
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             slot_mappings.shape[1],
             idx_mapping,
@@ -116,5 +120,7 @@ class AscendBlockTables(BlockTables):
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,
             BLOCK_TABLE_PAD_SIZE=self._block_table_pad_size,
+            slot_mapping_enabled=slot_mapping_enabled,
+            HAS_SLOT_MAPPING_ENABLED=not vllm_version_is("0.27.1"),
         )
         return slot_mappings[:, :num_tokens_padded]
