@@ -13,7 +13,8 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import AscendMLAMetadataBuilder
+from vllm_ascend.attention.dsa_v1 import AscendDSABackend
+from vllm_ascend.attention.mla_v1 import AscendMLABackend, AscendMLAMetadataBuilder
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel_single_grid
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
@@ -121,6 +122,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         # per-layer context slot mappings as a flat list
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
 
+        # Populated by initialize_attn_backend. MLA builds the draft KV length
+        # through parallel_draft_seq_lens_cpu, while DSA consumes the canonical
+        # host mirror for max_seqlen_kv; their host-length contracts differ.
+        self._draft_uses_mla_backend = False
+        self._draft_uses_dsa_backend = False
+
     @staticmethod
     def _resolve_kernel_block_size(
         gid: int,
@@ -205,6 +212,22 @@ class AscendDSparkProposer(AscendDflashProposer):
                 f"groups. Missing layers: {self.attn_layer_names}"
             )
 
+        self._draft_uses_mla_backend = any(
+            isinstance(attn_group.backend, type)
+            and issubclass(attn_group.backend, AscendMLABackend)
+            for attn_group in self.draft_attn_groups
+        )
+        self._draft_uses_dsa_backend = any(
+            isinstance(attn_group.backend, type)
+            and issubclass(attn_group.backend, AscendDSABackend)
+            for attn_group in self.draft_attn_groups
+        )
+        if self._draft_uses_mla_backend and self._draft_uses_dsa_backend:
+            raise RuntimeError(
+                "DSpark does not support mixing MLA and DSA draft attention "
+                "backends because their host sequence-length contracts differ."
+            )
+
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
 
@@ -265,6 +288,89 @@ class AscendDSparkProposer(AscendDflashProposer):
             self._per_group_block_table_buffers[gid] = buffer
         buffer[:num_rows].copy_(block_table)
         buffer[num_rows:].zero_()
+
+    def _prepare_parallel_draft_seq_lens_cpu(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_size: int,
+        num_draft_tokens_cpu: list[int] | None,
+    ) -> None:
+        # Only MLA consumes parallel_draft_seq_lens_cpu. DSA gets its max-KV
+        # upper bound from the canonical host mirror, while ordinary attention
+        # consumes the exact device seq_lens for parallel drafting.
+        if not self._draft_uses_mla_backend:
+            return
+
+        super()._prepare_parallel_draft_seq_lens_cpu(
+            common_attn_metadata,
+            batch_size,
+            num_draft_tokens_cpu,
+        )
+
+        # In padded synchronous scheduling, the reject count is available only
+        # in the device-side seq_lens that set_inputs_first_pass has already
+        # corrected to L_t + N. There is no pending-reject event, and the MLA
+        # builder otherwise falls back to the stale host mirror L_t + rejected_t.
+        # Publish an explicit CPU copy for MLA. The blocking D2H is confined to
+        # synchronous scheduling; async+padded keeps its overlapped reject-copy
+        # path and non-padded input preparation already has an exact host value.
+        reject_event = getattr(self.runner, "num_rejected_tokens_event", None)
+        sync_padded = num_draft_tokens_cpu is not None and reject_event is None
+        if sync_padded:
+            common_attn_metadata.parallel_draft_seq_lens_cpu = (
+                common_attn_metadata.seq_lens[: common_attn_metadata.num_reqs]
+                .detach()
+                .to("cpu", copy=True)
+            )
+
+    def _sample_dspark_tokens(
+        self,
+        raw_logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """Apply the Markov correction and sample one DSpark block."""
+        sampling_metadata = self.runner.input_batch.sampling_metadata
+        logits = raw_logits.view(
+            -1,
+            self.num_speculative_tokens,
+            raw_logits.shape[-1],
+        )
+        num_reqs = logits.shape[0]
+        draft_token_ids = self._dspark_draft_buffer[:num_reqs]
+        draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_reqs])
+
+        self._last_draft_probs = None
+        use_probabilistic = (
+            self._dspark_draft_probs is not None
+            and sampling_metadata is not None
+            and not sampling_metadata.all_greedy
+        )
+        draft_probs = None
+        if use_probabilistic:
+            assert self._dspark_draft_probs is not None
+            if logits.shape[-1] != self._dspark_draft_probs.shape[-1]:
+                raise RuntimeError(
+                    "DSpark draft/target vocabulary mismatch for probabilistic "
+                    f"sampling: draft={logits.shape[-1]}, "
+                    f"target={self._dspark_draft_probs.shape[-1]}"
+                )
+            draft_probs = self._dspark_draft_probs[:num_reqs]
+
+        for idx in range(self.num_speculative_tokens):
+            markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+            logits[:, idx].add_(self.model.markov_bias(markov_emb))
+            if draft_probs is None:
+                next_token_ids = logits[:, idx].argmax(dim=-1)
+            else:
+                next_token_ids, probs = self._sample_from_logits(
+                    logits[:, idx],
+                    sampling_metadata,
+                )
+                assert probs is not None
+                draft_probs[:, idx].copy_(probs)
+            draft_token_ids[:, idx + 1].copy_(next_token_ids)
+
+        self._last_draft_probs = draft_probs
+        return draft_token_ids
 
     def set_inputs_first_pass(
         self,
@@ -349,15 +455,23 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         cad.query_start_loc = self.arange_dflash[: batch_size + 1] * self.num_query_per_req
         cad.seq_lens = effective_seq_lens + self.num_query_per_req
-        # The model runner has already corrected this canonical host mirror
-        # with the accepted-token count. Extend it on CPU alongside the device
-        # lengths, without another reject D2H copy or attention-side wait.
-        if cad._seq_lens_cpu is not None:
-            draft_seq_lens_cpu = cad._seq_lens_cpu.clone()
-            draft_seq_lens_cpu[:batch_size].add_(self.num_query_per_req)
-            cad._seq_lens_cpu = draft_seq_lens_cpu
-            if getattr(cad, "seq_lens_cpu", None) is not None:
-                cad.seq_lens_cpu = draft_seq_lens_cpu
+        # Backend-specific host-length contract:
+        # - MLA must keep the canonical host mirror unchanged. Its parallel
+        #   draft path adds N exactly once and later finalizes pending rejects.
+        # - DSA ignores parallel_draft_seq_lens_cpu and derives max_seqlen_kv
+        #   from the canonical host mirror, so include N there as a safe upper
+        #   bound for its device seqused_kv=L_t+N.
+        # - Ordinary attention consumes device seq_lens while parallel drafting.
+        if self._draft_uses_dsa_backend:
+            host_seq_lens = cad._seq_lens_cpu
+            if host_seq_lens is None:
+                host_seq_lens = getattr(cad, "seq_lens_cpu", None)
+            if host_seq_lens is not None:
+                draft_seq_lens_cpu = host_seq_lens.clone()
+                draft_seq_lens_cpu[:batch_size].add_(self.num_query_per_req)
+                cad._seq_lens_cpu = draft_seq_lens_cpu
+                if getattr(cad, "seq_lens_cpu", None) is not None:
+                    cad.seq_lens_cpu = draft_seq_lens_cpu
         cad.query_start_loc_cpu = (
             torch.from_numpy(self.token_arange_np[: batch_size + 1]).clone() * self.num_query_per_req
         ).to(torch.int32)

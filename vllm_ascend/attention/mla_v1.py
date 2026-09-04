@@ -1062,6 +1062,17 @@ class AscendMLAImpl(MLAAttentionImpl):
                     attn_metadata_current = attn_metadata
 
                 seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
+                # The draft FULL-graph update deliberately consumes the
+                # optimistic host length (L_t + rejected_t + N) as a safe upper
+                # bound, WITHOUT the pending-reject finalize. The rejected_t
+                # over-read only attends to stale draft KV slots that the next
+                # step overwrites; it slightly degrades draft quality but can
+                # never affect the target-verified output. Subtracting the
+                # reject counts here would require a per-step host wait on the
+                # side-stream D2H event, which measurably costs TPOT
+                # (~2-3ms/step on K3 DSpark), so the graph path skips the
+                # finalize. The eager path still finalizes exactly at
+                # ``_forward_decode`` and yields L_t + N there.
                 if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
@@ -1696,6 +1707,26 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    @staticmethod
+    def _finalize_pending_reject(attn_metadata) -> None:
+        """Subtract the pending reject counts from ``decode.seq_lens_list`` once.
+
+        Shared by the eager ``_forward_decode`` entry and the FULL-graph
+        replay update path (``update_graph_params``). The side-stream D2H of
+        the reject counts was launched right after prepare_inputs_padded, so
+        by the time either consumer runs the copy is typically complete and
+        the event synchronize is effectively a no-op. ``reject_finalized``
+        guards re-entry across draft layers sharing one metadata object.
+        """
+        if attn_metadata.pending_reject_event is None or attn_metadata.reject_finalized:
+            return
+        attn_metadata.pending_reject_event.synchronize()
+        reject = attn_metadata.pending_reject_cpu[: attn_metadata.pending_reject_num_reqs].tolist()
+        seq_lens_list = attn_metadata.decode.seq_lens_list
+        for i in range(attn_metadata.pending_reject_num_reqs):
+            seq_lens_list[i] -= reject[i]
+        attn_metadata.reject_finalized = True
+
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -1715,13 +1746,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         # object; layers sharing this metadata skip via reject_finalized. The
         # D2H was launched right after prepare_inputs_padded, so by the first
         # attention layer the copy is typically already complete (sync no-op).
-        if attn_metadata.pending_reject_event is not None and not attn_metadata.reject_finalized:
-            attn_metadata.pending_reject_event.synchronize()
-            reject = attn_metadata.pending_reject_cpu[: attn_metadata.pending_reject_num_reqs].tolist()
-            seq_lens_list = decode_meta.seq_lens_list
-            for i in range(attn_metadata.pending_reject_num_reqs):
-                seq_lens_list[i] -= reject[i]
-            attn_metadata.reject_finalized = True
+        self._finalize_pending_reject(attn_metadata)
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.

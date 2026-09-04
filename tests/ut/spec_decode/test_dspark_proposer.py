@@ -853,23 +853,72 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         proposer = self._make_proposer(
             max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
         )
+        proposer._draft_uses_mla_backend = True
         _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
             proposer, num_reqs=num_reqs, block_size=block_size
         )[:4]
         expected_qsl = torch.arange(num_reqs + 1, dtype=torch.int32) * block_size
         assert torch.equal(cad.query_start_loc, expected_qsl)
         assert torch.equal(cad.query_start_loc_cpu, expected_qsl)
-        # seq_lens grow by block_size when no tokens were rejected.
+        # Only the device seq_lens grow by block_size when no tokens were
+        # rejected. The host mirrors (_seq_lens_cpu / seq_lens_cpu) keep their
+        # optimistic value (L_t + rejected_t); _prepare_parallel_draft_seq_lens_cpu
+        # adds exactly one N later, so the draft KV length is not double-counted.
         expected_seq_lens = torch.full((num_reqs,), 128 + block_size, dtype=torch.int32)
         assert torch.equal(cad.seq_lens, expected_seq_lens)
-        assert torch.equal(cad._seq_lens_cpu, expected_seq_lens)
-        assert torch.equal(cad.seq_lens_cpu, expected_seq_lens)
+        expected_host_seq_lens = torch.full((num_reqs,), 128, dtype=torch.int32)
+        assert torch.equal(cad._seq_lens_cpu, expected_host_seq_lens)
+        assert torch.equal(cad.seq_lens_cpu, expected_host_seq_lens)
+
+    @pytest.mark.parametrize(
+        ("backend_kind", "expected_host_seq_len"),
+        [
+            ("mla", 128),
+            ("dsa", 133),
+            ("ordinary", 128),
+        ],
+    )
+    def test_host_seq_lens_follow_backend_contract(
+        self,
+        backend_kind,
+        expected_host_seq_len,
+    ):
+        num_reqs, block_size, max_num_tokens = 4, 5, 256
+        proposer = self._make_proposer(
+            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
+        )
+        proposer._draft_uses_mla_backend = backend_kind == "mla"
+        proposer._draft_uses_dsa_backend = backend_kind == "dsa"
+        rejected = torch.full((num_reqs,), 2, dtype=torch.int32)
+
+        _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=num_reqs,
+            block_size=block_size,
+            seq_len=128,
+            host_seq_len=128,
+            num_rejected=rejected,
+        )[:4]
+
+        # Device length is always exact: L_t + N = 128 - 2 + 5.
+        assert torch.equal(
+            cad.seq_lens,
+            torch.full((num_reqs,), 131, dtype=torch.int32),
+        )
+        expected_host = torch.full(
+            (num_reqs,),
+            expected_host_seq_len,
+            dtype=torch.int32,
+        )
+        assert torch.equal(cad._seq_lens_cpu, expected_host)
+        assert torch.equal(cad.seq_lens_cpu, expected_host)
 
     def test_canonical_host_seq_lens_remains_authoritative(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         proposer = self._make_proposer(
             max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
         )
+        proposer._draft_uses_mla_backend = True
 
         _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
             proposer,
@@ -880,9 +929,11 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
             async_metadata=True,
         )[:4]
 
+        # Host mirror keeps its optimistic value (L_t + rejected_t); the +N is
+        # left to _prepare_parallel_draft_seq_lens_cpu to avoid double counting.
         assert torch.equal(
             cad._seq_lens_cpu,
-            torch.full((num_reqs,), 126 + block_size, dtype=torch.int32),
+            torch.full((num_reqs,), 126, dtype=torch.int32),
         )
         assert cad.seq_lens_cpu is None
 
@@ -901,6 +952,7 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         proposer = self._make_proposer(
             max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
         )
+        proposer._draft_uses_mla_backend = True
         rejected = torch.full((num_reqs,), 2, dtype=torch.int32)
         _nqt, _ti, cad, _extra = self._invoke_set_inputs_first_pass(
             proposer,
@@ -914,9 +966,10 @@ class TestSetInputsFirstPassRejectedTokens(_DSparkProposerTestBase):
         assert torch.equal(
             cad.seq_lens, torch.full((num_reqs,), 128 - 2 + block_size, dtype=torch.int32)
         )
+        # Host mirror keeps its optimistic value (126) without +N here.
         assert torch.equal(
             cad._seq_lens_cpu,
-            torch.full((num_reqs,), 126 + block_size, dtype=torch.int32),
+            torch.full((num_reqs,), 126, dtype=torch.int32),
         )
         assert cad.seq_lens_cpu is None
 
@@ -995,8 +1048,12 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         for spec in manager_specs:
             spec.block_size = 384
 
-        backend = MagicMock()
-        backend.full_cls_name.return_value = "fake.backend"
+        class FakeBackend:
+            @classmethod
+            def full_cls_name(cls):
+                return "fake.backend"
+
+        backend = FakeBackend
         layers = {}
         for gid in range(2):
             layer = MagicMock()
@@ -1039,6 +1096,8 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         assert set(proposer._per_group_query_slot_mapping_buffers) == {0, 1}
         assert set(proposer._per_group_context_slot_mapping_buffers) == {0, 1}
         assert proposer.kernel_block_size == 128
+        assert proposer._draft_uses_mla_backend is False
+        assert proposer._draft_uses_dsa_backend is False
         assert [
             call.kwargs["kernel_block_size"]
             for call in create_builders.call_args_list
@@ -1058,10 +1117,8 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
             del args, kwargs
             group.metadata_builders = [fake_builder]
 
-        backend = MagicMock()
-        backend.full_cls_name.return_value = "fake.backend"
         layer = MagicMock()
-        layer.get_attn_backend.return_value = backend
+        layer.get_attn_backend.return_value = dspark_proposer_module.AscendMLABackend
         monkeypatch.setattr(
             dspark_proposer_module,
             "get_layers_from_vllm_config",
@@ -1100,6 +1157,40 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
         proposer.initialize_attn_backend(kv_cache_config)
 
         assert fake_builder.use_mla_rope is dspark_proposer_module.K3_DSPARK_USE_MLA_ROPE
+        assert proposer._draft_uses_mla_backend is True
+        assert proposer._draft_uses_dsa_backend is False
+
+    def test_initialization_detects_dsa_backend(self, monkeypatch):
+        layer = MagicMock()
+        layer.get_attn_backend.return_value = dspark_proposer_module.AscendDSABackend
+        monkeypatch.setattr(
+            dspark_proposer_module,
+            "get_layers_from_vllm_config",
+            lambda *args, **kwargs: {"L0": layer},
+        )
+
+        proposer = self._make_proposer_for_init()
+        proposer.model = SimpleNamespace(
+            get_draft_kv_cache_layer_names=lambda: {"L0"}
+        )
+        proposer.max_query_tokens = 8
+        proposer.max_num_tokens = 16
+        manager_spec = MagicMock()
+        manager_spec.block_size = 128
+        kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(
+                    layer_names=["L0"],
+                    kv_cache_spec=manager_spec,
+                )
+            ]
+        )
+
+        with patch.object(AttentionGroup, "create_metadata_builders"):
+            proposer.initialize_attn_backend(kv_cache_config)
+
+        assert proposer._draft_uses_mla_backend is False
+        assert proposer._draft_uses_dsa_backend is True
 
     def test_kernel_block_size_falls_back_to_cache_spec(self):
         proposer = self._make_proposer_for_init()
@@ -1113,3 +1204,155 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
             == 384
         )
 # fmt: on
+
+
+class TestFinalizePendingReject:
+    """``AscendMLAImpl._finalize_pending_reject`` is shared by the eager FIA
+    entry and the FULL-graph replay update path. It must subtract the pending
+    reject counts exactly once per metadata object."""
+
+    @staticmethod
+    def _make_metadata(seq_lens_list, reject, num_reqs, with_event=True):
+        from vllm_ascend.attention.mla_v1 import AscendMLAImpl  # noqa: F401
+
+        return SimpleNamespace(
+            pending_reject_event=(MagicMock() if with_event else None),
+            pending_reject_cpu=torch.tensor(reject, dtype=torch.int32),
+            pending_reject_num_reqs=num_reqs,
+            reject_finalized=False,
+            decode=SimpleNamespace(seq_lens_list=list(seq_lens_list)),
+        )
+
+    def test_subtracts_reject_counts_once(self):
+        from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+
+        # parallel = (L_t + rejected_t) + N; finalize must yield L_t + N.
+        lt, n = 100, 7
+        rejected = [2, 5]
+        seq_lens_list = [lt + rejected[0] + n, lt + rejected[1] + n, 0]
+        metadata = self._make_metadata(seq_lens_list, rejected, num_reqs=2)
+
+        AscendMLAImpl._finalize_pending_reject(metadata)
+
+        assert metadata.decode.seq_lens_list == [lt + n, lt + n, 0]
+        assert metadata.reject_finalized is True
+        metadata.pending_reject_event.synchronize.assert_called_once_with()
+
+    def test_reentry_is_guarded(self):
+        from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+
+        metadata = self._make_metadata([109, 209], [2, 2], num_reqs=2)
+
+        AscendMLAImpl._finalize_pending_reject(metadata)
+        AscendMLAImpl._finalize_pending_reject(metadata)
+
+        assert metadata.decode.seq_lens_list == [107, 207]
+        metadata.pending_reject_event.synchronize.assert_called_once_with()
+
+    def test_no_event_is_noop(self):
+        from vllm_ascend.attention.mla_v1 import AscendMLAImpl
+
+        metadata = self._make_metadata([109, 209], [2, 2], num_reqs=2, with_event=False)
+
+        AscendMLAImpl._finalize_pending_reject(metadata)
+
+        assert metadata.decode.seq_lens_list == [109, 209]
+        assert metadata.reject_finalized is False
+
+
+class TestPrepareParallelDraftSeqLensCPU:
+    @staticmethod
+    def _make_proposer(*, uses_mla: bool, reject_event=None):
+        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+        proposer.parallel_drafting = True
+        proposer.num_query_per_req = 7
+        proposer._draft_uses_mla_backend = uses_mla
+        proposer.runner = SimpleNamespace(
+            num_rejected_tokens_event=reject_event,
+            num_rejected_tokens_cpu=torch.tensor([2, 3], dtype=torch.int32),
+        )
+        return proposer
+
+    @staticmethod
+    def _make_metadata():
+        return SimpleNamespace(
+            # Includes one FULL-graph padding request after the two real ones.
+            num_reqs=3,
+            # Padded target metadata is still optimistic on the host.
+            _seq_lens_cpu=torch.tensor([102, 203, 0], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([102, 203, 0], dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([102, 203, 0], dtype=torch.int32),
+            # set_inputs_first_pass has already applied reject and added N.
+            seq_lens=torch.tensor([107, 207, 0], dtype=torch.int32),
+            parallel_draft_seq_lens_cpu=None,
+            parallel_draft_num_reject_cpu=None,
+            parallel_draft_num_reject_event=None,
+            parallel_draft_num_reject_num_reqs=0,
+        )
+
+    def test_sync_padded_mla_uses_exact_device_seq_lens(self):
+        proposer = self._make_proposer(uses_mla=True)
+        metadata = self._make_metadata()
+
+        proposer._prepare_parallel_draft_seq_lens_cpu(
+            metadata,
+            batch_size=2,
+            num_draft_tokens_cpu=[7, 7],
+        )
+
+        assert torch.equal(
+            metadata.parallel_draft_seq_lens_cpu,
+            torch.tensor([107, 207, 0], dtype=torch.int32),
+        )
+        # The canonical host mirror remains untouched for other consumers.
+        assert torch.equal(
+            metadata._seq_lens_cpu,
+            torch.tensor([102, 203, 0], dtype=torch.int32),
+        )
+
+    @pytest.mark.parametrize("reject_event", [None, object()])
+    def test_non_mla_does_not_publish_parallel_lengths(self, reject_event):
+        proposer = self._make_proposer(
+            uses_mla=False,
+            reject_event=reject_event,
+        )
+        metadata = self._make_metadata()
+
+        proposer._prepare_parallel_draft_seq_lens_cpu(
+            metadata,
+            batch_size=2,
+            num_draft_tokens_cpu=[7, 7],
+        )
+
+        assert metadata.parallel_draft_seq_lens_cpu is None
+
+
+class TestIsK3DSparkGate:
+    """The K3-only gate for graph-mode draft actions: True only for a DSpark
+    drafter whose draft hf_config is a K3DSparkConfig; False for other
+    backends (DeepSeek V4 DSA, GLM5.2 regular attention) and other methods,
+    so those models keep their original code paths."""
+
+    def test_k3_dspark_detected(self):
+        from vllm_ascend.spec_decode.llm_base_proposer import _is_k3_dspark
+        from vllm_ascend.transformers_utils.configs.kimi_k3 import K3DSparkConfig
+
+        k3_config = K3DSparkConfig.__new__(K3DSparkConfig)
+
+        assert _is_k3_dspark("dspark", k3_config) is True
+
+    def test_non_k3_config_rejected(self):
+        from vllm_ascend.spec_decode.llm_base_proposer import _is_k3_dspark
+
+        assert _is_k3_dspark("dspark", SimpleNamespace()) is False
+        assert _is_k3_dspark("dspark", None) is False
+
+    def test_non_dspark_method_rejected(self):
+        from vllm_ascend.spec_decode.llm_base_proposer import _is_k3_dspark
+        from vllm_ascend.transformers_utils.configs.kimi_k3 import K3DSparkConfig
+
+        k3_config = K3DSparkConfig.__new__(K3DSparkConfig)
+
+        assert _is_k3_dspark("dflash", k3_config) is False
+        assert _is_k3_dspark("mtp", k3_config) is False
+        assert _is_k3_dspark("eagle", k3_config) is False
