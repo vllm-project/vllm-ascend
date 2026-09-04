@@ -27,7 +27,11 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+    get_storage_block_size,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -255,6 +259,42 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     assert merged.scale_dtype == spec.scale_dtype
 
 
+def test_ascend_mla_storage_geometry_survives_upstream_optional_field() -> None:
+    spec = AscendMLAAttentionSpec(
+        block_size=512,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        **_ratio_kwargs(4),
+    )
+    assert get_storage_block_size(spec) == 128
+    resized = replace(spec, block_size=1024)
+    assert get_storage_block_size(resized) == 256
+    merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
+    assert get_storage_block_size(merged) == 128
+    assert merged.page_size_bytes == 128 * 128 * 2
+    if vllm_version_is("0.27.1"):
+        assert spec.storage_block_size == 128
+    else:
+        # #53906's optional override must not be populated with Ascend's
+        # derived physical size, or upstream metadata building changes lanes.
+        assert spec.storage_block_size is None
+        assert resized.storage_block_size is None
+        assert merged.storage_block_size is None
+
+
+@pytest.mark.parametrize("spec_cls", [MLAAttentionSpec, AscendSFAIndexerCacheSpec])
+def test_optional_mla_storage_size_defaults_to_logical_block(spec_cls) -> None:
+    spec = spec_cls(block_size=32, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    assert get_storage_block_size(spec) == 32
+    uniform_spec = UniformTypeKVCacheSpecs(kv_cache_specs={"layer.0": spec, "layer.1": spec}, block_size=32)
+    assert get_storage_block_size(uniform_spec) == 32
+    if not vllm_version_is("0.27.1"):
+        assert spec.storage_block_size is None
+        explicit = replace(spec, storage_block_size=16)
+        assert get_storage_block_size(explicit) == 16
+
+
 @pytest.mark.parametrize(
     ("enable_prefix_caching", "expected_hash_block_size"),
     [
@@ -320,6 +360,45 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
     for group in grouped_specs[:2]:
         spec = next(iter(group.kv_cache_specs.values()))
         assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
+
+
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #53896 introduced the packed-group hook")
+def test_deepseek_v4_groups_patch_the_live_packed_group_hook() -> None:
+    c128_spec = MLAAttentionSpec(
+        block_size=128 * 128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **_ratio_kwargs(128),
+        model_version="deepseek_v4",
+    )
+    c4_spec = MLAAttentionSpec(
+        block_size=128 * 4,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        **_ratio_kwargs(4),
+        model_version="deepseek_v4",
+    )
+    swa_spec = SlidingWindowMLASpec(
+        block_size=128,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.float16,
+        sliding_window=512,
+    )
+    vllm_config = _make_vllm_config(enable_prefix_caching=True, dcp=1)
+    vllm_config.scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
+    vllm_config.speculative_config = None
+
+    groups = vllm_kv_cache_utils.get_kv_cache_groups(
+        vllm_config,
+        {"c128": c128_spec, "swa": swa_spec, "c4": c4_spec},
+    )
+
+    assert vllm_kv_cache_utils._get_packed_kv_cache_groups is kv_cache_utils_patch._ascend_get_packed_kv_cache_groups
+    assert [group.layer_names for group in groups[:2]] == [["c4"], ["c128"]]
+    assert groups[2].layer_names == ["swa"]
 
 
 @pytest.mark.parametrize(
@@ -479,7 +558,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert isinstance(full_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        kv_cache_utils_patch._get_max_layers_per_page_size(group.kv_cache_spec)
         for group in kv_cache_config.kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )

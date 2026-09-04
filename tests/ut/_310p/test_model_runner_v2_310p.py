@@ -85,6 +85,38 @@ def test_310p_v2_does_not_advertise_shared_kv_backing() -> None:
     assert NPUModelRunner310V2.supports_standardized_shared_kv_backing is False
 
 
+@pytest.mark.parametrize("is_vllm_0_27_1", [True, False])
+def test_execute_model_forwards_valid_dummy_state_slots_on_main(is_vllm_0_27_1: bool) -> None:
+    runner = object.__new__(NPUModelRunner310V2)
+    scheduler_output = object()
+    expected = object()
+
+    with (
+        patch.object(model_runner_module, "vllm_version_is", return_value=is_vllm_0_27_1),
+        patch.object(NPUModelRunner, "execute_model", return_value=expected) as parent_execute,
+    ):
+        output = runner.execute_model(
+            scheduler_output,
+            dummy_run=True,
+            valid_dummy_state_slots=True,
+        )
+
+    expected_kwargs: dict[str, object] = {
+        "intermediate_tensors": None,
+        "dummy_run": True,
+        "skip_attn_for_dummy_run": False,
+        "is_profile": False,
+    }
+    if not is_vllm_0_27_1:
+        expected_kwargs.update(
+            context_len=0,
+            valid_dummy_state_slots=True,
+        )
+    parent_execute.assert_called_once_with(scheduler_output, **expected_kwargs)
+    assert output is expected
+    assert runner._force_eager_pc_batch is False
+
+
 def test_310p_hybrid_postprocess_filters_padding_indices() -> None:
     state = object.__new__(Ascend310PMambaHybridModelState)
     state.num_accepted_tokens_gpu = torch.zeros(4, dtype=torch.int32)
@@ -401,6 +433,31 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks() -> None:
     )
     block_tables.append_block_ids(0, ([7],), overwrite=True)
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
+
+
+def test_block_table_disables_slot_mapping_for_recurrent_groups() -> None:
+    block_tables = Ascend310PBlockTables(
+        block_sizes=[4, 4],
+        max_num_reqs=1,
+        max_num_batched_tokens=2,
+        max_num_blocks_per_group=[1, 1],
+        device=torch.device("cpu"),
+        kernel_block_sizes=[4, 4],
+        slot_mapping_enabled=[True, False],
+    )
+    block_tables.append_block_ids(0, ([2], [3]), overwrite=True)
+
+    slots = block_tables.compute_slot_mappings(
+        np.array([0], dtype=np.int32),
+        np.array([0, 2], dtype=np.int32),
+        np.array([0, 1], dtype=np.int64),
+        num_tokens_padded=2,
+    )
+
+    torch.testing.assert_close(
+        slots,
+        torch.tensor([[8, 9], [-1, -1]], dtype=torch.int32),
+    )
 
 
 def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:

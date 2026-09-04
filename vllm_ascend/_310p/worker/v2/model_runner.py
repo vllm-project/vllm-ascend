@@ -15,6 +15,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_s
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1 import kv_cache_interface
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -38,6 +39,7 @@ from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
+from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -260,7 +262,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-            max_seq_len_np=None,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -272,7 +273,9 @@ class NPUModelRunner310V2(NPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        if not vllm_version_is("0.27.1"):
+        if vllm_version_is("0.27.1"):
+            input_batch_kwargs["max_seq_len_np"] = None
+        else:
             input_batch_kwargs["has_prefill"] = batch_has_prefill
         input_batch = AscendInputBatch(**input_batch_kwargs)
         # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
@@ -403,6 +406,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
         context_len: int = 0,
+        valid_dummy_state_slots: bool = False,
     ):
         self._force_eager_pc_batch = False
         if not dummy_run:
@@ -423,6 +427,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 skip_attn_for_dummy_run=skip_attn_for_dummy_run,
                 is_profile=is_profile,
                 context_len=context_len,
+                valid_dummy_state_slots=valid_dummy_state_slots,
             )
         finally:
             self._force_eager_pc_batch = False
@@ -477,9 +482,15 @@ class NPUModelRunner310V2(NPUModelRunner):
 
         block_sizes = []
         max_num_blocks_per_group = []
+        slot_mapping_enabled = []
+        circular_buffer_spec = getattr(kv_cache_interface, "CircularBufferSpec", None)
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
+            layer_spec = next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+            slot_mapping_enabled.append(
+                circular_buffer_spec is None or not isinstance(layer_spec, circular_buffer_spec)
+            )
             max_num_blocks = cdiv(self.max_model_len, spec.block_size)
             if spec.block_size <= 128:
                 alignment = 128 // spec.block_size
@@ -506,6 +517,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            slot_mapping_enabled=slot_mapping_enabled,
         )
         initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
 
@@ -612,7 +624,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     backend = layer_backends[layer_name]
                     group_id = layer_group_ids[layer_name]
-                    storage_block_size = getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+                    storage_block_size = get_storage_block_size(kv_cache_spec)
                     kernel_block_size = (
                         storage_block_size
                         if storage_block_size != kv_cache_spec.block_size

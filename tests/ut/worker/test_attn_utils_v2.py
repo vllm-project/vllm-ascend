@@ -30,6 +30,7 @@ from vllm_ascend.attention.dsa_v1 import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -376,13 +377,13 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
-    assert spec.storage_block_size == cache_config.block_size
+    assert get_storage_block_size(spec) == cache_config.block_size
     merged_spec = spec.merge([spec])
     if vllm_version_is("0.27.1"):
         assert merged_spec.compress_ratio == cache_layer.compress_ratio
     else:
         assert merged_spec.tokens_per_state == cache_layer.compress_ratio
-    assert merged_spec.storage_block_size == cache_config.block_size
+    assert get_storage_block_size(merged_spec) == cache_config.block_size
 
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
@@ -455,8 +456,10 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             forward_context: dict[str, Any],
             runner_kv_caches_: list[Any],
             num_attn_module: int = 1,
+            kv_cache_groups: Any = None,
         ) -> None:
-            del num_attn_module
+            # vLLM #52506 added kv_cache_groups to bind_kv_cache.
+            del num_attn_module, kv_cache_groups
             assert len(runner_kv_caches_) == 0
             for kv_cache in kv_caches.values():
                 runner_kv_caches_.append(kv_cache)
@@ -483,7 +486,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     # On main the layer cache is replaced by the freshly allocated views, so
     # the returned structure is validated by the checks below instead.
     assert [component.shape for component in cache_components] == [
-        (num_blocks, spec.storage_block_size, 1, dim) for dim in component_dims
+        (num_blocks, get_storage_block_size(spec), 1, dim) for dim in component_dims
     ]
     assert [component.dtype for component in cache_components] == [
         cache_dtype,
@@ -592,7 +595,7 @@ def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
         ],
     )
 
-    assert spec.storage_block_size == 32
+    assert get_storage_block_size(spec) == 32
     assert upstream_attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [spec.block_size]
 
 
