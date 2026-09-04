@@ -356,6 +356,31 @@ def test_balance_deltas_present_in_schedule():
     assert "if request_queue is None:" in src
 
 
+def test_prefix_cache_stats_recorded_only_at_admission():
+    """Prefix-cache stats must be recorded exactly once per admitted request,
+    at admission (mirrors upstream Scheduler.schedule + the #48860 fix). The
+    copied body must therefore:
+      * call ``record_prefix_cache_stats`` guarded by ``did_prefix_cache_lookup``,
+        so unscheduled lookups (defers, allocation failures) are not counted; and
+      * NOT manually ``prefix_cache_stats.record`` inside the Mamba hybrid
+        lookup, or Mamba requests would be recorded twice (once at lookup, once
+        at admission), double-counting ``requests``/``queries``/``hits``.
+    """
+    src = inspect.getsource(BalanceScheduler.schedule)
+
+    # Admission-time, lookup-gated recording.
+    assert src.count("did_prefix_cache_lookup = False") == 1
+    assert src.count("did_prefix_cache_lookup = True") == 1
+    assert src.count("if did_prefix_cache_lookup:") == 1
+    assert src.count("self.kv_cache_manager.record_prefix_cache_stats(") == 1
+
+    # The Mamba per-group lookup must honor the normal lookup guard and must
+    # not record stats itself (which would double count at admission).
+    assert "find_longest_cache_hit_per_group" in src
+    assert "self.kv_cache_manager.prefix_cache_lookup_enabled(request)" in src
+    assert "self.kv_cache_manager.prefix_cache_stats.record(" not in src
+
+
 # ---------------------------------------------------------------------------
 # 1c. copied schedule() body stays verbatim with the pinned release tag
 # ---------------------------------------------------------------------------
