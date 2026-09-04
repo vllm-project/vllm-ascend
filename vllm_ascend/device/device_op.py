@@ -43,6 +43,22 @@ def _npu_mla_prolog_v3_no_rope(**kwargs):
     return torch.ops._C_ascend.npu_mla_prolog_v3(**kwargs)
 
 
+def _scatter_nd_update(var, indices, updates):
+    # Advanced indexing: var[i0_list, i1_list, ..., i_{K-1}_list] = updates.
+    if HAS_TRITON:
+        from vllm_ascend.ops.triton.scatter_nd_update import (
+            can_use_triton_scatter,
+            triton_scatter_nd_update,
+        )
+
+        if can_use_triton_scatter(var, indices):
+            triton_scatter_nd_update(var, indices, updates)
+            return
+    idx = indices.to(torch.long)
+    idx_tuple = tuple(idx[:, d] for d in range(idx.shape[-1]))
+    var[idx_tuple] = updates
+
+
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
 
@@ -709,7 +725,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+        _scatter_nd_update(cache, slot_mapping, x)
 
     # ===== Indexer Quant + Scatter =====
 
@@ -735,8 +751,8 @@ class BaseDeviceAdaptor:
             kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
             if kv_scale_out.ndim < 4:
                 kv_scale_out = kv_scale_out.unsqueeze(-1)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
+            _scatter_nd_update(indexer_k_cache, slot_mapping, kv_out)
+            _scatter_nd_update(indexer_scale_cache, slot_mapping, kv_scale_out)
 
         return q, q_scale, kv_out, kv_scale_out
 
@@ -749,7 +765,7 @@ class BaseDeviceAdaptor:
             return None, None
         kv_out, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
         kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
+        _scatter_nd_update(indexer_k_cache, slot_mapping, kv_out)
         return kv_out, kv_scale
 
     @staticmethod
@@ -759,7 +775,7 @@ class BaseDeviceAdaptor:
         kv_scale = kv_scale.to(torch.float16)
         if kv_scale.ndim < 4:
             kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale)
+        _scatter_nd_update(indexer_scale_cache, slot_mapping, kv_scale)
 
     @staticmethod
     def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
@@ -772,8 +788,8 @@ class BaseDeviceAdaptor:
         dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
         indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
         indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_dummy)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_dummy)
+        _scatter_nd_update(indexer_k_cache, slot_mapping, kv_dummy)
+        _scatter_nd_update(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
 

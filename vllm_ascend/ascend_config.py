@@ -175,6 +175,17 @@ class AscendConfig:
         self.enable_sleep_mode_extra_cleanup = additional_config.get("enable_sleep_mode_extra_cleanup", False)
         self.multistream_dsv4_dsa_overlap = additional_config.get("multistream_dsv4_dsa_overlap", True)
         self.enable_prefill_mc2 = bool(additional_config.get("enable_prefill_mc2", False))
+        self.enable_compressor_sp = bool(additional_config.get("enable_compressor_sp", False))
+        self.compressor_sp_min_tokens_c4 = int(additional_config.get("compressor_sp_min_tokens_c4", 4096))
+        self.compressor_sp_min_tokens_c128 = int(additional_config.get("compressor_sp_min_tokens_c128", 8192))
+        if self.compressor_sp_min_tokens_c4 < 0 or self.compressor_sp_min_tokens_c128 < 0:
+            raise ValueError("Compressor SP minimum token thresholds must be non-negative")
+        self.compressor_sp_hccl_overlap = bool(additional_config.get("compressor_sp_hccl_overlap", True))
+        self.compressor_sp_hccl_overlap_min_tokens = int(
+            additional_config.get("compressor_sp_hccl_overlap_min_tokens", 8192)
+        )
+        if self.compressor_sp_hccl_overlap_min_tokens < 0:
+            raise ValueError("compressor_sp_hccl_overlap_min_tokens must be non-negative")
 
         self.enable_fused_mc2 = self._get_config_value(
             additional_config,
