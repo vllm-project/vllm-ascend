@@ -644,6 +644,25 @@ at::Tensor npu_recurrent_gated_delta_rule_meta(
     return output;
 }
 
+// Meta for npu_chunk_gated_delta_rule. Returns (out, final_state) with the same
+// shapes as value (bf16) and initial_state respectively. No real computation.
+std::tuple<at::Tensor, at::Tensor> npu_chunk_gated_delta_rule_meta(
+    const at::Tensor& query,
+    const at::Tensor& key,
+    const at::Tensor& value,
+    const at::Tensor& beta,
+    const at::Tensor& initial_state,
+    const at::Tensor& actual_seq_lengths,
+    const c10::optional<at::Tensor>& g,
+    double scale_value)
+{
+    auto out_options = value.options().dtype(at::ScalarType::BFloat16);
+    at::Tensor out = at::empty_symint(value.sym_sizes(), out_options);
+    at::Tensor final_state =
+        at::empty_symint(initial_state.sym_sizes(), initial_state.options());
+    return std::make_tuple(out, final_state);
+}
+
 at::Tensor recurrent_kda_meta(
     const at::Tensor& query,
     const at::Tensor& key,
@@ -1944,6 +1963,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_gemma_rms_norm", &vllm_ascend::meta::npu_gemma_rms_norm_meta);
     // recurrent_gated_delta_rule meta implementation
     ops.impl("npu_recurrent_gated_delta_rule", &vllm_ascend::meta::npu_recurrent_gated_delta_rule_meta);
+    ops.impl("npu_chunk_gated_delta_rule", &vllm_ascend::meta::npu_chunk_gated_delta_rule_meta);
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);

@@ -52,6 +52,7 @@
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
+#include "attention/chunk_gated_delta_rule/chunk_gated_delta_rule_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
@@ -2040,6 +2041,17 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? g=None, "
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
+
+    ops.def(
+        "npu_chunk_gated_delta_rule(Tensor query, "
+        "                          Tensor key, "
+        "                          Tensor value, "
+        "                          Tensor beta, "
+        "                          Tensor initial_state, "
+        "                          Tensor actual_seq_lengths, "
+        "                          Tensor? g=None, "
+        "                          float scale_value=1.0) -> (Tensor out, Tensor final_state)");
+    ops.impl("npu_chunk_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_chunk_gated_delta_rule);
 
     ops.def(
         "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
