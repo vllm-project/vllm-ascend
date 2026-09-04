@@ -8,6 +8,8 @@ This document will show the main verification steps of the model, including supp
 
 ## 2 Supported Features
 
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+
 Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
@@ -113,106 +115,106 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 5.1 Single-Node Online Deployment
 
-#### 5.1.1 Ascend950DT
+=== "Ascend950DT series"
 
-- Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 Ascend950DT (96GB × 8) .
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 Ascend950DT (96GB × 8) .
 
-Run the following script to execute online inference.
+    Run the following script to execute online inference.
 
-```shell
+  ```shell
 
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_BUFFSIZE=1024
-export OMP_NUM_THREADS=1
-export TASK_QUEUE_ENABLE=1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    export HCCL_BUFFSIZE=1024
+    export OMP_NUM_THREADS=1
+    export TASK_QUEUE_ENABLE=1
 
-vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
-  --host 0.0.0.0 \
-  --port 8011 \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 8 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --quantization ascend \
-  --served-model-name glm \
-  --max-num-seqs 128 \
-  --max-model-len 132096 \
-  --async-scheduling \
-  --enable-prefix-caching \
-  --max-num-batched-tokens 8192 \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.95 \
-  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
-```
+    vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM5-w8a8 \
+      --host 0.0.0.0 \
+      --port 8011 \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --quantization ascend \
+      --served-model-name glm \
+      --max-num-seqs 128 \
+      --max-model-len 132096 \
+      --async-scheduling \
+      --enable-prefix-caching \
+      --max-num-batched-tokens 8192 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.95 \
+      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'
+    ```
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
+    Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
-**Model-specific parameters:**
+    **Model-specific parameters:**
 
-- `--data-parallel-size 1` / `--tensor-parallel-size 8`: DP1 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights.
-- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
-- `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
-- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
-- `limit-mm-per-prompt '{"image": 1, "video": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{"image":2,"video":0}' for two-image requests, and use --limit-mm-per-prompt '{"image":0,"video":1}' for one-video requests.
-- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
+    - `--data-parallel-size 1` / `--tensor-parallel-size 8`: DP1 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights.
+    - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
+    - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
+    - `limit-mm-per-prompt '{"image": 1, "video": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{"image":2,"video":0}' for two-image requests, and use --limit-mm-per-prompt '{"image":0,"video":1}' for one-video requests.
+    - `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
 
 
-#### 5.1.2 Atlas 800 A3
+=== "Atlas 800 A3 series"
 
-- Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (64GB × 16) .
+    - Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (64GB × 16) .
 
-Run the following script to execute online inference.
+    Run the following script to execute online inference.
 
-```shell
-#!/bin/sh
+    ```shell
+    #!/bin/sh
 
-source /usr/local/Ascend/cann-9.1.0/opp/vendors/custom_transformer/bin/set_env.bash
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    source /usr/local/Ascend/cann-9.1.0/opp/vendors/custom_transformer/bin/set_env.bash
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
-export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=400
-export OMP_NUM_THREADS=10
-export TASK_QUEUE_ENABLE=1
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_BUFFSIZE=400
+    export OMP_NUM_THREADS=10
+    export TASK_QUEUE_ENABLE=1
 
-vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
-  --host 0.0.0.0 \
-  --port 8077 \
-  --max-model-len 133120  \
-  --data-parallel-size 1 \
-  --tensor-parallel-size 16 \
-  --enable-expert-parallel \
-  --seed 1024 \
-  --served-model-name glm \
-  --safetensors-load-strategy prefetch \
-  --max-num-seqs 128 \
-  --max-num-batched-tokens 8192 \
-  --trust-remote-code \
-  --quantization ascend \
-  --limit-mm-per-prompt '{"image": 1, "video": 0}' \
-  --gpu-memory-utilization 0.85 \
-  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
-  --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
-  --enable-prefix-caching \
-  --async-scheduling \
-  --api-server-count 1
-```
+    vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
+      --host 0.0.0.0 \
+      --port 8077 \
+      --max-model-len 133120  \
+      --data-parallel-size 1 \
+      --tensor-parallel-size 16 \
+      --enable-expert-parallel \
+      --seed 1024 \
+      --served-model-name glm \
+      --safetensors-load-strategy prefetch \
+      --max-num-seqs 128 \
+      --max-num-batched-tokens 8192 \
+      --trust-remote-code \
+      --quantization ascend \
+      --limit-mm-per-prompt '{"image": 1, "video": 0}' \
+      --gpu-memory-utilization 0.85 \
+      --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
+      --enable-prefix-caching \
+      --async-scheduling \
+      --api-server-count 1
+    ```
 
-Key Parameter Descriptions:
+    Key Parameter Descriptions:
 
-Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
+    Only the key parameters specific to this model/scenario are described below. `max-model-len` and `max-num-seqs` need to be set according to the actual usage scenario.
 
-**Model-specific parameters:**
+    **Model-specific parameters:**
 
-- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
-- `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
-- `--data-parallel-size 1` / `--tensor-parallel-size 16`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights. 
+    - `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.
+    - `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.
+    - `--data-parallel-size 1` / `--tensor-parallel-size 16`: DP2 TP8 parallelism layout, recommended to balance memory capacity and compute efficiency for the w8a8 weights. 
 
-- `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
-- `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
+    - `--speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding.
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.
 
 ## 6 Functional Verification
 
@@ -229,27 +231,26 @@ curl http://<node0_ip>:<port>/v1/completions \
 ```
 
 Expected Result:
-
-The service returns HTTP 200 OK. The JSON response contains the `choices` field with the generated text, along with usage statistics:
+The expected result of this request is a JSON payload containing the model’s generated text in a text_completion format.
 
 ```json
 {
-    "id": "cmpl-123abc",
-    "object": "text_completion",
-    "created": 1725444000,
-    "model": "glm-53-flash",
-    "choices": [
-        {
-            "text": " incredibly promising, with rapid advancements in machine learning and autonomous systems.",
-            "index": 0,
-            "finish_reason": "stop"
-        }
-    ],
-    "usage": {
-        "prompt_tokens": 5,
-        "completion_tokens": 15,
-        "total_tokens": 20
+  "id": "cmpl-123abc",
+  "object": "text_completion",
+  "created": 1725444000,
+  "model": "glm",
+  "choices": [
+    {
+      "text": " incredibly promising, with rapid advancements in machine learning and autonomous systems.",
+      "index": 0,
+      "finish_reason": "stop"
     }
+  ],
+  "usage": {
+    "prompt_tokens": 5,
+    "completion_tokens": 15,
+    "total_tokens": 20
+  }
 }
 ```
 
