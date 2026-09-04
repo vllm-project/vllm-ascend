@@ -150,3 +150,40 @@ def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
     kwargs = original_factory.call_args.kwargs
     assert kwargs["hash_indices_table"] is hash_indices_table
     assert kwargs["routed_experts_args"]["tid2eid"] is hash_indices_table
+
+
+def test_factory_forwards_jamba_positional_args():
+    """Jamba passes num_experts/top_k/hidden_size/intermediate_size positionally."""
+    router = _Router()
+    runner = SimpleNamespace(router=router)
+    original_factory = MagicMock(return_value=runner)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(
+            dynamic_eplb=False,
+            expert_map_path=None,
+            num_redundant_experts=0,
+        )
+    )
+
+    with (
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+        patch.object(
+            patch_fused_moe,
+            "create_ascend_fused_moe_router",
+            return_value=router,
+        ),
+    ):
+        patch_fused_moe._ascend_FusedMoE(
+            16,
+            2,
+            2048,
+            512,
+            renormalize=False,
+            prefix="model.layers.0.feed_forward.experts",
+        )
+
+    args, kwargs = original_factory.call_args
+    assert args == (16, 2, 2048, 512)
+    assert kwargs["renormalize"] is False
+    assert kwargs["prefix"] == "model.layers.0.feed_forward.experts"

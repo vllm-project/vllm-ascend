@@ -4,6 +4,10 @@ import itertools
 from typing import Any
 
 import torch
+
+# Replace the CUDA-only selective_scan_fn on NPU with our PyTorch-based
+# implementation, since torch.ops._C.selective_scan_fwd is not available.
+import vllm.model_executor.layers.mamba.ops.mamba_ssm  # noqa: E402
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.utils.math_utils import cdiv
@@ -21,6 +25,7 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.ops.triton.mamba.selective_scan import selective_scan_fn_npu
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -29,6 +34,10 @@ from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_ker
 # and remains valid at the configured request limit (for example,
 # 32 * 138 * 1 instead of 32 * 138 * 16).
 mamba_utils._TEMPORAL_TILES = 1
+
+# Replace the CUDA-only selective_scan_fn on NPU with our PyTorch-based
+# implementation, since torch.ops._C.selective_scan_fwd is not available.
+vllm.model_executor.layers.mamba.ops.mamba_ssm.selective_scan_fn = selective_scan_fn_npu
 
 
 def _can_launch_triton_batch_memcpy() -> bool:

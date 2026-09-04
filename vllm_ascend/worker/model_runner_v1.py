@@ -4007,6 +4007,16 @@ class NPUModelRunner(GPUModelRunner):
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         # NOTE(cmq): initialize_attn_backend must before using self.attn_groups
         self.initialize_attn_backend(kv_cache_config)
+        # Initialize Mamba SSU backend once KV cache groups are known.
+        # Upstream GPU model runner does this during init; Jamba models need it
+        # before graph capture but non-Mamba models no-op safely.
+        from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+            initialize_mamba_ssu_backend,
+        )
+        initialize_mamba_ssu_backend(
+            self.vllm_config.mamba_config,
+            kv_cache_config,
+        )
         self.use_hybrid_blocks = len(self.attn_groups) > 1
         # K3's packed layout keeps Mamba specs inside UniformType groups, so the
         # old first-spec scan over attn_groups cannot recognize them.
