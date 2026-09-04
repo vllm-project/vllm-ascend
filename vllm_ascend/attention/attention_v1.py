@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any
 
@@ -25,6 +25,7 @@ import vllm.envs as envs_vllm
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (  # type: ignore
     AttentionBackend,
     AttentionCGSupport,
@@ -39,6 +40,7 @@ from vllm.v1.attention.backends.registry import (  # type: ignore
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
+from vllm.v1.kv_cache_layout import KVCacheLayout
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -75,6 +77,21 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+def _split_kv_cache_planes(
+    kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return K/V planes without changing their underlying storage."""
+    if isinstance(kv_cache, torch.Tensor):
+        if kv_cache.ndim == 4 and kv_cache.shape[1] == 2:
+            return kv_cache[:, 0], kv_cache[:, 1]
+        if kv_cache.ndim == 5 and kv_cache.shape[0] == 2:
+            return kv_cache[0], kv_cache[1]
+        raise RuntimeError(f"Unsupported Ascend GQA KV cache shape: {tuple(kv_cache.shape)}.")
+    if len(kv_cache) < 2:
+        raise RuntimeError("Ascend attention requires both key and value cache views.")
+    return kv_cache[0], kv_cache[1]
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -90,6 +107,26 @@ class AscendAttentionBackend(AttentionBackend):
 
             return AscendAttentionDCPImpl
         return AscendAttentionBackendImpl
+
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        """Keep each layer's two complete K/V planes contiguous."""
+        return (KVCacheLayout.LHBNC,)
+
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """Describe Ascend GQA's two dense K/V planes to the core planner."""
+        if spec.head_size_v != spec.head_size:
+            raise NotImplementedError(
+                "Ascend's standardized GQA layout currently requires equal "
+                f"K/V head sizes, got {spec.head_size} and {spec.head_size_v}."
+            )
+        plane_size_bytes = spec.num_kv_heads * spec.head_size * get_dtype_size(spec.dtype)
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=plane_size_bytes,
+        )
 
     @staticmethod
     def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
@@ -122,8 +159,8 @@ class AscendAttentionBackend(AttentionBackend):
         dst_kv_cache: list[torch.Tensor],
         src_to_dst: torch.Tensor,
     ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
+        src_key_cache, src_value_cache = _split_kv_cache_planes(src_kv_cache)
+        dst_key_cache, dst_value_cache = _split_kv_cache_planes(dst_kv_cache)
         src_indices = src_to_dst[:, 0]
         dst_indices = src_to_dst[:, 1]
 
@@ -139,8 +176,7 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dists[:, 1]
 
         for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
+            key_caches, value_caches = _split_kv_cache_planes(kv_cache)
             key_caches[dst_indices] = key_caches[src_indices]
             value_caches[dst_indices] = value_caches[src_indices]
 
@@ -511,6 +547,41 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # attn_metadata during graph replay. Record the captured layer name only
         # for that path.
         self._layer_name: str | None = None
+
+    def _unpack_kv_cache(
+        self,
+        kv_cache: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Create zero-copy Ascend K/V views from the standardized cache."""
+        if isinstance(kv_cache, (list, tuple)):
+            if len(kv_cache) < 2:
+                raise RuntimeError("Ascend attention requires both key and value cache views.")
+            return kv_cache[0], kv_cache[1]
+
+        if not isinstance(kv_cache, torch.Tensor):
+            raise TypeError(f"Unsupported KV cache type: {type(kv_cache)!r}")
+
+        # Compatibility with a pre-standardized [2, B, N, H, D] view is
+        # useful for isolated backend tests. Production allocation uses the
+        # standardized [B, 2, N, H * D] view below.
+        if kv_cache.ndim == 5 and kv_cache.shape[0] == 2:
+            return kv_cache[0], kv_cache[1]
+        if kv_cache.ndim != 4 or kv_cache.shape[1] != 2:
+            raise RuntimeError(
+                f"Standardized Ascend GQA KV cache must have shape [B, 2, N, H * D], got {tuple(kv_cache.shape)}."
+            )
+
+        plane_width = self.num_kv_heads * self.head_size
+        if kv_cache.shape[-1] != plane_width:
+            raise RuntimeError(
+                "Ascend GQA KV cache plane width must equal "
+                f"num_kv_heads * head_size ({plane_width}), got "
+                f"{kv_cache.shape[-1]}."
+            )
+
+        key_cache = kv_cache[:, 0].unflatten(-1, (self.num_kv_heads, self.head_size))
+        value_cache = kv_cache[:, 1].unflatten(-1, (self.num_kv_heads, self.head_size))
+        return key_cache, value_cache
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name
@@ -1263,14 +1334,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
             # Initialize cache from kv_cache if not already set (for DecodeOnly mode)
             if self.key_cache is None and kv_cache is not None:
-                if (
-                    isinstance(kv_cache, torch.Tensor)
-                    and kv_cache.dim() > 0
-                    and kv_cache.shape[0] == 2
-                    or isinstance(kv_cache, (list, tuple))
-                    and len(kv_cache) >= 2
-                ):
-                    self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+                if isinstance(kv_cache, torch.Tensor) or (isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2):
+                    self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
 
             if self.key_cache is None:
                 raise RuntimeError(
@@ -1597,7 +1662,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             return
 
         if self.key_cache is None:
-            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
 
         DeviceOperator.reshape_and_cache(
             key=key,
@@ -1616,9 +1681,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        if len(kv_cache) > 1:
+        if isinstance(kv_cache, torch.Tensor) or len(kv_cache) > 1:
             if self.key_cache is None:
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+                self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
             if self.kv_sharing_target_layer_name is not None:
                 # KV-sharing target layers consume another layer's cache.
                 # Writing their dummy/current K/V would overwrite shared slots.
@@ -1743,14 +1808,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # This is needed for DecodeOnly mode where key/value are None but we still
         # need access to the cache for attention computation.
         if self.key_cache is None and kv_cache is not None:
-            if (
-                isinstance(kv_cache, torch.Tensor)
-                and kv_cache.dim() > 0
-                and kv_cache.shape[0] == 2
-                or isinstance(kv_cache, (list, tuple))
-                and len(kv_cache) >= 2
-            ):
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            if isinstance(kv_cache, torch.Tensor) or (isinstance(kv_cache, (list, tuple)) and len(kv_cache) >= 2):
+                self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
 
         output_padded = None
         if key is not None and value is not None:
@@ -2194,9 +2253,9 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        if len(kv_cache) > 1:
+        if isinstance(kv_cache, torch.Tensor) or len(kv_cache) > 1:
             if self.key_cache is None:
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+                self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
             if self.kv_sharing_target_layer_name is not None:
                 # C8/NZ cache writes follow the same KV-sharing rule.
                 if self.is_kv_producer:
