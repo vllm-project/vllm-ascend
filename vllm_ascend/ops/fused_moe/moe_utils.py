@@ -133,6 +133,8 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
     # NOT fix the W4A8 accuracy issue and slowed graph capture (see bug_a3.md),
     # so keep the working values until the W4A8 accuracy root cause is found on
     # the operator side.
+    if quant_type == QuantType.NONE:
+        return (0, None, None)
     if quant_type == QuantType.W8A8:
         return (_CANN_MEGA_MOE_QUANT_MODE_INT8, _CANN_ACL_INT8, _CANN_ACL_INT8)
     if quant_type == QuantType.W4A8:
