@@ -552,7 +552,7 @@ class AscendConfig:
         has_indexer = hasattr(vc.model_config, "hf_text_config") and hasattr(
             vc.model_config.hf_text_config, "index_topk"
         )
-        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer
+        self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
 
         # Sequence-parallel max_num_batched_tokens divisibility writeback
         if vc.parallel_config.prefill_context_parallel_size > 1 and enable_sp(vllm_config=vc):

@@ -1087,6 +1087,11 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             architectures=[],
         )
         supported_vc.additional_config = {"enable_dsa_cp": True}
+        # DSA-CP additionally requires sequence parallelism: EP + TP>1 + DP>1
+        # makes ParallelConfig.use_sequence_parallel_moe True.
+        supported_vc.parallel_config.enable_expert_parallel = True
+        supported_vc.parallel_config.tensor_parallel_size = 2
+        supported_vc.parallel_config.data_parallel_size = 2
         self.assertTrue(init_ascend_config(supported_vc).enable_dsa_cp)
 
         # init_ascend_config clears process caches after publishing the new
