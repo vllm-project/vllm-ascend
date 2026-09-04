@@ -669,6 +669,29 @@ def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 
 
+def update_tensor_inplace(layer: torch.nn.Module, name: str, new: torch.Tensor) -> None:
+    """Update ``layer.<name>`` to ``new`` while preserving tensor identity.
+
+    In graph mode (ACLGraph capture), the captured graph holds weight tensors
+    by reference. When weights are updated (e.g. in RL weight-update
+    scenarios) and ``process_weights_after_loading`` runs again, the new
+    values must be copied in-place into the existing tensor so captured
+    graphs keep referencing the updated weights. In all other cases, the
+    attribute is (re)assigned to ``new``.
+    """
+    old = getattr(layer, name, None)
+    if (
+        isinstance(old, torch.Tensor)
+        and old.data_ptr() != new.data_ptr()
+        and old.shape == new.shape
+        and old.dtype == new.dtype
+        and old.device == new.device
+    ):
+        old.copy_(new)
+    else:
+        setattr(layer, name, new)
+
+
 def register_ascend_customop(vllm_config: VllmConfig | None = None):
     """Register Ascend CustomOP
 
