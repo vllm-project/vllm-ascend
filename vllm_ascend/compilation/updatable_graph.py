@@ -10,7 +10,6 @@ import torch
 
 from vllm_ascend.utils import weak_ref_tensors
 
-
 Params = dict[str, Any]
 
 
@@ -47,9 +46,7 @@ class SharedSource:
         return self.params
 
 
-_ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar(
-    "capturing_updatable_graph", default=None
-)
+_ACTIVE_GRAPH: ContextVar["UpdatableGraph | None"] = ContextVar("capturing_updatable_graph", default=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,15 +131,10 @@ class UpdatableGraph(torch.npu.NPUGraph):
         self,
         source: ParamSource,
     ) -> tuple[GraphUpdateTask, ...]:
-        params_by_provider = {
-            provider: source.get(provider) for provider in self.provider_sizes
-        }
+        params_by_provider = {provider: source.get(provider) for provider in self.provider_sizes}
         for provider, size in self.provider_sizes.items():
             assert len(params_by_provider[provider]) == size
-        return tuple(
-            task.bind(params_by_provider[task.provider][task.provider_index])
-            for task in self.tasks
-        )
+        return tuple(task.bind(params_by_provider[task.provider][task.provider_index]) for task in self.tasks)
 
     def update(
         self,

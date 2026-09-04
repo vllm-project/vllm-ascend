@@ -578,8 +578,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         fia_params: list[dict[str, Any]] = []
         for step in range(1, self.num_speculative_steps):
             seq_lens = [
-                min(int(seq_len) + step, self.max_model_len)
-                for seq_len in self.input_batch.seq_lens_np[:num_reqs]
+                min(int(seq_len) + step, self.max_model_len) for seq_len in self.input_batch.seq_lens_np[:num_reqs]
             ]
             seq_lens.extend([0] * (num_reqs_padded - num_reqs))
             fia_params.append(

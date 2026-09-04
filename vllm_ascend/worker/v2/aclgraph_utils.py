@@ -38,13 +38,13 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.compilation.updatable_graph import (
     ContextSource,
     UpdatableGraph,
 )
-from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -215,12 +215,10 @@ class ModelAclGraphManager(ModelCudaGraphManager):
             )
         return ret
 
-    def _updatable_graph_replay(self, desc, attn_metadata):        
+    def _updatable_graph_replay(self, desc, attn_metadata):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
-        resolved_tasks = graph.resolve_tasks(
-            ContextSource(attn_metadata)
-        )
+        resolved_tasks = graph.resolve_tasks(ContextSource(attn_metadata))
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
         graph.update(self.update_stream, resolved_tasks)

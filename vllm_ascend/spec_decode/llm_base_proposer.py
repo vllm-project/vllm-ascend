@@ -600,18 +600,20 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
-    
+
     def set_update_stream(self, update_stream):
         self._runnable.set_update_stream(update_stream)
-    
+
     def _build_draft_attn_metadata_updates(self, multi_steps_attn_metadata):
         update_params = []
         for per_layer_metadata in multi_steps_attn_metadata:
             metadata = next(iter(per_layer_metadata.values()))
-            update_params.append({
-                "actual_seq_lengths": metadata.actual_seq_lengths_q,
-                "actual_seq_lengths_kv": metadata.seq_lens_list,
-        })
+            update_params.append(
+                {
+                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": metadata.seq_lens_list,
+                }
+            )
         return update_params
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
@@ -795,11 +797,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             inputs_embeds = None
 
         self.token_indices_to_sample.fill_(0)
-        
+
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
             self._runnable.set_draft_attn_metadata_updates(update_params)
-        
+
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
@@ -1129,7 +1131,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
-        
+
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
             self._runnable.set_draft_attn_metadata_updates(update_params)

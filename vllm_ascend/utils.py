@@ -963,9 +963,7 @@ def weak_ref_tensors(
     if isinstance(tensors, tuple):
         return tuple(weak_ref_tensor(t) for t in tensors)
     if isinstance(tensors, dict):
-        return {
-            key: weak_ref_tensors(tensor) for key, tensor in tensors.items()
-        }
+        return {key: weak_ref_tensors(tensor) for key, tensor in tensors.items()}
     if isinstance(tensors, IntermediateTensors):
         return IntermediateTensors(weak_ref_tensors(tensors.tensors))
     return tensors

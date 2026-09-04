@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import Specul
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_draft_graph_prefill_params,
@@ -30,7 +31,6 @@ from vllm_ascend.compilation.updatable_graph import (
     SharedSource,
     UpdatableGraph,
 )
-from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.worker.v2.aclgraph_utils import (
     collect_sorted_captured_token_sizes,
     model_capture_wrapper,
@@ -139,7 +139,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         else:
             logger.info_once("AutoRegressiveAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
         assert self.update_stream is not None
-        
+
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
         attn_metadata = self.speculator.model_state.attn_metadata
         if isinstance(attn_metadata, AscendMetadata):
@@ -188,7 +188,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             )
         return ret
 
-    def _updatable_graph_replay(self, desc):        
+    def _updatable_graph_replay(self, desc):
         graph = self.graphs[desc]
         assert isinstance(graph, UpdatableGraph)
         fia_params = self.speculator.build_fia_params(

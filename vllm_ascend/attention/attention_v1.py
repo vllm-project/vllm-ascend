@@ -58,7 +58,7 @@ from vllm_ascend.compilation.updatable_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import vllm_version_is
 
 if vllm_version_is("0.27.1"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -519,6 +519,7 @@ class PAParamProvider:
             "context_lens": metadata.seq_lens,
         }
 
+
 @dataclass(frozen=True, slots=True)
 class FIAParamProvider:
     layer_name: str
@@ -534,8 +535,9 @@ class FIAParamProvider:
             return {
                 "actual_seq_lengths": metadata.actual_seq_lengths_q,
                 "actual_seq_lengths_kv": metadata.seq_lens_list,
-                "block_table": metadata.block_tables
+                "block_table": metadata.block_tables,
             }
+
 
 @dataclass(frozen=True, slots=True)
 class FIAV2ParamProvider:
@@ -1078,7 +1080,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 sparse_mode=sparse_mode,
                 **extra_args,
             ),
-        ) 
+        )
         register_task(
             torch_npu.npu_fused_infer_attention_score.out,
             {
@@ -1101,7 +1103,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "out": [output_view, softmax_lse],
             },
             FIAParamProvider(self._layer_name),
-        )        
+        )
         return output, num_tokens
 
     def full_graph_fia_v2(
@@ -1138,7 +1140,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 pre_tokens=self.sliding_window if self.sliding_window is not None else SWA_INT_MAX,
                 next_tokens=0,
                 learnable_sink=self.sinks,
-            )
+            ),
         )
         register_task(
             torch_npu.npu_fused_infer_attention_score_v2.out,
@@ -1163,7 +1165,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "out": [output_view, softmax_lse],
             },
             FIAV2ParamProvider(self._layer_name),
-        ) 
+        )
         return output, num_tokens
 
     def full_graph_pa(
@@ -1184,10 +1186,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_table=attn_metadata.block_tables,
                 context_lens=attn_metadata.seq_lens,
                 out=output,
-            )
+            ),
         )
         register_task(
-            torch_npu.npu_fused_infer_attention_score_v2.out,
+            torch_npu._npu_paged_attention.out,
             {
                 "query": query,
                 "key_cache": self.key_cache,
@@ -1202,7 +1204,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "out": output,
             },
             FIAV2ParamProvider(self._layer_name),
-        ) 
+        )
         return output
 
     def _get_fia_params(self, key: torch.Tensor, value: torch.Tensor, attn_metadata: AscendMetadata, kv_cache=None):
@@ -1676,7 +1678,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        
+
         self._layer_name = layer.layer_name
 
         if output_scale is not None or output_block_scale is not None:

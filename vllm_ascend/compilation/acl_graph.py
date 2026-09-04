@@ -25,11 +25,10 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendMet
 
 from ..utils import vllm_version_is, weak_ref_tensors
 from .updatable_graph import (
-    SharedSource,
     ContextSource,
+    SharedSource,
     UpdatableGraph,
 )
-
 
 _acl_graph_wrappers: weakref.WeakSet[Any] = weakref.WeakSet()
 _STREAM_RESOURCE_ERROR_CODE = "207008"
@@ -279,31 +278,24 @@ class ACLGraphWrapper:
         need_sync = self.runtime_mode == CUDAGraphMode.FULL and not is_draft_eagle
         if not self.enable_enpu and need_sync:
             torch.npu.current_stream().synchronize()
-        
-        if (
-            isinstance(forward_context.attn_metadata, AscendMetadata) 
-            and self.runtime_mode == CUDAGraphMode.FULL
-        ):
+
+        if isinstance(forward_context.attn_metadata, AscendMetadata) and self.runtime_mode == CUDAGraphMode.FULL:
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
             entry.aclgraph.replay()
-        
+
         return entry.output
 
 
     def _updatable_graph_replay(
-        self, 
+        self,
         forward_context,
         graph: UpdatableGraph,
     ):
         if _EXTRA_CTX.is_draft_model:
-            resolved_tasks = graph.resolve_tasks(
-                SharedSource(self.draft_attn_metadata_updates)
-            )
+            resolved_tasks = graph.resolve_tasks(SharedSource(self.draft_attn_metadata_updates))
         else:
-            resolved_tasks = graph.resolve_tasks(
-                ContextSource(forward_context.attn_metadata)
-            )
+            resolved_tasks = graph.resolve_tasks(ContextSource(forward_context.attn_metadata))
         if self.enable_enpu:
             graph.update(self.update_stream, resolved_tasks)
             graph.replay()
@@ -333,9 +325,9 @@ def update_full_graph_params(
     print("AscendAttentionBackend", AscendAttentionBackend)
     if isinstance(attn_backend, AscendAttentionBackend):
         print(292)
-        return 
+        return
 
-    if issubclass(attn_backend, AscendAttentionBackend ):
+    if issubclass(attn_backend, AscendAttentionBackend):
         print(296)
         return
 
