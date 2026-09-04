@@ -17,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
 )
+from vllm_ascend.utils import kv_cache_tensor_layers, vllm_version_is
 
 _NUM_SHARED_BUFFERS = "layerwise_num_shared_buffers"
 _PREFETCH_LAYERS = "layerwise_prefetch_layers"
@@ -293,6 +294,12 @@ def apply_layerwise_kv_cache_plan(
     vllm_config: VllmConfig,
 ) -> None:
     """Rewrite logical layer tensors to use shared physical KV buffers."""
+    if not vllm_version_is("0.27.1"):
+        # The standardized KV cache layout packs each spec bucket's layers
+        # into one shared backing allocation, so the per-layer tensor
+        # descriptors this optimization rewrites no longer exist. Skip the
+        # reuse layout; correctness is unaffected.
+        return
     extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
     if extra_config is None:
         return
@@ -311,7 +318,10 @@ def apply_layerwise_kv_cache_plan(
     actual_layers = len(reuse_layout.layer_cache_specs)
     if not reuse_layout.has_layer_reuse:
         return
-    if any(len(tensor.shared_by) != 1 or tensor.offset != 0 or tensor.block_stride != 0 for tensor in old_tensors):
+    if any(
+        len(kv_cache_tensor_layers(tensor)) != 1 or tensor.offset != 0 or tensor.block_stride != 0
+        for tensor in old_tensors
+    ):
         raise NotImplementedError(
             "Layerwise KV cache reuse does not support pre-shared or packed KV cache tensor descriptors."
         )
@@ -330,7 +340,7 @@ def apply_layerwise_kv_cache_plan(
             actual_layers - base_layers,
         )
 
-    tensors_by_name = {tensor.shared_by[0]: tensor for tensor in old_tensors}
+    tensors_by_name = {kv_cache_tensor_layers(tensor)[0]: tensor for tensor in old_tensors}
 
     def _merge_specs(named_specs: list[NamedKVCacheSpec]) -> None:
         shared_by = [named_spec.layer_name for named_spec in named_specs]
@@ -345,7 +355,7 @@ def apply_layerwise_kv_cache_plan(
             )
         new_tensors.append(
             KVCacheTensor(
-                shared_by=shared_by,
+                shared_by=shared_by,  # type: ignore[call-arg]
                 size=cache_tensors[0].size,
             )
         )

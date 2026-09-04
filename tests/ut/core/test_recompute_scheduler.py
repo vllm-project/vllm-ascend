@@ -176,7 +176,7 @@ def test_dsv4_decode_node_observes_real_dense_local_cache_hit():
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.uint8,
-                    compress_ratio=4,
+                    **({"compress_ratio": 4} if vllm_version_is("0.27.1") else {"tokens_per_state": 4}),
                     model_version="deepseek_v4",
                 ),
             ),

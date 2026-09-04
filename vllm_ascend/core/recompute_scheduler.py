@@ -58,6 +58,7 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
     print_scheduler_summary,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -1213,7 +1214,15 @@ class RecomputeScheduler(Scheduler):
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
-            elif getattr(self, "is_encoder_only", False) and request.num_computed_tokens >= request.num_prompt_tokens:
+            elif (
+                getattr(
+                    self,
+                    # Upstream renamed the scheduler attribute on main.
+                    "is_encoder_only" if vllm_version_is("0.27.1") else "is_mm_encoder_only",
+                    False,
+                )
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 

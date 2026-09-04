@@ -38,6 +38,25 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import vllm_version_is
+
+
+def _make_kv_cache_tensor(size: int, layer_name: str) -> KVCacheTensor:
+    """Version-aware single-layer KV cache tensor descriptor."""
+    if vllm_version_is("0.27.1"):
+        return KVCacheTensor(size=size, shared_by=[layer_name])
+    return KVCacheTensor(size=size, layers=[layer_name], layer_stride=size, block_stride=0)
+
+
+def _mla_compression_kwargs(ratio: int) -> dict[str, int]:
+    """Compression kwarg for MLA specs across vLLM versions.
+
+    v0.27.1 carries it in ``compress_ratio``; newer versions express the same
+    quantity as ``tokens_per_state``.
+    """
+    if vllm_version_is("0.27.1"):
+        return {"compress_ratio": ratio}
+    return {"tokens_per_state": ratio}
 
 
 def _make_hybrid_kv_cache_config(
@@ -59,8 +78,8 @@ def _make_hybrid_kv_cache_config(
     return KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[
-            KVCacheTensor(size=full_spec.page_size_bytes * 10, shared_by=["attn"]),
-            KVCacheTensor(size=mamba_spec.page_size_bytes * 10, shared_by=["mamba"]),
+            _make_kv_cache_tensor(full_spec.page_size_bytes * 10, "attn"),
+            _make_kv_cache_tensor(mamba_spec.page_size_bytes * 10, "mamba"),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=full_spec),
@@ -134,7 +153,7 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=4,
+        **_mla_compression_kwargs(4),
         model_version="deepseek_v4",
     )
     c128_spec = MLAAttentionSpec(
@@ -142,7 +161,7 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=128,
+        **_mla_compression_kwargs(128),
         model_version="deepseek_v4",
     )
     c4_group_spec = UniformTypeKVCacheSpecs.from_specs({"c4_attn": c4_spec})
@@ -152,8 +171,8 @@ def _make_deepseek_v4_kv_cache_config() -> KVCacheConfig:
     return KVCacheConfig(
         num_blocks=10,
         kv_cache_tensors=[
-            KVCacheTensor(size=c4_spec.page_size_bytes * 10, shared_by=["c4_attn"]),
-            KVCacheTensor(size=c128_spec.page_size_bytes * 10, shared_by=["c128_attn"]),
+            _make_kv_cache_tensor(c4_spec.page_size_bytes * 10, "c4_attn"),
+            _make_kv_cache_tensor(c128_spec.page_size_bytes * 10, "c128_attn"),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(layer_names=["c4_attn"], kv_cache_spec=c4_group_spec),
@@ -219,10 +238,11 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
         page_size_padded=(512 // 4) * (128 * 2 + 2) + 128,
         compress_ratio=4,
         model_version="deepseek_v4",
-        indexes_kv_by_block_stride=True,
         scale_dim=1,
         scale_dtype=torch.float16,
     )
+    if vllm_version_is("0.27.1"):
+        spec = replace(spec, indexes_kv_by_block_stride=True)  # type: ignore[call-arg]
 
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
 
@@ -231,7 +251,11 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     assert merged.page_size_bytes == spec.page_size_padded
     assert merged.compress_ratio == spec.compress_ratio
     assert merged.model_version == spec.model_version
-    assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
+    if vllm_version_is("0.27.1"):
+        assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
+    else:
+        # The field was removed upstream; compression now lives in tokens_per_state.
+        assert merged.tokens_per_state == spec.tokens_per_state
     assert merged.scale_dim == spec.scale_dim
     assert merged.scale_dtype == spec.scale_dtype
 
@@ -269,7 +293,7 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=128,
+        **_mla_compression_kwargs(128),
         model_version="deepseek_v4",
     )
     c4_spec = MLAAttentionSpec(
@@ -277,7 +301,7 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=4,
+        **_mla_compression_kwargs(4),
         model_version="deepseek_v4",
     )
     swa_spec = SlidingWindowMLASpec(
@@ -358,6 +382,7 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
     assert scheduler_config.needs_kv_cache_zeroing
 
 
+@pytest.mark.skipif(not vllm_version_is("0.27.1"), reason="DeepSeek V4 packed tensor planning is v0.27.1-only")
 def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> None:
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
     assert groups is not None
@@ -709,7 +734,7 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         head_size=512,
         dtype=torch.float32,
         sliding_window=128,  # DeepSeek V4 window
-        compress_ratio=1,
+        **_mla_compression_kwargs(1),
     )
     alignment_tokens = 4096  # lcm_block_size
 

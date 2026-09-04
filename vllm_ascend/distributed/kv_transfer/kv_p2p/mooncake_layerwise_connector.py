@@ -70,7 +70,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_rank
-from vllm_ascend.utils import npu_stream_switch, trans_nd_to_nz
+from vllm_ascend.utils import kv_cache_tensor_layers, npu_stream_switch, trans_nd_to_nz
 
 # isort: off
 if TYPE_CHECKING:
@@ -1373,7 +1373,7 @@ class MooncakeLayerwiseConnectorWorker:
         use_mamba, use_attn = False, False
         conv_total_padding_size = 0
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in kv_cache_tensor_layers(kv_cache_tensor):
                 layer_kv_cache_spec = self.kv_cache_specs[layer2group_ids[layer_name]]
                 if isinstance(layer_kv_cache_spec, MambaSpec):
                     use_mamba = True
@@ -1445,7 +1445,7 @@ class MooncakeLayerwiseConnectorWorker:
         if self.use_attn_mamba_hybrid:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 tensor_addrs = []
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in kv_cache_tensor_layers(kv_cache_tensor):
                     tensor_addrs.extend(self.layer_metadata[layer_name].kv_caches_base_addr)
                     if "mtp" in layer_name:
                         tensor_addrs.append(min(tensor_addrs) - conv_total_padding_size)

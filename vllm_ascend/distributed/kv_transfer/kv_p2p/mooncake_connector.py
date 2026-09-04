@@ -73,6 +73,8 @@ from vllm_ascend.distributed.utils import (
 from vllm_ascend.utils import (
     enable_custom_op,
     enable_sfa_dcp_replicated_indexer,
+    kv_cache_tensor_compress_ratio,
+    kv_cache_tensor_layers,
     model_uses_sfa_sparse,
 )
 
@@ -1784,8 +1786,8 @@ class MooncakeConnectorScheduler:
         for spec in specs:
             if isinstance(spec, SlidingWindowSpec):
                 sliding_window = spec.sliding_window
-            elif hasattr(spec, "compress_ratio"):
-                compress_ratio = spec.compress_ratio
+            elif hasattr(spec, "compress_ratio") or hasattr(spec, "tokens_per_state"):
+                compress_ratio = kv_cache_tensor_compress_ratio(spec)
 
         return GroupTransferInfo(
             tokens_per_block=block_size * max(1, int(compress_ratio)),
@@ -2466,7 +2468,7 @@ class MooncakeConnectorWorker:
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_tensors: list[torch.Tensor] = []
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in kv_cache_tensor_layers(kv_cache_tensor):
                 for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
                     shared_tensors.append(single_kv_cache)
 
@@ -2495,7 +2497,7 @@ class MooncakeConnectorWorker:
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_addrs: list[int] = []
-            for layer_name in kv_cache_tensor.shared_by:
+            for layer_name in kv_cache_tensor_layers(kv_cache_tensor):
                 for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
                     shared_addrs.append(single_kv_cache.data_ptr())
 
