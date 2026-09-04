@@ -3,6 +3,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar
 
+import numpy as np
 import scipy  # type: ignore
 import torch
 import torch_npu
@@ -66,6 +67,8 @@ if TYPE_CHECKING:
 
 # token count limits within bmm_transpose operator
 BMM_TRANS_MAX_SUPPORTED_TOKENS = 1024
+SFA_INDEXER_SPARSE_COUNT = 2048
+SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE = 128
 
 
 class PreprocessType(enum.Enum):
@@ -414,6 +417,7 @@ class AscendSFAImpl(MLAAttentionImpl):
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
+    _full_visible_index_tables: dict[torch.device, torch.Tensor] = {}
 
     def __init__(
         self,
@@ -450,6 +454,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.q_a_layernorm = kwargs.get("q_a_layernorm")
         self.tp_size = get_tensor_model_parallel_world_size()
         self.skip_topk = kwargs.get("skip_topk", False)
+        self.allow_short_prefill_indexer_scoring_skip = kwargs.get("allow_short_prefill_indexer_scoring_skip", False)
         self.topk_indices_buffer = kwargs.get("topk_indices_buffer")
 
         ascend_config = get_ascend_config()
@@ -530,6 +535,61 @@ class AscendSFAImpl(MLAAttentionImpl):
         self.enable_mlapo = bool(get_ascend_config().enable_mlapo)
 
         self.enable_sp = enable_sp()
+        self._full_visible_index_table: torch.Tensor | None = None
+        if ascend_config.enable_sfa_full_visible_index_bypass and self.allow_short_prefill_indexer_scoring_skip:
+            device = torch.device("npu", torch.npu.current_device())
+            self._full_visible_index_table = self._get_or_create_full_visible_index_table(device)
+
+    @classmethod
+    def _get_or_create_full_visible_index_table(cls, device: torch.device) -> torch.Tensor:
+        table = cls._full_visible_index_tables.get(device)
+        if table is None:
+            order = (
+                np.arange(SFA_INDEXER_SPARSE_COUNT, dtype=np.int32)
+                .reshape(-1, SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE)
+                .T.reshape(-1)
+            )
+            host_table = np.full(
+                (SFA_INDEXER_SPARSE_COUNT + 1, SFA_INDEXER_SPARSE_COUNT),
+                -1,
+                dtype=np.int32,
+            )
+            for visible_len in range(1, SFA_INDEXER_SPARSE_COUNT + 1):
+                visible = order[order < visible_len]
+                host_table[visible_len, :visible_len] = visible
+            table = torch.from_numpy(host_table).to(device=device)
+            cls._full_visible_index_tables[device] = table
+        return table
+
+    def _get_full_visible_topk_indices(
+        self,
+        attn_metadata: AscendSFAMetadata,
+        topk_num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if (
+            type(self) is not AscendSFAImpl
+            or not get_ascend_config().enable_sfa_full_visible_index_bypass
+            or not self.allow_short_prefill_indexer_scoring_skip
+            or self.skip_topk
+            or not self.has_indexer
+            or self.enable_sparse_sfa_c8
+            or self.enable_sparse_li_c8
+            or attn_metadata.attn_state
+            not in (AscendAttentionState.PrefillNoCache, AscendAttentionState.PrefillCacheHit)
+            or attn_metadata.block_size != SFA_FULL_VISIBLE_TEMPLATE_BLOCK_SIZE
+            or attn_metadata.seq_lens_cpu is None
+            or attn_metadata.seq_lens_cpu.numel() != 1
+            or attn_metadata.num_actual_tokens != topk_num_tokens
+            or self._full_visible_index_table is None
+            or self._full_visible_index_table.device != device
+        ):
+            return None
+        kv_length = int(attn_metadata.seq_lens_cpu[0])
+        context_length = kv_length - attn_metadata.num_actual_tokens
+        if context_length < 0 or kv_length > SFA_INDEXER_SPARSE_COUNT:
+            return None
+        return self._full_visible_index_table[context_length + 1 : kv_length + 1].unsqueeze(1)
 
     @property
     def kv_cache_indexer_k_idx(self) -> int:
@@ -1667,16 +1727,22 @@ class AscendSFAImpl(MLAAttentionImpl):
             if not self.has_indexer:
                 raise RuntimeError(f"skip_topk is False but indexer is None. layer_name={self.layer_name}.")
             assert q_c is not None
-            topk_indices = self.indexer_select_post_process(
-                x=hidden_states,
-                q_c=q_c,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                cos=cos,
-                sin=sin,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
+            topk_indices = self._get_full_visible_topk_indices(
+                attn_metadata,
+                parallel_context.topk_num_tokens,
+                hidden_states.device,
             )
+            if topk_indices is None:
+                topk_indices = self.indexer_select_post_process(
+                    x=hidden_states,
+                    q_c=q_c,
+                    kv_cache=kv_cache,
+                    attn_metadata=attn_metadata,
+                    cos=cos,
+                    sin=sin,
+                    actual_seq_lengths_query=actual_seq_lengths_query,
+                    actual_seq_lengths_key=actual_seq_lengths_key,
+                )
             if self.use_index_cache:
                 self._update_indexcache_topk_indices(topk_indices)
 
