@@ -601,7 +601,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
 
     def set_update_stream(self, update_stream):
-        self._runnable.set_update_stream(update_stream)
+        self._runnable.set_update_stream(update_stream) # type: ignore
 
     def _build_draft_attn_metadata_updates(self, multi_steps_attn_metadata):
         update_params = []
@@ -799,7 +799,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
-            self._runnable.set_draft_attn_metadata_updates(update_params)
+            self._runnable.set_draft_attn_metadata_updates(update_params) # type: ignore
 
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
@@ -1133,7 +1133,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
-            self._runnable.set_draft_attn_metadata_updates(update_params)
+            self._runnable.set_draft_attn_metadata_updates(update_params) # type: ignore
 
         active_device_metadata_executor = (
             getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
