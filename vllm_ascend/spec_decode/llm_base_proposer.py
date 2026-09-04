@@ -54,6 +54,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
+from vllm_ascend.models.glm5_dspark import Glm5DSparkForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
@@ -77,6 +78,7 @@ _HIDDEN_STATE_DRAFTER_TYPES = (
     Eagle3VwnLlamaForCausalLM,
     Eagle3DeepseekV2ForCausalLM,
     DSparkDeepseekV4ForCausalLM,
+    Glm5DSparkForCausalLM,
 )
 
 
@@ -892,7 +894,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         assert self.runner is not None
         dcp_manager = getattr(self.runner, "dcp_manager", None)
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             assert long_seq_args is not None
             _, ori_token_indices_to_sample = long_seq_args
 
@@ -1064,7 +1066,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "slot_indices": None,
             "mtp_slot_mapping": None,
         }
-        if dcp_manager is not None:
+        if dcp_manager is not None and not self.parallel_drafting:
             dcp_mtp_inputs = dcp_manager.prepare_spec_decode_mtp_drafting_inputs(
                 common_attn_metadata=common_attn_metadata,
                 attn_metadata=attn_metadata_i,
@@ -2430,6 +2432,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # (dspark only - self.sliding_window is None for MTP.)
                 if self.sliding_window is not None:
                     self.sliding_window.apply(common_attn_metadata)
+                dcp_manager = getattr(self.runner, "dcp_manager", None)
+                if dcp_manager is not None and dcp_manager._is_mla_kv_cache_spec(attn_group.kv_cache_spec):
+                    seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+                    if seq_lens_cpu is None:
+                        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+                    dcp_manager.prepare_parallel_drafting_dcp_metadata(
+                        common_attn_metadata=common_attn_metadata,
+                        kv_cache_spec=attn_group.kv_cache_spec,
+                        seq_lens=common_attn_metadata.seq_lens,
+                        seq_lens_cpu=seq_lens_cpu,
+                    )
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )

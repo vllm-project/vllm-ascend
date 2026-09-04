@@ -485,6 +485,49 @@ class DCPManager:
 
         return isinstance(attn_metadata_builder, AscendSFADCPMetadataBuilder)
 
+    def prepare_parallel_drafting_dcp_metadata(
+        self,
+        common_attn_metadata: Any,
+        kv_cache_spec: Any,
+        seq_lens: torch.Tensor,
+        seq_lens_cpu: torch.Tensor | None = None,
+    ) -> None:
+        """Prepare DCP metadata for a parallel drafting proposal block."""
+        assert self._is_mla_kv_cache_spec(kv_cache_spec), "Parallel drafting with DCP requires an MLA KV cache."
+        dcp_metadata = common_attn_metadata.context_parallel_metadata
+        assert dcp_metadata is not None, "DCP metadata must be populated for parallel drafting."
+
+        dcp_metadata = copy.copy(dcp_metadata)
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        dcp_metadata.query_lens_cpu = query_lens_cpu
+        dcp_metadata.max_query_len = int(query_lens_cpu.max().item()) if query_lens_cpu.numel() else 0
+
+        num_draft_reqs = query_lens_cpu.shape[0]
+        if seq_lens_cpu is None:
+            draft_seq_lens_cpu = seq_lens[:num_draft_reqs].to("cpu")
+        else:
+            draft_seq_lens_cpu = seq_lens_cpu[:num_draft_reqs]
+        draft_base_seq_lens = draft_seq_lens_cpu.to(dtype=query_lens_cpu.dtype) - query_lens_cpu
+        dcp_metadata.draft_base_seq_lens = draft_base_seq_lens
+
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens[:num_draft_reqs])
+        dcp_metadata.num_computed_tokens_of_dcp = local_seq_lens
+        dcp_metadata.draft_cp_seq_len = local_seq_lens[:, self.dcp_world_rank]
+
+        mask = self.generate_mtp_attention_mask_for_decode(
+            draft_base_seq_lens.tolist(),
+            query_lens_cpu.numpy(),
+            num_decode_reqs=num_draft_reqs,
+        )
+        self.dcp_mtp_attn_mask.np[:num_draft_reqs] = mask
+        self.dcp_mtp_attn_mask.copy_to_gpu(num_draft_reqs)
+        dcp_metadata.dcp_mtp_attn_mask = self.dcp_mtp_attn_mask.gpu[:num_draft_reqs]
+        common_attn_metadata.context_parallel_metadata = dcp_metadata
+
+        if common_attn_metadata.is_prefilling is not None:
+            common_attn_metadata.is_prefilling = torch.zeros_like(common_attn_metadata.is_prefilling)
+
     def prepare_spec_decode_drafting_cp_metadata(
         self,
         common_attn_metadata: Any,

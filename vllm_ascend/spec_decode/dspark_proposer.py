@@ -6,7 +6,7 @@ from typing import Any
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -262,6 +262,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             gid = attn_group.kv_cache_group_id
             gid_block_table = self._per_group_block_table_buffers[gid]
             kernel_block_size = self._per_group_kernel_block_sizes[gid]
+            assert self.runner is not None
+            block_table = self.runner.input_batch.block_table[gid]
             copy_and_expand_dflash_and_dspark_inputs_kernel[
                 (_compute_num_programs(self._dflash_num_context, num_query_total),)
             ](
@@ -290,6 +292,13 @@ class AscendDSparkProposer(AscendDflashProposer):
                 num_speculative_tokens=self.num_speculative_tokens,
                 total_input_tokens=self._dflash_num_context,
                 batch_size=batch_size,
+                dcp_rank=block_table.dcp_rank,
+                dcp_logical_block_size=block_table.block_size,
+                dcp_physical_block_size=block_table.physical_block_size,
+                dcp_blocks_per_phys_block=block_table.blocks_per_phys_block,
+                DCP_SIZE=block_table.dcp_world_size,
+                DCP_INTERLEAVE=block_table.cp_kv_cache_interleave_size,
+                PAD_ID=PAD_SLOT_ID,
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
             )

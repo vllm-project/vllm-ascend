@@ -69,9 +69,15 @@ class AscendMlaDCPMetadataBuilder(
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[AscendMLAMetadata] | None = None,
-        supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls,
+            supports_dcp_with_varlen=True,
+        )
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(

@@ -258,6 +258,12 @@ class _DSparkProposerTestBase:
         max_num_tokens: int,
         num_reqs: int,
         block_size: int,
+        dcp_rank: int = 0,
+        dcp_world_size: int = 1,
+        dcp_logical_block_size: int | None = None,
+        dcp_physical_block_size: int | None = None,
+        dcp_blocks_per_phys_block: int = 1,
+        dcp_interleave: int = 1,
         hf_config: SimpleNamespace | None = None,
         draft_attn_causal: bool | None = None,
         draft_sample_method: str = "greedy",
@@ -330,6 +336,21 @@ class _DSparkProposerTestBase:
         proposer._per_group_kernel_block_sizes = {gid: block_size}
         proposer._per_group_query_slot_mapping_buffers = {gid: slot.clone()}
         proposer._per_group_context_slot_mapping_buffers = {gid: slot.clone()}
+        logical_block_size = dcp_logical_block_size or block_size
+        proposer.runner = SimpleNamespace(
+            input_batch=SimpleNamespace(
+                block_table={
+                    gid: SimpleNamespace(
+                        dcp_rank=dcp_rank,
+                        block_size=logical_block_size,
+                        physical_block_size=dcp_physical_block_size or logical_block_size,
+                        blocks_per_phys_block=dcp_blocks_per_phys_block,
+                        dcp_world_size=dcp_world_size,
+                        cp_kv_cache_interleave_size=dcp_interleave,
+                    )
+                }
+            )
+        )
         return proposer
 
     @staticmethod
@@ -591,6 +612,34 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         kwargs = kernel[1,].call_args.kwargs
         assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
         assert kwargs["block_size"] == 128
+
+    def test_query_slot_kernel_receives_dcp_block_table_metadata(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        proposer = self._make_proposer(
+            max_num_tokens=32,
+            num_reqs=1,
+            block_size=7,
+            dcp_rank=1,
+            dcp_world_size=2,
+            dcp_logical_block_size=128,
+            dcp_physical_block_size=256,
+            dcp_blocks_per_phys_block=2,
+            dcp_interleave=4,
+        )
+
+        self._invoke_set_inputs_first_pass(proposer, num_reqs=1, block_size=7)
+
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["dcp_rank"] == 1
+        assert kwargs["dcp_logical_block_size"] == 128
+        assert kwargs["dcp_physical_block_size"] == 256
+        assert kwargs["dcp_blocks_per_phys_block"] == 2
+        assert kwargs["DCP_SIZE"] == 2
+        assert kwargs["DCP_INTERLEAVE"] == 4
 
     def test_cad_rewritten_to_cross_attention_shape(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
