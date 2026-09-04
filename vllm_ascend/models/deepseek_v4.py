@@ -639,9 +639,8 @@ class Compressor(nn.Module):
             return_bias=False,
         )
 
-        # A5 compressor kernel needs float for norm_weight input
-        norm_dtype = torch.float32 if get_ascend_device_type() == AscendDeviceType.A5 else None
-        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=norm_dtype)
+        # Compressor kernel only accepts FP32 norm_weight.
+        self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=torch.float32)
 
         state_dtype = torch.float32
         # TODO(zyj): change following codes if block_size is configurable & refactor the magic numbers
