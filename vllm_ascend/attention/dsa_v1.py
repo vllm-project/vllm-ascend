@@ -2812,9 +2812,11 @@ class AscendDSAImpl(DSAAttentionImpl):
                 self._update_indexcache_topk_indices(compress_topk_idxs, offset=0)
 
         notify_kv_cache_written(layer_name)
-        sas_metadata = (
-            swa_decode_metadata.sas_metadata if self.compress_ratio <= 1 else compressor_decode_metadata.sas_metadata
-        )
+        if self.compress_ratio <= 1:
+            sas_metadata = swa_decode_metadata.sas_metadata
+        else:
+            assert compressor_decode_metadata is not None
+            sas_metadata = compressor_decode_metadata.sas_metadata
         wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(sas_metadata))
         record_attention_compute_start()
         attn_op = DeviceOperator.get_dsa_sparse_attn_op()
