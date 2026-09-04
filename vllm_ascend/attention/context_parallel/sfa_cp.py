@@ -3,14 +3,15 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple, TypeVar
 
 import torch
-import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -858,6 +859,9 @@ class AscendSFADCPMetadataBuilder(
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
+    can_return_lse_for_decode: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -1000,9 +1004,22 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             raise RuntimeError(
                 f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
             )
+        if topk_indices.numel() == 0:
+            return topk_indices
 
-        # Remap the topk indices from the replicated view to the DCP-local KV cache view.
-        # We use float32 for better performance on Ascend.
+        if HAS_TRITON and topk_indices.is_npu:
+            from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
+
+            return remap_sparse_indices_triton(
+                topk_indices,
+                self.dcp_size,
+                self.dcp_rank,
+                self._dcp_interleave_size,
+            )
+
+        # Fallback for environments without Triton: remap the topk indices from
+        # the replicated view to the DCP-local KV cache view. We use float32 for
+        # better performance on Ascend.
         topk_indices_fp32 = topk_indices.to(torch.float32)
         interleave_size = self._dcp_interleave_size
         local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
@@ -1027,47 +1044,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         _, pack_order = torch.sort(pack_keys, dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
-    def _all_to_all_dcp_tensor(
-        self,
-        tensor: torch.Tensor,
-        scatter_dim: int,
-    ) -> torch.Tensor:
-        assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
-        scatter_size = tensor.shape[scatter_dim]
-        if scatter_size % self.dcp_size != 0:
-            raise RuntimeError(
-                "DCP output All2All requires the scatter dimension to be divisible "
-                f"by dcp_size, got shape={tuple(tensor.shape)}, scatter_dim={scatter_dim}, "
-                f"and dcp_size={self.dcp_size}."
-            )
-
-        local_scatter_size = scatter_size // self.dcp_size
-        send = tensor.movedim(scatter_dim, 0).contiguous()
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.dcp_group.device_group)
-        recv = recv.view(self.dcp_size, local_scatter_size, *send.shape[1:])
-        return recv
-
-    @staticmethod
-    def _merge_dcp_outputs_with_torch(
-        output_recv: torch.Tensor,
-        lse_recv: torch.Tensor,
-        token_dim: int,
-    ) -> torch.Tensor:
-        if output_recv.ndim != 4 or lse_recv.ndim != 3 or output_recv.shape[:3] != lse_recv.shape:
-            raise RuntimeError(
-                "DCP output merge expects matching rank/token/head dimensions, "
-                f"got {tuple(output_recv.shape)} and {tuple(lse_recv.shape)}."
-            )
-        if token_dim not in (1, 2):
-            raise RuntimeError(f"DCP output merge token_dim must be 1 or 2, got {token_dim}.")
-        lse_recv = lse_recv.masked_fill(~torch.isfinite(lse_recv), float("-inf"))
-        weights = torch.softmax(lse_recv, dim=0)
-        weights = torch.nan_to_num(weights, nan=0.0)
-
-        output = (output_recv.to(lse_recv.dtype) * weights.unsqueeze(-1)).sum(dim=0)
-        return output.movedim(token_dim - 1, 0).contiguous()
-
     def _merge_dcp_outputs(
         self,
         sfa_output: torch.Tensor,
@@ -1075,7 +1051,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         dsa_cp_context: DSACPContext | None = None,
     ) -> torch.Tensor:
         scatter_dim = 1
-        token_dim = 2
         if dsa_cp_context is not None:
             # DSA-CP keeps heads replicated and shards tokens. The All2All
             # destination must match the token range assigned to this rank.
@@ -1100,11 +1075,15 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                     f"[{dsa_cp_context.local_start}, {dsa_cp_context.local_end_with_pad})."
                 )
             scatter_dim = 0
-            token_dim = 1
 
-        output_recv = self._all_to_all_dcp_tensor(sfa_output, scatter_dim)
-        lse_recv = self._all_to_all_dcp_tensor(softmax_lse, scatter_dim).squeeze(-1)
-        return self._merge_dcp_outputs_with_torch(output_recv, lse_recv, token_dim)
+        assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
+        return torch.ops.vllm.sfa_dcp_a2a_fused(
+            sfa_output,
+            softmax_lse,
+            self.dcp_size,
+            scatter_dim,
+            self.dcp_group.unique_name,
+        )
 
     def _start_dcp_query_gather(
         self,

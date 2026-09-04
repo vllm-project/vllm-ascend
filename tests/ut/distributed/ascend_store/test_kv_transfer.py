@@ -219,8 +219,10 @@ class TestKVTransferThread(unittest.TestCase):
 
 class TestGVALayerTransferFailures(unittest.TestCase):
     def _make_sending_thread(self):
+        # Plain mock store: the layerwise threads are backend-agnostic.
+        # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
-        store.store.batch_copy.return_value = 0
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
         store.batch_write_finish.return_value = [0]
         builder = MagicMock()
         builder.build_addrs.return_value = LayerBatchReqMeta(
@@ -283,8 +285,10 @@ class TestGVALayerTransferFailures(unittest.TestCase):
 
 class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
     def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
+        # Plain mock store: the layerwise threads are backend-agnostic.
+        # `.store` is attached explicitly to pin batch_copy's return value.
         store = MagicMock()
-        store.store.batch_copy.return_value = 0
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
         load_finished = [threading.Event(), threading.Event()]
         save_finished = [threading.Event(), threading.Event()]
         sync_events = [MagicMock(), MagicMock()]

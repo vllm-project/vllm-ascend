@@ -29,12 +29,13 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
-from vllm_ascend.ascend_config import _MEGA_MOE_SUPPORTED, get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
 from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
@@ -89,18 +90,16 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         # in their native format without explicit casting here.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
-            if _MEGA_MOE_SUPPORTED:
-                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-            else:
+            use_megamoe = use_cann_megamoe(get_current_vllm_config())
+            if not use_megamoe:
                 layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
                 layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-                if enable_fused_mc2 == 1 and self.dynamic_eplb:
-                    layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
-                    layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
-                    del layer.w13_weight
-                    del layer.w2_weight
-                    torch.npu.empty_cache()
+            if use_megamoe or self.dynamic_eplb:
+                layer.w13_weight_list = [weight.clone() for weight in layer.w13_weight.data.unbind(dim=0)]
+                layer.w2_weight_list = [weight.clone() for weight in layer.w2_weight.data.unbind(dim=0)]
+                del layer.w13_weight
+                del layer.w2_weight
+                torch.npu.empty_cache()
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
             layer.w2_weight.data = maybe_trans_nz(layer.w2_weight.data)
@@ -123,7 +122,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
         if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
-            if _MEGA_MOE_SUPPORTED:
+            if _EXTRA_CTX.use_mega_moe:
                 w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
                 w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
                 w1_scale = None
@@ -481,10 +480,9 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         # fp32, which is what npu_moe_token_unpermute expects for its `probs` arg.
         if hidden_states.dtype not in [torch.uint8, torch.float8_e4m3fn]:
             topk_weights = topk_weights.to(hidden_states.dtype)
-        # This is a naive implementation for experts load balance so as to
-        # avoid accumulating too much tokens on a single rank. It is only
-        # activated when doing profile runs.
-        if enable_force_load_balance:
+        if get_ascend_config().enable_force_eplb:
+            topk_ids = get_force_eplb_topk(topk_ids, num_logical_experts)
+        elif enable_force_load_balance:
             random_matrix = torch.rand(
                 topk_ids.size(0),
                 num_logical_experts,

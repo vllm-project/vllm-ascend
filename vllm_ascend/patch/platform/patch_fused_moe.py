@@ -26,6 +26,7 @@
 #   2. from vllm_ascend import ops
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched factory  ✓
 
+import sys
 from collections.abc import Callable
 from inspect import signature
 from types import MethodType
@@ -182,3 +183,10 @@ def _ascend_FusedMoE(
 
 _fused_moe_layer.FusedMoEFactory = _ascend_FusedMoE
 _fused_moe_pkg.FusedMoEFactory = _ascend_FusedMoE
+
+
+for module_name, module in list(sys.modules.items()):
+    if not module_name.startswith("vllm.model_executor.models") or module is None:
+        continue
+    if module.__dict__.get("FusedMoEFactory") is _original_FusedMoE:
+        module.__dict__["FusedMoEFactory"] = _ascend_FusedMoE

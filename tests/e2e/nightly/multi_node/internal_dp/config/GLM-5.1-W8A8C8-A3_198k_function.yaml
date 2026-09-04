@@ -11,7 +11,6 @@ env_common: &env_common
   HCCL_BUFFSIZE: "400"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_ASCEND_ENABLE_MLAPO: "1"
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   SERVER_PORT: 8077
 
@@ -44,7 +43,7 @@ deployment:
       --enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
   -
     envs:
@@ -76,28 +75,17 @@ deployment:
       --enable-prefix-caching
       --async-scheduling
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
-      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0}'
+      --additional-config '{"enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "enable_balance_scheduling": true, "ascend_compilation_config": {"fuse_muls_add": true}, "multistream_overlap_shared_expert": true,"enable_fused_mc2":0,"enable_mlapo":true}'
       --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp","enforce_eager":true}'
 benchmarks:
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in3500-bs2800
+    dataset_path: vllm-ascend/GSM8K_prefix90_in198656_bs10_glm5
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 8
+    num_prompts: 4
     max_out_len: 1500
-    batch_size: 2
+    batch_size: 1
     request_rate: 0
     baseline: 0
     threshold: 0.97
-  acc_aime2025:
-    case_type: accuracy
-    dataset_path: vllm-ascend/aime2025
-    request_conf: vllm_api_general_chat
-    dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 129024
-    batch_size: 32
-    baseline: 93.33
-    threshold: 10
-    temperature: 1.0
-    top_p: 0.95

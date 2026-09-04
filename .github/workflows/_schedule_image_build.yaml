@@ -91,7 +91,7 @@ on:
         description: 'Memcache date'
         required: false
         type: string
-        default: '20260725.3'
+        default: '20260811.14'
       memfabric_version:
         description: 'Memfabric version'
         required: false
@@ -101,7 +101,7 @@ on:
         description: 'Memfabric date'
         required: false
         type: string
-        default: '20260725.3'
+        default: '20260811.7'
       torch_npu_version:
         description: 'Torch NPU version'
         required: false
@@ -111,7 +111,7 @@ on:
         description: 'Torch NPU date'
         required: false
         type: string
-        default: '20260715.4'
+        default: '20260725.3'
       cann_quay_url:
         description: 'CANN Quay URL'
         required: false
@@ -121,7 +121,7 @@ on:
         description: 'CANN version'
         required: false
         type: string
-        default: '2026.08.03'
+        default: '9.1.0_20260731131545'
       triton_ascend_version:
         description: 'Triton Ascend version'
         required: false
@@ -340,11 +340,11 @@ jobs:
           VLLM_COMMIT=${{ inputs.vllm_commit }}
           BUILD_TYPE=${{ inputs.build_type || 'release' }}
           MEMCACHE_VERSION=${{ inputs.memcache_version || '1.2.0' }}
-          MEMCACHE_DATE=${{ inputs.memcache_date || '20260725.3' }}
+          MEMCACHE_DATE=${{ inputs.memcache_date || '20260811.14' }}
           MEMFABRIC_VERSION=${{ inputs.memfabric_version || '1.2.0' }}
-          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260725.3' }}
+          MEMFABRIC_DATE=${{ inputs.memfabric_date || '20260811.7' }}
           TORCH_NPU_VERSION=${{ inputs.torch_npu_version || '26.1.0' }}
-          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260715.4' }}
+          TORCH_NPU_DATE=${{ inputs.torch_npu_date || '20260725.3' }}
           TRITON_ASCEND_VERSION=${{ inputs.triton_ascend_version || '' }}
           TRITON_ASCEND_PACKAGE_VERSION=${{ inputs.triton_ascend_package_version || '3.2.2' }}
           ${{ inputs.build_args }}
@@ -515,7 +515,7 @@ jobs:
             latest=false
 
       - name: Login to SWR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ inputs.swr_registry }}
           username: ${{ secrets.SWR_USERNAME }}

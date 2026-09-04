@@ -164,6 +164,7 @@ class CoverageSelector:
         self.coverage_data_dir = Path(coverage_data_dir) if coverage_data_dir else None
         self.source_dir = Path(source_dir) if source_dir else None
         self.test_case_map = {}  # test_case_name -> {files: {filepath: {lines}}}
+        self._noise_lines_cache = {}  # filepath -> set of noise lines (import + def)
 
     def scan_test_cases(self) -> list[str]:
         """Scan all test case directories"""
@@ -240,6 +241,162 @@ class CoverageSelector:
             print(f"  Warning: Error reading {cov_file}: {e}")
         return files
 
+    def _get_function_def_lines(self, filepath: str) -> set[int]:
+        """
+        Get function definition line numbers (def line only, not function body).
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers where function definitions occur
+        """
+        def_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                source = f.read()
+                lines = source.splitlines()
+
+            tree = ast.parse(source, filename=filepath)
+
+            TARGET_DECORATORS = {"staticmethod", "classmethod", "property"}
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    # Add decorator lines (only @staticmethod, @classmethod, @property)
+                    for decorator in node.decorator_list:
+                        if isinstance(decorator, ast.Name) and decorator.id in TARGET_DECORATORS:
+                            if hasattr(decorator, "lineno") and decorator.lineno:
+                                def_lines.add(decorator.lineno)
+                                # Handle multi-line decorator expressions
+                                if hasattr(decorator, "end_lineno") and decorator.end_lineno:
+                                    for i in range(decorator.lineno, decorator.end_lineno + 1):
+                                        def_lines.add(i)
+
+                    def_lines.add(node.lineno)
+
+                    # Bracket counting to find header end
+                    start_idx = node.lineno - 1
+                    paren_count = lines[start_idx].count("(") - lines[start_idx].count(")")
+
+                    line_idx = start_idx
+                    while paren_count > 0 and line_idx < len(lines):
+                        line_idx += 1
+                        paren_count += lines[line_idx].count("(") - lines[line_idx].count(")")
+
+                    header_end = line_idx + 1  # Convert to 1-indexed
+
+                    # Extend to return type annotation if present
+                    if node.returns:
+                        header_end = max(header_end, node.returns.end_lineno)
+
+                    # Record all lines from def to header end
+                    for i in range(node.lineno, header_end + 1):
+                        def_lines.add(i)
+        except Exception:
+            pass
+        return def_lines
+
+    def _get_class_def_lines(self, filepath: str) -> set[int]:
+        """
+        Get line numbers of all class definition lines.
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers where class definitions occur
+        """
+        class_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=filepath)
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef):
+                    class_lines.add(node.lineno)
+        except Exception:
+            pass
+        return class_lines
+
+    def _get_docstring_lines(self, filepath: str) -> set[int]:
+        """
+        Get line numbers of all docstring lines (module, class, and function).
+
+        Docstrings are string literals that appear as the first statement
+        in a module, class, or function body.
+
+        Args:
+            filepath: Source file path
+
+        Returns:
+            Set of line numbers where docstrings occur
+        """
+        docstring_lines = set()
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                tree = ast.parse(f.read(), filename=filepath)
+
+            # Module-level docstring
+            if tree.body and isinstance(tree.body[0], ast.Expr) and isinstance(tree.body[0].value, ast.Constant):
+                docstring_lines.add(tree.body[0].lineno)
+
+            # Class and function docstrings
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                    if (
+                        node.body
+                        and isinstance(node.body[0], ast.Expr)
+                        and isinstance(node.body[0].value, ast.Constant)
+                    ):
+                        docstring_lines.add(node.body[0].lineno)
+        except Exception:
+            pass
+        return docstring_lines
+
+    def _filter_noise_lines(self, filepath: str, lines: set[int]) -> set[int]:
+        """
+        Filter out invalid noise lines from coverage data:
+        1. import/from...import statement lines
+        2. Function definition lines (def line only)
+        3. Class definition lines
+        4. Docstring lines
+
+        Args:
+            filepath: Source file path
+            lines: Original set of covered line numbers
+
+        Returns:
+            Filtered set with noise lines removed
+        """
+        if not lines:
+            return lines
+
+        # Use cache to avoid re-parsing the same file multiple times
+        if filepath not in self._noise_lines_cache:
+            import_lines = FunctionParser._get_import_lines(filepath)
+            def_lines = self._get_function_def_lines(filepath)
+            class_lines = self._get_class_def_lines(filepath)
+            docstring_lines = self._get_docstring_lines(filepath)
+            self._noise_lines_cache[filepath] = import_lines | def_lines | class_lines | docstring_lines
+
+        return lines - self._noise_lines_cache[filepath]
+
+    def _resolve_source_file(self, filename: str) -> Path | None:
+        """
+        Resolve source file path from relative filename.
+
+        Args:
+            filename: Relative file path (e.g., 'vllm_ascend/core/worker.py')
+
+        Returns:
+            Path object if found, None otherwise
+        """
+        if not self.source_dir:
+            return None
+
+        source_path = self.source_dir / REPO_NAME / filename
+        return source_path if source_path.exists() else None
+
     def build_test_case_map(self) -> dict:
         """Build test case -> covered files mapping (with line numbers)"""
         print("Scanning test cases...")
@@ -258,7 +415,14 @@ class CoverageSelector:
                 for filename in covered_files:
                     lines = self.get_covered_lines_from_file(str(cov_file), filename)
                     if lines:
-                        file_lines_map[filename].update(lines)
+                        # Filter noise lines if source_dir is available
+                        if self.source_dir:
+                            source_file = self._resolve_source_file(filename)
+                            if source_file and source_file.exists():
+                                lines = self._filter_noise_lines(str(source_file), lines)
+                        # Skip files with no coverage after filtering
+                        if lines:
+                            file_lines_map[filename].update(lines)
 
             normalized_name = self.normalize_test_name(test_case)
             self.test_case_map[normalized_name] = {

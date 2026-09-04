@@ -50,7 +50,7 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
 ### 3.2 Verify Multi-node Communication
 
-If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -194,7 +194,7 @@ Expected result: The version information is displayed, matching the pulled image
 
 ### 4.2 Source Code Installation
 
-If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
 
 !!! note
 
@@ -230,9 +230,9 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     Qwen3-32B-W8A8:
 
     ```bash
+    export HCCL_OP_EXPANSION_MODE="AIV"
     export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export HCCL_OP_EXPANSION_MODE="AIV"
 
     vllm serve your_model_path \
         --served-model-name qwen3 \
@@ -250,8 +250,8 @@ Single-node deployment completes both Prefill and Decode within the same node, s
     Qwen3-32B-W4A4:
 
     ```bash
-    export ASCEND_RT_VISIBLE_DEVICES=0,1
     export HCCL_BUFFSIZE=1024
+    export ASCEND_RT_VISIBLE_DEVICES=0,1
     vllm serve your_model_path \
         --port 8004 \
         --data-parallel-size 1 \

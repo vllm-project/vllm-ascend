@@ -28,8 +28,12 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
@@ -272,6 +276,14 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         if attn_metadata is None:
             # V1 profile run
             return
+
+        # Layerwise KV pool hooks must stay inside the custom op body: the
+        # forward() caller region is traced by Dynamo in fullgraph mode, and
+        # these side effects (thread locks, connector waits) would break the
+        # graph. Waiting here still orders the deferred mamba state copy and
+        # the layer load before conv/attention kernels touch mamba state.
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]

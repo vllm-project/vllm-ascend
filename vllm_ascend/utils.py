@@ -25,6 +25,7 @@ import math
 import os
 from contextlib import nullcontext
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -32,6 +33,7 @@ import regex as re
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from safetensors.torch import load_file
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
@@ -44,6 +46,7 @@ from vllm_ascend.device.device_config import (  # noqa: F401
     is_310p,
     is_950,
 )
+from vllm_ascend.device.hardware_profile import HardwareCapability, WeightLayoutPolicy, get_current_hardware_profile
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -114,12 +117,25 @@ def get_dsv4_compress_ratio(config: Any, layer_idx: int) -> int:
     return compress_ratios[layer_idx]
 
 
+def model_uses_kpool_indexer(model_config: Any | None) -> bool:
+    """Return True for GLM-5.3-Flash style kpool indexer models.
+
+    Those models expose ``index_topk`` like DeepSeek SFA but use a kpool
+    indexer over a hybrid MLA + KDA cache, so they must not be routed through
+    the SFA / DSA layouts.
+    """
+    return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
+
+
 def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)
+    if hf_text_config is None:
+        return False
+    if model_uses_kpool_indexer(model_config):
+        return False
     return (
-        hf_text_config is not None
-        and hasattr(hf_text_config, "index_topk")
+        hasattr(hf_text_config, "index_topk")
         and not hasattr(hf_text_config, "compress_ratios")
         and not hasattr(hf_config, "compress_ratios")
     )
@@ -152,7 +168,7 @@ def is_rc_device() -> bool:
     ``accelerators``.
     """
     global _IS_RC_DEVICE
-    if not is_310p():
+    if not get_current_hardware_profile().supports(HardwareCapability.RC_DEVICE_DISCOVERY):
         return False
     if _IS_RC_DEVICE is not None:
         return _IS_RC_DEVICE
@@ -255,8 +271,8 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
     if weight.is_meta:
         return False
 
-    # 310P always converts to NZ.
-    if is_310p():
+    # Some hardware profiles require NZ weight layout.
+    if get_current_hardware_profile().weight_layout_policy is WeightLayoutPolicy.FORCE_NZ:
         return True
 
     # Get config value instead of env
@@ -411,7 +427,7 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    if envs.VLLM_BATCH_INVARIANT or get_ascend_device_type() == AscendDeviceType.A5:
+    if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
@@ -743,8 +759,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
 
         REGISTERED_ASCEND_OPS["GateLinear"] = AscendGateLinear
 
-    # 310P: override selected ops with 310P implementations (keep minimal changes outside _310p)
-    if is_310p():
+    # Override selected ops when the compatibility implementations are required.
+    if get_current_hardware_profile().supports(HardwareCapability.COMPATIBILITY_OP_IMPLEMENTATIONS):
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310, AscendRoutedExperts310
         from vllm_ascend._310p.ops.activation import AscendSiluAndMul310
         from vllm_ascend._310p.ops.conv import AscendConv3dLayer310
@@ -823,6 +839,12 @@ def enable_sp(vllm_config=None) -> bool:
 # TODO remove it after vllm has this func
 def shared_expert_dp_enabled() -> bool:
     return get_ascend_config().enable_shared_expert_dp
+
+
+def is_score_encoder_cache_manager(vllm_config: VllmConfig) -> bool:
+    from vllm_ascend.ec_manager.score_ec_manager import ScoreEncoderCacheManager
+
+    return vllm_config.ec_manager_config.get_encoder_cache_manager_obj() is ScoreEncoderCacheManager
 
 
 def is_moe_model(vllm_config: VllmConfig):
@@ -1102,7 +1124,8 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     - Decode requires MC2 and ascend_config.scheduler_config.recompute_scheduler_enable is True.
 
     Skipping means each rank may have a different number of tokens, so MC2 needs
-    a non-zero global_bs and must NOT receive mc2_mask.
+    a non-zero global_bs and must NOT receive mc2_mask. CANN MegaMoe requires
+    uniform token counts across ranks, so its FUSED_MC2 path cannot skip.
 
     Returns False when hierarchy comm is enabled because hierarchy requires
     global_bs=0 (uniform tokens), which is incompatible with skipping allreduce.
@@ -1128,8 +1151,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     if not is_kv_consumer:
         return False
 
-    from vllm_ascend.ascend_forward_context import select_moe_comm_method
+    from vllm_ascend.ascend_forward_context import select_moe_comm_method, use_cann_megamoe
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
+
+    if use_cann_megamoe(vllm_config):
+        return False
 
     def needs_mc2(n: int) -> bool:
         return select_moe_comm_method(n, vllm_config) in {MoECommType.MC2, MoECommType.FUSED_MC2}
@@ -1527,4 +1553,33 @@ def enable_sfa(vllm_config) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     if hf_text_config is None:
         return False
+    if model_uses_kpool_indexer(model_config):
+        return False
     return hasattr(hf_text_config, "index_topk") and not hasattr(hf_text_config, "compress_ratios")
+
+
+def get_rotation_path(vllm_config: VllmConfig) -> Path | None:
+    quant_config = vllm_config.quant_config
+    if quant_config is None:
+        return None
+    target_model_path = vllm_config.model_config.model
+    try:
+        quant_description = quant_config.quant_description
+        rotation_relative_path = quant_description["optional"]["quarot"]["rotation_map"]["global_rotation"]
+    except KeyError:
+        return None
+    return Path(target_model_path) / rotation_relative_path
+
+
+def get_rotation_matrix(rotation_path: Path | None) -> torch.Tensor:
+    """Load the global rotation matrix."""
+    try:
+        safetensor_data = load_file(rotation_path)
+        Q = safetensor_data["global_rotation"]
+        return Q
+    except Exception as e:
+        logger.error(
+            "Failed to load rotation weight from '%s'. If you want to use quarot model with eagle3, take a check.",
+            rotation_path,
+        )
+        raise e

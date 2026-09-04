@@ -11,12 +11,16 @@ import torch
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import initialize_mamba_ssu_backend
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
@@ -32,6 +36,7 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
+from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
@@ -65,18 +70,18 @@ class NPUModelRunner310V2(NPUModelRunner):
         self.input_ids_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int32, device="cpu")
         self.positions_cpu = torch.zeros(self.max_num_tokens, dtype=torch.int64, device="cpu")
         self.next_prefill_tokens_cpu = torch.zeros(self.max_num_reqs, dtype=torch.int32, device="cpu")
+        # PrefillCacheHit / ChunkedPrefill must not replay FULL mixed ACLGraphs
+        # (same as MRv1 `_determine_batch_execution_and_padding`). FULL_DECODE_ONLY
+        # already keeps those batches eager via mixed_mode=NONE.
+        self._force_eager_pc_batch = False
 
     @staticmethod
     def _validate_config(vllm_config: VllmConfig) -> None:
         model_config = vllm_config.model_config
-        # TODO: Support multimodal and hybrid models in the next 310P MRV2 iteration.
-        if model_config.is_multimodal_model or model_config.is_hybrid:
-            raise NotImplementedError("Multimodal and hybrid models are not supported by model runner v2 on 310P.")
+        # Qwen3-VL (multimodal + MRoPE) and Qwen3.5 (hybrid + GDN + MRoPE) are
+        # in scope for 310P MRv2. MLA / sleep remain unsupported.
         if model_config.use_mla:
             raise NotImplementedError("MLA is not supported by model runner v2 on 310P.")
-        # TODO: Support multi-dimensional RoPE in the next 310P MRV2 iteration.
-        if getattr(model_config, "uses_mrope", False):
-            raise NotImplementedError("Multi-dimensional RoPE is not supported by model runner v2 on 310P.")
         if getattr(model_config, "enable_sleep_mode", False):
             raise NotImplementedError("Sleep mode is not supported by model runner v2 on 310P.")
 
@@ -101,9 +106,8 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Speculative decoding is not supported by model runner v2 on 310P.")
         if vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
-        # TODO: Support prefix caching in the next 310P MRV2 iteration.
-        if vllm_config.cache_config.enable_prefix_caching:
-            raise NotImplementedError("Prefix caching is not supported by model runner v2 on 310P.")
+        # Prefix caching is supported: 310P MRv2 reuses CPU Ascend310PBlockTables /
+        # PrefillCacheHit→splitfuse (attention_v1) and hybrid Mamba page sizing below.
         # TODO: Support LoRA in the next 310P MRV2 iteration.
         if vllm_config.lora_config is not None:
             raise NotImplementedError("LoRA is not supported by model runner v2 on 310P.")
@@ -115,6 +119,11 @@ class NPUModelRunner310V2(NPUModelRunner):
     ) -> AscendInputBatch:
         # TODO: Refactor this Triton-free input preparation through Triton
         # Dispatcher after vLLM RFC #45133 lands.
+        # ``super().execute_model`` has already run finish/add/update_requests and
+        # ``apply_staged_writes``; sync GPU counts now so mamba preprocess matches
+        # the CPU/np values used for positions and slot mappings.
+        self._sync_num_computed_tokens_gpu_from_np()
+
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
@@ -260,8 +269,157 @@ class NPUModelRunner310V2(NPUModelRunner):
         if not vllm_version_is("0.27.1"):
             input_batch_kwargs["has_prefill"] = batch_has_prefill
         input_batch = AscendInputBatch(**input_batch_kwargs)
-        update_cos_sin(input_batch.positions)
+        # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
+        # arange buffer above is only for slot-mapping / non-MRoPE paths.
+        if not self.model_config.uses_mrope:
+            update_cos_sin(input_batch.positions)
         return input_batch
+
+    def _scheduler_output_needs_pc_eager(self, scheduler_output: SchedulerOutput) -> bool:
+        """Force eager for PrefillCacheHit / ChunkedPrefill when mixed FULL graphs exist."""
+        if not self.cache_config.enable_prefix_caching:
+            return False
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        if not cudagraph_mode.has_full_cudagraphs():
+            return False
+        # FULL_DECODE_ONLY: mixed_mode is NONE → prefill/PC hits are already eager.
+        if cudagraph_mode.mixed_mode() != CUDAGraphMode.FULL:
+            return False
+
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
+        if num_reqs == 0:
+            return False
+
+        computed_by_req: dict[str, int] = {}
+        for req in scheduler_output.scheduled_new_reqs:
+            computed_by_req[req.req_id] = int(req.num_computed_tokens)
+        cached = scheduler_output.scheduled_cached_reqs
+        if cached is not None:
+            for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens):
+                computed_by_req[req_id] = int(num_computed)
+        for req_id in num_tokens_per_req:
+            if req_id in computed_by_req:
+                continue
+            req_idx = self.req_states.req_id_to_index.get(req_id)
+            if req_idx is not None:
+                computed_by_req[req_id] = int(self.req_states.num_computed_tokens_np[req_idx])
+
+        req_ids = list(num_tokens_per_req.keys())
+        num_scheduled = np.fromiter(
+            (num_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        seq_lens = np.fromiter(
+            (computed_by_req.get(req_id, 0) + int(num_tokens_per_req[req_id]) for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        attn_state = build_attn_state(
+            self.vllm_config,
+            seq_lens,
+            num_reqs,
+            num_scheduled,
+            num_scheduled,
+        )
+        # Avoid importing AscendAttentionState at module top (heavy attention_v1).
+        return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
+
+    def _install_pc_eager_cudagraph_dispatch(self) -> None:
+        """Wrap ACLGraph dispatch so PrefillCacheHit cannot replay FULL mixed graphs."""
+        manager = self.cudagraph_manager
+        if manager is None or getattr(manager, "_310p_pc_eager_wrapped", False):
+            return
+        orig_dispatch = manager.dispatch
+        runner = self
+
+        def dispatch(
+            num_reqs: int,
+            num_tokens: int,
+            uniform_token_count: int | None,
+            num_active_loras: int,
+            max_query_len: int | None = None,
+        ) -> BatchExecutionDescriptor:
+            if runner._force_eager_pc_batch:
+                return BatchExecutionDescriptor(
+                    cg_mode=CUDAGraphMode.NONE,
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                    num_active_loras=num_active_loras,
+                )
+            return orig_dispatch(
+                num_reqs,
+                num_tokens,
+                uniform_token_count,
+                num_active_loras,
+                max_query_len=max_query_len,
+            )
+
+        manager.dispatch = dispatch  # type: ignore[method-assign]
+        manager._310p_pc_eager_wrapped = True  # type: ignore[attr-defined]
+
+    def _sync_num_computed_tokens_gpu_from_np(self) -> None:
+        """Mirror ``num_computed_tokens_np`` onto GPU before mamba preprocess.
+
+        Must run after ``add_requests`` / ``update_requests`` (see ``prepare_inputs``):
+        ``update_requests`` only refreshes the CPU/np mirror for cached requests,
+        and prefix-cache hits seed ``num_computed_tokens_np`` in ``add_request`` while
+        the GPU tensor may still hold a freed slot or pre-``apply_staged_writes``
+        value. Hybrid align ``preprocess_state`` reads the GPU tensor, so syncing too
+        early in ``execute_model`` leaves stale counts and corrupts recurrent state.
+        """
+        np_vals = self.req_states.num_computed_tokens_np
+        gpu = self.req_states.num_computed_tokens.gpu
+        gpu.copy_(torch.from_numpy(np_vals).to(device=gpu.device, dtype=gpu.dtype))
+        self.req_states.num_computed_tokens_cpu.copy_(torch.from_numpy(np_vals))
+        self.req_states.num_computed_tokens.cpu.copy_(torch.from_numpy(np_vals))
+
+    def _advance_num_computed_tokens(self, valid_indices: torch.Tensor, query_lens: torch.Tensor) -> None:
+        """Advance per-request computed counts on both CPU mirror and GPU tensor."""
+        if valid_indices.numel() == 0:
+            return
+        vi = valid_indices.detach().cpu().numpy()
+        ql = query_lens.detach().cpu().numpy().astype(np.int32, copy=False)
+        self.req_states.num_computed_tokens_np[vi] += ql
+        self.req_states.num_computed_tokens.gpu.index_add_(
+            0,
+            valid_indices,
+            query_lens.to(self.req_states.num_computed_tokens.gpu.dtype),
+        )
+
+    @torch.inference_mode()
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        intermediate_tensors: Any | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        is_profile: bool = False,
+        context_len: int = 0,
+    ):
+        self._force_eager_pc_batch = False
+        if not dummy_run:
+            self._force_eager_pc_batch = self._scheduler_output_needs_pc_eager(scheduler_output)
+        try:
+            if vllm_version_is("0.27.1"):
+                return super().execute_model(
+                    scheduler_output,
+                    intermediate_tensors=intermediate_tensors,
+                    dummy_run=dummy_run,
+                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                    is_profile=is_profile,
+                )
+            return super().execute_model(
+                scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=dummy_run,
+                skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+                is_profile=is_profile,
+                context_len=context_len,
+            )
+        finally:
+            self._force_eager_pc_batch = False
 
     if vllm_version_is("0.27.1"):
 
@@ -286,13 +444,28 @@ class NPUModelRunner310V2(NPUModelRunner):
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         super().finish_requests(scheduler_output)
         if scheduler_output.finished_req_ids:
-            # A freed request slot can be reused and its CPU-owned block table
-            # rewritten in this step. Drain the previous ACLGraph replay before
-            # the new layout is gathered and copied to attention metadata.
+            # Same barrier as 310P MRv1 ``_update_states``: ACLGraph may still
+            # be reading the previous block-table layout while finish_requests
+            # rewrites CPU NumPy tables for a reused slot. Upstream GPU/MRv2
+            # does not need this because it does not use that CPU gather path.
             torch.npu.current_stream().synchronize()
 
+    def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
+        """Restore linear-attention specs omitted by some upstream V2 versions."""
+        kv_cache_spec = super().get_kv_cache_spec()
+        static_forward_context = self.compilation_config.static_forward_context
+        for layer_name, layer in static_forward_context.items():
+            if "linear_attn" not in layer_name or layer_name in kv_cache_spec:
+                continue
+            get_spec = getattr(layer, "get_kv_cache_spec", None)
+            if get_spec is None:
+                continue
+            if spec := get_spec(self.vllm_config):
+                kv_cache_spec[layer_name] = spec
+        return kv_cache_spec
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        """Allocate the 310P attention cache as separate K/V NZ tensors."""
+        """Allocate 310P attention caches as NZ and hybrid Mamba caches as ND."""
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
 
@@ -305,6 +478,12 @@ class NPUModelRunner310V2(NPUModelRunner):
             if spec.block_size <= 128:
                 alignment = 128 // spec.block_size
                 max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
+            if isinstance(spec, MambaSpec):
+                # Without prefix caching, hybrid recurrent state uses one page
+                # per request plus speculative slots (same as 820_new).
+                max_num_blocks = (
+                    max_num_blocks if self.cache_config.enable_prefix_caching else 1
+                ) + spec.num_speculative_blocks
             max_num_blocks_per_group.append(max_num_blocks)
 
         self.attn_groups, attn_cg_support, self.kernel_block_sizes = init_attn_backend(
@@ -322,6 +501,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
         )
+        initialize_mamba_ssu_backend(self.vllm_config.mamba_config, self.kv_cache_config)
 
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
@@ -350,7 +530,10 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.compilation_config.static_forward_context,
             self.kv_caches,
         )
+        if kv_cache_config.needs_kv_cache_zeroing:
+            self._init_kv_zero_meta()
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        self._install_pc_eager_cudagraph_dispatch()
 
     def _adjust_kernel_block_sizes(self, kv_cache_config: KVCacheConfig) -> None:
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -360,9 +543,9 @@ class NPUModelRunner310V2(NPUModelRunner):
             else:
                 specs = (group_spec,)
             attention_specs = [spec for spec in specs if isinstance(spec, AttentionSpec)]
-            if len(attention_specs) != len(specs):
-                # TODO: Support non-attention KV cache specs in the next 310P MRV2 iteration.
-                raise NotImplementedError("Non-attention KV cache specs are not supported by model runner v2 on 310P.")
+            # Hybrid groups may be pure MambaSpec; skip kernel-block sizing.
+            if not attention_specs:
+                continue
             max_head_size = max(spec.head_size for spec in attention_specs)
             if max_head_size > 256:
                 raise NotImplementedError(f"310P paged attention requires head_size <= 256, got {max_head_size}.")
@@ -378,11 +561,22 @@ class NPUModelRunner310V2(NPUModelRunner):
                 )
             self.kernel_block_sizes[group_id] = supported_sizes[0]
 
+    def _init_kv_zero_meta(self) -> None:
+        self.kv_block_zeroer = AscendKVBlockZeroer310V2(self.device, is_pin_memory_available())
+        self.kv_block_zeroer.init_meta(
+            attn_groups_iter=(group for groups in self.attn_groups for group in groups),
+            kernel_block_sizes=self.kernel_block_sizes,
+            cache_dtype=self.cache_config.cache_dtype,
+            runner_only_attn_layers=getattr(self, "runner_only_attn_layers", set()),
+            static_forward_context=self.compilation_config.static_forward_context,
+        )
+
     def _allocate_kv_cache_tensors(
         self,
         kv_cache_config: KVCacheConfig,
         shared_layers: dict[str, str],
     ) -> dict[str, Any]:
+        """Allocate attention caches as NZ and hybrid Mamba state as ND."""
         layer_specs: dict[str, KVCacheSpec] = {}
         layer_group_ids: dict[str, int] = {}
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
@@ -407,50 +601,85 @@ class NPUModelRunner310V2(NPUModelRunner):
                 continue
             cache_groups: dict[tuple[Any, ...], list[str]] = {}
             for layer_name in layer_names:
-                spec = layer_specs[layer_name]
-                if not isinstance(spec, AttentionSpec):
-                    raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(spec).__name__}.")
-                backend = layer_backends[layer_name]
-                group_id = layer_group_ids[layer_name]
-                storage_block_size = getattr(spec, "storage_block_size", spec.block_size)
-                kernel_block_size = (
-                    storage_block_size if storage_block_size != spec.block_size else self.kernel_block_sizes[group_id]
-                )
-                cache_groups.setdefault((spec, backend, kernel_block_size), []).append(layer_name)
+                kv_cache_spec = layer_specs[layer_name]
+                cache_key: tuple[Any, ...]
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    backend = layer_backends[layer_name]
+                    group_id = layer_group_ids[layer_name]
+                    storage_block_size = getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+                    kernel_block_size = (
+                        storage_block_size
+                        if storage_block_size != kv_cache_spec.block_size
+                        else self.kernel_block_sizes[group_id]
+                    )
+                    cache_key = (kv_cache_spec, backend, kernel_block_size)
+                else:
+                    cache_key = (kv_cache_spec,)
+                cache_groups.setdefault(cache_key, []).append(layer_name)
 
-            for (spec, backend, kernel_block_size), cache_layer_names in cache_groups.items():
-                if not issubclass(backend, AscendAttentionBackend310):
-                    raise TypeError(f"310P selected unexpected attention backend {backend}.")
-                if kv_cache_tensor.size % spec.page_size_bytes != 0:
+            for cache_key, cache_layer_names in cache_groups.items():
+                layer_name = cache_layer_names[0]
+                kv_cache_spec = layer_specs[layer_name]
+                if kv_cache_tensor.size % kv_cache_spec.page_size_bytes != 0:
                     raise ValueError("KV cache allocation is not page aligned.")
-                num_blocks = kv_cache_tensor.size // spec.page_size_bytes
+                num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError("KV cache allocation contains fewer blocks than requested.")
-                blocks_per_kv_block = spec.block_size // kernel_block_size
-                kv_cache_shape = backend.get_kv_cache_shape(
-                    num_blocks * blocks_per_kv_block,
-                    kernel_block_size,
-                    spec.num_kv_heads,
-                    spec.head_size,
-                    self.cache_config.cache_dtype,
-                )
-                if getattr(spec, "head_size_v", spec.head_size) != spec.head_size:
-                    raise NotImplementedError("310P MRV2 does not support asymmetric K/V head sizes.")
-                cache_shape = kv_cache_shape[1:]
-                k_cache = torch_npu.empty_with_format(
-                    size=cache_shape,
-                    dtype=spec.dtype,
-                    device=self.device,
-                    acl_format=ACL_FORMAT_FRACTAL_NZ,
-                )
-                v_cache = torch_npu.empty_with_format(
-                    size=cache_shape,
-                    dtype=spec.dtype,
-                    device=self.device,
-                    acl_format=ACL_FORMAT_FRACTAL_NZ,
-                )
-                for layer_name in cache_layer_names:
-                    kv_caches[layer_name] = (k_cache, v_cache)
+
+                if isinstance(kv_cache_spec, AttentionSpec):
+                    backend = cache_key[1]
+                    kernel_block_size = cache_key[2]
+                    if not issubclass(backend, AscendAttentionBackend310):
+                        raise TypeError(f"310P selected unexpected attention backend {backend}.")
+                    blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+                    kv_cache_shape = backend.get_kv_cache_shape(
+                        num_blocks * blocks_per_kv_block,
+                        kernel_block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        self.cache_config.cache_dtype,
+                    )
+                    if getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size) != kv_cache_spec.head_size:
+                        raise NotImplementedError("310P MRV2 does not support asymmetric K/V head sizes.")
+                    # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
+                    kv_view_shape = kv_cache_shape[1:]
+                    k_cache = torch_npu.empty_with_format(
+                        size=kv_view_shape,
+                        dtype=kv_cache_spec.dtype,
+                        device=self.device,
+                        acl_format=ACL_FORMAT_FRACTAL_NZ,
+                    )
+                    v_cache = torch_npu.empty_with_format(
+                        size=kv_view_shape,
+                        dtype=kv_cache_spec.dtype,
+                        device=self.device,
+                        acl_format=ACL_FORMAT_FRACTAL_NZ,
+                    )
+                    cache: Any = (k_cache, v_cache)
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    # Hybrid recurrent state stays ND (int8 raw + as_strided views).
+                    raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+                    state_tensors = []
+                    storage_offset_bytes = 0
+                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
+                        dtype_size = get_dtype_size(dtype)
+                        target_shape = (num_blocks, *shape)
+                        stride = torch.empty(target_shape).stride()
+                        state_tensors.append(
+                            torch.as_strided(
+                                raw_tensor.view(dtype),
+                                size=target_shape,
+                                stride=(stride[0], *stride[1:]),
+                                storage_offset=storage_offset_bytes // dtype_size,
+                            )
+                        )
+                        storage_offset_bytes += stride[0] * dtype_size
+                    cache = state_tensors
+                else:
+                    raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}.")
+
+                for name in cache_layer_names:
+                    kv_caches[name] = cache
 
         for layer_name, target_layer_name in shared_layers.items():
             kv_caches[layer_name] = kv_caches[target_layer_name]
@@ -640,11 +869,7 @@ class NPUModelRunner310V2(NPUModelRunner):
 
         if query_start_loc is not None:
             query_lens = self._get_valid_query_lens(idx_mapping, query_start_loc)
-            self.req_states.num_computed_tokens.gpu.index_add_(
-                0,
-                valid_indices,
-                query_lens.to(self.req_states.num_computed_tokens.gpu.dtype),
-            )
+            self._advance_num_computed_tokens(valid_indices, query_lens)
         self.model_state.postprocess_state(idx_mapping, num_sampled)
 
     @staticmethod
@@ -658,11 +883,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         return query_lens.masked_select(idx_mapping[:num_query_lens] >= 0)
 
     def postprocess_num_computed_tokens(self, input_batch: AscendInputBatch) -> None:
-        # TODO: Refactor this 310P state update to use Triton Dispatcher after
-        # vLLM RFC #45133 lands.
-        query_lens = input_batch.query_start_loc[1:] - input_batch.query_start_loc[:-1]
-        self.req_states.num_computed_tokens.gpu.index_add_(
-            0,
-            input_batch.idx_mapping,
-            query_lens.to(self.req_states.num_computed_tokens.gpu.dtype),
-        )
+        # ``postprocess_sampled`` already advances ``num_computed_tokens`` on
+        # both the CPU mirror and GPU tensor. Upstream GPU MRv2 splits the work
+        # across ``post_update`` + ``postprocess_num_computed_tokens``; our
+        # Triton-free ``postprocess_sampled`` performs both updates in one pass.
+        del input_batch

@@ -7,19 +7,35 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.attention import dsa_attn_kv_plan
 from vllm_ascend.models.deepseek_v4.compressor import (
     AscendCompressorMetadata,
     AscendCompressorStateCache,
     Compressor,
 )
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage
 
 
 class TestCompressorMetadata:
+    def test_compute_metadata_waits_for_precomputed_output(self):
+        compressor = Compressor.__new__(Compressor)
+        torch.nn.Module.__init__(compressor)
+        outputs = (torch.ones(1), torch.zeros(1), torch.zeros(1, dtype=torch.int32))
+        metadata = SimpleNamespace(
+            compressor_metadata=outputs,
+            compressor_metadata_group_id=11,
+        )
+
+        with patch("vllm_ascend.models.deepseek_v4.compressor.wait_for_device_metadata") as wait:
+            assert compressor._compute_metadata(metadata) is outputs
+
+        wait.assert_called_once_with(DeviceMetadataStage.COMPRESSOR, 11)
+
     def test_compute_metadata_flattens_rotary_inputs(self):
         compressor = Compressor.__new__(Compressor)
         torch.nn.Module.__init__(compressor)
         compressor.compress_ratio = 4
+        compressor.vllm_config = SimpleNamespace()
         full_cos = torch.arange(8).view(2, 1, 1, 4)
         full_sin = -full_cos
         query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32)
@@ -38,13 +54,14 @@ class TestCompressorMetadata:
         result_cos = torch.ones((3, 4))
         result_sin = torch.zeros((3, 4))
         slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
+        plan = SimpleNamespace(get_dsa_compressor_slot_mapping_format=MagicMock(return_value=7))
 
         with (
             patch.object(
-                DeviceOperator,
-                "get_dsa_compressor_slot_mapping_format",
-                return_value=7,
-            ) as get_slot_format,
+                dsa_attn_kv_plan,
+                "get_dsa_attn_kv_plan",
+                return_value=plan,
+            ),
             patch.object(
                 torch.ops._C_ascend,
                 "compressor_metadata",
@@ -57,7 +74,7 @@ class TestCompressorMetadata:
         assert actual[0] is result_cos
         assert actual[1] is result_sin
         assert actual[2] is slot_mapping
-        get_slot_format.assert_called_once_with()
+        plan.get_dsa_compressor_slot_mapping_format.assert_called_once_with()
         args = metadata_op.call_args.args
         assert torch.equal(args[0], full_cos.view(2, 4))
         assert torch.equal(args[1], full_sin.view(2, 4))
@@ -150,7 +167,9 @@ class TestCompressorStateCache:
         cache.block_size = 8
         cache.dtype = torch.float32
         cache.sliding_window = 64
-        vllm_config = SimpleNamespace(cache_config=SimpleNamespace(block_size=128))
+        vllm_config = SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
+        )
 
         spec = cache.get_kv_cache_spec(vllm_config)
 
