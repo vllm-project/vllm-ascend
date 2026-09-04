@@ -325,7 +325,7 @@ def use_updatable_graph(
     num_tokens,
     vllm_config,
 ) -> bool:
-    if(
+    if (
         runtime_mode == CUDAGraphMode.FULL
         and attn_backend is not None
         and issubclass(attn_backend, AscendAttentionBackend)

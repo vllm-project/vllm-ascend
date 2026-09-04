@@ -841,7 +841,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "workspace": workspace,
                 "out": [output_view, softmax_lse],
             },
-            FIAParamProvider(self._layer_name,  self.sliding_window, _EXTRA_CTX.is_draft_model),
+            FIAParamProvider(self._layer_name, self.sliding_window, _EXTRA_CTX.is_draft_model),
         )
         return output, num_tokens
 
