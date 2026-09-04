@@ -164,7 +164,9 @@ def test_unregister_memory_region_releases_registered_tensor_owners():
 def test_unregister_memory_region_keeps_tracking_when_engine_fails():
     backend = RForkTransferBackend.__new__(RForkTransferBackend)
     backend.rfork_transfer_engine = SimpleNamespace(
-        batch_unregister_memory=lambda *args: SimpleNamespace(is_error=lambda: True)
+        batch_unregister_memory=lambda *args: SimpleNamespace(
+            is_error=lambda: True, to_string=lambda: "mock unregister error"
+        )
     )
     stale_blocks = [(4096, 128)]
     backend.registered_weight_blocks = list(stale_blocks)
@@ -309,7 +311,7 @@ def _make_register_memory_region_backend(
 
     def batch_unregister_memory(addresses):
         unregistered_calls.append(list(addresses))
-        return SimpleNamespace(is_error=lambda: unregister_error)
+        return SimpleNamespace(is_error=lambda: unregister_error, to_string=lambda: "mock unregister error")
 
     backend = RForkTransferBackend.__new__(RForkTransferBackend)
     backend.rfork_transfer_engine = SimpleNamespace(
@@ -336,7 +338,7 @@ def test_register_memory_region_skips_shared_weights(monkeypatch):
     storage = torch.arange(100, dtype=torch.float32)
     shared_weight = storage[:10]
     own_weight = storage[20:32].reshape(2, 6)
-    backend, registered_calls = _make_register_memory_region_backend(
+    backend, registered_calls, _ = _make_register_memory_region_backend(
         monkeypatch,
         [("model.embed_tokens.weight", shared_weight), ("layers.0.fc.weight", own_weight)],
         [
