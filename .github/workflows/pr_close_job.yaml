@@ -16,14 +16,16 @@ jobs:
           github-token: ${{ github.token }}
           script: |
             const { owner, repo } = context.repo;
-            const branch = context.payload.pull_request.head.ref;
+            // Use head SHA, not head.ref: a fork PR named "main" would otherwise
+            // cancel origin/main Nightly, Coverage, and E2E runs.
+            const headSha = context.payload.pull_request.head.sha;
 
             const statuses = ["in_progress", "queued", "waiting", "pending", "requested"];
             for (const status of statuses) {
               let page = 1;
               while (true) {
                 const resp = await github.rest.actions.listWorkflowRunsForRepo({
-                  owner, repo, branch, status, per_page: 100, page
+                  owner, repo, head_sha: headSha, status, per_page: 100, page
                 });
 
                 const runs = resp.data.workflow_runs;
