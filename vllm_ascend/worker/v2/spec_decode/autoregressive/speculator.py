@@ -559,19 +559,19 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         num_reqs_padded: int,
         is_draft_model_prefill: bool,
     ) -> list[dict[str, Any]]:
+        metadata = next(
+            metadata
+            for layer_name, metadata in self.model_state.attn_metadata.items()
+            if layer_name in self.draft_attn_layer_names
+        )
         if is_draft_model_prefill:
-            metadata = next(
-                metadata
-                for layer_name, metadata in self.model_state.attn_metadata.items()
-                if layer_name in self.draft_attn_layer_names
-            )
             return [
                 {
-                    "actual_seq_lengths": metadata.query_start_loc,
-                    "actual_seq_lengths_kv": metadata.seq_lens,
+                    "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                    "actual_seq_lengths_kv": metadata.seq_lens_list,
+                    "block_table": metadata.block_tables,
                 }
             ]
-
         assert self.input_batch is not None
         num_reqs = self.input_batch.num_reqs
         query_start_loc = list(range(1, num_reqs_padded + 1))
@@ -585,6 +585,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 {
                     "actual_seq_lengths": query_start_loc,
                     "actual_seq_lengths_kv": seq_lens,
+                    "block_table": metadata.block_tables,
                 }
             )
         return fia_params

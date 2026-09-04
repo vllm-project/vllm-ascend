@@ -538,11 +538,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # for that path.
         self._layer_name: str | None = None
 
-    def get_sinks(self):
-        return self.sinks
-
-    def get_head_size(self):
-        return self.head_size
+    def get_update_condition(self):
+        return (self.sinks, self.head_size)
 
     def _graph_metadata_layer_name(self, layer: AttentionLayer | None = None) -> str | None:
         layer_name = layer.layer_name if layer is not None else self._layer_name

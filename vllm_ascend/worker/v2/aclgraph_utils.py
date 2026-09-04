@@ -24,9 +24,10 @@ from typing import Any
 import torch
 import torch.nn as nn
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.compilation import CUDAGraphMode
+from vllm.config.compilation import CUDAGraphMode, get_layers_from_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -38,7 +39,6 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.utils import using_paged_attention
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
@@ -264,11 +264,16 @@ class ModelAclGraphManager(ModelCudaGraphManager):
 
 
 def use_updatable_graph(attn_backend, num_tokens, vllm_config) -> bool:
+    from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)  
+    first_layer = next(iter(attn_layers.values()))  
+    sinks, head_size = first_layer.impl.get_update_condition() 
+
     if (
         attn_backend is not None
         and issubclass(attn_backend, AscendAttentionBackend)
-        and attn_backend.get_sinks() is None
-        and using_paged_attention(num_tokens, vllm_config, attn_backend.get_head_size())
+        and not sinks
+        and not using_paged_attention(num_tokens, vllm_config, head_size)
     ):
         return True
     else:
