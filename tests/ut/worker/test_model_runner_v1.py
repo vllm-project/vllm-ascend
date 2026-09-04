@@ -1303,12 +1303,8 @@ class TestNPUModelRunnerAsyncH2DStaging(unittest.TestCase):
             self.assertIs(out, npu_values[0])
             sources[0].pin_memory.assert_called_once()
             sources[0].to.assert_called_once_with("npu", non_blocking=True)
-            self.assertEqual(
-                runner._pending_h2d_staging, [(sources[0], events[0])]
-            )
-            events[0].record.assert_called_once_with(
-                fake_npu.current_stream.return_value
-            )
+            self.assertEqual(runner._pending_h2d_staging, [(sources[0], events[0])])
+            events[0].record.assert_called_once_with(fake_npu.current_stream.return_value)
 
             # Unfinished staging tensors are retained across calls.
             events[0].query.return_value = False
