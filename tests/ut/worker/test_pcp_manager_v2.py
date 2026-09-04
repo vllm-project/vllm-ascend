@@ -354,6 +354,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager._input_buffers = input_buffers
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    manager._hidden_restore_idx = torch.arange(4, dtype=torch.int64)
     local_attn_state = object()
 
     with (
@@ -519,7 +520,9 @@ def test_partition_batch_preserves_fia_dummy_layout() -> None:
         max_num_reqs=2,
         max_num_tokens=4,
     )
-    manager.vllm_config = object()
+    # PIECEWISE pads tokens without padding requests, so the request-shaped
+    # metadata must stay at the global batch's request extent.
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
     input_buffers = manager._input_buffers
     assert input_buffers is not None
     input_buffers.positions[0] = 10
@@ -605,7 +608,7 @@ def test_partition_batch_restores_speculative_target_inputs() -> None:
     manager.pcp_rank = 1
     manager.pcp_world_size = 2
     manager._padded_gather_idx = torch.tensor([0, 1, 2, 3, 4, 2, 3, 4, 0, 1])
-    manager.vllm_config = object()
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
     local_attn_state = object()
 
     with (
