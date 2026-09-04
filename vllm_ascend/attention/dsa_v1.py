@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, TypeAlias
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import (
@@ -49,6 +49,11 @@ from vllm_ascend.utils import (
     olora_tp_enable,
     oproj_tp_enable,
 )
+from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataStage,
+    DeviceMetadataTask,
+    wait_for_device_metadata,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
 if TYPE_CHECKING:
@@ -64,8 +69,41 @@ else:
 
 # The SAS and QLI metadata operators use a fixed 1024-element int32 layout.
 DSA_METADATA_BUFFER_SIZE = 1024
+CompressorMetadataOutput: TypeAlias = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 
 _DSV4_DSA_OVERLAP_STREAM = None
+
+
+def build_compressor_metadata_out(
+    metadata: Any,
+    compress_ratio: int,
+    outputs: CompressorMetadataOutput,
+    vllm_config: VllmConfig,
+) -> None:
+    assert metadata.full_compress_cos is not None
+    assert metadata.full_compress_sin is not None
+    assert metadata.start_pos is not None
+    assert metadata.num_actual_reqs is not None
+    full_compress_cos = metadata.full_compress_cos.view(
+        metadata.full_compress_cos.shape[0],
+        metadata.full_compress_cos.shape[-1],
+    )
+    full_compress_sin = metadata.full_compress_sin.view(
+        metadata.full_compress_sin.shape[0],
+        metadata.full_compress_sin.shape[-1],
+    )
+    torch.ops._C_ascend.compressor_metadata_out(
+        full_compress_cos,
+        full_compress_sin,
+        metadata.query_start_loc,
+        metadata.start_pos,
+        metadata.block_table,
+        metadata.storage_block_size,
+        get_dsa_attn_kv_plan(vllm_config).get_dsa_compressor_slot_mapping_format(),
+        compress_ratio,
+        metadata.num_actual_reqs,
+        *outputs,
+    )
 
 
 def dsv4_dsa_overlap_stream() -> torch.npu.Stream:
@@ -236,6 +274,8 @@ class AscendDSAReqMetadata:
     num_actual_reqs: int | None = None
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
+    compressor_metadata: CompressorMetadataOutput | None = None
+    compressor_metadata_group_id: int | None = None
     attn_mask: torch.Tensor | None = None
     cu_cmp_seqlen_list: torch.Tensor = None
     ori_win_left: int | None = None
@@ -305,6 +345,7 @@ def build_dspark_swa_indices(
     seq_lens: torch.Tensor,
     num_decode_tokens: int | None = None,
     index_width: int | None = None,
+    indices_output: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
@@ -343,6 +384,15 @@ def build_dspark_swa_indices(
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
     per_token_lens = torch.repeat_interleave(visible_lens, query_lens, dim=0, output_size=num_decode_tokens)
+
+    if indices_output is not None:
+        if indices_output.shape != per_token_slots.shape:
+            raise ValueError(
+                "DSpark SWA indices output shape does not match active metadata: "
+                f"output={tuple(indices_output.shape)}, active={tuple(per_token_slots.shape)}"
+            )
+        indices_output.copy_(per_token_slots)
+        per_token_slots = indices_output
 
     return per_token_slots, per_token_lens
 
@@ -422,6 +472,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.qli_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
+        self._device_metadata_enabled = False
+        self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
         self.cu_seqlens_cmp_kv = torch.tensor([], device=self.device)
         self.seqused_q = torch.tensor([], device=self.device)
@@ -429,6 +481,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Note(qcs): we use two dimension slot_mapping for kvcache with shape
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
+        self.compressor_metadata_buffers: CompressorMetadataOutput | None = None
+        self.dspark_swa_indices_buffer: torch.Tensor | None = None
 
     def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
@@ -603,6 +657,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_actual_reqs=num_actual_reqs,
             cos=cos,
             sin=sin,
+            full_graph_mode=kwargs.get("full_graph_mode", False),
         )
 
         return self.metadata_cls(  # type: ignore
@@ -706,6 +761,35 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata
         return self.qli_metadata_buffer
 
+    def enable_device_metadata(self) -> None:
+        self._device_metadata_enabled = True
+        if self.compressor_ratio > 1 and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL:
+            max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+            output_shape = (max_tokens, 1, 1, self.model_config.hf_config.qk_rope_head_dim)
+            self.compressor_metadata_buffers = (
+                torch.empty(output_shape, dtype=torch.float32, device=self.device),
+                torch.empty(output_shape, dtype=torch.float32, device=self.device),
+                self.slot_mapping,
+            )
+
+    def enable_dspark_device_metadata(self, max_num_tokens: int) -> None:
+        self.enable_device_metadata()
+        assert self.speculative_config is not None
+        index_width = _aligned_dspark_index_width(
+            self.model_config.hf_config.sliding_window,
+            self.speculative_config.num_speculative_tokens,
+        )
+        self.dspark_swa_indices_buffer = torch.empty(
+            (max_num_tokens, 1, index_width),
+            dtype=torch.int32,
+            device=self.device,
+        )
+
+    def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
+        tasks = self._device_metadata_tasks
+        self._device_metadata_tasks = ()
+        return tasks
+
     def build_req_metadata(
         self,
         common_attn_metadata: AscendCommonAttentionMetadata,
@@ -713,8 +797,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         num_actual_reqs: int | None,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        full_graph_mode: bool = False,
     ) -> AscendDSAReqMetadata:
         assert self.common_ratio_to_sas_metadata is not None
+        metadata_cache = self.common_ratio_to_sas_metadata
         assert self.num_actual_tokens is not None
         num_reqs = common_attn_metadata.num_reqs
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
@@ -734,7 +820,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             if num_actual_reqs < num_reqs:
                 self.start_pos_prefill[num_actual_reqs:num_reqs].fill_(0)
                 self.block_table[num_actual_reqs:num_reqs, ...].fill_(0)
-
         layer_name = f"c{self.compressor_ratio}"
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
@@ -771,34 +856,75 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         elif has_prefill:
             cu_seqlens_ori_kv = query_start_loc
 
-        sas_metadata = self._build_sas_metadata(
-            metadata_cache=self.common_ratio_to_sas_metadata,
-            layer_name=layer_name,
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-        )
-        qli_metadata = self._build_qli_metadata(
-            metadata_cache=self.common_ratio_to_sas_metadata,
-            query_start_loc=query_start_loc,
-            seq_lens=seq_lens,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-        )
+        if self._device_metadata_enabled:
+
+            def build_sas_metadata() -> None:
+                self._build_sas_metadata(
+                    metadata_cache=metadata_cache,
+                    layer_name=layer_name,
+                    query_start_loc=query_start_loc,
+                    seq_lens=seq_lens,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                    cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                )
+
+            def build_qli_metadata() -> None:
+                self._build_qli_metadata(
+                    metadata_cache=metadata_cache,
+                    query_start_loc=query_start_loc,
+                    seq_lens=seq_lens,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                )
+
+            if self.compressor_ratio == 4:
+                self._device_metadata_tasks = (
+                    DeviceMetadataTask(DeviceMetadataStage.INDEXER, build_qli_metadata, id(self.qli_metadata_buffer)),
+                    DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
+                )
+            else:
+                self._device_metadata_tasks = (
+                    DeviceMetadataTask(DeviceMetadataStage.ATTENTION, build_sas_metadata, id(self.sas_metadata_buffer)),
+                )
+            sas_metadata = self.sas_metadata_buffer
+            qli_metadata = self.qli_metadata_buffer if self.compressor_ratio == 4 else None
+        else:
+            self._device_metadata_tasks = ()
+            sas_metadata = self._build_sas_metadata(
+                metadata_cache=metadata_cache,
+                layer_name=layer_name,
+                query_start_loc=query_start_loc,
+                seq_lens=seq_lens,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+            )
+            qli_metadata = self._build_qli_metadata(
+                metadata_cache=metadata_cache,
+                query_start_loc=query_start_loc,
+                seq_lens=seq_lens,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+            )
 
         full_compress_cos, full_compress_sin = None, None
         if self.compressor_ratio > 1:
-            num_compressed_tokens = self._num_compressor_metadata_rows(num_reqs)
+            if full_graph_mode:
+                num_tokens = common_attn_metadata.num_input_tokens
+                num_compressed_tokens = min(num_tokens, num_tokens // self.compressor_ratio + num_reqs)
+                num_actual_reqs = num_reqs
+            else:
+                num_compressed_tokens = self._num_compressor_metadata_rows(num_reqs)
             full_compress_cos, full_compress_sin = get_full_cos_and_sin_dsa(layer_name)
             slot_mapping = None
         else:
             num_compressed_tokens = self.num_actual_tokens
             slot_mapping = self.slot_mapping[: self.num_actual_tokens]
 
-        return AscendDSAReqMetadata(
+        req_metadata = AscendDSAReqMetadata(
             block_table=self.block_table[:num_reqs, ...],
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
@@ -819,6 +945,28 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
         )
+        if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
+            assert num_compressed_tokens is not None
+            buffers = self.compressor_metadata_buffers
+            outputs = (
+                buffers[0][:num_compressed_tokens],
+                buffers[1][:num_compressed_tokens],
+                buffers[2][:num_compressed_tokens],
+            )
+            group_id = id(buffers[0])
+            req_metadata.compressor_metadata = outputs
+            req_metadata.compressor_metadata_group_id = group_id
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(
+                    DeviceMetadataStage.COMPRESSOR,
+                    lambda: build_compressor_metadata_out(
+                        req_metadata, self.compressor_ratio, outputs, self.vllm_config
+                    ),
+                    group_id,
+                ),
+                *self._device_metadata_tasks,
+            )
+        return req_metadata
 
     def build_for_drafting(
         self,
@@ -891,11 +1039,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         has_prefill = self.num_prefills > 0
 
         dspark_swa_indices = None
+        build_dspark_swa = None
         ori_win_left = self.model_config.hf_config.sliding_window - 1
         ori_win_right = 0
         if not common_attn_metadata.causal:
             assert self.speculative_config is not None
-            dspark_swa_indices, _ = build_dspark_swa_indices(
+            dspark_swa_args = (
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
@@ -904,7 +1053,24 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens,
                 self.num_actual_tokens,
             )
-            dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
+            if self._device_metadata_enabled and not has_prefill:
+                if self.dspark_swa_indices_buffer is None:
+                    raise RuntimeError(
+                        "DSpark device metadata buffers must be initialized before building draft attention metadata"
+                    )
+                if self.num_actual_tokens > self.dspark_swa_indices_buffer.shape[0]:
+                    raise ValueError(
+                        "DSpark SWA metadata rows exceed the persistent buffer capacity: "
+                        f"active={self.num_actual_tokens}, capacity={self.dspark_swa_indices_buffer.shape[0]}"
+                    )
+                dspark_swa_indices = self.dspark_swa_indices_buffer[: self.num_actual_tokens]
+                build_dspark_swa = lambda: build_dspark_swa_indices(
+                    *dspark_swa_args,
+                    indices_output=dspark_swa_indices,
+                )
+            else:
+                dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
+                dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
         cu_seqlens_ori_kv = (
@@ -927,35 +1093,53 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
-        sas_metadata = metadata_op(
-            **metadata_kwargs,
-            num_heads_q=n_local_heads,
-            num_heads_kv=1,
-            head_dim=self.model_config.get_head_size(),
-            cu_seqlens_q=query_start_loc,
-            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            seqused_q=self.seqused_q,
-            seqused_kv=seq_lens,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_kv=max_seqlen_kv,
-            batch_size=num_reqs,
-            cmp_ratio=1,
-            ori_mask_mode=4,
-            cmp_mask_mode=3,
-            ori_win_left=ori_win_left,
-            ori_win_right=ori_win_right,
-            layout_q="TND",
-            layout_kv=_dsa_layout_kv(self.vllm_config),
-            has_ori_kv=True,
-            has_cmp_kv=False,
-        )
-        if not has_prefill:
-            assert self.spec_sas_metadata is not None
-            self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
-                sas_metadata[:DSA_METADATA_BUFFER_SIZE]
+
+        def build_attention_metadata() -> torch.Tensor:
+            if build_dspark_swa is not None:
+                build_dspark_swa()
+            result = metadata_op(
+                **metadata_kwargs,
+                num_heads_q=n_local_heads,
+                num_heads_kv=1,
+                head_dim=self.model_config.get_head_size(),
+                cu_seqlens_q=query_start_loc,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                seqused_q=self.seqused_q,
+                seqused_kv=seq_lens,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                batch_size=num_reqs,
+                cmp_ratio=1,
+                ori_mask_mode=4,
+                cmp_mask_mode=3,
+                ori_win_left=ori_win_left,
+                ori_win_right=ori_win_right,
+                layout_q="TND",
+                layout_kv=_dsa_layout_kv(self.vllm_config),
+                has_ori_kv=True,
+                has_cmp_kv=False,
             )
+            if not has_prefill:
+                assert self.spec_sas_metadata is not None
+                self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
+                    result[:DSA_METADATA_BUFFER_SIZE]
+                )
+                return self.spec_sas_metadata[draft_index - 1]
+            return result
+
+        if build_dspark_swa is not None:
             sas_metadata = self.spec_sas_metadata[draft_index - 1]
+
+            def run_attention_metadata() -> None:
+                build_attention_metadata()
+
+            self._device_metadata_tasks = (
+                DeviceMetadataTask(DeviceMetadataStage.ATTENTION, run_attention_metadata, id(sas_metadata)),
+            )
+        else:
+            self._device_metadata_tasks = ()
+            sas_metadata = build_attention_metadata()
 
         assert self.spec_slot_mapping is not None
         slot_mapping = self.spec_slot_mapping[draft_index - 1][: self.num_actual_tokens]
@@ -1669,6 +1853,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
 
         notify_kv_cache_written(layer_name)
+        wait_for_device_metadata(DeviceMetadataStage.ATTENTION, id(common_metadata.sas_metadata))
         record_attention_compute_start()
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         attn_op = kv_plan.get_dsa_sparse_attn_op()

@@ -221,17 +221,30 @@ jobs:
             echo "============================"
           done
 
+  cpu-ut:
+    needs: pre-commit
+    if: ${{ needs.pre-commit.result == 'success' }}
+    uses: ./.github/workflows/_selected_tests.yaml
+    with:
+      vllm: ${{ needs.pre-commit.outputs.main_commit }}
+      ref: ${{ github.event.pull_request.head.sha }}
+      base_ref: ${{ github.base_ref }}
+      test_groups: >-
+        [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
+      enable-coverage: false
+
   recommend-tests:
     name: Recommend tests
-    needs: pre-commit
+    needs: [pre-commit, cpu-ut]
     # The recommendation only runs under the ready-precise label: that is the
     # only mode whose result depends on it. ready-all runs --all-tests and
-    # unlabeled runs select nothing, so both skip this job. The pre-commit
-    # check is explicit so the job can never be made to run after a failed
-    # pre-commit by adding !cancelled().
+    # unlabeled runs select nothing, so both skip this job. The pre-commit +
+    # cpu-ut checks are explicit so the job can never be made to run after a
+    # failed upstream by adding !cancelled().
     if: >-
       ${{
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
         contains(github.event.pull_request.labels.*.name, 'ready-precise')
       }}
     runs-on: linux-amd64-cpu-8-hk
@@ -330,15 +343,16 @@ jobs:
   select-tests:
     needs:
       - pre-commit
+      - cpu-ut
       - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # It runs only when a ready label asks for test execution; unlabeled runs
     # skip it and ci-gate decides whether that is allowed (no src paths) or
     # requires a label (src or ci_pipeline paths present). !cancelled() keeps
     # it out of the graph only when the workflow itself is cancelled; the
-    # explicit pre-commit success check stops it from running when pre-commit
-    # failed (!cancelled() alone would override the transitive skip). The
-    # src/ci_pipeline path categories are computed by the paths-filter step
+    # explicit pre-commit + cpu-ut success check stops it from running when
+    # either failed (!cancelled() alone would override the transitive skip).
+    # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
     #   all         - ready-all forced, or the PR touches the CI pipeline itself
@@ -347,6 +361,7 @@ jobs:
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
+        needs.cpu-ut.result == 'success' &&
         (
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
@@ -461,7 +476,8 @@ jobs:
           echo "Recommended paths from coverage:"
           cat "$LIST_FILE"
           python3 .github/workflows/scripts/select_tests.py \
-            --test-list-file "$LIST_FILE"
+            --test-list-file "$LIST_FILE" \
+            --skip-cpu-ut
 
       - name: Select all tests
         id: scope-all
@@ -469,7 +485,9 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
-          python3 .github/workflows/scripts/select_tests.py --all-tests
+          python3 .github/workflows/scripts/select_tests.py \
+            --all-tests \
+            --skip-cpu-ut
 
       - name: Set no-tests output when no tests selected
         id: noop
@@ -634,7 +652,7 @@ jobs:
   # Summary gate job — use this single, stable name as the required status check
   # in GitHub branch protection rules instead of tracking individual matrix job names.
   ci-gate:
-    needs: [pre-commit, select-tests, run-selected-tests, run-selected-tests-a5]
+    needs: [pre-commit, cpu-ut, select-tests, run-selected-tests, run-selected-tests-a5]
     if: ${{ !cancelled() }}
     runs-on: linux-amd64-cpu-2-hk
     steps:
@@ -649,12 +667,14 @@ jobs:
           set -euo pipefail
 
           PRE_COMMIT_RESULT="${{ needs.pre-commit.result }}"
+          CPU_UT_RESULT="${{ needs.cpu-ut.result }}"
           SELECT_TESTS_RESULT="${{ needs.select-tests.result }}"
           HAS_TESTS="${{ needs.select-tests.outputs.has_tests == 'true' }}"
           HAS_TESTS_A5="${{ needs.select-tests.outputs.has_tests_a5 }}"
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
+          echo "cpu-ut: ${CPU_UT_RESULT}"
           echo "src filter: ${{ needs.pre-commit.outputs.src }}"
           echo "ci_pipeline filter: ${{ needs.pre-commit.outputs.ci_pipeline }}"
           echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
@@ -668,6 +688,12 @@ jobs:
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
             echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})."
             echo "::error::This job runs lint / markdownlint / mypy / gitleaks on all files. Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
+            exit 1
+          fi
+
+          if [ "${CPU_UT_RESULT}" != "success" ]; then
+            echo "::error::cpu-ut did not succeed (result: ${CPU_UT_RESULT})."
+            echo "::error::Open the failed 'cpu-ut' job above, fix the failing test(s) and push again."
             exit 1
           fi
 

@@ -524,7 +524,14 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
 class AscendKimiLinearModel(UpstreamKimiLinearModel):
     """Kimi text model assembled from the Ascend decoder layer."""
 
-    packed_modules_mapping = UpstreamPackedKimiLinearModel.packed_modules_mapping
+    packed_modules_mapping = {
+        name: list(shards) for name, shards in UpstreamPackedKimiLinearModel.packed_modules_mapping.items()
+    }
+    packed_modules_mapping["fused_bfg_proj"] = [
+        "b_proj",
+        "f_a_proj",
+        "g_proj",
+    ]
     # Legacy Qwen3 GQA DSpark checkpoints consume the materialized input
     # to each selected Kimi layer. MLA DSpark checkpoints consume the raw
     # prefix-sum stream used by upstream vLLM, so keep that as the default.
@@ -595,9 +602,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         """Route mixed-precision KDA gates through vLLM's packed loader."""
         params_dict = dict(self.named_parameters())
         gate_mapping = (
-            (".g_proj", ".in_proj_gfab", 0),
-            (".f_a_proj", ".in_proj_gfab", 1),
-            (".b_proj", ".in_proj_gfab", 2),
+            (".b_proj.weight", ".fused_bfg_proj.weight", 0),
+            (".f_a_proj.weight", ".fused_bfg_proj.f_a_weight", None),
+            (".f_b_proj.weight", ".fused_bfg_proj.f_b_weight", None),
+            (".g_proj.weight", ".fused_bfg_proj.weight", 2),
         )
 
         def remap_mixed_gate_weights():
