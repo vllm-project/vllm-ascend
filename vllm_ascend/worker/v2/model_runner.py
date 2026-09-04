@@ -58,6 +58,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
+from vllm_ascend.worker.utils import disable_compilation
 
 if not vllm_version_is("0.27.1"):
     from vllm.v1.worker.gpu.model_runner import BatchReqState
@@ -329,7 +330,9 @@ class NPUModelRunner(GPUModelRunner):
                 and select_moe_comm_method(mc2_tokens_capacity, self.vllm_config)
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
-                self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
+                # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
+                with disable_compilation(self.get_model()):
+                    self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
     if vllm_version_is("0.27.1"):

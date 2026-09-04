@@ -202,7 +202,7 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTaskProvider,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
-from vllm_ascend.worker.utils import AscendKVBlockZeroer
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
 
 from vllm_ascend.ascend_forward_context import (  # isort: skip
     MoECommType,
@@ -3807,7 +3807,9 @@ class NPUModelRunner(GPUModelRunner):
         if self.max_num_tokens > mc2_tokens_capacity and select_moe_comm_method(
             mc2_tokens_capacity, self.vllm_config
         ) in {MoECommType.MC2, MoECommType.FUSED_MC2}:
-            self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
+            # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
+            with disable_compilation(self.get_model()):
+                self._dummy_run(mc2_tokens_capacity, with_prefill=True, is_profile=True)
         super().profile_run()
 
     def eplb_warmup(self):
