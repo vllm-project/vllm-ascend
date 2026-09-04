@@ -14,12 +14,9 @@ def parse_args():
     parser.add_argument("--dp-address", type=str, required=True, help="IP address for data parallel master node.")
     parser.add_argument("--dp-rpc-port", type=str, default=12345, help="Port for data parallel master node.")
     parser.add_argument("--vllm-start-port", type=int, default=9000, help="Starting port for the engine.")
-    parser.add_argument("--is-pd-disaggregated", action="store_true", help="Is pd-disaggregated deployment.")
-    parser.add_argument("--is-prefill", action="store_true", help="Is prefill dp.")
-    args = parser.parse_args()
-    if args.is_prefill and not args.is_pd_disaggregated:
-        parser.error("--is-prefill requires --is-pd-disaggregated.")
-    return args
+    parser.add_argument("--dp-deploy-role", type=str, default="mixed", help="Deploy role of current dp: mixed, prefill, decode.")
+    parser.add_argument("--local-dp-start-rank", type=int, default=0, help="Starting rank for current dp on local device.")
+    return parser.parse_args()
 
 
 args = parse_args()
@@ -32,13 +29,13 @@ dp_rank_start = args.dp_rank_start
 dp_address = args.dp_address
 dp_rpc_port = args.dp_rpc_port
 vllm_start_port = args.vllm_start_port
-template_path = "./run_dp_template.sh"
-if args.is_pd_disaggregated:
-    if args.is_prefill:
-        template_path = "./run_dp_template_p.sh"
-    else:
-        template_path = "./run_dp_template_d.sh"
-
+local_dp_start_rank = args.local_dp_start_rank
+if args.dp_deploy_role == "prefill":
+    template_path = "./run_dp_template_p.sh"
+elif args.dp_deploy_role == "decode":
+    template_path = "./run_dp_template_d.sh"
+else:
+    template_path = "./run_dp_template.sh"
 
 def run_command(visible_devices, dp_rank, vllm_engine_port):
     command = [
@@ -65,7 +62,7 @@ if __name__ == "__main__":
     for i in range(dp_size_local):
         dp_rank = dp_rank_start + i
         vllm_engine_port = vllm_start_port + i
-        visible_devices = ",".join(str(x) for x in range(i * tp_size, (i + 1) * tp_size))
+        visible_devices = ",".join(str(x) for x in range(local_dp_start_rank + i * tp_size, local_dp_start_rank + (i + 1) * tp_size))
         process = multiprocessing.Process(target=run_command, args=(visible_devices, dp_rank, vllm_engine_port))
         processes.append(process)
         process.start()
