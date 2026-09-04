@@ -56,7 +56,8 @@ def _build_case(seed: int = 1234):
     w_nd = (mag | sign).view(torch.float4_e2m1fn_x2).to(DEV)
 
     e = torch.randint(-2, 3, (E, N, kb, 2), generator=gen).float()
-    ws = torch.pow(2.0, e).permute(0, 2, 1, 3).contiguous().to(torch.float8_e8m0fnu).to(DEV)
+    ws_base = torch.pow(2.0, e).to(torch.float8_e8m0fnu).to(DEV)
+    ws = ws_base.transpose(-3, -2)
 
     gl = torch.tensor([4, 4, 4, 4], dtype=torch.int64, device=DEV)
     return x, xs, w_nd, ws, gl
@@ -118,9 +119,8 @@ def _build_empty_case(seed: int = 1234):
 def test_four_weight_forms_byte_identical():
     x, xs, w_nd, ws, gl = _build_case()
     w_nz = to_weight_nz(w_nd)
-    # NZ TensorList elements must be independently allocated (slicing a
-    # stacked NZ tensor yields non-contiguous internal-format views that the
-    # entry-layer cast rejects — hence the dedicated helper).
+    # NZ TensorList elements are independently allocated and passed directly
+    # through the dynamic-input address table.
     w_nz_list = to_weight_nz_list(w_nd)
     ws_list = [ws[ei] for ei in range(E)]
 
@@ -204,12 +204,14 @@ def test_empty_rank_still_validates_metadata():
         )
 
 
-def test_graph_capture_replay_and_dynamic_group_list():
+@pytest.mark.parametrize("use_list", [False, True])
+def test_graph_capture_replay_and_dynamic_group_list(use_list: bool):
     x, xs, w_nd, ws, gl = _build_case()
-    w_nz = to_weight_nz(w_nd)
+    weight = to_weight_nz_list(w_nd) if use_list else to_weight_nz(w_nd)
+    weight_scale = [ws[ei] for ei in range(E)] if use_list else ws
 
     def call():
-        return grouped_matmul_situ_quant(x, xs, w_nz, ws, gl, beta=4.0, linear_beta=25.0)
+        return grouped_matmul_situ_quant(x, xs, weight, weight_scale, gl, beta=4.0, linear_beta=25.0)
 
     y_eager, s_eager = call()
 

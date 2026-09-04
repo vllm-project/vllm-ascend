@@ -111,8 +111,8 @@ def to_weight_nz_list(w_nd: torch.Tensor) -> list[torch.Tensor]:
     """Per-expert NZ cast for the TensorList form of the weight.
 
     Each element is independently allocated ((1, K/2, N) cast of expert ei's
-    (1, N, K/2) slice) — required because slicing a stacked NZ tensor yields
-    internal-format storage views the entry-layer composition rejects.
+    (1, N, K/2) slice). The runtime passes these storages directly through an
+    ACL dynamic-input address table; no forward-time cat or format cast occurs.
     """
     import torch_npu
 
@@ -203,10 +203,9 @@ def grouped_matmul_situ_quant(
         x_scale:    e8m0 (M_cap, ceil(K/64), 2) MX scales of ``x``.
         weight:     NZ form (E, K/2, N) fp4x2 [default], ND packed
                     (E, N, K/2), or a per-expert list of either (``.list``).
-                    NZ list elements MUST be independently allocated
-                    (e.g. ``[to_weight_nz(w[ei:ei+1])[0] ...]``) — slicing a
-                    stacked NZ tensor yields non-contiguous internal-format
-                    views the entry-layer cast rejects.
+                    NZ list elements are passed directly through the custom
+                    op's dynamic address table; their storage is not
+                    concatenated or reformatted.
         weight_scale: e8m0 MX scales, stacked or per-expert list, in either the
             loader's transposed logical view (E, ceil(K/64), N, 2) of N-major
             bytes (non-contiguous; realigned zero-copy here) or an already

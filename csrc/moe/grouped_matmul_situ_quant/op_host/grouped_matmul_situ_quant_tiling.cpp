@@ -11,11 +11,13 @@ namespace {
 
 constexpr size_t INPUT_X_INDEX = 0;
 constexpr size_t INPUT_WEIGHT_INDEX = 2;
+constexpr size_t INPUT_GROUP_LIST_INDEX = 4;
 constexpr size_t ATTR_GROUP_LIST_TYPE_INDEX = 0;
 constexpr size_t ATTR_BETA_INDEX = 1;
 constexpr size_t ATTR_LINEAR_BETA_INDEX = 2;
 constexpr uint32_t BASE_M = 128;
 constexpr uint32_t MAIN_BLOCK_N2 = 64;
+constexpr uint32_t TENSOR_LIST_FLAG = 1U << 1;
 
 struct GroupedMatmulSituQuantCompileInfo {};
 
@@ -23,34 +25,39 @@ struct GroupedMatmulSituQuantCompileInfo {};
 
 ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
 {
-    const auto *xShape = context->GetInputShape(INPUT_X_INDEX);
-    const auto *weightShape = context->GetInputShape(INPUT_WEIGHT_INDEX);
-    if (xShape == nullptr || weightShape == nullptr) {
+    const auto *xShape = context->GetDynamicInputShape(INPUT_X_INDEX, 0);
+    const auto *weightShape = context->GetDynamicInputShape(INPUT_WEIGHT_INDEX, 0);
+    const auto *groupListShape = context->GetDynamicInputShape(INPUT_GROUP_LIST_INDEX, 0);
+    if (xShape == nullptr || weightShape == nullptr || groupListShape == nullptr) {
         OP_LOGE(context->GetNodeName(),
-                "[gmsq_tiling] FAIL: null shape ptr (x=%p weight=%p)",
-                static_cast<const void *>(xShape), static_cast<const void *>(weightShape));
+                "[gmsq_tiling] FAIL: null shape ptr (x=%p weight=%p groupList=%p)",
+                static_cast<const void *>(xShape), static_cast<const void *>(weightShape),
+                static_cast<const void *>(groupListShape));
         return ge::GRAPH_FAILED;
     }
 
     const auto &xOriginShape = xShape->GetOriginShape();
     const auto &weightOriginShape = weightShape->GetOriginShape();
+    const auto &groupListOriginShape = groupListShape->GetOriginShape();
+    const bool isTensorList = context->GetDynamicInputShape(INPUT_WEIGHT_INDEX, 1) != nullptr;
     OP_LOGI(context->GetNodeName(),
-            "[gmsq_tiling] enter: xDim=%zu xDims=[%ld,%ld] wDim=%zu wDim0=%ld wShapeSize=%ld",
+            "[gmsq_tiling] enter: xDim=%zu xDims=[%ld,%ld] wDim=%zu wDim0=%ld wShapeSize=%ld list=%d",
             xOriginShape.GetDimNum(),
             xOriginShape.GetDimNum() > 0 ? xOriginShape.GetDim(0) : -1,
             xOriginShape.GetDimNum() > 1 ? xOriginShape.GetDim(1) : -1,
             weightOriginShape.GetDimNum(),
             weightOriginShape.GetDimNum() > 0 ? weightOriginShape.GetDim(0) : -1,
-            weightOriginShape.GetShapeSize());
-    if (xOriginShape.GetDimNum() != 2 || weightOriginShape.GetDimNum() < 1) {
+            weightOriginShape.GetShapeSize(), isTensorList);
+    if (xOriginShape.GetDimNum() != 2 || weightOriginShape.GetDimNum() < 1 ||
+        groupListOriginShape.GetDimNum() != 1) {
         OP_LOGE(context->GetNodeName(),
-                "[gmsq_tiling] FAIL: xDim=%zu (want 2), wDim=%zu (want >=1)",
-                xOriginShape.GetDimNum(), weightOriginShape.GetDimNum());
+                "[gmsq_tiling] FAIL: xDim=%zu (want 2), wDim=%zu (want >=1), groupListDim=%zu (want 1)",
+                xOriginShape.GetDimNum(), weightOriginShape.GetDimNum(), groupListOriginShape.GetDimNum());
         return ge::GRAPH_FAILED;
     }
 
     const int64_t k = xOriginShape.GetDim(1);
-    const int64_t expertCount = weightOriginShape.GetDim(0);
+    const int64_t expertCount = isTensorList ? groupListOriginShape.GetDim(0) : weightOriginShape.GetDim(0);
     const int64_t packedWeightElements = weightOriginShape.GetShapeSize();
     if (k <= 0 || expertCount <= 0 || k % 64 != 0) {
         OP_LOGE(context->GetNodeName(),
@@ -58,7 +65,7 @@ ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
         return ge::GRAPH_FAILED;
     }
 
-    const int64_t packedElementsPerColumn = expertCount * (k / 2);
+    const int64_t packedElementsPerColumn = (isTensorList ? 1 : expertCount) * (k / 2);
     if (packedElementsPerColumn <= 0 || packedWeightElements % packedElementsPerColumn != 0) {
         OP_LOGE(context->GetNodeName(),
                 "[gmsq_tiling] FAIL: weight packed=%ld perCol=%ld rem=%ld",
@@ -107,7 +114,7 @@ ge::graphStatus Tiling4GroupedMatmulSituQuant(gert::TilingContext *context)
     tiling.baseM = BASE_M;
     tiling.mainBlockSize = MAIN_BLOCK_N2;
     tiling.firstTailBlockSize = 0;
-    tiling.reserved = static_cast<uint32_t>(*groupListType);
+    tiling.reserved = static_cast<uint32_t>(*groupListType) | (isTensorList ? TENSOR_LIST_FLAG : 0U);
     tiling.mainBlockCount = static_cast<uint64_t>(n2 / MAIN_BLOCK_N2);
     tiling.firstTailBlockCount = 0;
     tiling.beta = *beta;

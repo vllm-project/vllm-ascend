@@ -6,6 +6,7 @@ namespace {
 
 constexpr size_t INPUT_X_INDEX = 0;
 constexpr size_t INPUT_WEIGHT_INDEX = 2;
+constexpr size_t INPUT_GROUP_LIST_INDEX = 4;
 constexpr size_t OUTPUT_Y_INDEX = 0;
 constexpr size_t OUTPUT_Y_SCALE_INDEX = 1;
 constexpr int64_t MX_BLOCK_SPAN = 64;
@@ -15,23 +16,26 @@ constexpr int64_t MX_SCALE_ALIGN = 2;
 
 ge::graphStatus InferShape4GroupedMatmulSituQuant(gert::InferShapeContext *context)
 {
-    const auto *xShape = context->GetInputShape(INPUT_X_INDEX);
-    const auto *weightShape = context->GetInputShape(INPUT_WEIGHT_INDEX);
+    const auto *xShape = context->GetDynamicInputShape(INPUT_X_INDEX, 0);
+    const auto *weightShape = context->GetDynamicInputShape(INPUT_WEIGHT_INDEX, 0);
+    const auto *groupListShape = context->GetDynamicInputShape(INPUT_GROUP_LIST_INDEX, 0);
     auto *yShape = context->GetOutputShape(OUTPUT_Y_INDEX);
     auto *yScaleShape = context->GetOutputShape(OUTPUT_Y_SCALE_INDEX);
-    if (xShape == nullptr || weightShape == nullptr || yShape == nullptr || yScaleShape == nullptr ||
-        xShape->GetDimNum() != 2 || weightShape->GetDimNum() < 1) {
+    if (xShape == nullptr || weightShape == nullptr || groupListShape == nullptr || yShape == nullptr ||
+        yScaleShape == nullptr || xShape->GetDimNum() != 2 || weightShape->GetDimNum() < 1 ||
+        groupListShape->GetDimNum() != 1) {
         return ge::GRAPH_FAILED;
     }
 
     const int64_t m = xShape->GetDim(0);
     const int64_t k = xShape->GetDim(1);
-    const int64_t expertCount = weightShape->GetDim(0);
+    const bool isTensorList = context->GetDynamicInputShape(INPUT_WEIGHT_INDEX, 1) != nullptr;
+    const int64_t expertCount = isTensorList ? groupListShape->GetDim(0) : weightShape->GetDim(0);
     const int64_t packedWeightElements = weightShape->GetShapeSize();
     if (k <= 0 || expertCount <= 0 || k % 2 != 0) {
         return ge::GRAPH_FAILED;
     }
-    const int64_t packedElementsPerColumn = expertCount * (k / 2);
+    const int64_t packedElementsPerColumn = (isTensorList ? 1 : expertCount) * (k / 2);
     if (packedElementsPerColumn <= 0 || packedWeightElements % packedElementsPerColumn != 0) {
         return ge::GRAPH_FAILED;
     }

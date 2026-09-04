@@ -21,13 +21,13 @@ public:
         // contiguous (.contiguous() rejects internal format), and the kernel
         // already reads them via format metadata — accept them as-is.
         this->Input("weight")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT4_E2M1, ge::DT_FLOAT4_E2M1})
             .Format({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_16})
             .UnknownShapeFormat({ge::FORMAT_FRACTAL_NZ, ge::FORMAT_FRACTAL_NZ_C0_16})
             .IgnoreContiguous();
         this->Input("weight_scale")
-            .ParamType(REQUIRED)
+            .ParamType(DYNAMIC)
             .DataType({ge::DT_FLOAT8_E8M0, ge::DT_FLOAT8_E8M0})
             .Format({ge::FORMAT_ND, ge::FORMAT_ND})
             .UnknownShapeFormat({ge::FORMAT_ND, ge::FORMAT_ND})
@@ -53,6 +53,7 @@ public:
 
         OpAICoreConfig regbaseCfg;
         regbaseCfg.DynamicCompileStaticFlag(true)
+            .DynamicFormatFlag(true)
             .DynamicRankSupportFlag(false)
             .DynamicShapeSupportFlag(true)
             .ExtendCfgInfo("opFile.value", "grouped_matmul_situ_quant");

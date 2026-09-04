@@ -25,12 +25,12 @@
  *                 transposed (E,K/2,N) view, or the canonical 5D
  *                 [E,K/32,N/16,16,32]) — fed to the kernel byte-direct,
  *                 zero conversion (the fused kernel's native form).
- *   ND/NZ list  : per-expert tensors composed with torch-native device ops
- *                 (at::cat of byte views; NZ elements are format-cast back to
- *                 ND first, cat, then a single stacked ND->NZ cast — byte
- *                 identity guaranteed by the proven cast round-trip).
- *   weightScale : ND always (official contract); stacked Tensor used
- *                 directly, TensorList gathered by the same stage kernel.
+ *   ND list     : per-expert tensors composed once per call, then converted to
+ *                 the kernel's native stacked NZ byte stream.
+ *   NZ list     : passed as an ACL dynamic input; the kernel dereferences the
+ *                 per-expert address table directly, with no cast or cat.
+ *   weightScale : ND always (official contract); stacked and TensorList forms
+ *                 are both passed through the ACL dynamic-input address table.
  *
  * Parameter behavior matrix (§3.3):
  *   bias / smoothScale        : None/undefined -> skipped; real value ->
@@ -142,26 +142,23 @@ at::Tensor CastNdToNz(const at::Tensor &w)
                                                                 kAclDtFloat8E4m3Fn, kAclDtFloat4E2m1FnX2);
 }
 
-// NZ byte stream -> ND logical bytes (inverse of the production cast).
-at::Tensor CastNzToNd(const at::Tensor &w)
-{
-    return at_npu::native::custom_ops::npu_format_cast(w, kAclFormatNd, kAclDtFloat8E4m3Fn,
-                                                       kAclDtFloat4E2m1FnX2);
-}
-
-// Shared core: run the verified fused kernel on an op-ready stacked NZ byte
-// stream + stacked weight scale, device group_list. Returns typed outputs.
-std::tuple<at::Tensor, at::Tensor> RunV2Core(const at::Tensor &x, const at::Tensor &xScale, const at::Tensor &wNzStacked,
-                                  const at::Tensor &wScaleStacked, const at::Tensor &groupList, double beta,
-                                  double linearBeta, int64_t groupListType)
+// Shared core: dynamic ACL inputs encode either one stacked tensor or E
+// independent per-expert tensors as an address table. Tensor descriptors and
+// the address table are created for the launch; the tensor storage is reused.
+std::tuple<at::Tensor, at::Tensor> RunV2Core(const at::Tensor &x, const at::Tensor &xScale,
+                                            const std::vector<at::Tensor> &weights,
+                                            const std::vector<at::Tensor> &weightScales,
+                                            const at::Tensor &groupList, int64_t e, int64_t n, double beta,
+                                            double linearBeta, int64_t groupListType)
 {
     const int64_t mCap = x.sizes()[0];
     const int64_t k = x.sizes()[1];
-    const int64_t e = wNzStacked.numel() == 0 ? 0 : wNzStacked.sizes()[0];
-    TORCH_CHECK(wNzStacked.dim() >= 1 && e > 0, "weight must be non-empty");
-    const int64_t n = wNzStacked.numel() / (e * (k / 2));
     const int64_t n2 = n / 2;
 
+    TORCH_CHECK(e > 0 && !weights.empty(), "weight must be non-empty");
+    TORCH_CHECK(weights.size() == 1 || weights.size() == static_cast<size_t>(e),
+                "weight must contain one stacked tensor or E per-expert tensors");
+    TORCH_CHECK(weightScales.size() == weights.size(), "weightScale must use the same stacked/list form as weight");
     TORCH_CHECK(k % 64 == 0, "K must be a multiple of 64 (MX scale pairing)");
     TORCH_CHECK(n2 % SITU_MAIN_BLOCK_N2_DEV == 0, "N/2 must be a multiple of 64");
     TORCH_CHECK(groupList.is_privateuseone(), "groupList must be a NPU device tensor (graph-capturable contract)");
@@ -179,8 +176,10 @@ std::tuple<at::Tensor, at::Tensor> RunV2Core(const at::Tensor &x, const at::Tens
         return std::make_tuple(y, yScale);
     }
 
-    EXEC_NPU_CMD(aclnnGroupedMatmulSituQuant, x, xScale, wNzStacked,
-                 wScaleStacked, groupList, groupListType, beta, linearBeta,
+    at::TensorList weightList(weights);
+    at::TensorList weightScaleList(weightScales);
+    EXEC_NPU_CMD(aclnnGroupedMatmulSituQuant, x, xScale, weightList,
+                 weightScaleList, groupList, groupListType, beta, linearBeta,
                  y, yScale);
     return std::make_tuple(y, yScale);
 }
@@ -226,7 +225,8 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nd(
     ValidateWScaleNumel(weightScale, e, k, n);
 
     at::Tensor wNz = CastNdToNz(weight);
-    return RunV2Core(x, xScale, wNz, weightScale, groupList, beta, linearBeta, groupListType);
+    return RunV2Core(x, xScale, std::vector<at::Tensor>{wNz}, std::vector<at::Tensor>{weightScale}, groupList,
+                     e, n, beta, linearBeta, groupListType);
 }
 
 // ---- entry 2: gmm_situ_quant_weight_nz (NZ weight, stacked) ----
@@ -251,7 +251,8 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nz(
                 "gmm_situ_quant for ND weight), got tag ", wFmt);
     ValidateWScaleNumel(weightScale, e, k, n);
 
-    return RunV2Core(x, xScale, weight, weightScale, groupList, beta, linearBeta, groupListType);
+    return RunV2Core(x, xScale, std::vector<at::Tensor>{weight}, std::vector<at::Tensor>{weightScale}, groupList,
+                     e, n, beta, linearBeta, groupListType);
 }
 
 // ---- entry 1.list: gmm_situ_quant.list (ND weight TensorList) ----
@@ -281,7 +282,8 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nd_list(
     at::Tensor wStackedNd = CatTensorList(weight).view({e, n, k / 2});
     at::Tensor wScaleStacked = CatTensorList(weightScale);
     at::Tensor wNz = CastNdToNz(wStackedNd);
-    return RunV2Core(x, xScale, wNz, wScaleStacked, groupList, beta, linearBeta, groupListType);
+    return RunV2Core(x, xScale, std::vector<at::Tensor>{wNz}, std::vector<at::Tensor>{wScaleStacked}, groupList,
+                     e, n, beta, linearBeta, groupListType);
 }
 
 // ---- entry 2.list: gmm_situ_quant_weight_nz.list (NZ weight TensorList) ----
@@ -309,17 +311,11 @@ std::tuple<at::Tensor, at::Tensor> gmm_situ_quant_v2_nz_list(
                     "gmm_situ_quant_weight_nz.list expects FRACTAL_NZ weight elements");
     }
 
-    // NZ 元素先 format-cast 回 ND（字节恒等：round-trip 已板上验证），cat 成
-    // stacked ND 后单次统一 cast 到 NZ 字节流 — 与 stacked NZ 入口同一 kernel 输入。
-    std::vector<at::Tensor> ndViews;
-    ndViews.reserve(weight.size());
-    for (const auto &w : weight) {
-        ndViews.push_back(CastNzToNd(w));
+    TORCH_CHECK(weightScale.size() == weight.size(), "weightScale list length must equal weight list length");
+    for (const auto &scale : weightScale) {
+        ValidateWScaleNumel(scale, 1, k, n);
     }
-    at::Tensor wStackedNd = at::cat(ndViews, 0);
-    at::Tensor wScaleStacked = CatTensorList(weightScale);
-    at::Tensor wNz = CastNdToNz(wStackedNd);
-    return RunV2Core(x, xScale, wNz, wScaleStacked, groupList, beta, linearBeta, groupListType);
+    return RunV2Core(x, xScale, weight, weightScale, groupList, e, n, beta, linearBeta, groupListType);
 }
 
 } // namespace ascend_kernel

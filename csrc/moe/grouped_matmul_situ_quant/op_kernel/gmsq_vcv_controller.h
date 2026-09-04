@@ -46,6 +46,16 @@ static constexpr uint64_t L1_K_512 = 512;
 static constexpr uint64_t L1_K_N_THRESHOLD = 128;
 static constexpr uint64_t L1_K_M_THRESHOLD = 256; // 生产 swiglu_v2 动态规则
 static constexpr uint64_t A_L1_BUFFER_ELEMS = 128 * GetKBUnit<fp8_e4m3fn_t>();
+static constexpr uint32_t TENSOR_LIST_FLAG = 1U << 1;
+
+template <typename T>
+__aicore__ inline __gm__ T *GetTensorAddr(uint16_t index, GM_ADDR tensorPtr)
+{
+    __gm__ uint64_t *dataAddr = reinterpret_cast<__gm__ uint64_t *>(tensorPtr);
+    const uint64_t tensorPtrOffset = *dataAddr;
+    __gm__ uint64_t *addressTable = dataAddr + (tensorPtrOffset >> 3);
+    return reinterpret_cast<__gm__ T *>(*(addressTable + index));
+}
 
 class GmmSituController {
 public:
@@ -97,7 +107,7 @@ public:
                 ent.xScaleOff = entries_[g].xScaleOff;
                 ent.yOff = entries_[g].yOff;
                 ent.yScaleOff = entries_[g].yScaleOff;
-                ProcessGroup(ent, cubeBlockIdx, startBasicBlockId);
+                ProcessGroup(ent, g, cubeBlockIdx, startBasicBlockId);
             }
         } else {
             // preamble: per-core group table build (device cumsum) + zero-token skip
@@ -117,12 +127,12 @@ public:
                 SituGroupEntry ent;
                 ent.mSize = cnt;
                 ent.xOff = rowBase * hdr_->kSize;
-                ent.wOff = static_cast<uint64_t>(g) * devPerGroupW_;
-                ent.wScaleOff = static_cast<uint64_t>(g) * devPerGroupWScale_;
+                ent.wOff = weightListMode_ ? 0 : static_cast<uint64_t>(g) * devPerGroupW_;
+                ent.wScaleOff = weightListMode_ ? 0 : static_cast<uint64_t>(g) * devPerGroupWScale_;
                 ent.xScaleOff = rowBase * devKScaleRow_;
                 ent.yOff = rowBase * devN2_;
                 ent.yScaleOff = rowBase * devScaleRowBytes_;
-                ProcessGroup(ent, cubeBlockIdx, startBasicBlockId);
+                ProcessGroup(ent, g, cubeBlockIdx, startBasicBlockId);
                 rowBase += cnt;
             }
         }
@@ -141,17 +151,20 @@ private:
         hdr_ = hdrOf(tiling);
         xGm_ = reinterpret_cast<__gm__ fp8_e4m3fn_t *>(x);
         xScaleGm_ = reinterpret_cast<__gm__ fp8_e8m0_t *>(xScale);
-        wGm_ = reinterpret_cast<__gm__ fp4x2_e2m1_t *>(w);
-        wScaleGm_ = reinterpret_cast<__gm__ fp8_e8m0_t *>(wScale);
+        weightTensorPtr_ = w;
+        weightScaleTensorPtr_ = wScale;
+        wGm_ = GetTensorAddr<fp4x2_e2m1_t>(0, weightTensorPtr_);
+        wScaleGm_ = GetTensorAddr<fp8_e8m0_t>(0, weightScaleTensorPtr_);
         yGm_ = reinterpret_cast<__gm__ fp8_e4m3fn_t *>(y);
         yScaleGm_ = reinterpret_cast<__gm__ fp8_e8m0_t *>(yScale);
-        glType_ = hdr_->reserved; // dev entry reuses the reserved u32 slot for groupListType
+        glType_ = hdr_->reserved & 1U;
+        weightListMode_ = (hdr_->reserved & TENSOR_LIST_FLAG) != 0;
 
         basicBlock_.Init(WeightQuantBatchMatmulV2::Arch35::MX_GROUPSIZE, yGm_, yScaleGm_, hdr_->beta, hdr_->invBeta,
                          hdr_->linearBeta, hdr_->invLinearBeta);
     }
 
-    __aicore__ inline void ProcessGroup(const SituGroupEntry &ent, uint32_t cubeBlockIdx,
+    __aicore__ inline void ProcessGroup(const SituGroupEntry &ent, uint32_t groupIdx, uint32_t cubeBlockIdx,
                                         uint64_t &startBasicBlockId)
     {
         BasicBlockOffsetParam cur = {};
@@ -167,7 +180,11 @@ private:
 
         curYBase_ = yGm_ + ent.yOff;
         curYScaleBase_ = yScaleGm_ + ent.yScaleOff;
-        basicBlock_.UpdateGlobalAddr(xGm_ + ent.xOff, wGm_ + ent.wOff, wScaleGm_ + ent.wScaleOff,
+        __gm__ fp4x2_e2m1_t *groupWeight =
+            weightListMode_ ? GetTensorAddr<fp4x2_e2m1_t>(groupIdx, weightTensorPtr_) : wGm_ + ent.wOff;
+        __gm__ fp8_e8m0_t *groupWeightScale =
+            weightListMode_ ? GetTensorAddr<fp8_e8m0_t>(groupIdx, weightScaleTensorPtr_) : wScaleGm_ + ent.wScaleOff;
+        basicBlock_.UpdateGlobalAddr(xGm_ + ent.xOff, groupWeight, groupWeightScale,
                                      xScaleGm_ + ent.xScaleOff, curYBase_, curYScaleBase_,
                                      mL1Size < mSize || isCacheLineUnaligned);
 
@@ -222,6 +239,7 @@ private:
     }
 
     bool hostTableMode_ = true;
+    bool weightListMode_ = false;
     uint32_t glType_ = 1;
     uint32_t eCount_ = 0;
     uint64_t devKScaleRow_ = 0;
@@ -230,6 +248,8 @@ private:
     uint64_t devN2_ = 0;
     uint64_t devScaleRowBytes_ = 0;
     __gm__ const int64_t *glGm_ = nullptr;
+    GM_ADDR weightTensorPtr_ = nullptr;
+    GM_ADDR weightScaleTensorPtr_ = nullptr;
     __gm__ SituTilingHeader *hdr_ = nullptr;
     __gm__ SituGroupEntry *entries_ = nullptr;
     __gm__ fp8_e4m3fn_t *xGm_ = nullptr;
