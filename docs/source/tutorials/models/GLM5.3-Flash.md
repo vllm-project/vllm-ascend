@@ -14,7 +14,6 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-`GLM-5.3-Flash-BF16 (Ascend950DT mxfp8 Quantized)`: requires 2 Ascend950DT (96GB × 8) node.[Download model weight](https://www.modelscope.ai/models/zai-org/GLM-5.3-Flash-BF16).
 - `GLM-5.3-Flash-w8a8 (Ascend950DT mxfp8 Quantized)`: requires 1 Ascend950DT (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 - `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (64GB × 16) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).
 
@@ -175,13 +174,9 @@ source /usr/local/Ascend/cann-9.1.0/opp/vendors/custom_transformer/bin/set_env.b
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
 export HCCL_OP_EXPANSION_MODE="AIV"
-export HCCL_BUFFSIZE=1024
-export OMP_NUM_THREADS=1
+export HCCL_BUFFSIZE=400
+export OMP_NUM_THREADS=10
 export TASK_QUEUE_ENABLE=1
-echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
-sysctl -w vm.swappiness=0
-sysctl -w kernel.numa_balancing=0
-sysctl kernel.sched_migration_cost_ns=50000
 
 vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
   --host 0.0.0.0 \
@@ -199,7 +194,7 @@ vllm serve /mnt/share/w00936111/weights/GLM-5.3-Flash-0day-A3-0829   \
   --quantization ascend \
   --limit-mm-per-prompt '{"image": 1, "video": 0}' \
   --gpu-memory-utilization 0.85 \
-  --speculative-config '{"num_speculative_tokens": 2, "method": "deepseek_mtp", "enforce_eager": true}' \
+  --speculative-config '{"num_speculative_tokens": 3, "method": "deepseek_mtp", "enforce_eager": true}' \
   --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1,2,4,8,16,32,64,96,128]}' \
   --enable-prefix-caching \
   --async-scheduling \
