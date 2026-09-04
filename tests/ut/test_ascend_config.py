@@ -1144,18 +1144,38 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(config.enable_sparse_sfa_c8)
 
     @_clean_up
-    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_c8_reshape_optim_is_derived_on_factory_path(self, mock_fix, mock_sparse):
-        vc = VllmConfig()
-        vc.additional_config = {
-            "enable_sparse_li_c8": "true",
-            "c8_enable_reshape_optim": "true",
-        }
+    def test_c8_reshape_optim_is_initialized_from_sfa_li_c8_and_pd_role(
+        self,
+        mock_fix,
+        mock_uses_sfa,
+    ):
+        cases = (
+            (True, True, "kv_producer", True),
+            (False, True, "kv_producer", False),
+            (True, False, "kv_producer", False),
+            (True, True, "kv_consumer", False),
+            (True, True, "kv_both", False),
+            (True, True, None, False),
+        )
+        for uses_sfa, enable_li_c8, kv_role, expected in cases:
+            with self.subTest(uses_sfa=uses_sfa, enable_li_c8=enable_li_c8, kv_role=kv_role):
+                mock_uses_sfa.return_value = uses_sfa
+                vc = VllmConfig()
+                vc.additional_config = {
+                    "refresh": True,
+                    "enable_sparse_li_c8": enable_li_c8,
+                }
+                if kv_role is not None:
+                    vc.kv_transfer_config = KVTransferConfig(
+                        kv_connector="MooncakeConnectorV1",
+                        kv_role=kv_role,
+                    )
 
-        config = init_ascend_config(vc)
+                config = init_ascend_config(vc)
 
-        self.assertTrue(config.c8_enable_reshape_optim)
+                self.assertEqual(config.c8_reshape_optim_enabled, expected)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

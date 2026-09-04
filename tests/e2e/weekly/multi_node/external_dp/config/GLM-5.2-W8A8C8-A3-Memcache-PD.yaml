@@ -114,7 +114,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--max-model-len"
   - "133120"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim": true}'
+  - '{"fuse_muls_add": true, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
   - "--max-num-batched-tokens"
   - "8192"
   - "--trust-remote-code"

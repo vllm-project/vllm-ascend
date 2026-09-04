@@ -263,7 +263,6 @@ class AscendConfig:
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
-            "c8_enable_reshape_optim": false,
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
             "mlapo_keep_prefill_weights": false,
@@ -408,7 +407,6 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
-    c8_enable_reshape_optim: bool = False
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
@@ -453,6 +451,7 @@ class AscendConfig:
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+    _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -632,15 +631,22 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        # sparse c8 + reshape optim derivation
+        # Sparse C8 derivation. The StoreKVBlock optimization is internal and
+        # enabled only for SFA + Lightning Indexer C8 on PD prefill nodes.
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
         self.enable_sparse_sfa_c8 = self.enable_sparse_sfa_c8 and use_sparse
         self.enable_sparse_li_c8 = self.enable_sparse_li_c8 and use_sparse
-        # c8_enable_reshape_optim is a user input field now; keep the original
-        # semantics: only meaningful when enable_sparse_li_c8 is true.
-        self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and self.c8_enable_reshape_optim
+        kv_transfer_config = vc.kv_transfer_config
+        is_prefill_node = kv_transfer_config is not None and (
+            getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
+            or (
+                bool(getattr(kv_transfer_config, "is_kv_producer", False))
+                and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
+            )
+        )
+        self._c8_reshape_optim_enabled = self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -869,6 +875,11 @@ class AscendConfig:
 
         layer_ids = {extract_layer_index(normalized_layer_name)}
         return any(layer_id in self._sparse_li_c8_layer_ids for layer_id in layer_ids)
+
+    @property
+    def c8_reshape_optim_enabled(self) -> bool:
+        """Whether SFA should use StoreKVBlock for LI C8 cache writes."""
+        return self._c8_reshape_optim_enabled
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
@@ -1397,10 +1408,10 @@ def init_ascend_config(vllm_config):
         "dump_config",
         "dump_config_path",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
-        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/
-        # c8_enable_reshape_optim are NOT here — they are user-input fields that
-        # derive_and_validate *augments* (self.x = self.x and condition), so the user
-        # must be able to pass them. Only pure-derived fields (no user input) are stripped.
+        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8
+        # are NOT here — they are user-input fields that derive_and_validate
+        # augments (self.x = self.x and condition), so the user must be able to
+        # pass them. Only pure-derived fields (no user input) are stripped.
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",
