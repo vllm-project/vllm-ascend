@@ -359,7 +359,9 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AscendSFAIndexerMetadata,
         compute_topk: bool = True,
-    ) -> torch.Tensor | None:
+        *,
+        return_selected_scores: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
         """Full indexer pipeline: k path -> cache write -> top-k selection.
 
         The k path output is persisted first because the selection kernel
@@ -446,6 +448,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             indexer_metadata.actual_seq_lengths_key,
             self.enable_sparse_li_c8,
             self.use_torch_npu_lightning_indexer,
+            return_selected_scores=return_selected_scores,
         )
 
 

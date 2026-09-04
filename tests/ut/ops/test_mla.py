@@ -173,6 +173,38 @@ class TestAscendSFAIndexerBackend(TestBase):
             indexer_attn_metadata=indexer_metadata,
         )
 
+    def test_forward_selected_score_flag_is_forwarded(self):
+        indexer = self._make_forward_indexer()
+        indexer_metadata = self._make_indexer_metadata()
+        indexer.forward_k = MagicMock(return_value=(torch.zeros(2, 128), None))
+        indexer.write_cache = MagicMock()
+        expected_indices = torch.zeros(2, 2048, dtype=torch.int32)
+        expected_scores = torch.ones(2, 2048, dtype=torch.float32)
+
+        with (
+            patch("vllm_ascend.attention.indexer.HAS_TRITON", True),
+            patch(
+                "vllm_ascend.attention.indexer.rope_forward_triton_siso",
+                side_effect=lambda x, *args, **kwargs: x,
+            ),
+            patch(
+                "vllm_ascend.device.device_op.DeviceOperator.indexer_select_post_process",
+                return_value=(expected_indices, expected_scores),
+            ) as select,
+        ):
+            result = indexer.forward(
+                torch.zeros(2, 32),
+                torch.zeros(2, 16),
+                MagicMock(name="cos"),
+                MagicMock(name="sin"),
+                torch.zeros(2, 32),
+                indexer_metadata,
+                return_selected_scores=True,
+            )
+
+        self.assertEqual(result, (expected_indices, expected_scores))
+        self.assertIs(select.call_args.kwargs["return_selected_scores"], True)
+
     def test_forward_skip_topk_still_persists_cache(self):
         # compute_topk=False (SFA layers sharing top-k indices): k path and
         # the cache write still run; the selection stage is skipped.
@@ -329,6 +361,19 @@ class TestIndexerWrapper(TestBase):
 
         wrapper("hidden", "q_c", "cos", "sin", "k_hidden", "meta", False)
         wrapper.impl.assert_called_once_with("hidden", "q_c", "cos", "sin", "k_hidden", "meta", False)
+
+        wrapper.impl.reset_mock()
+        wrapper("hidden", "q_c", "cos", "sin", "k_hidden", "meta", return_selected_scores=True)
+        wrapper.impl.assert_called_once_with(
+            "hidden",
+            "q_c",
+            "cos",
+            "sin",
+            "k_hidden",
+            "meta",
+            True,
+            return_selected_scores=True,
+        )
 
         wrapper.process_weights_after_loading()
         wrapper.impl.process_weights_after_loading.assert_called_once_with()
