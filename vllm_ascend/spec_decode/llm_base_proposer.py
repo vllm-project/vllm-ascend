@@ -797,7 +797,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         self.token_indices_to_sample.fill_(0)
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
             self._runnable.set_draft_attn_metadata_updates(update_params)  # type: ignore
 
@@ -1131,7 +1131,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
-        if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
             self._runnable.set_draft_attn_metadata_updates(update_params)  # type: ignore
 
