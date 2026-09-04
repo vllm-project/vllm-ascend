@@ -109,11 +109,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             max_num_tokens=self.max_num_tokens,
             device=device,
         )
-        self.num_rejected_cpu = torch.zeros(
-            self.max_num_reqs,
-            dtype=torch.int32,
-            device="cpu",
-        )
 
         # add more attributes for `input_buffers` in graph mode
         cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
@@ -232,8 +227,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
-        if self.num_speculative_steps > 1 and self.attn_architecture not in ("DSA", "SFA"):
-            self._copy_num_rejected_to_cpu(num_rejected, input_batch.num_reqs)
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -560,20 +553,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
-        next_seqs_cpu = seq_lens_cpu[:num_reqs_padded].clone()
-        next_seqs_cpu[:num_reqs] = torch.clamp(
-            next_seqs_cpu[:num_reqs] - self.num_rejected_cpu[:num_reqs] + step,
-            min=0,
-            max=self.max_model_len,
-        )
+        # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`
+        # to avoid extra sync overhead, `v2` is currently aligned with NPU `v1` only
+
+        # follows the logic in `prepare_eagle_decode` and `update_eagle_inputs`
+        next_seqs_cpu = torch.clamp(seq_lens_cpu[:num_reqs_padded] + step, max=self.max_model_len)
         next_seqs_cpu[num_reqs:].fill_(0)
         return next_seqs_cpu
-
-    def _copy_num_rejected_to_cpu(self, num_rejected: torch.Tensor, num_reqs: int) -> None:
-        # FIA graph parameters consume host sequence lengths. This blocking copy
-        # keeps them aligned with prepare_decode_inputs, which subtracts rejected
-        # draft tokens on device before advancing to the next draft step.
-        self.num_rejected_cpu[:num_reqs].copy_(num_rejected[:num_reqs], non_blocking=False)
 
     def _get_seq_lens_cpu(self, num_reqs_padded: int) -> torch.Tensor:
         """Return the target sequence lengths for the padded graph batch.
