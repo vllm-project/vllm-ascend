@@ -21,7 +21,6 @@ from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import Specul
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-from vllm_ascend.attention.attention_v1 import AscendMetadata
 from vllm_ascend.compilation.acl_graph import (
     set_draft_graph_params,
     set_draft_graph_prefill_params,

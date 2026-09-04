@@ -326,7 +326,7 @@ def use_updatable_graph(
     vllm_config,
 ) -> bool:
     if(
-        runtime_mode == CUDAGraphMode.FULL 
+        runtime_mode == CUDAGraphMode.FULL
         and attn_backend is not None
         and issubclass(attn_backend, AscendAttentionBackend)
         and attn_backend.get_sinks() is None
@@ -346,7 +346,7 @@ def update_full_graph_params(
     speculative_config=None,
     draft_attn_metadatas=None,
 ):
-    if use_updatable_graph( CUDAGraphMode.FULL, attn_backend, num_tokens, vllm_config):
+    if use_updatable_graph(CUDAGraphMode.FULL, attn_backend, num_tokens, vllm_config):
         return
 
     if vllm_version_is("0.27.1"):

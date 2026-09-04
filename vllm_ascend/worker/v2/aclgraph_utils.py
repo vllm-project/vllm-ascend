@@ -176,7 +176,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         assert self.update_stream is not None
         attn_backend = _get_graph_update_backend(self.model_runner.attn_groups)
         attn_metadata = self.model_runner.model_state.attn_metadata
-        
+
         if use_updatable_graph(attn_backend, num_tokens, self.vllm_config):
             return self._updatable_graph_replay(desc, attn_metadata)
         else:
@@ -264,7 +264,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
 
 
 def use_updatable_graph(attn_backend, num_tokens, vllm_config) -> bool:
-    if(
+    if (
         attn_backend is not None
         and issubclass(attn_backend, AscendAttentionBackend)
         and attn_backend.get_sinks() is None
