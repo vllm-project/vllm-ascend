@@ -393,6 +393,228 @@ FLASHCOMM1 and language-model-only mode should not be enabled at the same time f
 
 `VLLM_ASCEND_ENABLE_FLASHCOMM1=1` is kept for compatibility, but `additional_config.enable_flashcomm1` is preferred.
 
+### 5.4 PD Disaggregation Deployment
+
+MiniMax-M3 supports Prefill-Decode (PD) disaggregation deployment with Mooncake connector. This section describes a multi-node "1P1D" architecture using the W8A8 quantized model, where the Prefiller and Decoder run on separate nodes connected via RDMA.
+
+The Prefiller node uses Pipeline Parallelism (PP=2) combined with Tensor Parallelism (TP=4) and Data Parallelism (DP=2) across 16 NPU chips. The Decoder node uses TP=4 with DP=4 across 16 NPU chips. KV cache is transferred from Prefiller to Decoder via the Mooncake connector.
+
+Before starting, verify the multi-node communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect), and install Mooncake by following the [Mooncake installation guide](https://github.com/kvcache-ai/Mooncake?tab=readme-ov-file#build-and-use-binaries).
+
+=== "Prefiller Node"
+
+    Run the following script on the Prefiller node. Update `NETWORK_CARD_NAME`, `IP_ADDRESS`, `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, and `LOG_PATH` for your environment.
+
+    ```bash
+    unset ftp_proxy
+    unset https_proxy
+    unset http_proxy
+
+    export NETWORK_CARD_NAME=enp194s0f0  # update to your network card name
+    export IP_ADDRESS=80.5.9.138          # update to your prefiller node IP
+
+    export VLLM_SERVER_DEV_MODE=1
+    export HCCL_BUFFSIZE=1024
+    export HCCL_IF_IP=$IP_ADDRESS
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+    export VLLM_ASCEND_LLMDD_RPC_PORT=6657
+    export VLLM_PP_LAYER_PARTITION="30,30"
+    export VLLM_DISABLE_COMPILE_CACHE=0
+
+    vllm serve ${WEIGHT_PATH} \
+      --host 0.0.0.0 \
+      --port 30050 \
+      --enforce-eager \
+      --enable-expert-parallel \
+      --data-parallel-size 2 \
+      --data-parallel-size-local 2 \
+      --api-server-count 1 \
+      --data-parallel-address ${IP_ADDRESS} \
+      --data-parallel-rpc-port 6884 \
+      --pipeline-parallel-size 2 \
+      --tensor-parallel-size 4 \
+      --seed 1024 \
+      --served-model-name minimax-m3 \
+      --max-model-len 67560 \
+      --max-num-batched-tokens 32768 \
+      --long-prefill-token-threshold 2048 \
+      --trust-remote-code \
+      --gpu-memory-utilization 0.95 \
+      --reasoning-parser minimax_m3 \
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+      --additional-config '{
+        "enable_cpu_binding": true,
+        "ascend_compilation_config": {
+          "enable_static_kernel": true,
+          "fuse_norm_quant": false
+        },
+        "multistream_overlap_shared_expert": true,
+        "weight_nz_mode": 2,
+        "enable_shared_expert_dp": true,
+        "enable_flashcomm1": true,
+        "enable_reduce_sample": false
+      }' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_producer",
+      "kv_port": "31000",
+      "engine_id": "0",
+      "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 4,
+            "pp_size": 2,
+            "pp_layer_partition": "30,30"
+          },
+          "decode": {
+            "dp_size": 4,
+            "tp_size": 4
+          }
+      }
+      }' \
+      > ${LOG_PATH}/prefiller.log 2>&1 &
+    ```
+
+    Key Prefiller configurations:
+
+    - `--enforce-eager`: Disables ACL Graph on the Prefiller side since prefill workloads have variable batch sizes.
+    - `--pipeline-parallel-size 2`: Splits the model layers into two pipeline stages (`VLLM_PP_LAYER_PARTITION="30,30"`).
+    - `--kv-transfer-config` with `kv_role: "kv_producer"`: Sends KV cache to the Decoder via Mooncake on port 31000.
+    - `kv_connector_extra_config.prefill` must match the actual prefill parallelism (dp=2, tp=4, pp=2).
+
+=== "Decoder Node"
+
+    Run the following script on the Decoder node. Update `NETWORK_CARD_NAME`, `IP_ADDRESS`, `WEIGHT_PATH`, `EAGLE3_WEIGHT_PATH`, and `LOG_PATH` for your environment.
+
+    ```bash
+    unset ftp_proxy
+    unset https_proxy
+    unset http_proxy
+
+    export NETWORK_CARD_NAME=enp194s0f0  # update to your network card name
+    export IP_ADDRESS=80.5.9.136          # update to your decoder node IP
+
+    export VLLM_SERVER_DEV_MODE=1
+    export HCCL_BUFFSIZE=2048
+    export HCCL_IF_IP=$IP_ADDRESS
+    export HCCL_OP_EXPANSION_MODE="AIV"
+    export HCCL_SOCKET_IFNAME=$NETWORK_CARD_NAME
+    export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+    export GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME
+    export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+
+    export VLLM_ASCEND_LLMDD_RPC_PORT=6657
+    export VLLM_DISABLE_COMPILE_CACHE=0
+    export HCCL_DETERMINISTIC=true
+
+    vllm serve ${WEIGHT_PATH} \
+      --host 0.0.0.0 \
+      --port 30060 \
+      --enable-expert-parallel \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 4 \
+      --data-parallel-start-rank 0 \
+      --api-server-count 1 \
+      --data-parallel-address ${IP_ADDRESS} \
+      --data-parallel-rpc-port 5964 \
+      --tensor-parallel-size 4 \
+      --seed 1024 \
+      --served-model-name minimax-m3 \
+      --reasoning-parser minimax_m3 \
+      --distributed-executor-backend mp \
+      --max-model-len 67560 \
+      --max-num-batched-tokens 32768 \
+      --trust-remote-code \
+      --max-num-seqs 64 \
+      --gpu-memory-utilization 0.95 \
+      --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+      --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
+      --additional-config '{
+        "enable_cpu_binding": true,
+        "ascend_compilation_config": {
+          "enable_static_kernel": false,
+          "fuse_norm_quant": false
+        },
+        "multistream_overlap_shared_expert": true,
+        "weight_nz_mode": 2,
+        "enable_shared_expert_dp": true,
+        "enable_flashcomm1": true,
+        "enable_reduce_sample": false
+      }' \
+      --kv-transfer-config \
+      '{"kv_connector": "MooncakeConnectorV1",
+      "kv_role": "kv_consumer",
+      "kv_port": "23010",
+      "kv_connector_extra_config": {
+          "prefill": {
+            "dp_size": 2,
+            "tp_size": 4,
+            "pp_size": 2,
+            "pp_layer_partition": "30,30"
+          },
+          "decode": {
+            "dp_size": 4,
+            "tp_size": 4
+          }
+      }
+      }' \
+      > ${LOG_PATH}/decoder.log 2>&1 &
+    ```
+
+    Key Decoder configurations:
+
+    - `--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'`: Enables ACL Graph for decode-only to reduce kernel launch overhead during token generation.
+    - `--max-num-seqs 64`: Allows more concurrent decode sequences on the Decoder side.
+    - `--kv-transfer-config` with `kv_role: "kv_consumer"`: Receives KV cache from the Prefiller via Mooncake on port 23010.
+    - `kv_connector_extra_config.decode` must match the actual decode parallelism (dp=4, tp=4).
+    - `kv_connector_extra_config.prefill` must match the Prefiller's parallelism so the connector can correctly map KV cache shards.
+
+=== "Proxy Server"
+
+    Run a proxy server on the same node as the Prefiller to route requests. Use the [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py) from the repository.
+
+    ```bash
+    python load_balance_proxy_server_example.py \
+      --host 0.0.0.0 \
+      --port 8080 \
+      --prefiller-hosts ${PREFILLER_IP} \
+      --prefiller-port 30050 \
+      --decoder-hosts ${DECODER_IP} \
+      --decoder-ports 30060
+    ```
+
+    | Parameter | Meaning |
+    | --- | --- |
+    | `--port` | Proxy port |
+    | `--prefiller-hosts` | Prefiller node IP |
+    | `--prefiller-port` | Prefiller serving port |
+    | `--decoder-hosts` | Decoder node IP |
+    | `--decoder-ports` | Decoder serving port |
+
+### 5.5 PD Disaggregation Verification
+
+After all services are up, verify through the proxy server endpoint:
+
+```bash
+curl http://{proxy_ip}:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m3",
+    "messages": [
+      {"role": "user", "content": "Who are you?"}
+    ],
+    "max_tokens": 100,
+    "temperature": 0
+  }'
+```
+
+**Note**: Ensure that `kv_connector_extra_config.prefill` on both Prefiller and Decoder nodes are identical and match the actual Prefiller parallelism. Mismatched configurations will cause KV cache transfer failures.
+
 ## 6 Thinking and Parser Configuration
 
 ### 6.1 Thinking Mode
