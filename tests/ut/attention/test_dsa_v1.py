@@ -1667,6 +1667,8 @@ def test_pcp_metadata_builds_from_manager_global_view():
     )
     pcp_manager._global_batch_slot_mappings = global_slot_mappings
     pcp_manager._hidden_restore_idx = hidden_restore_idx
+    pcp_manager._padded_gather_idx = None
+    pcp_manager._gathered_kv_write_mask = None
     pcp_context = pcp_manager.build_attention_context()
     global_metadata = AscendDSAMetadata(
         num_actual_tokens=5,

@@ -2,7 +2,7 @@
 
 from dataclasses import fields
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import torch
 
@@ -17,6 +17,8 @@ from vllm_ascend.attention.context_parallel.sfa_cp import (
     AscendSFADSADCPImpl,
     AscendSFADSADCPMetadata,
     AscendSFADSADCPMetadataBuilder,
+    AscendSFAPCPDCPImpl,
+    AscendSFAPCPDCPMetadataBuilder,
     AscendSFAPCPImpl,
     resolve_sfa_impl,
     resolve_sfa_metadata_builder,
@@ -49,6 +51,11 @@ def test_sfa_dcp_extends_v1_backend() -> None:
     builder_mro = AscendSFADSADCPMetadataBuilder.__mro__
     assert impl_mro.index(AscendSFADCPImpl) < impl_mro.index(AscendSFADSACPImpl)
     assert builder_mro.index(AscendSFADCPMetadataBuilder) < builder_mro.index(AscendSFADSACPMetadataBuilder)
+    assert issubclass(AscendSFAPCPDCPImpl, AscendSFADCPImpl)
+    assert issubclass(AscendSFAPCPDCPImpl, AscendSFAPCPImpl)
+    assert issubclass(AscendSFAPCPDCPMetadataBuilder, AscendSFADCPMetadataBuilder)
+    pcp_dcp_mro = AscendSFAPCPDCPImpl.__mro__
+    assert pcp_dcp_mro.index(AscendSFADCPImpl) < pcp_dcp_mro.index(AscendSFAPCPImpl)
 
 
 def test_sfa_cp_four_mode_resolution() -> None:
@@ -82,6 +89,138 @@ def test_sfa_pcp_resolution_for_mrv2_config() -> None:
         ),
     ):
         assert resolve_sfa_impl(vllm_config) is AscendSFAPCPImpl
+
+
+def test_sfa_pcp_dcp_builds_pcp_ordered_indexer_slots_with_receiver_local_blocks() -> None:
+    builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
+    builder.pcp_indexer_slot_mapping_buf = torch.empty(8, dtype=torch.int32)
+    local_block_table = torch.tensor([[11, 12]], dtype=torch.int32)
+    replicated_block_table = torch.tensor([[22, 23, 24, 25]], dtype=torch.int32)
+    global_slot_mapping = torch.tensor([100, 101, 102], dtype=torch.int32)
+    builder._get_dcp_local_block_table = Mock(return_value=local_block_table)
+    builder._build_block_table_replicated_view = Mock(return_value=replicated_block_table)
+    builder._build_slot_mapping_replicated_view = Mock(return_value=global_slot_mapping)
+    global_batch = SimpleNamespace(
+        num_reqs=1,
+        num_tokens=3,
+        query_start_loc=torch.tensor([0, 3], dtype=torch.int32),
+        seq_lens=torch.tensor([3], dtype=torch.int32),
+        positions=torch.tensor([0, 1, 2], dtype=torch.int32),
+    )
+    pcp_context = SimpleNamespace(
+        global_batch=global_batch,
+        global_block_tables=(local_block_table,),
+        padded_gather_idx=torch.tensor([2, 0, 1, 0], dtype=torch.int64),
+        gathered_kv_write_mask=torch.tensor([True, True, True, False]),
+    )
+    global_common = SimpleNamespace(seq_lens=global_batch.seq_lens)
+
+    with patch(
+        "vllm_ascend.attention.context_parallel.sfa_cp.replace",
+        return_value=global_common,
+    ) as replace_metadata:
+        result = builder._build_pcp_ordered_indexer_slot_mapping(
+            object(),
+            pcp_context,
+            0,
+        )
+
+    torch.testing.assert_close(
+        result,
+        torch.tensor([102, 100, 101, -1], dtype=torch.int32),
+    )
+    replace_metadata.assert_called_once()
+    builder._get_dcp_local_block_table.assert_called_once_with(
+        local_block_table,
+        1,
+    )
+    builder._build_block_table_replicated_view.assert_called_once_with(
+        local_block_table,
+        global_batch.seq_lens,
+    )
+
+
+def test_sfa_dcp_compact_kv_table_uses_logical_dcp_rank_order() -> None:
+    builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
+    builder.dcp_size = 8
+    builder.dcp_collective_rank_order = torch.tensor(
+        [0, 4, 1, 5, 2, 6, 3, 7],
+        dtype=torch.int32,
+    )
+    dcp_block_table = torch.tensor([[5, 9]], dtype=torch.int32)
+
+    valid_block_ids, block_table = builder._build_compact_kv_gather_metadata(dcp_block_table)
+
+    torch.testing.assert_close(
+        valid_block_ids,
+        torch.tensor([5, 9], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        block_table,
+        torch.tensor(
+            [[0, 8, 2, 10, 4, 12, 6, 14, 1, 9, 3, 11, 5, 13, 7, 15]],
+            dtype=torch.int32,
+        ),
+    )
+
+
+def test_sfa_pcp_dcp_builder_allows_decode_graph_metadata_without_pcp_context() -> None:
+    builder = AscendSFAPCPDCPMetadataBuilder.__new__(AscendSFAPCPDCPMetadataBuilder)
+    common_attn_metadata = SimpleNamespace()
+    expected = object()
+
+    with patch.object(
+        AscendSFADCPMetadataBuilder,
+        "build",
+        autospec=True,
+        return_value=expected,
+    ) as dcp_build:
+        result = builder.build(0, common_attn_metadata)
+
+    assert result is expected
+    dcp_build.assert_called_once_with(builder, 0, common_attn_metadata, False)
+
+
+def test_sfa_pcp_dcp_only_overrides_main_cache_slot_mapping() -> None:
+    impl = AscendSFAPCPDCPImpl.__new__(AscendSFAPCPDCPImpl)
+    attn_metadata = AscendSFADCPMetadata.__new__(AscendSFADCPMetadata)
+    attn_metadata.num_prefills = 1
+    attn_metadata.num_decode_tokens = 0
+    attn_metadata.num_input_tokens = 2
+    main_slots = torch.tensor([10, 11, 12, 13], dtype=torch.int64)
+    attn_metadata.dcp_context = SimpleNamespace(
+        slot_mapping=main_slots,
+    )
+    kv_no_split = torch.zeros(2, 3)
+    cos = torch.zeros(2, 1)
+    sin = torch.zeros(2, 1)
+    kv_cache = (torch.empty(1), torch.empty(1))
+
+    with patch.object(
+        AscendSFAPCPImpl,
+        "exec_kv",
+        autospec=True,
+        return_value="written",
+    ) as pcp_exec_kv:
+        result = impl.exec_kv(
+            kv_no_split,
+            cos,
+            sin,
+            kv_cache,
+            torch.tensor([-1, -1]),
+            attn_metadata,
+        )
+
+    assert result == "written"
+    pcp_exec_kv.assert_called_once_with(
+        impl,
+        kv_no_split,
+        cos,
+        sin,
+        kv_cache,
+        main_slots,
+        attn_metadata,
+    )
 
 
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
@@ -237,25 +376,43 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
         self.kernel_block_size = 128
 
     kv_cache_spec = SimpleNamespace(block_size=128)
-    vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
-        scheduler_config=SimpleNamespace(
-            max_num_seqs=4,
-            max_num_batched_tokens=1024,
-        ),
-        model_config=SimpleNamespace(max_model_len=1024),
-    )
-
-    with patch.object(DCPMetadataBuilderMixin, "__init__", new=fake_base_init):
-        builder = AscendSFADCPMetadataBuilder(
-            kv_cache_spec,
-            [],
-            vllm_config,
-            torch.device("cpu"),
+    for pcp_size, expected_num_reqs in ((1, 5), (2, 9)):
+        vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                cp_kv_cache_interleave_size=1,
+                prefill_context_parallel_size=pcp_size,
+            ),
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=4,
+                max_num_batched_tokens=1024,
+            ),
+            model_config=SimpleNamespace(max_model_len=1024),
         )
 
-    assert builder.block_table_replicated_view_buf.shape == (5, 8)
-    assert builder.arange_buffer.shape == (8,)
+        with (
+            patch.object(
+                DCPMetadataBuilderMixin,
+                "__init__",
+                new=fake_base_init,
+            ),
+            patch(
+                "vllm_ascend.attention.context_parallel.sfa_cp.get_dcp_group",
+                return_value=SimpleNamespace(ranks=[0, 1]),
+            ),
+        ):
+            builder = AscendSFADCPMetadataBuilder(
+                kv_cache_spec,
+                [],
+                vllm_config,
+                torch.device("cpu"),
+            )
+
+        assert builder.dcp_local_seq_lens_buf.shape == (expected_num_reqs,)
+        assert builder.block_table_replicated_view_buf.shape == (
+            expected_num_reqs,
+            8,
+        )
+        assert builder.arange_buffer.shape == (8,)
 
 
 def _make_builder(rank: int = 0) -> AscendSFADCPMetadataBuilder:

@@ -1,12 +1,12 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, NamedTuple, TypeVar, cast
 
 import torch
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -127,6 +127,8 @@ class DCPGatherContext(NamedTuple):
 
 @dataclass
 class DCPContext:
+    # Keep the complete main-cache mapping. Consumers that operate on the
+    # rank-local model input take a view of the required prefix.
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
@@ -603,8 +605,14 @@ class AscendSFADCPMetadataBuilder(
         if self.cp_kv_cache_interleave_size <= 0:
             raise RuntimeError(f"Invalid cp_kv_cache_interleave_size: {self.cp_kv_cache_interleave_size}")
 
-        # Full-graph FIA padding can append one dummy request.
-        max_num_reqs = vllm_config.scheduler_config.max_num_seqs + 1
+        # PCP represents each prefill with two local DualChunkSwap segments,
+        # while decode requests remain one local row. A mixed batch can
+        # therefore require up to twice max_num_seqs rows on each PCP rank.
+        # Full-graph FIA padding can append one additional dummy request.
+        max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            max_num_reqs *= 2
+        max_num_reqs += 1
         self.dcp_local_seq_lens_buf = torch.empty(
             max_num_reqs,
             dtype=torch.int32,
@@ -634,6 +642,22 @@ class AscendSFADCPMetadataBuilder(
         )
         self.arange_buffer: torch.Tensor = torch.arange(
             max_replicated_block_table_cols,
+            dtype=torch.int32,
+            device=device,
+        )
+        dcp_group = get_dcp_group()
+        collective_ranks = sorted(dcp_group.ranks)
+        # ``dcp_group.ranks`` is in logical PCP-first DCP order, but
+        # ``torch.distributed.new_group`` sorts its global ranks and AllGather
+        # writes payload segments in that ProcessGroup order. For example,
+        # with PCP=2, TP=4, and DCP=8:
+        #   logical DCP ranks:       [0, 4, 1, 5, 2, 6, 3, 7]
+        #   AllGather segment ranks: [0, 1, 2, 3, 4, 5, 6, 7]
+        # Logical DCP rank positions therefore address gathered segments
+        # [0, 4, 1, 5, 2, 6, 3, 7]. Store this permutation for block-table
+        # offsets so the large gathered KV tensor can stay in HCCL order.
+        self.dcp_collective_rank_order = torch.tensor(
+            [collective_ranks.index(rank) for rank in dcp_group.ranks],
             dtype=torch.int32,
             device=device,
         )
@@ -770,9 +794,10 @@ class AscendSFADCPMetadataBuilder(
         valid_block_ids, compact_block_table = dcp_block_table.flatten().unique(return_inverse=True)
         compact_block_table = compact_block_table.view_as(dcp_block_table)
         num_blocks = valid_block_ids.shape[0]
-        dcp_rank_arange = self.arange_buffer[: self.dcp_size]
+        dcp_collective_rank_order = self.dcp_collective_rank_order[: self.dcp_size]
         remapped_block_table = (
-            compact_block_table.unsqueeze(-1) + (dcp_rank_arange * num_blocks).view(1, 1, -1).to(dcp_block_table)
+            compact_block_table.unsqueeze(-1)
+            + (dcp_collective_rank_order * num_blocks).view(1, 1, -1).to(dcp_block_table)
         ).reshape(dcp_block_table.shape[0], -1)
         return valid_block_ids, remapped_block_table.to(torch.int32)
 
@@ -825,7 +850,7 @@ class AscendSFADCPMetadataBuilder(
         if num_prefills > 0:
             kv_gather_block_ids, kv_gather_block_table = self._build_compact_kv_gather_metadata(dcp_block_table)
         metadata.dcp_context = DCPContext(
-            slot_mapping=dcp_slot_mapping[:num_input_tokens],
+            slot_mapping=dcp_slot_mapping,
             block_table=dcp_block_table,
             seq_lens=local_seq_lens,
             kv_gather_block_ids=kv_gather_block_ids,
@@ -856,6 +881,121 @@ class AscendSFADCPMetadataBuilder(
         )
         attn_metadata.attn_state = attn_state
         return attn_metadata
+
+
+class AscendSFAPCPDCPMetadataBuilder(AscendSFADCPMetadataBuilder):
+    """Adds PCP's main-cache token layout to the DCP metadata view."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+        metadata_cls: type[AscendSFAMetadata] | None = None,
+        supports_dcp_with_varlen: bool = False,
+    ):
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            metadata_cls or AscendSFADCPMetadata,
+            supports_dcp_with_varlen,
+        )
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.pcp_indexer_slot_mapping_buf = torch.empty(
+            (max_num_input_tokens * pcp_size,),
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def _build_pcp_ordered_indexer_slot_mapping(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        pcp_context: Any,
+        pcp_cache_group_idx: int,
+    ) -> torch.Tensor:
+        """Build this receiver's Indexer addresses in PCP token order."""
+        global_batch = pcp_context.global_batch
+        num_reqs = global_batch.num_reqs
+        global_block_table = pcp_context.global_block_tables[pcp_cache_group_idx]
+        global_common_attn_metadata = cast(
+            AscendCommonAttentionMetadata,
+            common_attn_metadata.replace(
+                query_start_loc=global_batch.query_start_loc,
+                seq_lens=global_batch.seq_lens[:num_reqs],
+                num_reqs=num_reqs,
+                num_actual_tokens=global_batch.num_tokens,
+                num_input_tokens=global_batch.num_tokens,
+                positions=global_batch.positions,
+                block_table_tensor=global_block_table,
+            ),
+        )
+        dcp_block_table = self._get_dcp_local_block_table(
+            global_block_table,
+            num_reqs,
+        )
+        replicated_block_table = self._build_block_table_replicated_view(
+            dcp_block_table,
+            global_common_attn_metadata.seq_lens,
+        )
+        global_slot_mapping = self._build_slot_mapping_replicated_view(
+            global_common_attn_metadata,
+            replicated_block_table,
+        )
+
+        gather_idx = pcp_context.padded_gather_idx
+        write_mask = pcp_context.gathered_kv_write_mask
+        if gather_idx is None or write_mask is None:
+            raise RuntimeError("PCP+DCP prefill requires the PCP gathered-token layout.")
+        num_pcp_ordered_tokens = gather_idx.numel()
+        pcp_ordered_slot_mapping = self.pcp_indexer_slot_mapping_buf[:num_pcp_ordered_tokens]
+        torch.index_select(
+            global_slot_mapping,
+            0,
+            gather_idx,
+            out=pcp_ordered_slot_mapping,
+        )
+        pcp_ordered_slot_mapping.masked_fill_(~write_mask, -1)
+        return pcp_ordered_slot_mapping
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        fast_build: bool = False,
+        pcp_context: Any | None = None,
+        pcp_cache_group_idx: int | None = None,
+        **kwargs,
+    ) -> AscendSFAMetadata:
+        if pcp_context is None:
+            # Decode-only graph capture builds dummy metadata without running
+            # PCP's prefill gather, so no PCP context is available or needed.
+            return super().build(
+                common_prefix_len,
+                common_attn_metadata,
+                fast_build,
+                **kwargs,
+            )
+        pcp_ordered_indexer_slot_mapping = None
+        if bool(pcp_context.global_batch.is_prefilling_np.any()):
+            if pcp_cache_group_idx is None:
+                raise RuntimeError("PCP+DCP prefill requires the PCP cache-group index.")
+            pcp_ordered_indexer_slot_mapping = self._build_pcp_ordered_indexer_slot_mapping(
+                common_attn_metadata, pcp_context, pcp_cache_group_idx
+            )
+        metadata = super().build(
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build,
+            **kwargs,
+        )
+        assert isinstance(metadata, AscendSFADCPMetadata)
+        if pcp_ordered_indexer_slot_mapping is not None:
+            metadata.pcp_slot_mapping = pcp_ordered_indexer_slot_mapping
+        return metadata
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
@@ -1131,7 +1271,7 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> torch.Tensor:
         assert isinstance(attn_metadata, AscendSFADCPMetadata)
         assert attn_metadata.dcp_context is not None
-        return attn_metadata.dcp_context.slot_mapping
+        return attn_metadata.dcp_context.slot_mapping[: attn_metadata.num_input_tokens]
 
     def _store_parallel_kv(
         self,
@@ -1258,6 +1398,32 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         return output.to(output_dtype)
 
 
+class AscendSFAPCPDCPImpl(AscendSFADCPImpl, AscendSFAPCPImpl):
+    """Composes DCP attention with PCP gathered-token cache writes."""
+
+    def exec_kv(
+        self,
+        kv_no_split: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: tuple,
+        slots: torch.Tensor,
+        attn_metadata: M,
+    ):
+        if self._has_prefill(attn_metadata):
+            assert isinstance(attn_metadata, AscendSFADCPMetadata)
+            assert attn_metadata.dcp_context is not None
+            slots = attn_metadata.dcp_context.slot_mapping
+        return super().exec_kv(
+            kv_no_split,
+            cos,
+            sin,
+            kv_cache,
+            slots,
+            attn_metadata,
+        )
+
+
 class AscendSFADSADCPMetadataBuilder(
     AscendSFADCPMetadataBuilder,
     AscendSFADSACPMetadataBuilder,
@@ -1287,29 +1453,37 @@ class AscendSFADSADCPImpl(AscendSFADCPImpl, AscendSFADSACPImpl):
     """Composes DCP collectives around the DSA-CP SFA implementation."""
 
 
-def resolve_sfa_metadata_builder() -> type[AscendSFAMetadataBuilder]:
-    """Resolve one SFA metadata builder from the two independent CP switches."""
+def resolve_sfa_metadata_builder(
+    vllm_config: VllmConfig | None = None,
+) -> type[AscendSFAMetadataBuilder]:
+    """Resolve one SFA metadata builder from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPMetadataBuilder
     if dsa_cp_enabled:
         return AscendSFADSACPMetadataBuilder
+    if pcp_enabled and dcp_enabled:
+        return AscendSFAPCPDCPMetadataBuilder
     if dcp_enabled:
         return AscendSFADCPMetadataBuilder
     return AscendSFAMetadataBuilder
 
 
 def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImpl]:
-    """Resolve one SFA implementation from the two independent CP switches."""
+    """Resolve one SFA implementation from the independent CP switches."""
     dsa_cp_enabled = enable_dsa_cp()
     dcp_enabled = enable_sfa_dcp_replicated_indexer()
+    pcp_enabled = vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1
     if dsa_cp_enabled and dcp_enabled:
         return AscendSFADSADCPImpl
     if dsa_cp_enabled:
         return AscendSFADSACPImpl
+    if pcp_enabled and dcp_enabled:
+        return AscendSFAPCPDCPImpl
     if dcp_enabled:
         return AscendSFADCPImpl
-    if vllm_config is not None and vllm_config.parallel_config.prefill_context_parallel_size > 1:
+    if pcp_enabled:
         return AscendSFAPCPImpl
     return AscendSFAImpl
