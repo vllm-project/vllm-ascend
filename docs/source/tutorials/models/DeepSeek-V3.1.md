@@ -24,11 +24,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-V3.1`(BF16 version): [Download model weight](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1).
-- `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot).
-- `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot).
-- `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4).
-- `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp): [Download model weight](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8).
+|  Weight Version                                                          | Hardware Requirements | Download Links |
+|--------------------------------------------------------------------------|-----------------------|----------------|
+| `DeepSeek-V3.1`(BF16 version)                                            |                       | [Modelscope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V3.1) \| [HuggingFace]() |
+| `DeepSeek-V3.1-w8a8-mtp-QuaRot`(Quantized version with mix mtp)          |                       | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8-mtp-QuaRot) \| [HuggingFace]() |
+| `DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot`(Quantized version with mix mtp) |                       | [Modelscope](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-Terminus-w4a8-mtp-QuaRot) \| [HuggingFace]() |
+| `DeepSeek-V3.1-w4a4c8-mxfp4`(Quantized version with mix mtp)             |                       | [Modelscope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4) \| [HuggingFace]() |
+| `DeepSeek-V3.1-w8a8c8-mxfp8`(Quantized version with mix mtp)             |                       | [Modelscope](https://modelscope.cn/models/Eco-Tech/DeepSeek-V3.1-w8a8c8-mxfp8) \| [HuggingFace]() |
+
 - `Quantization method`: [msmodelslim](https://gitcode.com/Ascend/msmodelslim/blob/master/example/DeepSeek/README.md). You can use this method to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.

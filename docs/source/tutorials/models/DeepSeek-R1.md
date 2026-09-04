@@ -19,7 +19,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `DeepSeek-R1-W8A8`(Quantized version): require 1 Atlas 800 A3 (64GB × 16) nodes or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8)
+|  Weight Version | Hardware Requirements | Download Links |
+|-----------------|-----------------------|----------------|
+| `DeepSeek-R1-W8A8`(Quantized version) |  1 Atlas 800 A3 (64GB × 16) nodes or 2 Atlas 800 A2 (64GB × 8) nodes| [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-R1-W8A8) \| [HuggingFace]() |
 
 It is recommended to download the model weight to the shared directory of multiple nodes.
 
