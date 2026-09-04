@@ -435,6 +435,49 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks() -> None:
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
 
 
+@pytest.mark.parametrize("is_vllm_0_27_1", [True, False])
+def test_initialize_kv_cache_gates_circular_slot_mapping_by_version(is_vllm_0_27_1: bool) -> None:
+    class FakeCircularBufferSpec:
+        block_size = 128
+
+    class BlockTablesCaptured(Exception):
+        pass
+
+    runner = object.__new__(NPUModelRunner310V2)
+    runner.max_model_len = 128
+    runner.max_num_reqs = 2
+    runner.max_num_tokens = 8
+    runner.vllm_config = _make_vllm_config()
+    runner.device = torch.device("cpu")
+    runner.dcp_size = 1
+    runner.dcp_rank = 0
+    runner.cp_interleave = 1
+    kv_cache_config = SimpleNamespace(
+        kv_cache_groups=[
+            SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=128)),
+            SimpleNamespace(kv_cache_spec=FakeCircularBufferSpec()),
+        ],
+    )
+
+    with (
+        patch.object(model_runner_module, "vllm_version_is", return_value=is_vllm_0_27_1),
+        # Expose the type in both lanes: symbol presence must not select behavior.
+        patch.object(
+            model_runner_module,
+            "kv_cache_interface",
+            SimpleNamespace(CircularBufferSpec=FakeCircularBufferSpec),
+        ),
+        patch.object(model_runner_module, "init_attn_backend", return_value=([], MagicMock(), [128, 128])),
+        patch.object(NPUModelRunner310V2, "_adjust_kernel_block_sizes"),
+        patch.object(model_runner_module, "Ascend310PBlockTables", side_effect=BlockTablesCaptured) as block_tables,
+        pytest.raises(BlockTablesCaptured),
+    ):
+        runner.initialize_kv_cache(kv_cache_config)
+
+    block_tables.assert_called_once()
+    assert block_tables.call_args.kwargs["slot_mapping_enabled"] == [True, is_vllm_0_27_1]
+
+
 def test_block_table_disables_slot_mapping_for_recurrent_groups() -> None:
     block_tables = Ascend310PBlockTables(
         block_sizes=[4, 4],
