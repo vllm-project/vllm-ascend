@@ -82,7 +82,9 @@ def _resample_kernel(
                 has_mass = block_max > float("-inf")
                 safe_block_max = tl.where(has_mass, block_max, 0.0)
                 block_sumexp = tl.where(has_mass, tl.sum(tl.exp(target_block_logits - safe_block_max), axis=0), 0.0)
-                tl.store(local_argmax_ptr + req_idx * local_argmax_stride + block_idx, block_idx * BLOCK_SIZE + block_argmax)
+                tl.store(
+                    local_argmax_ptr + req_idx * local_argmax_stride + block_idx, block_idx * BLOCK_SIZE + block_argmax
+                )
                 tl.store(local_max_ptr + req_idx * local_max_stride + block_idx, block_max)
                 tl.store(local_mass_ptr + req_idx * local_mass_stride + block_idx, block_sumexp)
             else:
@@ -91,7 +93,10 @@ def _resample_kernel(
 
                 if HAS_DRAFT_LOGITS:
                     draft_block_logits = tl.load(
-                        draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + vocab_offsets,
+                        draft_logits_ptr
+                        + req_state_idx * draft_logits_stride_0
+                        + resample_idx * draft_logits_stride_1
+                        + vocab_offsets,
                         mask=vocab_mask,
                         other=float("-inf"),
                     ).to(tl.float32)
@@ -222,11 +227,15 @@ def _categorical_finalize_kernel(
         mask=is_random_bonus & has_total_mass,
         other=0.0,
     ).to(tl.float32)
-    safe_bonus_logits = tl.where(is_random_bonus & has_total_mass & valid_token_mask, target_block_logits, float("-inf"))
+    safe_bonus_logits = tl.where(
+        is_random_bonus & has_total_mass & valid_token_mask, target_block_logits, float("-inf")
+    )
     selected_block_scale = tl.exp(selected_block_max - safe_bonus_global_max)
     bonus_token_mass = tl.exp(safe_bonus_logits - selected_block_max) * selected_block_scale
 
-    target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0).to(tl.float32)
+    target_lse = tl.load(
+        target_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
+    ).to(tl.float32)
     residual_target_logits = tl.where(
         is_random_residual & has_total_mass & valid_token_mask,
         target_block_logits,
@@ -240,11 +249,15 @@ def _categorical_finalize_kernel(
             mask=valid_token_mask & is_random_residual & has_total_mass,
             other=float("-inf"),
         ).to(tl.float32)
-        draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0).to(tl.float32)
+        draft_lse = tl.load(
+            draft_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
+        ).to(tl.float32)
         draft_prob = tl.exp(draft_block_logits - draft_lse)
         residual_token_mass = tl.maximum(target_prob - draft_prob, 0.0)
     else:
-        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=is_random_residual & has_total_mass, other=-1)
+        rejected_draft_token = tl.load(
+            draft_sampled_ptr + resample_token_idx + 1, mask=is_random_residual & has_total_mass, other=-1
+        )
         residual_token_mass = tl.where(token_ids != rejected_draft_token, target_prob, 0.0)
 
     token_mass = tl.where(is_bonus, bonus_token_mass, residual_token_mass)

@@ -6,12 +6,13 @@
 # PyTorch/analytic references; no Triton implementation is reproduced here.
 
 import gc
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
+from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
