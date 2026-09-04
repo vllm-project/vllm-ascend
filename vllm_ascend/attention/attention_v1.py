@@ -336,8 +336,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             slot_mapping = common_attn_metadata.slot_mapping.to(torch.int32)
         elif (
             self.speculative_config
-            and self.speculative_config.parallel_drafting
-            and not self.speculative_config.skip_parallel_drafting_seq_lens_override
+            and getattr(self.speculative_config, "parallel_drafting", False)
+            and not getattr(self.speculative_config, "skip_parallel_drafting_seq_lens_override", False)
         ):
             seq_lens = common_attn_metadata.seq_lens
 

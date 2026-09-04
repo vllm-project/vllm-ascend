@@ -222,15 +222,15 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             num_computed_tokens_cpu=None,
             max_seq_len=23,
         )
-        self.builder.speculative_config = SimpleNamespace(
-            parallel_drafting=True,
-            skip_parallel_drafting_seq_lens_override=False,
-        )
+        self.builder.speculative_config = SimpleNamespace(parallel_drafting=True)
 
         self.builder.build(0, common_attn_metadata)
         torch.testing.assert_close(mock_ascend_metadata.call_args.kwargs["seq_lens"], device_seq_lens)
 
-        self.builder.speculative_config.skip_parallel_drafting_seq_lens_override = True
+        self.builder.speculative_config = SimpleNamespace(
+            parallel_drafting=True,
+            skip_parallel_drafting_seq_lens_override=True,
+        )
         self.builder.build(0, common_attn_metadata)
         torch.testing.assert_close(mock_ascend_metadata.call_args.kwargs["seq_lens"], host_seq_lens)
 
