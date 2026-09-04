@@ -1,655 +1,662 @@
 # SPDX-License-Identifier: Apache-2.0
-# Numerical test for `_resample_kernel` in
-# vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils, against a plain
-# PyTorch fp32 reference.
-# Requires NPU and Triton-Ascend.
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Numerical tests for MRV2 categorical resampling on Ascend NPU.
 #
-# See vllm_ascend/ops/triton/docs/resample.md for the operator spec.
-#
-# Regression scope: #9155 (main2main import of the MRV2 rejection sampler) and
-# #13470 (probabilistic rejection sampling enabled on NPU) -- neither PR shipped
-# any numerical coverage for this kernel.
-#
-# `_npu_gumbel_block_argmax` is a `@triton.jit` device function inlined into
-# `_resample_kernel`, not a separate operator: it has no `tl.program_id` and
-# cannot be launched on its own.  It is covered here only through
-# `_resample_kernel`, which is the sole caller.
+# The tests exercise the public resample() API and use independent
+# PyTorch/analytic references; no Triton implementation is reproduced here.
 
 import gc
-
 import pytest
 import torch
-import torch_npu  # noqa: F401  # registers the npu backend / torch.npu namespace
-from vllm.triton_utils import triton
+import torch_npu  # noqa: F401
 
+from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
-from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import _resample_kernel, rejection_sample
+from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
-
-# Everything is fp32 end to end; the only slack needed is for the different
-# order of the `log`/`exp` chain in the residual-logits branch.
-_RTOL = 1e-5
-_ATOL = 1e-5
-
-# Production launch constants, mirrored so the tests exercise the real tiling.
-RESAMPLE_BLOCK_SIZE = 1024
+STAT_TRIALS = 4096
+STAT_ATOL = 0.03
 VOCAB_BLOCK_SIZE = 8192
 
-# Sentinels written into the outputs before every launch, so that "the kernel
-# returned early and left the slot untouched" is observable.
-_ARGMAX_POISON = -777
-_MAX_POISON = -12345.0
 
-
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def _npu_env():
     init_device_properties_triton()
     yield
+    torch.npu.synchronize()
     gc.collect()
     torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+def _cu_num_logits(lengths: list[int]) -> torch.Tensor:
+    cu = [0]
+    for length in lengths:
+        cu.append(cu[-1] + length)
+    return torch.tensor(cu, dtype=torch.int32, device=DEVICE)
 
 
-def _ref_block_argmax(logits, vocab_size, block_size):
-    """Plain PyTorch per-block max/argmax over fp32 logits.
-
-    Positions beyond `vocab_size` are padded with -inf, and the returned indices
-    are global vocabulary indices rather than offsets within each block.
-
-    Returns (values [T, num_blocks] fp32, indices [T, num_blocks] int64).
-    """
-    num_tokens = logits.shape[0]
-    num_blocks = triton.cdiv(vocab_size, block_size)
-    padded = torch.full(
-        (num_tokens, num_blocks * block_size),
-        float("-inf"),
-        dtype=torch.float32,
-        device=logits.device,
-    )
-    padded[:, :vocab_size] = logits.float()
-    padded = padded.view(num_tokens, num_blocks, block_size)
-    values, idx = padded.max(dim=-1)
-    offsets = torch.arange(num_blocks, device=logits.device, dtype=torch.int64) * block_size
-    return values, idx.to(torch.int64) + offsets
+def _expanded_mapping(lengths: list[int], req_state_rows: list[int] | None = None) -> torch.Tensor:
+    if req_state_rows is None:
+        req_state_rows = list(range(len(lengths)))
+    mapping = torch.empty(sum(lengths), dtype=torch.int32)
+    offset = 0
+    for length, row in zip(lengths, req_state_rows):
+        mapping[offset : offset + length] = row
+        offset += length
+    return mapping.to(DEVICE)
 
 
-def _assert_valid_block_outputs(argmax, local_max, vocab_size, block_size):
-    """Check that every launched block writes a finite, in-range winner."""
-    num_blocks = triton.cdiv(vocab_size, block_size)
-    assert argmax.shape[1] == num_blocks
-    assert bool(torch.isfinite(local_max).all()), "resample produced a non-finite block maximum"
-    for block_idx in range(num_blocks):
-        block_start = block_idx * block_size
-        block_end = min(block_start + block_size, vocab_size)
-        chosen = argmax[:, block_idx]
-        assert bool(((chosen >= block_start) & (chosen < block_end)).all()), (
-            f"block {block_idx} returned an index outside [{block_start}, {block_end})"
-        )
+def _request_state_tensors(req_state_rows: list[int], temperatures: list[float]):
+    max_num_reqs = max(req_state_rows) + 1
+    temperature = torch.zeros(max_num_reqs, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(max_num_reqs, dtype=torch.int64, device=DEVICE) * 104729 + 17
+    for row, value in zip(req_state_rows, temperatures):
+        temperature[row] = value
+    return temperature, seed
 
 
-def _new_outputs(num_reqs, num_blocks):
-    """Poisoned resample outputs, so an early return is distinguishable from a write."""
-    argmax = torch.full((num_reqs, num_blocks), _ARGMAX_POISON, dtype=torch.int64, device=DEVICE)
-    local_max = torch.full((num_reqs, num_blocks), _MAX_POISON, dtype=torch.float32, device=DEVICE)
-    return argmax, local_max
+def _position_tensor(num_logits: int) -> torch.Tensor:
+    # Keep positions well inside int32 because the NPU RNG path casts them to int32.
+    return torch.arange(num_logits, dtype=torch.int64, device=DEVICE) * 7 + 11
 
 
-def _run_resample(
-    *,
-    target_logits,
-    draft_logits,
-    draft_sampled,
-    cu_num_logits,
-    expanded_idx_mapping,
-    rejected_step,
-    temperature,
-    seeds,
-    pos,
-    target_lse,
-    draft_lse,
-    block_size=RESAMPLE_BLOCK_SIZE,
-):
-    num_reqs = cu_num_logits.shape[0] - 1
-    vocab_size = target_logits.shape[1]
-    num_blocks = triton.cdiv(vocab_size, block_size)
-    has_draft_logits = draft_logits is not None
-    if draft_logits is None:
-        draft_logits = target_logits.new_empty(1, 1, 1)
+def _assert_distribution(samples: torch.Tensor, expected: torch.Tensor, atol: float = STAT_ATOL) -> None:
+    samples_cpu = samples.cpu()
+    assert int(samples_cpu.min()) >= 0
+    assert int(samples_cpu.max()) < expected.numel()
+    counts = torch.bincount(samples_cpu, minlength=expected.numel()).to(torch.float64)
+    observed = counts / counts.sum()
+    torch.testing.assert_close(observed, expected.to(torch.float64).cpu(), rtol=0.0, atol=atol)
 
-    argmax, local_max = _new_outputs(num_reqs, num_blocks)
-    _resample_kernel[(num_reqs, num_blocks)](
-        argmax,
-        argmax.stride(0),
-        local_max,
-        local_max.stride(0),
+
+def _repeat_rows(rows: torch.Tensor, repeats: int) -> torch.Tensor:
+    return rows.unsqueeze(0).expand(repeats, -1).contiguous()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_random_bonus_single_support_accepts_logits_dtypes(dtype):
+    """The operator loads fp16/bf16/fp32 logits and accumulates categorical mass in fp32."""
+    vocab_size = 1025
+    lengths = [1, 1, 1]
+    req_state_rows = [2, 0, 1]
+    expected_ids = [1024, 17, 1023]
+    expected = torch.tensor(expected_ids, dtype=torch.int64, device=DEVICE)
+
+    target_logits = torch.full((3, vocab_size), float("-inf"), dtype=dtype, device=DEVICE)
+    target_logits[0, expected_ids[0]] = 0.0
+    target_logits[1, expected_ids[1]] = 1.0
+    target_logits[2, expected_ids[2]] = -1.0
+
+    sampled = torch.full((3, 1), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(3, dtype=torch.int32, device=DEVICE)
+    cu_num_logits = _cu_num_logits(lengths)
+    expanded_idx_mapping = _expanded_mapping(lengths, req_state_rows)
+    draft_sampled = torch.zeros(3, dtype=torch.int32, device=DEVICE)
+    temperature, seed = _request_state_tensors(req_state_rows, [1.0, 0.7, 1.3])
+    lse = torch.zeros(3, dtype=torch.float32, device=DEVICE)
+
+    resample(
+        sampled,
+        num_sampled,
         target_logits,
-        target_logits.stride(0),
-        target_lse,
-        draft_logits,
-        draft_logits.stride(0),
-        draft_logits.stride(1),
-        draft_lse,
-        rejected_step,
+        lse,
+        None,
+        lse,
         cu_num_logits,
         expanded_idx_mapping,
         draft_sampled,
         temperature,
-        seeds,
-        pos,
-        vocab_size,
-        BLOCK_SIZE=block_size,
-        HAS_DRAFT_LOGITS=has_draft_logits,
+        seed,
+        _position_tensor(3),
     )
     torch.npu.synchronize()
-    return argmax, local_max
+
+    assert torch.equal(sampled[:, 0], expected)
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
 
 
-def _make_batch(num_logits_per_req, vocab_size, max_num_reqs, temps, seed=99):
-    """Build a resample batch.
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@torch.inference_mode()
+def test_full_draft_residual_accepts_logits_dtypes(dtype):
+    """Full-draft residual supports fp16/bf16/fp32 target and draft logits with fp32 mass computation."""
+    vocab_size = 4
+    target_row = torch.tensor([2.0, -10.0, -10.0, -2.0], dtype=dtype, device=DEVICE)
+    draft_row = torch.tensor([-2.0, -10.0, -10.0, 2.0], dtype=dtype, device=DEVICE)
+    target_logits = torch.stack([target_row, target_row])
+    draft_logits = draft_row.reshape(1, 1, vocab_size)
+    target_lse = torch.logsumexp(target_row.float(), dim=0).reshape(1)
+    draft_lse = torch.logsumexp(draft_row.float(), dim=0).reshape(1)
+    sampled = torch.full((1, 2), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(1, dtype=torch.int32, device=DEVICE)
 
-    `expanded_idx_mapping` deliberately maps to shuffled, non-contiguous
-    request-state rows, and the number of logits differs per request, so that
-    `req_idx` / `req_state_idx` / `resample_token_idx` confusions cannot pass.
-    """
-    torch.manual_seed(seed)
-    num_reqs = len(num_logits_per_req)
-    cu = [0]
-    for n in num_logits_per_req:
-        cu.append(cu[-1] + n)
-    num_logits = cu[-1]
-    cu_num_logits = torch.tensor(cu, dtype=torch.int32, device=DEVICE)
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        target_lse,
+        draft_logits,
+        draft_lse,
+        _cu_num_logits([2]),
+        _expanded_mapping([2]),
+        torch.zeros(2, dtype=torch.int32, device=DEVICE),
+        torch.ones(1, dtype=torch.float32, device=DEVICE),
+        torch.tensor([211], dtype=torch.int64, device=DEVICE),
+        _position_tensor(2),
+        has_draft_logits=True,
+    )
+    torch.npu.synchronize()
 
-    rows = torch.randperm(max_num_reqs)[:num_reqs].to(torch.int32)
-    expanded = torch.empty(num_logits, dtype=torch.int32)
-    for r, n in enumerate(num_logits_per_req):
-        expanded[cu[r] : cu[r + 1]] = rows[r]
-    expanded_idx_mapping = expanded.to(DEVICE)
-
-    target_logits = torch.randn(num_logits, vocab_size, dtype=torch.float32, device=DEVICE)
-    draft_sampled = torch.randint(0, vocab_size, (num_logits,), dtype=torch.int32, device=DEVICE)
-    temperature = torch.zeros(max_num_reqs, dtype=torch.float32, device=DEVICE)
-    for r, t in enumerate(temps):
-        temperature[int(rows[r])] = t
-    seeds = torch.randint(1, 2**30, (max_num_reqs,), dtype=torch.int64, device=DEVICE)
-    pos = torch.arange(num_logits, dtype=torch.int64, device=DEVICE) * 3 + 11
-    return {
-        "cu": cu,
-        "rows": rows,
-        "cu_num_logits": cu_num_logits,
-        "expanded_idx_mapping": expanded_idx_mapping,
-        "target_logits": target_logits,
-        "draft_sampled": draft_sampled,
-        "temperature": temperature,
-        "seeds": seeds,
-        "pos": pos,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Tests
-# ---------------------------------------------------------------------------
+    assert sampled[0, 0].item() == 0
+    assert num_sampled[0].item() == 1
 
 
 @torch.inference_mode()
-def test_resample_greedy_bonus_is_plain_argmax():
-    """Greedy request whose whole draft was accepted: resample the bonus token.
+def test_partial_negative_inf_has_zero_probability_mass():
+    """Masked -inf vocabulary entries are valid zero-mass tokens and are never sampled."""
+    probs = torch.tensor([0.25, 0.0, 0.75, 0.0, 0.0], dtype=torch.float32)
+    logits = torch.where(probs > 0, torch.log(probs), torch.tensor(float("-inf")))
+    target_logits = _repeat_rows(logits, STAT_TRIALS).to(DEVICE)
+    sampled = torch.full((STAT_TRIALS, 1), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(STAT_TRIALS, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(STAT_TRIALS, dtype=torch.float32, device=DEVICE)
 
-    `temp == 0 and is_bonus` is the one combination that does *not* take the
-    early return, and it carries no noise, so the expected output is an exact
-    per-block argmax of the raw target logits.  This is the path every greedy
-    spec-decode step ends on.
-    """
-    num_logits_per_req = [4, 3, 5]
-    vocab_size = 2 * RESAMPLE_BLOCK_SIZE + 137
-    batch = _make_batch(num_logits_per_req, vocab_size, max_num_reqs=9, temps=[0.0, 0.0, 0.0])
-    num_reqs = len(num_logits_per_req)
-    # rejected_step = num_tokens - 1 => resample_token_idx == end_idx - 1 => bonus.
-    rejected_step = torch.tensor([n - 1 for n in num_logits_per_req], dtype=torch.int32, device=DEVICE)
-    lse = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
-
-    argmax, local_max = _run_resample(
-        target_logits=batch["target_logits"],
-        draft_logits=None,
-        draft_sampled=batch["draft_sampled"],
-        cu_num_logits=batch["cu_num_logits"],
-        expanded_idx_mapping=batch["expanded_idx_mapping"],
-        rejected_step=rejected_step,
-        temperature=batch["temperature"],
-        seeds=batch["seeds"],
-        pos=batch["pos"],
-        target_lse=lse,
-        draft_lse=lse,
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        None,
+        zeros,
+        _cu_num_logits([1] * STAT_TRIALS),
+        _expanded_mapping([1] * STAT_TRIALS),
+        torch.zeros(STAT_TRIALS, dtype=torch.int32, device=DEVICE),
+        torch.ones(STAT_TRIALS, dtype=torch.float32, device=DEVICE),
+        torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 401,
+        _position_tensor(STAT_TRIALS),
     )
+    torch.npu.synchronize()
 
-    bonus_rows = torch.tensor([batch["cu"][r + 1] - 1 for r in range(num_reqs)], dtype=torch.long, device=DEVICE)
-    ref_val, ref_idx = _ref_block_argmax(batch["target_logits"][bonus_rows], vocab_size, RESAMPLE_BLOCK_SIZE)
-    torch.testing.assert_close(local_max, ref_val, rtol=_RTOL, atol=_ATOL)
-    assert torch.equal(argmax, ref_idx)
-    assert int(argmax.max()) < vocab_size, "tail block resampled a padded position"
+    assert not bool(((sampled[:, 0] == 1) | (sampled[:, 0] == 3) | (sampled[:, 0] == 4)).any())
+    _assert_distribution(sampled[:, 0], probs)
 
 
 @torch.inference_mode()
-def test_resample_greedy_non_bonus_returns_without_writing():
-    """Greedy request with a rejected draft token: the kernel must return early.
+def test_ragged_requests_and_shuffled_mapping_select_correct_rows():
+    """Ragged cu_num_logits and shuffled request-state mappings select the intended resample row per request."""
+    lengths = [2, 4, 3]
+    rejected_step_values = [0, 2, 2]
+    rejected_steps = torch.tensor(rejected_step_values, dtype=torch.int32, device=DEVICE)
+    req_state_rows = [4, 1, 3]
+    vocab_size = 19
+    expected_ids = [3, 11, 18]
+    target_logits = torch.full((sum(lengths), vocab_size), float("-inf"), dtype=torch.float32, device=DEVICE)
+    cu = [0, 2, 6, 9]
+    for req_idx, token_id in enumerate(expected_ids):
+        target_logits[cu[req_idx] + rejected_step_values[req_idx], token_id] = 0.0
 
-    `_insert_resampled_kernel` skips the same `temp == 0 and not is_bonus`
-    combination and reuses the target argmax already stored by the rejection
-    kernel, so the resample outputs stay *uninitialised* (`new_empty`) on this
-    path.  If the early return were dropped, the sampler would still work but
-    the outputs would silently become live -- which is exactly what this asserts
-    against, by poisoning them first.
-    """
-    num_logits_per_req = [4, 3]
-    vocab_size = RESAMPLE_BLOCK_SIZE + 3
-    batch = _make_batch(num_logits_per_req, vocab_size, max_num_reqs=6, temps=[0.0, 0.0])
-    # rejected at step 0 and 1: strictly before the bonus slot.
-    rejected_step = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
-    lse = torch.zeros(2, dtype=torch.float32, device=DEVICE)
+    sampled = torch.full((3, 5), -1, dtype=torch.int64, device=DEVICE)
+    draft_sampled = torch.zeros(sum(lengths), dtype=torch.int32, device=DEVICE)
+    temperature, seed = _request_state_tensors(req_state_rows, [0.7, 1.0, 1.3])
+    zeros = torch.zeros(3, dtype=torch.float32, device=DEVICE)
 
-    argmax, local_max = _run_resample(
-        target_logits=batch["target_logits"],
-        draft_logits=None,
-        draft_sampled=batch["draft_sampled"],
-        cu_num_logits=batch["cu_num_logits"],
-        expanded_idx_mapping=batch["expanded_idx_mapping"],
-        rejected_step=rejected_step,
-        temperature=batch["temperature"],
-        seeds=batch["seeds"],
-        pos=batch["pos"],
-        target_lse=lse,
-        draft_lse=lse,
+    resample(
+        sampled,
+        rejected_steps,
+        target_logits,
+        zeros,
+        None,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths, req_state_rows),
+        draft_sampled,
+        temperature,
+        seed,
+        _position_tensor(sum(lengths)),
     )
+    torch.npu.synchronize()
 
-    assert bool((argmax == _ARGMAX_POISON).all()), "greedy non-bonus request wrote resampled_local_argmax"
-    assert bool((local_max == _MAX_POISON).all()), "greedy non-bonus request wrote resampled_local_max"
+    for req_idx, (step, token_id) in enumerate(zip(rejected_step_values, expected_ids)):
+        assert sampled[req_idx, step].item() == token_id
+    assert torch.equal(rejected_steps, torch.tensor([1, 3, 3], dtype=torch.int32, device=DEVICE))
+
+
+@pytest.mark.parametrize("vocab_size", [1023, 1024, 1025])
+@torch.inference_mode()
+def test_greedy_bonus_handles_block_tail(vocab_size):
+    """Cover BLOCK_SIZE - 1 / BLOCK_SIZE / BLOCK_SIZE + 1 and exact global argmax selection."""
+    target_logits = torch.arange(vocab_size, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+    sampled = torch.full((1, 1), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(1, dtype=torch.float32, device=DEVICE)
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        None,
+        zeros,
+        _cu_num_logits([1]),
+        _expanded_mapping([1]),
+        torch.zeros(1, dtype=torch.int32, device=DEVICE),
+        torch.zeros(1, dtype=torch.float32, device=DEVICE),
+        torch.tensor([19], dtype=torch.int64, device=DEVICE),
+        _position_tensor(1),
+    )
+    torch.npu.synchronize()
+
+    assert sampled[0, 0].item() == vocab_size - 1
+    assert num_sampled[0].item() == 1
 
 
 @torch.inference_mode()
-def test_resample_one_hot_draft_excludes_rejected_token():
-    """HAS_DRAFT_LOGITS=False: the residual is the target with the draft token knocked out.
+def test_greedy_non_bonus_preserves_verification_result():
+    """Greedy rejection must not read unwritten workspaces or overwrite the target argmax from verification."""
+    lengths = [2, 3]
+    num_reqs = len(lengths)
+    vocab_size = 33
+    target_logits = torch.randn(sum(lengths), vocab_size, dtype=torch.float32, device=DEVICE)
+    sampled = torch.full((num_reqs, 3), -777, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
+    sampled[0, 0] = 11
+    sampled[1, 1] = 22
+    zeros = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
 
-    Two things are pinned here:
-      * the token read is `draft_sampled[resample_token_idx + 1]` -- the input-id
-        stream is shifted one slot ahead of the logits, and an off-by-one here
-        would exclude an innocent token and keep the rejected one eligible;
-      * -inf survives the noise add, so the rejected token can never come back.
-    """
-    num_logits_per_req = [4, 5]
-    vocab_size = 2 * RESAMPLE_BLOCK_SIZE + 91
-    batch = _make_batch(num_logits_per_req, vocab_size, max_num_reqs=7, temps=[1.0, 0.6])
-    num_reqs = len(num_logits_per_req)
-    rejected_step = torch.tensor([1, 2], dtype=torch.int32, device=DEVICE)
-    lse = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
-
-    # Guard the guard: make the excluded token the outright winner of its block,
-    # so that "the kernel forgot to exclude it" is a guaranteed failure rather
-    # than something a random draw might hide.
-    resample_tokens = [batch["cu"][r] + int(rejected_step[r]) for r in range(num_reqs)]
-    for r, tok in enumerate(resample_tokens):
-        rejected = int(batch["draft_sampled"][tok + 1])
-        batch["target_logits"][tok, rejected] = 50.0
-
-    argmax, local_max = _run_resample(
-        target_logits=batch["target_logits"],
-        draft_logits=None,
-        draft_sampled=batch["draft_sampled"],
-        cu_num_logits=batch["cu_num_logits"],
-        expanded_idx_mapping=batch["expanded_idx_mapping"],
-        rejected_step=rejected_step,
-        temperature=batch["temperature"],
-        seeds=batch["seeds"],
-        pos=batch["pos"],
-        target_lse=lse,
-        draft_lse=lse,
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        None,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths),
+        torch.zeros(sum(lengths), dtype=torch.int32, device=DEVICE),
+        torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE),
+        torch.tensor([101, 103], dtype=torch.int64, device=DEVICE),
+        _position_tensor(sum(lengths)),
     )
+    torch.npu.synchronize()
 
-    _assert_valid_block_outputs(argmax, local_max, vocab_size, RESAMPLE_BLOCK_SIZE)
-
-    for r, tok in enumerate(resample_tokens):
-        rejected = int(batch["draft_sampled"][tok + 1])
-        assert rejected not in argmax[r].tolist(), "the rejected draft token was resampled"
+    assert sampled[0, 0].item() == 11
+    assert sampled[1, 1].item() == 22
+    assert torch.equal(num_sampled, torch.tensor([1, 2], dtype=torch.int32, device=DEVICE))
 
 
 @torch.inference_mode()
-def test_resample_draft_logits_selects_positive_residual():
-    """HAS_DRAFT_LOGITS=True keeps only positions where target probability wins.
-
-    Each vocabulary block has exactly one position with `q < p`; every other
-    position has `q == p` and therefore a -inf residual.  Gumbel noise cannot
-    change the sole finite winner, so this checks the production kernel without
-    reproducing its RNG implementation in the test.
-    """
-    num_logits_per_req = [4, 3]
-    vocab_size = RESAMPLE_BLOCK_SIZE + 233
-    num_spec_steps = 3
-    max_num_reqs = 6
-    batch = _make_batch(num_logits_per_req, vocab_size, max_num_reqs, temps=[1.0, 0.9])
-    num_reqs = len(num_logits_per_req)
-    rejected_step = torch.tensor([1, 0], dtype=torch.int32, device=DEVICE)
-
-    batch["target_logits"].zero_()
-    draft_logits = torch.zeros(max_num_reqs, num_spec_steps, vocab_size, dtype=torch.float32, device=DEVICE)
-    target_lse = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
-    draft_lse = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
-
-    num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-    expected_winners = []
-    for req_idx in range(num_reqs):
-        req_state_idx = int(batch["rows"][req_idx])
-        step = int(rejected_step[req_idx])
-        request_winners = []
-        for block_idx in range(num_blocks):
-            block_start = block_idx * RESAMPLE_BLOCK_SIZE
-            block_end = min(block_start + RESAMPLE_BLOCK_SIZE, vocab_size)
-            winner = min(block_start + 17 + req_idx, block_end - 1)
-            draft_logits[req_state_idx, step, winner] = -10.0
-            request_winners.append(winner)
-        expected_winners.append(request_winners)
-
-    argmax, local_max = _run_resample(
-        target_logits=batch["target_logits"],
-        draft_logits=draft_logits,
-        draft_sampled=batch["draft_sampled"],
-        cu_num_logits=batch["cu_num_logits"],
-        expanded_idx_mapping=batch["expanded_idx_mapping"],
-        rejected_step=rejected_step,
-        temperature=batch["temperature"],
-        seeds=batch["seeds"],
-        pos=batch["pos"],
-        target_lse=target_lse,
-        draft_lse=draft_lse,
-    )
-
-    expected = torch.tensor(expected_winners, dtype=torch.int64, device=DEVICE)
-    assert torch.equal(argmax, expected)
-    _assert_valid_block_outputs(argmax, local_max, vocab_size, RESAMPLE_BLOCK_SIZE)
-
-
-@torch.inference_mode()
-def test_resample_bonus_ignores_draft_logits():
-    """A sampling bonus uses target logits even when draft logits are present.
-
-    Each block has one finite target position, making the expected winner
-    independent of the Gumbel draw.  Arbitrary draft logits must not affect the
-    bonus branch.
-    """
-    num_logits_per_req = [3, 4]
-    vocab_size = RESAMPLE_BLOCK_SIZE + 401
-    num_spec_steps = 3
-    max_num_reqs = 5
-    batch = _make_batch(num_logits_per_req, vocab_size, max_num_reqs, temps=[1.0, 1.5])
-    num_reqs = len(num_logits_per_req)
-    rejected_step = torch.tensor([n - 1 for n in num_logits_per_req], dtype=torch.int32, device=DEVICE)
-    draft_logits = torch.randn(max_num_reqs, num_spec_steps, vocab_size, dtype=torch.float32, device=DEVICE)
-    lse = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
-
-    num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-    expected_winners = []
-    for req_idx in range(num_reqs):
-        token_idx = batch["cu"][req_idx + 1] - 1
-        batch["target_logits"][token_idx].fill_(float("-inf"))
-        request_winners = []
-        for block_idx in range(num_blocks):
-            block_start = block_idx * RESAMPLE_BLOCK_SIZE
-            block_end = min(block_start + RESAMPLE_BLOCK_SIZE, vocab_size)
-            winner = min(block_start + 7 + req_idx, block_end - 1)
-            batch["target_logits"][token_idx, winner] = 0.0
-            request_winners.append(winner)
-        expected_winners.append(request_winners)
-
-    argmax, local_max = _run_resample(
-        target_logits=batch["target_logits"],
-        draft_logits=draft_logits,
-        draft_sampled=batch["draft_sampled"],
-        cu_num_logits=batch["cu_num_logits"],
-        expanded_idx_mapping=batch["expanded_idx_mapping"],
-        rejected_step=rejected_step,
-        temperature=batch["temperature"],
-        seeds=batch["seeds"],
-        pos=batch["pos"],
-        target_lse=lse,
-        draft_lse=lse,
-    )
-
-    expected = torch.tensor(expected_winners, dtype=torch.int64, device=DEVICE)
-    assert torch.equal(argmax, expected)
-    _assert_valid_block_outputs(argmax, local_max, vocab_size, RESAMPLE_BLOCK_SIZE)
-
-
-@torch.inference_mode()
-def test_resample_mixed_batch_keeps_requests_independent():
-    """One launch, greedy + sampling + bonus + rejected all mixed.
-
-    5 requests and 3 vocab blocks -- both non-powers of two and unequal, so a
-    swapped `//` / `%` in the grid mapping cannot come out right by accident.
-    Greedy non-bonus rows must stay poisoned while their neighbours are written,
-    which is the invariant a per-request early return is easiest to break.
-    """
-    num_logits_per_req = [2, 5, 3, 4, 3]
-    vocab_size = 2 * RESAMPLE_BLOCK_SIZE + 17
-    max_num_reqs = 13
-    temps = [0.0, 0.0, 1.0, 0.8, 1.2]
-    batch = _make_batch(num_logits_per_req, vocab_size, max_num_reqs, temps=temps, seed=4242)
-    num_reqs = len(num_logits_per_req)
-    # req0: greedy bonus, req1: greedy rejected, req2: sampling rejected,
-    # req3: sampling bonus, req4: sampling rejected at step 0.
-    steps = [num_logits_per_req[0] - 1, 2, 1, num_logits_per_req[3] - 1, 0]
-    rejected_step = torch.tensor(steps, dtype=torch.int32, device=DEVICE)
-    lse = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
-
-    argmax, local_max = _run_resample(
-        target_logits=batch["target_logits"],
-        draft_logits=None,
-        draft_sampled=batch["draft_sampled"],
-        cu_num_logits=batch["cu_num_logits"],
-        expanded_idx_mapping=batch["expanded_idx_mapping"],
-        rejected_step=rejected_step,
-        temperature=batch["temperature"],
-        seeds=batch["seeds"],
-        pos=batch["pos"],
-        target_lse=lse,
-        draft_lse=lse,
-    )
-
-    for r in range(num_reqs):
-        tok = batch["cu"][r] + steps[r]
-        is_bonus = tok == batch["cu"][r + 1] - 1
-        temp = temps[r]
-        if temp == 0.0 and not is_bonus:
-            assert bool((argmax[r] == _ARGMAX_POISON).all()), f"req {r} should have returned early"
-            assert bool((local_max[r] == _MAX_POISON).all()), f"req {r} should have returned early"
-            continue
-
-        if temp == 0.0:
-            ref_val, ref_idx = _ref_block_argmax(
-                batch["target_logits"][tok].unsqueeze(0), vocab_size, RESAMPLE_BLOCK_SIZE
-            )
-            torch.testing.assert_close(local_max[r : r + 1], ref_val, rtol=_RTOL, atol=_ATOL)
-            assert torch.equal(argmax[r : r + 1], ref_idx)
-        else:
-            _assert_valid_block_outputs(argmax[r : r + 1], local_max[r : r + 1], vocab_size, RESAMPLE_BLOCK_SIZE)
-            if not is_bonus:
-                rejected = int(batch["draft_sampled"][tok + 1])
-                assert rejected not in argmax[r].tolist(), f"req {r} resampled its rejected draft token"
-
-
-@torch.inference_mode()
-def test_resample_is_deterministic():
-    """Two identical launches must produce bit-identical output.
-
-    The kernel derives its randomness only from (seed, pos); if anything else
-    leaked in -- program id, launch order, uninitialised memory -- rerunning the
-    same batch would drift, and a seeded request would stop being reproducible.
-    """
-    num_logits_per_req = [4, 4]
-    vocab_size = RESAMPLE_BLOCK_SIZE + 7
-    batch = _make_batch(num_logits_per_req, vocab_size, max_num_reqs=6, temps=[1.0, 1.0])
-    rejected_step = torch.tensor([1, 3], dtype=torch.int32, device=DEVICE)
-    lse = torch.zeros(2, dtype=torch.float32, device=DEVICE)
-
-    kwargs = dict(
-        target_logits=batch["target_logits"],
-        draft_logits=None,
-        draft_sampled=batch["draft_sampled"],
-        cu_num_logits=batch["cu_num_logits"],
-        expanded_idx_mapping=batch["expanded_idx_mapping"],
-        rejected_step=rejected_step,
-        temperature=batch["temperature"],
-        seeds=batch["seeds"],
-        pos=batch["pos"],
-        target_lse=lse,
-        draft_lse=lse,
-    )
-    a1, m1 = _run_resample(**kwargs)
-    a2, m2 = _run_resample(**kwargs)
-    assert torch.equal(a1, a2)
-    torch.testing.assert_close(m1, m2, rtol=0.0, atol=0.0)
-
-
-@torch.inference_mode()
-def test_resample_argmax_follows_softmax_distribution():
-    """The resampled token must follow softmax(residual), not merely "some token".
-
-    This validates the RNG from its mathematical behavior without reproducing
-    the implementation: adding independent Gumbel noise and taking the argmax
-    must sample from `softmax(logits)`.  It catches a constant draw, biased seed
-    mixing, or a sign error in the Gumbel transform.
-
-    Driven through the bonus branch (residual == target logits) so the expected
-    distribution is the target softmax itself.  One request per draw, each with
-    a distinct `pos`, since the noise is keyed on (seed, pos).
-    """
-    num_draws, vocab_size, max_num_reqs = 16384, 8, 1
-    torch.manual_seed(7)
-    row_logits = torch.tensor([2.0, 1.0, 0.5, 0.0, -0.5, -1.0, -1.5, -2.0], dtype=torch.float32)
-    target_logits = row_logits.to(DEVICE).repeat(num_draws, 1).contiguous()
-
-    # One logit per request => resample_token_idx == end_idx - 1 => bonus branch.
-    cu_num_logits = torch.arange(num_draws + 1, dtype=torch.int32, device=DEVICE)
-    expanded_idx_mapping = torch.zeros(num_draws, dtype=torch.int32, device=DEVICE)
-    rejected_step = torch.zeros(num_draws, dtype=torch.int32, device=DEVICE)
-    draft_sampled = torch.zeros(num_draws, dtype=torch.int32, device=DEVICE)
-    temperature = torch.ones(max_num_reqs, dtype=torch.float32, device=DEVICE)
-    seeds = torch.full((max_num_reqs,), 20260827, dtype=torch.int64, device=DEVICE)
-    pos = torch.arange(num_draws, dtype=torch.int64, device=DEVICE)
-    lse = torch.zeros(num_draws, dtype=torch.float32, device=DEVICE)
-
-    argmax, _ = _run_resample(
-        target_logits=target_logits,
-        draft_logits=None,
-        draft_sampled=draft_sampled,
-        cu_num_logits=cu_num_logits,
-        expanded_idx_mapping=expanded_idx_mapping,
-        rejected_step=rejected_step,
-        temperature=temperature,
-        seeds=seeds,
-        pos=pos,
-        target_lse=lse,
-        draft_lse=lse,
-        block_size=vocab_size,
-    )
-
-    counts = torch.bincount(argmax.flatten().cpu(), minlength=vocab_size).float()
-    empirical = counts / num_draws
-    expected = torch.softmax(row_logits, dim=0)
-    # 16384 draws => per-category std <= 0.004; 0.02 is ~5 sigma and leaves room
-    # for the coarse fp32 tail of `-log(-log(u))` (see the operator doc).
-    assert torch.allclose(empirical, expected, atol=0.02), (
-        f"argmax frequencies {empirical.tolist()} deviate from softmax {expected.tolist()}"
-    )
-
-
-@torch.inference_mode()
-def test_resample_draft_logits_follows_residual_distribution():
-    """The draft-logits branch must sample from the normalised residual `(p - q)+`.
-
-    `test_resample_draft_logits_selects_positive_residual` pins which positions
-    survive `ratio < 1`, but with degenerate all-zero inputs it cannot see the
-    value the surviving positions get: writing `log(ratio)` instead of
-    `log(1 - ratio)`, or dropping a log-sum-exp, leaves the same single winner.
-    Sampling frequencies do see it -- both of those mutations shift this
-    distribution by more than 0.3 and 0.11 respectively, against a 0.02 tolerance.
-
-    Two logits per request so the resample slot is not the bonus slot, which is
-    what selects the draft-logits branch.
-    """
-    num_draws, vocab_size, num_spec_steps = 16384, 8, 1
-    torch.manual_seed(11)
-    target_row = torch.tensor([0.9, 0.7, 0.6, 0.5, 0.3, 0.1, -0.2, -0.6], dtype=torch.float32)
-    draft_row = torch.tensor([-0.8, 1.5, -0.7, 1.3, 0.2, 1.0, -0.4, 0.6], dtype=torch.float32)
-
-    num_logits = 2 * num_draws
-    target_logits = target_row.to(DEVICE).repeat(num_logits, 1).contiguous()
-    draft_logits = draft_row.to(DEVICE).view(1, 1, vocab_size).repeat(1, num_spec_steps, 1).contiguous()
-
-    # Two logits per request, resampling step 0 => resample_token_idx < end_idx - 1.
-    cu_num_logits = torch.arange(0, num_logits + 1, 2, dtype=torch.int32, device=DEVICE)
-    expanded_idx_mapping = torch.zeros(num_logits, dtype=torch.int32, device=DEVICE)
-    rejected_step = torch.zeros(num_draws, dtype=torch.int32, device=DEVICE)
-    draft_sampled = torch.zeros(num_logits, dtype=torch.int32, device=DEVICE)
+def test_one_hot_none_and_dummy_tensor_are_semantically_identical():
+    """Support both direct draft_logits=None and the upper-layer dummy-tensor compatibility path."""
+    vocab_size = 5
+    probs = torch.tensor([0.0, 0.8, 0.0, 0.2, 0.0], dtype=torch.float32)
+    target_row = torch.where(probs > 0, torch.log(probs), torch.tensor(float("-inf")))
+    target_logits = torch.stack([target_row, torch.zeros_like(target_row)]).to(DEVICE)
+    draft_sampled = torch.tensor([0, 1], dtype=torch.int32, device=DEVICE)
+    cu_num_logits = _cu_num_logits([2])
+    expanded_idx_mapping = _expanded_mapping([2])
     temperature = torch.ones(1, dtype=torch.float32, device=DEVICE)
-    seeds = torch.full((1,), 20260829, dtype=torch.int64, device=DEVICE)
-    pos = torch.arange(num_logits, dtype=torch.int64, device=DEVICE)
-    target_lse = torch.full((num_draws,), float(torch.logsumexp(target_row, dim=0)), device=DEVICE)
-    draft_lse = torch.full((num_draws,), float(torch.logsumexp(draft_row, dim=0)), device=DEVICE)
+    seed = torch.tensor([123], dtype=torch.int64, device=DEVICE)
+    pos = _position_tensor(2)
+    lse = torch.zeros(1, dtype=torch.float32, device=DEVICE)
 
-    argmax, _ = _run_resample(
-        target_logits=target_logits,
-        draft_logits=draft_logits,
-        draft_sampled=draft_sampled,
-        cu_num_logits=cu_num_logits,
-        expanded_idx_mapping=expanded_idx_mapping,
-        rejected_step=rejected_step,
-        temperature=temperature,
-        seeds=seeds,
-        pos=pos,
-        target_lse=target_lse,
-        draft_lse=draft_lse,
-        block_size=vocab_size,
+    sampled_none = torch.full((1, 2), -1, dtype=torch.int64, device=DEVICE)
+    count_none = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    resample(
+        sampled_none,
+        count_none,
+        target_logits,
+        lse,
+        None,
+        lse,
+        cu_num_logits,
+        expanded_idx_mapping,
+        draft_sampled,
+        temperature,
+        seed,
+        pos,
     )
 
-    prob_target = torch.softmax(target_row, dim=0)
-    prob_draft = torch.softmax(draft_row, dim=0)
-    residual = (prob_target - prob_draft).clamp(min=0.0)
+    sampled_dummy = torch.full((1, 2), -1, dtype=torch.int64, device=DEVICE)
+    count_dummy = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    dummy = target_logits.new_empty(1, 1, 1)
+    resample(
+        sampled_dummy,
+        count_dummy,
+        target_logits,
+        lse,
+        dummy,
+        lse,
+        cu_num_logits,
+        expanded_idx_mapping,
+        draft_sampled,
+        temperature,
+        seed,
+        pos,
+        has_draft_logits=False,
+    )
+    torch.npu.synchronize()
+
+    assert sampled_none[0, 0].item() == 3
+    assert torch.equal(sampled_none, sampled_dummy)
+    assert torch.equal(count_none, count_dummy)
+
+
+@torch.inference_mode()
+def test_full_draft_residual_uses_request_state_mapping():
+    """req_idx and req_state_idx are different address spaces; shuffled mappings must select the right draft row."""
+    lengths = [2, 2]
+    req_state_rows = [3, 1]
+    vocab_size = 4
+    p = torch.tensor([[0.2, 0.5, 0.2, 0.1], [0.1, 0.2, 0.6, 0.1]], dtype=torch.float32)
+    q = torch.tensor([[0.3, 0.4, 0.2, 0.1], [0.1, 0.3, 0.5, 0.1]], dtype=torch.float32)
+    expected = torch.tensor([1, 2], dtype=torch.int64, device=DEVICE)
+
+    target_logits = torch.empty(sum(lengths), vocab_size, dtype=torch.float32, device=DEVICE)
+    target_logits[0] = p[0].log().to(DEVICE)
+    target_logits[1].zero_()
+    target_logits[2] = p[1].log().to(DEVICE)
+    target_logits[3].zero_()
+
+    draft_logits = torch.zeros(4, 1, vocab_size, dtype=torch.float32, device=DEVICE)
+    draft_logits[3, 0] = q[0].log().to(DEVICE)
+    draft_logits[1, 0] = q[1].log().to(DEVICE)
+    sampled = torch.full((2, 2), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(2, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(2, dtype=torch.float32, device=DEVICE)
+    temperature, seed = _request_state_tensors(req_state_rows, [1.0, 1.0])
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        draft_logits,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths, req_state_rows),
+        torch.zeros(sum(lengths), dtype=torch.int32, device=DEVICE),
+        temperature,
+        seed,
+        _position_tensor(sum(lengths)),
+        has_draft_logits=True,
+    )
+    torch.npu.synchronize()
+
+    assert torch.equal(sampled[:, 0], expected)
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
+
+
+@torch.inference_mode()
+def test_random_bonus_distribution_matches_softmax():
+    probs = torch.tensor([0.05, 0.15, 0.40, 0.25, 0.15], dtype=torch.float32)
+    target_logits = _repeat_rows(probs.log(), STAT_TRIALS).to(DEVICE)
+    lengths = [1] * STAT_TRIALS
+    sampled = torch.full((STAT_TRIALS, 1), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(STAT_TRIALS, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(STAT_TRIALS, dtype=torch.float32, device=DEVICE)
+    temperature = torch.ones(STAT_TRIALS, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 1009
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        None,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths),
+        torch.zeros(STAT_TRIALS, dtype=torch.int32, device=DEVICE),
+        temperature,
+        seed,
+        _position_tensor(STAT_TRIALS),
+    )
+    torch.npu.synchronize()
+    _assert_distribution(sampled[:, 0], probs)
+
+
+@torch.inference_mode()
+def test_full_draft_residual_distribution_matches_positive_p_minus_q():
+    p = torch.tensor([0.35, 0.30, 0.20, 0.10, 0.05], dtype=torch.float32)
+    q = torch.tensor([0.10, 0.35, 0.15, 0.15, 0.25], dtype=torch.float32)
+    residual = torch.clamp(p - q, min=0.0)
     expected = residual / residual.sum()
 
-    # Guard the guard: the input must actually exercise both sides of `ratio < 1`.
-    excluded = (residual == 0.0).nonzero().flatten().tolist()
-    assert excluded and len(excluded) < vocab_size, "input no longer produces both ratio<1 and ratio>=1 tokens"
+    lengths = [2] * STAT_TRIALS
+    total_logits = 2 * STAT_TRIALS
+    target_logits = torch.empty(total_logits, p.numel(), dtype=torch.float32, device=DEVICE)
+    target_logits[0::2] = p.log().to(DEVICE)
+    target_logits[1::2] = p.log().to(DEVICE)
+    draft_logits = _repeat_rows(q.log(), STAT_TRIALS).unsqueeze(1).to(DEVICE)
+    sampled = torch.full((STAT_TRIALS, 2), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(STAT_TRIALS, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(STAT_TRIALS, dtype=torch.float32, device=DEVICE)
+    temperature = torch.ones(STAT_TRIALS, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 2017
 
-    counts = torch.bincount(argmax.flatten().cpu(), minlength=vocab_size).float()
-    empirical = counts / num_draws
-    assert not any(counts[i] for i in excluded), (
-        f"tokens with q >= p were resampled: {[i for i in excluded if counts[i]]}"
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        draft_logits,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths),
+        torch.zeros(total_logits, dtype=torch.int32, device=DEVICE),
+        temperature,
+        seed,
+        _position_tensor(total_logits),
+        has_draft_logits=True,
     )
-    # 16384 draws => per-category std <= 0.004; 0.02 is ~5 sigma.
-    assert torch.allclose(empirical, expected, atol=0.02), (
-        f"resampled frequencies {empirical.tolist()} deviate from the residual {expected.tolist()}"
+    torch.npu.synchronize()
+    _assert_distribution(sampled[:, 0], expected)
+
+
+@torch.inference_mode()
+def test_one_hot_residual_distribution_excludes_rejected_token_and_renormalizes():
+    probs = torch.tensor([0.10, 0.45, 0.20, 0.15, 0.10], dtype=torch.float32)
+    rejected_token = 1
+    expected = probs.clone()
+    expected[rejected_token] = 0.0
+    expected /= expected.sum()
+
+    lengths = [2] * STAT_TRIALS
+    total_logits = 2 * STAT_TRIALS
+    target_logits = torch.empty(total_logits, probs.numel(), dtype=torch.float32, device=DEVICE)
+    target_logits[0::2] = probs.log().to(DEVICE)
+    target_logits[1::2] = probs.log().to(DEVICE)
+    draft_sampled = torch.zeros(total_logits, dtype=torch.int32, device=DEVICE)
+    draft_sampled[1::2] = rejected_token
+    sampled = torch.full((STAT_TRIALS, 2), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(STAT_TRIALS, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(STAT_TRIALS, dtype=torch.float32, device=DEVICE)
+    temperature = torch.ones(STAT_TRIALS, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(STAT_TRIALS, dtype=torch.int64, device=DEVICE) + 3001
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        None,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths),
+        draft_sampled,
+        temperature,
+        seed,
+        _position_tensor(total_logits),
     )
+    torch.npu.synchronize()
+
+    assert not bool((sampled[:, 0] == rejected_token).any())
+    _assert_distribution(sampled[:, 0], expected)
+
+
+@torch.inference_mode()
+def test_business_vocab_shape_single_support():
+    """Exercise the current business vocabulary shape with multiple tasks per Vector Core worker."""
+    num_reqs = 8
+    vocab_size = 151936
+    expected_ids = [0, 1023, 1024, 8191, 8192, 65535, 100001, vocab_size - 1]
+    target_logits = torch.full((num_reqs, vocab_size), float("-inf"), dtype=torch.float32, device=DEVICE)
+    for req_idx, token_id in enumerate(expected_ids):
+        target_logits[req_idx, token_id] = float(req_idx)
+
+    sampled = torch.full((num_reqs, 1), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
+    temperature = torch.ones(num_reqs, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE) + 701
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        None,
+        zeros,
+        _cu_num_logits([1] * num_reqs),
+        _expanded_mapping([1] * num_reqs),
+        torch.zeros(num_reqs, dtype=torch.int32, device=DEVICE),
+        temperature,
+        seed,
+        _position_tensor(num_reqs),
+    )
+    torch.npu.synchronize()
+
+    expected = torch.tensor(expected_ids, dtype=torch.int64, device=DEVICE)
+    assert torch.equal(sampled[:, 0], expected)
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
+
+
+@torch.inference_mode()
+def test_mixed_greedy_bonus_random_bonus_and_residual_in_one_launch():
+    """Inactive workspace cells must stay masked when different request branches share one launch."""
+    lengths = [2, 1, 1, 2]
+    vocab_size = 9
+    target_logits = torch.zeros(sum(lengths), vocab_size, dtype=torch.float32, device=DEVICE)
+
+    # req0: greedy non-bonus, sampled[0, 0] already belongs to the verification kernel.
+    # req1: greedy bonus with exact argmax 5.
+    target_logits[2] = torch.arange(vocab_size, dtype=torch.float32, device=DEVICE)
+    target_logits[2, 5] = 100.0
+    # req2: random bonus with one supported token 7.
+    target_logits[3].fill_(float("-inf"))
+    target_logits[3, 7] = 0.0
+    # req3: random full-draft residual with one positive residual token 2.
+    p = torch.tensor([0.1, 0.1, 0.4, 0.1, 0.1, 0.05, 0.05, 0.05, 0.05], dtype=torch.float32)
+    q = torch.tensor([0.1, 0.1, 0.3, 0.1, 0.1, 0.10, 0.05, 0.05, 0.10], dtype=torch.float32)
+    target_logits[4] = p.log().to(DEVICE)
+
+    draft_logits = torch.zeros(4, 1, vocab_size, dtype=torch.float32, device=DEVICE)
+    draft_logits[3, 0] = q.log().to(DEVICE)
+    sampled = torch.full((4, 2), -777, dtype=torch.int64, device=DEVICE)
+    sampled[0, 0] = 4
+    num_sampled = torch.zeros(4, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(4, dtype=torch.float32, device=DEVICE)
+    temperature = torch.tensor([0.0, 0.0, 1.0, 1.0], dtype=torch.float32, device=DEVICE)
+    seed = torch.tensor([31, 37, 41, 43], dtype=torch.int64, device=DEVICE)
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        draft_logits,
+        zeros,
+        _cu_num_logits(lengths),
+        _expanded_mapping(lengths),
+        torch.zeros(sum(lengths), dtype=torch.int32, device=DEVICE),
+        temperature,
+        seed,
+        _position_tensor(sum(lengths)),
+        has_draft_logits=True,
+    )
+    torch.npu.synchronize()
+
+    assert torch.equal(sampled[:, 0], torch.tensor([4, 5, 7, 2], dtype=torch.int64, device=DEVICE))
+    assert torch.equal(num_sampled, torch.ones_like(num_sampled))
+
+
+@torch.inference_mode()
+def test_full_draft_moderate_near_cancellation_keeps_positive_residual():
+    """A small but fp32-resolvable positive residual must not collapse to zero mass."""
+    p = torch.tensor([0.5001, 0.4999], dtype=torch.float32)
+    q = torch.tensor([0.5000, 0.5000], dtype=torch.float32)
+    target_logits = torch.stack([p.log(), p.log()]).to(DEVICE)
+    draft_logits = q.log().reshape(1, 1, -1).to(DEVICE)
+    sampled = torch.full((1, 2), -1, dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    zeros = torch.zeros(1, dtype=torch.float32, device=DEVICE)
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        zeros,
+        draft_logits,
+        zeros,
+        _cu_num_logits([2]),
+        _expanded_mapping([2]),
+        torch.zeros(2, dtype=torch.int32, device=DEVICE),
+        torch.ones(1, dtype=torch.float32, device=DEVICE),
+        torch.tensor([4099], dtype=torch.int64, device=DEVICE),
+        _position_tensor(2),
+        has_draft_logits=True,
+    )
+    torch.npu.synchronize()
+
+    assert sampled[0, 0].item() == 0
+    assert num_sampled[0].item() == 1
+
+
+@torch.inference_mode()
+def test_same_seed_and_position_are_deterministic():
+    vocab_size = 17
+    lengths = [1] * 32
+    target_logits = torch.randn(32, vocab_size, dtype=torch.float32, device=DEVICE)
+    zeros = torch.zeros(32, dtype=torch.float32, device=DEVICE)
+    temperature = torch.ones(32, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(32, dtype=torch.int64, device=DEVICE) + 901
+    pos = _position_tensor(32)
+
+    def run_once():
+        sampled = torch.full((32, 1), -1, dtype=torch.int64, device=DEVICE)
+        num_sampled = torch.zeros(32, dtype=torch.int32, device=DEVICE)
+        resample(
+            sampled,
+            num_sampled,
+            target_logits,
+            zeros,
+            None,
+            zeros,
+            _cu_num_logits(lengths),
+            _expanded_mapping(lengths),
+            torch.zeros(32, dtype=torch.int32, device=DEVICE),
+            temperature,
+            seed,
+            pos,
+        )
+        return sampled.clone(), num_sampled.clone()
+
+    sampled_a, count_a = run_once()
+    sampled_b, count_b = run_once()
+    torch.npu.synchronize()
+    assert torch.equal(sampled_a, sampled_b)
+    assert torch.equal(count_a, count_b)
 
 
 # ---------------------------------------------------------------------------
-# End-to-end through the patched entry point
+# End-to-end through the patched rejection_sample entry point
 # ---------------------------------------------------------------------------
 
 
 @torch.inference_mode()
 def test_rejection_sample_greedy_end_to_end():
-    """Full `rejection_sample` on a greedy batch, against a loop reference.
-
-    This is the only case that runs `_resample_kernel` with the production
-    launch configuration (BLOCK_SIZE=1024, grid from `cdiv(vocab, 1024)`) and
-    with `_insert_resampled_kernel` downstream, so it is what proves the two
-    early-return conditions in the two kernels still agree: on a rejected greedy
-    token the resample output is garbage *and must not be read*, on a fully
-    accepted one the bonus token comes out of it.
-    """
+    """The upper rejection path and categorical resample preserve greedy semantics."""
     num_reqs = 5
     num_spec_steps = 3
     num_logits_per_req = num_spec_steps + 1
@@ -667,21 +674,19 @@ def test_rejection_sample_greedy_end_to_end():
 
     target_logits = torch.randn(num_logits, vocab_size, dtype=torch.float32, device=DEVICE)
     draft_sampled = torch.randint(0, vocab_size, (num_logits,), dtype=torch.int32, device=DEVICE)
-    # Force a spread of acceptance lengths: request r accepts exactly r draft
-    # tokens (r == num_spec_steps means "everything accepted, take the bonus").
     target_argmax = target_logits.argmax(dim=1)
-    for r in range(num_reqs):
-        accept = min(r, num_spec_steps)
-        for i in range(num_spec_steps):
-            slot = cu[r] + i + 1
-            if i < accept:
-                draft_sampled[slot] = target_argmax[cu[r] + i]
-            else:
-                bad = (int(target_argmax[cu[r] + i]) + 1) % vocab_size
-                draft_sampled[slot] = bad
+
+    # Request r accepts min(r, num_spec_steps) draft tokens.  The batch
+    # therefore includes immediate rejection, later rejection, and bonus paths.
+    for req_idx in range(num_reqs):
+        accept = min(req_idx, num_spec_steps)
+        for step in range(num_spec_steps):
+            draft_slot = cu[req_idx] + step + 1
+            target_token = int(target_argmax[cu[req_idx] + step])
+            draft_sampled[draft_slot] = target_token if step < accept else (target_token + 1) % vocab_size
 
     temperature = torch.zeros(max_num_reqs, dtype=torch.float32, device=DEVICE)
-    seeds = torch.randint(1, 2**30, (max_num_reqs,), dtype=torch.int64, device=DEVICE)
+    seed = torch.randint(1, 2**30, (max_num_reqs,), dtype=torch.int64, device=DEVICE)
     pos = torch.arange(num_logits, dtype=torch.int64, device=DEVICE) + 5
 
     sampled, num_sampled = rejection_sample(
@@ -694,32 +699,147 @@ def test_rejection_sample_greedy_end_to_end():
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
-        seeds,
+        seed,
         num_spec_steps,
     )
     torch.npu.synchronize()
 
-    argmax_cpu = target_argmax.cpu().tolist()
-    draft_cpu = draft_sampled.cpu().tolist()
-    for r in range(num_reqs):
+    target_argmax_cpu = target_argmax.cpu().tolist()
+    draft_sampled_cpu = draft_sampled.cpu().tolist()
+
+    for req_idx in range(num_reqs):
         expected = []
         accepted = 0
-        for i in range(num_logits_per_req - 1):
-            targ = argmax_cpu[cu[r] + i]
-            expected.append(targ)
-            if targ != draft_cpu[cu[r] + i + 1]:
+        for step in range(num_spec_steps):
+            target_token = target_argmax_cpu[cu[req_idx] + step]
+            expected.append(target_token)
+            if target_token != draft_sampled_cpu[cu[req_idx] + step + 1]:
                 break
             accepted += 1
         else:
-            # Everything accepted: the bonus token is resampled from the last
-            # logit row, which is the `_resample_kernel` greedy-bonus path.
-            expected.append(argmax_cpu[cu[r + 1] - 1])
-        assert int(num_sampled[r]) == accepted + 1, f"req {r}: wrong accepted length"
-        assert sampled[r, : accepted + 1].cpu().tolist() == expected, f"req {r}: wrong tokens"
+            expected.append(target_argmax_cpu[cu[req_idx + 1] - 1])
 
-    # Guard the guard: the batch must contain both a rejected request (early
-    # return path) and a fully accepted one (bonus resample path).
-    lengths = num_sampled.cpu().tolist()
-    assert min(lengths) == 1 and max(lengths) == num_logits_per_req, (
-        f"batch no longer covers both resample branches: {lengths}"
+        expected_count = accepted + 1
+        assert int(num_sampled[req_idx]) == expected_count
+        assert sampled[req_idx, :expected_count].cpu().tolist() == expected
+
+    counts = num_sampled.cpu().tolist()
+    assert min(counts) == 1
+    assert max(counts) == num_logits_per_req
+
+
+@torch.inference_mode()
+def test_empty_batch_is_noop():
+    target_logits = torch.empty((0, 8), dtype=torch.float32, device=DEVICE)
+    sampled = torch.empty((0, 1), dtype=torch.int64, device=DEVICE)
+    num_sampled = torch.empty((0,), dtype=torch.int32, device=DEVICE)
+    empty_i32 = torch.empty((0,), dtype=torch.int32, device=DEVICE)
+    empty_i64 = torch.empty((0,), dtype=torch.int64, device=DEVICE)
+    cu_num_logits = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+
+    resample(
+        sampled,
+        num_sampled,
+        target_logits,
+        torch.empty((0,), dtype=torch.float32, device=DEVICE),
+        None,
+        torch.empty((0,), dtype=torch.float32, device=DEVICE),
+        cu_num_logits,
+        empty_i32,
+        empty_i32,
+        torch.empty((0,), dtype=torch.float32, device=DEVICE),
+        empty_i64,
+        empty_i64,
     )
+
+    assert sampled.numel() == 0
+    assert num_sampled.numel() == 0
+
+
+@torch.inference_mode()
+def test_zero_vocab_is_rejected():
+    with pytest.raises(ValueError, match="vocab_size must be greater than 0"):
+        resample(
+            torch.empty((1, 1), dtype=torch.int64, device=DEVICE),
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            torch.empty((1, 0), dtype=torch.float32, device=DEVICE),
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            None,
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            _cu_num_logits([1]),
+            _expanded_mapping([1]),
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            torch.ones(1, dtype=torch.float32, device=DEVICE),
+            torch.tensor([1], dtype=torch.int64, device=DEVICE),
+            _position_tensor(1),
+        )
+
+
+@torch.inference_mode()
+def test_explicit_full_draft_requires_draft_logits():
+    with pytest.raises(ValueError, match="draft_logits cannot be None"):
+        resample(
+            torch.full((1, 2), -1, dtype=torch.int64, device=DEVICE),
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            torch.zeros((2, 8), dtype=torch.float32, device=DEVICE),
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            None,
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            _cu_num_logits([2]),
+            _expanded_mapping([2]),
+            torch.zeros(2, dtype=torch.int32, device=DEVICE),
+            torch.ones(1, dtype=torch.float32, device=DEVICE),
+            torch.tensor([1], dtype=torch.int64, device=DEVICE),
+            _position_tensor(2),
+            has_draft_logits=True,
+        )
+
+
+@torch.inference_mode()
+def test_target_vocab_dimension_must_be_contiguous():
+    vocab_size = 8
+    base = torch.zeros((1, vocab_size * 2), dtype=torch.float32, device=DEVICE)
+    target_logits = base[:, ::2]
+    assert target_logits.stride(-1) == 2
+
+    with pytest.raises(ValueError, match="vocabulary dimension must be contiguous"):
+        resample(
+            torch.full((1, 1), -1, dtype=torch.int64, device=DEVICE),
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            target_logits,
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            None,
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            _cu_num_logits([1]),
+            _expanded_mapping([1]),
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            torch.ones(1, dtype=torch.float32, device=DEVICE),
+            torch.tensor([1], dtype=torch.int64, device=DEVICE),
+            _position_tensor(1),
+        )
+
+
+@torch.inference_mode()
+def test_draft_vocab_dimension_must_be_contiguous():
+    vocab_size = 8
+    target_logits = torch.zeros((2, vocab_size), dtype=torch.float32, device=DEVICE)
+    draft_base = torch.zeros((1, 1, vocab_size * 2), dtype=torch.float32, device=DEVICE)
+    draft_logits = draft_base[..., ::2]
+    assert draft_logits.stride(-1) == 2
+
+    with pytest.raises(ValueError, match="vocabulary dimension must be contiguous"):
+        resample(
+            torch.full((1, 2), -1, dtype=torch.int64, device=DEVICE),
+            torch.zeros(1, dtype=torch.int32, device=DEVICE),
+            target_logits,
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            draft_logits,
+            torch.zeros(1, dtype=torch.float32, device=DEVICE),
+            _cu_num_logits([2]),
+            _expanded_mapping([2]),
+            torch.zeros(2, dtype=torch.int32, device=DEVICE),
+            torch.ones(1, dtype=torch.float32, device=DEVICE),
+            torch.tensor([1], dtype=torch.int64, device=DEVICE),
+            _position_tensor(2),
+            has_draft_logits=True,
+        )

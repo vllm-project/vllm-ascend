@@ -82,9 +82,7 @@ def _resample_kernel(
                 has_mass = block_max > float("-inf")
                 safe_block_max = tl.where(has_mass, block_max, 0.0)
                 block_sumexp = tl.where(has_mass, tl.sum(tl.exp(target_block_logits - safe_block_max), axis=0), 0.0)
-                tl.store(
-                    local_argmax_ptr + req_idx * local_argmax_stride + block_idx, block_idx * BLOCK_SIZE + block_argmax
-                )
+                tl.store(local_argmax_ptr + req_idx * local_argmax_stride + block_idx, block_idx * BLOCK_SIZE + block_argmax)
                 tl.store(local_max_ptr + req_idx * local_max_stride + block_idx, block_max)
                 tl.store(local_mass_ptr + req_idx * local_mass_stride + block_idx, block_sumexp)
             else:
@@ -93,10 +91,7 @@ def _resample_kernel(
 
                 if HAS_DRAFT_LOGITS:
                     draft_block_logits = tl.load(
-                        draft_logits_ptr
-                        + req_state_idx * draft_logits_stride_0
-                        + resample_idx * draft_logits_stride_1
-                        + vocab_offsets,
+                        draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + vocab_offsets,
                         mask=vocab_mask,
                         other=float("-inf"),
                     ).to(tl.float32)
@@ -227,15 +222,11 @@ def _categorical_finalize_kernel(
         mask=is_random_bonus & has_total_mass,
         other=0.0,
     ).to(tl.float32)
-    safe_bonus_logits = tl.where(
-        is_random_bonus & has_total_mass & valid_token_mask, target_block_logits, float("-inf")
-    )
+    safe_bonus_logits = tl.where(is_random_bonus & has_total_mass & valid_token_mask, target_block_logits, float("-inf"))
     selected_block_scale = tl.exp(selected_block_max - safe_bonus_global_max)
     bonus_token_mass = tl.exp(safe_bonus_logits - selected_block_max) * selected_block_scale
 
-    target_lse = tl.load(
-        target_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
-    ).to(tl.float32)
+    target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0).to(tl.float32)
     residual_target_logits = tl.where(
         is_random_residual & has_total_mass & valid_token_mask,
         target_block_logits,
@@ -249,15 +240,11 @@ def _categorical_finalize_kernel(
             mask=valid_token_mask & is_random_residual & has_total_mass,
             other=float("-inf"),
         ).to(tl.float32)
-        draft_lse = tl.load(
-            draft_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
-        ).to(tl.float32)
+        draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0).to(tl.float32)
         draft_prob = tl.exp(draft_block_logits - draft_lse)
         residual_token_mass = tl.maximum(target_prob - draft_prob, 0.0)
     else:
-        rejected_draft_token = tl.load(
-            draft_sampled_ptr + resample_token_idx + 1, mask=is_random_residual & has_total_mass, other=-1
-        )
+        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1, mask=is_random_residual & has_total_mass, other=-1)
         residual_token_mass = tl.where(token_ids != rejected_draft_token, target_prob, 0.0)
 
     token_mass = tl.where(is_bonus, bonus_token_mass, residual_token_mass)
@@ -308,36 +295,29 @@ def resample(
     advanced by one. Greedy non-bonus rows preserve the target argmax already
     written by the verification kernel and only advance ``num_sampled``.
 
-    ``draft_logits=None`` selects the one-hot draft path. Callers that already
-    replaced ``None`` with a dummy tensor can pass ``has_draft_logits=False``
-    explicitly to preserve the same semantics.
+    ``target_logits`` and full ``draft_logits`` support fp16, bf16, and fp32;
+    probability-mass arithmetic is fp32. Their vocabulary dimension must be
+    contiguous. ``draft_logits=None`` selects the one-hot draft path. Callers
+    that already replaced ``None`` with a dummy tensor can pass
+    ``has_draft_logits=False`` explicitly to preserve the same semantics.
     """
-    if target_logits.ndim != 2 or target_logits.dtype != torch.float32 or target_logits.stride(-1) != 1:
-        raise ValueError("target_logits must be contiguous-vocab FP32 [num_logits, vocab_size]")
-    if sampled.ndim != 2 or sampled.dtype != torch.int64:
-        raise ValueError("sampled must be int64 [num_reqs, num_speculative_steps + 1]")
-    if num_sampled.ndim != 1 or num_sampled.dtype != torch.int32:
-        raise ValueError("num_sampled must be int32 [num_reqs]")
-
     num_reqs = cu_num_logits.shape[0] - 1
+    if num_reqs == 0:
+        return
+
     vocab_size = target_logits.shape[1]
-    if sampled.shape[0] != num_reqs or num_sampled.shape[0] != num_reqs:
-        raise ValueError("sampled, num_sampled, and cu_num_logits disagree on num_reqs")
+    if vocab_size == 0:
+        raise ValueError("vocab_size must be greater than 0")
+    if target_logits.stride(-1) != 1:
+        raise ValueError("target_logits vocabulary dimension must be contiguous")
 
     if has_draft_logits is None:
         has_draft_logits = draft_logits is not None
     if has_draft_logits:
         if draft_logits is None:
             raise ValueError("draft_logits cannot be None when has_draft_logits=True")
-        if (
-            draft_logits.ndim != 3
-            or draft_logits.dtype != torch.float32
-            or draft_logits.shape[-1] != vocab_size
-            or draft_logits.stride(-1) != 1
-        ):
-            raise ValueError(
-                "draft_logits must be contiguous-vocab FP32 [max_num_reqs, num_speculative_steps, vocab_size]"
-            )
+        if draft_logits.stride(-1) != 1:
+            raise ValueError("draft_logits vocabulary dimension must be contiguous")
     elif draft_logits is None:
         draft_logits = target_logits.new_empty(1, 1, 1)
 
