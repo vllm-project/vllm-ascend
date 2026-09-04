@@ -24,13 +24,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
-from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
-    get_rotation_matrix,
     get_rotation_path,
 )
 from vllm_ascend.worker.v2.attn_utils import (
@@ -54,6 +53,22 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+        config = self.draft_model_config.hf_config
+        dflash_config = getattr(config, "dflash_config", {}) or {}
+        logger.warning(
+            "[dspark/config] top_sample_from_anchor=%s "
+            "nested_sample_from_anchor=%s runtime_sample_from_anchor=%s "
+            "num_query_per_req=%s target_layer_ids=%s mask_token_id=%s "
+            "ptd_token_id=%s rope_parameters=%s",
+            getattr(config, "sample_from_anchor", None),
+            dflash_config.get("sample_from_anchor"),
+            self.sample_from_anchor,
+            self.num_query_per_req,
+            getattr(config, "target_layer_ids", None),
+            getattr(config, "mask_token_id", None),
+            getattr(config, "ptd_token_id", None),
+            getattr(config, "rope_parameters", None),
+        )
 
     def load_draft_model(
         self,
@@ -66,7 +81,20 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             target_model,
             draft_hf_config,
         )
-        model = super().load_draft_model(target_model, target_attn_layer_names)
+        # Upstream intentionally clears the target quant config before it
+        # builds a BF16 draft. Pass only the target QuaRot metadata through the
+        # draft config so the Ascend model loader can align FC, embedding and
+        # lm_head before upstream decides whether to share target weights.
+        rotation_path = get_rotation_path(self.vllm_config)
+        injected_rotation = rotation_path is not None and draft_hf_config is not None
+        if injected_rotation:
+            draft_hf_config._ascend_target_rotation_path = str(rotation_path)
+        try:
+            model = super().load_draft_model(target_model, target_attn_layer_names)
+        finally:
+            if injected_rotation:
+                delattr(draft_hf_config, "_ascend_target_rotation_path")
+
         model_format = getattr(model, "dspark_aux_hidden_state_format", None)
         if configured_format is None:
             self._configure_target_aux_hidden_state_format(target_model, model)
@@ -75,19 +103,44 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 "DSpark auxiliary hidden-state format mismatch between config "
                 f"({configured_format!r}) and model ({model_format!r})."
             )
-        # Upstream load_dspark_model overrides the drafter's quant_config with
-        # get_draft_quant_config (None for a bf16 drafter), so the drafter's
-        # __init__ derives rotation_path=None and its fc projection is loaded
-        # unrotated. The target is QuaRot-quantized, so the aux hidden states it
-        # feeds the drafter are in rotated space; fc must be rotated (W @ R) to
-        # project them back to model space.
-        rotation_path = get_rotation_path(self.vllm_config)
-        if rotation_path is not None and hasattr(model.model, "fc"):
-            rotation_weight = get_rotation_matrix(rotation_path)
-            fc = model.model.fc
-            with torch.no_grad():
-                fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
+
+        if rotation_path is not None and self._is_qwen3_gqa_draft(draft_hf_config):
+            target_language_model = (
+                target_model.get_language_model()
+                if hasattr(target_model, "get_language_model")
+                else target_model
+            )
+            target_inner = target_language_model.model
+            target_lm_head = get_target_lm_head(target_model, target_language_model)
+            draft_inner = model.model
+            embed_shared = getattr(draft_inner, "embed_tokens", None) is getattr(
+                target_inner, "embed_tokens", None
+            )
+            lm_head_shared = getattr(model, "lm_head", None) is target_lm_head
+            logger.warning(
+                "[dspark/quarot-check] rotation_path=%s embed_shared=%s "
+                "lm_head_shared=%s has_own_embed=%s has_own_lm_head=%s",
+                rotation_path,
+                embed_shared,
+                lm_head_shared,
+                getattr(model, "has_own_embed_tokens", False),
+                getattr(model, "has_own_lm_head", False),
+            )
+            if embed_shared:
+                raise RuntimeError("QuaRot GQA DSpark must not share target embed_tokens.")
+            if lm_head_shared:
+                raise RuntimeError("QuaRot GQA DSpark must not share target lm_head.")
         return model
+
+    @staticmethod
+    def _is_qwen3_gqa_draft(config: Any) -> bool:
+        if config is None:
+            return False
+        architectures = getattr(config, "architectures", ()) or ()
+        return getattr(config, "model_type", None) == "qwen3" or any(
+            architecture in ("Qwen3DSparkModel", "DSparkDraftModel")
+            for architecture in architectures
+        )
 
     @staticmethod
     def _configure_target_aux_hidden_state_format(
