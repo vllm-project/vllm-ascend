@@ -24,6 +24,9 @@ class FakeTokenizer:
     def get_vocab(self):
         return {}
 
+    def decode(self, token_ids):
+        return ""
+
 
 def _param_open(name: str, is_string: bool) -> str:
     string_attr = "true" if is_string else "false"
