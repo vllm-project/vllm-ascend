@@ -436,7 +436,7 @@ class KVPoolWorker:
                 self.prefetch_layer_map = self._layerwise_reuse_layout.prefetch_layer_map
                 self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
         else:
-            self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
+            self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 2))
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
