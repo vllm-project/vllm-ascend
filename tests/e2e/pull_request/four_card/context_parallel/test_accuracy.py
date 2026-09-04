@@ -204,7 +204,7 @@ def test_deepseek_v4_dsa_cp_prefill_decode_accuracy() -> None:
 
     for enable_dsa_cp in (False, True):
         mode_tokens = []
-        with VllmRunner(
+        with DPVllmRunner(
             DEEPSEEK_V4_MODEL,
             max_model_len=8192,
             max_num_seqs=16,
