@@ -87,8 +87,12 @@ templates:
       - "1024"
       - --max-model-len
       - "133120"
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -150,8 +154,12 @@ templates:
       - "1024"
       - --max-model-len
       - "133120"
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -217,8 +225,12 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_fused_mc2":0,"enable_mlapo":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":0,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -281,8 +293,12 @@ templates:
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --speculative-config
       - '{"num_speculative_tokens": 3,  "method":"deepseek_mtp","enforce_eager":true}'
+      - --kv-cache-dtype
+      - "int8"
+      - --attention_config.indexer_kv_dtype
+      - "int8"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true,"enable_fused_mc2":0,"enable_mlapo":true}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"enable_fused_mc2":0,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"

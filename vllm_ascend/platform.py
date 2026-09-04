@@ -1075,14 +1075,6 @@ def _update_compilation_modes(vllm_config: VllmConfig, ascend_config) -> None:
             else ascend_compilation_config
         )
 
-    if model_config and hasattr(model_config.hf_text_config, "index_topk"):
-        from vllm_ascend.attention.dsa_attn_kv_plan import resolve_dsv4_cache_dtype
-
-        vllm_config.cache_config.cache_dtype = resolve_dsv4_cache_dtype(
-            vllm_config.cache_config.cache_dtype,
-            str(model_config.dtype).replace("torch.", ""),
-        )
-
     # Update compilation mode in some cases
     enforce_eager = getattr(model_config, "enforce_eager", False)
 
