@@ -379,7 +379,7 @@ Before starting the service:
         export VLLM_USE_MODELSCOPE=True
 
         # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
-        export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
+        export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-310p
 
         vllm serve $MODEL_PATH \
             --host 127.0.0.1 \
