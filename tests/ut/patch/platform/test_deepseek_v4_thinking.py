@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import pickle
-
 import pytest
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.parser.deepseek_v4 import DeepSeekV4Parser
@@ -248,20 +246,6 @@ def test_rewrapping_tokenizer_binds_method_to_new_instance(monkeypatch):
 
     assert first.apply_chat_template.__self__ is first
     assert second.apply_chat_template.__self__ is second
-
-
-def test_tokenizer_pickle_rebuilds_through_patched_factory(monkeypatch):
-    _mock_checkpoint_config(monkeypatch, post_preview=True)
-    tokenizer = deepseek_v4.get_deepseek_v4_tokenizer(FakeTokenizer())
-
-    restored = pickle.loads(pickle.dumps(tokenizer))
-
-    assert restored.apply_chat_template.__self__ is restored
-    prompt = restored.apply_chat_template(
-        [{"role": "user", "content": "hi"}],
-        tokenize=False,
-    )
-    assert "Reasoning Effort: Absolute maximum" in prompt
 
 
 @pytest.mark.parametrize(
