@@ -19,8 +19,8 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 
 | Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | Sequence Parallelism (SP) + PCP |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |
+| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |
 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
 | DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
 
@@ -64,9 +64,55 @@ vllm serve <supported-model> \
 
 Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = prefill_context_parallel_size * original_world_size`.
 
+#### Speculative Decoding
+
+MRV2 PCP supports MTP with MLA models and Eagle3 with GQA models. The target model runs with the configured PCP topology, while the draft model is replicated on every PCP rank and runs with a logical PCP size of `1`. Configure PCP only for the target model.
+
+For general speculative decoding configuration and model requirements, see [Speculative Decoding](speculative_decoding.md).
+
+##### MTP with MLA
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+vllm serve <mtp-capable-mla-model> \
+    --tensor-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --enable-chunked-prefill \
+    --enforce-eager \
+    --speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'
+```
+
+##### Eagle3 with GQA
+
+```bash
+export VLLM_USE_V2_MODEL_RUNNER=1
+
+vllm serve <gqa-target-model> \
+    --tensor-parallel-size 2 \
+    --prefill-context-parallel-size 2 \
+    --enable-chunked-prefill \
+    --enforce-eager \
+    --speculative-config '{"method": "eagle3", "model": "<eagle3-draft-model>", "num_speculative_tokens": 3}'
+```
+
+For either method, remove `--enforce-eager` and add the following option to use the supported graph mode:
+
+```bash
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+```
+
 #### Constraints
 
 - PCP is supported only with ModelRunner V2.
+- PCP speculative decoding supports only MTP with MLA models and Eagle3 with GQA models.
+- Draft sampling must use the greedy method.
+- Full graph execution with PCP is limited to `FULL_DECODE_ONLY`.
+- Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.
+- DSA and SFA draft attention are not supported with PCP speculative decoding.
+- PCP and DCP cannot be enabled simultaneously.
+- Adaptive verification is not supported with PCP speculative decoding.
+- Dynamic draft lengths are outside the currently validated scope.
 - PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend.
 
 ### Decode Context Parallel
