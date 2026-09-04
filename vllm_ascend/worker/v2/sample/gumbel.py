@@ -17,8 +17,12 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from collections.abc import Callable
+
 import torch
 from vllm.triton_utils import tl, triton
+
+from vllm_ascend.utils import vllm_version_is
 
 
 @triton.jit(do_not_specialize=["logits_stride", "vocab_size"])
@@ -103,6 +107,7 @@ def _gumbel_sample_kernel(
     vocab_size,
     num_blocks,
     BLOCK_SIZE: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
 ):
@@ -146,6 +151,10 @@ def _gumbel_sample_kernel(
             # NOTE(Ronald1995): change pos's dtype to tl.int32, because triton-ascend's
             # compiler doesn't support uint64 of pos arg.
             pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+            # vLLM #54282 separates draft and target Gumbel streams. The salt
+            # remains in int32 range for every supported model position.
+            if IS_DRAFTING:
+                pos += 1 << 30
             gumbel_seed = tl.randint(seed, pos)
 
             # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
@@ -164,7 +173,7 @@ def _gumbel_sample_kernel(
         tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
 
-def gumbel_sample(
+def _gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
     temperature: torch.Tensor,  # [max_num_reqs]
@@ -174,6 +183,8 @@ def gumbel_sample(
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
     use_fp64: bool = False,
+    *,
+    is_drafting: bool = False,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
@@ -210,6 +221,7 @@ def gumbel_sample(
         vocab_size,
         num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
+        IS_DRAFTING=is_drafting,
         APPLY_TEMPERATURE=apply_temperature,
         PER_TOKEN_COL=per_token_col,
     )
@@ -217,3 +229,37 @@ def gumbel_sample(
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
     return sampled
+
+
+gumbel_sample: Callable[..., torch.Tensor]
+if vllm_version_is("0.27.1"):
+    # Preserve the legacy positional order; #54282 inserted is_drafting on main.
+    gumbel_sample = _gumbel_sample
+else:
+
+    def _gumbel_sample_main(
+        logits: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seed: torch.Tensor,
+        pos: torch.Tensor,
+        apply_temperature: bool,
+        is_drafting: bool,
+        logits_cache: torch.Tensor | None = None,
+        logits_cache_col: torch.Tensor | None = None,
+        use_fp64: bool = False,
+    ) -> torch.Tensor:
+        return _gumbel_sample(
+            logits,
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            apply_temperature,
+            logits_cache,
+            logits_cache_col,
+            use_fp64,
+            is_drafting=is_drafting,
+        )
+
+    gumbel_sample = _gumbel_sample_main
