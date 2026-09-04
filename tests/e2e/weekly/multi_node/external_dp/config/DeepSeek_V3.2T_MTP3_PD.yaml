@@ -266,7 +266,7 @@ templates:
 benchmarks:
   perf_1:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K_in2048_bs4000_deepseek3_2
+    dataset_path: vllm-ascend/GSM8K-in2048-bs4000-ds3.2
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 128

@@ -114,6 +114,10 @@ a3:
         config_file_path: QWEN3_235B_PD_3_5K_1_5k.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 3
+      - name: QWEN3_235B_PD
+        config_file_path: QWEN3_235B_PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 3
 
   double_node:
     test_config:
@@ -247,6 +251,9 @@ a3:
       - name: qwen_3_6_27b_w8a8_A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: qwen_3_6_27b_w8a8_A3.yaml
+      - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
