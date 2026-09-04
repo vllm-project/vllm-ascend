@@ -553,6 +553,10 @@ class NPUModelRunner(GPUModelRunner):
             reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
         )
         self.num_draft_tokens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.spec_decode_meta_buf = self._make_buffer(
+            3 * self.max_num_reqs + 3 * self.max_num_tokens,
+            dtype=torch.int32,
+        )
         # here we use int32
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -1640,17 +1644,38 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
-        # TODO: Optimize the CPU -> NPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).pin_memory().to(self.device, non_blocking=True)
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).pin_memory().to(self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).pin_memory().to(self.device, non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).pin_memory().to(self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).pin_memory().to(self.device, non_blocking=True)
+        draft_token_idx = logits_indices[target_logits_indices + 1]
+        num_reqs = len(num_draft_tokens)
+        total_num_sampled_tokens = cu_num_sampled_tokens[-1]
+        max_tokens = self.max_num_tokens
+        assert total_num_sampled_tokens <= max_tokens
+        assert total_num_draft_tokens <= max_tokens
+        meta_np = self.spec_decode_meta_buf.np
+        off = 0
+        meta_np[off:off + num_reqs] = cu_num_draft_tokens
+        off += num_reqs
+        meta_np[off:off + num_reqs] = cu_num_sampled_tokens
+        off += num_reqs
+        meta_np[off:off + total_num_sampled_tokens] = logits_indices
+        off += total_num_sampled_tokens
+        meta_np[off:off + total_num_draft_tokens] = target_logits_indices
+        off += total_num_draft_tokens
+        meta_np[off:off + total_num_draft_tokens] = draft_token_idx
+        off += total_num_draft_tokens
+        meta_np[off:off + num_reqs] = bonus_logits_indices
+        off += num_reqs
+        self.spec_decode_meta_buf.copy_to_gpu(off)
+        gpu_buf = self.spec_decode_meta_buf.gpu
+        (cu_num_draft_tokens, cu_num_sampled_tokens, logits_indices,
+         target_logits_indices, draft_token_idx, bonus_logits_indices) = torch.split(
+            gpu_buf[:off],
+            [num_reqs, num_reqs, total_num_sampled_tokens,
+             total_num_draft_tokens, total_num_draft_tokens, num_reqs],
+        )
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
-        draft_token_ids = self.input_ids.gpu[logits_indices]
-        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+        draft_token_ids = self.input_ids.gpu[draft_token_idx]
         return SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
             num_draft_tokens=num_draft_tokens.tolist(),
