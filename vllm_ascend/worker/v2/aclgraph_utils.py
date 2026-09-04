@@ -175,7 +175,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         assert self.update_stream is not None
 
         attn_metadata = self.model_runner.model_state.attn_metadata
-        if isinstance(attn_metadata, AscendMetadata):
+        sample_meta = next(iter(attn_metadata.values()), None)
+        if isinstance(sample_meta, AscendMetadata):
             return self._updatable_graph_replay(desc, attn_metadata)
         else:
             self.update_stream.wait_stream(torch.npu.current_stream())
