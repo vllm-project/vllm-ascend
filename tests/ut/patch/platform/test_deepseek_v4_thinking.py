@@ -23,7 +23,7 @@ class FakeTokenizer:
 
 
 def _mock_checkpoint_config(monkeypatch, *, post_preview: bool) -> None:
-    config = {"dspark_block_size": 5} if post_preview else {"model_type": "deepseek_v4"}
+    config: dict[str, object] = {"dspark_block_size": 5} if post_preview else {"model_type": "deepseek_v4"}
     monkeypatch.setattr(
         patch_deepseek_v4_frontend,
         "get_hf_file_to_dict",
