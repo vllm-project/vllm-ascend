@@ -150,3 +150,37 @@ def test_factory_shares_upstream_hash_table_with_legacy_ascend_routing():
     kwargs = original_factory.call_args.kwargs
     assert kwargs["hash_indices_table"] is hash_indices_table
     assert kwargs["routed_experts_args"]["tid2eid"] is hash_indices_table
+
+
+def test_factory_keeps_vision_bias_in_ascend_router_only():
+    bias_vl = torch.arange(8, dtype=torch.float32)
+    router = _Router()
+    runner = SimpleNamespace(router=router)
+    original_factory = MagicMock(return_value=runner)
+    router_factory = MagicMock(return_value=router)
+    ascend_config = SimpleNamespace(
+        eplb_config=SimpleNamespace(
+            dynamic_eplb=False,
+            expert_map_path=None,
+            num_redundant_experts=0,
+        )
+    )
+
+    with (
+        patch.object(patch_fused_moe, "_original_FusedMoE", original_factory),
+        patch.object(patch_fused_moe, "create_ascend_fused_moe_router", router_factory),
+        patch.object(patch_fused_moe, "get_ascend_config", return_value=ascend_config),
+    ):
+        patch_fused_moe._ascend_FusedMoE(
+            num_experts=8,
+            top_k=2,
+            bias_vl=bias_vl,
+            image_sentinel_lo=129257,
+        )
+
+    router_kwargs = router_factory.call_args.kwargs
+    assert router_kwargs["bias_vl"] is bias_vl
+    assert router_kwargs["image_sentinel_lo"] == 129257
+    factory_kwargs = original_factory.call_args.kwargs
+    assert "bias_vl" not in factory_kwargs
+    assert "image_sentinel_lo" not in factory_kwargs

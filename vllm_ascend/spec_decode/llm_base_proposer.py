@@ -114,7 +114,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
     @staticmethod
-    def _get_multimodal_image_token_index(model_name: str, config: Any) -> int:
+    def _get_multimodal_image_token_index(model_name: str, config: Any) -> int | None:
         if model_name in [
             "Qwen2_5_VLForConditionalGeneration",
             "Qwen3VLForConditionalGeneration",
@@ -135,7 +135,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "AscendKimiK3ForConditionalGeneration",
         }:
             return config.media_placeholder_token_id
-        return config.image_token_index
+        # Some models (for example DeepSeek-V4 Vision) use multiple
+        # position-dependent image sentinel tokens instead of one placeholder
+        # token. Their text-only drafter does not need a synthetic image token
+        # index during decode.
+        return getattr(config, "image_token_index", None)
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
@@ -405,7 +409,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if supports_multimodal(model):
             # handle multimodality
             model_name = self.get_model_name(model)
-            self.model.config.image_token_index = self._get_multimodal_image_token_index(model_name, model.config)
+            image_token_index = self._get_multimodal_image_token_index(model_name, model.config)
+            if image_token_index is not None:
+                self.model.config.image_token_index = image_token_index
             target_language_model = model.get_language_model()
         else:
             target_language_model = model

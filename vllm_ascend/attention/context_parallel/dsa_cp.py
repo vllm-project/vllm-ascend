@@ -1351,9 +1351,9 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         self.wo_a = kwargs["wo_a"]
         self.wo_b = kwargs["wo_b"]
 
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp() and get_current_hardware_profile().supports(
-            HardwareCapability.DSA_O_PROJ_TP
-        )
+        # Device-independent: the selected linear method validates whether
+        # its tensors support TP/full-weight switching.
+        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
         self._o_proj_tp_weight_switch_enabled = False
 
         self.eps = kwargs["eps"]
