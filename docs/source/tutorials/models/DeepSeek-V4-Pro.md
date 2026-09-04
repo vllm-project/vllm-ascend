@@ -1314,75 +1314,75 @@ Before you start, please:
 
    For each P instance, only these two configuration values need to be modified: `kv_port` and `engine_id`. The `engine_id` should start from 0 and increment sequentially, while the `kv_port` (e.g., `30100`) must be unique for each P instance, such as 30000, 30100, etc.
 
-   ```shell
-	unset https_proxy
-	unset http_proxy
-	export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
-
-	nic_name=xxx
-	local_ip=xxx
-
-	export HCCL_IF_IP=$local_ip
-	export GLOO_SOCKET_IFNAME=$nic_name
-	export TP_SOCKET_IFNAME=$nic_name
-	export HCCL_SOCKET_IFNAME=$nic_name
-	export VLLM_RPC_TIMEOUT=3600000
-	export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-	export HCCL_EXEC_TIMEOUT=204
-	export HCCL_CONNECT_TIMEOUT=6000
-	export OMP_PROC_BIND=false
-	export OMP_NUM_THREADS=10
-	export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-	export HCCL_BUFFSIZE=1024
-	export TASK_QUEUE_ENABLE=1
-	export HCCL_OP_EXPANSION_MODE="AIV"
-	export ASCEND_RT_VISIBLE_DEVICES=$1
-	export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
-
-	vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8 \
-	  --host 0.0.0.0 \
-	  --port $2 \
-	  --data-parallel-size $3 \
-	  --data-parallel-rank $4 \
-	  --data-parallel-address $5 \
-	  --data-parallel-rpc-port $6 \
-	  --tensor-parallel-size $7 \
-	  --enable-expert-parallel \
-	  --seed 1024 \
-	  --served-model-name auto \
-	  --max-model-len 150000 \
-	  --max-num-batched-tokens 4096 \
-	  --max-num-seqs 16 \
-	  --no-disable-hybrid-kv-cache-manager \
-	  --tokenizer-mode deepseek_v4 \
-	  --tool-call-parser deepseek_v4 \
-	  --enable-auto-tool-choice \
-	  --reasoning-parser deepseek_v4 \
-	  --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}' \
-	  --trust-remote-code \
-	  --gpu-memory-utilization 0.92 \
-	  --quantization ascend \
-	  --block-size 32 \
-	  --enforce-eager \
-	  --speculative-config '{"num_speculative_tokens": 7, "method": "dspark","enforce_eager": true}' \
-	  --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1":true}' \
-	  --kv-transfer-config \
-	  '{"kv_connector": "MooncakeHybridConnector",
-	  "kv_role": "kv_producer",
-	  "kv_port": "30000",
-	  "engine_id": "0",
-	  "kv_connector_extra_config": {
-				  "prefill": {
-						  "dp_size": 4,
-						  "tp_size": 8
-				  },
-				  "decode": {
-						  "dp_size": 8,
-						  "tp_size": 4
-				  }
-		  }
-	  }'
-   ```
+	   ```shell
+		unset https_proxy
+		unset http_proxy
+		export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib/
+	
+		nic_name=xxx
+		local_ip=xxx
+	
+		export HCCL_IF_IP=$local_ip
+		export GLOO_SOCKET_IFNAME=$nic_name
+		export TP_SOCKET_IFNAME=$nic_name
+		export HCCL_SOCKET_IFNAME=$nic_name
+		export VLLM_RPC_TIMEOUT=3600000
+		export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
+		export HCCL_EXEC_TIMEOUT=204
+		export HCCL_CONNECT_TIMEOUT=6000
+		export OMP_PROC_BIND=false
+		export OMP_NUM_THREADS=10
+		export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+		export HCCL_BUFFSIZE=1024
+		export TASK_QUEUE_ENABLE=1
+		export HCCL_OP_EXPANSION_MODE="AIV"
+		export ASCEND_RT_VISIBLE_DEVICES=$1
+		export VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096
+	
+		vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V4-Pro-w4a8 \
+		  --host 0.0.0.0 \
+		  --port $2 \
+		  --data-parallel-size $3 \
+		  --data-parallel-rank $4 \
+		  --data-parallel-address $5 \
+		  --data-parallel-rpc-port $6 \
+		  --tensor-parallel-size $7 \
+		  --enable-expert-parallel \
+		  --seed 1024 \
+		  --served-model-name auto \
+		  --max-model-len 150000 \
+		  --max-num-batched-tokens 4096 \
+		  --max-num-seqs 16 \
+		  --no-disable-hybrid-kv-cache-manager \
+		  --tokenizer-mode deepseek_v4 \
+		  --tool-call-parser deepseek_v4 \
+		  --enable-auto-tool-choice \
+		  --reasoning-parser deepseek_v4 \
+		  --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 128}' \
+		  --trust-remote-code \
+		  --gpu-memory-utilization 0.92 \
+		  --quantization ascend \
+		  --block-size 32 \
+		  --enforce-eager \
+		  --speculative-config '{"num_speculative_tokens": 7, "method": "dspark","enforce_eager": true}' \
+		  --additional-config '{"enable_cpu_binding": true, "enable_dsa_cp": true, "enable_flashcomm1":true}' \
+		  --kv-transfer-config \
+		  '{"kv_connector": "MooncakeHybridConnector",
+		  "kv_role": "kv_producer",
+		  "kv_port": "30000",
+		  "engine_id": "0",
+		  "kv_connector_extra_config": {
+					  "prefill": {
+							  "dp_size": 4,
+							  "tp_size": 8
+					  },
+					  "decode": {
+							  "dp_size": 8,
+							  "tp_size": 4
+					  }
+			  }
+		  }'
+	   ```
 
 2. Decode node (4 D nodes share the same script)
 
