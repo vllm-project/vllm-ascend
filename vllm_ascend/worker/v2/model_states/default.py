@@ -67,7 +67,12 @@ class AscendModelState(DefaultModelState):
         num_actual_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        # ``max_query_len`` is only populated for adaptive verification, where
+        # the CPU per-request counts may have been compacted below the upper
+        # bound carried by ``num_scheduled_tokens``.
+        max_query_len = getattr(input_batch, "max_query_len", None)
+        if max_query_len is None:
+            max_query_len = input_batch.num_scheduled_tokens.max().item()
         pcp_context = (
             self.pcp_manager.build_attention_context(
                 input_batch,

@@ -12,6 +12,11 @@
 - `logits_indices` 用于建立 grammar bitmask 行与实际 logits 行之间的映射：
   `logits_indices[i]` 表示第 `i` 行 bitmask 应作用到哪一行 logits。
 
+- 自 adaptive verification（vLLM PR #47808）适配后，mapping 改为按
+  `(request, position)` 键控：`logits_indices[i] = req_idx * MASK_STRIDE + position`。
+  kernel 通过 device 端 `cu_num_logits` 解析该 (req, position) 实际对应的 logits 行，
+  并被 adaptive verification 裁剪掉（未验证）的 draft position 跳过，不再写入 `-inf`。
+
 - 计算公式：
 
   对第 `r` 行 bitmask、第 `v` 个 token：
@@ -62,9 +67,11 @@
 | 参数名 | 输入/输出/属性 | 描述 | 数据类型 | 数据格式 |
 |:--------|:----------------|:------|:---------|:---------|
 | logits | 输入/输出 | 二维 `[num_logits, vocab_size]` logits 张量。根据 grammar bitmask 原地将禁止 token 对应位置写为 `-inf`。 | BFLOAT16 | ND |
-| logits_indices | 输入 | 一维 `[num_masks]` 映射表。`logits_indices[i]` 指定第 `i` 行 bitmask 对应的 logits 行。 | INT32 | ND |
+| logits_indices | 输入 | 一维 `[num_masks]` 映射表。`logits_indices[i]` 按 `(req, position)` 键控：`req = logits_indices[i] // MASK_STRIDE`，`position = logits_indices[i] % MASK_STRIDE`，实际 logits 行由 `cu_num_logits[req] + position` 给出。 | INT32 | ND |
+| cu_num_logits | 输入 | 一维 `[num_reqs + 1]` 每个 request 的 logits 行起始偏移（device 端），用于解析 `logits_indices` 并判断 position 是否被 adaptive verification 裁剪。 | INT32 | ND |
 | bitmask | 输入 | 二维 `[num_masks, ceil(vocab_size / 32)]` packed grammar bitmask，每个 INT32 保存连续 32 个 token 的允许/禁止状态。 | INT32 | ND |
 | vocab_size | 属性 | 实际词表大小，用于限制最后一个 vocab block 的有效范围。 | INT | - |
+| MASK_STRIDE | 属性 | `(request, position)` 键控编码宽度，取值 `decode_query_len`。 | INT | - |
 | BLOCK_SIZE | 属性 | 每个 logical task 负责的 vocab block 大小。当前 A2/A3 验证配置为 `8192`。 | INT | - |
 
 ## 约束说明

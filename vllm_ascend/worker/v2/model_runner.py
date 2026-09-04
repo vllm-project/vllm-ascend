@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import os
 from contextlib import contextmanager
 
 import numpy as np
@@ -24,6 +25,7 @@ import torch
 from vllm.compilation import breakable_cudagraph
 from vllm.config import VllmConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -225,7 +227,11 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
+        with (
+            graph_manager_wrapper(self),
+            adaptive_verification_gate_wrapper(self),
+            _use_ascend_pcp_manager_for_vllm_0271(),
+        ):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -245,6 +251,19 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
     ):
         self._cpp_execution_time_ms = None
+        if (
+            not dummy_run
+            and not is_profile
+            and getattr(self, "adaptive_verification", None) is not None
+            and self.update_stream is not None
+        ):
+            # Adaptive verification rewrites the shared per-step buffers
+            # (query_start_loc / cu_num_logits / capacities) in prepare_inputs.
+            # FULL-graph param updates for the previous step run on
+            # ``update_stream`` and are never joined back into the main stream,
+            # so fence here to keep those async reads/writes from racing with
+            # the in-place reallocation of this step.
+            torch.npu.current_stream().wait_stream(self.update_stream)
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
@@ -586,11 +605,27 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
             num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+            # Adaptive verification (DSpark confidence-scheduled decoding): the
+            # CPU side already picked a per-step draft budget in
+            # ``gather_batch_req_state`` (via ``get_num_tokens``), which is why
+            # ``batch_req_state.num_tokens`` may be smaller than the scheduler
+            # total. Compaction redistributes that budget on the CPU first.
+            adaptive_verification = (
+                self.adaptive_verification if num_draft_tokens_per_req is not None else None
+            )
+            if adaptive_verification is not None:
+                num_scheduled_tokens_np, cu_num_logits_np = (
+                    adaptive_verification.compact_batch(
+                        num_draft_tokens_per_req,
+                        num_scheduled_tokens_np,
+                        cu_num_logits_np,
+                    )
+                )
             # Get query_start_loc.
             # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
             # See _pad_query_start_loc_for_fia.
             num_reqs_padded = batch_desc.num_reqs or num_reqs
-            query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+            query_start_loc_np = self.input_buffers.query_start_loc_cpu.numpy()
             query_start_loc_np[0] = 0
             np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
             # Pad for full CUDA graph mode.
@@ -610,6 +645,33 @@ class NPUModelRunner(GPUModelRunner):
 
             query_start_loc = self.input_buffers.query_start_loc
             async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+
+            if adaptive_verification is not None:
+                # Device-side draft reallocation: ranks the scheduled draft
+                # slots by survival probability and admits the best prefix into
+                # the per-step budget. It rewrites the shared device
+                # ``query_start_loc``/``cu_num_logits`` buffers in place.
+                cu_num_logits, query_start_loc, total_num_draft_tokens = (
+                    adaptive_verification.reallocate_drafts(req_ids, idx_mapping)
+                )
+                total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
+                # TODO(probe): temporary adaptive-verification probe, remove
+                # after on-device validation. Logs every step where the draft
+                # budget was trimmed below the scheduled draft count.
+                scheduled_drafts = int(np.asarray(num_draft_tokens_per_req).sum())
+                if scheduled_drafts > total_num_draft_tokens:
+                    logger.info(
+                        "[ADAPTIVE-PROBE] reqs=%d scheduled_drafts=%d budget=%d",
+                        num_reqs,
+                        scheduled_drafts,
+                        total_num_draft_tokens,
+                    )
+                # Plan A (PIECEWISE decode): the Ascend attention metadata
+                # builders are CPU-driven and read ``query_start_loc_np``, so
+                # reflect the device-rewritten layout back to the CPU mirror to
+                # keep CPU and device per-request query lengths consistent.
+                self.input_buffers.query_start_loc_cpu.copy_(self.input_buffers.query_start_loc)
+                query_start_loc_np = self.input_buffers.query_start_loc_cpu.numpy()
 
             if draft_tokens:
                 expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
@@ -724,6 +786,13 @@ class NPUModelRunner(GPUModelRunner):
                 cu_num_logits=cu_num_logits,
                 cu_num_logits_np=cu_num_logits_np,
                 has_structured_output_reqs=scheduler_output.has_structured_output_requests,
+                # Only populated when adaptive verification compacts the CPU
+                # batch below the per-request upper bounds.
+                max_query_len=(
+                    int(num_scheduled_tokens_upper_bound.max())
+                    if adaptive_verification is not None
+                    else None
+                ),
                 # TODO: only populated for R-SWA (not supported yet).
                 prompt_lens=prompt_lens,
                 # extra attributes for ascend npus.
@@ -851,6 +920,17 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to copy num_computed_tokens back to cpu here.
         """
+        if (
+            getattr(self, "adaptive_verification", None) is not None
+            and int(os.environ.get("VLLM_ASCEND_DEBUG_ADAPTIVE_OOB", "0")) > 0
+        ):
+            self._debug_probe_adaptive_post_update(
+                idx_mapping,
+                sampled_tokens,
+                num_sampled,
+                num_rejected,
+                query_start_loc,
+            )
         super().postprocess_sampled(
             idx_mapping,
             sampled_tokens,
@@ -863,6 +943,136 @@ class NPUModelRunner(GPUModelRunner):
         # from num_computed_tokens_np in _update_seq_lens_cpu instead.
         if self.speculator is not None:
             self._copy_num_computed_tokens_to_cpu()
+
+    def _debug_probe_adaptive_post_update(
+        self,
+        idx_mapping,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc=None,
+    ):
+        """Temporary ADAPTIVE-verification probe (remove after triage).
+
+        Replicates every address ``vllm input_batch._post_update_kernel``
+        touches and logs the first step where any goes out of bounds, so the
+        device-side aivec fault can be tied to concrete per-request values.
+        Gated by ``VLLM_ASCEND_DEBUG_ADAPTIVE_OOB``.
+        """
+        rows = idx_mapping.shape[0]
+        ns_len = num_sampled.shape[0]
+        nr_len = num_rejected.shape[0]
+        token_row = sampled_tokens.shape[1] if sampled_tokens.ndim == 2 else 1
+        all_token_row = self.req_states.all_token_ids.gpu.shape[1]
+        num_req_states = self.req_states.num_computed_tokens.gpu.shape[0]
+        qsl_len = query_start_loc.shape[0] if query_start_loc is not None else 0
+
+        torch.accelerator.synchronize()
+        idx = idx_mapping.cpu().numpy().reshape(-1)
+        ns = num_sampled.cpu().numpy().reshape(-1)
+        nr = num_rejected.cpu().numpy().reshape(-1)
+        qsl = query_start_loc.cpu().numpy().reshape(-1) if query_start_loc is not None else None
+        smp = sampled_tokens.cpu().numpy()
+        total_len = self.req_states.total_len.gpu.cpu().numpy()
+        num_computed = self.req_states.num_computed_tokens.gpu.cpu().numpy()
+
+        obc_shape = None
+        penalties = getattr(self.sampler, "penalties_state", None)
+        if penalties is not None:
+            obc_t = penalties.output_bin_counts
+            if obc_t is not None:
+                obc_shape = obc_t.shape
+
+        step = getattr(self, "_dbg_probe_step", 0) + 1
+        self._dbg_probe_step = step
+
+        issues = []
+        for r in range(rows):
+            req = int(idx[r])
+            if req < 0:
+                continue
+            if not (0 <= req < num_req_states):
+                issues.append(
+                    (r, req, f"idx_mapping out of req-state range [0,{num_req_states})")
+                )
+                continue
+            if r >= ns_len or r >= nr_len:
+                issues.append(
+                    (
+                        r,
+                        req,
+                        f"row {r} beyond sampler arrays "
+                        f"(ns_len={ns_len} nr_len={nr_len})",
+                    )
+                )
+                continue
+            if qsl is None or r + 1 >= qsl_len:
+                issues.append(
+                    (r, req, f"query_start_loc too short (qsl_len={qsl_len})")
+                )
+                continue
+            s = int(ns[r])
+            j = int(nr[r])
+            qlen = int(qsl[r + 1]) - int(qsl[r])
+            total = int(total_len[req])
+            if s < 0 or s > token_row:
+                issues.append(
+                    (r, req, f"num_sampled={s} outside row width {token_row}")
+                )
+                continue
+            if total < 0 or total + s > all_token_row:
+                issues.append(
+                    (
+                        r,
+                        req,
+                        f"all_token_ids overflow: total_len={total} + "
+                        f"num_sampled={s} > row {all_token_row}",
+                    )
+                )
+            delta = qlen - j
+            if num_computed[req] + delta < 0:
+                issues.append(
+                    (
+                        r,
+                        req,
+                        f"num_computed underflow: nc={int(num_computed[req])} "
+                        f"delta=qlen({qlen})-num_rejected({j})={delta}",
+                    )
+                )
+            if obc_shape is not None and s > 0:
+                vocab = obc_shape[1]
+                for i in range(s):
+                    tid = int(smp[r, i])
+                    if not (0 <= tid < vocab):
+                        issues.append(
+                            (
+                                r,
+                                req,
+                                f"output_bin_counts token_id={tid} out of "
+                                f"[0,{vocab}) at sampled pos {i}",
+                            )
+                        )
+                        break
+            if step <= 3 and r < 8:
+                toks = [int(t) for t in smp[r, :s]] if s else []
+                logger.warning(
+                    "[OOB-PROBE step=%d row=%d req=%d] qlen=%d ns=%d nr=%d "
+                    "total=%d tokens=%s",
+                    step,
+                    r,
+                    req,
+                    qlen,
+                    s,
+                    j,
+                    total,
+                    toks,
+                )
+
+        logger.warning(
+            "[OOB-PROBE step=%d] rows=%d issues=%d", step, rows, len(issues)
+        )
+        for r, req, msg in issues:
+            logger.warning("[OOB-PROBE step=%d row=%d req=%d] %s", step, r, req, msg)
 
     def _copy_num_computed_tokens_to_cpu(self):
         # npu attention backend still need to use seq_lens_cpu,
@@ -978,14 +1188,28 @@ def graph_manager_wrapper(model_runner):
             lora_capture_cases: list[int] | None = None,
             varlen_decode: bool = False,
         ):
+            resolved_mode = cudagraph_mode
+            resolved_varlen = varlen_decode
+            if getattr(model_runner, "adaptive_verification", None) is not None:
+                # Plan A: Ascend attention backends report UNIFORM_BATCH and
+                # cannot capture varlen FULL decode graphs (upstream demands
+                # ALWAYS). Adaptive verification therefore runs the target
+                # decode through PIECEWISE/dynamic graphs instead.
+                resolved_mode = CUDAGraphMode.PIECEWISE
+                resolved_varlen = False
+                logger.warning(
+                    "Adaptive verification on Ascend: running target decode "
+                    "through PIECEWISE graphs (attention backends report "
+                    "UNIFORM_BATCH, no varlen FULL decode capture)."
+                )
             return ModelAclGraphManager(
                 vllm_config,
                 device,
-                cudagraph_mode,
+                resolved_mode,
                 decode_query_len,
                 model_runner,
                 lora_capture_cases=lora_capture_cases,
-                varlen_decode=varlen_decode,  # type: ignore[call-arg]
+                varlen_decode=resolved_varlen,  # type: ignore[call-arg]
             )
 
     try:
@@ -993,3 +1217,145 @@ def graph_manager_wrapper(model_runner):
         yield
     finally:
         vllm_model_runner.ModelCudaGraphManager = original_graph_manager
+
+
+@contextmanager
+def adaptive_verification_gate_wrapper(model_runner):
+    """Relax the upstream ``AttentionCGSupport.ALWAYS`` requirement on Ascend.
+
+    Upstream adaptive verification captures varlen FULL decode graphs, so its
+    factory refuses to create the manager unless every attention builder
+    reports ``AttentionCGSupport.ALWAYS`` (``adaptive_verification.py``).
+    Ascend attention backends only report ``UNIFORM_BATCH`` today, which would
+    make ``enable_adaptive_verification=true`` fail at startup. Under Plan A
+    the decode runs through PIECEWISE graphs (see ``graph_manager_wrapper``),
+    so the ALWAYS hard gate is relaxed here while every other upstream
+    validation (device/CPU query-len mismatch support, etc.) still runs.
+    """
+    original_factory = getattr(
+        vllm_model_runner, "maybe_create_adaptive_verification_manager", None
+    )
+    if original_factory is None:
+        yield
+        return
+
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdaptiveVerificationManager,
+    )
+
+    def make_piecewise_manager(
+        req_states,
+        query_start_loc,
+        num_bonus_tokens,
+        max_total_logits,
+    ) -> AdaptiveVerificationManager:
+        """Plan-A manager whose cost curves seed from piecewise dummy runs.
+
+        Upstream seeds its step-cost tables from FULL-decode-graph dummy runs
+        (``full_cudagraph=True`` samples) and profile sizes derived from the
+        captured full-graph token counts. Under Plan A the target decode runs
+        through PIECEWISE graphs, so there are no full graphs to price: profile
+        a representative grid of piecewise batch sizes instead and price the
+        drafter curve from every sample (not only ``full_cudagraph`` ones).
+        """
+
+        class AscendPiecewiseAdaptiveManager(AdaptiveVerificationManager):
+            def batches_to_profile(self, capture_sizes):
+                del capture_sizes
+                # No FULL graphs: leave ``_cudagraph_limit`` at 0 so the cost
+                # tables stay smooth (nothing pads to a captured size).
+                self._cudagraph_limit = 0
+                max_num_tokens = self.req_states.max_num_batched_tokens
+                base_size = max(1, self.num_speculative_steps + 1)
+                grid = [base_size]
+                while grid[-1] < max_num_tokens:
+                    grid.append(min(grid[-1] * 2, max_num_tokens))
+                from vllm import envs
+
+                context_len = envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
+                for num_tokens in grid:
+                    for _ in range(3):
+                        yield {
+                            "num_tokens": num_tokens,
+                            "context_len": context_len,
+                        }
+
+            def set_initial_cost_curves(self, samples):
+                from collections import defaultdict
+
+                def median_curve(points):
+                    grouped: dict[int, list[float]] = defaultdict(list)
+                    for key, value in points:
+                        grouped[key].append(value)
+                    return [(k, float(np.median(v))) for k, v in sorted(grouped.items())]
+
+                draft_curve = median_curve(
+                    (s.num_reqs, s.drafter_ms) for s in samples
+                )
+                verify_curve = median_curve(
+                    (s.num_target_tokens, s.forward_ms) for s in samples
+                )
+                self.set_cost_curves(draft_curve, verify_curve)
+
+        return AscendPiecewiseAdaptiveManager(
+            req_states,
+            query_start_loc,
+            num_bonus_tokens,
+            max_total_logits=max_total_logits,
+        )
+
+    def relaxed_factory(
+        *,
+        enable_adaptive_verification: bool,
+        attn_groups,
+        attn_cg_support,
+        req_states,
+        query_start_loc,
+        num_bonus_tokens,
+        max_total_logits,
+    ):
+        if not enable_adaptive_verification:
+            return original_factory(
+                enable_adaptive_verification=enable_adaptive_verification,
+                attn_groups=attn_groups,
+                attn_cg_support=attn_cg_support,
+                req_states=req_states,
+                query_start_loc=query_start_loc,
+                num_bonus_tokens=num_bonus_tokens,
+                max_total_logits=max_total_logits,
+            )
+        try:
+            manager = original_factory(
+                enable_adaptive_verification=enable_adaptive_verification,
+                attn_groups=attn_groups,
+                attn_cg_support=attn_cg_support,
+                req_states=req_states,
+                query_start_loc=query_start_loc,
+                num_bonus_tokens=num_bonus_tokens,
+                max_total_logits=max_total_logits,
+            )
+        except ValueError as exc:
+            # Only the ALWAYS requirement is relaxed on Ascend; any other
+            # validation failure must keep failing loudly.
+            if "AttentionCGSupport.ALWAYS" not in str(exc):
+                raise
+            logger.warning(
+                "Relaxing the adaptive-verification AttentionCGSupport.ALWAYS "
+                "gate for Ascend; decode runs through PIECEWISE graphs: %s",
+                exc,
+            )
+            manager = None
+        if manager is None:
+            manager = make_piecewise_manager(
+                req_states,
+                query_start_loc,
+                num_bonus_tokens,
+                max_total_logits=max_total_logits,
+            )
+        return manager
+
+    try:
+        vllm_model_runner.maybe_create_adaptive_verification_manager = relaxed_factory
+        yield
+    finally:
+        vllm_model_runner.maybe_create_adaptive_verification_manager = original_factory
