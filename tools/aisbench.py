@@ -99,10 +99,15 @@ class AisbenchRunner:
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.exp_folder = None
         self.result_line = None
+        self.result = None
         self._init_dataset_conf()
         self._init_request_conf()
         self._run_aisbench_task()
         self._wait_for_task()
+        if self.task_type == "accuracy":
+            self._get_result_accuracy()
+        if self.task_type == "performance":
+            self._get_result_performance()
         if verify:
             self.baseline = aisbench_config.get("baseline", 1)
             if self.task_type == "accuracy":
@@ -237,7 +242,6 @@ class AisbenchRunner:
         self.result = float(df.iloc[0, -1])
 
     def _performance_verify(self):
-        self._get_result_performance()
         output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
         assert float(output_throughput) >= self.threshold * self.baseline, (
             "Performance verification failed. "
@@ -258,7 +262,6 @@ class AisbenchRunner:
             )
 
     def _accuracy_verify(self):
-        self._get_result_accuracy()
         acc_value = self.result
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, (
             "Accuracy verification failed. "
