@@ -49,8 +49,8 @@ Use the published image for the target hardware. Each image contains matching
 vLLM and vLLM Ascend revisions:
 
 ```text
-A3: quay.io/ascend/vllm-ascend:DeepSeek-V4-Flash-Vision-Exp-a3
-A2: quay.io/ascend/vllm-ascend:DeepSeek-V4-Flash-Vision-Exp
+A3: quay.io/ascend/vllm-ascend:deepseekv4-flash-vision-exp-a3
+A2: quay.io/ascend/vllm-ascend:deepseekv4-flash-vision-exp
 ```
 
 Do not replace either package inside the container independently. Mixing other
@@ -64,7 +64,7 @@ Pull the A3 image and start the container as follows. The A3 server has 8 NPUs,
 exposed as 16 logical devices (`davinci0` through `davinci15`) in the container.
 
 ```shell
-export IMAGE=quay.io/ascend/vllm-ascend:DeepSeek-V4-Flash-Vision-Exp-a3
+export IMAGE=quay.io/ascend/vllm-ascend:deepseekv4-flash-vision-exp-a3
 export MODEL_ROOT="/data/weights"
 
 docker pull "$IMAGE"
@@ -110,7 +110,7 @@ Run the following command on both A2 servers. Each server has 8 NPU dies,
 exposed as `davinci0` through `davinci7`.
 
 ```shell
-export IMAGE=quay.io/ascend/vllm-ascend:DeepSeek-V4-Flash-Vision-Exp
+export IMAGE=quay.io/ascend/vllm-ascend:deepseekv4-flash-vision-exp
 export MODEL_ROOT="/data/weights"
 
 docker pull "$IMAGE"
