@@ -600,6 +600,7 @@ class AscendCompilationConfig:
         self,
         enable_npugraph_ex: bool = True,
         enable_static_kernel: bool = False,
+        enable_super_kernel: bool | None = None,
         fuse_norm_quant: bool = True,
         fuse_qknorm_rope: bool = True,
         **kwargs,
@@ -619,6 +620,8 @@ class AscendCompilationConfig:
                 binary files with the corresponding shapes based on the current batch_size,
                 which usually takes some time.
                 Default: False
+            enable_super_kernel (bool | None): Whether to enable Super Kernel.
+                When omitted, it follows enable_static_kernel.
             fuse_norm_quant (bool): Whether to enable norm and quant fusion optimization.
                 When set to True, the system will optimize norm and quant operations.
                 Default: True
@@ -628,6 +631,9 @@ class AscendCompilationConfig:
         """
         from vllm_ascend.utils import is_310p
 
+        if enable_super_kernel is None:
+            enable_super_kernel = enable_static_kernel
+
         if is_310p():
             if enable_npugraph_ex:
                 logger.warning("npugraph_ex is not supported on Ascend 310P. Disabling it.")
@@ -635,16 +641,24 @@ class AscendCompilationConfig:
                 logger.warning(
                     "static kernel requires npugraph_ex, which is not supported on Ascend 310P. Disabling it."
                 )
+            if enable_super_kernel:
+                logger.warning(
+                    "super kernel requires static kernel, which is not supported on Ascend 310P. Disabling it."
+                )
             enable_npugraph_ex = False
             enable_static_kernel = False
+            enable_super_kernel = False
 
         self.fuse_norm_quant = fuse_norm_quant
         self.fuse_qknorm_rope = fuse_qknorm_rope
         self.enable_npugraph_ex = enable_npugraph_ex
         self.enable_static_kernel = enable_static_kernel
+        self.enable_super_kernel = enable_super_kernel
         self.fuse_muls_add = kwargs.get("fuse_muls_add", True)
         if self.enable_static_kernel:
             assert self.enable_npugraph_ex, "Static kernel generation requires npugraph_ex to be enabled."
+        if self.enable_super_kernel:
+            assert self.enable_static_kernel, "Super kernel generation requires static kernel to be enabled."
 
 
 class AscendFusionConfig:
