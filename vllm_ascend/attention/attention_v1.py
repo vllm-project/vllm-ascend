@@ -1682,7 +1682,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_metadata: AscendMetadata,
         output: torch.Tensor,
     ):
-        if isinstance(kv_cache, torch.Tensor) or len(kv_cache) > 1:
+        if kv_cache is not None and (isinstance(kv_cache, torch.Tensor) or len(kv_cache) > 1):
             if self.key_cache is None:
                 self.key_cache, self.value_cache = self._unpack_kv_cache(kv_cache)
             if self.kv_sharing_target_layer_name is not None:
