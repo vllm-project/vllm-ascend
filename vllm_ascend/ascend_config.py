@@ -526,28 +526,29 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
         # TODO: delete the deprecated flashcomm option when upstream SP is ready.
-        flashcomm_explicitly_enabled = (
-            bool((vc.additional_config or {}).get("enable_flashcomm1", False))
-            or int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) != 0
-        )
+        flashcomm_explicitly_enabled = validate_additional_config_bool(
+            (vc.additional_config or {}).get("enable_flashcomm1", False),
+            "additional_config.enable_flashcomm1",
+        ) or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0").strip().lower() in ("1", "true")
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
         # so users only need `enable_dsa_cp=true` in additional_config.
         if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
             logger.info_once("DSA-CP is enabled. Auto-enabling FlashComm .")
 
-        if not flashcomm_explicitly_enabled and not self.enable_dsa_cp:
+        effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
+
+        if not effective_flashcomm:
             vllm_config.parallel_config.all2all_backend = (
                 "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
             )
             logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
+        elif not vc.parallel_config.use_sequence_parallel_moe:
+            logger.warning_once(
+                "FlashComm1 is enabled, but the current config does not support sequence-parallel MoE. "
+                "Disabling FlashComm1."
+            )
         else:
-            if not vc.parallel_config.use_sequence_parallel_moe and flashcomm_explicitly_enabled:
-                logger.warning_once(
-                    "FlashComm1 is enabled, but the current config does not support sequence-parallel MoE. "
-                    "Disabling FlashComm1."
-                )
-            else:
-                logger.info_once("FlashComm1 is enabled. ")
+            logger.info_once("FlashComm1 is enabled.")
 
         # DSA CP is only applicable to models with an indexer (for example,
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
