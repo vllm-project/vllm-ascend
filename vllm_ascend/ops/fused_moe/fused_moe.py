@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CUDAGraphMode, get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_tp_group, tensor_model_parallel_all_reduce
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -35,6 +35,7 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -54,6 +55,8 @@ from vllm_ascend.utils import (
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
 )
+
+ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE = envs.VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -99,6 +102,27 @@ def mock_true():
 def use_multistage_eplb_load(dynamic_eplb: bool, policy_type: int, collection_interval: int) -> bool:
     """Whether EPLB should retain a separate expert-load vector per step."""
     return dynamic_eplb and policy_type == 3 and collection_interval > 1
+
+
+def should_force_moe_load_balance(
+    *,
+    quant_type: QuantType,
+    in_profile_run: bool,
+    capturing: bool,
+    cudagraph_runtime_mode: CUDAGraphMode | None,
+) -> bool:
+    """Select the existing invasive routing override for debug-only runs."""
+    if in_profile_run:
+        return True
+    if not ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE or quant_type != QuantType.W4A8MXFP:
+        return False
+    if capturing or cudagraph_runtime_mode not in (None, CUDAGraphMode.NONE):
+        logger.warning_once(
+            "VLLM_ASCEND_ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE is ignored for graph-mode requests; "
+            "the debug routing override applies only to eager execution."
+        )
+        return False
+    return True
 
 
 def make_eplb_placement_config(eplb_config, num_redundant_experts: int) -> SimpleNamespace:
@@ -726,10 +750,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             moe_layer_index = forward_context.moe_layer_index % (len(forward_context.all_moe_layers))
             forward_context.moe_layer_index = moe_layer_index
 
-        # Load balancing for token distribution among experts in dummy_run
-        # TODO: The community only considers load balancing when DP > 1.
-        # This approach may overlook some extreme scenarios.
-        enable_force_load_balance = _EXTRA_CTX.in_profile_run
+        # Profile runs preserve the existing behavior. The development-only
+        # environment switch additionally enables exact W4A8 MXFP balancing
+        # for real eager requests, while graph requests stay untouched.
+        enable_force_load_balance = should_force_moe_load_balance(
+            quant_type=self.quant_type,
+            in_profile_run=_EXTRA_CTX.in_profile_run,
+            capturing=getattr(forward_context, "capturing", False),
+            cudagraph_runtime_mode=getattr(forward_context, "cudagraph_runtime_mode", None),
+        )
 
         lora_context = getattr(self.routed_experts, "_ascend_moe_lora_context", None)
         if lora_context is not None:
