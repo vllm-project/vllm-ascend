@@ -510,7 +510,7 @@ class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
 
 @dataclass(frozen=True, slots=True)
 class PAParamProvider:
-    layer_name: str
+    layer_name: str | None
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -521,7 +521,8 @@ class PAParamProvider:
 
 @dataclass(frozen=True, slots=True)
 class FIAParamProvider:
-    layer_name: str
+    layer_name: str | None
+    sliding_window: int | None
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -540,7 +541,7 @@ class FIAParamProvider:
 
 @dataclass(frozen=True, slots=True)
 class FIAV2ParamProvider:
-    layer_name: str
+    layer_name: str | None
 
     def resolve(self, attn_metadata) -> dict[str, Any]:
         metadata = attn_metadata[self.layer_name]
@@ -1101,7 +1102,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 "workspace": workspace,
                 "out": [output_view, softmax_lse],
             },
-            FIAParamProvider(self._layer_name),
+            FIAParamProvider(self._layer_name, self.sliding_window),
         )
         return output, num_tokens
 

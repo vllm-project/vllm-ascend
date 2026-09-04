@@ -143,7 +143,7 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
         attn_metadata = self.speculator.model_state.attn_metadata
         if isinstance(attn_metadata, AscendMetadata):
-            return self._updatable_graph_replay(desc, attn_metadata)
+            return self._updatable_graph_replay(desc)
         else:
             self.update_stream.wait_stream(torch.npu.current_stream())
             ret = super().run_fullgraph(desc)

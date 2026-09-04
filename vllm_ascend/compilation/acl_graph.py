@@ -122,7 +122,7 @@ class ACLGraphWrapper:
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
         self.update_stream = update_stream
-        self.draft_attn_metadata_updates = list[dict[str, Any]] = []
+        self.draft_attn_metadata_updates: list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
 
     def set_update_stream(self, update_stream):
