@@ -171,7 +171,7 @@ a3:
         size: 2
       - name: DeepSeek-R1-W8A8-EPLB
         config_file_path: DeepSeek-R1-W8A8-EPLB.yaml
-        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        config_base_path: tests/e2e/nightly/multi_node/internal_dp/config
         size: 4
   single_node:
     test_config:
