@@ -326,6 +326,19 @@ a3:
       - name: Qwen3.5-397B-Memcache-perf
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-Memcache-perf.yaml
+      - name: acceptace_rate_deepseekv4-flash-w8a8-mtp
+        os: linux-aarch64-nightly-a3-8
+        config_file_path: acceptace_rate_deepseekv4-flash-w8a8-mtp.yaml
+      - name: Qwen3.6_35B_27B_A3_acceptance_rate
+        os: linux-aarch64-nightly-a3-2
+        config_file_path: Qwen3.6_35B_27B_A3_acceptance_rate.yaml
+      - name: kimi-k2.6_max_model_len
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: kimi-k2.6_max_model_len.yaml
+      - name: kimi25_w4a8_step_3_7
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: kimi25_w4a8_step_3_7.yaml
+
 310p:
   single_node:
     test_config:
