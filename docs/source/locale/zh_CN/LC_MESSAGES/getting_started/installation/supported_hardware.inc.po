@@ -1,0 +1,43 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-04 01:11+0000\n"
+"PO-Revision-Date: 2026-09-04 01:11+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "| Type | Common products |"
+msgstr "| 类型 | 常见产品 |"
+
+msgid ""
+"| Atlas A2 series products | Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 "
+"Box16, Atlas 300T A2, Atlas 800I A2, and others |"
+msgstr ""
+"| Atlas A2 系列产品 | Atlas 800T A2、Atlas 900 A2 PoD、Atlas 200T A2 Box16、Atlas "
+"300T A2、Atlas 800I A2 等 |"
+
+msgid ""
+"| Atlas A3 series products | Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas "
+"9000 A3 SuperPoD, Atlas 800I A3, and others |"
+msgstr ""
+"| Atlas A3 系列产品 | Atlas 800T A3、Atlas 900 A3 SuperPoD、Atlas 9000 A3 "
+"SuperPoD、Atlas 800I A3 等 |"
+
+msgid ""
+"| Atlas inference series products | Atlas 300I DUO and Atlas 200I Pro |"
+msgstr "| Atlas 推理系列产品 | Atlas 300I DUO 和 Atlas 200I Pro |"
+
+msgid "| Atlas 950DT series products | Atlas 950DT |"
+msgstr "| Atlas 950DT 系列产品 | Atlas 950DT |"

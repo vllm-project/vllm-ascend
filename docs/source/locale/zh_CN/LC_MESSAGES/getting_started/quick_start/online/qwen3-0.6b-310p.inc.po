@@ -1,0 +1,74 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-04 01:11+0000\n"
+"PO-Revision-Date: 2026-09-04 01:11+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid ""
+"The following Qwen3-0.6B example has been validated on Atlas 300I DUO and "
+"Atlas 200I Pro."
+msgstr "以下 Qwen3-0.6B 示例已在 Atlas 300I DUO 和 Atlas 200I Pro 上验证通过。"
+
+msgid "???+ important \"Runtime requirements for this hardware path\""
+msgstr "???+ important \"此硬件路径的运行时要求\""
+
+msgid ""
+"- Use `float16`.\n"
+"    - Use `FULL_DECODE_ONLY` and limit the graph capture sizes.\n"
+"    - `enable_npugraph_ex` is not supported. Set `--additional-config '{\"ascend_compilation_config\": {\"enable_npugraph_ex\":false}}'`."
+msgstr ""
+"- 使用 `float16`。\n"
+"    - 使用 `FULL_DECODE_ONLY` 并限制图捕获大小。\n"
+"    - 不支持 `enable_npugraph_ex`。设置 `--additional-config '{\"ascend_compilation_config\": {\"enable_npugraph_ex\":false}}'`。"
+
+msgid "If you see the following logs:"
+msgstr "如果您看到以下日志："
+
+msgid "Congratulations! You have successfully started the vLLM server."
+msgstr "恭喜！您已成功启动 vLLM 服务器。"
+
+msgid "You can query the model list:"
+msgstr "您可以查询模型列表："
+
+msgid "You can also send a prompt to the model:"
+msgstr "您还可以向模型发送提示词："
+
+msgid ""
+"vLLM is running as a background process. You can use `kill -2 $VLLM_PID` to "
+"stop it gracefully, which is similar to pressing `Ctrl+C` for a foreground "
+"vLLM process:"
+msgstr ""
+"vLLM 作为后台进程运行。您可以使用 `kill -2 $VLLM_PID` 优雅地停止它，这类似于对前台 vLLM 进程按 `Ctrl+C`："
+
+msgid "???+ warning \"Confirm the process before stopping the service\""
+msgstr "???+ warning \"停止服务前请确认进程\""
+
+msgid ""
+"If other `vllm serve` processes are running in the current environment, "
+"`pgrep -f \"vllm serve\"` may also match those vLLM services."
+msgstr "如果当前环境中运行着其他 `vllm serve` 进程，`pgrep -f \"vllm serve\"` 也可能匹配到这些 vLLM 服务。"
+
+msgid ""
+"Before running `kill`, confirm that `VLLM_PID` is the service started by "
+"this example to avoid stopping another running vLLM process by mistake."
+msgstr "在运行 `kill` 之前，请确认 `VLLM_PID` 是本示例启动的服务，以免误停其他正在运行的 vLLM 进程。"
+
+msgid "The output is as follows:"
+msgstr "输出如下："
+
+msgid "Finally, press `Ctrl+D` to exit the container."
+msgstr "最后，按 `Ctrl+D` 退出容器。"
