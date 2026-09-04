@@ -375,7 +375,7 @@ class KVCacheRecvingThread(threading.Thread):
         local_kv_caches_base_addr: list[int],
         block_len_per_addr: list[int],
         block_stride_per_addr: list[int],
-        addr_group_idx: list[int],
+        addr_group_idx: list[list[int]],
         mamba_ssm_size: tuple[int, int],
         use_hybrid,
         has_mamba,
@@ -719,7 +719,7 @@ class KVCacheRecvingThread(threading.Thread):
             for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                 zip(local_addrs, remote_kv_caches_base_addrs)
             ):
-                if addr_group_arr and i not in addr_group_arr[k]:  # type: ignore[operator]
+                if addr_group_arr and i not in addr_group_arr[k]:
                     continue
                 block_len = block_len_arr[k]
                 block_stride = block_stride_arr[k]
@@ -1674,7 +1674,7 @@ class MooncakeConnectorWorker:
         self.kv_caches_base_addr = []
         self.block_len_per_addr: list[int] = []
         self.block_stride_per_addr: list[int] = []
-        self.addr_group_idx: list[int] = []
+        self.addr_group_idx: list[list[int]] = []
         ptrs = []
         lengths = []
         if not self.use_hybrid:
@@ -1713,28 +1713,50 @@ class MooncakeConnectorWorker:
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):
                 for layer_name in group.layer_names:
                     layer_group_idx[layer_name] = i
+            # Hybrid attention overlays several kv_cache_groups (full-attn /
+            # sparse / SWA / state-cache) onto the same physical per-layer
+            # pools: one tensor is registered in kv_caches under multiple
+            # layer names that belong to different groups. Registering each
+            # pool only under the first group that touched it left the
+            # overlay groups (e.g. odd-layer full attention, SWA, state
+            # cache) with zero registered addresses, and the transfer loop
+            # (`if i not in addr_group_arr[k]: continue`) never applied their
+            # block-id mappings. Decode then read those pools through the
+            # overlay groups' own block-id spaces, i.e. misaligned or stale
+            # KV, corrupting the output. Collect every unique address once
+            # together with the FULL set of groups that reference it, so each
+            # group's block-id mapping is transferred for every pool it
+            # overlays. Walking every tensor's every layer's every
+            # single_tensor also keeps per-layer pools all registered:
+            # registering only the minimum address of a descriptor used to
+            # transfer just one layer per descriptor and leave the other
+            # layers zero-filled on the decode side.
+            _addr_groups: dict[int, set[int]] = {}
+            _addr_stride: dict[int, int] = {}
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
                 if not get_kv_cache_tensor_layers(kv_cache_tensor):
                     continue
-                share_tensor_addr = []
-                share_tensor_stride = []
-                cur_tensor_group_idx = []
                 for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
-                    cur_tensor_group_idx.append(layer_group_idx[layer_name])
                     kv_cache_tuple = kv_caches[layer_name]
                     if not isinstance(kv_cache_tuple, (tuple, list)):
                         kv_cache_tuple = [kv_cache_tuple]
                     for single_tensor in kv_cache_tuple:
                         tensor_addr = single_tensor.data_ptr()
-                        if tensor_addr in share_tensor_addr or tensor_addr in self.kv_caches_base_addr:
-                            continue
-                        share_tensor_addr.append(tensor_addr)
-                        share_tensor_stride.append(single_tensor.stride(0) * single_tensor.element_size())
-                cur_tensor_group_idx = sorted(list(set(cur_tensor_group_idx)))
-                self.kv_caches_base_addr.append(min(share_tensor_addr))
-                self.addr_group_idx.append(cur_tensor_group_idx)  # type: ignore[arg-type]
-                self.block_stride_per_addr.append(share_tensor_stride[0])
-                self.block_len_per_addr.append(share_tensor_stride[0])
+                        _stride = single_tensor.stride(0) * single_tensor.element_size()
+                        _addr_groups.setdefault(tensor_addr, set()).add(layer_group_idx[layer_name])
+                        if tensor_addr in _addr_stride and _addr_stride[tensor_addr] != _stride:
+                            logger.warning(
+                                "Hybrid KV cache address 0x%x is shared by layers with conflicting strides %d vs %d.",
+                                tensor_addr,
+                                _addr_stride[tensor_addr],
+                                _stride,
+                            )
+                        _addr_stride.setdefault(tensor_addr, _stride)
+            for tensor_addr, _groups in _addr_groups.items():
+                self.kv_caches_base_addr.append(tensor_addr)
+                self.addr_group_idx.append(sorted(_groups))
+                self.block_stride_per_addr.append(_addr_stride[tensor_addr])
+                self.block_len_per_addr.append(_addr_stride[tensor_addr])
         else:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
@@ -1762,7 +1784,20 @@ class MooncakeConnectorWorker:
                     lengths.append(max(tensor_ends) - start)
 
             # Overlaid hybrid groups may still cover the same physical bytes.
-            regions = sorted((ptr, ptr + length) for ptr, length in zip(ptrs, lengths))
+            # devmm IPC export (rtsIpcMemGetExportKey) requires a 2MB-aligned
+            # base address and a page-multiple length; unaligned regions make
+            # the kernel reject the registration with Invalid para (-22) and
+            # cross-node KV transfer fail. Align each region down/up to 2MB
+            # page boundaries before merging.
+            ipc_page_size = 2 * 1024 * 1024
+
+            def _align_down(addr: int) -> int:
+                return addr & ~(ipc_page_size - 1)
+
+            def _align_up(addr: int) -> int:
+                return (addr + ipc_page_size - 1) & ~(ipc_page_size - 1)
+
+            regions = sorted((_align_down(ptr), _align_up(ptr + length)) for ptr, length in zip(ptrs, lengths))
             merged_regions: list[tuple[int, int]] = []
             for start, end in regions:
                 if merged_regions and start < merged_regions[-1][1]:
