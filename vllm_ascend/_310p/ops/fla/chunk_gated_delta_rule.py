@@ -490,9 +490,12 @@ def _can_use_npu_compute_wy(
         return False
     if q.shape[3] % 16 != 0 or v.shape[3] % 16 != 0:
         return False
+    # Must mirror the binding's TORCH_CHECK guards, or eligible-looking shapes crash the
+    # engine instead of falling back to torch WY. K/V=128 is supported again via
+    # the kernel's two-pass solve.
     if q.shape[3] > 128 or v.shape[3] > 128:
         return False
-    # Mirror host tiling: K/V<=128 (UB), B<=32, Hv<=64 (g/beta staging into attn scratch).
+    # Mirror host tiling: B<=32, Hv<=64 (g/beta staging into attn scratch).
     if q.shape[0] > 32 or v.shape[2] > 64:
         return False
     return v.shape[2] % q.shape[2] == 0
