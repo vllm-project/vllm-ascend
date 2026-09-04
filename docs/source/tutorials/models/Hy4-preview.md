@@ -45,10 +45,12 @@ The features below are the ones enabled by the verified deployment commands in [
 
 | Model | Weight |
 | --- | --- |
-| Hy4-preview | <https://huggingface.co/tencent/Hy4-preview> |
-| Hy4-preview-w8a8 | <https://www.modelscope.cn/models/Eco-Tech/Hy4-preview-w8a8> |
+| Hy4-preview | [Hugging Face](https://huggingface.co/tencent/Hy4-preview) |
+| Hy4-preview-w8a8 | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Hy4-preview-w8a8) |
 
 This document uses the quantized [Hy4-preview-w8a8](https://www.modelscope.cn/models/Eco-Tech/Hy4-preview-w8a8) weights, which are about 762 GB. Download the weights to the local disk.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Hardware and Software Preparation
 
@@ -149,6 +151,7 @@ export VLLM_ASCEND_ENABLE_MLAPO=1
 export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
+# Ensure the model path matches the directory recorded during download
 vllm serve /path/to/Hy4-preview-w8a8 \
   --host 127.0.0.1 --port 8000 \
   --tensor-parallel-size 16 \
@@ -207,6 +210,7 @@ export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
+# Ensure the model path matches the directory recorded during download
 vllm serve ${MODEL} \
   --host 0.0.0.0 \
   --port ${PORT} \
@@ -260,6 +264,7 @@ export VLLM_ASCEND_ENABLE_FUSED_MC2=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
+# Ensure the model path matches the directory recorded during download
 vllm serve ${MODEL} \
   --headless \
   --data-parallel-start-rank 1 \

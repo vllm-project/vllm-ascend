@@ -14,7 +14,11 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### Model Weight
 
-- `gpt-oss-120b`(bf16 version): require 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://huggingface.co/unsloth/gpt-oss-120b-BF16)
+|  Weight Version              | Hardware Requirements                                               | Download Links |
+|------------------------------|---------------------------------------------------------------------|----------------|
+| `gpt-oss-120b`(bf16 version) | 1 Atlas 800 A3 (64GB × 16) nodes or 1 Atlas 800 A2 (64GB × 8) nodes | [ModelScope]() \| [Hugging Face](https://huggingface.co/unsloth/gpt-oss-120b-BF16) |
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### Installation
 
@@ -109,6 +113,7 @@ export TASK_QUEUE_ENABLE=1
 export OMP_NUM_THREADS=1
 export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
 
+# Ensure the model path matches the directory recorded during download
 vllm serve unsloth/gpt-oss-120b-BF16 \
 --served-model-name gpt-oss-120b-bf16 \
 --port 8000 \

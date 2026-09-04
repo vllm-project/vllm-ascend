@@ -18,15 +18,20 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-4.5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5).
-- `GLM-4.6`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6).
-- `GLM-4.7`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7).
-- `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8).
-- `GLM-4.6-w8a8`(Quantized version without mtp): [Download model weight](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8). Because vllm does not support GLM4.6 mtp in October, we do not provide an mtp version. Since it is now supported, you can use the following quantization scheme to add mtp weights to the quantized weights.
-- `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp).
+|  Weight Version                                           | Download Links |
+|-----------------------------------------------------------|----------------|
+| `GLM-4.5`(BF16 version)                                   | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.5) |
+| `GLM-4.6`(BF16 version)                                   | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.6) |
+| `GLM-4.7`(BF16 version)                                   | [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-4.7) |
+| `GLM-4.5-w8a8-with-float-mtp`(Quantized version with mtp) | [Modelers](https://modelers.cn/models/Modelers_Park/GLM-4.5-w8a8) |
+| `GLM-4.6-w8a8`(Quantized version without mtp)             | [Modelers](https://modelers.cn/models/Modelers_Park/GLM-4.6-w8a8) |
+| `GLM-4.7-w8a8-with-float-mtp`(Quantized version with mtp) | [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-4.7-W8A8-floatmtp) |
+
 - `Method of Quantization`: [quantization scheme](https://ai.gitcode.com/Ascend-SACT/GLM-4.5-w8a8). You can use these methods to quantize the model.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ## 4 Installation
 
@@ -132,6 +137,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export HCCL_OP_EXPANSION_MODE=AIV
 export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
 
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
   --data-parallel-size 2 \
   --tensor-parallel-size 8 \
@@ -179,7 +185,8 @@ While the previous documentation advises against multi-node deployment on the At
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
     --host 0.0.0.0 \
     --port 8004 \
@@ -228,7 +235,8 @@ While the previous documentation advises against multi-node deployment on the At
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export HCCL_OP_EXPANSION_MODE=AIV
     export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
-
+    
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
     --host 0.0.0.0 \
     --port 8004 \
@@ -391,6 +399,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -454,6 +463,7 @@ Before you start, please
         export ASCEND_RT_VISIBLE_DEVICES=$1
         export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -519,6 +529,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \
@@ -587,6 +598,7 @@ Before you start, please
         export VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/GLM-4.7-W8A8-floatmtp \
             --host 0.0.0.0 \
             --port $2 \

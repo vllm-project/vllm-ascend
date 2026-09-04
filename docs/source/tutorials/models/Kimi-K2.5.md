@@ -18,10 +18,14 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `Kimi-K2.5-w4a8` (Quantized version for w4a8): requires 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8).
-- `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5): [Download model weight](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3)
+|  Weight Version                                                                     | Hardware Requirements                                             | Download Links |
+|-------------------------------------------------------------------------------------|-------------------------------------------------------------------|----------------|
+| `Kimi-K2.5-w4a8` (Quantized version for w4a8)                                       | 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes| [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Kimi-K2.5-W4A8)  |
+| `kimi-k2.5-eagle3` (Eagle3 MTP draft model for accelerating inference of Kimi-K2.5) |                                                                   | [Hugging Face](https://huggingface.co/lightseekorg/kimi-k2.5-eagle3) |
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
+
+>**Path description**: Download the model weights to a directory of your choice and record it. Ensure the model path in the subsequent deployment command matches this directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
@@ -142,6 +146,7 @@ export OMP_NUM_THREADS=1
 export TASK_QUEUE_ENABLE=1
 
 export HCCL_BUFFSIZE=800
+# Ensure the model path matches the directory recorded during download
 vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
   --host 0.0.0.0 \
   --port 8088 \
@@ -268,6 +273,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
@@ -332,6 +338,7 @@ Run the following scripts on two nodes respectively.
     export TASK_QUEUE_ENABLE=1
 
     export HCCL_BUFFSIZE=1024
+    # Ensure the model path matches the directory recorded during download
     vllm serve Eco-Tech/Kimi-K2.5-w4a8 --additional-config '{"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}' \
     --host 0.0.0.0 \
     --port 8088 \
@@ -467,6 +474,7 @@ Parameter descriptions:
         export HCCL_BUFFSIZE=256
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -545,7 +553,8 @@ Parameter descriptions:
 
         export HCCL_BUFFSIZE=256
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+ 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -624,7 +633,8 @@ Parameter descriptions:
 
         export HCCL_BUFFSIZE=1100
         export ASCEND_RT_VISIBLE_DEVICES=$1
-
+        
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \
@@ -703,6 +713,7 @@ Parameter descriptions:
         export HCCL_BUFFSIZE=1100
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
+        # Ensure the model path matches the directory recorded during download
         vllm serve Eco-Tech/Kimi-K2.5-w4a8 \
             --host 0.0.0.0 \
             --port $2 \

@@ -74,8 +74,8 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 
 | 权重版本 | 硬件要求 |       权重链接      |
 |---------|---------|---------------------|
-| `DeepSeek-V3.2-Exp-W8A8` |  1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
-| `DeepSeek-V3.2-W8A8` | 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \|    [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-Exp-W8A8` |  1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-W8A8` | 1 台 Atlas 800 A3（64GB × 16）节点或 2 台 Atlas 800 A2（64GB × 8）节点 | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \|    [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
 
 > **路径说明：** 请将模型权重下载至您指定的目录，并记录该路径。例如：`/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`，后续部署命令中将使用 `<YOUR_MODEL_PATH>` 占位符，请替换为此处记录的路径。
 

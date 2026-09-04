@@ -74,8 +74,8 @@ Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for fe
 
 |  Weight Version | Hardware Requirements | Download Links |
 |-----------------|-----------------------|----------------|
-| `DeepSeek-V3.2-Exp-W8A8` |  1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
-| `DeepSeek-V3.2-W8A8` | 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [Modelscope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \| [HuggingFace](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-Exp-W8A8` |  1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-Exp-W8A8) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
+| `DeepSeek-V3.2-W8A8` | 1 Atlas 800 A3 (64GB × 16) node or 2 Atlas 800 A2 (64GB × 8) nodes | [ModelScope](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3.2-W8A8/) \| [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V3.2) |
 
 >**Path description:** Please download the model weights to a directory of your choice and record this path. For example: `/root/.cache/modelscope/hub/models/vllm-ascend/DeepSeek-V3.2-W8A8`. In subsequent deployment commands, the placeholder `<YOUR_MODEL_PATH>` will be used; please replace it with the path you have recorded here.
 
