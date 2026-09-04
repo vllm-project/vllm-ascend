@@ -1,7 +1,6 @@
 """Unit tests for the isolated MemFabric transfer-engine singleton."""
 
 import sys
-from enum import Enum
 from types import ModuleType
 from unittest.mock import MagicMock, call, patch
 
@@ -16,18 +15,11 @@ from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import 
 )
 
 
-class _FakeTransDataOpType(Enum):
-    SDMA = 1
-    DEVICE_RDMA = 2
-    DEVICE_URMA = 3
-
-
 def _fake_memfabric(raw_engine: MagicMock) -> ModuleType:
     module = ModuleType("memfabric_hybrid")
     module.TransferEngine = MagicMock(return_value=raw_engine)  # type: ignore[attr-defined]
     module.set_conf_store_tls = MagicMock()  # type: ignore[attr-defined]
     module.set_log_level = MagicMock()  # type: ignore[attr-defined]
-    module.TransDataOpType = _FakeTransDataOpType  # type: ignore[attr-defined]
     return module
 
 
@@ -52,7 +44,6 @@ def test_memfabric_initialization_publishes_session_from_engine_port():
         MEMFABRIC_ROLE_PREFILL,
         3,
         store_server_role=MEMFABRIC_ROLE_PREFILL,
-        data_op_type=_FakeTransDataOpType.SDMA,
     )
     assert raw_engine.method_calls[:2] == [
         call.initialize(
@@ -61,7 +52,6 @@ def test_memfabric_initialization_publishes_session_from_engine_port():
             MEMFABRIC_ROLE_PREFILL,
             3,
             store_server_role=MEMFABRIC_ROLE_PREFILL,
-            data_op_type=_FakeTransDataOpType.SDMA,
         ),
         call.get_rpc_port(),
     ]
@@ -70,15 +60,13 @@ def test_memfabric_initialization_publishes_session_from_engine_port():
 def test_memfabric_configuration_is_idempotent_but_role_bound():
     manager = GlobalMemfabricTE()
 
-    manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="device_urma")
-    manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="device_urma")
+    manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0)
+    manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0)
 
     with pytest.raises(RuntimeError, match="already configured"):
-        manager.configure(role=MEMFABRIC_ROLE_PREFILL, device_id=0, transfer_protocol="device_urma")
+        manager.configure(role=MEMFABRIC_ROLE_PREFILL, device_id=0)
     with pytest.raises(RuntimeError, match="already configured"):
-        manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=1, transfer_protocol="device_urma")
-    with pytest.raises(RuntimeError, match="already configured"):
-        manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="sdma")
+        manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=1)
 
 
 def test_memfabric_engine_is_bound_to_initial_hostname():
@@ -134,45 +122,3 @@ def test_memfabric_initialization_failure_does_not_publish_session():
         manager.get_transfer_engine("127.0.0.1")
     with pytest.raises(RuntimeError, match="has not been initialized"):
         _ = manager.unique_id
-
-
-def test_memfabric_transfer_protocol_defaults_to_sdma():
-    raw_engine = MagicMock()
-    raw_engine.get_rpc_port.return_value = 23456
-    raw_engine.initialize.return_value = 0
-    manager = GlobalMemfabricTE()
-    manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0)
-
-    with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw_engine)}):
-        manager.get_transfer_engine("127.0.0.1")
-
-    assert raw_engine.initialize.call_args.kwargs["data_op_type"] == _FakeTransDataOpType.SDMA
-
-
-@pytest.mark.parametrize(
-    "protocol,expected",
-    [
-        ("sdma", _FakeTransDataOpType.SDMA),
-        ("device_rdma", _FakeTransDataOpType.DEVICE_RDMA),
-        ("device_urma", _FakeTransDataOpType.DEVICE_URMA),
-        (" DEVICE_URMA ", _FakeTransDataOpType.DEVICE_URMA),
-    ],
-)
-def test_memfabric_transfer_protocol_from_configure(protocol, expected):
-    raw_engine = MagicMock()
-    raw_engine.get_rpc_port.return_value = 23456
-    raw_engine.initialize.return_value = 0
-    manager = GlobalMemfabricTE()
-    manager.configure(role=MEMFABRIC_ROLE_PREFILL, device_id=1, transfer_protocol=protocol)
-
-    with patch.dict(sys.modules, {"memfabric_hybrid": _fake_memfabric(raw_engine)}):
-        manager.get_transfer_engine("127.0.0.1")
-
-    assert raw_engine.initialize.call_args.kwargs["data_op_type"] == expected
-
-
-def test_memfabric_transfer_protocol_rejects_unknown_value():
-    manager = GlobalMemfabricTE()
-
-    with pytest.raises(ValueError, match="Invalid MemFabric transfer_protocol"):
-        manager.configure(role=MEMFABRIC_ROLE_DECODE, device_id=0, transfer_protocol="rocev2")
