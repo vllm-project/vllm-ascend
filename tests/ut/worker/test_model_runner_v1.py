@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -1536,19 +1537,13 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
         from contextlib import nullcontext
 
         mock_record_function.return_value = nullcontext()
-        mock_get_pp_group.return_value = SimpleNamespace(
-            world_size=1, is_first_rank=True, is_last_rank=True
-        )
+        mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
         mock_get_ec_transfer.return_value = SimpleNamespace(is_consumer=True)
         runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
         runner.vllm_config = MagicMock()
         runner.vllm_config.model_config.enable_return_routed_experts = False
         runner.ascend_config = SimpleNamespace(
-            scheduler_config=SimpleNamespace(
-                profiling_chunk_config=SimpleNamespace(
-                    enabled=False, need_timing=False
-                )
-            )
+            scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
         )
         runner.execute_model_state = None
         runner.speculative_config = None
@@ -1565,16 +1560,12 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
             enable_dbo=False,
         )
         runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False)
-        runner.input_batch = SimpleNamespace(
-            num_reqs=0, req_ids=[], prev_req_id_to_index=None
-        )
+        runner.input_batch = SimpleNamespace(num_reqs=0, req_ids=[], prev_req_id_to_index=None)
         runner.requests = {}
         runner.encoder_cache = {}
         expected_output = object()
         runner.ec_connector_no_forward = MagicMock(return_value=expected_output)
-        scheduler_output = SimpleNamespace(
-            total_num_scheduled_tokens=1, num_scheduled_tokens={}
-        )
+        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={})
 
         output = runner.execute_model(scheduler_output)
 
