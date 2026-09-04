@@ -105,6 +105,7 @@ def _make_execute_runner(executor, trace, forward_error=None):
 
 def _make_dummy_runner(executor, trace, mode, forward_error=None):
     runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.device = torch.device("cpu")
     runner.uniform_decode_query_len = 1
     runner.scheduler_config = SimpleNamespace(
         max_num_batched_tokens=4,
