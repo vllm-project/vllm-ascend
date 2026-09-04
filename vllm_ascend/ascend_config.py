@@ -414,6 +414,7 @@ class AscendConfig:
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
     enable_fused_mc2: int = 0
     enable_mlapo: bool = True
+    enable_sfa_full_visible_index_bypass: bool = False
     # When True, keep MLAPO prefill weights on NPU instead of freeing them
     # on kv_consumer D nodes. Trades NPU memory for stability — D nodes have
     # normal local-prefill paths (recompute / fallback / preempt) that crash

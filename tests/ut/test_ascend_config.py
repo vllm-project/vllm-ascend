@@ -992,6 +992,18 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_sfa_full_visible_index_bypass_defaults_false(self, mock_fix):
+        self.assertFalse(init_ascend_config(VllmConfig()).enable_sfa_full_visible_index_bypass)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_sfa_full_visible_index_bypass_opt_in(self, mock_fix):
+        vc = VllmConfig()
+        vc.additional_config = {"enable_sfa_full_visible_index_bypass": True}
+        self.assertTrue(init_ascend_config(vc).enable_sfa_full_visible_index_bypass)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_a_family_additional_config_gets_typed_validation(self, mock_fix):
         vc = VllmConfig()
         vc.additional_config = {
