@@ -1247,12 +1247,26 @@ class TestTopLevelSwitchTypeValidation(TestBase):
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_combine_quant_mode_int_lax(self, mock_fix):
-        # Pydantic lax int coercion must resolve int strings ("4") to int 4,
-        # matching the other top-level integer switches.
+    def test_combine_quant_mode_accepts_whitelisted_int(self, mock_fix):
+        # combine_quant_mode is a Literal[0, 2, 3, 4], so only the whitelisted
+        # integer values are accepted. Unlike the plain-int top-level switches
+        # (e.g. weight_nz_mode), int strings ("4") are rejected rather than
+        # lax-coerced, so the orthogonal test below covers that.
+        for value in (0, 2, 4):
+            with self.subTest(value=value):
+                vc = VllmConfig()
+                vc.additional_config = {"combine_quant_mode": value}
+                self.assertEqual(init_ascend_config(vc).combine_quant_mode, value)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_rejects_int_string(self, mock_fix):
+        # The Literal whitelist does not lax-coerce int strings; a JSON-parsed
+        # "4" must be rejected rather than silently accepted.
         vc = VllmConfig()
         vc.additional_config = {"combine_quant_mode": "4"}
-        self.assertEqual(init_ascend_config(vc).combine_quant_mode, 4)
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")

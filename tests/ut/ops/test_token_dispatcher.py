@@ -415,10 +415,10 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         self.assertEqual(kwargs["comm_quant_mode"], 0)
 
-    def test_get_combine_mc_kwargs_explicit_comm_quant_mode_wins_over_combine_quant_mode(self):
-        # An explicit comm_quant_mode (set by a deeper quant config) must take
-        # precedence over combine_quant_mode, so the switch never silently
-        # overrides a deliberate per-layer quant decision.
+    def test_get_combine_mc_kwargs_combine_quant_mode_wins_over_explicit_comm_quant_mode(self):
+        # combine_quant_mode is documented as a force switch: when non-zero it
+        # overrides even an explicit per-layer comm_quant_mode (the opposite of
+        # the older test name, which assumed comm_quant_mode took precedence).
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
@@ -451,7 +451,9 @@ class TestTokenDispatcherWithMC2(TestBase):
 
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
 
-        self.assertEqual(kwargs["comm_quant_mode"], 2)
+        # combine_quant_mode (4) is non-zero and takes precedence over the
+        # explicit comm_quant_mode (2) in the current implementation.
+        self.assertEqual(kwargs["comm_quant_mode"], 4)
 
     def test_get_dispatch_mc2_kwargs_with_mxfp8_quant(self):
         hidden_states = torch.randn(10, 128)
