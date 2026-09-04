@@ -518,7 +518,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # [block_nums, block_size, head_num, head_dim]
         self.slot_mapping = torch.zeros(self.slot_mapping_shape, dtype=torch.int32, device=self.device)
         self.compressor_metadata_buffers: CompressorMetadataOutput | None = None
-        self.dspark_swa_indices_buffer: torch.Tensor | None = None
 
     def _init_hadamard(self, layer_names: list[str]) -> None:
         hf_config = self.model_config.hf_config
