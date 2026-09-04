@@ -123,8 +123,14 @@ class ACLGraphWrapper:
         self.enable_enpu = enable_enpu
         self.use_eagle = use_eagle
         self.update_stream = update_stream
-        self.draft_update_attn_metadata = list[dict[str, Any]] = []
+        self.draft_attn_metadata_updates = list[dict[str, Any]] = []
         _acl_graph_wrappers.add(self)
+
+    def set_update_stream(self, update_stream):
+        self.update_stream = update_stream
+
+    def set_draft_attn_metadata_updates(self, update_params: list[dict[str, Any]]):
+        self.draft_attn_metadata_updates = update_params
 
     def __getattr__(self, key: str):
         # allow accessing the attributes of the runnable.
@@ -292,7 +298,7 @@ class ACLGraphWrapper:
     ):
         if _EXTRA_CTX.is_draft_model:
             resolved_tasks = graph.resolve_tasks(
-                SharedSource(self.draft_update_attn_metadata)
+                SharedSource(self.draft_attn_metadata_updates)
             )
         else:
             resolved_tasks = graph.resolve_tasks(

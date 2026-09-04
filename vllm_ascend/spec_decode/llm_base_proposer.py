@@ -48,6 +48,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     prepare_sparse_kv_offload_mtp_dummy_metadata,
@@ -599,6 +600,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
+    
+    def set_update_stream(self, update_stream):
+        self._runnable.set_update_stream(update_stream)
+    
+    def _build_draft_attn_metadata_updates(self, multi_steps_attn_metadata):
+        update_params = []
+        for per_layer_metadata in multi_steps_attn_metadata:
+            metadata = next(iter(per_layer_metadata.values()))
+            update_params.append({
+                "actual_seq_lengths": metadata.actual_seq_lengths_q,
+                "actual_seq_lengths_kv": metadata.seq_lens_list,
+        })
+        return update_params
 
     def _maybe_share_topk_indices(self, target_language_model: nn.Module) -> None:
         if hasattr(target_language_model.model, "topk_indices_buffer"):
@@ -781,7 +795,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             inputs_embeds = None
 
         self.token_indices_to_sample.fill_(0)
-
+        
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+            update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
+            self._runnable.set_draft_attn_metadata_updates(update_params)
+        
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0] if multi_steps_attn_metadata else None,
             self.vllm_config,
@@ -1111,6 +1129,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         token_indices_to_sample_len = token_indices_to_sample.shape[0]
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
+        
+        if aclgraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
+            update_params = self._build_draft_attn_metadata_updates(multi_steps_attn_metadata)
+            self._runnable.set_draft_attn_metadata_updates(update_params)
 
         active_device_metadata_executor = (
             getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
