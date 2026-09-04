@@ -94,5 +94,8 @@ class AscendModelState(DefaultModelState):
             attn_state=input_batch.attn_state,
             pcp_context=pcp_context,
             for_cudagraph_capture=for_capture,
+            req_ids_tensor=(
+                input_batch.offload_req_ids[:num_reqs] if input_batch.offload_req_ids is not None else None
+            ),
         )
         return self.attn_metadata

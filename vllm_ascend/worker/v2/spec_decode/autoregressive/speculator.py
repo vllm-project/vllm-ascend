@@ -459,7 +459,26 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 if metadata is None:
                     continue
                 metadata.attn_state = AscendAttentionState.DecodeOnly
+            self._populate_sparse_kv_offload_draft_metadata(
+                attn_metadata,
+                num_reqs_padded,
+            )
         return attn_metadata
+
+    def _populate_sparse_kv_offload_draft_metadata(
+        self,
+        attn_metadata: dict[str, Any],
+        num_reqs_padded: int,
+    ) -> None:
+        req_ids_tensor = getattr(self.target_input_buffers, "offload_req_ids", None)
+        if req_ids_tensor is None:
+            return
+
+        req_ids_tensor = req_ids_tensor[:num_reqs_padded]
+        for metadata in attn_metadata.values():
+            if metadata is None:
+                continue
+            metadata.req_ids_tensor = req_ids_tensor
 
     def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
         """Build draft_attn_metadatas for partial-merged draft graph."""

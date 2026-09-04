@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import vllm
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size, get_kv_cache_torch_dtype
@@ -56,6 +57,11 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSlidingWindowMLASpec,
 )
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_cache_tensors_for_sparse_kv_offload,
+    get_sparse_kv_offload_manager,
+    reshape_kv_cache_tensors_for_sparse_kv_offload,
+)
 from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
@@ -127,6 +133,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype=dtype,
                 cache_dtype_str=cache_dtype_str,
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
+                store_on_host=get_ascend_config().sparse_kv_offload_config.enabled,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
             # GLM-5.3-Flash kpool indexer/tail caches keep their own spec.
@@ -208,6 +215,7 @@ def build_attn_metadata(
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool | Mapping[int, bool] = True,
+    req_ids_tensor: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
     # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
@@ -273,6 +281,7 @@ def build_attn_metadata(
             max_seq_len=max_seq_len,
             causal=group_causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
+            req_ids_tensor=req_ids_tensor,
             **common_attn_metadata_extra_kwargs,
         )
 
@@ -568,7 +577,7 @@ def _allocate_kv_cache(
     kv_cache_config: KVCacheConfig,
     shared_layers: dict[str, str],
     device: torch.device,
-) -> dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]]:
+) -> dict[str, Any]:
     """
     Initialize the KV cache buffer with the correct size. The buffer needs to be
     reshaped to the desired shape before being used by the models.
@@ -586,7 +595,7 @@ def _allocate_kv_cache(
     vllm_config = get_current_vllm_config()
     is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
-    kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
+    kv_cache_raw_tensors: dict[str, Any] = {}
     # prefill disaggregation need the addr of cache tensor be aligned with 2M
     alignment = 2 * 1024 * 1024
     layer_kv_cache_spec = _get_layer_kv_cache_specs(kv_cache_config)
@@ -638,8 +647,31 @@ def _allocate_kv_cache(
             continue
         assert isinstance(example_spec, AttentionSpec)
 
+        if bool(getattr(example_spec, "store_on_host", False)):
+            if len(kv_cache_tensor.shared_by) != 1:
+                raise ValueError("Sparse KV offload does not support shared main-cache allocations.")
+            k_dim, v_dim = _get_attention_kv_cache_dims(example_layer_name, example_spec)
+            k_factor, v_factor = calc_split_factor([k_dim, v_dim])
+            k_size = int(kv_cache_tensor.size // k_factor)
+            v_size = int(kv_cache_tensor.size // v_factor)
+            sparse_config = get_ascend_config().sparse_kv_offload_config
+            raw_cache = allocate_kv_cache_tensors_for_sparse_kv_offload(
+                k_size,
+                v_size,
+                alignment,
+                get_tensor_model_parallel_rank(),
+                sparse_config.keep_device_kv_cache,
+                lambda size, cache_alignment: _allocate_int8_cache_tensor(
+                    size,
+                    cache_alignment,
+                    device,
+                ),
+            )
+            kv_cache_raw_tensors[example_layer_name] = raw_cache
+            continue
+
         if isinstance(example_spec, AscendSFAIndexerCacheSpec):
-            raw_cache: tuple[torch.Tensor, ...]
+            indexer_raw_cache: tuple[torch.Tensor, ...]
             num_blocks = kv_cache_tensor.size // example_spec.page_size_bytes
 
             k_tensor_size = (
@@ -666,17 +698,17 @@ def _allocate_kv_cache(
                     scale_dtype=example_spec.scale_dtype,
                     device=device,
                 )
-                raw_cache = (k_tensor, scale_tensor)
+                indexer_raw_cache = (k_tensor, scale_tensor)
             else:
                 k_tensor = _allocate_int8_cache_tensor(
                     k_tensor_size,
                     alignment,
                     device,
                 )
-                raw_cache = (k_tensor,)
+                indexer_raw_cache = (k_tensor,)
 
             for layer_name_inner in kv_cache_tensor.shared_by:
-                kv_cache_raw_tensors[layer_name_inner] = raw_cache
+                kv_cache_raw_tensors[layer_name_inner] = indexer_raw_cache
 
             continue
 
@@ -740,7 +772,7 @@ def _reshape_mamba_kv_cache(
 
 def _reshape_kv_cache_v2(
     attn_groups: Sequence[AttentionGroup],
-    kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]],
+    kv_cache_raw_tensors: dict[str, Any],
     cache_dtype: str,
     kernel_block_sizes: list[int],
     shared_kv_cache_layers: dict[str, str],
@@ -837,6 +869,17 @@ def _reshape_kv_cache_v2(
             if not isinstance(kv_cache_spec, AttentionSpec):
                 raise TypeError(f"Unsupported KV cache spec: {type(kv_cache_spec).__name__}.")
 
+            if bool(getattr(kv_cache_spec, "store_on_host", False)):
+                kv_caches[layer_name] = reshape_kv_cache_tensors_for_sparse_kv_offload(
+                    kv_cache_raw_tensors[layer_name],
+                    kv_cache_spec,
+                    group.backend,
+                    get_tensor_model_parallel_rank(),
+                    vllm_config,
+                    get_ascend_config().sparse_kv_offload_config,
+                )
+                continue
+
             if isinstance(raw_cache, tuple):
                 raw_k_tensor, raw_v_tensor = raw_cache
                 total_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
@@ -908,6 +951,11 @@ def _reshape_kv_cache_v2(
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
+    if get_ascend_config().sparse_kv_offload_config.enabled:
+        manager = get_sparse_kv_offload_manager()
+        if manager is None:
+            raise RuntimeError("Sparse KV offload manager must be initialized before KV-cache reshape.")
+        manager.register_kv_caches(kv_caches)
     return kv_caches
 
 

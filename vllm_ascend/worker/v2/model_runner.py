@@ -18,6 +18,7 @@
 #
 
 from contextlib import contextmanager
+from copy import deepcopy
 
 import numpy as np
 import torch
@@ -55,6 +56,14 @@ from vllm_ascend.ascend_forward_context import (
 from vllm_ascend.core.profiling_chunk_predictor import (
     _finish_profiling_chunk_timing,
     _start_profiling_chunk_timing,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
+    apply_layerwise_kv_cache_plan,
+)
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+    allocate_kv_offload_topk_profile_buffers,
+    init_sparse_kv_offload_manager,
+    prepare_sparse_kv_offload_metadata,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
@@ -111,6 +120,9 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.sparse_kv_offload_config = self.ascend_config.sparse_kv_offload_config
+        self.sparse_kv_offload_enabled = self.sparse_kv_offload_config.enabled
+        self.sparse_kv_offload_manager = None
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -187,6 +199,7 @@ class NPUModelRunner(GPUModelRunner):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
+            enable_sparse_kv_offload=self.sparse_kv_offload_enabled,
         )
 
         # Pinned D2H staging for corrected device state after spec rejection.
@@ -263,6 +276,14 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        kv_cache_config = deepcopy(kv_cache_config)
+        apply_layerwise_kv_cache_plan(kv_cache_config, self.vllm_config)
+        if self.sparse_kv_offload_enabled:
+            self.sparse_kv_offload_manager = init_sparse_kv_offload_manager(
+                self.vllm_config,
+                kv_cache_config,
+                self.sparse_kv_offload_config,
+            )
         with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
@@ -322,6 +343,13 @@ class NPUModelRunner(GPUModelRunner):
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
         override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
         """
+        if self.sparse_kv_offload_enabled:
+            allocate_kv_offload_topk_profile_buffers(
+                self.get_kv_cache_spec(),
+                self.vllm_config,
+                self.sparse_kv_offload_config,
+            )
+
         mc2_tokens_capacity = get_mc2_tokens_capacity()
         with override_mrv2_in_profile_run(True):
             if (
@@ -553,6 +581,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+            if self.input_buffers.offload_req_ids is not None:
+                input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
@@ -774,6 +804,8 @@ class NPUModelRunner(GPUModelRunner):
             )
 
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+            if self.input_buffers.offload_req_ids is not None:
+                input_batch = prepare_sparse_kv_offload_metadata(input_batch, self.input_buffers)
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)

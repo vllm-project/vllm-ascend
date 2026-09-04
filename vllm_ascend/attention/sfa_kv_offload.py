@@ -18,16 +18,16 @@ Data plane (see zsc-sfa-kv-offload-merge-plan.md):
 
 from typing import Any, TypeVar
 
+import numpy as np
 import torch
 import torch_npu
-from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import (
-    get_forward_context,
-    is_forward_context_available,
-)
+from vllm.config import VllmConfig
+from vllm.forward_context import is_forward_context_available
 from vllm.logger import logger
+from vllm.utils.torch_utils import np_to_pinned_tensor
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -61,7 +61,7 @@ def _check_device_kv_cache_exist() -> None:
 
 
 class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
-    """Fills the offload-specific SFA metadata (decode split + request ids)."""
+    """Fills offload-specific SFA metadata."""
 
     def __init__(
         self,
@@ -80,12 +80,44 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
             metadata_cls,
             supports_dcp_with_varlen,
         )
+        self.token_to_req_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
         kv_transfer_config = vllm_config.kv_transfer_config
         self.is_pd_decode_consumer = (
             kv_transfer_config is not None
             and kv_transfer_config.is_kv_consumer
             and not kv_transfer_config.is_kv_producer
         )
+
+    def _build_token_to_req(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> torch.Tensor:
+        num_tokens = common_attn_metadata.num_actual_tokens
+        starts = np.asarray(
+            common_attn_metadata.query_start_loc_cpu,
+            dtype=np.int32,
+        )
+        query_lens = np.diff(starts)
+        token_to_req = np.repeat(
+            np.arange(query_lens.shape[0], dtype=np.int32),
+            query_lens,
+        )
+        num_mapped_tokens = token_to_req.shape[0]
+        assert self.token_to_req_buffer.shape[0] >= max(
+            num_mapped_tokens,
+            num_tokens,
+        )
+        self.token_to_req_buffer[:num_mapped_tokens].copy_(
+            np_to_pinned_tensor(token_to_req),
+            non_blocking=True,
+        )
+        if num_mapped_tokens < num_tokens:
+            self.token_to_req_buffer[num_mapped_tokens:num_tokens].zero_()
+        return self.token_to_req_buffer[:num_tokens]
 
     def _populate_offload_metadata(
         self,
@@ -106,7 +138,7 @@ class AscendSFAKVOffloadMetadataBuilder(AscendSFAMetadataBuilder):
         metadata.num_prefills = num_prefills
         metadata.num_decode_tokens = num_decode_tokens
         metadata.req_ids_tensor = common_attn_metadata.req_ids_tensor
-        metadata.token_to_req = common_attn_metadata.token_to_req
+        metadata.token_to_req = self._build_token_to_req(common_attn_metadata)
         return metadata
 
     def build(
@@ -240,19 +272,10 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         return padded
 
     @staticmethod
-    def _in_graph_runtime() -> bool:
+    def _is_graph_capturing() -> bool:
         if not is_forward_context_available():
             return False
-        forward_context = get_forward_context()
-        runtime_mode = getattr(
-            forward_context,
-            "cudagraph_runtime_mode",
-            CUDAGraphMode.NONE,
-        )
-        return forward_context.capturing or runtime_mode not in (
-            None,
-            CUDAGraphMode.NONE,
-        )
+        return bool(_EXTRA_CTX.capturing)
 
     def forward(
         self,
@@ -317,7 +340,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
                 k=k_nope,
                 v=k_pe,
                 has_prefill=False,
-                capturing=self._in_graph_runtime(),
+                capturing=self._is_graph_capturing(),
             )
             return k_pe, k_nope
 
@@ -338,7 +361,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             k=None,
             v=None,
             has_prefill=True,
-            capturing=self._in_graph_runtime(),
+            capturing=self._is_graph_capturing(),
         )
         return result
 
@@ -432,7 +455,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             decode_req_ids,
             decode_stable_prefix_lens,
             token_to_req,
-            capturing=self._in_graph_runtime(),
+            capturing=self._is_graph_capturing(),
             skip_topk=self.skip_topk,
         )
         decode_attn_output = DeviceOperator.execute_sparse_flash_attention_process(

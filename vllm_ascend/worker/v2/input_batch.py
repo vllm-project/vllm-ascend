@@ -35,6 +35,7 @@ class AscendInputBuffers(InputBuffers):
         max_num_reqs: int,
         max_num_tokens: int,
         device: torch.device,
+        enable_sparse_kv_offload: bool = False,
     ):
         super().__init__(
             max_num_reqs,
@@ -62,6 +63,14 @@ class AscendInputBuffers(InputBuffers):
         # define seq_lens_np for easier calculation with numpy.
         self.seq_lens_np: np.ndarray = self.seq_lens_cpu.numpy()
 
+        self.offload_req_ids: torch.Tensor | None = None
+        if enable_sparse_kv_offload:
+            self.offload_req_ids = torch.zeros(
+                max_num_reqs,
+                dtype=torch.int64,
+                device=device,
+            )
+
 
 @dataclass
 class AscendInputBatch(InputBatch):
@@ -78,6 +87,7 @@ class AscendInputBatch(InputBatch):
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
+    offload_req_ids: torch.Tensor | None = None
 
     if vllm_version_is("0.27.1"):
 
@@ -102,12 +112,19 @@ class AscendInputBatch(InputBatch):
             seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
             update_cos_sin(input_batch.positions)
             base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
-            return cls(
+            batch = cls(
                 **base_fields,
                 seq_lens_np=seq_lens_np,
                 attn_state=AscendAttentionState.DecodeOnly,
                 is_dummy=True,
             )
+            if input_buffers.offload_req_ids is not None:
+                from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+                    prepare_sparse_kv_offload_metadata,
+                )
+
+                batch = prepare_sparse_kv_offload_metadata(batch, input_buffers)
+            return batch
 
     else:
 
@@ -134,9 +151,16 @@ class AscendInputBatch(InputBatch):
             seq_lens_np = input_buffers.seq_lens_np[:num_reqs]
             update_cos_sin(input_batch.positions)
             base_fields = {field.name: getattr(input_batch, field.name) for field in fields(InputBatch)}
-            return cls(
+            batch = cls(
                 **base_fields,
                 seq_lens_np=seq_lens_np,
                 attn_state=AscendAttentionState.DecodeOnly,
                 is_dummy=True,
             )
+            if input_buffers.offload_req_ids is not None:
+                from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
+                    prepare_sparse_kv_offload_metadata,
+                )
+
+                batch = prepare_sparse_kv_offload_metadata(batch, input_buffers)
+            return batch

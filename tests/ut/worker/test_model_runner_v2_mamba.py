@@ -302,6 +302,89 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
     assert backend.get_kv_cache_shape.call_args.args[0] == num_kernel_blocks
 
 
+@patch("vllm_ascend.worker.v2.attn_utils.get_tensor_model_parallel_rank", return_value=0)
+@patch("vllm_ascend.worker.v2.attn_utils._get_attention_kv_cache_dims", return_value=(4, 2))
+@patch("vllm_ascend.worker.v2.attn_utils.allocate_kv_cache_tensors_for_sparse_kv_offload")
+@patch("vllm_ascend.worker.v2.attn_utils.get_current_vllm_config")
+@patch("vllm_ascend.worker.v2.attn_utils.get_ascend_config")
+def test_mrv2_sparse_mla_allocation_and_reshape_contract(
+    mock_get_ascend_config,
+    mock_get_current_config,
+    mock_allocate_sparse,
+    _mock_cache_dims,
+    _mock_tp_rank,
+):
+    sparse_config = SimpleNamespace(enabled=True, keep_device_kv_cache=False)
+    mock_get_ascend_config.return_value = SimpleNamespace(
+        sparse_kv_offload_config=sparse_config,
+    )
+    mock_get_current_config.return_value = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(),
+        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="glm4_moe")),
+    )
+    raw_sparse_cache = (None, None, "cpu-k", "cpu-v", 96)
+    mock_allocate_sparse.return_value = raw_sparse_cache
+    spec = AscendMLAAttentionSpec(
+        block_size=4,
+        num_kv_heads=1,
+        head_size=6,
+        dtype=torch.bfloat16,
+        store_on_host=True,
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[KVCacheTensor(size=96, shared_by=["mla_attn"])],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=["mla_attn"], kv_cache_spec=spec),
+        ],
+    )
+
+    raw_caches = _allocate_kv_cache(
+        kv_cache_config,
+        shared_layers={},
+        device=torch.device("cpu"),
+    )
+    assert raw_caches["mla_attn"] is raw_sparse_cache
+    assert mock_allocate_sparse.call_args.args[:5] == (
+        64,
+        32,
+        2 * 1024 * 1024,
+        0,
+        False,
+    )
+
+    reshaped_sparse_cache = (None, None, "cpu-k", "cpu-v", "topk-k", "topk-v")
+    group = SimpleNamespace(
+        kv_cache_group_id=0,
+        kv_cache_spec=spec,
+        layer_names=["mla_attn"],
+        backend=MagicMock(),
+    )
+    manager = MagicMock()
+    with (
+        patch(
+            "vllm_ascend.worker.v2.attn_utils.reshape_kv_cache_tensors_for_sparse_kv_offload",
+            return_value=reshaped_sparse_cache,
+        ) as mock_reshape,
+        patch(
+            "vllm_ascend.worker.v2.attn_utils.get_sparse_kv_offload_manager",
+            return_value=manager,
+        ),
+    ):
+        caches = _reshape_kv_cache_v2(
+            attn_groups=[group],
+            kv_cache_raw_tensors=raw_caches,
+            cache_dtype="auto",
+            kernel_block_sizes=[spec.block_size],
+            shared_kv_cache_layers={},
+            kv_cache_config=kv_cache_config,
+        )
+
+    assert caches["mla_attn"] is reshaped_sparse_cache
+    assert mock_reshape.call_args.args[0] is raw_sparse_cache
+    manager.register_kv_caches.assert_called_once_with(caches)
+
+
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
 def test_get_kv_cache_spec_keeps_mamba_layers(mock_get_layers):
     spec = _mamba_spec()

@@ -30,8 +30,12 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+
+if typing.TYPE_CHECKING:
+    from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
 # Main BF16 cache:
 # [k_cache, v_cache, k_cache_cpu, v_cache_cpu, topk_buffer_k, topk_buffer_v].
@@ -382,6 +386,36 @@ def update_sparse_kv_offload_metadata(
     if num_tokens_padded > num_tokens:
         offload_token_to_req.np[num_tokens:num_tokens_padded].fill(0)
     offload_token_to_req.copy_to_gpu(num_tokens_padded)
+
+
+def prepare_sparse_kv_offload_metadata(
+    input_batch: "AscendInputBatch",
+    input_buffers: "AscendInputBuffers",
+) -> "AscendInputBatch":
+    """Stage sparse-offload request metadata into MRV2 input buffers."""
+    req_ids_buffer = input_buffers.offload_req_ids
+    if req_ids_buffer is None:
+        input_batch.offload_req_ids = None
+        return input_batch
+
+    num_reqs = input_batch.num_reqs
+    num_reqs_padded = input_batch.num_reqs_after_padding
+    if len(input_batch.req_ids) < num_reqs:
+        raise RuntimeError(
+            "KV offload request metadata is shorter than the scheduled batch: "
+            f"metadata={len(input_batch.req_ids)}, requests={num_reqs}"
+        )
+
+    req_ids_np = np.zeros(num_reqs_padded, dtype=np.int64)
+    req_ids_np[:num_reqs] = np.fromiter(
+        (adler32(req_id.encode("utf-8")) for req_id in input_batch.req_ids[:num_reqs]),
+        dtype=np.int64,
+        count=num_reqs,
+    )
+
+    async_copy_to_gpu(req_ids_np, out=req_ids_buffer[:num_reqs_padded])
+    input_batch.offload_req_ids = req_ids_buffer[:num_reqs_padded]
+    return input_batch
 
 
 def prepare_sparse_kv_offload_mtp_dummy_metadata(
