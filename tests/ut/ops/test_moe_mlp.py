@@ -218,7 +218,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
                 return_value=gate_up_out,
                 create=True,
             ),
-            patch("torch.npu.current_stream", return_value=stream),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
         ):
             output, output_evt = unquant_apply_mlp(
                 hidden_states=hidden_states,
@@ -264,7 +264,7 @@ class TestUnifiedApplyMlpRequest(unittest.TestCase):
         with (
             patch("torch_npu.npu_grouped_matmul", side_effect=grouped_matmul, create=True),
             patch("torch_npu.npu_swiglu", side_effect=activation, create=True),
-            patch("torch.npu.current_stream", return_value=stream),
+            patch(f"{MOE_MLP}.torch.npu.current_stream", return_value=stream),
         ):
             output, output_evt = unquant_apply_mlp(
                 hidden_states=hidden_states,
