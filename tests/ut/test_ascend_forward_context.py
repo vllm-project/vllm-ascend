@@ -3,9 +3,12 @@ from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
 
 import pytest
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend import ascend_forward_context as afc
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.activation import SituActivationConfig
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 @pytest.fixture(autouse=True)
@@ -88,6 +91,10 @@ def _patch_select_moe_comm_method_deps(
     enable_fused_mc2: int = 0,
     enable_prefill_mc2: int = 0,
     is_moe: bool = True,
+    mega_moe_max_tokens: int = 65536,
+    dynamic_eplb: bool = False,
+    num_redundant_experts: int = 0,
+    mix_placement: bool = False,
 ):
     monkeypatch.setattr(afc, "is_moe_model", lambda _: is_moe)
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: capacity)
@@ -96,7 +103,16 @@ def _patch_select_moe_comm_method_deps(
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
-        lambda: SimpleNamespace(enable_fused_mc2=enable_fused_mc2, enable_prefill_mc2=enable_prefill_mc2),
+        lambda: SimpleNamespace(
+            enable_fused_mc2=enable_fused_mc2,
+            enable_prefill_mc2=enable_prefill_mc2,
+            mega_moe_max_tokens=mega_moe_max_tokens,
+            mix_placement=mix_placement,
+            eplb_config=SimpleNamespace(
+                dynamic_eplb=dynamic_eplb,
+                num_redundant_experts=num_redundant_experts,
+            ),
+        ),
     )
 
 
@@ -476,6 +492,175 @@ def test_select_moe_comm_method_a5(monkeypatch, num_tokens, world_size, top_k_ex
     vllm_config = _make_vllm_config(world_size=world_size, top_k_experts=top_k_experts)
 
     assert afc.select_moe_comm_method(num_tokens, vllm_config) == expected
+
+
+def _cache_kimi_k3_capability(vllm_config, *, quant_type=QuantType.W4A8MXFP, group_size=32):
+    afc.cache_a5_mega_moe_capability(
+        vllm_config,
+        quant_type=quant_type,
+        activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
+        group_size=group_size,
+        layer_name="model.layers.1.block_sparse_moe.experts",
+    )
+
+
+def test_select_moe_comm_method_a5_uses_mega_moe_for_kimi_k3(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=1024,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    _cache_kimi_k3_capability(vllm_config)
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.FUSED_MC2
+
+
+def test_select_moe_comm_method_a5_preserves_swiglu_capability(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=1024,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    afc.cache_a5_mega_moe_capability(
+        vllm_config,
+        quant_type=QuantType.W4A8MXFP,
+        activation=MoEActivation.SILU,
+        group_size=32,
+        layer_name="model.layers.0.mlp",
+    )
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.FUSED_MC2
+
+
+def test_conflicting_a5_layer_capabilities_disable_mega_moe(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=1024,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    _cache_kimi_k3_capability(vllm_config)
+    afc.cache_a5_mega_moe_capability(
+        vllm_config,
+        quant_type=QuantType.W8A8MXFP,
+        activation=MoEActivation.SILU,
+        group_size=32,
+        layer_name="model.layers.2.mlp",
+    )
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.MC2
+
+
+def test_select_moe_comm_method_a5_resolves_kimi_block_sparse_moe(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=1024,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    runner = SimpleNamespace(
+        quant_type=QuantType.W4A8MXFP,
+        activation=SituActivationConfig(beta=4.0, linear_beta=25.0),
+        _quant_method=SimpleNamespace(quant_method=SimpleNamespace(group_size=32)),
+    )
+    model_instance = SimpleNamespace(
+        language_model=SimpleNamespace(
+            model=SimpleNamespace(
+                layers=[SimpleNamespace(block_sparse_moe=SimpleNamespace(experts=runner))],
+            ),
+        ),
+    )
+
+    assert afc.select_moe_comm_method(128, vllm_config, model_instance=model_instance) == MoECommType.FUSED_MC2
+
+
+@pytest.mark.parametrize(
+    ("quant_type", "group_size", "is_draft_model"),
+    [
+        (QuantType.W8A8MXFP, 32, False),
+        (QuantType.W4A8MXFP, 64, False),
+        (QuantType.W4A8MXFP, 32, True),
+    ],
+)
+def test_select_moe_comm_method_a5_falls_back_for_unsupported_capability(
+    monkeypatch,
+    quant_type,
+    group_size,
+    is_draft_model,
+):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=1024,
+    )
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    _cache_kimi_k3_capability(vllm_config, quant_type=quant_type, group_size=group_size)
+
+    assert afc.select_moe_comm_method(128, vllm_config, is_draft_model=is_draft_model) == MoECommType.MC2
+
+
+@pytest.mark.parametrize(
+    ("config_overrides", "expected"),
+    [
+        ({"dynamic_eplb": True}, MoECommType.MC2),
+        ({"num_redundant_experts": 1}, MoECommType.MC2),
+        ({"mix_placement": True}, MoECommType.MC2),
+        ({"mega_moe_max_tokens": 512}, MoECommType.MC2),
+    ],
+)
+def test_select_moe_comm_method_a5_falls_back_for_runtime_constraints(
+    monkeypatch,
+    config_overrides,
+    expected,
+):
+    patch_kwargs = {
+        "device_type": afc.AscendDeviceType.A5,
+        "capacity": 128,
+        "ep_world_size": 8,
+        "enable_fused_mc2": 1,
+        "mega_moe_max_tokens": 1024,
+    }
+    patch_kwargs.update(config_overrides)
+    _patch_select_moe_comm_method_deps(monkeypatch, **patch_kwargs)
+    vllm_config = _make_vllm_config(world_size=8, top_k_experts=4)
+    _cache_kimi_k3_capability(vllm_config)
+
+    assert afc.select_moe_comm_method(128, vllm_config) == expected
+
+
+def test_a5_mega_moe_prefill_capacity_uses_scheduler_budget(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A5,
+        capacity=512,
+        ep_world_size=32,
+        enable_fused_mc2=1,
+        mega_moe_max_tokens=65536,
+    )
+    vllm_config = _make_vllm_config(
+        world_size=32,
+        max_num_batched_tokens=2048,
+        kv_role="kv_producer",
+    )
+
+    assert afc.get_a5_mega_moe_buffer_tokens_per_rank(vllm_config) == 2048
 
 
 def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
