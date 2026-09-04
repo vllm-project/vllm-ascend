@@ -798,6 +798,9 @@ class BaseDeviceAdaptor:
     def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
+        if q_norm_without_weight is not None:
+            return q_norm_without_weight(q)
+
         if triton_q_rms is not None:
             return triton_q_rms(q, eps)
         else:
