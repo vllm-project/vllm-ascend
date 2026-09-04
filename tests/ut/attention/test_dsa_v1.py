@@ -43,6 +43,7 @@ from vllm_ascend.attention.dsa_v1 import (
     AscendDSAMetadataBuilder,
     AscendDSAReqMetadata,
     build_compressor_metadata_out,
+    build_vision_bidirectional_swa_indices,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
@@ -59,6 +60,46 @@ from vllm_ascend.worker.v2.pcp_manager import (
     AscendPCPAttentionContext,
     AscendPCPManager,
 )
+
+
+def test_build_vision_bidirectional_swa_indices():
+    indices, lengths = build_vision_bidirectional_swa_indices(
+        block_table=torch.tensor([[10, 11]], dtype=torch.int32),
+        window_size=2,
+        max_image_tokens=4,
+        block_size=4,
+        query_start_loc=torch.tensor([0, 8], dtype=torch.int32),
+        seq_lens=torch.tensor([8], dtype=torch.int32),
+        mm_prefix_ranges={0: [(2, 5)]},
+        num_tokens=8,
+    )
+
+    assert indices.shape == (8, 1, 6)
+    assert lengths.tolist() == [1, 2, 5, 4, 4, 4, 2, 2]
+    assert indices[:, 0].tolist() == [
+        [40, -1, -1, -1, -1, -1],
+        [40, 41, -1, -1, -1, -1],
+        [41, 42, 43, 44, 45, -1],
+        [42, 43, 44, 45, -1, -1],
+        [42, 43, 44, 45, -1, -1],
+        [42, 43, 44, 45, -1, -1],
+        [45, 46, -1, -1, -1, -1],
+        [46, 47, -1, -1, -1, -1],
+    ]
+
+
+def test_build_vision_bidirectional_swa_indices_rejects_oversized_span():
+    with pytest.raises(ValueError, match="exceeds vision_max_n_token"):
+        build_vision_bidirectional_swa_indices(
+            block_table=torch.tensor([[0, 1]], dtype=torch.int32),
+            window_size=2,
+            max_image_tokens=3,
+            block_size=4,
+            query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+            seq_lens=torch.tensor([4], dtype=torch.int32),
+            mm_prefix_ranges={0: [(0, 3)]},
+            num_tokens=4,
+        )
 
 
 def _mock_dsa_kv_plan(**method_returns) -> MagicMock:

@@ -173,6 +173,59 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         self.assertEqual(events, ["context_enter", "forward", "context_exit", "release"])
 
 
+class TestMultimodalPrefillCompilationGuard(unittest.TestCase):
+    def _build_runner(self, *, mm_features, num_computed_tokens, num_prompt_tokens):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.requests = {
+            "req": SimpleNamespace(mm_features=mm_features),
+        }
+        runner.input_batch = SimpleNamespace(
+            req_id_to_index={"req": 0},
+            num_computed_tokens_cpu=np.array([num_computed_tokens], dtype=np.int32),
+            num_prompt_tokens=np.array([num_prompt_tokens], dtype=np.int32),
+        )
+        return runner
+
+    def test_scheduled_encoder_input_skips_compiled_backbone(self):
+        runner = self._build_runner(mm_features=[], num_computed_tokens=0, num_prompt_tokens=0)
+        scheduler_output = SimpleNamespace(
+            scheduled_encoder_inputs={"req": [0]},
+            num_scheduled_tokens={},
+        )
+
+        self.assertTrue(runner._should_skip_compiled_for_encoder_input(scheduler_output))
+
+    def test_initial_multimodal_prefill_skips_compiled_backbone(self):
+        runner = self._build_runner(mm_features=[object()], num_computed_tokens=0, num_prompt_tokens=237)
+        scheduler_output = SimpleNamespace(scheduled_encoder_inputs={}, num_scheduled_tokens={"req": 237})
+
+        self.assertTrue(runner._should_skip_compiled_for_encoder_input(scheduler_output))
+
+    def test_cache_hit_multimodal_prefill_skips_compiled_backbone(self):
+        runner = self._build_runner(mm_features=[object()], num_computed_tokens=224, num_prompt_tokens=237)
+        scheduler_output = SimpleNamespace(scheduled_encoder_inputs={}, num_scheduled_tokens={"req": 13})
+
+        self.assertTrue(runner._should_skip_compiled_for_encoder_input(scheduler_output))
+
+    def test_pure_text_prefill_keeps_compiled_backbone(self):
+        runner = self._build_runner(mm_features=[], num_computed_tokens=0, num_prompt_tokens=88)
+        scheduler_output = SimpleNamespace(scheduled_encoder_inputs={}, num_scheduled_tokens={"req": 88})
+
+        self.assertFalse(runner._should_skip_compiled_for_encoder_input(scheduler_output))
+
+    def test_multimodal_decode_keeps_compiled_backbone(self):
+        runner = self._build_runner(mm_features=[object()], num_computed_tokens=237, num_prompt_tokens=237)
+        scheduler_output = SimpleNamespace(scheduled_encoder_inputs={}, num_scheduled_tokens={"req": 1})
+
+        self.assertFalse(runner._should_skip_compiled_for_encoder_input(scheduler_output))
+
+    def test_unscheduled_multimodal_prefill_keeps_compiled_backbone(self):
+        runner = self._build_runner(mm_features=[object()], num_computed_tokens=0, num_prompt_tokens=237)
+        scheduler_output = SimpleNamespace(scheduled_encoder_inputs={}, num_scheduled_tokens={})
+
+        self.assertFalse(runner._should_skip_compiled_for_encoder_input(scheduler_output))
+
+
 class TestDSparkAuxCaptureMode(unittest.TestCase):
     def _build_runner(
         self,
@@ -1485,7 +1538,7 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
 
         runner.execute_model(scheduler_output)
 
-        runner._dummy_run.assert_called_once_with(1)
+        runner._dummy_run.assert_called_once_with(1, num_actual_reqs=0)
         runner._start_dump_data.assert_not_called()
 
     @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)

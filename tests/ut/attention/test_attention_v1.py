@@ -166,6 +166,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
             slot_mapping=torch.arange(9, dtype=torch.int32),
             causal=True,
+            mm_req_doc_ranges={0: [(1, 2)], 1: [(3, 4)], 2: [(5, 6)]},
             actual_seq_lengths_q=[2, 3, 4],
             positions=torch.arange(9),
             attn_state=AscendAttentionState.ChunkedPrefill,
@@ -176,6 +177,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
+        self.assertEqual(unpadded_metadata.mm_req_doc_ranges, {0: [(1, 2)], 1: [(3, 4)]})
 
     @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):
