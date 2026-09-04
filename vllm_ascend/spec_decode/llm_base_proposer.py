@@ -596,7 +596,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._run_merged_draft,
                 self.vllm_config,
                 runtime_mode=CUDAGraphMode.FULL,
-                use_eagle=self.use_eagle,draft
+                use_eagle=self.use_eagle,
                 enable_enpu=self.enable_enpu,
             )
 

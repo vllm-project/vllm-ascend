@@ -463,58 +463,6 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         return attn_metadata
 
 
-class AscendAttentionPCPMetadataBuilder(AscendAttentionMetadataBuilder):
-    """Build GQA metadata while retaining expanded cache slots."""
-
-    metadata_cls = AscendAttentionPCPMetadata
-
-    def __init__(self, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-
-    def _split_decodes_and_prefills(
-        self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-    ) -> tuple[int, int, int, int]:
-        return split_decodes_and_prefills(
-            common_attn_metadata,
-            decode_threshold=self.decode_threshold,
-            treat_short_extends_as_decodes=False,
-        )
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: AscendCommonAttentionMetadata,
-        fast_build: bool = False,
-    ) -> AscendAttentionPCPMetadata:
-        expanded_slot_mapping = common_attn_metadata.slot_mapping
-        metadata = super().build(
-            common_prefix_len,
-            common_attn_metadata,
-            fast_build,
-        )
-        assert isinstance(metadata, AscendAttentionPCPMetadata)
-        if expanded_slot_mapping.numel() % self.pcp_size != 0:
-            raise RuntimeError(
-                "PCP slot mapping size must be divisible by the PCP world size: "
-                f"{expanded_slot_mapping.numel()} % {self.pcp_size} != 0."
-            )
-
-        local_num_input_tokens = expanded_slot_mapping.numel() // self.pcp_size
-        if metadata.num_actual_tokens > local_num_input_tokens:
-            raise RuntimeError(
-                "PCP actual token count exceeds the rank-local padded token count: "
-                f"{metadata.num_actual_tokens} > {local_num_input_tokens}."
-            )
-
-        metadata.slot_mapping = expanded_slot_mapping
-        metadata.pcp_local_num_input_tokens = local_num_input_tokens
-        if metadata.num_prefills > 0:
-            metadata.attn_state = AscendAttentionState.ChunkedPrefill
-        return metadata
-
-
 @dataclass(frozen=True, slots=True)
 class FIAParamProvider:
     layer_name: str | None
