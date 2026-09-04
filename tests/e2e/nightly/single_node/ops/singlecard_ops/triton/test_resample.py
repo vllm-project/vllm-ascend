@@ -289,7 +289,6 @@ def test_greedy_non_bonus_preserves_verification_result():
 @torch.inference_mode()
 def test_one_hot_none_and_dummy_tensor_are_semantically_identical():
     """Support both direct draft_logits=None and the upper-layer dummy-tensor compatibility path."""
-    vocab_size = 5
     probs = torch.tensor([0.0, 0.8, 0.0, 0.2, 0.0], dtype=torch.float32)
     target_row = torch.where(probs > 0, torch.log(probs), torch.tensor(float("-inf")))
     target_logits = torch.stack([target_row, torch.zeros_like(target_row)]).to(DEVICE)
