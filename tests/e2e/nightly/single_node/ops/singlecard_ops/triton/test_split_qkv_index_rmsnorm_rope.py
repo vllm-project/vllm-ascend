@@ -21,6 +21,8 @@ HAS_BIAS = [False, True]
 FP8_MODES = [(False, False), (True, True)]
 DEFAULT_ATOL = 5e-2
 DEFAULT_RTOL = 5e-3
+FP8_ATOL = 0.5
+FP8_RTOL = 0.125
 _FP8_E4M3_MAX = 448.0
 
 
@@ -264,11 +266,23 @@ def test_split_qkv_index_rmsnorm_rope(
         k_bias=k_bias,
     )
 
-    torch.testing.assert_close(q_fused.to(torch.float32).cpu(), q_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(k_fused.to(torch.float32).cpu(), k_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(v_fused.to(torch.float32).cpu(), v_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(iq_fused.to(torch.float32).cpu(), iq_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(ik_fused.to(torch.float32).cpu(), ik_ref.to(torch.float32), atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    def _assert_close(actual, expected):
+        # FP8 E4M3 only has 3 mantissa bits; the kernel and reference may round
+        # one quantization step apart (step is 0.0625~0.25 for |x| in [1, 8)),
+        # which exceeds the bf16 tolerance, so use a looser tolerance for FP8.
+        if actual.dtype == torch.float8_e4m3fn:
+            atol, rtol = FP8_ATOL, FP8_RTOL
+        else:
+            atol, rtol = DEFAULT_ATOL, DEFAULT_RTOL
+        torch.testing.assert_close(
+            actual.to(torch.float32).cpu(), expected.to(torch.float32), atol=atol, rtol=rtol
+        )
+
+    _assert_close(q_fused, q_ref)
+    _assert_close(k_fused, k_ref)
+    _assert_close(v_fused, v_ref)
+    _assert_close(iq_fused, iq_ref)
+    _assert_close(ik_fused, ik_ref)
 
     gc.collect()
     torch.npu.empty_cache()
