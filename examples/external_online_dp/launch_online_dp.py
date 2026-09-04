@@ -30,12 +30,12 @@ dp_address = args.dp_address
 dp_rpc_port = args.dp_rpc_port
 vllm_start_port = args.vllm_start_port
 local_dp_start_rank = args.local_dp_start_rank
+template_path = "./run_dp_template.sh"
 if args.dp_deploy_role == "prefill":
     template_path = "./run_dp_template_p.sh"
 elif args.dp_deploy_role == "decode":
     template_path = "./run_dp_template_d.sh"
-else:
-    template_path = "./run_dp_template.sh"
+
 
 def run_command(visible_devices, dp_rank, vllm_engine_port):
     command = [
