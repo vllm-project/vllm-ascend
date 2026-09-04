@@ -103,8 +103,17 @@ class IndexerWrapper(nn.Module):
         k_hidden_states: torch.Tensor,
         indexer_metadata: AttentionMetadata,
         compute_topk: bool = True,
-    ) -> torch.Tensor | None:
-        return self.impl(hidden_states, q_c, k_hidden_states, indexer_metadata, compute_topk)
+        *,
+        return_selected_scores: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | None:
+        return self.impl(
+            hidden_states,
+            q_c,
+            k_hidden_states,
+            indexer_metadata,
+            compute_topk,
+            return_selected_scores=return_selected_scores,
+        )
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
