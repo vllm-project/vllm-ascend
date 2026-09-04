@@ -178,6 +178,8 @@ curl -s "http://<master_host>:9003/api/v1/tenant_quotas?tenant_id=tenant-a"
 
 Using `MultiConnector` to simultaneously utilize both `MooncakeConnectorV1` and `AscendStoreConnector`. `MooncakeConnectorV1` performs kv_transfer, while `AscendStoreConnector` serves as the prefix-cache node.
 
+For A3 and Ascend 950 Products Store/PD traffic separation, set `ASCEND_GLOBAL_RESOURCE_CONFIG` on both the prefill and decode nodes and use **CANN >= 9.1.0**. The top-level resource configuration controls `MooncakeConnectorV1` PD traffic, and the `store` section controls `AscendStoreConnector` Mooncake Store traffic.
+
 **run_prefill.sh/run_decode.sh:**
 
 ```shell
@@ -1358,3 +1360,30 @@ Ensure `free -h` **available** on the host exceeds this sum plus vLLM overhead. 
 
 For the temporary DSv4 known issue, see:
 <https://github.com/vllm-project/vllm-ascend/issues/9975>
+
+### 5.6. ASCEND_GLOBAL_RESOURCE_CONFIG
+
+`ASCEND_GLOBAL_RESOURCE_CONFIG` is a JSON string passed to HIXL. Common fields are:
+
+| Field | Description |
+| :--- | :--- |
+| `comm_resource_config.protocol_desc` | Protocol descriptor for the top-level Mooncake transfer engine. In PD disaggregation, this controls the `MooncakeConnectorV1` PD transfer path. Example values include `["hccs:device"]` and `["roce:device"]`. |
+| `store.comm_resource_config.protocol_desc` | Protocol descriptor for Mooncake Store traffic used by `AscendStoreConnector`. On A3, this can be set to `["roce:device"]` while PD transfer uses HCCS. |
+| `store.comm_resource_config.qos` | Transfer QoS for Mooncake Store traffic used by `AscendStoreConnector`. The valid range is **0-4 (integers only)**; the **default value is 0**, and a larger value means a higher transfer priority. Invalid values cause startup to fail fast with a validation error. See [QoS Configuration](#561-qos-configuration). |
+| `comm_resource_config.listen_port` | One-sided communication listen port. The HIXL default is `16666`; use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients. |
+| `fabric_memory.max_capacity` | Fabric memory quota in GB per process. Use it only when the fabric memory budget is too small; see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1). |
+
+Store/PD traffic separation requires **CANN >= 9.1.0**. It is intended for A3 and Ascend 950 Products deployments where PD transfer traffic can use HCCS and Mooncake Store traffic can use ROCE, so the two traffic classes do not compete on the same physical link. For more HIXL deployment patterns, see the [Mooncake + HIXL pooling overview](https://gitcode.com/cann/hixl/wiki/Mooncake%20+%20HIXL%20%E6%B1%A0%E5%8C%96%E6%96%B9%E6%A1%88%E6%80%BB%E8%A7%88%EF%BC%88A2%20-%20A3%EF%BC%89.md).
+
+#### 5.7. QoS Configuration
+
+Both the Mooncake and Memcache backends support configuring the transfer
+QoS. The valid range is **0-4 (integers only)**, and the **default value is 0**
+when not configured. A larger value means a higher transfer priority. Invalid
+values (non-integer, out of range) cause startup to fail fast with a
+validation error.
+
+| Backend | Configuration Method | Example |
+| :--- | :--- | :--- |
+| Mooncake | `store.comm_resource_config.qos` field in `ASCEND_GLOBAL_RESOURCE_CONFIG` | `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"store":{"comm_resource_config":{"qos":3}}}'` |
+| Memcache | `MF_DEVICE_UB_QOS` environment variable | `export MF_DEVICE_UB_QOS=3` |

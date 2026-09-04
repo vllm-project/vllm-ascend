@@ -18,6 +18,7 @@ _SPARSE_ATTN_INNER_PRECISE = 4
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _ASCEND_DEVICE_TYPE = get_ascend_device_type()
+_FP8_E4M3_MAX = 448.0
 
 if _ASCEND_DEVICE_TYPE != AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton import (
@@ -123,6 +124,10 @@ def _split_main_kv_cache(
 
 def _select_num_idx_from_topk(topk_idx: torch.Tensor) -> torch.Tensor:
     return (topk_idx >= 0).sum(dim=-1).to(dtype=torch.int32)
+
+
+def _to_fp8_e4m3(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.clamp(min=-_FP8_E4M3_MAX, max=_FP8_E4M3_MAX).to(torch.float8_e4m3fn)
 
 
 def _build_cu_block_lens(
@@ -535,6 +540,12 @@ def _minimax_m3_sparse_attn_a5(
     block_size: int,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
+    inner_precise = 1
+    if key.dtype == torch.float8_e4m3fn:
+        if value.dtype != torch.float8_e4m3fn:
+            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
+        q = _to_fp8_e4m3(q)
+        inner_precise = _SPARSE_ATTN_INNER_PRECISE
     cu_block_lens = _build_cu_block_lens(seq_lens, block_size)
     k2q_row_ptr, k2q_q_indices, k2q_slot_indices = _npu_k2q_csr(
         topk_idx,
@@ -562,7 +573,7 @@ def _minimax_m3_sparse_attn_a5(
         sm_scale,
         block_size,
         topk_idx.shape[-1],
-        1,
+        inner_precise,
         actual_seq_lengths=q_lens_t,
         actual_seq_lengths_kv=kv_lens_t,
     )
@@ -614,6 +625,9 @@ def minimax_m3_sparse_attn_decode(
     output: torch.Tensor,
     decode_query_len: int,
     block_size: int = 128,
+    *,
+    select_num_idx: torch.Tensor | None = None,
+    dequant_scale: torch.Tensor | None = None,
 ) -> None:
     """Run sparse decode through the AscendC sparse-attention operator."""
     if q.shape[0] != seq_lens.shape[0] * decode_query_len:
@@ -621,13 +635,29 @@ def minimax_m3_sparse_attn_decode(
 
     key, value = _split_main_kv_cache(kv_cache)
     query_lens = torch.full_like(seq_lens, decode_query_len, dtype=torch.int32)
+    if select_num_idx is None:
+        select_num_idx = _select_num_idx_from_topk(topk_idx)
+
+    op_kwargs: dict[str, Any] = {}
+    if key.dtype == torch.float8_e4m3fn:
+        if value.dtype != torch.float8_e4m3fn:
+            raise TypeError("MiniMax-M3 FP8 sparse attention requires both K and V caches in E4M3")
+        q = _to_fp8_e4m3(q)
+        if dequant_scale is None:
+            dequant_scale = torch.ones((1, 1, 1, 1), dtype=torch.float32, device=q.device)
+        op_kwargs = {
+            "q_dequant_scale": dequant_scale,
+            "k_dequant_scale": dequant_scale,
+            "v_dequant_scale": dequant_scale,
+            "attention_out_dtype": torch.bfloat16,
+        }
     out = torch.ops._C_ascend.npu_sparse_attention_score(
         q,
         key,
         value,
         topk_idx,
         block_table,
-        select_num_idx=_select_num_idx_from_topk(topk_idx),
+        select_num_idx=select_num_idx,
         actual_seq_lengths=query_lens,
         actual_seq_lengths_kv=seq_lens,
         num_key_value_heads=num_kv_heads,
@@ -635,5 +665,6 @@ def minimax_m3_sparse_attn_decode(
         block_size=block_size,
         top_k=topk_idx.shape[-1],
         inner_precise=_SPARSE_ATTN_INNER_PRECISE,
+        **op_kwargs,
     )
     output.copy_(out)

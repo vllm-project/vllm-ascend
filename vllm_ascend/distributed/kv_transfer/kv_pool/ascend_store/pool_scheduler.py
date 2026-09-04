@@ -25,12 +25,13 @@ from vllm.v1.serial_utils import MsgpackEncoder
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
+    get_layerwise_protocol,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
-    get_gva_layerwise_config,
     get_layerwise_kv_cache_specs,
+    get_layerwise_reuse_config,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
@@ -160,9 +161,12 @@ class KVPoolScheduler:
         )
         self.tp_mismatch = tp_mismatch_info.enabled
 
-        backend_name = vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake")
+        backend_name = str(vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake"))
         self.backend_name = backend_name.lower()
-        self.use_gva_layerwise = self.use_layerwise and self.backend_name == "memcache"
+        # Resolve the backend's layerwise protocol (if any) once through the
+        # registry; generic code never imports the protocol module by name.
+        self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
+        self.use_layerwise_transfer = self.use_layerwise and self.layerwise_protocol is not None
         backend = backend_map.get(self.backend_name)
         if backend is None:
             raise ValueError(f"Unsupported KV pool backend: {backend_name}")
@@ -190,8 +194,8 @@ class KVPoolScheduler:
             self.put_step = 1
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.layerwise_offload = False
-        if self.use_gva_layerwise:
-            extra_config = get_gva_layerwise_config(vllm_config.kv_transfer_config)
+        if self.use_layerwise_transfer:
+            extra_config = get_layerwise_reuse_config(vllm_config.kv_transfer_config)
             if kv_cache_config is not None and extra_config is not None:
                 reuse_layout = build_layerwise_reuse_layout(
                     get_layerwise_kv_cache_specs(kv_cache_config),
@@ -305,20 +309,24 @@ class KVPoolScheduler:
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
 
-    def _make_layerwise_gva_keys_for_hit_check(self, group_id: int, block_hash_hex: str) -> list[str]:
-        """Generate all-rank GVA keys for scheduler-side hit check.
+    def _make_layerwise_hit_check_keys(self, group_id: int, block_hash_hex: str) -> list[str]:
+        """All-rank keys for scheduler-side hit check, built by the
+        backend's protocol module.
 
         Single-group uses PR #11585 format; multi-group includes group_id.
         Returns one key per head_or_tp_rank (ranks in the same put_step
         group share one key for MLA).
         """
         head_or_tp_ranks = self.tp_size // self.put_step
-        if len(self.kv_cache_group_ids) > 1:
-            return [f"{self.model_name}@{group_id}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
-        else:
-            return [f"{self.model_name}@{block_hash_hex}@{h}" for h in range(head_or_tp_ranks)]
+        return self.layerwise_protocol.make_hit_check_keys(
+            self.model_name,
+            group_id,
+            block_hash_hex,
+            head_or_tp_ranks,
+            len(self.kv_cache_group_ids),
+        )
 
-    def _get_layerwise_gva_hit_tokens(
+    def _get_layerwise_hit_tokens(
         self,
         request: "Request",
         token_len: int,
@@ -340,8 +348,7 @@ class KVPoolScheduler:
             group_block_hashes = group_block_hashes[query_start_block:]
             # Generate all-rank keys for each block hash
             keys_by_block = [
-                self._make_layerwise_gva_keys_for_hit_check(group_id, block_hash_to_str(bh))
-                for bh in group_block_hashes
+                self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(bh)) for bh in group_block_hashes
             ]
             all_keys = [key for block_keys in keys_by_block for key in block_keys]
             if not all_keys:
@@ -466,9 +473,9 @@ class KVPoolScheduler:
         ):
             return 0, False
 
-        if self.use_gva_layerwise:
+        if self.use_layerwise_transfer:
             token_len = prompt_token_len
-            num_external_hit_tokens = self._get_layerwise_gva_hit_tokens(request, token_len, num_computed_tokens)
+            num_external_hit_tokens = self._get_layerwise_hit_tokens(request, token_len, num_computed_tokens)
         else:
             if self._discard_partial_chunks:
                 token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
@@ -499,11 +506,21 @@ class KVPoolScheduler:
 
         store_skip_tokens = num_external_hit_tokens
         if self.use_layerwise and self.use_eagle:
-            # TODO(lf): Support loading the trailing block as dirty data.
-            num_external_hit_tokens = max(
-                num_computed_tokens,
-                num_external_hit_tokens - self.lcm_block_size,
-            )
+            # Keep the draft model's recomputation zone intact: the
+            # generation-point hidden states must be freshly computed, and the
+            # local prefix-cache path already drops its trailing block
+            # (drop_eagle_block). Only trim the external hit when it reaches
+            # into the prompt's final granularity block, so that (local +
+            # external) never covers the last block whose KV the engine will
+            # rewrite during MTP draft/verify steps. Partial hits that stop on
+            # an interior block boundary carry a valid mamba state snapshot
+            # at that boundary and can be loaded as-is.
+            hit_reaches_final_block = num_external_hit_tokens > (request.num_tokens - self.lcm_block_size)
+            if hit_reaches_final_block:
+                num_external_hit_tokens = max(
+                    num_computed_tokens,
+                    num_external_hit_tokens - self.lcm_block_size,
+                )
         if num_external_hit_tokens == request.num_tokens:
             num_external_hit_tokens -= 1
 
@@ -888,6 +905,11 @@ class KVPoolScheduler:
         keep the reference of all non-null mamba blocks that will send to external kv store
         """
         if not self.use_hybrid or len(self.mamba_group_ids) == 0 or not req_meta.can_save:
+            return
+        # Layerwise transfer frees mamba blocks layer by layer on its own
+        # completion path (see KVCacheStoreSendingThread); bulk-touching them
+        # here would double-reference the block pool and leak blocks.
+        if self.use_layerwise:
             return
         using_event_id = self.get_sending_event_id()
         req_meta.event_id = using_event_id

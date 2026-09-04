@@ -220,7 +220,18 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         use_compress = getattr(attn_selector_config, "use_compress", False)
-        key = (attn_selector_config.use_mla, attn_selector_config.use_sparse)
+        use_mla = attn_selector_config.use_mla
+        use_sparse = attn_selector_config.use_sparse
+        # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
+        try:
+            from vllm.config import get_current_vllm_config
+            from vllm_ascend.utils import enable_sfa
+
+            if use_sparse and not enable_sfa(get_current_vllm_config()):
+                use_sparse = False
+        except Exception:
+            pass
+        key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
         if attn_selector_config.use_pcp and attn_selector_config.use_dcp:
@@ -563,6 +574,8 @@ class NPUPlatform(Platform):
 
         if num_tokens is None and attn_metadata is not None:
             num_tokens = list(attn_metadata.values())[0].num_actual_tokens
+        pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        max_tokens_across_pcp = num_tokens if pcp_size > 1 else 0
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and dp_metadata is not None:
             max_tokens_across_dp = dp_metadata.num_tokens_across_dp_cpu.max().item()
@@ -597,6 +610,7 @@ class NPUPlatform(Platform):
             "num_tokens": num_tokens,
             "padded_length": padded_length,
             "max_tokens_across_dp": max_tokens_across_dp,
+            "max_tokens_across_pcp": max_tokens_across_pcp,
             "mc2_mask": mc2_mask,
             "is_draft_model": is_draft_model,
             "is_draft_model_prefill": is_draft_model_prefill,

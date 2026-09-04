@@ -12,9 +12,12 @@ from vllm.forward_context import BatchDescriptor, get_forward_context, set_forwa
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
+from vllm_ascend.device.hardware_profile import (
+    HardwareCapability,
+    MoECommPolicy,
+    get_current_hardware_profile,
+)
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
     has_layer_idx,
     is_moe_model,
 )
@@ -33,6 +36,32 @@ _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", defa
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
+
+
+def _is_decode_only_node(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return False
+
+    is_decode_bench = getattr(kv_transfer_config, "kv_connector", None) == "DecodeBenchConnector"
+    kv_role = getattr(kv_transfer_config, "kv_role", None)
+    is_kv_consumer = (
+        kv_role == "kv_consumer"
+        if kv_role is not None
+        else bool(
+            getattr(kv_transfer_config, "is_kv_consumer", False)
+            and not getattr(kv_transfer_config, "is_kv_producer", False)
+        )
+    )
+    if not (is_decode_bench or is_kv_consumer):
+        return False
+
+    scheduler_config = getattr(get_ascend_config(), "scheduler_config", None)
+    # Actual semantics of `recompute_scheduler_enable`:
+    # - Enabled: when preemption occurs on the decode node, the request is sent back
+    #     to the P node to redo prefill, so the decode node only ever decodes;
+    # - Disabled: prefill is executed locally on the decode node.
+    return bool(getattr(scheduler_config, "recompute_scheduler_enable", False))
 
 
 @contextmanager
@@ -59,7 +88,7 @@ def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
     # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
     return (
         is_mega_moe_supported()
-        and get_ascend_device_type() == AscendDeviceType.A3
+        and get_current_hardware_profile().supports(HardwareCapability.CANN_MEGAMOE)
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
@@ -83,6 +112,7 @@ def set_ascend_forward_context(
     skip_compiled: bool = False,
     max_tokens_across_pcp: int = 0,
     draft_attn_metadatas=None,
+    device_metadata_executor=None,
     has_sinks=False,
     eplb_heat_collection_status: bool = False,
 ):
@@ -109,6 +139,7 @@ def set_ascend_forward_context(
     with set_current_vllm_config(vllm_config), set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
         forward_context.draft_attn_metadatas = draft_attn_metadatas
+        forward_context.device_metadata_executor = device_metadata_executor
 
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
@@ -120,6 +151,7 @@ def set_ascend_forward_context(
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
+        forward_context.is_decode_only_node = _is_decode_only_node(vllm_config)
         forward_context.use_mega_moe = use_cann_megamoe(vllm_config)
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -198,10 +230,14 @@ def set_mc2_tokens_capacity(vllm_config, max_num_reqs, uniform_decode_query_len)
     global _mc2_tokens_capacity
     if _mc2_tokens_capacity is not None:
         return
+
     ascend_config = get_ascend_config()
     use_mega_moe = use_cann_megamoe(vllm_config)
 
-    if ascend_config.enable_prefill_mc2 or use_mega_moe:
+    # Cap for fused MC2 / MegaMoe: regular MC2 (gated by enable_prefill_mc2) uses
+    # HCCL comm buffer (HCCL_BUFFSIZE); MegaMoe (use_mega_moe, non-decode-only)
+    # uses the symm buffer (separate torch alloc, not HCCL_BUFFSIZE).
+    if ascend_config.enable_prefill_mc2 or (use_mega_moe and not _is_decode_only_node(vllm_config)):
         max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
     elif vllm_config.compilation_config.cudagraph_capture_sizes:
         max_num_tokens = vllm_config.compilation_config.max_cudagraph_capture_size
@@ -244,7 +280,7 @@ def get_mc2_mask():
     return _reserved_mc2_mask
 
 
-def _select_a2_moe_comm_method(
+def _select_capacity_and_expert_density_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
@@ -263,10 +299,10 @@ def _select_a2_moe_comm_method(
     return MoECommType.ALLGATHER
 
 
-def _select_a3_moe_comm_method(
+def _select_fused_or_capacity_moe_comm_method(
     num_tokens: int,
-    mc2_tokens_capacity: int,
     vllm_config: VllmConfig,
+    mc2_tokens_capacity: int,
 ) -> MoECommType:
     if use_cann_megamoe(vllm_config):
         return MoECommType.FUSED_MC2
@@ -279,7 +315,7 @@ def _select_a3_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def _select_a5_moe_comm_method(
+def _select_capacity_and_world_size_moe_comm_method(
     num_tokens: int,
     vllm_config: VllmConfig,
     mc2_tokens_capacity: int,
@@ -297,30 +333,20 @@ def _select_a5_moe_comm_method(
     return MoECommType.ALLTOALL
 
 
-def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
-    """Select the MoE communication method according to parallel settings,
-    device generation, and token count.
+_MOE_COMM_SELECTORS = {
+    MoECommPolicy.CAPACITY_AND_EXPERT_DENSITY: _select_capacity_and_expert_density_moe_comm_method,
+    MoECommPolicy.FUSED_OR_CAPACITY: _select_fused_or_capacity_moe_comm_method,
+    MoECommPolicy.CAPACITY_AND_WORLD_SIZE: _select_capacity_and_world_size_moe_comm_method,
+}
 
-    1. Non-MoE models return `None`.
-    2. Without expert parallel, fall back to all-gather.
-    3. On A2 with expert parallel, pick MC2 when tokens fit the MC2 capacity
-       and the DP size is large enough; otherwise use all-gather.
-    4. On A3 with expert parallel, prefer fused MC2 when enabled and the EP
-       group size is small enough; otherwise use MC2 within capacity or
-       all-to-all.
-    5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+
+def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommType | None:
+    """Select the MoE communication method from the active hardware policy,
+    parallel settings, and token count.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_draft_model (bool): Whether the model runs in MTP mode.
-
-    Raises:
-        ValueError: If the soc version is unsupported.
-
     Returns:
         MoECommType | None: The selected MoE communication method.
     """
@@ -328,7 +354,7 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         return None
 
     mc2_tokens_capacity = get_mc2_tokens_capacity()
-    soc_version = get_ascend_device_type()
+    moe_comm_policy = get_current_hardware_profile().moe_comm_policy
     lora_config = getattr(vllm_config, "lora_config", None)
     if not vllm_config.parallel_config.enable_expert_parallel or get_ep_group().world_size == 1:
         moe_comm_type = MoECommType.ALLGATHER
@@ -338,24 +364,17 @@ def select_moe_comm_method(num_tokens: int, vllm_config: VllmConfig) -> MoECommT
         # is a single fused C++ op. This covers both normal model
         # forward and _dummy_run during profile_run.
         moe_comm_type = MoECommType.ALLTOALL
-    elif soc_version == AscendDeviceType.A2:
-        moe_comm_type = _select_a2_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
-    elif soc_version == AscendDeviceType.A3:
-        moe_comm_type = _select_a3_moe_comm_method(
-            num_tokens,
-            mc2_tokens_capacity,
-            vllm_config,
-        )
-    elif soc_version == AscendDeviceType.A5:
-        moe_comm_type = _select_a5_moe_comm_method(num_tokens, vllm_config, mc2_tokens_capacity)
-    elif soc_version == AscendDeviceType._310P:
+    elif moe_comm_policy is MoECommPolicy.ALLGATHER:
         moe_comm_type = MoECommType.ALLGATHER
-
     else:
-        raise ValueError(f"Unsupported soc_version: {soc_version}")
+        moe_comm_type = _MOE_COMM_SELECTORS[moe_comm_policy](
+            num_tokens,
+            vllm_config,
+            mc2_tokens_capacity,
+        )
     logger.debug(
-        "MoE comm method selected: soc=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
-        soc_version,
+        "MoE comm method selected: policy=%s, method=%s, num_tokens=%d, mc2_capacity=%s",
+        moe_comm_policy,
         moe_comm_type,
         num_tokens,
         mc2_tokens_capacity,
@@ -370,6 +389,7 @@ class _ExtraForwardContextProxy:
         "capturing",
         "moe_comm_type",
         "moe_comm_method",
+        "is_decode_only_node",
         "use_mega_moe",
         "mmrs_fusion",
         "num_tokens",

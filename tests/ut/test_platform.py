@@ -662,6 +662,7 @@ class TestNPUPlatform(TestBase):
     def test_set_additional_forward_context_v2_includes_required_moe_fields(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
         dummy_comm_method = object()
 
         with (
@@ -683,6 +684,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertFalse(kwargs["in_profile_run"])
         self.assertEqual(kwargs["padded_num_tokens"], 8)
+        self.assertEqual(kwargs["max_tokens_across_pcp"], 5)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
 

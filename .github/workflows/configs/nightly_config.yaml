@@ -174,6 +174,12 @@ a3:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
@@ -246,6 +252,9 @@ a3:
   multi_card:
     test_config:
       # pytest-driven tests
+      - name: compressor-metadata-cross-stream
+        os: linux-aarch64-a3-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_compressor_metadata.py
       - name: qwen3-30b-acc
         os: linux-aarch64-nightly-a3-4
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
@@ -313,6 +322,12 @@ a3-560t:
       - name: Minimax_m2.7_w8a8_A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Minimax_m2.7_w8a8_A3.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
