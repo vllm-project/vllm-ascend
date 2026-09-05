@@ -573,6 +573,26 @@ at::Tensor npu_causal_conv1d_custom_meta(
     return output;
 }
 
+// P1: meta for split-output variant (mirrors npu_causal_conv1d_custom_3io).
+std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_causal_conv1d_custom_3io_meta(
+    const at::Tensor& y_q,
+    const at::Tensor& y_k,
+    const at::Tensor& y_v,
+    const at::Tensor& x,
+    const at::Tensor& weight,
+    const at::Tensor& conv_state,
+    const c10::optional<at::Tensor>& bias_opt,
+    const c10::optional<at::Tensor>& query_start_loc_opt,
+    const c10::optional<at::Tensor>& cache_indices_opt,
+    const c10::optional<at::Tensor>& initial_state_mode_opt,
+    const c10::optional<at::Tensor>& num_accepted_tokens_opt,
+    int64_t  activation_mode,
+    int64_t  pad_slot_id,
+    int64_t  run_mode)
+{
+    return std::make_tuple(y_q, y_k, y_v);
+}
+
 at::Tensor npu_causal_conv1d_310_meta(
     const at::Tensor& x,
     const at::Tensor& weight,
@@ -2099,6 +2119,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_copy_and_expand_eagle_inputs", &vllm_ascend::meta::npu_copy_and_expand_eagle_inputs_meta);
     // causal_conv1d_fn
     ops.impl("npu_causal_conv1d_custom", &vllm_ascend::meta::npu_causal_conv1d_custom_meta);
+    ops.impl("npu_causal_conv1d_custom_3io", &vllm_ascend::meta::npu_causal_conv1d_custom_3io_meta);
     // moe_grouped_matmul
     ops.impl("moe_grouped_matmul", &vllm_ascend::meta::moe_grouped_matmul_meta);
     ops.impl("moe_gating_top_k_hash", &vllm_ascend::meta::moe_gating_top_k_hash_meta);

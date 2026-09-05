@@ -311,8 +311,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             )
         return self.o_norm(core_attn_out, output_gate)
 
-    @staticmethod
     def _run_causal_conv1d(
+        self,
         mixed_qkv: torch.Tensor,
         conv_weights_t: torch.Tensor,
         conv_state: torch.Tensor,
@@ -320,13 +320,22 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         *,
         run_mode: int,
         num_accepted_tokens: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        out = torch.empty_like(mixed_qkv)
-        torch.ops._C_ascend.npu_causal_conv1d_custom(
-            out,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # P2: split-write path. The kernel writes q/k/v directly into 3 contiguous
+        # [N, C] buffers (C = local_num_heads * head_dim = dim/3), eliminating the
+        # external chunk(3)+rearrange+.contiguous() that emitted 3 aclnnInplaceCopy.
+        n = mixed_qkv.shape[0]
+        c = self.local_num_heads * self.head_dim
+        y_q = torch.empty((n, c), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
+        y_k = torch.empty((n, c), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
+        y_v = torch.empty((n, c), dtype=mixed_qkv.dtype, device=mixed_qkv.device)
+        torch.ops._C_ascend.npu_causal_conv1d_custom_3io(
+            y_q,
+            y_k,
+            y_v,
             mixed_qkv,
             conv_weights_t,
-            conv_state=conv_state,
+            conv_state,
             bias_opt=None,
             query_start_loc_opt=metadata.query_start_loc,
             cache_indices_opt=metadata.cache_indices,
@@ -336,7 +345,8 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             pad_slot_id=PAD_SLOT_ID,
             run_mode=run_mode,
         )
-        return out
+        h, d = self.local_num_heads, self.head_dim
+        return y_q.view(1, n, h, d), y_k.view(1, n, h, d), y_v.view(1, n, h, d)
 
     def _packed_conv_shape(self) -> tuple[int, int]:
         local_channels = self.local_num_heads * self.head_dim
@@ -587,10 +597,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 run_mode=1,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
             )
-            q_spec, k_spec, v_spec = mixed_spec.chunk(3, dim=-1)
-            q_spec, k_spec, v_spec = (
-                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in (q_spec, k_spec, v_spec)
-            )
+            q_spec, k_spec, v_spec = mixed_spec
             assert raw_gate_spec is not None and beta_spec is not None
             assert attn_metadata.spec_query_start_loc is not None
             assert attn_metadata.spec_state_indices_tensor is not None
@@ -635,10 +642,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                     run_mode=1,
                 )
 
-            q_non_spec, k_non_spec, v_non_spec = mixed_non_spec.chunk(3, dim=-1)
-            q_non_spec, k_non_spec, v_non_spec = (
-                rearrange(x, "n (h d) -> 1 n h d", d=self.head_dim) for x in (q_non_spec, k_non_spec, v_non_spec)
-            )
+            q_non_spec, k_non_spec, v_non_spec = mixed_non_spec
             assert raw_gate_non_spec is not None and beta_non_spec is not None
 
             split_non_spec = spec_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0

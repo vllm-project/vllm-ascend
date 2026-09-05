@@ -62,8 +62,25 @@ public:
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
 
+        // P1: y is OPTIONAL now — default path binds y (merged [N,3C]); the KDA
+        // split path (split_qkv=true) binds y_q/y_k/y_v (each [N,C]) instead.
         this->Output("y")
-            .ParamType(REQUIRED)
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Output("y_q")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Output("y_k")
+            .ParamType(OPTIONAL)
+            .DataType({ge::DT_FLOAT16, ge::DT_BF16})
+            .FormatList({ge::FORMAT_ND})
+            .AutoContiguous();
+        this->Output("y_v")
+            .ParamType(OPTIONAL)
             .DataType({ge::DT_FLOAT16, ge::DT_BF16})
             .FormatList({ge::FORMAT_ND})
             .AutoContiguous();
@@ -71,6 +88,9 @@ public:
         this->Attr("activationMode").AttrType(OPTIONAL).Int(0);
         this->Attr("padSlotId").AttrType(OPTIONAL).Int(-1);
         this->Attr("runMode").AttrType(OPTIONAL).Int(0);
+        // P1: when true, kernel writes q/k/v into y_q/y_k/y_v (eliminating the
+        // external chunk(3)+rearrange+.contiguous). Default false -> merged y.
+        this->Attr("split_qkv").AttrType(OPTIONAL).Bool(false);
 
         OpAICoreConfig aicoreConfig;
         aicoreConfig.DynamicCompileStaticFlag(true)
