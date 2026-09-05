@@ -37,6 +37,12 @@ def register_connector():
     )
 
     KVConnectorFactory.register_connector(
+        "MooncakeD2RHConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_d2rh_connector",
+        "MooncakeConnector",
+    )
+
+    KVConnectorFactory.register_connector(
         "MooncakeConnectorStoreV1",
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
         "AscendStoreConnector",
