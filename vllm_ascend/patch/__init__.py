@@ -51,24 +51,31 @@
 # ** 2. File: platform/patch_deepseek_v4_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
+#   2. `vllm.entrypoints.chat_utils._parse_chat_message_content_parts`
+#      `vllm.entrypoints.chat_utils._get_full_multimodal_text_prompt`
 #    Why:
 #       The supported vLLM revision has the generic DeepSeek-V4 text config
 #       conversion but does not identify a checkpoint with `vision_n_layers`
 #       as the multimodal conditional-generation architecture. Without this
 #       distinction, vllm-ascend cannot select its DeepSeek-V4 vision wrapper
 #       or enable bidirectional attention over the image prefix.
+#       The generic string-content parser also moves multimodal placeholders
+#       ahead of text and joins content parts with one newline. The checkpoint
+#       renderer preserves image order and separates every part with two.
 #    How:
 #       Register an Ascend DeepSeek-V4 config conversion handler. For vision checkpoints
 #       it selects `DeepseekV4ForConditionalGeneration`, enables multimodal
 #       prefix-LM attention, and records the prefix-padding constraints used by
-#       the Ascend DSA path. Text-only DeepSeek-V4 behavior is unchanged.
+#       the Ascend DSA path. For vision checkpoints, preserve interleaved image
+#       placeholders and use the checkpoint's two-newline separator. Text-only
+#       DeepSeek-V4 and other model behavior is unchanged.
 #    Related PR (if no, explain why):
 #       https://github.com/vllm-project/vllm/pull/54566
 #    Future Plan:
 #       Remove this patch once the supported vLLM revision natively maps
 #       DeepSeek-V4 vision checkpoints to the conditional-generation model and
-#       exposes the required multimodal prefix-LM and padding metadata without
-#       replacing `MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4"]`.
+#       exposes both the required multimodal prefix-LM metadata and a
+#       model-specific content-part renderer without downstream patching.
 #
 # ** 3. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
