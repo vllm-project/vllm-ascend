@@ -28,6 +28,15 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
     """Ascend Eagle speculator: the NPU loop from AscendAutoRegressiveSpeculator
     layered on upstream EagleSpeculator (flat/GQA attention)."""
 
+    def load_draft_model(self, target_model, target_attn_layer_names):
+        draft_model = super().load_draft_model(target_model, target_attn_layer_names)
+        if (
+            self.method == "eagle3"
+            and draft_model.config.draft_vocab_size == self.draft_model_config.get_vocab_size()
+        ):
+            draft_model.draft_id_to_target_id = None
+        return draft_model
+
     def _create_draft_vllm_config(self) -> VllmConfig:
         # EAGLE draft models are dense even when the target is an MoE model.
         # Reusing the target's EP/EPLB flags makes VllmConfig validate the
