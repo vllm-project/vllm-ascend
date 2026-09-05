@@ -346,9 +346,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                         kv_cache_gid,
                     )
                     if getattr(self, "replicated_draft_kv", False):
-                        builder_spec = layer_kv_cache_spec.copy_with_new_block_size(
-                            kernel_block_size
-                        )
+                        builder_spec = layer_kv_cache_spec.copy_with_new_block_size(kernel_block_size)
                         attn_group.metadata_builders = [
                             AscendAttentionMetadataBuilder(
                                 builder_spec,
@@ -446,8 +444,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             if gid in self._per_group_replication_sizes:
                 block_table = self._build_replicated_block_table(
                     gid,
-                    block_table,
-                    cad.seq_lens,
+                    block_table[:batch_size],
+                    cad.seq_lens[:batch_size],
                 )
             self._per_group_block_table_buffers[gid] = block_table
         self._context_slot_mapping_buffers = None
