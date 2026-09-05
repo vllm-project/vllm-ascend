@@ -333,6 +333,22 @@ def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     assert non_spec_indices.numel() == 0
 
 
+def test_dspark_target_reorder_threshold_includes_base_token():
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+    )
+    builder.vllm_config.speculative_config.method = "dspark"
+    builder.vllm_config.speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(sample_from_anchor=True),
+    )
+
+    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
+    assert builder.reorder_batch_threshold == 8
+
+
 def _cache_index_first_column(cache_indices: torch.Tensor) -> torch.Tensor:
     if cache_indices.dim() == 1:
         return cache_indices

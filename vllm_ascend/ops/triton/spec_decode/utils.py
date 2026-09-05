@@ -95,6 +95,9 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
     TILE_SIZE: tl.constexpr = 256,
+    DCP_SIZE: tl.constexpr = 1,
+    DCP_RANK: tl.constexpr = 0,
+    CP_INTERLEAVE_SIZE: tl.constexpr = 1,
 ):
     # Grid-stride kernel: launch grid is capped at the vector-core count by
     # the caller (grid = min(cdiv(total_work, TILE_SIZE), num_vectorcore)),
@@ -155,11 +158,26 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         # rather than from query_pos. For text-only inputs the two values are
         # identical, so this only changes behaviour for multimodal inputs.
         query_kv_slot_pos = effective_seq_len + q_idx
-        block_num_q = query_kv_slot_pos // block_size
+        if DCP_SIZE > 1:
+            # Match BlockTable._compute_dcp_slot_mapping: the paged cache on
+            # each DCP rank is compacted, so global token positions must first
+            # be mapped to an owner rank and then to that rank's local position.
+            virtual_block_size = CP_INTERLEAVE_SIZE * DCP_SIZE
+            virtual_block_offset = query_kv_slot_pos % virtual_block_size
+            owner_rank = virtual_block_offset // CP_INTERLEAVE_SIZE
+            local_kv_slot_pos = (
+                query_kv_slot_pos // virtual_block_size * CP_INTERLEAVE_SIZE
+                + virtual_block_offset % CP_INTERLEAVE_SIZE
+            )
+        else:
+            owner_rank = DCP_RANK
+            local_kv_slot_pos = query_kv_slot_pos
+        block_num_q = local_kv_slot_pos // block_size
         block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
             tl.int64
         )
-        slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
+        slot_q = block_id_q * block_size + (local_kv_slot_pos % block_size)
+        slot_q = tl.where(owner_rank == DCP_RANK, slot_q, -1)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)

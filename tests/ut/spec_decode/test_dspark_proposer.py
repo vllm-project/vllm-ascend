@@ -592,6 +592,52 @@ class TestSetInputsFirstPassOutputs(_DSparkProposerTestBase):
         assert proposer.draft_attn_groups[0].kv_cache_spec.block_size == 384
         assert kwargs["block_size"] == 128
 
+    def test_dcp_updates_slot_kernel_and_parallel_block_metadata(self, monkeypatch):
+        kernel = MagicMock()
+        monkeypatch.setattr(
+            "vllm_ascend.spec_decode.dspark_proposer.copy_and_expand_dflash_and_dspark_inputs_kernel",
+            kernel,
+        )
+        proposer = self._make_proposer(max_num_tokens=64, num_reqs=1, block_size=5)
+        proposer.dcp_size = 8
+        proposer.dcp_rank = 3
+        proposer.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(cp_kv_cache_interleave_size=1),
+        )
+        dcp_manager = SimpleNamespace(
+            prepare_spec_decode_first_pass_inputs=MagicMock(),
+            prepare_spec_decode_drafting_cp_metadata=MagicMock(),
+        )
+        proposer.runner = SimpleNamespace(
+            dcp_manager=dcp_manager,
+        )
+
+        num_query_total, _, cad, extra, _, _ = self._invoke_set_inputs_first_pass(
+            proposer,
+            num_reqs=1,
+            block_size=5,
+        )
+
+        kwargs = kernel[1,].call_args.kwargs
+        assert kwargs["DCP_SIZE"] == 8
+        assert kwargs["DCP_RANK"] == 3
+        assert kwargs["CP_INTERLEAVE_SIZE"] == 1
+        assert extra == (None, None)
+        dcp_manager.prepare_spec_decode_first_pass_inputs.assert_not_called()
+        dcp_manager.prepare_spec_decode_drafting_cp_metadata.assert_not_called()
+        metadata = cad.context_parallel_metadata
+        assert np.array_equal(
+            metadata.num_computed_tokens_of_dcp,
+            np.array([[16, 16, 16, 16, 16, 16, 16, 16]], dtype=np.int32),
+        )
+        assert torch.equal(
+            metadata.query_lens_cpu,
+            torch.tensor([5], dtype=torch.int32),
+        )
+        assert metadata.max_query_len == 5
+        assert metadata.dcp_mtp_attn_mask is None
+        assert num_query_total == 5
+
     def test_cad_rewritten_to_cross_attention_shape(self):
         num_reqs, block_size, max_num_tokens = 4, 5, 256
         proposer = self._make_proposer(max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size)
