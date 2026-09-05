@@ -184,23 +184,15 @@ class AscendRejectionSampler(RejectionSampler):
         # won't affect the original logits tensor.
         assert logits is not None
         bonus_logits = logits[bonus_logits_indices]
-        # When force_topk is active, pass the original max_num_logprobs so
-        # that force_topk can engage (D5 won't trigger on -1). When force_topk
-        # is inactive or unavailable, keep the upstream behavior (-1) to
-        # return full [B,V] logits for _get_logprobs_tensors.
-        _force_topk_active = (
-            hasattr(self.sampler, "_force_topk_enabled")
-            and self.sampler._force_topk_enabled(sampling_metadata)
+        # Keep the full-logits path unless force_topk is safe for this batch.
+        force_topk_active = hasattr(self.sampler, "_force_topk_enabled") and self.sampler._force_topk_enabled(
+            sampling_metadata
         )
         bonus_sampler_output = self.sampler(
             logits=bonus_logits,
             sampling_metadata=replace(
                 sampling_metadata,
-                max_num_logprobs=(
-                    sampling_metadata.max_num_logprobs
-                    if _force_topk_active
-                    else -1
-                ),
+                max_num_logprobs=(sampling_metadata.max_num_logprobs if force_topk_active else -1),
             ),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
@@ -266,21 +258,9 @@ class AscendRejectionSampler(RejectionSampler):
         bonus_logits: torch.Tensor | None,
         sampled_token_ids: torch.Tensor,
     ) -> LogprobsTensors:
-        """Override to handle force_topk CompactDist in bonus path.
-
-        When force_topk is active, bonus_sampler_output.logprobs_tensors.logprobs
-        may be a [B, N] tensor (from gather_logprobs_compact) instead of [B, V]
-        raw logits. The upstream _get_logprobs_tensors expects [B, V] to fill
-        into final_logits. We detect the shape mismatch and recover the full
-        [B, V] logits from the original logits tensor.
-        """
-        if (
-            bonus_logits is not None
-            and bonus_logits.shape[-1] != logits.shape[-1]
-        ):
-            bonus_logits = logits[metadata.bonus_logits_indices].to(
-                torch.float32
-            )
+        """Handle compact force_topk logprobs in the bonus path."""
+        if bonus_logits is not None and bonus_logits.shape[-1] != logits.shape[-1]:
+            bonus_logits = logits[metadata.bonus_logits_indices].to(torch.float32)
         return super()._get_logprobs_tensors(
             max_num_logprobs,
             metadata,

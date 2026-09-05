@@ -50,6 +50,8 @@ class TestVllmAdaptor(unittest.TestCase):
         self.model.quant_config = None
         adaptor = VllmEplbAdaptor(self.model)
         self.assertEqual(adaptor.expert_weight_key_per_layer[0], (QuantType.NONE, True))
+        self.assertIs(adaptor.expert_param_per_layer[0][0][0], self.mock_layer.w13_weight_list[0])
+        self.assertIs(adaptor.expert_param_per_layer[0][0][1], self.mock_layer.w2_weight_list[0])
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")

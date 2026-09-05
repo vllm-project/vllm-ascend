@@ -28,9 +28,7 @@ class CompactDist:
             (descending).
     """
 
-    def __init__(
-        self, token_index: torch.Tensor, logprobs: torch.Tensor
-    ):
+    def __init__(self, token_index: torch.Tensor, logprobs: torch.Tensor):
         self.token_index = token_index
         self.logprobs = logprobs
 
@@ -51,17 +49,11 @@ class CompactDist:
         """
         hit = self.token_index == vocab_ids.to(torch.int32).unsqueeze(-1)
         pos = hit.long().argmax(dim=-1)  # [B]
-        val = self.logprobs.gather(
-            1, pos.unsqueeze(1)
-        ).squeeze(1)  # [B]
+        val = self.logprobs.gather(1, pos.unsqueeze(1)).squeeze(1)  # [B]
         found = hit.any(dim=-1)  # [B]
-        return torch.where(
-            found, val, torch.full_like(val, float("-inf"))
-        )
+        return torch.where(found, val, torch.full_like(val, float("-inf")))
 
-    def topn(
-        self, n: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def topn(self, n: int) -> tuple[torch.Tensor, torch.Tensor]:
         """Return the top-n (logprob, token_id) pairs.
 
         Since token_index/logprobs are already descending by logit,

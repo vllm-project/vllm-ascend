@@ -37,7 +37,6 @@ quick_start
 installation
 tutorials/models/index
 tutorials/features/index
-tutorials/hardwares/index
 faqs
 :::
 
