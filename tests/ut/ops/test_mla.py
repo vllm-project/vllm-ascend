@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -7,6 +8,7 @@ from vllm.forward_context import ForwardContext
 from vllm.model_executor.layers.mla import MLAModules
 
 from tests.ut.base import TestBase
+from vllm_ascend.attention.sfa_v1 import PreprocessType
 from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention, IndexerWrapper
 
 
@@ -106,6 +108,47 @@ class TestAscendMultiHeadLatentAttention(TestBase):
 
             self.assertEqual(attn.tp_size, 2)
             self.assertIsNotNone(attn.mla_attn)
+
+    @patch("vllm_ascend.ops.mla.get_current_vllm_config")
+    @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
+    def test_marks_layers_only_when_fused_preprocess_type_resolved(self, mock_tp_size, mock_get_vllm_config):
+        for resolved_type, should_mark in ((PreprocessType.MLAPO, True), (None, False)):
+            with self.subTest(resolved_type=resolved_type):
+                fused_qkv_a_proj = SimpleNamespace()
+                q_proj = SimpleNamespace()
+                mock_mla_attn = MagicMock()
+                mock_mla_attn.process_weights_after_loading = MagicMock()
+                mock_mla_attn.impl = MagicMock()
+                mock_mla_attn.impl._fused_preprocess_type.return_value = resolved_type
+                mock_mla_attn.impl.fused_qkv_a_proj = fused_qkv_a_proj
+                mock_mla_attn.impl.q_proj = q_proj
+
+                with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+                    mock_tp_size.return_value = 2
+                    mock_vllm_config = MagicMock(spec=VllmConfig)
+                    mock_vllm_config.model_config.hf_text_config = MagicMock(
+                        num_hidden_layers=32, first_k_dense_replace=True
+                    )
+                    mock_get_vllm_config.return_value = mock_vllm_config
+                    mock_vllm_config.compilation_config = CompilationConfig()
+
+                    AscendMultiHeadLatentAttention(
+                        hidden_size=self.hidden_size,
+                        num_heads=self.num_heads,
+                        scale=self.scale,
+                        qk_nope_head_dim=self.qk_nope_head_dim,
+                        qk_rope_head_dim=self.qk_rope_head_dim,
+                        v_head_dim=self.v_head_dim,
+                        q_lora_rank=self.q_lora_rank,
+                        kv_lora_rank=self.kv_lora_rank,
+                        mla_modules=self.mock_mla_modules,
+                        cache_config=self.mock_cache_config,
+                        quant_config=self.mock_quant_config,
+                        prefix=self.prefix,
+                    )
+
+                self.assertEqual(hasattr(fused_qkv_a_proj, "_fused_preprocess_managed"), should_mark)
+                self.assertEqual(hasattr(q_proj, "_fused_preprocess_managed"), should_mark)
 
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
