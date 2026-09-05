@@ -921,6 +921,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         dst_type=situ_dst_type,
                     )
                 else:
+                    # aclnnSwigluGroupQuant does not accept glu_alpha/glu_bias:
+                    # the MXFP kernel computes the plain swish(x)*x activation.
+                    # Fail loudly instead of silently dropping a non-default
+                    # alpha/beta configured on the shared experts.
+                    if fused_moe_evts.swiglu_alpha != 1.0 or fused_moe_evts.swiglu_beta != 0.0:
+                        raise NotImplementedError(
+                            "npu_swiglu_group_quant does not support swiglu_alpha/"
+                            "swiglu_beta on the MXFP shared-expert path; got "
+                            f"alpha={fused_moe_evts.swiglu_alpha}, "
+                            f"beta={fused_moe_evts.swiglu_beta}."
+                        )
                     quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
                         hidden_states,
                         topk_weight=None,
