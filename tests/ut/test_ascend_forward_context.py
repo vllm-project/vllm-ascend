@@ -480,6 +480,145 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
 
 
+# ---------------------------------------------------------------------------
+# mega_moe ratio guard + dispatch_ffn_combine HCCL guard
+# ---------------------------------------------------------------------------
+
+
+def test_hccl_buffsize_would_overflow_false_within_limit(monkeypatch):
+    monkeypatch.setenv("HCCL_BUFFSIZE", "200")
+    vllm_config = _make_vllm_config(num_experts_per_tok=8, hidden_size=2048)
+
+    assert afc._hccl_buffsize_would_overflow(128, vllm_config) is False
+
+
+def test_hccl_buffsize_would_overflow_true_when_exceeds(monkeypatch):
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1")
+    vllm_config = _make_vllm_config(num_experts_per_tok=8, hidden_size=2048)
+
+    assert afc._hccl_buffsize_would_overflow(128, vllm_config) is True
+
+
+def test_hccl_buffsize_would_overflow_none_tokens(monkeypatch):
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1")
+    vllm_config = _make_vllm_config()
+
+    assert afc._hccl_buffsize_would_overflow(None, vllm_config) is False
+
+
+def test_hccl_buffsize_would_overflow_uses_per_tp_rank(monkeypatch):
+    # The op sees M=ceil(num_tokens/tp), not the full num_tokens. With tp=8 and
+    # num_tokens=128, M=16. HCCL_BUFFSIZE=12MB: the full-num_tokens check (16MB)
+    # would overflow, but the per-TP-rank check (~10.75MB) does not -> False.
+    monkeypatch.setenv("HCCL_BUFFSIZE", "12")
+    vllm_config = _make_vllm_config(num_experts_per_tok=8, hidden_size=2048, tensor_parallel_size=8)
+
+    assert afc._hccl_buffsize_would_overflow(128, vllm_config) is False
+
+
+@pytest.mark.parametrize(
+    ("num_tokens", "mega_moe_max_tokens", "ratio", "expected"),
+    [
+        # worst_case = 128 * 8 * 8 = 8192 < 65536
+        (128, 65536, 1.0, MoECommType.FUSED_MC2),
+        # worst_case = 1100 * 8 * 8 = 70400 > 65536 -> all2all
+        (1100, 65536, 1.0, MoECommType.ALLTOALL),
+        # ratio < 1 keeps mega_moe: 70400 * 0.5 = 35200 < 65536
+        (1100, 65536, 0.5, MoECommType.FUSED_MC2),
+        # ratio > 1 is stricter: 8192 * 2.0 = 16384 < 65536 still ok
+        (128, 65536, 2.0, MoECommType.FUSED_MC2),
+    ],
+)
+def test_select_mega_moe_or_all2all_ratio_guard(monkeypatch, num_tokens, mega_moe_max_tokens, ratio, expected):
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=8))
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=1,
+            mega_moe_max_tokens=mega_moe_max_tokens,
+            mega_moe_threshold_ratio=ratio,
+        ),
+    )
+    monkeypatch.setattr(afc, "_is_decode_only_node", lambda _vc: False)
+    vllm_config = _make_vllm_config(num_experts=128, num_experts_per_tok=8, tensor_parallel_size=1)
+
+    assert afc._select_mega_moe_or_all2all(num_tokens, vllm_config) == expected
+
+
+def test_select_mega_moe_or_all2all_decode_only_exempt(monkeypatch):
+    # Even when worst_case exceeds the buffer, decode-only nodes are exempt.
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=8))
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=1,
+            mega_moe_max_tokens=1,
+            mega_moe_threshold_ratio=1.0,
+        ),
+    )
+    monkeypatch.setattr(afc, "_is_decode_only_node", lambda _vc: True)
+    vllm_config = _make_vllm_config(num_experts=128, num_experts_per_tok=8, tensor_parallel_size=1)
+
+    assert afc._select_mega_moe_or_all2all(1100, vllm_config) == MoECommType.FUSED_MC2
+
+
+def test_select_a3_mega_moe_falls_back_to_all2all(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _vc: True)
+    monkeypatch.setattr(
+        afc,
+        "get_ascend_config",
+        lambda: SimpleNamespace(
+            enable_fused_mc2=1,
+            mega_moe_max_tokens=65536,
+            mega_moe_threshold_ratio=1.0,
+        ),
+    )
+    monkeypatch.setattr(afc, "_is_decode_only_node", lambda _vc: False)
+    vllm_config = _make_vllm_config(num_experts=128, num_experts_per_tok=8, tensor_parallel_size=1)
+
+    # worst_case = 1100 * 8 * 8 = 70400 > 65536 -> all2all
+    assert afc.select_moe_comm_method(1100, vllm_config) == MoECommType.ALLTOALL
+
+
+def test_select_a3_dispatch_ffn_combine_hccl_fallback(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _vc: False)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "1")
+    vllm_config = _make_vllm_config(num_experts=128, num_experts_per_tok=8, tensor_parallel_size=1, hidden_size=2048)
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.ALLTOALL
+
+
+def test_select_a3_dispatch_ffn_combine_no_hccl_overflow(monkeypatch):
+    _patch_select_moe_comm_method_deps(
+        monkeypatch,
+        device_type=afc.AscendDeviceType.A3,
+        capacity=128,
+        ep_world_size=8,
+        enable_fused_mc2=1,
+    )
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _vc: False)
+    monkeypatch.setenv("HCCL_BUFFSIZE", "200")
+    vllm_config = _make_vllm_config(num_experts=128, num_experts_per_tok=8, tensor_parallel_size=1, hidden_size=2048)
+
+    assert afc.select_moe_comm_method(128, vllm_config) == MoECommType.FUSED_MC2
+
+
 def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}

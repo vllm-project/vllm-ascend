@@ -212,6 +212,7 @@ class TestAscendConfig(TestBase):
         self.assertFalse(ascend_config.enable_kv_nz)
         self.assertEqual(ascend_config.weight_nz_mode, 1)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 65536)
+        self.assertEqual(ascend_config.mega_moe_threshold_ratio, 1.0)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertTrue(ascend_compilation_config.fuse_norm_quant)
@@ -260,12 +261,14 @@ class TestAscendConfig(TestBase):
             "xlite_graph_config": {"enabled": False, "full_mode": True},
             "finegrained_tp_config": {"lmhead_tensor_parallel_size": "0"},
             "mega_moe_max_tokens": 32768,
+            "mega_moe_threshold_ratio": 0.5,
         }
         ascend_config = init_ascend_config(test_vllm_config)
         self.assertEqual(ascend_config.eplb_config.num_redundant_experts, 2)
         self.assertTrue(ascend_config.multistream_overlap_shared_expert)
         self.assertTrue(ascend_config.enable_force_eplb)
         self.assertEqual(ascend_config.mega_moe_max_tokens, 32768)
+        self.assertEqual(ascend_config.mega_moe_threshold_ratio, 0.5)
 
         ascend_compilation_config = ascend_config.ascend_compilation_config
         self.assertFalse(ascend_compilation_config.fuse_norm_quant)
@@ -293,6 +296,22 @@ class TestAscendConfig(TestBase):
             with (
                 self.subTest(invalid_value=invalid_value),
                 self.assertRaisesRegex(ValueError, "mega_moe_max_tokens must be"),
+            ):
+                init_ascend_config(test_vllm_config)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_init_ascend_config_validates_mega_moe_threshold_ratio(self, mock_fix_incompatible_config):
+        invalid_values = [0, -1, -0.5]
+
+        for invalid_value in invalid_values:
+            clear_ascend_config()
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"mega_moe_threshold_ratio": invalid_value}
+
+            with (
+                self.subTest(invalid_value=invalid_value),
+                self.assertRaisesRegex(ValueError, "mega_moe_threshold_ratio must be"),
             ):
                 init_ascend_config(test_vllm_config)
 
@@ -1036,6 +1055,14 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc = VllmConfig()
         vc.additional_config = {"mega_moe_max_tokens": "131072"}
         self.assertEqual(init_ascend_config(vc).mega_moe_max_tokens, 131072)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_mega_moe_threshold_ratio_float_lax(self, mock_fix):
+        # float string "0.5" coerces to 0.5 (fixes str-vs-float silent failure).
+        vc = VllmConfig()
+        vc.additional_config = {"mega_moe_threshold_ratio": "0.5"}
+        self.assertEqual(init_ascend_config(vc).mega_moe_threshold_ratio, 0.5)
 
     @_clean_up
     @patch("vllm_ascend.ascend_config._MEGA_MOE_SUPPORTED", True)
