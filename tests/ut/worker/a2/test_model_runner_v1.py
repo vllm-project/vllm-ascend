@@ -214,6 +214,40 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
 
+    def test_allocate_packed_kv_cache_reuses_one_backing(self):
+        runner = self._build_runner()
+        layer_names = ["model.layers.0.attn", "model.layers.1.attn"]
+        layer_specs = {
+            name: FullAttentionSpec(
+                block_size=2,
+                num_kv_heads=1,
+                head_size=4,
+                dtype=torch.bfloat16,
+            )
+            for name in layer_names
+        }
+        runner._get_layer_kv_cache_specs = MagicMock(return_value=layer_specs)
+        total_size = 128
+        block_stride = 32
+        kv_cache_config = KVCacheConfig(
+            num_blocks=total_size // block_stride,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=total_size,
+                    shared_by=[name],
+                    offset=index * 16,
+                    block_stride=block_stride,
+                )
+                for index, name in enumerate(layer_names)
+            ],
+            kv_cache_groups=[],
+        )
+
+        raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
+
+        self.assertIs(raw_caches[layer_names[0]], raw_caches[layer_names[1]])
+        self.assertEqual(raw_caches[layer_names[0]].numel(), total_size)
+
     def test_get_layer_kv_cache_specs_restores_sfa_indexer_spec(self):
         runner = self._build_runner()
         layer_name = "model.layers.1.self_attn.indexer.k_cache"
@@ -764,6 +798,67 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertEqual(indexer_scale_cache.dtype, torch.float16)
 
 
+class TestQwen4ExpPleInputs(unittest.TestCase):
+    def _build_runner(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.model_config = SimpleNamespace(
+            hf_text_config=SimpleNamespace(
+                ple_layer_ids=[0],
+                ngram_size=3,
+                eos_token_id=999,
+            )
+        )
+        runner.max_num_reqs = 2
+        runner.device = torch.device("cpu")
+        runner._qwen4_exp_ngram_context_buffer = None
+        runner.input_ids = SimpleNamespace(gpu=torch.tensor([5], dtype=torch.int32))
+        runner.query_start_loc = SimpleNamespace(
+            gpu=torch.tensor([0, 1], dtype=torch.int32)
+        )
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.array([3], dtype=np.int32),
+            token_ids_cpu=np.array([[7, 8, 9, 0]], dtype=np.int32),
+        )
+        return runner
+
+    def test_ngram_context_keeps_address_and_refreshes_values(self):
+        runner = self._build_runner()
+        dummy_kwargs = {}
+        runner._maybe_add_qwen4_exp_ple_inputs(
+            dummy_kwargs,
+            num_tokens=1,
+            num_reqs=1,
+            num_reqs_padded=1,
+            is_dummy=True,
+        )
+        dummy_context = dummy_kwargs["ngram_context"]
+        stable_ptr = dummy_context.data_ptr()
+        self.assertEqual(dummy_context.tolist(), [[999, 999]])
+
+        real_kwargs = {}
+        runner._maybe_add_qwen4_exp_ple_inputs(
+            real_kwargs,
+            num_tokens=1,
+            num_reqs=1,
+            num_reqs_padded=1,
+        )
+        real_context = real_kwargs["ngram_context"]
+        self.assertEqual(real_context.data_ptr(), stable_ptr)
+        self.assertEqual(real_context.tolist(), [[8, 9]])
+
+        external = torch.tensor([[33, 44]], dtype=torch.int32)
+        external_kwargs = {"ngram_context": external}
+        runner._maybe_add_qwen4_exp_ple_inputs(
+            external_kwargs,
+            num_tokens=1,
+            num_reqs=1,
+            num_reqs_padded=1,
+        )
+        copied_context = external_kwargs["ngram_context"]
+        self.assertEqual(copied_context.data_ptr(), stable_ptr)
+        self.assertEqual(copied_context.tolist(), [[33, 44]])
+
+
 class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -1069,6 +1164,73 @@ class TestCorrectOptimisticSeqLensCpu(unittest.TestCase):
         runner.valid_sampled_token_count_event = None
         with self.assertRaises(AssertionError):
             runner._correct_optimistic_seq_lens_cpu(1)
+
+
+class TestQSAInputBatchBlockTableSizing(unittest.TestCase):
+    """Exercise the production runner path that supplies BlockTable widths."""
+
+    @staticmethod
+    def _qsa_group():
+        compressed = AscendMLAAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            compress_ratio=4,
+        )
+        main = FullAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=256,
+            head_size_v=256,
+            dtype=torch.bfloat16,
+        )
+        return KVCacheGroupSpec(
+            layer_names=["compressed", "main"],
+            kv_cache_spec=UniformTypeKVCacheSpecs(
+                block_size=768,
+                kv_cache_specs={"compressed": compressed, "main": main},
+            ),
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.select_common_block_size", return_value=768)
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_runner_uses_composite_spec_contract_for_boundaries(self, mock_input_batch, _mock_select):
+        group = self._qsa_group()
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.max_encoder_len = 0
+        runner.cache_config = SimpleNamespace(block_size=128)
+        runner.kernel_block_sizes = []
+        runner.attn_groups = [[SimpleNamespace(backend=object())]]
+        runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
+        runner.max_num_reqs = 32
+        runner.max_num_tokens = 4096
+        runner.device = torch.device("cpu")
+        runner.pin_memory = False
+        runner.model_config = MagicMock()
+        runner.model_config.get_vocab_size.return_value = 152064
+        runner.is_pooling_model = False
+        runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+        runner.input_batch = SimpleNamespace(logitsprocs=None)
+        runner.vllm_config = SimpleNamespace(
+            speculative_config=SimpleNamespace(num_speculative_tokens=3),
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=256,
+            kv_cache_tensors=[],
+            kv_cache_groups=[group],
+        )
+
+        for max_model_len in (4096, 6143, 6144, 71680, 135168):
+            with self.subTest(max_model_len=max_model_len):
+                runner.max_model_len = max_model_len
+                mock_input_batch.reset_mock()
+                runner.may_reinitialize_input_batch(kv_cache_config)
+                self.assertEqual(
+                    mock_input_batch.call_args.kwargs["max_num_blocks_per_req"],
+                    [(max_model_len + 767) // 768],
+                )
 
 
 if __name__ == "__main__":

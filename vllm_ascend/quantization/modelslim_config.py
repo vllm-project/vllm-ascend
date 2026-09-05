@@ -81,6 +81,13 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
         ],
         "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     },
+    "qwen4_exp": {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    },
     "qwen3_5": {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -413,6 +420,8 @@ def get_linear_quant_type(
         ]
         for shard_prefix in shard_prefixes:
             shard_key = shard_prefix + ".weight"
+            if shard_key not in quant_description and shard_prefix in quant_description:
+                shard_key = shard_prefix
             # Only Gemma4 k_eq_v is allowed to omit v_proj; other missing
             # shards fall through to the original dictionary lookup below.
             if shard_key not in quant_description and _is_missing_v_shard(shard_key, quant_description):
@@ -650,6 +659,12 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
 
+        if model_type in ("qwen4_exp_mtp", "qwen4_exp") and prefix.startswith("mtp.layers."):
+            # Qwen4-Exp MTP weights are stored with local layer indices
+            # (mtp.layers.0), while the runtime module uses global indices
+            # (mtp.layers.48).
+            prefix = re.sub(r"(?<=^mtp\.layers\.)\d+", "0", prefix, count=1)
+
         if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use
             # ``model.layers.*``.  The Step3P7 vLLM wrapper mapper rewrites
@@ -760,6 +775,8 @@ class AscendModelSlimConfig(QuantizationConfig):
             is_skipped = None
             for shard_prefix in shard_prefixes:
                 shard_key = shard_prefix + ".weight"
+                if shard_key not in self.quant_description and shard_prefix in self.quant_description:
+                    shard_key = shard_prefix
                 # Preserve the original failure behavior except for the known
                 # k_eq_v case where v_proj is replicated from k_proj.
                 if shard_key not in self.quant_description and _is_missing_v_shard(shard_key, self.quant_description):
