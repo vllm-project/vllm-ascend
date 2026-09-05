@@ -532,7 +532,23 @@ class NPUPlatform(Platform):
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        if compilation_config.mode not in [CompilationMode.NONE, CompilationMode.VLLM_COMPILE]:
+        # debug_dump_path keeps direct Dynamo modes enabled for FX graph
+        # collection. vLLM may wrap the configured Inductor backend with a
+        # graph-dumping backend before execution.
+        direct_inductor_modes = (
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+        )
+        dump_inductor_fx = (
+            compilation_config.mode in direct_inductor_modes
+            and compilation_config.backend == "inductor"
+            and compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            and compilation_config.debug_dump_path is not None
+        )
+        if not dump_inductor_fx and compilation_config.mode not in [
+            CompilationMode.NONE,
+            CompilationMode.VLLM_COMPILE,
+        ]:
             logger.warning(
                 "NPU does not support compilation mode. mode=%s, action: setting CUDAGraphMode to NONE.",
                 compilation_config.mode,
@@ -591,7 +607,8 @@ class NPUPlatform(Platform):
 
         compilation_config.use_inductor = False
         if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
-            compilation_config.mode = CompilationMode.NONE
+            if not dump_inductor_fx:
+                compilation_config.mode = CompilationMode.NONE
             ascend_config.ascend_compilation_config.enable_npugraph_ex = False
             ascend_config.ascend_compilation_config.enable_static_kernel = False
             vllm_config.additional_config["ascend_compilation_config"]["enable_npugraph_ex"] = False

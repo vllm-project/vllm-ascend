@@ -35,6 +35,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size, tensor_model_parallel_all_gather
@@ -3802,7 +3803,22 @@ class NPUModelRunner(GPUModelRunner):
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         ) # type: bool
-        
+
+        if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+            from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+            _apply_constrain_to_fx_strides_patch()
+            backend = self.compilation_config.init_backend(self.vllm_config)
+            debug_dump_path = self.vllm_config.compile_debug_dump_path()
+            if debug_dump_path is not None:
+                from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
+
+                backend = wrap_backend_with_fx_dump(
+                    backend, debug_dump_path / "fx_graphs", "model"
+                )
+            compilation_counter.stock_torch_compile_count += 1
+            self.model.compile(fullgraph=True, backend=backend)
+
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
