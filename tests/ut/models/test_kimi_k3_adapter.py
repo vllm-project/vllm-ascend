@@ -49,6 +49,31 @@ def test_ascend_attn_res_matches_canonical_k3_math():
     torch.testing.assert_close(output, expected)
 
 
+def test_ascend_attn_res_keeps_empty_blocks_on_eager_path(monkeypatch):
+    prefix_sum = torch.randn(2, 4, dtype=torch.bfloat16)
+    block_residual = torch.empty(2, 0, 4, dtype=torch.bfloat16)
+    projection = SimpleNamespace(weight=torch.randn(1, 4, dtype=torch.bfloat16))
+    norm = SimpleNamespace(
+        weight=torch.randn(4, dtype=torch.bfloat16),
+        variance_epsilon=1e-5,
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("empty block_residual must stay on the eager path")
+
+    monkeypatch.setattr(kimi_k3, "apply_attn_res", fail_if_called)
+
+    output = kimi_k3._apply_ascend_attn_res(
+        prefix_sum,
+        block_residual,
+        projection,
+        norm,
+        num_valid_blocks=0,
+    )
+
+    assert output is prefix_sum
+
+
 def test_k3_dspark_reports_draft_attention_causality():
     model = AscendK3DSparkForCausalLM.__new__(AscendK3DSparkForCausalLM)
     nn.Module.__init__(model)
