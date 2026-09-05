@@ -138,23 +138,34 @@ def _make_vllm_config(num_speculative_tokens: int | None = None) -> SimpleNamesp
     )
 
 
-def _make_kv_cache_spec(compressor_ratio: int) -> SimpleNamespace:
+def _make_kv_cache_spec(
+    compressor_ratio: int,
+    *,
+    use_tokens_per_state: bool = False,
+) -> SimpleNamespace:
     physical_block_size = 128
     logical_compress_ratio = 128 if compressor_ratio > 4 else compressor_ratio
-    return SimpleNamespace(
-        compress_ratio=compressor_ratio,
+    # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
+    ratio_kwargs = (
+        {"tokens_per_state": compressor_ratio} if use_tokens_per_state else {"compress_ratio": compressor_ratio}
+    )
+    kv_cache_spec = SimpleNamespace(
         block_size=physical_block_size * logical_compress_ratio,
         storage_block_size=physical_block_size,
+        **ratio_kwargs,
     )
+    return kv_cache_spec
 
 
 def _make_builder(
     compressor_ratio: int = 4,
     num_speculative_tokens: int | None = None,
+    *,
+    use_tokens_per_state: bool = False,
 ) -> AscendDSAMetadataBuilder:
     vllm_config = _make_vllm_config(num_speculative_tokens)
     builder = AscendDSAMetadataBuilder(
-        kv_cache_spec=_make_kv_cache_spec(compressor_ratio),
+        kv_cache_spec=_make_kv_cache_spec(compressor_ratio, use_tokens_per_state=use_tokens_per_state),
         layer_names=["model.layers.0.self_attn.attn"],
         vllm_config=vllm_config,
         device=torch.device("cpu"),
@@ -205,6 +216,35 @@ def _build_draft_req_metadata(
         torch.ones(num_tokens),
         torch.zeros(num_tokens),
     )
+
+
+@pytest.mark.parametrize("use_tokens_per_state", [False, True])
+def test_metadata_builder_accepts_compression_ratio_aliases(
+    use_tokens_per_state: bool,
+):
+    builder = _make_builder(4, use_tokens_per_state=use_tokens_per_state)
+
+    assert builder.compressor_ratio == 4
+
+
+@pytest.mark.parametrize(
+    ("compressor_ratio", "num_tokens", "num_reqs", "expected_rows"),
+    [
+        (1, 13, 3, 13),
+        (4, 13, 3, 6),
+        (128, 13, 3, 3),
+    ],
+)
+def test_num_compressor_metadata_rows(
+    compressor_ratio: int,
+    num_tokens: int,
+    num_reqs: int,
+    expected_rows: int,
+):
+    builder = _make_builder(compressor_ratio)
+    builder.num_actual_tokens = num_tokens
+
+    assert builder._num_compressor_metadata_rows(num_reqs) == expected_rows
 
 
 def test_draft_swa_and_sas_share_attention_task():

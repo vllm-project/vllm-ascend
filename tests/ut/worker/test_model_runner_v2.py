@@ -1,3 +1,5 @@
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -42,7 +44,7 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
             side_effect=[10.0, 10.125],
         ),
     ):
-        output = runner.execute_model(scheduler_output)
+        output = runner.execute_model(scheduler_output, valid_dummy_state_slots=True)
 
     assert output is None
     assert runner._cpp_execution_time_ms == pytest.approx(125.0)
@@ -55,6 +57,7 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
     }
     if not is_vllm_0_27_1:
         expected_kwargs["context_len"] = 0
+        expected_kwargs["valid_dummy_state_slots"] = True
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -146,3 +149,44 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     )
     state._replace.assert_called_once_with(aux_hidden_states=[restored_aux_hidden_states])
     assert runner.execute_model_state is restored_state
+
+
+def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
+    source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    padding_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "num_tokens_after_padding" for target in node.targets)
+    ]
+    partition_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "maybe_partition_pcp_batch"
+    ]
+
+    # prepare_inputs has one implementation for v0.27.1 and one for newer
+    # vLLM snapshots. Both retain the real global PCP batch when it is larger
+    # than the graph descriptor. Only the newer upstream contract from vLLM
+    # #53515 accepts the descriptor as an explicit rank-local padded extent.
+    assert len(padding_assignments) == 2
+    for assignment in padding_assignments:
+        assert ast.unparse(assignment.value) == "max(num_tokens, batch_desc.num_tokens)"
+
+    assert len(partition_calls) == 2
+    padded_num_tokens_values = [
+        next(
+            (keyword.value for keyword in call.keywords if keyword.arg == "padded_num_tokens"),
+            None,
+        )
+        for call in partition_calls
+    ]
+    assert sum(value is None for value in padded_num_tokens_values) == 1
+    padded_num_tokens = next(value for value in padded_num_tokens_values if value is not None)
+    assert isinstance(padded_num_tokens, ast.Attribute)
+    assert padded_num_tokens.attr == "num_tokens"
+    assert isinstance(padded_num_tokens.value, ast.Name)
+    assert padded_num_tokens.value.id == "batch_desc"

@@ -54,7 +54,7 @@ from vllm.v1.request import RequestStatus
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
-from vllm_ascend.utils import enable_custom_op, is_vl_model
+from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
 
 # isort: off
 if TYPE_CHECKING:
@@ -1693,8 +1693,7 @@ class MooncakeConnectorWorker:
                     lengths.append(single_kv_cache.element_size() * math.prod(single_kv_cache.shape))
         elif self.use_mamba:
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-                share_tensor_addr = []
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
                     kv_cache_tuple = kv_caches[layer_name]
                     if isinstance(kv_cache_tuple, (list, tuple)) is False:
                         kv_cache_tuple = [kv_cache_tuple]
@@ -1708,10 +1707,6 @@ class MooncakeConnectorWorker:
                             single_kv_cache.element_size() * math.prod(block_shape) * block_size_scale
                         )
                         self.kv_caches_base_addr.append(single_kv_cache.data_ptr())
-                        share_tensor_addr.append(single_kv_cache.data_ptr())
-                if share_tensor_addr:
-                    ptrs.append(min(share_tensor_addr))
-                    lengths.append(kv_cache_tensor.size)
             self.block_stride_per_addr.extend(self.block_len_per_addr)
         elif self.use_compress:
             layer_group_idx = dict[str, int]()
@@ -1719,16 +1714,16 @@ class MooncakeConnectorWorker:
                 for layer_name in group.layer_names:
                     layer_group_idx[layer_name] = i
             for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-                if not kv_cache_tensor.shared_by:
+                if not get_kv_cache_tensor_layers(kv_cache_tensor):
                     continue
                 share_tensor_addr = []
                 share_tensor_stride = []
                 cur_tensor_group_idx = []
-                for layer_name in kv_cache_tensor.shared_by:
+                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
                     cur_tensor_group_idx.append(layer_group_idx[layer_name])
                     kv_cache_tuple = kv_caches[layer_name]
                     if not isinstance(kv_cache_tuple, (tuple, list)):
-                        kv_cache_tuple = kv_cache_tuple
+                        kv_cache_tuple = [kv_cache_tuple]
                     for single_tensor in kv_cache_tuple:
                         tensor_addr = single_tensor.data_ptr()
                         if tensor_addr in share_tensor_addr or tensor_addr in self.kv_caches_base_addr:
@@ -1740,10 +1735,43 @@ class MooncakeConnectorWorker:
                 self.addr_group_idx.append(cur_tensor_group_idx)  # type: ignore[arg-type]
                 self.block_stride_per_addr.append(share_tensor_stride[0])
                 self.block_len_per_addr.append(share_tensor_stride[0])
-                ptrs.append(min(share_tensor_addr))
-                lengths.append(kv_cache_tensor.size)
         else:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
+
+        if self.use_hybrid:
+            # KVCacheTensor.size is the size of the shared backing pool, not
+            # the byte length of every logical tensor group described by it.
+            ptrs = []
+            lengths = []
+            for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
+                tensor_addrs = []
+                tensor_ends = []
+                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
+                    kv_cache_tuple = kv_caches[layer_name]
+                    if not isinstance(kv_cache_tuple, (tuple, list)):
+                        kv_cache_tuple = [kv_cache_tuple]
+                    for tensor in kv_cache_tuple:
+                        tensor_nbytes = tensor.element_size() * math.prod(tensor.shape)
+                        if tensor_nbytes == 0:
+                            continue
+                        tensor_addrs.append(tensor.data_ptr())
+                        tensor_ends.append(tensor.data_ptr() + tensor_nbytes)
+                if tensor_addrs:
+                    start = min(tensor_addrs)
+                    ptrs.append(start)
+                    lengths.append(max(tensor_ends) - start)
+
+            # Overlaid hybrid groups may still cover the same physical bytes.
+            regions = sorted((ptr, ptr + length) for ptr, length in zip(ptrs, lengths))
+            merged_regions: list[tuple[int, int]] = []
+            for start, end in regions:
+                if merged_regions and start < merged_regions[-1][1]:
+                    previous_start, previous_end = merged_regions[-1]
+                    merged_regions[-1] = (previous_start, max(previous_end, end))
+                else:
+                    merged_regions.append((start, end))
+            ptrs = [start for start, _ in merged_regions]
+            lengths = [end - start for start, end in merged_regions]
 
         global_te.register_buffer(ptrs, lengths)
         # After KV Caches registered, start the sending or receiving thread.

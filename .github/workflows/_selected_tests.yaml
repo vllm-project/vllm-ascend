@@ -128,8 +128,14 @@ jobs:
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
+        env:
+          EXPECTED_VLLM_REF: ${{ inputs.vllm }}
         run: |
+          echo "Requested vLLM ref: ${EXPECTED_VLLM_REF}"
+          echo "vLLM checkout: $(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "${EXPECTED_VLLM_REF}^{commit}")"
           VLLM_TARGET_DEVICE=empty uv pip install .
+          python3 -c 'from importlib.metadata import version; print("Installed vLLM version:", version("vllm"))'
           pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
@@ -155,6 +161,9 @@ jobs:
           fi
           git cat-file -e "${BASE_SHA}^{commit}"
           git rebase "$BASE_SHA"
+          echo "Validation base SHA: ${BASE_SHA}"
+          echo "Validation source commit: $(git rev-parse HEAD)"
+          echo "Validation source tree: $(git rev-parse 'HEAD^{tree}')"
           git submodule sync --recursive
           git submodule update --init --recursive
 
@@ -272,6 +281,24 @@ jobs:
         if: ${{ matrix.group.npu_type != 'cpu' && matrix.group.npu_type == '310p' }}
         run: |
           pip uninstall -y triton-ascend triton
+
+      - name: Verify installed validation version
+        env:
+          EXPECTED_VLLM_REF: ${{ inputs.vllm }}
+        run: |
+          python3 - <<'PY'
+          import os
+          from importlib.metadata import version
+          from packaging.version import Version
+
+          installed = version("vllm")
+          effective = os.environ.get("VLLM_VERSION") or installed
+          expected_release = os.environ["EXPECTED_VLLM_REF"] == "v0.27.1"
+          print(f"Validation installed vLLM: {installed}; effective version: {effective}")
+          for value in (installed, effective):
+              is_release = Version(value.split("+")[0]) == Version("0.27.1")
+              assert is_release == expected_release, (installed, effective, expected_release)
+          PY
 
       - name: Run selected tests with device
         if: ${{ matrix.group.npu_type != 'cpu' }}

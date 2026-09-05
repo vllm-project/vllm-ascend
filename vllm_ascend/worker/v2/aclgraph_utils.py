@@ -60,12 +60,19 @@ def _prepare_pcp_inputs_to_capture(
     """Build graph inputs with the same PCP-local layout used on replay."""
     if vllm_version_is("0.27.1"):
         input_batch = cudagraph_utils.InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+        input_batch = pcp_manager.partition_batch(input_batch)
+        input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
     else:
+        # vLLM #53515 passes PCP-local input buffers into graph capture, so the
+        # dummy batch must not be partitioned a second time. vLLM #53869
+        # supplies capture-only PCP metadata instead. The block tables must
+        # retain the same PCP-local backing that runtime prepare_attn updates,
+        # because the SFA full graph cannot rebind their captured pointer.
         input_batch = cudagraph_utils.InputBatch.make_dummy(
             num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
         )
-    input_batch = pcp_manager.partition_batch(input_batch)
-    input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
+        input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
+        slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
     attn_metadata = model_state.prepare_attn(
@@ -218,6 +225,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        # vLLM #53869 supplies PCP slot mappings during graph capture.
+        pcp_manager: Any = None,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
@@ -228,6 +237,21 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 pcp_manager=pcp_manager,
             )
         with communicator_switch():
+            if not vllm_version_is("0.27.1"):
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
             return super().capture(
                 model,
                 model_state,

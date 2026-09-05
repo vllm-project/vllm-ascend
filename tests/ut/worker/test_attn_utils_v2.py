@@ -8,14 +8,17 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -33,8 +36,208 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.models.deepseek_v4 import compressor as deepseek_v4_compressor
 from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
+from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _get_kv_cache_config_deepseek_v4_main,
+)
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0) -> KVCacheTensor:
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.27.1"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size,
+        block_stride=page_size,
+        offset=0,
+    )
+
+
+def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttentionSpec:
+    """Build a DSV4 AscendMLAAttentionSpec; #51718 moved compress_ratio ->
+    tokens_per_state on main."""
+    ratio_kwargs = (
+        {"compress_ratio": compress_ratio} if vllm_version_is("0.27.1") else {"tokens_per_state": compress_ratio}
+    )
+    return AscendMLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        model_version="deepseek_v4",
+        **ratio_kwargs,
+    )
+
+
+def _spec_compress_ratio(spec) -> int:
+    """Compression ratio of an MLA spec on either vLLM lane."""
+    return spec.compress_ratio if vllm_version_is("0.27.1") else spec.tokens_per_state
+
+
+@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #51718 only changed the main allocation entry point")
+def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
+    layer_name = "model.layers.0.self_attn.attn"
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    num_blocks = 3
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [layer_name],
+                spec.page_size_bytes,
+            )
+        ],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+    )
+    layer = SimpleNamespace(
+        get_attn_backend=lambda: AscendAttentionBackend,
+        kv_sharing_target_layer_name=None,
+        num_heads=8,
+    )
+    vllm_config = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="auto"),
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(hf_config=SimpleNamespace()),
+        quant_config=None,
+    )
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vllm_config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: {layer_name: layer})
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *_args, **_kwargs: False)
+
+    kv_caches = attn_utils.allocate_kv_cache_main(
+        kv_cache_config,
+        device=torch.device("cpu"),
+        layout=None,
+        kernel_block_sizes=[spec.block_size],
+    )
+
+    key_cache, value_cache = kv_caches[layer_name]
+    expected_shape = (num_blocks, spec.block_size, spec.num_kv_heads, spec.head_size)
+    assert key_cache.shape == expected_shape
+    assert value_cache.shape == expected_shape
+
+
+@pytest.mark.skipif(
+    vllm_version_is("0.27.1"),
+    reason="vLLM #51718 only changed the main planner",
+)
+def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
+    small_name = "model.layers.0.self_attn.attn"
+    large_name = "model.layers.1.self_attn.attn"
+    aliased_large_name = "model.layers.2.self_attn.attn"
+    mtp_name = "model.mtp.layers.0.self_attn.attn"
+    small_spec = AscendMLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.float16,
+        model_version="deepseek_v4",
+        tokens_per_state=1,
+    )
+    large_spec = AscendMLAAttentionSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=8,
+        dtype=torch.float16,
+        model_version="deepseek_v4",
+        tokens_per_state=1,
+    )
+    full_group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {
+            small_name: small_spec,
+            large_name: large_spec,
+            mtp_name: large_spec,
+        }
+    )
+    alias_group_spec = UniformTypeKVCacheSpecs.from_specs({aliased_large_name: large_spec})
+    assert full_group_spec is not None
+    assert alias_group_spec is not None
+    groups = [
+        KVCacheGroupSpec(
+            layer_names=[small_name, large_name, mtp_name],
+            kv_cache_spec=full_group_spec,
+        ),
+        KVCacheGroupSpec(
+            layer_names=[aliased_large_name],
+            kv_cache_spec=alias_group_spec,
+        ),
+    ]
+    num_blocks = 3
+    tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
+    backing_size = tuple_stride * 2
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, value: value,
+    )
+    planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
+        SimpleNamespace(),
+        groups,
+        backing_size,
+    )
+    assert planned_num_blocks == num_blocks
+    kv_cache_config = KVCacheConfig(
+        num_blocks=planned_num_blocks,
+        kv_cache_tensors=descriptors,
+        kv_cache_groups=groups,
+    )
+    vllm_config = SimpleNamespace(
+        kv_transfer_config=None,
+        model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(compress_ratios=[1]),
+        ),
+    )
+    monkeypatch.setattr(
+        attn_utils,
+        "get_current_vllm_config",
+        lambda: vllm_config,
+    )
+    allocations = []
+
+    def allocate_once(numel, _alignment, _device):
+        allocations.append(numel)
+        return torch.zeros(numel, dtype=torch.int8)
+
+    monkeypatch.setattr(
+        attn_utils,
+        "_allocate_int8_cache_tensor",
+        allocate_once,
+    )
+
+    raw_caches = attn_utils._allocate_kv_cache(
+        kv_cache_config,
+        shared_layers={},
+        device=torch.device("cpu"),
+    )
+
+    assert allocations == [backing_size]
+    tensor_raw_caches: dict[str, torch.Tensor] = {}
+    for layer_name, raw in raw_caches.items():
+        assert isinstance(raw, torch.Tensor)
+        tensor_raw_caches[layer_name] = raw
+    assert len({raw.untyped_storage().data_ptr() for raw in tensor_raw_caches.values()}) == 1
+    descriptors_by_layer = {layer_name: descriptor for descriptor in descriptors for layer_name in descriptor.layers}
+    base_offset = min(
+        raw.storage_offset() - descriptors_by_layer[name].offset for name, raw in tensor_raw_caches.items()
+    )
+    for layer_name, raw in tensor_raw_caches.items():
+        descriptor = descriptors_by_layer[layer_name]
+        assert raw.storage_offset() == base_offset + descriptor.offset
+    assert tensor_raw_caches[large_name].storage_offset() == tensor_raw_caches[aliased_large_name].storage_offset()
+    assert tensor_raw_caches[small_name].storage_offset() != tensor_raw_caches[large_name].storage_offset()
+    assert tensor_raw_caches[mtp_name].storage_offset() == (
+        base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks
+    )
 
 
 @pytest.mark.parametrize(
@@ -112,7 +315,13 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
 ):
     """Exercise DSV4 discovery, allocation, reshape, and binding as one flow."""
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
-    cache_config = SimpleNamespace(block_size=32, cache_dtype="auto")
+    cache_config = SimpleNamespace(
+        block_size=32,
+        cache_dtype="auto",
+        # vLLM #51718: main's init_kv_cache reads the resolved KV cache layout
+        # from the cache config; the Ascend DSV4 path ignores it.
+        get_resolved_kv_cache_layout=lambda: None,
+    )
     vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
@@ -169,17 +378,21 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
     assert spec.storage_block_size == cache_config.block_size
     merged_spec = spec.merge([spec])
-    assert merged_spec.compress_ratio == cache_layer.compress_ratio
+    if vllm_version_is("0.27.1"):
+        assert merged_spec.compress_ratio == cache_layer.compress_ratio
+    else:
+        assert merged_spec.tokens_per_state == cache_layer.compress_ratio
     assert merged_spec.storage_block_size == cache_config.block_size
 
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
-            KVCacheTensor(
-                size=num_blocks * spec.page_size_bytes,
-                shared_by=[layer_name],
-            )
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                [layer_name],
+                spec.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -196,21 +409,81 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     )
     runner_kv_caches: list[Any] = []
 
-    kv_caches = upstream_attn_utils.init_kv_cache(
-        runner_kv_caches=runner_kv_caches,
-        forward_context={layer_name: cache_layer},
-        kv_cache_config=kv_cache_config,
-        attn_groups=[[attn_group]],
-        device=torch.device("cpu"),
-        cache_dtype=cache_config.cache_dtype,
-        kernel_block_sizes=[spec.block_size],
-        vllm_config=vllm_config,
-    )
+    if vllm_version_is("0.27.1"):
+        kv_caches = upstream_attn_utils.init_kv_cache(
+            runner_kv_caches=runner_kv_caches,
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            attn_groups=[[attn_group]],
+            device=torch.device("cpu"),
+            cache_dtype=cache_config.cache_dtype,
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
+    else:
+        # vLLM #51718 reworked upstream init_kv_cache to allocate generic 4D
+        # views via `allocate_kv_cache` + `create_kv_cache_views`; that layout
+        # cannot express the Ascend DSV4 page-strided cache. Route the
+        # allocation through the Ascend DSV4 path (the same wiring the v0.27.1
+        # patch applies) so the returned structure matches on both lanes.
+        def _ascend_allocate_kv_cache(
+            _kv_cache_config: KVCacheConfig,
+            _device: torch.device,
+            _layout: Any,
+            _kernel_block_sizes: list[int],
+        ) -> dict[str, Any]:
+            del _layout
+            raw_tensors = attn_utils._allocate_kv_cache(
+                _kv_cache_config,
+                shared_layers={},
+                device=_device,
+            )
+            # `_reshape_kv_cache_v2` expects the flat attention-group list,
+            # matching upstream v0.27.1 `init_kv_cache`, which flattens
+            # `attn_groups` before reshaping.
+            return attn_utils._reshape_kv_cache_v2(
+                attn_groups=[attn_group],
+                kv_cache_raw_tensors=raw_tensors,
+                cache_dtype=cache_config.cache_dtype,
+                kernel_block_sizes=_kernel_block_sizes,
+                shared_kv_cache_layers={},
+                kv_cache_config=_kv_cache_config,
+            )
+
+        def _ascend_bind_kv_cache(
+            kv_caches: dict[str, Any],
+            forward_context: dict[str, Any],
+            runner_kv_caches_: list[Any],
+            num_attn_module: int = 1,
+            kv_cache_groups: Any = None,
+        ) -> None:
+            # vLLM #52506 added kv_cache_groups to bind_kv_cache.
+            del num_attn_module, kv_cache_groups
+            assert len(runner_kv_caches_) == 0
+            for kv_cache in kv_caches.values():
+                runner_kv_caches_.append(kv_cache)
+            for layer_name_, kv_cache in kv_caches.items():
+                forward_context[layer_name_].kv_cache = kv_cache
+
+        monkeypatch.setattr(upstream_attn_utils, "allocate_kv_cache", _ascend_allocate_kv_cache)
+        monkeypatch.setattr(upstream_attn_utils, "bind_kv_cache", _ascend_bind_kv_cache)
+        kv_caches = upstream_attn_utils.init_kv_cache(
+            runner_kv_caches=runner_kv_caches,
+            forward_context={layer_name: cache_layer},
+            kv_cache_config=kv_cache_config,
+            device=torch.device("cpu"),
+            kernel_block_sizes=[spec.block_size],
+            vllm_config=vllm_config,
+        )
 
     cache_components = kv_caches[layer_name]
-    assert cache_layer.kv_cache is cache_components
     assert len(runner_kv_caches) == 1
     assert runner_kv_caches[0] is cache_components
+    if vllm_version_is("0.27.1"):
+        # The v0.27.1 patch binds the pre-set layer tensor in place.
+        assert cache_layer.kv_cache is cache_components
+    # On main the layer cache is replaced by the freshly allocated views, so
+    # the returned structure is validated by the checks below instead.
     assert [component.shape for component in cache_components] == [
         (num_blocks, spec.storage_block_size, 1, dim) for dim in component_dims
     ]
@@ -268,21 +541,14 @@ def _make_dsa_metadata_groups():
         "model.layers.0.self_attn.indexer",
     ]
     specs = [
-        AscendMLAAttentionSpec(
-            block_size=storage_block_size * compress_ratio,
-            num_kv_heads=1,
-            head_size=128,
-            dtype=torch.bfloat16,
-            compress_ratio=compress_ratio,
-            model_version="deepseek_v4",
-        )
+        _make_dsv4_mla_spec(storage_block_size * compress_ratio, compress_ratio)
         for storage_block_size, compress_ratio in ((32, 4), (64, 128))
     ]
     calls: list[dict[str, Any]] = []
     attn_groups = [
         [
             AttentionGroup(
-                backend=(AscendDSAC4Backend if spec.compress_ratio == 4 else AscendDSAC128Backend),
+                backend=(AscendDSAC4Backend if _spec_compress_ratio(spec) == 4 else AscendDSAC128Backend),
                 layer_names=[layer_name],
                 kv_cache_spec=spec,
                 kv_cache_group_id=group_id,
@@ -306,13 +572,7 @@ def _make_dsa_metadata_groups():
 
 
 def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
-    spec = AscendMLAAttentionSpec(
-        block_size=128,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        compress_ratio=4,
-    )
+    spec = _make_dsv4_mla_spec(128, 4)
     attn_groups = [
         [
             AttentionGroup(

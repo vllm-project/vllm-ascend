@@ -22,6 +22,8 @@ def _compute_slot_mappings_kernel(
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     BLOCK_TABLE_PAD_SIZE: tl.constexpr,
+    slot_mapping_enabled=None,
+    HAS_SLOT_MAPPING_ENABLED: tl.constexpr = False,
 ):
     group_id = tl.program_id(0)
     batch_idx = tl.program_id(1)
@@ -33,6 +35,17 @@ def _compute_slot_mappings_kernel(
             offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
             tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
         return
+
+    if HAS_SLOT_MAPPING_ENABLED:
+        if not tl.load(slot_mapping_enabled + group_id):
+            # Circular-buffer groups have state slots, not token-position
+            # block tables. Do not index their rows using token positions.
+            start_idx = tl.load(query_start_loc + batch_idx)
+            end_idx = tl.load(query_start_loc + batch_idx + 1)
+            for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
+                offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
+                tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < end_idx)
+            return
 
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)

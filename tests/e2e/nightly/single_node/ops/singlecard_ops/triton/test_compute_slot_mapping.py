@@ -11,6 +11,7 @@ from vllm.v1.worker.gpu.block_table import (
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.block_table import (
     AscendBlockTables,
 )
@@ -107,6 +108,8 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.cp_size = 1
     block_tables.cp_interleave = 1
     block_tables._block_table_pad_size = triton.next_power_of_2(block_table.stride(0))
+    if not vllm_version_is("0.27.1"):
+        block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(
