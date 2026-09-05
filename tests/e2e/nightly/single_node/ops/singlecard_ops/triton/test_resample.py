@@ -142,9 +142,14 @@ def _run_resample(
         temperature,
         seeds,
         pos,
+        # Standard (non-block-verification) path: the host wrapper passes
+        # cumulative_log_p = None, and USE_BLOCK_VERIFICATION=False keeps the
+        # kernel from dereferencing it.
+        None,
         vocab_size,
         BLOCK_SIZE=block_size,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        USE_BLOCK_VERIFICATION=False,
     )
     torch.npu.synchronize()
     return argmax, local_max

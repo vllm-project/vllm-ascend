@@ -7,7 +7,7 @@ This guide shows how to use Speculative Decoding with vLLM Ascend. Speculative d
 vLLM Ascend implements speculative decoding through a **proposer-verifier** architecture:
 
 1. **Proposer** (`vllm_ascend/spec_decode/`): Generates draft (speculative) tokens using various methods — from simple n-gram matching to neural-network-based draft models.
-2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional optimizations including [Block Verify and Entropy Verify](#block-verify-and-entropy-verify).
+2. **Rejection Sampler** (`vllm_ascend/sample/`): Verifies draft tokens against the target model's output, accepting matches and rejecting mismatches, with optional optimizations including [Block Verify and Entropy Verify](#block-verify-and-entropy-verify), and alternative verification methods: [Synthetic Rejection Sampling](#synthetic-rejection-sampling) and [Block Rejection Sampling](#block-rejection-sampling).
 
 The following speculative decoding methods are supported:
 
@@ -680,6 +680,9 @@ vLLM Ascend provides two optional optimizations for the rejection sampler in spe
 
 Block Verify evaluates all draft tokens as a block using cumulative probability products, rather than checking each token independently. This can improve the acceptance rate and reduce the overhead of rejection sampling, especially when `num_speculative_tokens >= 3`.
 
+> [!NOTE]
+> This section describes the MRV1 interface (`rejection_sampler_config.enable_block_verify` in `additional_config`), which trades a small amount of output precision for throughput. The V2 model runner instead supports upstream's lossless [Block Rejection Sampling](#block-rejection-sampling) via `speculative_config` (`"rejection_sample_method": "block"`) — a different feature despite the similar name.
+
 ### Entropy Verify
 
 Entropy Verify adjusts the acceptance threshold based on the entropy of the target distribution:
@@ -740,7 +743,7 @@ Synthetic mode **decouples the verifier's acceptance logic from draft-model qual
 
 Synthetic mode is configured through `speculative_config`, alongside the proposer settings:
 
-- **`rejection_sample_method`** (str, default: `"standard"`): set to `"synthetic"` to enable.
+- **`rejection_sample_method`** (str, default: `"standard"`): one of `standard`, `synthetic`, or `block`; set to `"synthetic"` to enable synthetic rejection sampling, or `"block"` for [block rejection sampling](#block-rejection-sampling).
 - **`synthetic_acceptance_rates`** (list[float], optional): per-position acceptance rates. Must have length `num_speculative_tokens`, each entry in `[0, 1]`, and be monotonically non-increasing.
 - **`synthetic_acceptance_length`** (float, optional): target mean acceptance length in `[1, num_speculative_tokens + 1]`, resolved internally to an equivalent `synthetic_acceptance_rates` schedule. Mutually exclusive with `synthetic_acceptance_rates`; exactly one must be provided when `rejection_sample_method == "synthetic"`.
 
@@ -778,3 +781,48 @@ Upstream vLLM's synthetic path draws the per-token uniform numbers with `tl_rand
 - **MRV2** (`vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`, used when the V2 model runner is enabled): the uniform draw is generated **inside** `_probabilistic_rejection_kernel` with `SYNTHETIC_MODE=True`, using a 1-element-block fp32 `tl.rand` clamped to `[2^-31, 1)` — equivalent to upstream's `includes_zero=False` semantics. Both greedy and sampling temperatures are supported, and the first rejected position is followed by a resampled/bonus token from the target distribution, as in `standard` mode.
 
 The configuration interface (`rejection_sample_method`, `synthetic_acceptance_rates`, `synthetic_acceptance_length`) is identical on both paths.
+
+## Block Rejection Sampling {: #block-rejection-sampling }
+
+In addition to the default `standard` (token-wise) rejection sampling, the V2 model runner supports **block** rejection sampling (`rejection_sample_method: "block"`), ported from upstream vLLM and based on [Block Verification Accelerates Speculative Decoding](https://arxiv.org/abs/2403.10444) (Sun et al., 2024).
+
+### How it works
+
+- `standard` verifies each draft token independently: token `i` is accepted when `p(x_i) / q(x_i) > u_i` for a uniform draw `u_i`, and the accepted prefix stops at the first rejection.
+- `block` evaluates the whole draft prefix jointly. The rejected position is chosen by comparing a single uniform draw against a threshold built from the *joint* probability of the drafted prefix, `p_tau = Π_{i≤τ} q(x_i)`, and the token emitted at the rejected position is resampled from the residual distribution `max(p_tau · M_b(x) − M_s(x), 0) / Z` over the vocabulary, where `M_s` is the accepted prefix's residual mass and `M_b` the next draft token's. Blocks truncated by `-1` placeholder draft tokens fall back to a closed-form token-wise threshold.
+
+Block rejection sampling is **lossless**: it provably yields the same output distribution as `standard` token-wise verification. Its benefit is efficiency — the acceptance decision and the resample are computed jointly in one kernel pass instead of per-token tests followed by a separate resample, which suits block-style drafters such as [DSpark](#speculating-using-dspark).
+
+### How to use
+
+Add `"rejection_sample_method": "block"` to `speculative_config`:
+
+**Offline inference**:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="Qwen/Qwen3-8B",
+    speculative_config={
+        "method": "dspark",
+        "model": "deepseek-ai/dspark_qwen3_8b_block7",
+        "num_speculative_tokens": 7,
+        "rejection_sample_method": "block",
+    },
+)
+```
+
+**Online serving**:
+
+```shell
+vllm serve Qwen/Qwen3-8B \
+  --speculative-config '{"method": "dspark", "model": "deepseek-ai/dspark_qwen3_8b_block7", "num_speculative_tokens": 7, "rejection_sample_method": "block"}'
+```
+
+### Ascend-specific notes
+
+- Requires the V2 model runner (`VLLM_USE_V2_MODEL_RUNNER=1`). The MRV1 path is not supported; MRV1 offers its own [Block Verify](#block-verify-and-entropy-verify) switch with different (lossy) semantics.
+- `(num_speculative_tokens + 1)` must be ≤ 16, the same `npu_fused_infer_attention_score` limit that applies to all speculative methods.
+- Mutually exclusive with `rejection_sample_method: "synthetic"`: enabling both raises an error, since synthetic per-token acceptance is incompatible with joint (block) verification.
+- The NPU implementation lives in `vllm_ascend/worker/v2/spec_decode/rejection_sampler_utils.py`: `_compute_cumulative_log_p_kernel` builds the joint prefix probability, and the `USE_BLOCK_VERIFICATION` constexpr in `_resample_kernel` selects the block-residual path. Kernel launch grids are chunked to respect the NPU limit of 65535 blocks per flattened grid. See `vllm_ascend/ops/triton/docs/resample.md` for parameter-level details.
