@@ -37,7 +37,8 @@ def _config(*, use_dspark=True, disable_hybrid=False):
         cache_config=SimpleNamespace(num_gpu_blocks_override=None),
         model_config=SimpleNamespace(max_model_len=257000),
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
-        max_in_flight_tokens=80,
+        # Async scheduling doubles --max-num-batched-tokens=80.
+        max_in_flight_tokens=160,
     )
 
 
@@ -206,7 +207,7 @@ def test_257k_request_fits_candidate_block_capacity():
     assert sum(
         tensor.size for tensor in cache_config.kv_cache_tensors
     ) == bytes_per_block * available_blocks
-    assert required_blocks == 2008 + 10
+    assert required_blocks == 2008 + 11
     assert required_blocks < cache_config.num_blocks
 
 
