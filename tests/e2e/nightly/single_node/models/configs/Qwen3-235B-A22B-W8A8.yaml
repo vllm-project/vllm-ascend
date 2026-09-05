@@ -72,12 +72,36 @@ test_cases:
     model: "vllm-ascend/Qwen3-235B-A22B-W8A8"
     envs:
       <<: *envs
-      DYNAMIC_EPLB: "true"
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--additional-config"
-      - '{"eplb_config": {"dynamic_eplb": "true", "expert_heat_collection_interval": 600, "algorithm_execution_interval": 50, "num_redundant_experts": 16, "eplb_policy_type": 2}}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    runner_configs:
+      v1:
+        envs:
+          DYNAMIC_EPLB: "true"
+        server_cmd_extra:
+          - "--additional-config"
+          - '{"eplb_config": {"dynamic_eplb": true, "expert_heat_collection_interval": 600, "algorithm_execution_interval": 50, "num_redundant_experts": 16, "eplb_policy_type": 2}}'
+      v2:
+        envs:
+          DYNAMIC_EPLB: "false"
+          EXPERT_MAP_RECORD: "false"
+        server_cmd_extra:
+          - "--enable-eplb"
+          - "--eplb-config.window_size"
+          - "50"
+          - "--eplb-config.step_interval"
+          - "50"
+          - "--eplb-config.num_redundant_experts"
+          - "16"
+          - "--eplb-config.use_async"
+          - "false"
+          - "--eplb-config.log_balancedness"
+          - "true"
+          - "--eplb-config.log_balancedness_interval"
+          - "1"
+          - "--additional-config"
+          - '{"eplb_config": {"load_collection_phase": "all"}}'
     benchmarks:
       <<: *benchmarks
