@@ -241,7 +241,7 @@ int32_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tenso
                                    const int64_t gvas_v_base, const int64_t addr_k_base, const int64_t addr_v_base,
                                    const int32_t resident_capacity, const int32_t max_num_threads,
                                    at::Tensor& gvas_buffer, at::Tensor& addr_buffer, at::Tensor& size_buffer,
-                                   at::Tensor& num_tokens_buffer) {
+                                   at::Tensor& num_tokens_buffer, uintptr_t stable_prefix_lens_ptr = 0) {
   const int32_t num_reqs = miss_tokens.size(0);
   const int32_t topk = miss_tokens.size(1);
   const int32_t max_num_tokens_to_load = num_reqs * topk;
@@ -275,11 +275,26 @@ int32_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tenso
   n_threads = std::max(n_threads, 1);
 
   std::vector<int32_t> num_tokens_to_load_req(num_reqs);
+  const int32_t* stable_lens =
+      stable_prefix_lens_ptr != 0 ? reinterpret_cast<const int32_t*>(stable_prefix_lens_ptr) : nullptr;
 #pragma omp parallel for num_threads(n_threads)
   for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
     int32_t count = miss_count_ptr[req_idx];
     count = std::max(count, 0);
     count = std::min(count, topk);
+    // v8: fresh tokens (>= stable prefix) are filled locally, not via the
+    // pool engine - exclude them from the emitted descriptor count.
+    if (stable_lens != nullptr) {
+      const int32_t stable = stable_lens[req_idx];
+      int32_t kept = 0;
+      for (int32_t idx = 0; idx < count; ++idx) {
+        const int32_t token = miss_tokens_ptr[req_idx * topk + idx];
+        if (token >= 0 && token < stable) {
+          ++kept;
+        }
+      }
+      count = kept;
+    }
     num_tokens_to_load_req[req_idx] = count;
   }
   int32_t num_tokens_to_load_sum = std::accumulate(num_tokens_to_load_req.begin(), num_tokens_to_load_req.end(), 0);
@@ -294,11 +309,21 @@ int32_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tenso
   for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
     int32_t req_start_loc_k = req_start_locs[req_idx];
     int32_t req_start_loc_v = num_tokens_to_load_sum + req_start_loc_k;
-    for (int32_t idx = 0; idx < num_tokens_to_load_req[req_idx]; ++idx) {
+    int32_t emit_idx = 0;
+    const int32_t raw_count = std::max(0, std::min(miss_count_ptr[req_idx], topk));
+    for (int32_t idx = 0; idx < raw_count && emit_idx < num_tokens_to_load_req[req_idx]; ++idx) {
       const int32_t token = miss_tokens_ptr[req_idx * topk + idx];
       const int32_t slot = miss_slots_ptr[req_idx * topk + idx];
       if (token < 0 || slot < 0 || slot >= resident_capacity) {
         continue;
+      }
+      // v8: skip the current step's freshly computed tokens (position >=
+      // this row's stable prefix). Their pool dump may still be in flight
+      // on tp0, so they are NOT loaded through the pool engine; the caller
+      // fills their resident slots from the local K/V activations instead
+      // (stream-ordered, no cross-rank dependency).
+      if (stable_lens != nullptr && token >= stable_lens[req_idx]) {
+        continue;  // fresh token: filled locally by the caller
       }
       const int32_t block_id = token / block_size;
       if (block_id < 0 || block_id >= max_num_blocks) {
@@ -313,10 +338,11 @@ int32_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tenso
       const int64_t gvas_v = gvas_v_base + block_indice * block_size_bytes_v + offset_in_block * token_size_bytes_v;
       const int64_t addr_k = addr_k_base + (req_idx * resident_capacity + slot) * token_size_bytes_k;
       const int64_t addr_v = addr_v_base + (req_idx * resident_capacity + slot) * token_size_bytes_v;
-      gvas_buffer_ptr[req_start_loc_k + idx] = gvas_k;
-      gvas_buffer_ptr[req_start_loc_v + idx] = gvas_v;
-      addr_buffer_ptr[req_start_loc_k + idx] = addr_k;
-      addr_buffer_ptr[req_start_loc_v + idx] = addr_v;
+      gvas_buffer_ptr[req_start_loc_k + emit_idx] = gvas_k;
+      gvas_buffer_ptr[req_start_loc_v + emit_idx] = gvas_v;
+      addr_buffer_ptr[req_start_loc_k + emit_idx] = addr_k;
+      addr_buffer_ptr[req_start_loc_v + emit_idx] = addr_v;
+      ++emit_idx;
     }
   }
 
