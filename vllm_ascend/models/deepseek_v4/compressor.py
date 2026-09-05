@@ -144,6 +144,10 @@ class Compressor(nn.Module):
             return_bias=False,
         )
 
+        # The custom compressor op consumes ND weights directly.
+        self.wkv.skip_weight_nz_conversion = True
+        self.wgate.skip_weight_nz_conversion = True
+
         # The DSV4 compressor kernel only accepts FP32 norm_weight.
         self.norm = RMSNorm(self.head_dim, config.rms_norm_eps, dtype=torch.float32)
 
