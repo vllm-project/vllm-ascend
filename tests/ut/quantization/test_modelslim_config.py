@@ -747,6 +747,85 @@ class TestQuantPrefixMapper(TestBase):
 
         self.assertEqual(prefix, "model.layers.0.moe.experts")
 
+    def test_mistral3_packed_mapping_covers_outer_and_text_models(self):
+        expected_mapping = {
+            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+            "gate_up_proj": ["gate_proj", "up_proj"],
+            "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+            "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        }
+
+        for model_type in ("mistral3", "mistral4"):
+            with self.subTest(model_type=model_type):
+                self.assertEqual(get_packed_modules_mapping(model_type), expected_mapping)
+
+    def test_mistral3_modelslim_quant_types_cover_fused_text_modules(self):
+        quant_description = {
+            "language_model.model.layers.0.self_attn.q_a_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.self_attn.kv_a_proj_with_mqa.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.mlp.shared_experts.gate_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.mlp.shared_experts.up_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.mlp.experts.0.up_proj.weight": "W8A8_DYNAMIC",
+            "language_model.model.layers.0.mlp.experts.0.down_proj.weight": "W8A8_DYNAMIC",
+        }
+        mapping = get_packed_modules_mapping("mistral4")
+
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                "language_model.model.layers.0.self_attn.fused_qkv_a_proj",
+                mapping,
+            ),
+            "W8A8_DYNAMIC",
+        )
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                "language_model.model.layers.0.mlp.shared_experts.gate_up_proj",
+                mapping,
+            ),
+            "W8A8_DYNAMIC",
+        )
+        self.assertEqual(
+            get_linear_quant_type(
+                quant_description,
+                "language_model.model.layers.0.mlp.experts",
+                mapping,
+            ),
+            "W8A8_DYNAMIC",
+        )
+
+    def test_mistral3_modelslim_keeps_multimodal_exceptions_float(self):
+        quant_description = {
+            "vision_tower.transformer.layers.0.attention.q_proj.weight": "FLOAT",
+            "vision_tower.transformer.layers.0.attention.k_proj.weight": "FLOAT",
+            "vision_tower.transformer.layers.0.attention.v_proj.weight": "FLOAT",
+            "multi_modal_projector.linear_1.weight": "FLOAT",
+            "language_model.lm_head.weight": "FLOAT",
+        }
+        config = AscendModelSlimConfig(quant_description)
+        mapping = get_packed_modules_mapping("mistral3")
+
+        self.assertTrue(
+            config.is_layer_skipped_ascend(
+                "vision_tower.transformer.layers.0.attention.qkv_proj",
+                mapping,
+            )
+        )
+        self.assertTrue(
+            config.is_layer_skipped_ascend(
+                "multi_modal_projector.linear_1",
+                mapping,
+            )
+        )
+        self.assertTrue(
+            config.is_layer_skipped_ascend(
+                "language_model.lm_head",
+                mapping,
+            )
+        )
+
 
 class TestGetKvQuantDtype(TestBase):
     def test_enable_fa_quant(self):

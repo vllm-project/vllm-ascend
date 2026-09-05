@@ -2,6 +2,13 @@ from vllm import ModelRegistry
 
 
 def register_model():
+    from .mistral import patch_mistral3_text_model
+
+    patch_mistral3_text_model()
+    ModelRegistry.register_model(
+        "Mistral4ForCausalLM",
+        "vllm_ascend.models.mistral:Mistral4ForCausalLM",
+    )
     ModelRegistry.register_model(
         "Gemma4ForConditionalGeneration",
         "vllm_ascend.models.gemma4_mm:AscendGemma4ForConditionalGeneration",

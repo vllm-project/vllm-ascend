@@ -40,6 +40,10 @@ class AscendRMSNorm(RMSNorm):
         vllm_config = get_current_vllm_config()
         self.bias = None
         self.bias_loaded = False
+        self.mistral_native_add_rms_norm = (
+            getattr(vllm_config.model_config.hf_config, "model_type", None)
+            in {"mistral3", "ministral3", "mistral4"}
+        )
 
         # quantization with anti_method m4 will generate none-zero norm bias
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
@@ -69,7 +73,7 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if enable_custom_op() and not self.mistral_native_add_rms_norm:
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )

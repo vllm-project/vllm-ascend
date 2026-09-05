@@ -125,6 +125,18 @@ class TestUtils(TestBase):
             mock_import_module.side_effect = ImportError("import error")
             self.assertFalse(utils.enable_custom_op())
 
+    def test_enable_custom_op_does_not_import_during_compile(self):
+        utils._CUSTOM_OP_ENABLED = None
+
+        with (
+            mock.patch("torch.compiler.is_compiling", return_value=True),
+            mock.patch.object(utils, "bootstrap_custom_op_env") as mock_bootstrap,
+        ):
+            self.assertFalse(utils.enable_custom_op())
+
+        self.assertIsNone(utils._CUSTOM_OP_ENABLED)
+        mock_bootstrap.assert_not_called()
+
     def test_find_hccl_library(self):
         with mock.patch.dict(os.environ, {"HCCL_SO_PATH": "/path/to/hccl/libhccl.so"}):
             self.assertEqual(utils.find_hccl_library(), "/path/to/hccl/libhccl.so")

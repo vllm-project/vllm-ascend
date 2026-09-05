@@ -415,12 +415,19 @@ def enable_custom_op():
     Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component.
     Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
     """
-    import vllm.envs as envs
-
     global _CUSTOM_OP_ENABLED
 
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
+
+    # Importing an extension while Dynamo is tracing is unsupported. Standard
+    # workers initialize this state after selecting the NPU and before the
+    # first profile run; keep this fallback uncached for other call paths so a
+    # later eager invocation can still discover the extension.
+    if torch.compiler.is_compiling():
+        return False
+
+    import vllm.envs as envs
 
     # There are some customed operators which aren't implemented
     # with batch invariant in vllm-ascend, we need to disable them.

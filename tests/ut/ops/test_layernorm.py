@@ -6,7 +6,7 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
+from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendRMSNorm
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -128,3 +128,30 @@ def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_te
         expected_out_x = dummy_tensor + 1
         mock_rmsnorm.assert_called_once()
         assert torch.allclose(out_x, expected_out_x)
+
+
+@patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
+@patch("torch.ops._C_ascend.npu_add_rms_norm_bias", side_effect=mock_add_rms_norm_bias)
+def test_mistral4_uses_native_add_rms_norm(
+    mock_add_rms_norm_bias,
+    mock_add_rmsnorm,
+    dummy_tensor,
+):
+    mock_config = MagicMock()
+    mock_config.model_config.hf_config.model_type = "mistral3"
+    mock_config.model_config.hf_config.text_config.model_type = "mistral4"
+    mock_config.quant_config = None
+    mock_config.compilation_config.custom_ops = ["all"]
+    residual = torch.randn_like(dummy_tensor)
+
+    with (
+        set_current_vllm_config(mock_config),
+        patch("vllm_ascend.ops.layernorm.enable_custom_op", return_value=True),
+    ):
+        layer = AscendRMSNorm(hidden_size=8, eps=1e-5)
+        out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
+
+    mock_add_rmsnorm.assert_called_once()
+    mock_add_rms_norm_bias.assert_not_called()
+    assert torch.allclose(out_x, 2 * dummy_tensor)
+    assert torch.allclose(out_residual, 2 * residual)
