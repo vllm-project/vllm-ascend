@@ -1,0 +1,366 @@
+root@cb62b1b74057:/workspace/user_data/Qwen2.5-Omni-7B# export VLLM_USE_MODELSCOPE=True
+export MODEL_PATH="/workspace/user_data/Qwen2.5-Omni-7B"
+
+vllm serve "${MODEL_PATH}" \
+--host 0.0.0.0 \
+--port 8000 \
+--served-model-name Qwen-Omni \
+--allowed-local-media-path ${LOCAL_MEDIA_PATH} \
+--trust-remote-code \
+--compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+--no-enable-prefix-caching
+INFO 07-22 05:09:13 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 07-22 05:09:13 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 07-22 05:09:13 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 07-22 05:09:13 [__init__.py:239] Platform plugin ascend is activated
+INFO 07-22 05:09:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 07-22 05:09:31 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(APIServer pid=16171) INFO 07-22 05:09:33 [utils.py:297] 
+(APIServer pid=16171) INFO 07-22 05:09:33 [utils.py:297]        ¨€     ¨€     ¨€¨{   ¨{¨€
+(APIServer pid=16171) INFO 07-22 05:09:33 [utils.py:297]  ¨{¨{ ¨{¨€ ¨€     ¨€     ¨€ ?¨{? ¨€  version 0.18.0
+(APIServer pid=16171) INFO 07-22 05:09:33 [utils.py:297]   ¨€¨{¨€? ¨€     ¨€     ¨€     ¨€  model   /workspace/user_data/Qwen2.5-Omni-7B
+(APIServer pid=16171) INFO 07-22 05:09:33 [utils.py:297]    ??  ????? ????? ?     ?
+(APIServer pid=16171) INFO 07-22 05:09:33 [utils.py:297] 
+(APIServer pid=16171) INFO 07-22 05:09:33 [utils.py:233] non-default args: {'model_tag': '/workspace/user_data/Qwen2.5-Omni-7B', 'host': '0.0.0.0', 'model': '/workspace/user_data/Qwen2.5-Omni-7B', 'trust_remote_code': True, 'allowed_local_media_path': '/root/.cache/vllm/assets/vllm_public_assets/', 'served_model_name': ['Qwen-Omni'], 'enable_prefix_caching': False, 'compilation_config': {'mode': None, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': [], 'splitting_ops': None, 'compile_mm_encoder': False, 'compile_sizes': None, 'compile_ranges_endpoints': None, 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_DECODE_ONLY: (2, 0)>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': None, 'pass_config': {}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': None, 'static_all_moe_layers': []}}
+(APIServer pid=16171) Unrecognized keys in `rope_scaling` for 'rope_type'='default': {'mrope_section'}
+(APIServer pid=16171) INFO 07-22 05:09:35 [model.py:533] Resolved architecture: Qwen2_5OmniModel
+(APIServer pid=16171) INFO 07-22 05:09:35 [model.py:1582] Using max model len 32768
+(APIServer pid=16171) INFO 07-22 05:09:39 [scheduler.py:231] Chunked prefill is enabled with max_num_batched_tokens=2048.
+(APIServer pid=16171) INFO 07-22 05:09:39 [vllm.py:754] Asynchronous scheduling is enabled.
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:749] Parameter '--disable-cascade-attn' is a GPU-specific feature. Resetting to False for Ascend.
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:838] Ignored parameter 'disable_flashinfer_prefill'. This is a GPU-specific feature not supported on Ascend. Resetting to False.
+(APIServer pid=16171) INFO 07-22 05:09:39 [ascend_config.py:425] Dynamic EPLB is False
+(APIServer pid=16171) INFO 07-22 05:09:39 [ascend_config.py:426] The number of redundant experts is 0
+(APIServer pid=16171) INFO 07-22 05:09:39 [platform.py:377] FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394] 
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             **********************************************************************************
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * WARNING: You have enabled the *full graph* feature.
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * This is an early experimental stage and may involve various unknown issues.
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * A known problem is that capturing too many batch sizes can lead to OOM
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * (Out of Memory) errors or inference hangs. If you encounter such issues,
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * batch size for graph capture.
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * For more details, please refer to:
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             **********************************************************************************
+(APIServer pid=16171) WARNING 07-22 05:09:39 [platform.py:394]             
+(APIServer pid=16171) INFO 07-22 05:09:39 [utils.py:1114] Block size is set to 128 if prefix cache or chunked prefill is enabled.
+(APIServer pid=16171) INFO 07-22 05:09:39 [platform.py:502] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(APIServer pid=16171) INFO 07-22 05:09:39 [compilation.py:289] Enabled custom fusions: norm_quant, act_quant
+(APIServer pid=16171) The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+INFO 07-22 05:10:03 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 07-22 05:10:03 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 07-22 05:10:03 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 07-22 05:10:04 [__init__.py:239] Platform plugin ascend is activated
+(EngineCore pid=16396) INFO 07-22 05:10:21 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+(EngineCore pid=16396) INFO 07-22 05:10:21 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+(EngineCore pid=16396) INFO 07-22 05:10:21 [core.py:103] Initializing a V1 LLM engine (v0.18.0) with config: model='/workspace/user_data/Qwen2.5-Omni-7B', speculative_config=None, tokenizer='/workspace/user_data/Qwen2.5-Omni-7B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=True, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=npu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=Qwen-Omni, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'vllm_ascend.compilation.compiler_interface.AscendCompiler', 'custom_ops': ['all'], 'splitting_ops': [], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_endpoints': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.FULL_DECODE_ONLY: (2, 0)>, 'cudagraph_num_of_warmups': 1, 'cudagraph_capture_sizes': [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256], 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False}, 'max_cudagraph_capture_size': 256, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore pid=16396) INFO 07-22 05:10:31 [ascend_config.py:425] Dynamic EPLB is False
+(EngineCore pid=16396) INFO 07-22 05:10:31 [ascend_config.py:426] The number of redundant experts is 0
+(EngineCore pid=16396) INFO 07-22 05:10:33 [parallel_state.py:1395] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://172.17.0.8:40979 backend=hccl
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore pid=16396) INFO 07-22 05:10:34 [parallel_state.py:1717] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+(EngineCore pid=16396) INFO 07-22 05:10:57 [cpu_binding.py:320] [cpu_bind_mode] mode=topo_affinity rank=0 visible_npus=[0]
+(EngineCore pid=16396) INFO 07-22 05:10:57 [cpu_binding.py:367] The CPU allocation plan is as follows:
+(EngineCore pid=16396) INFO 07-22 05:10:57 [cpu_binding.py:372] NPU0: main=[66 67 68 69 70 71 72 73 74 75 76 77 78 79 80 81 82 83 84 85 86 87 88 89 90 91 92 93 94 95 96 97 98 99 100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115 116 117 118 119 120 121 122 123 124 125]  acl=[126]  release=[[127]]
+(EngineCore pid=16396) INFO 07-22 05:11:02 [cpu_binding.py:394] [migrate] NPU:0 -> NUMA [2]
+(EngineCore pid=16396) The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+(EngineCore pid=16396) INFO 07-22 05:11:09 [model_runner_v1.py:2562] Starting to load model /workspace/user_data/Qwen2.5-Omni-7B...
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [qwen2_5_omni_thinker.py:1083] flash_attn is not available, the model may not yield the exactly same result as the transformers implementation in the audio tower part.
+(EngineCore pid=16396) INFO 07-22 05:11:10 [interface.py:275] Using default backend AttentionBackendEnum.TORCH_SDPA for vit attention
+(EngineCore pid=16396) INFO 07-22 05:11:10 [mm_encoder_attention.py:230] Using AttentionBackendEnum.TORCH_SDPA for MMEncoderAttention.
+(EngineCore pid=16396) INFO 07-22 05:11:10 [vllm.py:754] Asynchronous scheduling is enabled.
+(EngineCore pid=16396) INFO 07-22 05:11:10 [platform.py:377] FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394] 
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             **********************************************************************************
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * WARNING: You have enabled the *full graph* feature.
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * This is an early experimental stage and may involve various unknown issues.
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * A known problem is that capturing too many batch sizes can lead to OOM
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * (Out of Memory) errors or inference hangs. If you encounter such issues,
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * batch size for graph capture.
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * For more details, please refer to:
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             **********************************************************************************
+(EngineCore pid=16396) WARNING 07-22 05:11:10 [platform.py:394]             
+(EngineCore pid=16396) INFO 07-22 05:11:10 [platform.py:502] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(EngineCore pid=16396) INFO 07-22 05:11:10 [compilation.py:289] Enabled custom fusions: norm_quant, act_quant
+(EngineCore pid=16396) INFO 07-22 05:11:11 [compilation.py:942] Using OOT custom backend for compilation.
+Loading safetensors checkpoint shards:   0% Completed | 0/5 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards:  20% Completed | 1/5 [00:00<00:03,  1.13it/s]
+Loading safetensors checkpoint shards:  40% Completed | 2/5 [00:01<00:02,  1.14it/s]
+Loading safetensors checkpoint shards:  60% Completed | 3/5 [00:03<00:02,  1.15s/it]
+Loading safetensors checkpoint shards:  80% Completed | 4/5 [00:03<00:00,  1.07it/s]
+Loading safetensors checkpoint shards: 100% Completed | 5/5 [00:03<00:00,  1.29it/s]
+(EngineCore pid=16396) 
+(EngineCore pid=16396) INFO 07-22 05:11:16 [default_loader.py:384] Loading weights took 4.03 seconds
+(EngineCore pid=16396) INFO 07-22 05:11:17 [model_runner_v1.py:2589] Loading model weights took 16.6776 GB
+(EngineCore pid=16396) INFO 07-22 05:11:17 [gpu_model_runner.py:5488] Encoder cache will be initialized with a budget of 32768 tokens, and profiled with 1 video items of the maximum feature size.
+(EngineCore pid=16396) INFO 07-22 05:11:25 [backends.py:988] Using cache directory: /root/.cache/vllm/torch_compile_cache/b3d1572f6e/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore pid=16396) INFO 07-22 05:11:25 [backends.py:1048] Dynamo bytecode transform time: 5.29 s
+
+(EngineCore pid=16396) INFO 07-22 05:12:23 [compiler_interface.py:162] enable_npugraph_ex is enabled, which will bring graph compilation optimization.
+(EngineCore pid=16396) /usr/local/python3.11.14/lib/python3.11/site-packages/torch_npu/dynamo/torchair/configs/compiler_config.py:106: UserWarning: The following torchair config or properties may not take effect or report error in reduce-overhead mode: config.experimental_config.enable_view_optimize:True, set_dim_gears, dynamo_export, scope, npu_print
+(EngineCore pid=16396)   warnings.warn(
+(EngineCore pid=16396) INFO 07-22 05:12:34 [backends.py:387] Compiling a graph for compile range (1, 2048) takes 11.72 s
+(EngineCore pid=16396) INFO 07-22 05:12:36 [monitor.py:48] torch.compile and initial profiling/warmup run together took 76.57 s in total
+(EngineCore pid=16396) INFO 07-22 05:12:38 [worker.py:357] Available KV cache memory: 37.74 GiB
+(EngineCore pid=16396) INFO 07-22 05:12:38 [kv_cache_utils.py:1316] GPU KV cache size: 706,560 tokens
+(EngineCore pid=16396) INFO 07-22 05:12:38 [kv_cache_utils.py:1321] Maximum concurrency for 32,768 tokens per request: 21.56x
+Capturing CUDA graphs (decode, FULL): 100%|¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€| 35/35 [00:03<00:00,  9.46it/s]
+(EngineCore pid=16396) INFO 07-22 05:12:44 [gpu_model_runner.py:5746] Graph capturing finished in 5 secs, took 0.41 GiB
+(EngineCore pid=16396) INFO 07-22 05:12:44 [core.py:281] init engine (profile, create kv cache, warmup model) took 86.70 seconds
+(EngineCore pid=16396) INFO 07-22 05:12:44 [platform.py:377] FULL_DECODE_ONLY compilation enabled on NPU. use_inductor not supported - using only ACL Graph mode
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394] 
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             **********************************************************************************
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * WARNING: You have enabled the *full graph* feature.
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * This is an early experimental stage and may involve various unknown issues.
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * A known problem is that capturing too many batch sizes can lead to OOM
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * (Out of Memory) errors or inference hangs. If you encounter such issues,
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * batch size for graph capture.
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * For more details, please refer to:
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             **********************************************************************************
+(EngineCore pid=16396) WARNING 07-22 05:12:44 [platform.py:394]             
+(EngineCore pid=16396) INFO 07-22 05:12:44 [platform.py:502] Set PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+(APIServer pid=16171) INFO 07-22 05:12:45 [api_server.py:576] Supported tasks: ['generate']
+(APIServer pid=16171) INFO 07-22 05:12:47 [hf.py:320] Detected the chat template content format to be 'openai'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192] Chat template warmup failed
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192] Traceback (most recent call last):
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/renderers/base.py", line 185, in warmup
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/renderers/base.py", line 776, in render_chat
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     rendered = [
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]                ^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/renderers/base.py", line 777, in <listcomp>
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     self.render_messages(conversation, chat_params)
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/renderers/hf.py", line 652, in render_messages
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     conversation, mm_data, mm_uuids = parse_chat_messages(
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]                                       ^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/entrypoints/chat_utils.py", line 1595, in parse_chat_messages
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     sub_messages = _parse_chat_message_content(
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/entrypoints/chat_utils.py", line 1517, in _parse_chat_message_content
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     result = _parse_chat_message_content_parts(
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/entrypoints/chat_utils.py", line 1389, in _parse_chat_message_content_parts
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     mm_parser = mm_tracker.create_parser(mm_processor_kwargs=mm_processor_kwargs)
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/entrypoints/chat_utils.py", line 698, in create_parser
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     return MultiModalContentParser(self, mm_processor_kwargs=mm_processor_kwargs)
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/entrypoints/chat_utils.py", line 798, in __init__
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]                                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/utils/registry.py", line 51, in load
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     return cls(*args, **kwargs)
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]            ^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]   File "/vllm-workspace/vllm/vllm/multimodal/media/connector.py", line 102, in __init__
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192]     raise ValueError(
+(APIServer pid=16171) WARNING 07-22 05:12:47 [base.py:192] ValueError: Invalid `--allowed-local-media-path`: The path /root/.cache/vllm/assets/vllm_public_assets does not exist.
+(APIServer pid=16171) INFO 07-22 05:12:49 [base.py:216] Multi-modal warmup completed in 2.211s
+(APIServer pid=16171) INFO 07-22 05:12:49 [api_server.py:580] Starting vLLM server on http://0.0.0.0:8000
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:37] Available routes are:
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /openapi.json, Methods: HEAD, GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /docs, Methods: HEAD, GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /docs/oauth2-redirect, Methods: HEAD, GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /redoc, Methods: HEAD, GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /tokenize, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /detokenize, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /load, Methods: GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /version, Methods: GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /health, Methods: GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /metrics, Methods: GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/models, Methods: GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /ping, Methods: GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /ping, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /invocations, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/responses, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/completions, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/messages, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/messages/count_tokens, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=16171) INFO 07-22 05:12:49 [launcher.py:46] Route: /v1/completions/render, Methods: POST
+(APIServer pid=16171) INFO:     Started server process [16171]
+(APIServer pid=16171) INFO:     Waiting for application startup.
+(APIServer pid=16171) INFO:     Application startup complete.
+
+
+
+
+/workspace/user_data# vllm bench serve \
+  --backend vllm \
+    --model /workspace/user_data/Qwen2.5-Omni-7B  \
+  --served-model-name Qwen-Omni \
+  --port 8000 \
+  --dataset-name random \
+  --random-input 3500 \
+  --random-output 1500 \
+  --max-concurrency 20 \
+  --num-prompts 80 \
+  --save-result \
+  --result-dir ./benchmark_results/
+
+INFO 07-22 05:16:51 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 07-22 05:16:51 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 07-22 05:16:51 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 07-22 05:16:51 [__init__.py:239] Platform plugin ascend is activated
+INFO 07-22 05:17:02 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 07-22 05:17:02 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0xffff1aa5fec0>, trust_remote_code=False, seed=0, num_prompts=80, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=3500, random_output_len=1500, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='vllm', base_url=None, host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=20, model='/workspace/user_data/Qwen2.5-Omni-7B', input_len=None, output_len=None, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=True, save_detailed=False, append_result=False, metadata=None, result_dir='./benchmark_results/', result_filename=None, ignore_eos=False, percentile_metrics=None, metric_percentiles='99', goodput=None, request_id_prefix='bench-3500c8bc-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name='Qwen-Omni', lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds=[25.0, 50.0], plot_dataset_stats=False)
+INFO 07-22 05:17:06 [datasets.py:631] Sampling input_len from [3500, 3500] and output_len from [1500, 1500]
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 20
+100%|¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€| 80/80 [02:33<00:00,  1.92s/it]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     80        
+Failed requests:                         0         
+Maximum request concurrency:             20        
+Benchmark duration (s):                  153.55    
+Total input tokens:                      280000    
+Total generated tokens:                  120000    
+Request throughput (req/s):              0.52      
+Output token throughput (tok/s):         781.49    
+Peak output token throughput (tok/s):    940.00    
+Peak concurrent requests:                25.00     
+Total token throughput (tok/s):          2604.95   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1282.37   
+Median TTFT (ms):                        761.79    
+P99 TTFT (ms):                           5128.79   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          24.70     
+Median TPOT (ms):                        24.82     
+P99 TPOT (ms):                           25.40     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           24.70     
+Median ITL (ms):                         22.27     
+P99 ITL (ms):                            150.55    
+==================================================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+root@cb62b1b74057:/workspace/user_data# 
+root@cb62b1b74057:/workspace/user_data# 
+
+/workspace/user_data# vllm bench serve \
+  --backend vllm \
+    --model /workspace/user_data/Qwen2.5-Omni-7B  \
+  --served-model-name Qwen-Omni \
+  --port 8000 \
+  --dataset-name random \
+  --random-input 3500 \
+  --random-output 1500 \
+  --max-concurrency 20 \
+  --num-prompts 80 \
+  --save-result \
+  --result-dir ./benchmark_results/
+
+INFO 07-22 05:16:51 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 07-22 05:16:51 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 07-22 05:16:51 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 07-22 05:16:51 [__init__.py:239] Platform plugin ascend is activated
+INFO 07-22 05:17:02 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 07-22 05:17:02 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0xffff1aa5fec0>, trust_remote_code=False, seed=0, num_prompts=80, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=3500, random_output_len=1500, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='vllm', base_url=None, host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=20, model='/workspace/user_data/Qwen2.5-Omni-7B', input_len=None, output_len=None, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=True, save_detailed=False, append_result=False, metadata=None, result_dir='./benchmark_results/', result_filename=None, ignore_eos=False, percentile_metrics=None, metric_percentiles='99', goodput=None, request_id_prefix='bench-3500c8bc-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name='Qwen-Omni', lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds=[25.0, 50.0], plot_dataset_stats=False)
+INFO 07-22 05:17:06 [datasets.py:631] Sampling input_len from [3500, 3500] and output_len from [1500, 1500]
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 20
+100%|¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€| 80/80 [02:33<00:00,  1.92s/it]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     80        
+Failed requests:                         0         
+Maximum request concurrency:             20        
+Benchmark duration (s):                  153.55    
+Total input tokens:                      280000    
+Total generated tokens:                  120000    
+Request throughput (req/s):              0.52      
+Output token throughput (tok/s):         781.49    
+Peak output token throughput (tok/s):    940.00    
+Peak concurrent requests:                25.00     
+Total token throughput (tok/s):          2604.95   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1282.37   
+Median TTFT (ms):                        761.79    
+P99 TTFT (ms):                           5128.79   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          24.70     
+Median TPOT (ms):                        24.82     
+P99 TPOT (ms):                           25.40     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           24.70     
+Median ITL (ms):                         22.27     
+P99 ITL (ms):                            150.55    
+==================================================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+root@cb62b1b74057:/workspace/user_data# 
+root@cb62b1b74057:/workspace/user_data# 
+
+root@cb62b1b74057:/workspace/user_data# vllm bench serve   --backend vllm     --model /workspace/user_data/Qwen2.5-Omni-7B    --served-model-name Qwen-Omni   --port 8000   --dataset-name random   --random-input 3500   --random-output 1500   --max-concurrency 20   --num-prompts 80   --save-result   --result-dir ./benchmark_results/
+INFO 07-22 05:33:31 [__init__.py:44] Available plugins for group vllm.platform_plugins:
+INFO 07-22 05:33:31 [__init__.py:46] - ascend -> vllm_ascend:register
+INFO 07-22 05:33:31 [__init__.py:49] All plugins in this group will be loaded. Set `VLLM_PLUGINS` to control which plugins to load.
+INFO 07-22 05:33:31 [__init__.py:239] Platform plugin ascend is activated
+INFO 07-22 05:33:45 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.netloader.netloader.ModelNetLoaderElastic'>` with load format `netloader`
+INFO 07-22 05:33:45 [__init__.py:110] Registered model loader `<class 'vllm_ascend.model_loader.rfork.rfork_loader.RForkModelLoader'>` with load format `rfork`
+Namespace(subparser='bench', bench_type='serve', dispatch_function=<function BenchmarkServingSubcommand.cmd at 0xffff152bfec0>, trust_remote_code=False, seed=0, num_prompts=80, dataset_name='random', no_stream=False, dataset_path=None, no_oversample=False, skip_chat_template=False, enable_multimodal_chat=False, disable_shuffle=False, custom_output_len=256, spec_bench_output_len=256, spec_bench_category=None, sonnet_input_len=550, sonnet_output_len=150, sonnet_prefix_len=200, sharegpt_output_len=None, blazedit_min_distance=0.0, blazedit_max_distance=1.0, asr_max_audio_len_sec=inf, asr_min_audio_len_sec=0.0, random_input_len=3500, random_output_len=1500, random_range_ratio=0.0, random_prefix_len=0, random_batch_size=1, no_reranker=False, random_mm_base_items_per_request=1, random_mm_num_mm_items_range_ratio=0.0, random_mm_limit_mm_per_prompt={'image': 255, 'video': 1}, random_mm_bucket_config={(256, 256, 1): 0.5, (720, 1280, 1): 0.5, (720, 1280, 16): 0.0}, hf_subset=None, hf_split=None, hf_name=None, hf_output_len=None, prefix_repetition_prefix_len=256, prefix_repetition_suffix_len=256, prefix_repetition_num_prefixes=10, prefix_repetition_output_len=128, label=None, backend='vllm', base_url=None, host='127.0.0.1', port=8000, endpoint='/v1/completions', header=None, max_concurrency=20, model='/workspace/user_data/Qwen2.5-Omni-7B', input_len=None, output_len=None, tokenizer=None, tokenizer_mode='auto', use_beam_search=False, logprobs=None, request_rate=inf, burstiness=1.0, disable_tqdm=False, num_warmups=0, profile=False, save_result=True, save_detailed=False, append_result=False, metadata=None, result_dir='./benchmark_results/', result_filename=None, ignore_eos=False, percentile_metrics=None, metric_percentiles='99', goodput=None, request_id_prefix='bench-d5972b7d-', top_p=None, top_k=None, min_p=None, temperature=None, frequency_penalty=None, presence_penalty=None, repetition_penalty=None, served_model_name='Qwen-Omni', lora_modules=None, ramp_up_strategy=None, ramp_up_start_rps=None, ramp_up_end_rps=None, ready_check_timeout_sec=0, extra_body=None, skip_tokenizer_init=False, insecure=False, plot_timeline=False, timeline_itl_thresholds=[25.0, 50.0], plot_dataset_stats=False)
+INFO 07-22 05:33:48 [datasets.py:631] Sampling input_len from [3500, 3500] and output_len from [1500, 1500]
+WARNING: vllm bench serve no longer sets temperature==0 (greedy) in requests by default. The default will be determined on the server side and can be model/API specific. For the old behavior, include --temperature=0.
+Starting initial single prompt test run...
+Skipping endpoint ready check.
+Starting main benchmark run...
+Traffic request rate: inf
+Burstiness factor: 1.0 (Poisson process)
+Maximum request concurrency: 20
+100%|¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€¨€| 80/80 [02:31<00:00,  1.90s/it]
+tip: install termplotlib and gnuplot to plot the metrics
+============ Serving Benchmark Result ============
+Successful requests:                     80        
+Failed requests:                         0         
+Maximum request concurrency:             20        
+Benchmark duration (s):                  151.98    
+Total input tokens:                      280000    
+Total generated tokens:                  120000    
+Request throughput (req/s):              0.53      
+Output token throughput (tok/s):         789.55    
+Peak output token throughput (tok/s):    940.00    
+Peak concurrent requests:                24.00     
+Total token throughput (tok/s):          2631.85   
+---------------Time to First Token----------------
+Mean TTFT (ms):                          1249.13   
+Median TTFT (ms):                        762.28    
+P99 TTFT (ms):                           4996.29   
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          24.46     
+Median TPOT (ms):                        24.72     
+P99 TPOT (ms):                           25.01     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           24.46     
+Median ITL (ms):                         22.22     
+P99 ITL (ms):                            151.06    
+==================================================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+root@cb62b1b74057:/workspace/user_data# 
