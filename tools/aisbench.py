@@ -29,6 +29,10 @@ import pandas as pd
 import regex as re
 from modelscope import snapshot_download  # type: ignore
 
+from tools.benchmark_dataset import DEFAULT_CACHE_ROOT, generate_benchmark_dataset, get_prefix_dataset_path
+
+logger = logging.getLogger(__name__)
+
 BENCHMARK_HOME = os.getenv("BENCHMARK_HOME", os.path.abspath("./benchmark"))
 DATASET_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "datasets")
 REQUEST_CONF_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "benchmark", "configs", "models", "vllm_api")
@@ -68,11 +72,22 @@ class AisbenchRunner:
     def __init__(self, model: str, port: int, aisbench_config: dict, host_ip: str = "localhost", verify=True):
         self.model = model
         self.dataset_path = aisbench_config.get("dataset_path_local")
-        if not self.dataset_path:
+        dataset_generator = aisbench_config.get("dataset_generator")
+        generated_dataset = False
+        if not self.dataset_path and not dataset_generator:
             self.dataset_path = maybe_download_from_modelscope(aisbench_config["dataset_path"], repo_type="dataset")
         self.model_path = aisbench_config.get("model_path")
         if not self.model_path:
             self.model_path = maybe_download_from_modelscope(model)
+        if not self.dataset_path:
+            if aisbench_config["case_type"] != "performance":
+                raise ValueError("dataset_generator is only supported for performance cases")
+            self.dataset_path = generate_benchmark_dataset(
+                model_path=self.model_path,
+                config=dataset_generator,
+                cache_root=os.getenv("VLLM_ASCEND_DATASET_CACHE", DEFAULT_CACHE_ROOT),
+            )
+            generated_dataset = True
         assert self.dataset_path is not None and self.model_path is not None, (
             f"Failed to download dataset or model: dataset={self.dataset_path}, model={self.model_path}"
         )
@@ -99,6 +114,10 @@ class AisbenchRunner:
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.exp_folder = None
         self.result_line = None
+        self.prefix_dataset_path = None
+        if generated_dataset and dataset_generator.get("warmup_prefix", False):
+            self.prefix_dataset_path = get_prefix_dataset_path(self.dataset_path)
+            self._run_prefix_warmup(dataset_generator)
         self._init_dataset_conf()
         self._init_request_conf()
         self._run_aisbench_task()
@@ -111,6 +130,39 @@ class AisbenchRunner:
             if self.task_type == "performance":
                 self.threshold = aisbench_config.get("threshold", 0.97)
                 self._performance_verify()
+
+    def _run_prefix_warmup(self, dataset_generator: dict) -> None:
+        """Run the generated prefix-only dataset before the full benchmark."""
+        original_dataset_path = self.dataset_path
+        original_num_prompts = self.num_prompts
+        original_max_out_len = self.max_out_len
+        original_batch_size = self.batch_size
+
+        try:
+            dp = int(dataset_generator.get("dp", 1))
+            prefix_num = int(dataset_generator.get("prefix_num", 1))
+            self.dataset_path = self.prefix_dataset_path
+            self.num_prompts = dp * prefix_num
+            self.max_out_len = 1
+            self.batch_size = dp
+            logger.info(
+                "Starting prefix warmup: dataset=%s, prefixes=%d, dp=%d",
+                self.dataset_path,
+                prefix_num,
+                dp,
+            )
+            self._init_dataset_conf()
+            self._init_request_conf()
+            self._run_aisbench_task()
+            self._wait_for_task()
+            logger.info("Prefix warmup completed")
+        finally:
+            self.dataset_path = original_dataset_path
+            self.num_prompts = original_num_prompts
+            self.max_out_len = original_max_out_len
+            self.batch_size = original_batch_size
+            self.exp_folder = None
+            self.result_line = None
 
     def _init_dataset_conf(self):
         if self.task_type == "accuracy":
