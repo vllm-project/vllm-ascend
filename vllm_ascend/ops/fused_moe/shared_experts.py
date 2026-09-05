@@ -28,11 +28,10 @@ from vllm.model_executor.layers.fused_moe import FusedMoEConfig, FusedMoEMethodB
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
     npu_stream_switch,
     shared_experts_calculation_stream,
 )
@@ -343,7 +342,7 @@ class AscendSharedExperts:
                         clamp_limit=self.swiglu_limit,
                         **(
                             {}
-                            if get_ascend_device_type() == AscendDeviceType.A5
+                            if not get_current_hardware_profile().supports(HardwareCapability.FUSED_SWIGLU_TUNING_ARGS)
                             else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
                         ),
                     )

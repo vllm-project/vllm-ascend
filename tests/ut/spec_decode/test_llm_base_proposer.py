@@ -26,7 +26,10 @@ import pytest
 import torch
 from vllm.config import CUDAGraphMode
 
-from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.llm_base_proposer import (
+    AscendSpecDecodeBaseProposer,
+    _draft_embed_accepts_mm,
+)
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
 # two composite modes that mix FULL with NONE / PIECEWISE.
@@ -55,6 +58,7 @@ class TestMultimodalImageTokenIndex:
             "Step3p7ForConditionalGeneration",
             "Gemma4ForConditionalGeneration",
             "Gemma4UnifiedForConditionalGeneration",
+            "Glm5NextForConditionalGeneration",
         ],
     )
     def test_models_using_image_token_id(self, model_name: str):
@@ -104,6 +108,15 @@ class TestMultimodalImageTokenIndex:
         )
 
         assert image_token_index == 456
+
+    def test_model_with_multiple_image_sentinels_needs_no_single_index(self):
+        config = SimpleNamespace()
+
+        image_token_index = AscendSpecDecodeBaseProposer._get_multimodal_image_token_index(
+            "AscendDeepseekV4ForConditionalGeneration", config
+        )
+
+        assert image_token_index is None
 
 
 class TestMtpSharesTheTargetLmHead:
@@ -195,6 +208,40 @@ def test_load_model_reads_validated_draft_window_size():
     mock_adapter.assert_called_once_with(4096, 16, 8, 4, "cpu")
 
 
+def test_draft_vllm_config_only_propagates_draft_runner_type():
+    draft_model_config = SimpleNamespace(
+        runner_type="draft",
+        architecture="draft-architecture",
+        num_experts=0,
+    )
+    base_model_config = SimpleNamespace(
+        runner_type="generate",
+        architecture="target-architecture",
+        num_experts=256,
+    )
+    base_vllm_config = SimpleNamespace(model_config=base_model_config)
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+    proposer.speculative_config = SimpleNamespace(
+        draft_model_config=draft_model_config,
+    )
+
+    with (
+        patch(
+            "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
+            return_value=base_vllm_config,
+        ),
+    ):
+        draft_vllm_config = proposer._create_draft_vllm_config()
+
+    assert draft_vllm_config is not base_vllm_config
+    assert draft_vllm_config.model_config is not base_model_config
+    assert draft_vllm_config.model_config is not draft_model_config
+    assert draft_vllm_config.model_config.runner_type == "draft"
+    assert draft_vllm_config.model_config.architecture == "target-architecture"
+    assert draft_vllm_config.model_config.num_experts == 256
+    assert base_model_config.runner_type == "generate"
+
+
 class TestDisablePaddedDrafterBatchWithFullGraph:
     """Guard: ``disable_padded_drafter_batch=True`` + cuda graph + any full
     cudagraph mode must raise ``NotImplementedError``.
@@ -265,3 +312,81 @@ class TestDisablePaddedDrafterBatchWithFullGraph:
         )
 
         proposer._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
+
+
+class TestMtpTargetLmHeadLookup:
+    """Where the MTP branch of ``_maybe_share_lm_head`` finds the target head.
+
+    Multimodal wrappers such as ``Glm5NextForConditionalGeneration`` own no
+    ``lm_head``; it lives on the nested language model, so reading it off the
+    wrapper raises ``AttributeError``.
+    """
+
+    @staticmethod
+    def _share(target) -> SimpleNamespace:
+        """Return the resulting draft head after sharing runs."""
+        proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+        proposer.method = "mtp"
+        proposer.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(is_deepseek_mla=True),
+            compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
+        )
+        proposer.use_cuda_graph = False
+        layers = {"0": SimpleNamespace(shared_head=SimpleNamespace(head=SimpleNamespace(weight=torch.zeros(4, 3))))}
+        # The checkpoint ships no MTP head, so the draft head is shared
+        # whenever the target head is reachable at all.
+        proposer.model = SimpleNamespace(model=SimpleNamespace(layers=layers), has_own_lm_head=False)
+
+        proposer._maybe_share_lm_head(target)
+
+        return layers["0"].shared_head.head
+
+    def test_resolves_lm_head_through_get_language_model(self):
+        target_lm_head = SimpleNamespace(weight=torch.ones(4, 3))
+        target = SimpleNamespace(get_language_model=lambda: SimpleNamespace(lm_head=target_lm_head))
+
+        assert self._share(target) is target_lm_head
+
+    def test_resolves_lm_head_through_the_language_model_attribute(self):
+        target_lm_head = SimpleNamespace(weight=torch.ones(4, 3))
+        target = SimpleNamespace(language_model=SimpleNamespace(lm_head=target_lm_head))
+
+        assert self._share(target) is target_lm_head
+
+    def test_unreachable_lm_head_keeps_the_draft_head(self):
+        draft_head = self._share(SimpleNamespace())
+
+        assert torch.equal(draft_head.weight, torch.zeros(4, 3))
+
+
+class TestDraftEmbedMmSupport:
+    """Text-only MTP heads such as Glm5NextMTP expose ``embed_input_ids``
+    without multimodal parameters, so forwarding a multimodal target model's
+    multimodal kwargs to them raises ``TypeError``.
+    """
+
+    def test_head_taking_multimodal_embeddings_accepts_mm(self):
+        def embed_input_ids(input_ids, multimodal_embeddings=None):
+            return input_ids
+
+        assert _draft_embed_accepts_mm(embed_input_ids) is True
+
+    def test_text_only_head_does_not_accept_mm(self):
+        def embed_input_ids(input_ids):
+            return input_ids
+
+        assert _draft_embed_accepts_mm(embed_input_ids) is False
+
+    @pytest.mark.parametrize("error", [TypeError("C-bound callable"), ValueError("no signature found")])
+    def test_uninspectable_callable_is_treated_as_text_only(self, error: Exception):
+        """Falling back to text-only cannot raise, whereas assuming multimodal
+        support and forwarding the kwargs to a head that rejects them would.
+        """
+
+        def embed_input_ids(input_ids, multimodal_embeddings=None):
+            return input_ids
+
+        with patch("vllm_ascend.spec_decode.llm_base_proposer._inspect") as fake_inspect:
+            fake_inspect.signature.side_effect = error
+
+            assert _draft_embed_accepts_mm(embed_input_ids) is False

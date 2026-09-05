@@ -186,7 +186,7 @@ _benchmarks_bs16_in65536: &benchmarks_bs16_in65536
 _benchmarks_bs80: &benchmarks_bs80
   perf:
     case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in131072-bs100-qwen3
+    dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 80
@@ -224,7 +224,7 @@ test_cases:
       <<: *envs
     server_cmd: *server_cmd
     server_cmd_extra:
-      - "--no-enable-prefix-caching"
+      - "--enable-prefix-caching"
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 5, "enforce_eager": true}'
       - "--compilation-config"

@@ -48,6 +48,28 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 2. File: platform/patch_deepseek_v4_vision.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
+#    Why:
+#       The supported vLLM revision has the generic DeepSeek-V4 text config
+#       conversion but does not identify a checkpoint with `vision_n_layers`
+#       as the multimodal conditional-generation architecture. Without this
+#       distinction, vllm-ascend cannot select its DeepSeek-V4 vision wrapper
+#       or enable bidirectional attention over the image prefix.
+#    How:
+#       Register an Ascend DeepSeek-V4 config conversion handler. For vision checkpoints
+#       it selects `DeepseekV4ForConditionalGeneration`, enables multimodal
+#       prefix-LM attention, and records the prefix-padding constraints used by
+#       the Ascend DSA path. Text-only DeepSeek-V4 behavior is unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this patch once the supported vLLM revision natively maps
+#       DeepSeek-V4 vision checkpoints to the conditional-generation model and
+#       exposes the required multimodal prefix-LM and padding metadata without
+#       replacing `MODEL_ARCH_CONFIG_CONVERTORS["deepseek_v4"]`.
+#
 # ** 3. File: platform/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `torch.distributed.all_reduce`, `torch.distributed.broadcast`
@@ -148,6 +170,61 @@
 #       Remove this patch once upstream exposes a backend dispatch / plugin hook
 #       for selecting the MoE runner implementation.
 #
+#   2. `vllm.model_executor.layers.fused_moe.FusedMoEFactory`
+#    Why:
+#       DeepSeek-V4 vision routing supplies `bias_vl` and
+#       `image_sentinel_lo` through the upstream MoE factory. The Ascend
+#       replacement factory must preserve those arguments so image tokens use
+#       the checkpoint's vision-specific expert-routing bias.
+#    How:
+#       Accept the two DeepSeek-V4 vision arguments in `_ascend_FusedMoE` and
+#       pass them to the Ascend router while leaving every other model's
+#       defaults unchanged.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this DeepSeek-V4-specific argument bridge once upstream exposes
+#       a backend-neutral router configuration object or MoE factory extension
+#       hook that carries vision routing metadata into the Ascend runner.
+#
+# ** 7a. File: platform/patch_glm5next_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY`
+#    Why:
+#       The GLM-5.3-Flash architecture is maintained in vllm-ascend
+#       (`vllm_ascend/models/glm5next/`) rather than upstream, so its config
+#       classes are not in vLLM's `model_type` lookup table. Without an entry,
+#       loading a GLM-5.3-Flash checkpoint fails to resolve `glm5_next`.
+#    How：
+#       Insert `Glm5NextConfig` / `Glm5NextTextConfig` / `Glm5NextVisionConfig`
+#       into `_CONFIG_REGISTRY`. The registry is a `LazyConfigDict` whose values
+#       may be either a module attribute name or the class itself, so the
+#       downstream classes are inserted directly.
+#    Related PR (if no, explain why):
+#       No. The upstream GLM-5.3-Flash PR (vllm-project/vllm#53906) is not
+#       merged, and vllm-ascend carries the architecture downstream instead of
+#       depending on it.
+#    Future Plan:
+#       Remove this patch once the supported vLLM version registers the
+#       GLM-5.3-Flash configs itself.
+#
+#   2. `vllm.config.model.ModelConfig.is_deepseek_mla`
+#    Why:
+#       GLM-5.3-Flash uses MLA, but upstream decides `is_deepseek_mla` from a
+#       hard-coded `model_type` tuple that cannot know about a downstream
+#       architecture. Answering False routes the model down the non-MLA KV cache
+#       and quantization paths.
+#    How：
+#       Wrap the property so it additionally returns True for `glm5_next` /
+#       `glm5_next_text` when the text config carries `kv_lora_rank`, preserving
+#       upstream behavior for every other model type.
+#    Related PR (if no, explain why):
+#       No, see above.
+#    Future Plan:
+#       Remove this patch once upstream either includes the GLM-5.3-Flash
+#       model types or resolves MLA from the config contents instead of a
+#       model_type whitelist.
+#
 # ** 8. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
@@ -191,7 +268,25 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
-# ** 10. File: platform/patch_mamba_config.py**
+# ** 10. File: platform/patch_mamba_block_aligned_split.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`
+#    Why:
+#       On a PD decode consumer, a request with one prompt token remaining can
+#       be padded to a `1 + K` speculative verifier window before Mamba
+#       alignment runs. Splitting that window at the next block boundary makes
+#       its physical width smaller than the advertised speculative placeholder
+#       count.
+#    How:
+#       Return the complete requested width on KV consumers. Delegate producers
+#       and non-PD deployments to the original upstream method unchanged.
+#    Related issue:
+#       https://github.com/vllm-project/vllm/issues/54392
+#    Future Plan:
+#       Remove this compatibility patch once upstream preserves speculative
+#       window atomicity for PD-admitted requests.
+#
+# ** 10a. File: platform/patch_mamba_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config`
 #    Why:
@@ -477,6 +572,24 @@
 #       models without a custom `hf_config_override`, or exposes a plugin hook
 #       for MTP model_type/architecture remapping.
 #
+#   2. `vllm.config.speculative.SpeculativeConfig.__post_init__`
+#    Why:
+#       DeepSeek-V4 Vision uses the target checkpoint for its DSpark drafter.
+#       Multimodal model-architecture conversion can overwrite the draft's
+#       `DSparkDraftModel` architecture with the full conditional-generation
+#       architecture, which constructs a second target model and produces
+#       duplicate attention-layer registrations.
+#    How:
+#       After upstream speculative-config initialization, restore the draft's
+#       `DSparkDraftModel` architecture in both Hugging Face and normalized
+#       model configs, then refresh the cached registry inspection result.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/54566
+#    Future Plan:
+#       Remove this normalization once upstream performs multimodal conversion
+#       before DSpark draft selection, or otherwise guarantees that rebuilding
+#       `model_arch_config` preserves the selected draft architecture.
+#
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`
@@ -739,7 +852,9 @@
 #       2. preprocess_mamba copy the state of previous step to the last block before kv transfer load
 #    How:
 #       1. patch to remove assert
-#       2. path to only collect copy metadata in preprocess_mamba(and do actual copy after kv transfer load).
+#       2. patch to collect per-layer copy metadata in preprocess_mamba. With
+#          layerwise KV transfer, copy each layer's state only after that
+#          layer finishes loading; otherwise keep the original batched copy.
 #    Future Plan:
 #       Remove this patch when:
 #       vLLM itself supports kv transfer for mamba
@@ -924,6 +1039,22 @@
 #    Future Plan:
 #       Remove this patch when torch_npu's Triton includes
 #       next_power_of_2 or when vLLM no longer calls triton.next_power_of_2.
+#
+#   3. `vllm.third_party.flash_linear_attention.ops.kda`
+#    Why:
+#       GLM-5.3-Flash and Kimi KDA layers import `fused_recurrent_kda` /
+#       `chunk_kda_with_fused_gate` from upstream FLA. Those kernels are CUDA
+#       Triton; Ascend already has NPU Triton equivalents under
+#       `vllm_ascend.ops.triton.kda`.
+#    How：
+#       Rebind the FLA kda entry points to the NPU implementations before the
+#       model is constructed. The NPU wrappers expand GLM's bounded (safe)
+#       gate and beta sigmoid in Python because the NPU recurrent kernel does
+#       not fuse `COMPUTE_GATE` / `SIGMOID_BETA`.
+#    Related PR (if no, explain why):
+#       Native FP8 serving of zai-org/GLM-5.3-Flash on Ascend 950.
+#    Future Plan:
+#       Remove this patch when vLLM Triton ops dispatch to the Ascend backend.
 #
 # ** 22. File: worker/patch_v2/patch_attn_utils.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

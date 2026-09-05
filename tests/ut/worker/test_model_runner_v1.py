@@ -76,6 +76,103 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
             runner._dummy_run(1)
 
 
+class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
+    def test_full_mode_requires_external_events(self):
+        for mode, uses_external_events, should_raise in (
+            (CUDAGraphMode.FULL, False, True),
+            (CUDAGraphMode.FULL, True, False),
+            (CUDAGraphMode.PIECEWISE, False, False),
+            (CUDAGraphMode.NONE, False, False),
+        ):
+            with self.subTest(mode=mode, uses_external_events=uses_external_events):
+                runner = NPUModelRunner.__new__(NPUModelRunner)
+                executor = SimpleNamespace(
+                    submission_in_flight=True,
+                    uses_external_events=uses_external_events,
+                )
+                runner.device_metadata_executor = executor
+
+                if should_raise:
+                    with self.assertRaisesRegex(RuntimeError, "requires external events"):
+                        runner._prepare_device_metadata_for_forward(mode)
+                else:
+                    self.assertIs(runner._prepare_device_metadata_for_forward(mode), executor)
+
+    def test_ignores_executor_without_active_submission(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        executor = MagicMock(submission_in_flight=False)
+        runner.device_metadata_executor = executor
+
+        active_executor = runner._prepare_device_metadata_for_forward(CUDAGraphMode.FULL)
+
+        self.assertIsNone(active_executor)
+
+    def test_dummy_full_uses_external_events_without_global_wait(self):
+        from contextlib import contextmanager, nullcontext
+
+        events = []
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 1
+        runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=4)
+        runner.dynamic_eplb = False
+        runner.dcp_size = 1
+        runner._determine_batch_execution_and_padding = MagicMock(
+            return_value=(
+                CUDAGraphMode.FULL,
+                SimpleNamespace(num_tokens=4, num_reqs=4),
+                None,
+                None,
+                None,
+            )
+        )
+        runner.synchronize_input_prep = nullcontext
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=False)
+        runner.maybe_dummy_run_with_lora = MagicMock(return_value=nullcontext())
+        runner.lora_config = None
+        runner.max_num_tokens = 4
+        runner.device = torch.device("cpu")
+        runner.supports_mm_inputs = False
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+        runner.enable_prompt_embeds = False
+        runner.input_ids = SimpleNamespace(gpu=torch.zeros(4, dtype=torch.int64))
+        runner.uses_mrope = False
+        runner.uses_xdrope_dim = 0
+        runner.positions = torch.zeros(4, dtype=torch.int64)
+        runner.drafter = None
+        runner.vllm_config = MagicMock()
+        runner.model = MagicMock()
+        runner._has_sinks = False
+        runner.use_aux_hidden_state_outputs = False
+        runner.use_compress = False
+        runner._finalize_dump_data = MagicMock()
+
+        def model_forward(*args):
+            events.append("forward")
+            return torch.zeros((4, 1))
+
+        runner._model_forward = MagicMock(side_effect=model_forward)
+        executor = MagicMock(submission_in_flight=True)
+        executor.uses_external_events = True
+        executor.release.side_effect = lambda: events.append("release")
+        runner.device_metadata_executor = executor
+
+        @contextmanager
+        def forward_context(*args, **kwargs):
+            events.append("context_enter")
+            yield
+            events.append("context_exit")
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.get_pp_group", return_value=SimpleNamespace(is_first_rank=True)),
+            patch("vllm_ascend.worker.model_runner_v1.lmhead_tp_enable", return_value=False),
+            patch("vllm_ascend.worker.model_runner_v1.set_ascend_forward_context", forward_context),
+            patch("vllm_ascend.worker.model_runner_v1.update_cos_sin"),
+        ):
+            runner._dummy_run(4, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
+
+        self.assertEqual(events, ["context_enter", "forward", "context_exit", "release"])
+
+
 class TestDSparkAuxCaptureMode(unittest.TestCase):
     def _build_runner(
         self,
@@ -1180,6 +1277,7 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
     def _build_runner(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.device = torch.device("cpu")
+        runner._pending_spec_decode_metadata_copies = deque()
         runner.vllm_config = MagicMock()
         runner.model_config = MagicMock()
         runner.use_compress = False
@@ -1304,6 +1402,36 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         self.assertEqual(runner.input_ids.gpu.tolist(), [11, 0, 0, 0])
         self.assertEqual(runner.input_ids.cpu.tolist(), [11, -1, -1, -1])
 
+    def test_spec_decode_metadata_keeps_cpu_sources_until_h2d_completes(self):
+        runner = self._build_runner()
+        runner.device = SimpleNamespace(type="npu")
+        sources = tuple(MagicMock() for _ in range(5))
+        device_values = tuple(MagicMock() for _ in range(5))
+        for source, device_value in zip(sources, device_values):
+            source.to.return_value = device_value
+        copy_done = MagicMock()
+        copy_done.query.return_value = False
+        fake_npu = SimpleNamespace(
+            Event=MagicMock(return_value=copy_done),
+            current_stream=MagicMock(),
+        )
+
+        with patch.object(torch, "npu", fake_npu, create=True):
+            result = runner._copy_spec_decode_metadata_to_device(sources)
+
+            self.assertEqual(result, device_values)
+            pending_sources, event = runner._pending_spec_decode_metadata_copies[0]
+            self.assertIs(pending_sources, sources)
+            self.assertIs(event, copy_done)
+            for source in sources:
+                source.to.assert_called_once_with(runner.device, non_blocking=True)
+            fake_npu.current_stream.assert_called_once_with()
+            copy_done.record.assert_called_once_with(fake_npu.current_stream.return_value)
+
+            copy_done.query.return_value = True
+            runner._copy_spec_decode_metadata_to_device(sources)
+        self.assertEqual(len(runner._pending_spec_decode_metadata_copies), 1)
+
 
 class TestNPUModelRunnerDebugger(unittest.TestCase):
     def _build_runner(self, debugger=None):
@@ -1388,7 +1516,10 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
 
         runner.execute_model(scheduler_output)
 
-        runner._dummy_run.assert_called_once_with(1)
+        runner._dummy_run.assert_called_once_with(
+            1,
+            skip_gdn_state_update=True,
+        )
         runner._start_dump_data.assert_not_called()
 
     @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)

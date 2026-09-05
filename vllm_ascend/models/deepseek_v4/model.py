@@ -320,6 +320,15 @@ class DeepseekV4MoE(nn.Module):
             )
 
         self.hash = layer_idx < config.num_hash_layers and not is_draft_layer
+        self.gate.bias_vl = None
+        if getattr(config, "vision_n_layers", 0) > 0:
+            self.gate.bias_vl = nn.Parameter(
+                torch.empty(
+                    config.n_routed_experts,
+                    dtype=torch.float32,
+                ),
+                requires_grad=False,
+            )
         if self.hash:
             # Use zeros instead of empty to avoid garbage values causing
             # invalid memory access in dummy mode (--load-format="dummy")
@@ -353,6 +362,8 @@ class DeepseekV4MoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor,
             swiglu_limit=self.swiglu_limit,
             e_score_correction_bias=self.gate.e_score_correction_bias,
+            bias_vl=self.gate.bias_vl,
+            image_sentinel_lo=129257,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
@@ -819,6 +830,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.hc_head_fn = nn.Parameter(torch.empty(hc_mult, hc_dim, dtype=torch.float32))
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
+        self.hc_norm = RMSNorm(hc_dim, eps=config.rms_norm_eps, has_weight=False, dtype=torch.float32)
 
         # Pre-hc_head residual stream buffer for the speculative draft
         # (MTP / DSpark / DFlash). Only needed when the decoder consumes
@@ -846,8 +858,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
     def hc_head(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
         shape, dtype = x.size(), x.dtype
         x = x.flatten(1).float()
-        rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
-        mixes = torch.nn.functional.linear(x, hc_fn) * rsqrt
+        x_norm = self.hc_norm(x)
+        mixes = torch.nn.functional.linear(x_norm, hc_fn)
         pre = torch.sigmoid(mixes * hc_scale + hc_base) + self.hc_eps
         y = torch.sum(pre.unsqueeze(-1) * x.view(shape), dim=1)
         return y.to(dtype)
@@ -1122,7 +1134,12 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
 
             if "rotary_emb.inv_freq" in name:
                 continue
-            if ".gate.bias" in name:
+            if ".gate.bias_vl" in name:
+                # The parameter keeps the checkpoint name on Ascend. It is
+                # passed to the hash router as its vision-only correction
+                # bias, while text rows continue to use tid2eid.
+                pass
+            elif ".gate.bias" in name:
                 name = name.replace(".gate.bias", ".gate.e_score_correction_bias")
 
             if "sink" in name:

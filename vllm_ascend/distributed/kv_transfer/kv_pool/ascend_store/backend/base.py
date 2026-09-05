@@ -5,9 +5,16 @@ from typing import Any
 
 from vllm.config import ParallelConfig
 
+# QoS range supported by the pooled KV store backends. A larger value
+# means a higher transfer priority.
+QOS_VALUE_MIN = 0
+QOS_VALUE_MAX = 4
+
 
 class Backend(ABC):
     store: Any | None = None
+    # Whether the connector must filter existing keys before calling put().
+    requires_exists_before_put: bool = True
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):

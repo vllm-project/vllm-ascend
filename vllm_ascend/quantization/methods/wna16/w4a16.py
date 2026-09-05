@@ -25,7 +25,9 @@ from vllm.config import get_current_vllm_config
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.utils import dispose_tensor
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
@@ -177,6 +179,10 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
     supports_eplb = False
 
     quant_type: QuantType = QuantType.W4A16
+    act_quant_type: torch.dtype | None = None
+    # W4A16 never fuses gmm1+act+quant: activation runs through the action
+    # method fallback and the A16 path keeps activations unquantized.
+    fused_activations = frozenset()
 
     def __init__(self) -> None:
         self.num_bits = 4  # dtype = torch.int4
@@ -264,8 +270,7 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight_packed,
-                w2=layer.w2_weight_packed,
+                layer=layer,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
@@ -274,11 +279,8 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                w1_offset=layer.w13_weight_offset,
-                w2_offset=layer.w2_weight_offset,
-            )
+            ),
+            quant_method=self,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -314,3 +316,40 @@ class AscendW4A16FusedMoEMethod(AscendMoEScheme):
 
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.transpose(1, 2).contiguous()
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.transpose(1, 2).contiguous()
+
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
+        hidden_states = mlp_compute_input.hidden_states
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w13_weight_packed],
+            antiquant_scale=[layer.w13_weight_scale],
+            antiquant_offset=[layer.w13_weight_offset],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            output_dtype=layer.w2_weight_scale.dtype,
+        )[0]
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states
+
+    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
+        # A16 activation: no (re)quantization.
+        return hidden_states, None
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w2_weight_packed],
+            antiquant_scale=[layer.w2_weight_scale],
+            antiquant_offset=[layer.w2_weight_offset],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            output_dtype=layer.w2_weight_scale.dtype,
+        )[0]

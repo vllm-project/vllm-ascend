@@ -29,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     ReqMeta,
     SharedBlockData,
+    get_partial_block_index,
 )
 
 
@@ -108,6 +109,17 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             with self.subTest(exists=exists):
                 self.assertEqual(cls.check_all_layers_exists(None, exists, num_layers), expected)
 
+    def test_uses_mamba_kv_cache_inside_uniform_group(self):
+        from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+
+        cls = self._make_worker_class()
+        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(np.dtype("float32"),))
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs({"mamba.layer": mamba_spec})
+        self.assertIsNotNone(uniform_spec)
+        kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=uniform_spec)])
+
+        self.assertTrue(cls._uses_mamba_kv_cache(True, kv_cache_config))
+
     def test_find_all_continuous_hit_positions(self):
         cls = self._make_worker_class()
         cases = [
@@ -180,12 +192,10 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(result, [48])
 
     def test_partial_prefill_block_index_boundaries(self):
-        cls = self._make_worker_class()
-
-        self.assertEqual(cls._get_partial_block_index(20, 16, 1, True), 1)
-        self.assertEqual(cls._get_partial_block_index(32, 16, 1, True), 1)
-        self.assertIsNone(cls._get_partial_block_index(32, 16, 2, True))
-        self.assertIsNone(cls._get_partial_block_index(20, 16, 1, False))
+        self.assertEqual(get_partial_block_index(20, 16, 1, True), 1)
+        self.assertEqual(get_partial_block_index(32, 16, 1, True), 1)
+        self.assertIsNone(get_partial_block_index(32, 16, 2, True))
+        self.assertIsNone(get_partial_block_index(20, 16, 1, False))
 
     def test_find_all_discontinuous_hit_positions_all_tp_hits_with_limits(self):
         cls = self._make_worker_class()
@@ -253,7 +263,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         worker.num_layers = 4
         worker.num_kv_cache_groups = 2
         worker.hf_config = SimpleNamespace(num_hidden_layers=4)
-        worker.use_gva_layerwise = True
+        worker.use_layerwise_transfer = True
         worker._extra_config = {"layerwise_num_shared_buffers": 2}
         main_spec = FullAttentionSpec(
             block_size=2,
@@ -963,8 +973,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         return make_worker(self)
 
     def _make_gva_worker(self, num_groups=1):
-        worker = self._make_worker()
-        worker.use_gva_layerwise = True
+        worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
         worker.num_kv_cache_groups = num_groups
         worker.grouped_block_size = [16] * num_groups
@@ -994,6 +1003,33 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             block_ids_np=np.asarray(block_ids_by_group[0], dtype=np.int64),
             block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64) for block_ids in block_ids_by_group],
         )
+
+    def test_set_external_slot_release_waiter_gated_on_layerwise_transfer(self):
+        waiter = MagicMock()
+
+        worker = self._make_worker()
+        worker.use_layerwise_transfer = False
+        self.assertFalse(worker.set_external_slot_release_waiter(waiter))
+        self.assertIsNone(worker.external_slot_release_waiter)
+
+        worker.use_layerwise_transfer = True
+        self.assertTrue(worker.set_external_slot_release_waiter(waiter))
+        self.assertIs(worker.external_slot_release_waiter, waiter)
+
+    def test_set_external_slot_release_waiter_updates_running_recv_thread(self):
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+            KVCacheStoreLayerRecvingThread,
+        )
+
+        waiter = MagicMock()
+
+        worker = self._make_worker()
+        worker.use_layerwise_transfer = True
+        worker.kv_recv_thread = MagicMock(spec=KVCacheStoreLayerRecvingThread)
+        self.assertTrue(worker.set_external_slot_release_waiter(waiter))
+        # A waiter registered after the receive thread started is handed
+        # over to the thread directly, not just stored on the worker.
+        self.assertIs(worker.kv_recv_thread.external_slot_release_waiter, waiter)
 
     def test_process_layer_data_empty_requests(self):
         worker = self._make_worker()
@@ -1228,8 +1264,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         )
 
         self.assertIsNotNone(_pool_worker)
-        worker = self._make_worker()
-        worker.use_gva_layerwise = True
+        worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
         worker.layerwise_offload = True
         worker.independent_layers = [0]
         worker.num_kv_cache_groups = 1
@@ -1375,7 +1410,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             [partial_key],
         )
         sleep.assert_called_once()
-        self.assertEqual(request.load_keys, [worker._make_layerwise_gva_key(0, "h0"), partial_key])
+        self.assertEqual(request.load_keys, [worker._make_layerwise_full_key(0, "h0"), partial_key])
         self.assertEqual(request.partial_load_gva_per_group, [202])
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
@@ -1407,7 +1442,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
         ):
             worker._prepare_load_gvas([request])
 
-        group0_key = worker._make_layerwise_gva_key(0, "h0")
+        group0_key = worker._make_layerwise_full_key(0, "h0")
         worker.m_store.batch_remove_lease.assert_called_once_with([group0_key])
 
     def test_worker_physical_layer_index_supports_mtp_layers_namespace(self):
@@ -1422,7 +1457,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
 
     def test_evicted_allocated_gva_is_reallocated(self):
         worker = self._make_gva_worker()
-        key = worker._make_layerwise_gva_key(0, "h0")
+        key = worker._make_layerwise_full_key(0, "h0")
         worker._allocated_gvas[key] = 101
         worker.m_store.batch_is_exist.return_value = [0]
         worker.m_store.batch_alloc.return_value = [202]

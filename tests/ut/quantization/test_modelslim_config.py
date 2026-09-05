@@ -13,7 +13,6 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.models.utils import WeightsMapper
 
 from tests.ut.base import TestBase
-from vllm_ascend.models.llama_eagle3 import get_rotation_path
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.configs.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
@@ -22,7 +21,7 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     get_linear_quant_type,
     get_packed_modules_mapping,
 )
-from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
 
 
 class TestAscendModelSlimConfig(TestBase):
@@ -538,6 +537,27 @@ class TestApplyVllmMapper(TestBase):
 
 
 class TestQuantPrefixMapper(TestBase):
+    def test_deepseek_v4_vision_maps_wrapped_language_model_prefixes(self):
+        config = AscendModelSlimConfig(
+            {
+                "model.embed_tokens.weight": "W8A8_DYNAMIC",
+                "model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+                "lm_head.weight": "FLOAT",
+            }
+        )
+
+        cases = {
+            "language_model.model.embed_tokens": "model.embed_tokens",
+            "language_model.model.layers.0.self_attn.q_proj": ("model.layers.0.self_attn.q_proj"),
+            "language_model.lm_head": "lm_head",
+        }
+        for prefix, expected in cases.items():
+            with self.subTest(prefix=prefix):
+                self.assertEqual(
+                    config.quant_prefix_mapper("deepseek_v4", prefix),
+                    expected,
+                )
+
     def test_qwen3_5_text_backbones_use_packed_module_mappings(self):
         dense_mapping = get_packed_modules_mapping("qwen3_5_text")
         moe_mapping = get_packed_modules_mapping("qwen3_5_moe_text")
@@ -684,6 +704,15 @@ class TestQuantPrefixMapper(TestBase):
             method = config.get_quant_method(layer, fused_prefix)
 
         self.assertIsInstance(method, AscendUnquantizedLinearMethod)
+
+    def test_glm5_next_packed_modules_mapping_covers_moe_mla_and_kda(self):
+        expected_mapping = {
+            "gate_up_proj": ["gate_proj", "up_proj"],
+            "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+            "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+            "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
+        }
+        self.assertEqual(get_packed_modules_mapping("glm5_next"), expected_mapping)
 
     def test_gemma4_moe_experts_float_shards_are_skipped_together(self):
         quant_description = {

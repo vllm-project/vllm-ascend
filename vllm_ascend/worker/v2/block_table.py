@@ -17,7 +17,13 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
+from vllm.triton_utils import triton
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
+
+from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
+    _compute_slot_mappings_kernel,
+)
 
 
 class AscendBlockTables(BlockTables):
@@ -48,6 +54,13 @@ class AscendBlockTables(BlockTables):
             cp_rank,
             cp_interleave,
         )
+        # The kernel block-table row can be wider than
+        # max_num_blocks_per_group when one KV block maps to multiple kernel
+        # blocks. Use the allocated row stride so the staged row is complete.
+        max_block_table_stride = max(block_table.gpu.stride(0) for block_table in self.block_tables)
+        # tl.arange needs a compile-time power-of-two size. This value is
+        # passed as a constexpr and covers every KV cache group's row.
+        self._block_table_pad_size = triton.next_power_of_2(max_block_table_stride)
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
@@ -59,3 +72,33 @@ class AscendBlockTables(BlockTables):
             dtype=torch.int32,
             device=self.device,
         )
+
+    def compute_slot_mappings(
+        self,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        num_tokens_padded: int,
+        out: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        num_reqs = idx_mapping.shape[0]
+        num_groups = self.num_kv_cache_groups
+        slot_mappings = self.slot_mappings if out is None else out
+        _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
+            slot_mappings.shape[1],
+            idx_mapping,
+            query_start_loc,
+            positions,
+            self.block_table_ptrs,
+            self.block_table_strides,
+            self.block_sizes_tensor,
+            slot_mappings,
+            slot_mappings.stride(0),
+            self.cp_rank,
+            CP_SIZE=self.cp_size,
+            CP_INTERLEAVE=self.cp_interleave,
+            PAD_ID=PAD_SLOT_ID,
+            TRITON_BLOCK_SIZE=1024,
+            BLOCK_TABLE_PAD_SIZE=self._block_table_pad_size,
+        )
+        return slot_mappings[:, :num_tokens_padded]

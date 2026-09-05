@@ -48,6 +48,7 @@ from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     get_sfa_qsfa_packed_head_dim,
+    is_glm5_next_kpool_cache,
 )
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
@@ -128,6 +129,10 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 cache_sparse_sfa_c8=cache_sparse_sfa_c8,
             )
         if isinstance(attn_module, DeepseekV32IndexerCache):
+            # GLM-5.3-Flash kpool indexer/tail caches keep their own spec.
+            if is_glm5_next_kpool_cache(attn_module):
+                kv_cache_spec[layer_name] = spec
+                continue
             cache_sparse_li_c8 = get_ascend_config().is_sparse_li_c8_layer(layer_name)
             kv_cache_spec[layer_name] = AscendSFAIndexerCacheSpec(
                 block_size=vllm_config.cache_config.block_size,
@@ -226,6 +231,10 @@ def build_attn_metadata(
     if num_actual_reqs is None:
         num_actual_reqs = num_reqs
 
+    # positions will not be used directly in graph modes, so it is saft to create it here.
+    if positions is None:
+        positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
+
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}
@@ -269,39 +278,42 @@ def build_attn_metadata(
 
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
-            if for_cudagraph_capture:
-                # All backends use the capture wrapper; DSA overrides it internally.
-                metadata = attn_metadata_builder.build_for_cudagraph_capture(common_attn_metadata)
-            else:
-                is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
-                attn_metadata_extra_kwargs = (
-                    model_specific_attn_metadata.get_extra_attn_kwargs(
-                        attn_metadata_builder,
-                        num_reqs,
-                    )
-                    if model_specific_attn_metadata is not None
-                    else {}
+            is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)
+            attn_metadata_extra_kwargs = (
+                model_specific_attn_metadata.get_extra_attn_kwargs(
+                    attn_metadata_builder,
+                    num_reqs,
                 )
-                if is_dsa_builder:
-                    # DSA cache groups share request-level metadata during replay.
+                if not for_cudagraph_capture and model_specific_attn_metadata is not None
+                else {}
+            )
+            if is_dsa_builder:
+                # DSA cache groups share request-level metadata during replay.
+                attn_metadata_extra_kwargs.update(
+                    num_actual_reqs=num_actual_reqs,
+                    common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                )
+                if pcp_context is not None:
                     attn_metadata_extra_kwargs.update(
-                        num_actual_reqs=num_actual_reqs,
-                        common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                        pcp_context=pcp_context,
+                        pcp_cache_group_idx=i,
                     )
-                    if pcp_context is not None:
-                        attn_metadata_extra_kwargs.update(
-                            pcp_context=pcp_context,
-                            pcp_cache_group_idx=i,
-                        )
+
+            if for_cudagraph_capture:
+                metadata = attn_metadata_builder.build_for_cudagraph_capture(
+                    common_attn_metadata,
+                    **attn_metadata_extra_kwargs,
+                )
+            else:
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
                     **attn_metadata_extra_kwargs,
                 )
-                if is_dsa_builder:
-                    # Preserve sharing even if a builder replaces one of the
-                    # dictionaries while constructing its metadata.
-                    common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
+            if is_dsa_builder:
+                # Preserve sharing even if a builder replaces one of the
+                # dictionaries while constructing its metadata.
+                common_ratio_to_sas_metadata = attn_metadata_builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata

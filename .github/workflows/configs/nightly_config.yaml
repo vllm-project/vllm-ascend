@@ -246,6 +246,9 @@ a3:
   multi_card:
     test_config:
       # pytest-driven tests
+      - name: compressor-metadata-cross-stream
+        os: linux-aarch64-a3-2
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_compressor_metadata.py
       - name: qwen3-30b-acc
         os: linux-aarch64-nightly-a3-4
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
