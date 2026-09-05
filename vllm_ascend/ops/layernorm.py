@@ -21,10 +21,30 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm, RMSNormGated
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.triton.kda.kda import rms_norm_gated
 from vllm_ascend.ops.triton.layernorm_gated import layer_norm_fwd_npu
 from vllm_ascend.utils import enable_custom_op
+
+
+# Residual-add RMSNorm kernel selection.
+#
+# torch.ops._C_ascend.npu_add_rms_norm_bias and torch_npu.npu_add_rms_norm return
+# bitwise-identical tensors when called in isolation (also with a zero bias), but
+# inside the compiled model graph the two lead to different numerical paths for
+# the whole network: the backend can fuse the native op, while the custom op is
+# opaque to it. Both are legitimate rounding, so which one is taken must not
+# depend on whether the custom op library happened to be importable when the
+# graph was traced - a cached compilation artifact keeps whichever op it was
+# traced with. The custom op is only required when a norm bias was actually
+# loaded from the checkpoint (anti-outlier biases); the bias parameter that
+# AscendRMSNorm allocates whenever the quant description mentions "norm.bias"
+# stays zero for residual norms and must not select it.
+def use_custom_add_rms_norm(bias: torch.Tensor | None, bias_loaded: bool) -> bool:
+    if envs_ascend.VLLM_ASCEND_NATIVE_ADD_RMS_NORM and (bias is None or not bias_loaded):
+        return False
+    return enable_custom_op()
 
 
 class AscendRMSNorm(RMSNorm):
@@ -69,7 +89,7 @@ class AscendRMSNorm(RMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if use_custom_add_rms_norm(self.bias, self.bias_loaded):
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, self.weight, self.bias, self.variance_epsilon
                 )
@@ -95,7 +115,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
         import torch_npu
 
         if residual is not None:
-            if enable_custom_op():
+            if use_custom_add_rms_norm(None, False):
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
                     x, residual, 1.0 + self.weight, None, self.variance_epsilon
                 )
