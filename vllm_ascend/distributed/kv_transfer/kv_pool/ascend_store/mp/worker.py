@@ -60,7 +60,10 @@ def run_worker(endpoint: str, parent_fd: int, runtime_factory=None) -> int:
                 return 1 if closed_exit_code is None else closed_exit_code
             if socket in events:
                 identity, encoded = socket.recv_multipart()
-                operation_id, operation, payload = msgspec.msgpack.decode(encoded)
+                try:
+                    operation_id, operation, payload = msgspec.msgpack.decode(encoded)
+                except Exception as exc:
+                    raise RuntimeError("Failed to decode KV transfer command") from exc
                 try:
                     if closing:
                         raise RuntimeError("KV transfer process is closing")

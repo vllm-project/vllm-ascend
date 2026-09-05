@@ -154,7 +154,9 @@ class TransferChannel:
                 readable = socket.poll(POLL_INTERVAL_MS)
                 while readable:
                     operation_id, result, error = msgspec.msgpack.decode(socket.recv())
-                    completed = pending.pop(operation_id)
+                    completed = pending.pop(operation_id, None)
+                    if completed is None:
+                        raise RuntimeError(f"Received completion for unknown KV transfer operation {operation_id}")
                     if completed.operation == "close":
                         self._stop.set()
                     if error is not None:
