@@ -9,7 +9,7 @@
  */
 #include <cstring>
 #include "graph/types.h"
-#include "aclnn_sparse_flash_attention.h"
+#include "aclnn_sparse_flash_attention_vllm.h"
 
 #include "opdev/make_op_executor.h"
 #include "opdev/op_dfx.h"
@@ -30,7 +30,7 @@ extern "C" {
 
 namespace {
 
-extern aclnnStatus aclnnInnerSparseFlashAttentionGetWorkspaceSize(
+extern aclnnStatus aclnnInnerSparseFlashAttentionVllmGetWorkspaceSize(
     const aclTensor *query, const aclTensor *key, const aclTensor *value, const aclTensor *sparse_indices,
     const aclTensor *blockTableOptional, const aclTensor *actualSeqLengthsQueryOptional, const aclTensor *actualSeqLengthsKvOptional,
     const aclTensor *queryRopeOptional, const aclTensor *keyRopeOptional, double scaleValue,
@@ -39,7 +39,7 @@ extern aclnnStatus aclnnInnerSparseFlashAttentionGetWorkspaceSize(
     bool returnSoftmaxLse, const aclTensor *attentionOut, const aclTensor *softmaxMax,
     const aclTensor *softmaxSum, uint64_t *workspaceSize, aclOpExecutor **executor);
 
-extern aclnnStatus aclnnInnerSparseFlashAttention(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
+extern aclnnStatus aclnnInnerSparseFlashAttentionVllm(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
                                          const aclrtStream stream);
 
 class TensorHolder {
@@ -81,7 +81,7 @@ private:
     std::string name_;
 };
 
-aclnnStatus aclnnSparseFlashAttentionGetWorkspaceSize(
+aclnnStatus aclnnSparseFlashAttentionVllmGetWorkspaceSize(
     const aclTensor *query,
     const aclTensor *key,
     const aclTensor *value,
@@ -125,17 +125,17 @@ aclnnStatus aclnnSparseFlashAttentionGetWorkspaceSize(
             }
         }
     }
-    return aclnnInnerSparseFlashAttentionGetWorkspaceSize(
+    return aclnnInnerSparseFlashAttentionVllmGetWorkspaceSize(
         query, key, value, sparseIndices, blockTableOptional, actualSeqLengthsQueryOptional, actualSeqLengthsKvOptional, queryRopeOptional, keyRopeOptional,
         scaleValue, sparseBlockSizeOptional, layoutQueryOptional, layoutKvOptional, sparseMode, preTokens,
         nextTokens, attentionMode, returnSoftmaxLse, attentionOut,
         softmaxMax, softmaxSum, workspaceSize, executor);
 }
 
-aclnnStatus aclnnSparseFlashAttention(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
+aclnnStatus aclnnSparseFlashAttentionVllm(void *workspace, uint64_t workspaceSize, aclOpExecutor *executor,
                                      const aclrtStream stream)
 {
-    return aclnnInnerSparseFlashAttention(workspace, workspaceSize, executor, stream);
+    return aclnnInnerSparseFlashAttentionVllm(workspace, workspaceSize, executor, stream);
 }
 
 } // namespace
