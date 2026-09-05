@@ -524,6 +524,10 @@ class FinegrainedTPConfig:
         self.embedding_tensor_parallel_size = finegrained_tp_config.get("embedding_tensor_parallel_size", 0)
         self.mlp_tensor_parallel_size = finegrained_tp_config.get("mlp_tensor_parallel_size", 0)
         self.olora_tensor_parallel_size = finegrained_tp_config.get("olora_tensor_parallel_size", 0)
+        # markov_tensor_parallel_size: replicate the DSpark Markov head
+        # (markov_w1 / markov_w2) by routing it to a world_size=1 comm group.
+        # Only 0 (disabled, follow standard TP) or 1 (replicated) is meaningful.
+        self.markov_tensor_parallel_size = finegrained_tp_config.get("markov_tensor_parallel_size", 0)
 
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
@@ -566,6 +570,13 @@ class FinegrainedTPConfig:
             enabled_configs.append(f"embedding_tensor_parallel_size={self.embedding_tensor_parallel_size}")
         if self.mlp_tensor_parallel_size > 0:
             enabled_configs.append(f"mlp_tensor_parallel_size={self.mlp_tensor_parallel_size}")
+        if self.markov_tensor_parallel_size > 0:
+            if self.markov_tensor_parallel_size != 1:
+                raise AssertionError(
+                    "markov_tensor_parallel_size only supports 1 (replicate "
+                    f"the Markov head), got {self.markov_tensor_parallel_size}."
+                )
+            enabled_configs.append(f"markov_tensor_parallel_size={self.markov_tensor_parallel_size}")
         module_tp_sizes = [
             self.oproj_tensor_parallel_size,
             self.lmhead_tensor_parallel_size,
@@ -583,8 +594,9 @@ class FinegrainedTPConfig:
                 raise AssertionError("The finegrained tp sizes can be enabled only for MOE models.")
             if module_tp_size > 0 and vllm_config.parallel_config.data_parallel_size % module_tp_size != 0:
                 raise AssertionError("finegrained tp sizes must divide by data_parallel_size.")
-        if any(size > 0 for size in module_tp_sizes) and enabled_configs:
-            logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
+        if any(size > 0 for size in module_tp_sizes) or self.markov_tensor_parallel_size > 0:
+            if enabled_configs:
+                logger.info("finegrained_tp_config enabled: %s", ", ".join(enabled_configs))
 
 
 class AscendCompilationConfig:
