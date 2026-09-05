@@ -1360,6 +1360,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_model = getattr(self.model, "model", None)
         if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
             draft_model.set_skip_topk(True)
+            if hasattr(draft_model, "compact_topk_indices"):
+                # Step 0 wrote top-k rows for every query token in the
+                # multi-token batch. Compact the rows of each request's last
+                # token to the buffer front so steps 1+ read request-aligned
+                # rows (mirrors the upstream proposer). Draft predictors
+                # without this method (e.g. vllm-ascend DeepSeekV4MTP) are
+                # left untouched.
+                draft_model.compact_topk_indices(token_indices_to_sample)
 
         if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
