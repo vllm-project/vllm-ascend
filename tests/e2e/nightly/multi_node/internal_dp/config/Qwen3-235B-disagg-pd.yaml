@@ -39,7 +39,7 @@ deployment:
         --trust-remote-code
         --gpu-memory-utilization 0.9
         --no-enable-prefix-caching
-        --additional-config '{"enable_fused_mc2":1}'
+        --additional-config '{"enable_fused_mc2":0}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
@@ -78,7 +78,7 @@ deployment:
         --gpu-memory-utilization 0.9
         --no-enable-prefix-caching
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-        --additional-config '{"enable_fused_mc2":1}'
+        --additional-config '{"enable_fused_mc2":0}'
         --kv-transfer-config
         '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
