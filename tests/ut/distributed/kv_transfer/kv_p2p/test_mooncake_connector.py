@@ -1,3 +1,4 @@
+import inspect
 import os
 import queue
 import sys
@@ -18,6 +19,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -98,6 +100,55 @@ def make_kv_cache_tensor(size, layers, **kwargs):
     if "layers" in KVCacheTensor.__dataclass_fields__:
         return KVCacheTensor(size=size, layers=layers, layer_stride=size, **kwargs)
     return KVCacheTensor(size=size, shared_by=layers, **kwargs)
+
+
+def make_exact_aligned_cpu_buffer(size):
+    """Real CPU storage with an exact extent, independent of allocator alignment.
+
+    frombuffer retains the bytearray owner. Unlike slicing a tensor, it makes
+    storage.nbytes() equal to size, so a one-byte registration overrun is real.
+    """
+    alignment = 2 * 1024 * 1024
+    backing = bytearray(size + alignment)
+    start = (-torch.frombuffer(backing, dtype=torch.uint8).data_ptr()) % alignment
+    return torch.frombuffer(backing, dtype=torch.uint8, offset=start, count=size)
+
+
+@pytest.mark.parametrize("offset", [0, 1, 2 * 1024 * 1024 - 1, 2 * 1024 * 1024, 2 * 1024 * 1024 + 1])
+def test_k3_registration_recovers_storage_across_alignment_boundary(offset):
+    """Padding/view alignment must not change the registered allocation."""
+    size = 4 * 1024 * 1024
+    allocation = make_exact_aligned_cpu_buffer(size)
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(
+        kv_cache_tensors=[make_kv_cache_tensor(size=size, layers=["target", "state"])]
+    )
+    assert allocation.untyped_storage().nbytes() == size
+    assert allocation.data_ptr() % (2 * 1024 * 1024) == 0
+    assert worker._get_registered_kv_tensor_buffers(
+        {"target": allocation[offset:], "state": (allocation[128:], allocation[512:])}
+    ) == ([allocation.data_ptr()], [size])
+
+
+@pytest.mark.parametrize("invalid", ["one-byte-overrun", "two-allocations", "view-before-aligned-base", "no-views"])
+def test_k3_registration_rejects_unrecoverable_allocation(invalid):
+    size = 4 * 1024 * 1024
+    allocation = make_exact_aligned_cpu_buffer(size)
+    views = [allocation[128:]]
+    if invalid == "one-byte-overrun":
+        size += 1
+    elif invalid == "two-allocations":
+        views.append(make_exact_aligned_cpu_buffer(size)[256:])
+    elif invalid == "view-before-aligned-base":
+        # Deliberately expose storage starting one byte after an aligned base.
+        # The next aligned address is after this logical view: rounding it up
+        # would omit live data, even though the remaining allocation is large.
+        views = [torch.frombuffer(allocation.numpy(), dtype=torch.uint8, offset=1)]
+        size = 128
+    else:
+        views = []
+    with pytest.raises(RuntimeError, match="Unable to recover one aligned KV tensor base"):
+        MooncakeConnectorWorker._recover_aligned_kv_tensor_base(views, size)
 
 
 @pytest.mark.parametrize(
@@ -1851,6 +1902,68 @@ def wire_transfer_contract(monkeypatch, request):
         yield worker, receiver, engine, socket, peer
     finally:
         receiver.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize("overrun_bytes", [0, 1], ids=["valid-shared-target-and-draft", "reject-one-byte-overrun"])
+def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract, monkeypatch, overrun_bytes):
+    """UT integration: real group building and registration, only backend/startup faked.
+
+    Fixed MLA + Mamba + draft schema captures K3 padding/aliasing mechanisms;
+    this is not execution of the K3 model or the NPU allocator.
+    """
+    worker, _, _, _, _ = wire_transfer_contract
+    module = sys.modules[MooncakeConnectorWorker.__module__]
+    size = 4 * 1024 * 1024
+    target, draft = make_exact_aligned_cpu_buffer(size), make_exact_aligned_cpu_buffer(size)
+    attention, state, mtp = "model.layers.0.self_attn", "model.layers.1.mamba", "model.mtp.0.self_attn"
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.uint8)
+    mamba = MambaSpec(block_size=16, shapes=((16,), (16,)), dtypes=(torch.uint8, torch.uint8))
+    worker.total_layers = 2
+    worker.kv_cache_config.num_blocks = 2
+    worker.kv_cache_config.kv_cache_groups = [
+        KVCacheGroupSpec(layer_names=[attention], kv_cache_spec=mla),
+        KVCacheGroupSpec(layer_names=[state], kv_cache_spec=mamba),
+        KVCacheGroupSpec(layer_names=[mtp], kv_cache_spec=mla),
+    ]
+    worker._layer_specs = worker._build_layer_specs_from_kv_cache_config(worker.kv_cache_config)
+    worker.kv_cache_config.kv_cache_tensors = [
+        make_kv_cache_tensor(size=size + overrun_bytes, layers=[attention, state]),
+        make_kv_cache_tensor(size=size, layers=[state]),
+        make_kv_cache_tensor(size=size, layers=[mtp]),
+    ]
+    caches = {
+        attention: target[128:160].view(2, 16),
+        state: (target[256:288].view(2, 16), target[512:544].view(2, 16)),
+        mtp: draft[2 * 1024 * 1024 + 64 : 2 * 1024 * 1024 + 96].view(2, 16),
+    }
+    backend = MagicMock()
+    startup = MagicMock()
+
+    def ready_receiver(*args, **kwargs):
+        arguments = inspect.signature(KVCacheRecvingThread).bind(*args, **kwargs).arguments
+        arguments["ready_event"].set()
+        return startup
+
+    monkeypatch.setattr(module.global_te, "register_buffer", backend)
+    monkeypatch.setattr(module, "KVCacheRecvingThread", ready_receiver)
+    if overrun_bytes:
+        with pytest.raises(RuntimeError, match="Unable to recover one aligned KV tensor base"):
+            worker.register_kv_caches(caches)
+        backend.assert_not_called()
+        startup.start.assert_not_called()
+        return
+
+    worker.register_kv_caches(caches)
+    backend.assert_called_once_with([target.data_ptr(), draft.data_ptr()], [size, size])
+    startup.start.assert_called_once()
+    # Registration covers raw allocations; wire metadata must still address
+    # each logical state/attention view rather than the rounded allocation base.
+    assert worker.xfer_handshake_metadata.kv_caches_base_addr == [
+        [target.data_ptr() + 128],
+        [target.data_ptr() + 256, target.data_ptr() + 512],
+        [draft.data_ptr() + 2 * 1024 * 1024 + 64],
+    ]
+    assert worker.xfer_handshake_metadata.block_strides == [[16], [16, 16], [16]]
 
 
 @pytest.mark.parametrize(
