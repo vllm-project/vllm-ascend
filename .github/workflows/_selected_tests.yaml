@@ -473,33 +473,45 @@ jobs:
               echo "TASK_NAME=${TASK_NAME}"
             } >> "${GITHUB_ENV}"
 
-        - name: Upload coverage to OBS
-          run: |
-            pip install esdk-obs-python --quiet
-            python3 - <<'EOF'
-            import os
-            from obs import ObsClient
+        # - name: Upload coverage to OBS
+        #   run: |
+        #     pip install esdk-obs-python --quiet
+        #     python3 - <<'EOF'
+        #     import os
+        #     from obs import ObsClient
+        #
+        #     OBS_BUCKET = 'vllm-ascend'
+        #     OBS_PREFIX = 'ci/precision-test'
+        #     client = ObsClient(
+        #         access_key_id=os.environ['OBS_ACCESS_KEY'],
+        #         secret_access_key=os.environ['OBS_SECRET_KEY'],
+        #         server='https://obs.cn-north-4.myhuaweicloud.com'
+        #     )
+        #
+        #     uploads = [
+        #         ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
+        #         ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
+        #         ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
+        #     ]
+        #     for local_path, obs_path in uploads:
+        #         resp = client.putFile(OBS_BUCKET, obs_path, local_path)
+        #         if resp.status < 300:
+        #             print(f'Uploaded: {local_path} -> {obs_path}')
+        #         else:
+        #             raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
+        #     EOF
 
-            OBS_BUCKET = 'vllm-ascend'
-            OBS_PREFIX = 'ci/precision-test'
-            client = ObsClient(
-                access_key_id=os.environ['OBS_ACCESS_KEY'],
-                secret_access_key=os.environ['OBS_SECRET_KEY'],
-                server='https://obs.cn-north-4.myhuaweicloud.com'
-            )
-
-            uploads = [
-                ('coverage.tar', f'{OBS_PREFIX}/coverage.tar'),
-                ('coverage_version.txt', f'{OBS_PREFIX}/coverage_version.txt'),
-                ('test_case_map.json', f'{OBS_PREFIX}/test_case_map.json'),
-            ]
-            for local_path, obs_path in uploads:
-                resp = client.putFile(OBS_BUCKET, obs_path, local_path)
-                if resp.status < 300:
-                    print(f'Uploaded: {local_path} -> {obs_path}')
-                else:
-                    raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
-            EOF
+        - name: Upload coverage artifact
+          uses: actions/upload-artifact@v7
+          with:
+            name: assembled-coverage
+            path: |
+              coverage.tar
+              coverage_version.txt
+              test_case_map.json
+            if-no-files-found: error
+            retention-days: 14
+            compression-level: 0
 
         - name: Prune extra tests already present in coverage
           id: prune-extra

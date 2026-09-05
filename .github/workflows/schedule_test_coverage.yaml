@@ -18,6 +18,16 @@
 name: Schedule Test Coverage
 
 on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - labeled
+    branches:
+      - 'main'
+      - '*-dev'
+      - 'releases/v*'
   workflow_dispatch:
     inputs:
       vllm_ascend_ref:
@@ -39,7 +49,7 @@ concurrency:
 
 jobs:
   select-full-tests:
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -82,12 +92,13 @@ jobs:
             echo "release_tag=${release_tag}"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Select all tests
+      - name: Select test_glm5_2.py
         id: full-scope
         run: |
           pip install regex pyyaml
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          python3 .github/workflows/scripts/select_tests.py --all-tests
+          python3 .github/workflows/scripts/select_tests.py \
+            --explicit-e2e-tests tests/e2e/pull_request/eight_card/test_glm5_2.py
 
   ensure-csrc-cache:
     needs: select-full-tests
