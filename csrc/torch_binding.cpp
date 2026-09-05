@@ -498,6 +498,108 @@ at::Tensor sgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indic
     cmd.Run();
     return y_out;
 }
+
+static bool lora_rank_supported(int64_t rank)
+{
+    return rank == 8 || rank == 16 || rank == 32 || rank == 64;
+}
+
+at::Tensor sgmv_lora(at::Tensor &x, at::Tensor &weight_a, at::Tensor &weight_b, at::Tensor &lora_indices,
+                     at::Tensor &seq_len, at::Tensor &y, double scale, int64_t slice_offset, int64_t slice_size)
+{
+    at::ScalarType scalar_type = y.scalar_type();
+    TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
+    TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
+    TORCH_CHECK(y.dim() == 2, "y should be [batch_size, hidden_out]");
+    TORCH_CHECK(weight_a.dim() == 3 || weight_a.dim() == 4, "LoRA A rank/layout invalid");
+    TORCH_CHECK(weight_b.dim() == 3 || weight_b.dim() == 4, "LoRA B rank/layout invalid");
+    int64_t lora_rank = weight_a.size(-2);
+    TORCH_CHECK(lora_rank_supported(lora_rank), "fused lora rank must be 8/16/32/64");
+    TORCH_CHECK(weight_b.size(-1) == lora_rank, "A rank and B hidden_in must match");
+    TORCH_CHECK(x.size(0) == y.size(0), "x/y batch must match");
+    TORCH_CHECK(slice_offset >= 0, "slice offset should be no smaller than 0");
+    TORCH_CHECK((slice_size + slice_offset) <= y.size(1), "slice exceeds y");
+    TORCH_CHECK(lora_rank <= slice_size, "rank should be smaller than slice");
+
+    void *x_ptr = x.data_ptr();
+    void *wa_ptr = weight_a.data_ptr();
+    void *wb_ptr = weight_b.data_ptr();
+    void *lora_indices_ptr = lora_indices.data_ptr();
+    void *seq_len_ptr = seq_len.data_ptr();
+    void *y_ptr = y.data_ptr();
+    int lora_indices_size = lora_indices.size(0);
+    int seq_len_size = seq_len.size(0);
+    int batch_size = x.size(0);
+    int input_hidden = x.size(1);
+    int output_full_dim = y.size(1);
+    float scale_f = static_cast<float>(scale);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at_npu::native::OpCommand cmd;
+    cmd.Name("sgmv_lora");
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, wa_ptr, wb_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr,
+                          seq_len_size, y_ptr, batch_size, input_hidden, lora_rank, slice_offset, slice_size,
+                          output_full_dim, scale_f]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        int device_id = 0;
+        int64_t aiv_num = 0;
+        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
+        int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
+        TORCH_CHECK(num_tokens_per_core != 0, "num_tokens_per_core should not be 0");
+        sgmv_lora_impl(dtype, stream, x_ptr, wa_ptr, wb_ptr, lora_indices_ptr, lora_indices_size, seq_len_ptr,
+                       seq_len_size, y_ptr, batch_size, num_tokens_per_core, input_hidden,
+                       static_cast<uint32_t>(lora_rank), static_cast<uint32_t>(slice_size),
+                       static_cast<uint32_t>(slice_offset), output_full_dim, scale_f);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
+
+at::Tensor bgmv_lora(at::Tensor &x, at::Tensor &weight_a, at::Tensor &weight_b, at::Tensor &indices, at::Tensor &y,
+                     double scale, int64_t slice_offset, int64_t slice_size)
+{
+    at::ScalarType scalar_type = y.scalar_type();
+    TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
+    TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
+    TORCH_CHECK(y.dim() == 2, "y should be [batch_size, hidden_out]");
+    TORCH_CHECK(indices.dim() == 1, "indices should be [batch_size]");
+    int64_t lora_rank = weight_a.size(-2);
+    TORCH_CHECK(lora_rank_supported(lora_rank), "fused lora rank must be 8/16/32/64");
+    TORCH_CHECK(weight_b.size(-1) == lora_rank, "A rank and B hidden_in must match");
+    TORCH_CHECK(x.size(0) == y.size(0) && x.size(0) == indices.size(0), "x/y/indices batch must match");
+    TORCH_CHECK(slice_offset >= 0, "slice offset should be no smaller than 0");
+    TORCH_CHECK((slice_size + slice_offset) <= y.size(1), "slice exceeds y");
+
+    void *x_ptr = x.data_ptr();
+    void *wa_ptr = weight_a.data_ptr();
+    void *wb_ptr = weight_b.data_ptr();
+    void *indices_ptr = indices.data_ptr();
+    void *y_ptr = y.data_ptr();
+    int indices_size = indices.size(0);
+    int batch_size = x.size(0);
+    int input_hidden = x.size(1);
+    int output_full_dim = y.size(1);
+    float scale_f = static_cast<float>(scale);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    at_npu::native::OpCommand cmd;
+    cmd.Name("bgmv_lora");
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, wa_ptr, wb_ptr, indices_ptr, indices_size, y_ptr, batch_size,
+                          input_hidden, lora_rank, slice_offset, slice_size, output_full_dim, scale_f]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        int device_id = 0;
+        int64_t aiv_num = 0;
+        TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
+        int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
+        TORCH_CHECK(num_tokens_per_core != 0, "num_tokens_per_core should not be 0");
+        bgmv_lora_impl(dtype, stream, x_ptr, wa_ptr, wb_ptr, indices_ptr, indices_size, y_ptr, batch_size,
+                       num_tokens_per_core, input_hidden, static_cast<uint32_t>(lora_rank),
+                       static_cast<uint32_t>(slice_size), static_cast<uint32_t>(slice_offset), output_full_dim,
+                       scale_f);
+        return 0;
+    });
+    cmd.Run();
+    return y;
+}
 #endif
 
 at::Tensor npu_sign_bits_pack(const at::Tensor& input,
@@ -2089,6 +2191,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "sgmv_expand(Tensor! x, Tensor! weight, Tensor! lora_indices, Tensor! seq_len, Tensor! y,"
         "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("sgmv_expand", torch::kPrivateUse1, &vllm_ascend::sgmv_expand);
+
+    ops.def(
+        "sgmv_lora(Tensor! x, Tensor! weight_a, Tensor! weight_b, Tensor! lora_indices, Tensor! seq_len, Tensor! y,"
+        "          float scale, int slice_offset, int slice_size) -> Tensor");
+    ops.impl("sgmv_lora", torch::kPrivateUse1, &vllm_ascend::sgmv_lora);
+
+    ops.def(
+        "bgmv_lora(Tensor! x, Tensor! weight_a, Tensor! weight_b, Tensor! indices, Tensor! y,"
+        "          float scale, int slice_offset, int slice_size) -> Tensor");
+    ops.impl("bgmv_lora", torch::kPrivateUse1, &vllm_ascend::bgmv_lora);
 
     ops.def(
         "mla_preprocess(Tensor hiddenState, Tensor wdqkv,"

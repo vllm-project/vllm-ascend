@@ -57,6 +57,18 @@ at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_
     return y_out;
 }
 
+at::Tensor sgmv_lora_meta(at::Tensor &x, at::Tensor &weight_a, at::Tensor &weight_b, at::Tensor &lora_indices,
+                          at::Tensor &seq_len, at::Tensor &y, double scale, int64_t slice_offset, int64_t slice_size) {
+    // Alias y: the impl mutates y in place and returns it. empty_like() makes
+    // ACL graphs treat the result as a new tensor and drop the custom op.
+    return y;
+}
+
+at::Tensor bgmv_lora_meta(at::Tensor &x, at::Tensor &weight_a, at::Tensor &weight_b, at::Tensor &indices,
+                          at::Tensor &y, double scale, int64_t slice_offset, int64_t slice_size) {
+    return y;
+}
+
 std::tuple<at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &, at::Tensor &> mla_preprocess(
     const at::Tensor &hiddenState,
     const at::Tensor &wdqkv,
@@ -1957,6 +1969,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
     // Sgmv expand
     ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
+    ops.impl("sgmv_lora", &vllm_ascend::meta::sgmv_lora_meta);
+    ops.impl("bgmv_lora", &vllm_ascend::meta::bgmv_lora_meta);
     // MLA preprocess
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
     // batch_matmul_transpose
