@@ -307,6 +307,24 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         self.assertEqual(params["num_prompt_blocks"], 2)
         self.assertIn("req1", scheduler._reqs_need_send)
 
+    def test_request_finished_accepts_stopped_prefill_request(self):
+        scheduler = self._make_scheduler()
+        request = MockRequest(
+            "req1",
+            prompt_token_ids=list(range(129)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_STOPPED,
+        )
+        block_ids = (list(range(10)), [100, 101, 102, 103])
+
+        delay_free, params = scheduler.request_finished_all_groups(request, block_ids)
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        self.assertEqual(params["remote_block_ids"], ([0], [100, 101]))
+        self.assertEqual(params["num_prompt_blocks"], 2)
+        self.assertIn("req1", scheduler._reqs_need_send)
+
     def test_request_finished_uses_num_prompt_tokens(self):
         scheduler = self._make_scheduler()
         request = MockRequest(
