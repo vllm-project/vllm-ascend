@@ -1087,23 +1087,6 @@ class TestCoreFunctionality(unittest.TestCase):
         self.mock_queue.task_done.assert_called_once()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
-    def test_transfer_kv_cache(self, mock_get_meta):
-        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
-            mock_config.return_value.enable_kv_nz = False
-            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
-            self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1]]}
-            self.thread._transfer_kv_cache_all_groups(self.test_req)
-        self.engine.batch_transfer_sync_read.assert_called_once()
-        call_args, call_kwargs = self.engine.batch_transfer_sync_read.call_args
-        self.assertEqual(call_args[0], "localhost:7777")
-        self.assertIsInstance(call_args[1], list)
-        self.assertIsInstance(call_args[2], list)
-        self.assertIsInstance(call_args[3], list)
-        self.assertEqual(len(call_args[1]), len(call_args[2]))
-        self.assertEqual(len(call_args[1]), len(call_args[3]))
-        mock_get_meta.assert_not_called()
-
-    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_sfa_metadata_plane_uses_cache_spec_type(self, mock_get_meta):
         metadata_layer_idx = self.thread.index_cache_plane_base + 3
         metadata_size = metadata_layer_idx + 1
@@ -1727,6 +1710,279 @@ class MockKVCacheConfig:
     def __init__(self, kv_cache_groups=None, num_blocks=10):
         self.kv_cache_groups = kv_cache_groups or [MockKVCacheGroup()]
         self.num_blocks = num_blocks
+
+
+@pytest.fixture
+def wire_transfer_contract(monkeypatch, request):
+    """Real PD objects with a declared padded allocation and fake external I/O.
+
+    Registration/thread startup is outside this contract. The fixture supplies
+    its resolved allocation geometry; it does not replace routing, serialization,
+    descriptor construction, completion tracking or error propagation.
+    """
+    module = sys.modules[MooncakeConnectorWorker.__module__]
+    config = MockVllmConfig()
+    config.parallel_config.tensor_parallel_size = 1
+    config.model_config.hf_text_config.num_key_value_heads = 1
+    config.model_config.hf_text_config.num_hidden_layers = 1
+    config.model_config.get_total_num_hidden_layers.return_value = 1
+    config.model_config.get_total_num_kv_heads.return_value = 1
+    config.kv_transfer_config.kv_role = "kv_consumer"
+    config.kv_transfer_config.get_from_extra_config.side_effect = lambda key, default: {
+        "prefill": {"tp_size": 1, "dp_size": 1},
+        "decode": {"tp_size": 1, "dp_size": 1},
+    }.get(key, default)
+    engine = MagicMock()
+    engine.get_rpc_port.return_value = 9090
+    engine.batch_transfer_sync_read.return_value = 0
+    monkeypatch.setattr(module.global_te, "get_transfer_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(module, "get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(module, "get_tp_group", lambda: types.SimpleNamespace(rank_in_group=0, world_size=1))
+    monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(module, "get_decode_context_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(module, "get_ascend_config", lambda: types.SimpleNamespace(enable_kv_nz=False))
+    # Constructor writes this setting; restore it after the case.
+    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", "30")
+    layer_name = "model.layers.0.self_attn"
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=2, dtype=torch.float16)
+    layer_names = [layer_name]
+    local_addrs, remote_addrs = [[0x1000, 0x2000]], [[0x3000, 0x4000]]
+    lengths, local_strides, remote_strides, scales = [[64, 64]], [[80, 80]], [[96, 96]], [[1, 1]]
+    caches = {layer_name: (torch.empty(1), torch.empty(1))}
+    if getattr(request, "param", None) == "split-kernels":
+        # One manager group, two transfer groups, different kernel scales.
+        # This is a fixed mixed-layout schema, not a real-model accuracy test.
+        config.model_config.hf_text_config.num_hidden_layers = 2
+        config.model_config.get_total_num_hidden_layers.return_value = 2
+        second_layer = "model.layers.1.self_attn"
+        layer_names.append(second_layer)
+        spec = UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={
+                layer_name: spec,
+                second_layer: MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=2, dtype=torch.float16),
+            },
+        )
+        local_addrs.append([0x5000])
+        remote_addrs.append([0x6000])
+        lengths.append([32])
+        local_strides.append([48])
+        remote_strides.append([64])
+        scales.append([2])
+        caches[second_layer] = (torch.empty(1),)
+    cache_config = MockKVCacheConfig([KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)])
+    worker = MooncakeConnectorWorker(config, "decode-engine", cache_config)
+    worker.use_mla = worker.use_sparse = False
+    worker.enable_sfa_dcp_replicated_indexer = module.enable_sfa_dcp_replicated_indexer(config)
+    worker.kv_group2layeridx = worker._build_kv_group2layeridx()
+    worker.block_size_scale = scales
+    receiver = KVCacheRecvingThread(
+        tp_rank=0,
+        tp_size=1,
+        _prefill_pp_size=1,
+        engine=engine,
+        local_engine_id="decode-engine",
+        local_handshake_port=5000,
+        side_channel_port=5000,
+        local_kv_caches_base_addr=local_addrs,
+        block_len_per_addr=lengths,
+        block_stride_per_addr=local_strides,
+        vllm_config=config,
+        kv_caches=caches,
+        kv_group2layeridx=worker.kv_group2layeridx,
+        block_size_scale=worker.block_size_scale,
+    )
+    worker.kv_recv_thread = receiver
+    peer = make_agent_metadata(
+        engine_id="prefill-engine",
+        kv_group2layeridx=worker.kv_group2layeridx,
+        kv_caches_base_addr=remote_addrs,
+        block_size_scale=scales,
+        block_lens=lengths,
+        block_strides=remote_strides,
+        num_blocks=10,
+    )
+    socket = MagicMock()
+    # Seed only the external socket pool: real acquisition, codec and ACK path
+    # are retained without opening a port or starting the receiver/executor.
+    receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)].append(socket)
+    try:
+        yield worker, receiver, engine, socket, peer
+    finally:
+        receiver.executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize(
+    "computed_tokens,local_blocks,remote_offsets",
+    [(0, [1, 2], [288, 384]), (16, [1, 2], [384, 480]), (48, [], [])],
+    ids=["no-prefix", "partial-prefix", "full-prefix"],
+)
+def test_metadata_to_wire_descriptors_and_completion(
+    wire_transfer_contract, computed_tokens, local_blocks, remote_offsets
+):
+    """UT-IT: prefix + padded P/D layout reaches the backend without bridging mocks."""
+    worker, receiver, engine, socket, peer = wire_transfer_contract
+    socket.recv.side_effect = [msgspec.msgpack.encode(peer), b"ACK"] if local_blocks else [b"ACK"]
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        (local_blocks,),
+        48 - computed_tokens,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3, 4, 5],),
+            "remote_block_size": 16,
+            "num_computed_tokens": computed_tokens,
+        },
+    )
+    worker.start_load_kv(metadata)
+    assert worker.get_finished() == (set(), set())
+    receiver._handle_request(receiver.request_queue.get_nowait())
+    assert receiver.request_queue.empty()
+    if local_blocks:
+        # 64 bytes per K/V block, D stride 80, P stride 96. The padding
+        # forbids coalescing even though the logical block ids are contiguous.
+        engine.batch_transfer_sync_read.assert_called_once_with(
+            "127.0.0.1:9090",
+            [0x1000 + 80, 0x1000 + 160, 0x2000 + 80, 0x2000 + 160],
+            [base + offset for base in (0x3000, 0x4000) for offset in remote_offsets],
+            [64, 64, 64, 64],
+        )
+    else:
+        engine.batch_transfer_sync_read.assert_not_called()
+    messages = [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list]
+    expected = [[GET_META_MSG, ""]] if local_blocks else []
+    assert messages == expected + [[DONE_RECVING_MSG, "prefill-request", {}]]
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.get_finished() == (set(), {"decode-request"})
+    assert worker.get_finished() == (set(), set())
+
+
+def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contract):
+    """UT-IT: backend failure reports invalid blocks, releases P and isolates B."""
+    worker, receiver, engine, socket, peer = wire_transfer_contract
+    socket.recv.side_effect = [msgspec.msgpack.encode(peer), b"ACK", b"ACK"]
+    engine.batch_transfer_sync_read.side_effect = [-1, 0]
+    for request_id, block_id, expected_errors in [("a", 1, {1}), ("b", 2, set())]:
+        metadata = MooncakeConnectorMetadata()
+        metadata.reqs_in_batch.add(request_id)
+        metadata.add_new_req(
+            request_id,
+            ([block_id],),
+            16,
+            {
+                "remote_request_id": "prefill-" + request_id,
+                "remote_engine_id": "prefill-engine",
+                "remote_host": "127.0.0.1",
+                "remote_port": 6000,
+                "remote_block_ids": ([3],),
+                "remote_block_size": 16,
+            },
+        )
+        worker.start_load_kv(metadata)
+        assert worker.get_finished() == (set(), set())
+        receiver._handle_request(receiver.request_queue.get_nowait())
+        # Completion permits cleanup; it does NOT mean the transfer succeeded.
+        assert worker.get_block_ids_with_load_errors() == expected_errors
+        assert worker.get_block_ids_with_load_errors() == set()
+        assert worker.get_finished() == (set(), {request_id})
+        assert worker.get_finished() == (set(), set())
+    assert engine.batch_transfer_sync_read.call_count == 2
+    assert [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list] == [
+        [GET_META_MSG, ""],
+        [DONE_RECVING_MSG, "prefill-a", {}],
+        [DONE_RECVING_MSG, "prefill-b", {}],
+    ]
+
+
+@pytest.mark.parametrize("wire_transfer_contract", ["split-kernels"], indirect=True)
+@pytest.mark.parametrize(
+    "computed_tokens,full_offsets,mla_offsets",
+    [(0, [288, 384], [384, 448, 512, 576]), (16, [384, 480], [512, 576, 640, 704])],
+    ids=["no-prefix", "partial-prefix"],
+)
+def test_one_cache_group_reaches_distinct_transfer_descriptors(
+    wire_transfer_contract, computed_tokens, full_offsets, mla_offsets
+):
+    """UT-IT / HIST-003 mechanism: cache ids must not index transfer groups.
+
+    Both layers consume manager group 0. Full attention uses scale 1; MLA
+    uses scale 2. Retaining only the last group's block ids corrupts the first
+    layer; indexing manager ids by transfer group fails on the second layer.
+    """
+    worker, receiver, engine, socket, peer = wire_transfer_contract
+    socket.recv.side_effect = [msgspec.msgpack.encode(peer), b"ACK"]
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        ([1, 2],),
+        32,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3, 4, 5],),
+            "remote_block_size": 16,
+            "num_computed_tokens": computed_tokens,
+        },
+    )
+    worker.start_load_kv(metadata)
+    assert worker.get_finished() == (set(), set())
+    receiver._handle_request(receiver.request_queue.get_nowait())
+    engine.batch_transfer_sync_read.assert_called_once_with(
+        "127.0.0.1:9090",
+        [0x1000 + 80, 0x1000 + 160, 0x2000 + 80, 0x2000 + 160]
+        + [0x5000 + 96, 0x5000 + 144, 0x5000 + 192, 0x5000 + 240],
+        [base + offset for base in (0x3000, 0x4000) for offset in full_offsets]
+        + [0x6000 + offset for offset in mla_offsets],
+        [64, 64, 64, 64, 32, 32, 32, 32],
+    )
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.get_finished() == (set(), {"decode-request"})
+    assert worker.get_finished() == (set(), set())
+
+
+@pytest.mark.parametrize("invalid_peer", ["invalid-msgpack", "conflicting-engine"])
+def test_invalid_wire_metadata_never_submits_a_transfer(wire_transfer_contract, invalid_peer):
+    """UT-IT: handshake failure is reported before backend I/O, with P cleanup."""
+    worker, receiver, engine, socket, peer = wire_transfer_contract
+    if invalid_peer == "conflicting-engine":
+        peer.engine_id = "decode-engine"
+        payload = msgspec.msgpack.encode(peer)
+    else:
+        payload = b"\xc1"  # Reserved MessagePack byte, not a fabricated decoder exception.
+    socket.recv.side_effect = [payload, b"ACK"]
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        ([1],),
+        16,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3],),
+            "remote_block_size": 16,
+        },
+    )
+    worker.start_load_kv(metadata)
+    receiver._handle_request(receiver.request_queue.get_nowait())
+    engine.batch_transfer_sync_read.assert_not_called()
+    assert worker.get_block_ids_with_load_errors() == {1}
+    assert worker.get_finished() == (set(), {"decode-request"})
+    assert worker.get_finished() == (set(), set())
+    assert [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list] == [
+        [GET_META_MSG, ""],
+        [DONE_RECVING_MSG, "prefill-request", {}],
+    ]
 
 
 @pytest.mark.parametrize("request_ids", [(), ("a",), ("a", "b", "c")], ids=["empty", "single", "multiple"])
