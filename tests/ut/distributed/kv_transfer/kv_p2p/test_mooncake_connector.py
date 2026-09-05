@@ -2,7 +2,6 @@ import os
 import queue
 import sys
 import threading
-import time
 import types
 import unittest
 from collections import defaultdict, deque
@@ -866,67 +865,58 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
-        release_first_request = threading.Event()
-        first_request_started = threading.Event()
-        other_peer_started = threading.Event()
-        handled_requests: list[str] = []
-        active_by_peer: defaultdict[tuple[str, int], int] = defaultdict(int)
-        max_active_by_peer: defaultdict[tuple[str, int], int] = defaultdict(int)
-        state_lock = threading.Lock()
+        # Control executor scheduling, not the production peer queue/handler.
+        # This proves a fixed interleaving without relying on OS scheduling.
+        scheduled = deque()
+        events = []
+        concurrent_jobs = []
+        self.thread.executor.shutdown(wait=True)
+        self.thread.executor = MagicMock()
+        self.thread.executor.submit.side_effect = lambda fn, *args: scheduled.append((fn, args))
 
-        def handle_request(req_meta: dict[str, Any]):
-            peer_key = (req_meta["remote_host"], req_meta["remote_handshake_port"])
-            with state_lock:
-                active_by_peer[peer_key] += 1
-                max_active_by_peer[peer_key] = max(max_active_by_peer[peer_key], active_by_peer[peer_key])
-                handled_requests.append(req_meta["request_id"])
+        def request(request_id, host, port):
+            return {
+                "request_id": request_id,
+                "remote_host": host,
+                "remote_handshake_port": port,
+                "all_task_done": True,
+            }
 
-            if req_meta["request_id"] == "same-peer-1":
-                first_request_started.set()
-                self.assertTrue(release_first_request.wait(timeout=2.0))
-            elif req_meta["request_id"] == "other-peer-1":
-                other_peer_started.set()
+        first = request("same-peer-1", "host-a", 6000)
+        second = request("same-peer-2", "host-a", 6000)
+        other = request("other-peer-1", "host-b", 6001)
 
-            time.sleep(0.01)
-            with state_lock:
-                active_by_peer[peer_key] -= 1
+        def handle_request(req_meta):
+            request_id = req_meta["request_id"]
+            events.append(("start", request_id))
+            if request_id == "same-peer-1":
+                self.thread._submit_request(second)
+                self.thread._submit_request(other)
+                # Only the other peer may start while the first is active.
+                concurrent_jobs.append(len(scheduled))
+                fn, args = scheduled.popleft()
+                fn(*args)
+            events.append(("finish", request_id))
 
-        self.thread._handle_request = handle_request  # type: ignore[method-assign]
-        same_peer_1 = {
-            "request_id": "same-peer-1",
-            "remote_host": "host-a",
-            "remote_handshake_port": 6000,
-            "all_task_done": False,
-        }
-        same_peer_2 = {
-            "request_id": "same-peer-2",
-            "remote_host": "host-a",
-            "remote_handshake_port": 6000,
-            "all_task_done": True,
-        }
-        other_peer = {
-            "request_id": "other-peer-1",
-            "remote_host": "host-b",
-            "remote_handshake_port": 6001,
-            "all_task_done": True,
-        }
+        self.thread._handle_request = handle_request
+        self.thread._submit_request(first)
+        self.assertEqual(len(scheduled), 1)
+        fn, args = scheduled.popleft()
+        fn(*args)
 
-        try:
-            self.thread._submit_request(same_peer_1)
-            self.assertTrue(first_request_started.wait(timeout=1.0))
-            self.thread._submit_request(same_peer_2)
-            self.thread._submit_request(other_peer)
-
-            self.assertTrue(other_peer_started.wait(timeout=1.0))
-            time.sleep(0.05)
-            self.assertNotIn("same-peer-2", handled_requests)
-        finally:
-            release_first_request.set()
-            self.thread.executor.shutdown(wait=True, cancel_futures=True)
-
-        self.assertLess(handled_requests.index("same-peer-1"), handled_requests.index("same-peer-2"))
-        self.assertEqual(max_active_by_peer[("host-a", 6000)], 1)
-        self.assertEqual(max_active_by_peer[("host-b", 6001)], 1)
+        self.assertEqual(concurrent_jobs, [1])
+        self.assertEqual(
+            events,
+            [
+                ("start", "same-peer-1"),
+                ("start", "other-peer-1"),
+                ("finish", "other-peer-1"),
+                ("finish", "same-peer-1"),
+                ("start", "same-peer-2"),
+                ("finish", "same-peer-2"),
+            ],
+        )
+        self.assertFalse(scheduled)
 
     def test_peer_handler_yields_after_batch_limit(self):
         peer_key = ("host-a", 6000)
@@ -2541,7 +2531,10 @@ class TestUtils(unittest.TestCase):
         mock_socket.send.side_effect = zmq.ZMQError(  # type: ignore
             "send failed"
         )
-        with self.assertRaises(RuntimeError):
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "Failed to send data.*after 2 retries"),
+        ):
             ensure_zmq_send(mock_socket, b"hello", "tcp://localhost:1234", max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
 
@@ -2556,8 +2549,12 @@ class TestUtils(unittest.TestCase):
     def test_ensure_zmq_recv_timeout_and_fail(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")  # type: ignore
-        with self.assertRaises(RuntimeError):
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "Failed to receive data after 2 retries"),
+        ):
             ensure_zmq_recv(mock_socket, "tcp://localhost:1234", max_retries=2)
+        self.assertEqual(mock_socket.recv.call_count, 2)
 
 
 class MockMooncakeAgentMetadata:
