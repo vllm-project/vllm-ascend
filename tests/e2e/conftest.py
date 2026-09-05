@@ -2047,3 +2047,13 @@ def pytest_collection_modifyitems(config, items):
             "  Values must come from tests/e2e/coverage_taxonomy.py "
             "(ALLOWED_VALUES). Fix the marker or update the taxonomy."
         )
+
+
+@pytest.fixture(scope="session")
+def qwen36_moe_2d_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen36-35ba3b-2d-weights-poken-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen36_moe_3d_lora_files():
+    return snapshot_download(repo_id="vllm-ascend/qwen36-35ba3b-moe-all-linear-poken-lora")
