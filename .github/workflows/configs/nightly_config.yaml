@@ -201,6 +201,12 @@ a3:
       - name: glm-5.1-w8a8-prefill-mc2
         os: linux-aarch64-nightly-a3-16
         config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
+      - name: glm-5.2-w4a8-dspark
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
+      - name: glm-5.2-w4a8-mtp
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8.yaml
@@ -314,6 +320,12 @@ a3-560t:
       - name: glm-5.1-w8a8-prefill-mc2
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: GLM-5.1-W8A8-PrefillMC2.yaml
+      - name: glm-5.2-w4a8-dspark
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: GLM-5.2-W4A8-DSpark-A3.yaml
+      - name: glm-5.2-w4a8-mtp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: GLM-5.2-W4A8-MTP-A3.yaml
       - name: qwen3-235b-a22b-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Qwen3-235B-A22B-W8A8.yaml

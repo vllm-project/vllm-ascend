@@ -1,0 +1,55 @@
+test_cases:
+  - name: "GLM-5.2-W4A8-DSpark-A3"
+    model: "Eco-Tech/GLM-5.2-w4a8"
+    envs:
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      HCCL_TRANSFER_TIMEOUT: "600"
+      HCCL_EXEC_TIMEOUT: "3600"
+      HCCL_CONNECT_TIMEOUT: "3600"
+      HCCL_BUFFSIZE: "200"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      VLLM_USE_MODELSCOPE: "true"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--tensor-parallel-size"
+      - "8"
+      - "--data-parallel-size"
+      - "2"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--safetensors-load-strategy"
+      - "prefetch"
+      - "--seed"
+      - "1024"
+      - "--max-model-len"
+      - "16384"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--max-num-seqs"
+      - "12"
+      - "--trust-remote-code"
+      - "--quantization"
+      - "ascend"
+      - "--enable-expert-parallel"
+      - "--gpu-memory-utilization"
+      - "0.92"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative-config"
+      - '{"method":"dspark","model":"RedHatAI/GLM-5.2-speculator.dspark","num_speculative_tokens":7,"enforce_eager":true}'
+      - "--additional-config"
+      - '{"multistream_overlap_shared_expert":true,"enable_fused_mc2":0}'
+    benchmarks:
+      spec_decode:
+        case_type: spec_decode
+        dataset_path: vllm-ascend/gsm8k-lite
+        request_conf: vllm_api_general_chat
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
+        max_out_len: 8192
+        batch_size: 32
+        # W4A8/A3/TP8 per-position golden from the repository GLM-5.2 E2E history.
+        # Recalibrate with repeated GSM8K DP2/TP8 nightly measurements before tightening the gate.
+        baseline: [0.72, 0.45, 0.32, 0.21, 0.16, 0.12, 0.10]
+        threshold: 0.05

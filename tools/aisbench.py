@@ -36,7 +36,11 @@ DATASET_DIR = os.path.join(BENCHMARK_HOME, "ais_bench", "datasets")
 
 
 class AisbenchRunner:
-    RESULT_MSG = {"performance": "Performance Result files located in ", "accuracy": "write csv to "}
+    RESULT_MSG = {
+        "performance": "Performance Result files located in ",
+        "accuracy": "write csv to ",
+        "spec_decode": "write csv to ",
+    }
     DATASET_RENAME = {
         "aime2024": "aime",
         "gsm8k-lite": "gsm8k",
@@ -46,7 +50,7 @@ class AisbenchRunner:
 
     def _run_aisbench_task(self):
         dataset_conf = self.dataset_conf.split("/")[-1]
-        if self.task_type == "accuracy":
+        if self.task_type in ("accuracy", "spec_decode"):
             aisbench_cmd = ["ais_bench", "--models", f"{self.request_conf}_custom", "--datasets", f"{dataset_conf}"]
         if self.task_type == "performance":
             aisbench_cmd = [
@@ -97,10 +101,17 @@ class AisbenchRunner:
         self.thinking = aisbench_config.get("thinking")
         self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
+        self.spec_decode_baseline = aisbench_config.get("baseline", [])
         self.exp_folder = None
         self.result_line = None
         self._init_dataset_conf()
         self._init_request_conf()
+        if self.task_type == "spec_decode":
+            assert self.spec_decode_baseline, "spec_decode baseline must contain a rate for every position"
+            from tools.spec_decode_metrics import capture_baseline
+
+            self.metrics_server = _MetricsServer(self.host_ip, self.port)
+            self.metrics_baseline = capture_baseline(self.metrics_server, len(self.spec_decode_baseline))
         self._run_aisbench_task()
         self._wait_for_task()
         if verify:
@@ -111,9 +122,12 @@ class AisbenchRunner:
             if self.task_type == "performance":
                 self.threshold = aisbench_config.get("threshold", 0.97)
                 self._performance_verify()
+            if self.task_type == "spec_decode":
+                self.threshold = aisbench_config.get("threshold", 0.05)
+                self._spec_decode_verify()
 
     def _init_dataset_conf(self):
-        if self.task_type == "accuracy":
+        if self.task_type in ("accuracy", "spec_decode"):
             dataset_name = os.path.basename(self.dataset_path)
             dataset_rename = self.DATASET_RENAME.get(dataset_name, dataset_name)
             dst_dir = os.path.join(DATASET_DIR, dataset_rename)
@@ -166,7 +180,7 @@ class AisbenchRunner:
             content = re.sub(r"request_rate.*", f"request_rate={self.request_rate},", content)
             content = re.sub(r"temperature.*", "temperature=0,", content)
             content = re.sub(r"ignore_eos.*", "ignore_eos=True,", content)
-        if self.task_type == "accuracy":
+        if self.task_type in ("accuracy", "spec_decode"):
             content = re.sub(r"temperature.*", "temperature=0.6,", content)
         if self.temperature is not None:
             content = re.sub(r"temperature.*", f"temperature={self.temperature},", content)
@@ -270,6 +284,32 @@ class AisbenchRunner:
             f"The accuracy of {self.dataset_path} is {acc_value}, "
             f"which is not within {self.threshold} relative to baseline {self.baseline}."
         )
+
+
+    def _spec_decode_verify(self):
+        from tools.spec_decode_metrics import (
+            measure_acceptance_rate,
+            validate_acceptance_rates,
+        )
+
+        _, self.result = measure_acceptance_rate(
+            self.metrics_server,
+            len(self.spec_decode_baseline),
+            self.metrics_baseline,
+        )
+        validate_acceptance_rates(self.result, self.spec_decode_baseline, self.threshold)
+
+
+class _MetricsServer:
+    """Minimal URL adapter used by the shared speculative-decoding metrics helpers."""
+
+    def __init__(self, host: str, port: int):
+        self.host = host
+        self.port = port
+
+    def url_for(self, *parts: str) -> str:
+        path = "/".join(part.strip("/") for part in parts)
+        return f"http://{self.host}:{self.port}/{path}"
 
 
 def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="localhost"):
