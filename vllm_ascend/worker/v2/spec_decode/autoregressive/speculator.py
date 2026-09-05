@@ -135,6 +135,29 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             parallel_config=parallel_config,
         )
 
+    # TODO: Remove this method once vllm-project/vllm#53458 or an
+    # equivalent upstream fix is merged.
+    def _maybe_remove_d2t(self, draft_model: torch.nn.Module) -> None:
+        """Drop the identity d2t mapping of a full-vocab EAGLE3 draft."""
+        if self.method != "eagle3":
+            return
+        target_vocab_size = self.draft_model_config.get_vocab_size()
+        draft_vocab_size = draft_model.config.draft_vocab_size
+        if draft_vocab_size == target_vocab_size:
+            draft_model.draft_id_to_target_id = None
+
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        draft_model = super().load_draft_model(
+            target_model,
+            target_attn_layer_names,
+        )
+        self._maybe_remove_d2t(draft_model)
+        return draft_model
+
     @property
     def draft_prefill_attn_groups(self) -> list[list[AttentionGroup]]:
         if self.replicated_pcp:
