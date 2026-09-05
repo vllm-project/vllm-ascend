@@ -321,11 +321,12 @@ class KVPoolWorker:
     def _init_backend(self, parallel_config, extra_config) -> None:
         self.transfer_process = None
         self.m_store: Any
-        if self.use_multiprocess:
-            if self.use_layerwise or self.use_hybrid or self.use_compress or self.tp_mismatch:
-                raise NotImplementedError(
-                    "use_multiprocess currently supports ordinary, non-hybrid KV caches with matching TP sizes"
-                )
+        use_transfer_process = self.use_multiprocess and not self.use_layerwise
+        if use_transfer_process:
+            from .mp.transfer_backend import requires_model_worker_backend
+
+            use_transfer_process = not requires_model_worker_backend(self.backend_name)
+        if use_transfer_process:
             from .mp.transfer import KVTransferProcess
 
             self.transfer_process = KVTransferProcess(
@@ -338,6 +339,7 @@ class KVPoolWorker:
                     put_step=self.put_step,
                     kv_role=self.kv_role,
                     enable_kv_events=self.enable_kv_events,
+                    lazy_init=self.use_compress,
                 )
             )
             self.m_store = self.transfer_process

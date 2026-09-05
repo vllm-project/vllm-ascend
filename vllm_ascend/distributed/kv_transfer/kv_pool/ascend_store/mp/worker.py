@@ -117,7 +117,7 @@ class TransferRuntime:
         self.config = config
         self.device_index = config["device_index"]
         torch.npu.set_device(self.device_index)
-        self.backend = create_transfer_backend(config["backend"], self.device_index)
+        self.backend = create_transfer_backend(config["backend"], self.device_index, config.get("lazy_init", False))
         self.cache: ImportedKVCache | None = None
         self.sender: KVCacheStoreSendingThread | None = None
         self.receiver: KVCacheStoreRecvingThread | None = None
@@ -183,6 +183,26 @@ class TransferRuntime:
         )
         ranges = payload["registered_ranges"]
         self.backend.register_buffer([cache.resolve_range(*item) for item in ranges], [item[2] for item in ranges])
+        transfer_worker = None
+        tp_mismatch = payload["tp_mismatch"]
+        if tp_mismatch is not None:
+            from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
+
+            # The existing transfer handlers delegate this mode to KVPoolWorker.
+            # Rebuild only the state read by those methods instead of copying
+            # their key, address, and backend logic into the process layer.
+            transfer_worker = KVPoolWorker.__new__(KVPoolWorker)
+            transfer_worker.tp_mismatch = True
+            transfer_worker.m_store = self.backend
+            transfer_worker.token_database = database
+            transfer_worker.group_kv_caches_base_addr = addresses
+            transfer_worker.group_block_len = payload["block_lengths"]
+            transfer_worker.group_block_stride = payload["block_strides"]
+            transfer_worker.block_size = tp_mismatch["block_size"]
+            transfer_worker.num_sub_keys = tp_mismatch["num_sub_keys"]
+            transfer_worker.sub_size_bytes = tp_mismatch["sub_size_bytes"]
+            transfer_worker.tp_rank = self.config["tp_rank"]
+            transfer_worker.enable_kv_events = self.config["enable_kv_events"]
         common = dict(
             m_store=self.backend,
             token_database=database,
@@ -197,8 +217,13 @@ class TransferRuntime:
             kv_role=self.config["kv_role"],
             group_uses_align_state=payload["align_state"],
             enable_kv_event=self.config["enable_kv_events"],
+            worker=transfer_worker,
         )
-        self.receiver = KVCacheStoreRecvingThread(**common)
+        self.receiver = KVCacheStoreRecvingThread(**common, worker=transfer_worker)
+        if transfer_worker is not None:
+            transfer_worker.kv_send_thread = self.sender
+            transfer_worker._invalid_block_ids = self.receiver._invalid_block_ids
+            transfer_worker._invalid_block_ids_lock = self.receiver._invalid_block_ids_lock
 
     def submit(self, operation: str, payload: Any) -> Future:
         if self.cache is None or self.sender is None or self.receiver is None:

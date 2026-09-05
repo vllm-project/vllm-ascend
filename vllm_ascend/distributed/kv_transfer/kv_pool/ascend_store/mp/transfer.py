@@ -267,6 +267,15 @@ class KVTransferProcess:
             num_layers=worker.group_num_layers,
             entry_offsets=worker.group_layer_cache_entry_offsets,
             align_state=worker.group_uses_align_state,
+            tp_mismatch=(
+                dict(
+                    block_size=worker.block_size,
+                    num_sub_keys=worker.num_sub_keys,
+                    sub_size_bytes=worker.sub_size_bytes,
+                )
+                if getattr(worker, "tp_mismatch", False)
+                else None
+            ),
         )
         try:
             self.channel.call("register", payload)
