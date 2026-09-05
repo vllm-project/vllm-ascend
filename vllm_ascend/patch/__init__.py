@@ -495,6 +495,20 @@
 #       models without a custom `hf_config_override`, or exposes a plugin hook
 #       for MTP model_type/architecture remapping.
 #
+#   2. `vllm.config.speculative.SpeculativeConfig`
+#    Why:
+#       Ascend parallel drafting may need to preserve the host-side sequence
+#       lengths instead of replacing them with the device-side buffer.
+#    How:
+#       Add `skip_parallel_drafting_seq_lens_override` (default `False`) to the
+#       speculative config. When enabled, the Ascend attention metadata builder
+#       keeps the sequence lengths selected before the parallel-drafting branch.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm-ascend/pull/15681
+#    Future Plan:
+#       Remove the field after the parallel-drafting metadata path no longer
+#       requires an Ascend-specific compatibility switch.
+#
 # ** 19. File: platform/patch_structured_output.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.sampling_params.SamplingParams._validate_structured_outputs`

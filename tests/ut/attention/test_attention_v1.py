@@ -200,6 +200,40 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
         self.builder.build(1, common_attn_metadata, mock_model)
 
+    @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
+    def test_parallel_drafting_seq_lens_override_switch(self, mock_ascend_metadata):
+        host_seq_lens = torch.tensor([11, 12, 13], dtype=torch.int32)
+        device_seq_lens = torch.tensor([21, 22, 23], dtype=torch.int32)
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 1, 2, 3]),
+            query_start_loc_cpu=torch.tensor([0, 1, 2, 3]),
+            seq_lens=device_seq_lens,
+            _seq_lens_cpu=host_seq_lens,
+            seq_lens_cpu=None,
+            num_reqs=3,
+            num_actual_tokens=3,
+            max_query_len=1,
+            decode_token_per_req=torch.tensor([1, 1, 1]),
+            block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(3, dtype=torch.int32),
+            actual_seq_lengths_q=torch.tensor([1, 1, 1]),
+            positions=torch.arange(3),
+            attn_state=AscendAttentionState.SpecDecoding,
+            num_computed_tokens_cpu=None,
+            max_seq_len=23,
+        )
+        self.builder.speculative_config = SimpleNamespace(parallel_drafting=True)
+
+        self.builder.build(0, common_attn_metadata)
+        torch.testing.assert_close(mock_ascend_metadata.call_args.kwargs["seq_lens"], device_seq_lens)
+
+        self.builder.speculative_config = SimpleNamespace(
+            parallel_drafting=True,
+            skip_parallel_drafting_seq_lens_override=True,
+        )
+        self.builder.build(0, common_attn_metadata)
+        torch.testing.assert_close(mock_ascend_metadata.call_args.kwargs["seq_lens"], host_seq_lens)
+
 
 def test_pcp_metadata_keeps_expanded_slot_mapping() -> None:
     builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
