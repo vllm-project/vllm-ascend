@@ -4,8 +4,9 @@
 These tests watch the upstream vLLM surfaces that ``patch_balance_schedule.py``
 depends on. If upstream changes any of them in a way that would silently break
 the patch (or stop it from taking effect), CI turns red here so we notice and
-sync. They are NOT behavior/equivalence tests -- those need a running DP+MoE
-engine on NPU and live under e2e/nightly.
+sync. They also include a lightweight CPU scheduler-path smoke test; full
+behavior/equivalence tests still need a running DP+MoE engine on NPU and live
+under e2e/nightly.
 
 What is guarded here (everything reachable from CPU UT):
 
@@ -21,6 +22,8 @@ What is guarded here (everything reachable from CPU UT):
   actually took effect;
 * the upstream Scheduler/DPEngineCoreProc methods the patch calls/super-calls
   still exist;
+* the Mamba-aligned waiting path can schedule a request through the real
+  upstream helper without an argument mismatch;
 * the 3 balance deltas remain present in ``schedule()`` (intent lock);
 * the copied ``schedule()`` body stays a verbatim copy of the ``schedule()``
   at vllm-ascend's pinned vLLM release tag (read from
@@ -47,16 +50,25 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 # Capture the upstream originals BEFORE importing the patch: importing the patch
 # mutates the module-level ``Scheduler`` / ``DPEngineCoreProc`` symbols, so grab
 # the pristine classes/file paths first.
 import vllm.v1.core.sched.scheduler as _upstream_sched_mod
 import vllm.v1.engine.core as _upstream_engine_mod
+from vllm.model_executor.models import ModelRegistry
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine.core import DPEngineCoreProc as _UpstreamDPEngineCoreProc
 from vllm.v1.engine.core import EngineCoreProc as _UpstreamEngineCoreProc
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
+from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.ut.kv_offload.utils import create_request, create_vllm_config
 from vllm_ascend.core.short_request_first_scheduler import ShortRequestFirstRequestQueue
 
 _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
@@ -215,6 +227,109 @@ def test_balance_scheduler_does_not_import_sfr_when_disabled(monkeypatch):
         call.args[0] == "vllm_ascend.core.short_request_first_scheduler" for call in import_mock.call_args_list
     )
     assert not isinstance(scheduler.waiting, ShortRequestFirstRequestQueue)
+
+
+def test_mamba_waiting_path_schedules_without_argument_mismatch():
+    """Run the balance waiting path through the real upstream Mamba helper."""
+    block_size = 4
+    ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            enable_balance_scheduling=True,
+            short_request_first_config=SimpleNamespace(enabled=False),
+        )
+    )
+    model_info = SimpleNamespace(
+        architecture="OPTForCausalLM",
+        is_text_generation_model=True,
+        is_pooling_model=False,
+        attn_type="decoder",
+        default_seq_pooling_type=None,
+        default_tok_pooling_type=None,
+        score_type=None,
+        supports_multimodal=False,
+        supports_multimodal_raw_input_only=False,
+        requires_raw_input_tokens=False,
+        supports_multimodal_encoder_tp_data=False,
+        supports_pp=True,
+        has_inner_state=False,
+        is_attention_free=False,
+        is_hybrid=False,
+        has_noops=False,
+        supports_mamba_prefix_caching=False,
+        supports_replayssm=False,
+        supports_transcription=False,
+        supports_transcription_only=False,
+        supported_video_pruning_methods=(),
+    )
+    with (
+        patch.object(
+            ModelRegistry,
+            "inspect_model_cls",
+            return_value=(model_info, model_info.architecture),
+        ),
+        patch(
+            "vllm_ascend.platform.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch("vllm_ascend.logger.configure_ascend_file_logging"),
+    ):
+        vllm_config = create_vllm_config(
+            max_num_seqs=2,
+            max_num_batched_tokens=16,
+            block_size=block_size,
+        )
+    vllm_config.additional_config = {"scheduler_config": {"enable_balance_scheduling": True}}
+    vllm_config.cache_config.num_gpu_blocks = 64
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
+    with (
+        patch(
+            "vllm_ascend.patch.platform.patch_balance_schedule.init_ascend_config",
+            return_value=ascend_config,
+        ),
+        patch(
+            "vllm_ascend.ascend_config.get_ascend_config",
+            return_value=ascend_config,
+        ),
+    ):
+        scheduler = BalanceScheduler(
+            vllm_config=vllm_config,
+            kv_cache_config=kv_cache_config,
+            structured_output_manager=StructuredOutputManager(vllm_config),
+            block_size=block_size,
+        )
+
+    # Exercise the exact branch involved in the regression without requiring
+    # an NPU or a remote KV backend.
+    scheduler.connector = None
+    scheduler.need_mamba_block_aligned_split = True
+    scheduler.has_mamba_layers = True
+    scheduler.mamba_partial_cache_hit = False
+    request = create_request(
+        request_id=1,
+        num_tokens=6,
+        max_tokens=1,
+        block_size=block_size,
+    )
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    assert scheduler_output.num_scheduled_tokens[request.request_id] == block_size
+    assert request in scheduler.running
 
 
 # ---------------------------------------------------------------------------
