@@ -253,12 +253,19 @@ class TestFullVisibleHostDispatch(unittest.TestCase):
         impl._finalize_o_proj = MagicMock(return_value=output)
         events = MagicMock()
         for name in (
-            "indexer_select_pre_process", "exec_kv", "_store_parallel_kv", "indexer_select_post_process",
+            "indexer_select_pre_process",
+            "exec_kv",
+            "_store_parallel_kv",
+            "indexer_select_post_process",
             "_execute_sparse_flash_attention_process",
         ):
             events.attach_mock(getattr(impl, name), name)
-        for name in ("_write_indexer_cache", "_update_indexcache_topk_indices", "_get_indexcache_topk_indices",
-                     "_get_full_visible_topk_indices"):
+        for name in (
+            "_write_indexer_cache",
+            "_update_indexcache_topk_indices",
+            "_get_indexcache_topk_indices",
+            "_get_full_visible_topk_indices",
+        ):
             spy = MagicMock(wraps=getattr(AscendSFAImpl, name).__get__(impl))
             setattr(impl, name, spy)
             events.attach_mock(spy, name)
@@ -280,16 +287,20 @@ class TestFullVisibleHostDispatch(unittest.TestCase):
 
         with ExitStack() as stack:
             stack.enter_context(patch("vllm_ascend.attention.sfa_v1.DeviceOperator", BaseDeviceAdaptor))
-            native = stack.enter_context(patch(
-                "torch.ops._C_ascend.npu_sparse_flash_attention", create=True, side_effect=native_consumer
-            ))
-            for name in ("wait_for_kv_layer_from_connector", "notify_kv_cache_written",
-                         "record_attention_compute_start", "maybe_save_kv_layer_to_connector"):
+            native = stack.enter_context(
+                patch("torch.ops._C_ascend.npu_sparse_flash_attention", create=True, side_effect=native_consumer)
+            )
+            for name in (
+                "wait_for_kv_layer_from_connector",
+                "notify_kv_cache_written",
+                "record_attention_compute_start",
+                "maybe_save_kv_layer_to_connector",
+            ):
                 spy = stack.enter_context(patch("vllm_ascend.attention.sfa_v1." + name))
                 events.attach_mock(spy, name)
-            scatter = stack.enter_context(patch(
-                "vllm_ascend.attention.sfa_v1.torch_npu.npu_scatter_nd_update_", side_effect=scatter_cpu
-            ))
+            scatter = stack.enter_context(
+                patch("vllm_ascend.attention.sfa_v1.torch_npu.npu_scatter_nd_update_", side_effect=scatter_cpu)
+            )
             result = impl.forward(impl.layer_name, hidden, main_cache, metadata, output)
 
         native.assert_called_once()
@@ -302,9 +313,7 @@ class TestFullVisibleHostDispatch(unittest.TestCase):
             impl._write_indexer_cache.assert_called_once()
             scatter.assert_called_once()
             destination, slots, values = scatter.call_args.args
-            self.assertEqual(
-                destination.untyped_storage().data_ptr(), indexer_cache.untyped_storage().data_ptr()
-            )
+            self.assertEqual(destination.untyped_storage().data_ptr(), indexer_cache.untyped_storage().data_ptr())
             self.assertTrue(torch.equal(slots.flatten(), metadata.slot_mapping))
             self.assertTrue(torch.equal(values, keys.view(query, 2)))
             expected_cache = torch.full_like(indexer_cache.view(-1, 2), -37)
@@ -320,8 +329,11 @@ class TestFullVisibleHostDispatch(unittest.TestCase):
         self.assertEqual(received.shape, (query, 1, 2048))
         self.assertEqual(received.dtype, torch.int32)
         self.assertTrue(received.is_contiguous())
-        eligible = enabled and not skip_topk and total <= 2048 and state in (
-            AscendAttentionState.PrefillNoCache, AscendAttentionState.PrefillCacheHit
+        eligible = (
+            enabled
+            and not skip_topk
+            and total <= 2048
+            and state in (AscendAttentionState.PrefillNoCache, AscendAttentionState.PrefillCacheHit)
         )
         if skip_topk:
             impl._get_full_visible_topk_indices.assert_not_called()
@@ -368,9 +380,11 @@ class TestFullVisibleHostDispatch(unittest.TestCase):
             )
 
     def test_forward_eligible_prefills_and_owning_cache(self):
-        for state, total in ((AscendAttentionState.PrefillNoCache, 64),
-                             (AscendAttentionState.PrefillCacheHit, 192),
-                             (AscendAttentionState.PrefillCacheHit, 2048)):
+        for state, total in (
+            (AscendAttentionState.PrefillNoCache, 64),
+            (AscendAttentionState.PrefillCacheHit, 192),
+            (AscendAttentionState.PrefillCacheHit, 2048),
+        ):
             for owner in (False, True):
                 with self.subTest(state=state, total=total, owner=owner):
                     self.forward_case(state, total, owner=owner)
