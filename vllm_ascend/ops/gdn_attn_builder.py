@@ -295,13 +295,12 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             speculative_config = self.vllm_config.speculative_config
             method = getattr(speculative_config, "method", None)
             num_spec = getattr(speculative_config, "num_speculative_tokens", None)
-            if num_spec is not None:
-                # dflash counts the base token in addition to the N speculative
-                # tokens; dspark's threshold is just N by design.
-                if method == "dflash":
-                    self.reorder_batch_threshold = 1 + num_spec
-                elif method == "dspark":
-                    self.reorder_batch_threshold = num_spec
+            if num_spec is not None and method in ("dflash", "dspark"):
+                # The target-model verification query always contains the
+                # base token plus N speculative tokens. DSpark's
+                # sample_from_anchor only makes the draft-model forward use N
+                # queries; it must not change target batch reordering.
+                self.reorder_batch_threshold = 1 + num_spec
 
     def _copy_sequence_indices_to_device(
         self,

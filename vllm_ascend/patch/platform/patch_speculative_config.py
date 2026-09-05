@@ -6,6 +6,10 @@ from vllm.config.speculative import SpeculativeConfig
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
 
+_UPSTREAM_K3_DSPARK_DCP_ERROR_FRAGMENT = (
+    "MLA DSpark does not currently support decode context parallelism"
+)
+
 
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
 # DeepseekV2Config. K3 MLA has independent projection/head dimensions (e.g.
@@ -73,8 +77,30 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
     draft_model_config._architecture = architecture
 
 
+def _is_ascend_k3_dspark_dcp(self: SpeculativeConfig) -> bool:
+    """Return whether this is the K3 DSpark+DCP case supported by Ascend."""
+    target_parallel_config = getattr(self, "target_parallel_config", None)
+    draft_model_config = getattr(self, "draft_model_config", None)
+    architectures = getattr(draft_model_config, "architectures", None) or ()
+    return (
+        getattr(self, "method", None) == "dspark"
+        and "K3DSparkModel" in architectures
+        and getattr(target_parallel_config, "decode_context_parallel_size", 1) > 1
+    )
+
+
 def _dspark_post_init(self):
-    _orig_post_init(self)
+    try:
+        _orig_post_init(self)
+    except ValueError as error:
+        # Upstream rejects K3 MLA DSpark+DCP for GPU backends. Ascend has its
+        # own DCP metadata and MLA implementation, so bypass only the matching
+        # upstream guard. Keep all other SpeculativeConfig validation intact.
+        if (
+            _UPSTREAM_K3_DSPARK_DCP_ERROR_FRAGMENT not in str(error)
+            or not _is_ascend_k3_dspark_dcp(self)
+        ):
+            raise
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)
