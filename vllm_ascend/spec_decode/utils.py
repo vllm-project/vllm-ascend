@@ -9,6 +9,14 @@ import numpy as np
 import torch
 import vllm.distributed.parallel_state as _ps  # type: ignore[import-not-found]
 from vllm.config import CompilationMode
+from vllm.triton_utils import HAS_TRITON
+
+if HAS_TRITON:
+    from vllm_ascend.ops.triton.update_num_computed_tokens import (
+        update_num_computed_tokens_triton,
+    )
+else:
+    update_num_computed_tokens_triton = None
 
 
 def update_num_computed_tokens_for_batch_change(
@@ -24,6 +32,16 @@ def update_num_computed_tokens_for_batch_change(
     Requests that had drafts: corrected = prev_gpu + valid_count.
     New requests or non-draft (e.g. prefills): use CPU value directly.
     """
+    if update_num_computed_tokens_triton is not None and num_computed_tokens.device.type != "cpu":
+        update_num_computed_tokens_triton(
+            num_computed_tokens,
+            num_accepted_tokens,
+            prev_positions,
+            valid_sampled_token_count,
+            prev_num_draft_tokens,
+            cpu_num_computed_tokens,
+        )
+        return
     # Clamp because prev_positions can be -1 for new requests
     gather_indices = prev_positions.clamp(min=0)
 
