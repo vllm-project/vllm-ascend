@@ -135,8 +135,6 @@ def _mock_npu_env():
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,
         oproj_tensor_parallel_size=0,
-        olora_tensor_parallel_size=0,
-        mlp_tensor_parallel_size=0,
     )
     with (
         patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=_mock),

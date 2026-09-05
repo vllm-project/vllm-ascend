@@ -227,8 +227,9 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
     along the output dimension. When the weight matrix is loaded, the
     different partitions are sharded separately.
 
-    Use the MLP tensor parallelism group in the MLP module,
-    and the original TP group in other modules.
+    Weight sharding goes through get_parallel_op like the other Ascend
+    parallel linears; no custom op is currently selected for merged
+    prefixes, so the original TP group applies.
     """
 
     def __init__(
@@ -276,8 +277,8 @@ class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
 
 class AscendRowParallelLinear(RowParallelLinear):
     """Linear layer with row parallelism.
-    Use the MLP tensor parallelism group in the MLP module,
-    and the original TP group in other modules.
+    Use the module-specific fine-grained TP group when configured
+    (e.g. the o_proj TP group), and the original TP group in other modules.
     """
 
     def __init__(
@@ -366,8 +367,8 @@ class AscendRowParallelLinear(RowParallelLinear):
 class AscendColumnParallelLinear(ColumnParallelLinear):
     """Linear layer with column parallelism.
 
-    Use the MLP tensor parallelism group in the MLP module,
-    and the original TP group in other modules.
+    Use the module-specific fine-grained TP group when configured
+    (e.g. the o_proj TP group), and the original TP group in other modules.
     """
 
     def __init__(

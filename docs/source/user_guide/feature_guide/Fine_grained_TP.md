@@ -2,7 +2,7 @@
 
 ## Overview
 
-Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules—such as embedding, LM head, attention output projection (o_proj), and MLP blocks—via the `finegrained_tp_config` parameter.
+Fine-Grained Tensor Parallelism (Fine-grained TP) extends standard tensor parallelism by enabling **independent tensor-parallel sizes for different model components**. Instead of applying a single global `tensor_parallel_size` to all layers, Fine-grained TP allows users to configure separate TP sizes for key modules—such as embedding, LM head, and attention output projection (o_proj)—via the `finegrained_tp_config` parameter.
 
 This capability supports heterogeneous parallelism strategies within a single model, providing finer control over weight distribution, memory layout, and communication patterns across devices. The feature is compatible with standard dense transformer architectures and integrates seamlessly into vLLM’s serving pipeline.
 
@@ -34,13 +34,11 @@ Fine-grained TP is **model-agnostic** and supports all standard dense transforme
 | ------------- | ----- | ----- | ------ | ------- | ------ |
 | **embedding** | ✅     | ✅     | ✅      | ✅       | ✅      |
 | **o_proj**    | ❌     | ✅     | ❌      | ❌       | ✅      |
-| **mlp**       | ✅     | ✅     | ✅      | ✅       | ✅      |
 | **LM head**   | ✅     | ✅     | ✅      | ✅       | ✅      |
 
 > ⚠️ Note:  
 >
 > - `o_proj` TP is only supported in Graph mode during Decode, because dummy_run in eager mode will not trigger o_proj. It additionally requires `tensor_parallel_size == 1` (enforced at config load); see [Standard Tensor Parallelism Requirement](#standard-tensor-parallelism-requirement) below.
-> - `mlp` TP supports dense models, or dense layers in MoE models. For example, the first three dense layers of DeepSeek-R1.
 
 ### Configuration Limit
 
@@ -58,7 +56,7 @@ Fine-grained TP shards the configured layer **across the data-parallel (DP) dime
 | Component | Behavior with `tensor_parallel_size > 1` |
 |-----------|------------------------------------------|
 | `o_proj` | **Not supported.** The DSA attention output is reshaped with `n_local_groups = n_groups // tp_size` (standard TP), while the wo_a/wo_b weights are sharded by the OTP group (DP dimension). The two axes no longer align, so a config-time error is raised requiring `tensor_parallel_size == 1`. |
-| `embedding` / LM head / `mlp` | **Supported, but only effective under `tensor_parallel_size == 1`.** All three components are sharded along the fine-grained (DP-realm) group, whose process group is built along the DP axis at a fixed `tp_idx` — orthogonal to the standard TP axis. When `tensor_parallel_size > 1`, the standard TP sharding and the fine-grained sharding operate on different axes of the rank grid and can no longer compose: the fine-grained group's ranks all share the same standard-TP weight shard, so fine-grained TP cannot deliver additional sharding. In other words, these components are designed for the all-DP (`tensor_parallel_size == 1`) decode scenario; under `tensor_parallel_size > 1` the standard TP dimension takes over and the fine-grained configuration does not take effect. |
+| `embedding` / LM head | **Supported, but only effective under `tensor_parallel_size == 1`.** Both components are sharded along the fine-grained (DP-realm) group, whose process group is built along the DP axis at a fixed `tp_idx` — orthogonal to the standard TP axis. When `tensor_parallel_size > 1`, the standard TP sharding and the fine-grained sharding operate on different axes of the rank grid and can no longer compose: the fine-grained group's ranks all share the same standard-TP weight shard, so fine-grained TP cannot deliver additional sharding. In other words, these components are designed for the all-DP (`tensor_parallel_size == 1`) decode scenario; under `tensor_parallel_size > 1` the standard TP dimension takes over and the fine-grained configuration does not take effect. |
 
 ---
 
@@ -73,8 +71,7 @@ Fine-grained TP is controlled via the `finegrained_tp_config` field inside `--ad
     "finegrained_tp_config": {
         "embedding_tensor_parallel_size": 8,
         "lmhead_tensor_parallel_size": 8,
-        "oproj_tensor_parallel_size": 8,
-        "mlp_tensor_parallel_size": 8
+        "oproj_tensor_parallel_size": 8
     }
 }'
 ```
@@ -89,8 +86,7 @@ vllm serve deepseek-ai/DeepSeek-R1 \
     --additional-config '{
         "finegrained_tp_config": {
             "embedding_tensor_parallel_size": 8,
-            "lmhead_tensor_parallel_size": 8,
-            "mlp_tensor_parallel_size": 8
+            "lmhead_tensor_parallel_size": 8
         }
     }'
 ```
@@ -105,9 +101,8 @@ To evaluate the effectiveness of fine-grained TP in large-scale service scenario
 | ---------------- | -------------- | ------------------------- |
 | o_proj TP = 8    | 5.8 GB         | **+1.5 ms** (degradation) |
 | LM head TP = 8   | 1.51 GB        | **−1.2 ms** (improvement) |
-|  FFN TP = 8 | 0.9 GB         | **−1.0 ms** (improvement) |
 | Embedding TP = 8 | 1.51 GB        | **−1.0 ms** (improvement) |
-| **Total**        | **9.72 GB**    | —                         |
+| **Total**        | **8.82 GB**    | —                         |
 
 - We achieved significant gains in terms of high memory capacity on a single card, as well as the benefits of TPOT.
 

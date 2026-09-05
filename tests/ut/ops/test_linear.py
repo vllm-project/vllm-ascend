@@ -21,23 +21,19 @@ class BaseLinearTest(unittest.TestCase):
         self.mock_group.world_size = 2
         self.mock_group.rank_in_group = 0
 
-        parallel_state._MLP_TP = self.mock_group
         parallel_state._OTP = self.mock_group
 
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
-        self.mock_ascend_config.finegrained_tp_config.mlp_tensor_parallel_size = 2
 
         self.patches = [
             patch("vllm_ascend.ascend_config.get_ascend_config", return_value=self.mock_ascend_config),
             patch("vllm_ascend.distributed.parallel_state.get_otp_group", return_value=self.mock_group),
-            patch("vllm_ascend.distributed.parallel_state.get_mlp_tp_group", return_value=self.mock_group),
             patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=self.mock_group),
             patch(
                 "vllm.distributed.parallel_state.get_tp_group",
                 return_value=self.mock_group,
             ),
-            patch("vllm_ascend.utils.mlp_tp_enable", return_value=True),
             patch("vllm_ascend.utils.oproj_tp_enable", return_value=True),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
         ]
@@ -94,27 +90,6 @@ class TestAscendRowParallelLinear(BaseLinearTest):
         "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
         new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
     )
-    def test_mlp_optimize(self, mock_get_current_vllm_config):
-        ascend_config._ASCEND_CONFIG = MagicMock()
-        ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
-        ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
-        ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
-
-        linear = AscendRowParallelLinear(
-            input_size=16,
-            output_size=8,
-            prefix="down_proj",
-        )
-        self.assertEqual(linear.custom_op.comm_group, parallel_state._MLP_TP)
-
-        input_tensor = torch.randn(16, 8)
-        linear(input_tensor)
-
-    @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
-    @patch(
-        "vllm_ascend.ops.linear.AscendUnquantizedLinearMethod.apply",
-        new=lambda self, layer, x, bias=None: torch.nn.functional.linear(x, layer.weight, bias),
-    )
     def test_oproj_tp(self, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
@@ -133,10 +108,11 @@ class TestAscendRowParallelLinear(BaseLinearTest):
 
 
 class TestAscendMergedColumnParallelLinear(BaseLinearTest):
-    def test_merged_mlp_tp_init(self):
+    @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
+    def test_default_tp_when_no_custom_op(self, mock_get_current_vllm_config):
         ascend_config._ASCEND_CONFIG = MagicMock()
         ascend_config._ASCEND_CONFIG.scheduler_config.recompute_scheduler_enable = False
-        ascend_config._ASCEND_CONFIG.finegrained_tp_config.mlp_tensor_parallel_size = 2
+        ascend_config._ASCEND_CONFIG.finegrained_tp_config.oproj_tensor_parallel_size = 2
         ascend_config._ASCEND_CONFIG.ascend_scheduler_config.enabled = False
 
         linear = AscendMergedColumnParallelLinear(
@@ -144,7 +120,9 @@ class TestAscendMergedColumnParallelLinear(BaseLinearTest):
             output_sizes=[8, 8],
             prefix="gate_up_proj",
         )
-        self.assertEqual(linear.custom_op.comm_group, parallel_state._MLP_TP)
+        self.assertIsNone(linear.custom_op)
+        self.assertEqual(linear.tp_rank, 0)
+        self.assertEqual(linear.tp_size, 2)
 
 
 class TestAscendReplicatedLinear(BaseLinearTest):
@@ -169,10 +147,8 @@ class TestColumnParallelOpDispatch(unittest.TestCase):
     def setUp(self):
         self.mock_layer = MagicMock()
         self._patches = [
-            patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
-            patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:
             p.start()
@@ -207,10 +183,8 @@ class TestRowParallelOpDispatch(unittest.TestCase):
     def setUp(self):
         self.mock_layer = MagicMock()
         self._patches = [
-            patch("vllm_ascend.ops.linear_op.mlp_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.oproj_tp_enable", return_value=False),
             patch("vllm_ascend.ops.linear_op.enable_dsa_cp", return_value=False),
-            patch("vllm_ascend.ops.linear_op.is_moe_layer", return_value=False),
         ]
         for p in self._patches:
             p.start()
