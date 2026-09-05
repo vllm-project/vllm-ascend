@@ -16,6 +16,7 @@ MAX_POSITION_EMBEDDINGS = [262144]
 # (head_size, rotary_dim)
 HEAD_ROTARY_DIMS = [
     (64, 32),
+    (128, 96),
     (128, 128),
 ]
 # (num_q_heads, num_k_heads)

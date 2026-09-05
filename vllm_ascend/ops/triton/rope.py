@@ -99,7 +99,7 @@ def _triton_rope(
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+        sin_offsets = cos_offsets + (rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
         if USE_COS_SIN:
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
@@ -224,7 +224,7 @@ def _triton_rope_siso(
         # m of this program instance
         # ####################################################################
         cos_offsets = tl.arange(0, pad_rope_dim // 2)
-        sin_offsets = tl.arange(pad_rope_dim // 2, pad_rope_dim)
+        sin_offsets = cos_offsets + (rope_dim // 2)
         cos_mask = cos_offsets < (rope_dim // 2)
         if USE_COS_SIN:
             pos_idx = tl.load(pos_ptr + row_idx).to(tl.int64)
