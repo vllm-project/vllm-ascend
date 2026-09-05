@@ -528,14 +528,26 @@ class AscendSFADSACPImpl(AscendSFAImpl):
             )
             try:
                 local_output = self._apply_o_proj_full_weight(attn_output)
-                full_output = get_tp_group().all_gather(local_output.contiguous(), dim=0)
-                if full_output.shape[0] < output.shape[0] or full_output.shape[1:] != output.shape[1:]:
-                    raise RuntimeError(
-                        "SFA DSA-CP gathered output does not match the replicated "
-                        f"model state, got {tuple(full_output.shape)} and expected "
-                        f"{tuple(output.shape)}."
-                    )
-                output[...] = full_output[: output.shape[0]]
+                tp_group = get_tp_group()
+                if not self.o_proj.reduce_results:
+                    # The decoder's sequence-parallel path will reduce-scatter
+                    # this tensor. Place each rank's complete local projection in
+                    # its token slot so that collective scatters without summing
+                    # duplicate, already-complete outputs.
+                    local_start = tp_group.rank_in_group * local_output.shape[0]
+                    local_end = min(local_start + local_output.shape[0], output.shape[0])
+                    output.zero_()
+                    if local_end > local_start:
+                        output[local_start:local_end] = local_output[: local_end - local_start]
+                else:
+                    full_output = tp_group.all_gather(local_output.contiguous(), dim=0)
+                    if full_output.shape[0] < output.shape[0] or full_output.shape[1:] != output.shape[1:]:
+                        raise RuntimeError(
+                            "SFA DSA-CP gathered output does not match the replicated "
+                            f"model state, got {tuple(full_output.shape)} and expected "
+                            f"{tuple(output.shape)}."
+                        )
+                    output[...] = full_output[: output.shape[0]]
             finally:
                 linear_method.switch_tp_weight(
                     self.o_proj,
