@@ -14,7 +14,7 @@ setup_catlass_dependency() {
     local absolute_catlass_path
 
     git config --global --add safe.directory "$ROOT_DIR"
-    catlass_commit=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit)
+    catlass_commit=$(git config -f "${ROOT_DIR}/.gitmodules" --get submodule.csrc/third_party/catlass.commit 2>/dev/null)
     if [[ ! -d "${catlass_path}" ]]; then
         echo "dependency catlass is missing, try to fetch it..."
         git submodule sync
@@ -264,9 +264,20 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
-  log "build command: bash build.sh --pkg --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
+  # Determine optimal build parallelism based on SMT availability.
+  # - SMT-enabled (e.g., AMD): logical_cpus * 2 for full throughput (matches build.sh default behavior)
+  # - No SMT (e.g., ARM):      physical cores to avoid OOM
+  logical_cpus=$(nproc)
+  physical_cores=$(grep '^core id' /proc/cpuinfo 2>/dev/null | sort -u | wc -l || true)
+  if [ "$physical_cores" -gt 0 ] && [ "$logical_cpus" -gt "$physical_cores" ]; then
+    build_jobs=$((logical_cpus * 2))
+  else
+    build_jobs=$logical_cpus
+  fi
+
+  log "build command: bash build.sh --pkg -j${build_jobs} --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
-  bash build.sh --pkg --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  bash build.sh --pkg -j${build_jobs} --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
