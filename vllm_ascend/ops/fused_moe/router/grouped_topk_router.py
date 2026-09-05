@@ -119,7 +119,14 @@ class AscendGroupedTopKRouter(BaseRouter):
             topk_weights = topk_weights + self.e_score_correction_bias
 
         topk_weights, topk_ids = topk_weights.topk(self.top_k, dim=-1)
-        topk_weights = topk_weights.to(hidden_states.dtype)
+        # Keep routing weights in a floating compute dtype: the MoE
+        # sequence-parallel prepare (`_prepare_with_ep_group`) may have already
+        # quantized hidden_states (int8 / float8_e4m3fn / uint8), and
+        # quantized weights break downstream ops and the renormalization below.
+        if hidden_states.dtype in (torch.float32, torch.float16, torch.bfloat16):
+            topk_weights = topk_weights.to(hidden_states.dtype)
+        else:
+            topk_weights = topk_weights.to(torch.float32)
 
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)

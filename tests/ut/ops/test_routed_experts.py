@@ -110,3 +110,49 @@ def test_update_expert_map_preserves_upstream_and_legacy_contracts(monkeypatch):
 
     assert routed_experts.ascend_expert_map is legacy_map
     assert expert_map_manager._expert_map is legacy_map
+
+
+@pytest.mark.parametrize(
+    "hidden_dtype,expected_dtype",
+    [
+        (torch.float32, torch.float32),
+        (torch.float16, torch.float16),
+        (torch.bfloat16, torch.bfloat16),
+        (torch.float8_e4m3fn, torch.float32),
+        (torch.int8, torch.float32),
+        (torch.uint8, torch.float32),
+    ],
+)
+def test_select_experts_keeps_topk_weights_float_for_quantized_hidden(monkeypatch, hidden_dtype, expected_dtype):
+    """topk_weights must never inherit a quantized hidden_states dtype.
+
+    When the MoE sequence-parallel prepare (`_prepare_with_ep_group`) has
+    already quantized hidden_states (e.g. W8A8 -> int8, MXFP -> fp8/uint8),
+    propagating that dtype to topk_weights breaks downstream ops (e.g.
+    `topk_weights * mask` in the token dispatcher: fp8 x bool promotion is
+    unsupported).
+    """
+    router_weights = torch.tensor([[0.6, 0.4]], dtype=torch.float32)
+    router_ids = torch.tensor([[0, 1]], dtype=torch.int32)
+    routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    routed_experts.router = SimpleNamespace(
+        _select_experts=lambda **kwargs: (router_weights.clone(), router_ids.clone())
+    )
+    routed_experts.log2phy = None
+    routed_experts.n_shared_experts = 0
+    routed_experts.moe_config = SimpleNamespace(num_experts=2)
+    routed_experts.global_redundant_expert_num = 0
+    monkeypatch.setattr(
+        "vllm_ascend.ops.fused_moe.routed_experts.get_ascend_config",
+        lambda: SimpleNamespace(enable_force_eplb=False),
+    )
+
+    hidden_states = torch.zeros(1, 4, dtype=hidden_dtype)
+    topk_weights, topk_ids = routed_experts._select_experts(
+        hidden_states=hidden_states,
+        router_logits=torch.randn(1, 2),
+        enable_force_load_balance=False,
+    )
+
+    assert topk_weights.dtype == expected_dtype
+    assert topk_ids.dtype == torch.int32
