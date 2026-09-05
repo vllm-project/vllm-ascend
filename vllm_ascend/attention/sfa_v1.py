@@ -142,11 +142,7 @@ class AscendSFABackend(AttentionBackend):
 
 @dataclass
 class AscendSFAMetadata:
-    """Metadata for MLACommon.
-
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Runtime metadata for Ascend sparse flash attention."""
 
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
@@ -201,10 +197,7 @@ class SFAForwardContext:
 
 
 class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Build runtime metadata for Ascend sparse flash attention."""
 
     def __init__(
         self,
@@ -406,10 +399,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
 
 class AscendSFAImpl(MLAAttentionImpl):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+    """Ascend implementation of sparse flash attention."""
 
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
