@@ -19,6 +19,7 @@
 
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict, deque
@@ -129,6 +130,8 @@ from vllm_ascend.attention.utils import (
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
+    acc_graph_timing,
+    graph_timing_enabled,
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
@@ -239,7 +242,10 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
-SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+# Workspace-probe seq_len baked into the captured FIA calls. GLM53_GRAPH_CAPTURE_SEQLEN
+# overrides it for the graph-mode negative-optimization investigation (tiling for a
+# giant KV len may be the 4x device-time inflation); 6144 is the upstream default.
+SEQ_LEN_WITH_MAX_PA_WORKSPACE = int(os.environ.get("GLM53_GRAPH_CAPTURE_SEQLEN", "6144"))
 
 
 @dataclass
@@ -2946,6 +2952,8 @@ class NPUModelRunner(GPUModelRunner):
             if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
 
+            if graph_timing_enabled():
+                _t_upd = time.perf_counter()
             update_full_graph_params(
                 self.attn_backend,
                 self.update_stream,
@@ -2954,6 +2962,8 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 self.speculative_config,
             )
+            if graph_timing_enabled():
+                acc_graph_timing("update_host", time.perf_counter() - _t_upd)
 
     def _model_forward(
         self,
@@ -3696,8 +3706,17 @@ class NPUModelRunner(GPUModelRunner):
                 if profile_seq_lens is not None:
                     seq_lens = profile_seq_lens
                 else:
+                    # The workspace probe must cover the LONGEST KV any replay
+                    # will see, not a fixed 6144: the FULL-graph FIA task
+                    # update rebinds actual_seq_kvlen to the real values at
+                    # every replay, and a workspace sized for 6144 lets the
+                    # kernel write past its end once a sequence exceeds that
+                    # (silent corruption around 10k, EZ9999 MTE invalid GM
+                    # address around 15k+ - reproduced and fixed 2026-09-01).
+                    # Memory cost of the bigger probe is negligible (measured
+                    # graph memory 0.61 -> 0.63 GiB at 49152).
                     seq_lens = (
-                        SEQ_LEN_WITH_MAX_PA_WORKSPACE
+                        max(SEQ_LEN_WITH_MAX_PA_WORKSPACE, self.max_model_len)
                         if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
                         else max_query_len
                     )  # type: ignore[assignment]
