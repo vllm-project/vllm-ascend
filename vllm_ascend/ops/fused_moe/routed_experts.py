@@ -24,18 +24,17 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed.utils import is_weak_contiguous
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts
+from vllm.model_executor.layers.fused_moe import FusedMoERouter, RoutedExperts, SharedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import UnquantizedFusedMoEMethod
 from vllm.model_executor.utils import replace_parameter
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType, use_cann_megamoe
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
@@ -45,23 +44,12 @@ from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
-    """Unquantized MoE method with Ascend-specific kernels.
-
-    The MLP stage is orchestrated by ``MoeActionMethod`` through the same
-    gmm1 / act_quant / gmm2 hooks as the quantized schemes. This class
-    duck-types the hook interface instead of inheriting ``AscendMoEScheme``
-    because it must extend the upstream ``UnquantizedFusedMoEMethod``.
-    """
-
-    quant_type = QuantType.NONE
-
     def __init__(self, moe: FusedMoEConfig = None, tid2eid=None):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else get_ascend_config().eplb_config.dynamic_eplb
         self.tid2eid = tid2eid
         self.lora_context = None
-        self._lora_routing = None
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
@@ -83,9 +71,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if layer.w2_bias is not None:
             weights.append(layer.w2_bias)
         return weights
-
-    def supports_fused_activation(self, activation) -> bool:
-        return False
 
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
@@ -121,11 +106,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def apply(
         self,
-        layer,
+        layer: "AscendRoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        shared_experts,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         activation = getattr(layer, "activation", "silu")
@@ -133,12 +118,46 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             activation = "swigluoai_uninterleave"
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
-        return moe_comm_method.fused_experts(
+        w13_weight_list = getattr(layer, "w13_weight_list", None)
+        w2_weight_list = getattr(layer, "w2_weight_list", None)
+        has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
+        if _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2:
+            if _EXTRA_CTX.use_mega_moe:
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = None
+                w2_scale = None
+                w1_scale_bias = None
+                w2_scale_bias = None
+            else:
+                if self.dynamic_eplb and not has_split_weight_lists:
+                    logger.warning_once(
+                        "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
+                        "tensor lists. This may cause accuracy issues or communication hangs."
+                    )
+                w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
+                w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
+                w1_scale = [torch.tensor([], dtype=torch.int64)]
+                w2_scale = [torch.tensor([], dtype=torch.int64)]
+                w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
+                w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
+        else:
+            w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
+            w1_scale = None
+            w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
+            w2_scale = None
+            w1_scale_bias = None
+            w2_scale_bias = None
+
+        final_hidden_states = moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                layer=layer,
+                w1=w1,
+                w2=w2,
+                w1_bias=layer.w13_bias if self.moe.has_bias else None,
+                w2_bias=layer.w2_bias if self.moe.has_bias else None,
                 quant_type=QuantType.NONE,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
@@ -147,151 +166,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=activation,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
                 lora_context=getattr(layer, "_ascend_moe_lora_context", None),
-            ),
-            quant_method=self,
+            )
         )
-
-    def get_fused_mc2_weights(self, layer):
-        """Normalized weight payload for the FUSED_MC2 comm path."""
-        w13_weight_list = getattr(layer, "w13_weight_list", None)
-        w2_weight_list = getattr(layer, "w2_weight_list", None)
-        has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
-        if _EXTRA_CTX.use_mega_moe:
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = None
-            w2_scale = None
-            w1_scale_bias = None
-            w2_scale_bias = None
-        else:
-            if self.dynamic_eplb and not has_split_weight_lists:
-                logger.warning_once(
-                    "FUSED_MC2 is enabled with dynamic EPLB, but unquantized MoE weights are not split into "
-                    "tensor lists. This may cause accuracy issues or communication hangs."
-                )
-            w1 = w13_weight_list if isinstance(w13_weight_list, list) else [layer.w13_weight]
-            w2 = w2_weight_list if isinstance(w2_weight_list, list) else [layer.w2_weight]
-            w1_scale = [torch.tensor([], dtype=torch.int64)]
-            w2_scale = [torch.tensor([], dtype=torch.int64)]
-            w1_scale_bias = [torch.tensor([], dtype=torch.float32)]
-            w2_scale_bias = [torch.tensor([], dtype=torch.float32)]
-        return MoEWeights(
-            w1=w1,
-            w2=w2,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            w1_scale_bias=w1_scale_bias,
-            w2_scale_bias=w2_scale_bias,
-        )
-
-    def get_mlp_weights(self, layer):
-        w13_weight_list = getattr(layer, "w13_weight_list", None)
-        w2_weight_list = getattr(layer, "w2_weight_list", None)
-        w1 = w13_weight_list if isinstance(w13_weight_list, list) else layer.w13_weight
-        w2 = w2_weight_list if isinstance(w2_weight_list, list) else layer.w2_weight
-        return w1, w2
-
-    def _maybe_transpose(self, weight, need_trans: bool):
-        if not need_trans:
-            return weight
-        if isinstance(weight, list):
-            return [w.transpose(1, 2) for w in weight]
-        return weight.transpose(1, 2)
-
-    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        w1, _ = self.get_mlp_weights(layer)
-        w1 = self._maybe_transpose(w1, mlp_compute_input.need_trans)
-        hidden_states = mlp_compute_input.hidden_states
-        w1_bias = layer.w13_bias if self.moe.has_bias else None
-        gate_up_out = torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=w1 if isinstance(w1, list) else [w1],
-            bias=[w1_bias.to(dtype=torch.float32)] if w1_bias is not None else None,
-            split_item=2,
-            group_list_type=mlp_compute_input.group_list_type,
-            group_type=0,
-            group_list=mlp_compute_input.group_list,
-        )[0]
-
-        # MoE LoRA: only attempt injection when an adapter wraps this layer and
-        # the comm method provided routing metadata in lora_context.
-        self._lora_routing = None
-        lora_context = mlp_compute_input.lora_context
-        if lora_context is not None:  # LoRA applied
-            from vllm_ascend.lora.fused_moe import (
-                _recover_moe_lora_routing_all2all,
-                _recover_moe_lora_routing_allgather,
-                moe_lora_apply_w13,
-            )
-
-            if mlp_compute_input.expanded_row_idx is not None and mlp_compute_input.topk_ids is not None:
-                # AllGather path: use npu_moe_init_routing's expanded_row_idx.
-                self._lora_routing = _recover_moe_lora_routing_allgather(
-                    lora_context,
-                    mlp_compute_input.expanded_row_idx,
-                    mlp_compute_input.topk_ids,
-                )
-            elif getattr(lora_context, "exchanged_lora_indices", None) is not None:
-                # AlltoAll path: tokens already sorted by expert after exchange.
-                self._lora_routing = _recover_moe_lora_routing_all2all(
-                    lora_context,
-                    group_list=mlp_compute_input.group_list,
-                )
-            else:
-                raise AssertionError(
-                    "MoE LoRA requires either expanded_row_idx+topk_ids "
-                    "(AllGather) or lora_context.exchanged_lora_indices "
-                    "(AlltoAll). Neither was provided."
-                )
-
-            moe_lora_apply_w13(
-                lora_context,
-                gate_up_out=gate_up_out,
-                hidden_states=hidden_states,
-                lora_routing=self._lora_routing,
-            )
-        return gate_up_out
-
-    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
-        # Apply router weights between activation and down-proj, then keep the
-        # activation unquantized.
-        if mlp_compute_input.topk_scales is not None:
-            hidden_states = hidden_states * mlp_compute_input.topk_scales
-        return hidden_states, None
-
-    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
-        layer = mlp_compute_input.layer
-        assert layer is not None
-        _, w2 = self.get_mlp_weights(layer)
-        w2 = self._maybe_transpose(w2, mlp_compute_input.need_trans)
-        w2_bias = layer.w2_bias if self.moe.has_bias else None
-        silu_out = hidden_states
-        hidden_states = torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=w2 if isinstance(w2, list) else [w2],
-            bias=[w2_bias.to(dtype=torch.float32)] if w2_bias is not None else None,
-            split_item=2,
-            group_list_type=mlp_compute_input.group_list_type,
-            group_type=0,
-            group_list=mlp_compute_input.group_list,
-        )[0]
-
-        # LoRA w2 delta: applied to the down-proj output, with the activation
-        # output as the lora_a input.
-        if self._lora_routing is not None:
-            from vllm_ascend.lora.fused_moe import moe_lora_apply_w2
-
-            moe_lora_apply_w2(
-                self.lora_context,
-                down_out=hidden_states,
-                silu_out=silu_out,
-                lora_routing=self._lora_routing,
-            )
-            self._lora_routing = None
-        return hidden_states
+        return final_hidden_states
 
 
 def use_multistage_eplb_load(dynamic_eplb: bool, policy_type: int, collection_interval: int) -> bool:
