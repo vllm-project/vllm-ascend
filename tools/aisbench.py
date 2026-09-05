@@ -105,6 +105,7 @@ class AisbenchRunner:
         self._wait_for_task()
         if verify:
             self.baseline = aisbench_config.get("baseline", 1)
+            self.input_throughput_baseline = aisbench_config.get("input_throughput_baseline", 1)
             if self.task_type == "accuracy":
                 self.threshold = aisbench_config.get("threshold", 1)
                 self._accuracy_verify()
@@ -249,12 +250,14 @@ class AisbenchRunner:
             f"The current Output Token Throughput is {output_throughput} token/s, "
             f"which is not greater than or equal to {self.threshold} * baseline {self.baseline}."
         )
-        if self.input_throughput_threshold is not None:
-            input_throughput = str(self.result_json["Input Token Throughput"]["total"]).replace("token/s", "")
-            assert float(input_throughput) >= float(self.input_throughput_threshold), (
-                f"Input Token Throughput verification failed. The current value is {input_throughput} token/s, "
-                f"which is not greater than {self.input_throughput_threshold} token/s."
-            )
+        input_throughput = self.result_json["Input Token Throughput"]["total"].replace("token/s", "")
+        assert float(input_throughput) >= self.input_throughput_threshold * self.input_throughput_baseline, (
+            "Input Token verification failed. "
+            f"The current Input Token Throughput is {input_throughput} token/s, "
+            f"which is not greater than or equal to "
+            f"{self.input_throughput_threshold} * baseline {self.input_throughput_baseline}."
+        )
+
         if self.tpot_threshold is not None:
             tpot = float(str(self.result_csv.loc["TPOT", "Average"]).replace("ms", ""))
             assert tpot <= float(self.tpot_threshold), (

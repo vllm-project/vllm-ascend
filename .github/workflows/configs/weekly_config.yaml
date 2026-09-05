@@ -326,6 +326,13 @@ a3:
       - name: Qwen3.5-397B-Memcache-perf
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3.5-397B-Memcache-perf.yaml
+      - name: Qwen3.5-397B-no-Memcache-perf
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3.5-397B-no-Memcache-perf.yaml
+      - name: Qwen3-30B-A3B-W8A8-offload-test-acc
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3-30B-A3B-W8A8-offload-test-acc.yaml
+        
 310p:
   single_node:
     test_config:
