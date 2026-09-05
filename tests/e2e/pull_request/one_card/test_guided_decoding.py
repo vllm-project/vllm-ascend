@@ -207,6 +207,47 @@ def test_guided_regex_guidance(sample_regex, vllm_runner):
 @pytest.mark.model(
     model_name=MODEL_NAME,
     compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "auto"}},
+)
+def test_guided_auto_rejects_mixed_structured_output_backends(vllm_runner):
+    xgrammar_schema = {
+        "type": "object",
+        "properties": {"name": {"type": "string"}},
+        "required": ["name"],
+    }
+    guidance_schema = {
+        "type": "object",
+        "properties": {"count": {"type": "integer", "multipleOf": 2}},
+        "required": ["count"],
+    }
+
+    xgrammar_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=32,
+        structured_outputs=StructuredOutputsParams(json=xgrammar_schema),
+    )
+    prompts = [f"Give an example JSON that fits this schema: {xgrammar_schema}"]
+    inputs = vllm_runner.get_inputs(prompts)
+    outputs = vllm_runner.model.generate(inputs, sampling_params=xgrammar_params)
+
+    assert outputs is not None
+    assert outputs[0] is not None
+
+    guidance_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=32,
+        structured_outputs=StructuredOutputsParams(json=guidance_schema),
+    )
+    prompts = [f"Give an example JSON that fits this schema: {guidance_schema}"]
+    inputs = vllm_runner.get_inputs(prompts)
+    with pytest.raises(ValueError, match="already using 'xgrammar'.*'guidance'"):
+        vllm_runner.model.generate(inputs, sampling_params=guidance_params)
+
+
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODEL_NAME,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
     extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "outlines"}},
 )
 def test_guided_json_completion_outlines(sample_json_schema, request):

@@ -698,6 +698,7 @@ class MooncakeLayerwiseConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None):
         super().__init__(vllm_config, role, kv_cache_config)
         assert vllm_config.kv_transfer_config is not None
+        self._is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeLayerwiseConnectorMetadata()
 
@@ -1702,16 +1703,21 @@ class MooncakeLayerwiseConnectorWorker:
             # get reshape and cache event
             if layer_name == "":
                 layer_name = self.index_to_name[self.current_layer][0]
-            if (self.use_mla and not hasattr(attn_metadata[layer_name], "reshape_cache_event")) or (
-                not self.use_mla and not hasattr(attn_metadata, "reshape_cache_event")
+            if (
+                isinstance(attn_metadata, dict)
+                and hasattr(attn_metadata[layer_name], "reshape_cache_event")
+                and attn_metadata[layer_name].reshape_cache_event is not None
             ):
+                reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
+            elif (
+                attn_metadata
+                and hasattr(attn_metadata, "reshape_cache_event")
+                and attn_metadata.reshape_cache_event is not None
+            ):
+                reshape_cache_event = attn_metadata.reshape_cache_event
+            else:
                 reshape_cache_event = torch.npu.Event()
                 reshape_cache_event.record()
-            elif self.use_mla:
-                reshape_cache_event = attn_metadata[layer_name].reshape_cache_event
-            else:
-                reshape_cache_event = attn_metadata.reshape_cache_event
-
             send_task = connector_metadata.send_task
             layer_group_idx = self.layer_metadata[layer_name].tensor_group_idx[0]
             keys = None

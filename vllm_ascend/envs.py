@@ -130,13 +130,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # force_topk sampler optimization: 0=disabled (default), >0=global
-    # top-k candidate ceiling (e.g. 2048). Replaces full-vocab sort with
-    # a single topk + compact-space computation to reduce sampling latency
-    # on large vocabularies (V>=150k).
-    "VLLM_ASCEND_SAMPLER_FORCE_TOPK": lambda: int(
-        os.getenv("VLLM_ASCEND_SAMPLER_FORCE_TOPK", "0")
-    ),
 }
 
 # end-env-vars-definition

@@ -16,7 +16,7 @@ env_common: &env_common
   ACL_OP_INIT_MODE: 1
   ASCEND_A3_ENABLE: 1
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
-  VLLM_ENGINE_READY_TIMEOUT_S: "7200"
+  VLLM_ENGINE_READY_TIMEOUT_S: "3000"
   HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_INTRA_PCIE_ENABLE: 1
   HCCL_INTRA_ROCE_ENABLE: 0
@@ -53,7 +53,7 @@ deployment:
           "torch_profiler_with_stack": false}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -101,7 +101,7 @@ deployment:
           "torch_profiler_with_stack": false}'
           --seed 1024
           --max-model-len 131072
-          --additional-config '{"fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --max-num-batched-tokens 4096
           --trust-remote-code
           --max-num-seqs 64
@@ -152,7 +152,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92
@@ -202,7 +202,7 @@ deployment:
           --max-model-len 202752
           --max-num-batched-tokens 32
           --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY", "cudagraph_capture_sizes":[4, 8, 12, 16,20,24,28, 32]}'
-          --additional-config '{"recompute_scheduler_enable": true, "fuse_muls_add": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
+          --additional-config '{"recompute_scheduler_enable": true, "ascend_compilation_config": {"enable_npugraph_ex": true}}'
           --trust-remote-code
           --max-num-seqs 8
           --gpu-memory-utilization 0.92

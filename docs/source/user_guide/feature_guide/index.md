@@ -18,7 +18,9 @@ rfork
 dynamic_batch
 epd_disaggregation
 kv_pool
+layerwise_kv_pool
 kv_cache_cpu_offload
+recompute_cpu_offload
 external_dp
 large_scale_ep
 ucm_deployment
