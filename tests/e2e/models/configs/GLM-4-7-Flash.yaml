@@ -1,0 +1,30 @@
+model_name: "zai-org/GLM-4.7-Flash"
+hardware: "Atlas A2 Series"
+trust_remote_code: True
+dtype: float16
+revision: main
+
+tasks:
+  # 基础生成能力测试
+  - name: "hellaswag"
+    metrics:
+      - name: "acc_norm"
+        value: 0.85
+    num_fewshot: 10
+    batch_size: 4
+
+  # 长上下文理解测试
+  - name: "lambada"
+    metrics:
+      - name: "acc"
+        value: 0.82
+    num_fewshot: 0
+    batch_size: 4
+
+  # 代码生成能力测试
+  - name: "humaneval"
+    metrics:
+      - name: "pass@1"
+        value: 0.65
+    num_fewshot: 0
+    batch_size: 2
