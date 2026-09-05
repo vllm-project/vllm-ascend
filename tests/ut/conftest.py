@@ -249,12 +249,12 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_configure(config):
+if "--pd-unit" not in sys.argv:
     # PD control-plane tests exercise real connectors and dependency types, not
     # model execution. Importing every model patch here couples their collection
-    # to unrelated model APIs. Keep the default full UT setup unchanged.
-    if config.getoption("--pd-unit"):
-        return
+    # to unrelated model APIs. Preserve the default import-time setup, before
+    # child conftests are imported; delaying it to pytest_configure changes that
+    # ordering for unrelated tests.
     adapt_patch()
     adapt_patch(True)
     register_ascend_customop()

@@ -5,11 +5,13 @@ Run with python3 -m unittest discover -s .github/workflows/scripts/tests.
 These test routing and failure propagation, not connector correctness.
 """
 
+import ast
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -124,6 +126,42 @@ class TestSelectedTestsRouting(unittest.TestCase):
         result, calls = self.run_runner([V1, OTHER], fail=V1)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(len(calls), 1)
+
+
+class TestDefaultUTInitializationOrder(unittest.TestCase):
+    def test_model_patches_remain_at_import_time_except_in_explicit_pd_mode(self):
+        """Execute the actual startup guard without importing device dependencies.
+
+        A child conftest may import patched APIs before pytest_configure. Moving
+        this guard into a hook must fail this regression. Actual dependency
+        initialization remains the responsibility of the full UT job.
+        """
+        path = Path(__file__).resolve().parents[4] / "tests/ut/conftest.py"
+        tree = ast.parse(path.read_text())
+        guards = [
+            node
+            for node in tree.body
+            if isinstance(node, ast.If)
+            and any(
+                isinstance(child, ast.Call) and isinstance(child.func, ast.Name) and child.func.id == "adapt_patch"
+                for child in ast.walk(node)
+            )
+        ]
+        self.assertEqual(len(guards), 1, "Default model patches must run while conftest is imported")
+        code = compile(ast.Module(body=guards, type_ignores=[]), str(path), "exec")
+        for argv, expected in [(["pytest"], [False, True, "customops"]), (["pytest", "--pd-unit"], [])]:
+            with self.subTest(argv=argv):
+                events = []
+                exec(
+                    code,
+                    {
+                        "sys": types.SimpleNamespace(argv=argv),
+                        "_npu_available": True,
+                        "adapt_patch": lambda worker=False, events=events: events.append(worker),
+                        "register_ascend_customop": lambda events=events: events.append("customops"),
+                    },
+                )
+                self.assertEqual(events, expected)
 
 
 if __name__ == "__main__":

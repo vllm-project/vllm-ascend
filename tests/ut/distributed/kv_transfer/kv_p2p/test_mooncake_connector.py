@@ -166,6 +166,47 @@ def test_sender_endpoint_includes_pipeline_and_prefill_context_ranks(pp_rank, pc
 
 
 class TestKVCacheSendingThread(unittest.TestCase):
+    def test_multiple_done_messages_complete_only_after_all_pulls(self):
+        """UT-IT: real sender counter gates completion; peers may finish in either order.
+
+        The current wire contract counts pull completions, not unique identities.
+        This checks normal delivery and terminal idempotence, not pre-terminal
+        deduplication of retransmitted completion messages.
+        """
+        for peers in ((b"decode-a", b"decode-b"), (b"decode-b", b"decode-a")):
+            with self.subTest(peers=peers):
+                sender = KVCacheSendingThread(
+                    vllm_config=MockVllmConfig(),
+                    tp_rank=0,
+                    prefill_tp_size=1,
+                    local_engine_id="prefill-engine",
+                    side_channel_host="127.0.0.1",
+                    side_channel_port=5555,
+                    metadata=make_agent_metadata(engine_id="prefill-engine"),
+                    ready_event=threading.Event(),
+                    kv_caches={},
+                    pcp_rank=0,
+                )
+                sender.task_tracker.add_req_to_process("request-a")
+                expected_pulls = {5555: {"num": 2, "host": "127.0.0.1"}}
+                socket = MagicMock(spec=zmq.Socket)
+                payload = msgspec.msgpack.encode((DONE_RECVING_MSG, "request-a", expected_pulls))
+                for peer, expected_finished in (
+                    (peers[0], set()),
+                    (peers[1], {"request-a"}),
+                    (peers[1], set()),
+                ):
+                    socket.recv_multipart.side_effect = [[peer, b"", payload], SystemExit]
+                    with self.assertRaises(SystemExit):
+                        sender.run_busy_loop(socket)
+                    self.assertEqual(sender.get_and_clear_finished_requests(), expected_finished)
+                    self.assertEqual(sender.get_and_clear_finished_requests(), set())
+                self.assertEqual(
+                    [call.args[0] for call in socket.send_multipart.call_args_list],
+                    [(peers[0], b"", b"ACK"), (peers[1], b"", b"ACK"), (peers[1], b"", b"ACK")],
+                )
+                self.assertFalse(sender.is_alive())
+
     def test_metadata_and_completion_protocol_without_network(self):
         """Real wire codec -> sender handler -> tracker; fake only the socket."""
         ready_event = threading.Event()
