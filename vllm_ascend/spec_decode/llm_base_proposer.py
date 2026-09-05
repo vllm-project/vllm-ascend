@@ -304,6 +304,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_eagle = self.runner.use_eagle
         self.draft_window_size = None
         self.sliding_window = None
+        self._per_group_sliding_windows: dict[int, SlidingWindowAdapter] = {}
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -2478,6 +2479,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             else None
         )
+        base_common_attn_metadata = common_attn_metadata
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
             device_metadata_provider = (
@@ -2489,23 +2491,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.use_compress:
                 extra_attn_metadata_args["block_size"] = attn_group.kv_cache_spec.block_size
             if self.method == "dspark":
-                gid = attn_group.kv_cache_group_id
-                common_attn_metadata = copy.copy(common_attn_metadata)
-                block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
-                if block_table is not None:
-                    common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
-                slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
-                if slot_mapping is not None:
-                    common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
-                # Apply the sliding window to the per-group block_table + seq_lens
-                # that DSpark's draft FIA actually reads. This branch overwrites
-                # common_attn_metadata.block_table_tensor with the full per-group
-                # table, so the window applied earlier (line 922) is bypassed; we
-                # skipped it there for dspark and re-apply here on the per-group
-                # table so FIA reads the recent-blocks clone instead of block 0.
-                # (dspark only - self.sliding_window is None for MTP.)
-                if self.sliding_window is not None:
-                    self.sliding_window.apply(common_attn_metadata)
+                common_attn_metadata = self._prepare_dspark_group_metadata(
+                    base_common_attn_metadata,
+                    attn_group,
+                    num_input_tokens,
+                )
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )

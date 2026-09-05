@@ -39,6 +39,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer
 from vllm_ascend.spec_decode.dspark_proposer import AscendDSparkProposer
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.utils import SlidingWindowAdapter
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetadataTask
 
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
@@ -817,6 +818,64 @@ class TestDSparkGraphDummyRun(_DSparkProposerTestBase):
         assert common_metadata.num_reqs == 3
         assert common_metadata.query_start_loc_cpu.tolist() == [0, 3, 6, 8]
         assert proposer._runnable.call_args.kwargs["num_input_tokens"] == 8
+
+    def test_group_window_metadata_is_persistent_and_pads_virtual_request(self):
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=2,
+            block_size=8,
+            draft_attn_causal=False,
+        )
+        device = torch.device("cpu")
+        proposer.draft_window_size = 1024
+        proposer.sliding_window = None
+        proposer._per_group_sliding_windows = {
+            0: SlidingWindowAdapter(1024, 128, 3, 0, device),
+            1: SlidingWindowAdapter(1024, 128, 3, 0, device),
+        }
+        proposer._per_group_block_table_buffers = {
+            0: torch.arange(32, dtype=torch.int32).reshape(2, 16),
+            1: torch.arange(100, 132, dtype=torch.int32).reshape(2, 16),
+        }
+        proposer._per_group_query_slot_mapping_buffers = {
+            0: torch.arange(24, dtype=torch.int32),
+            1: torch.arange(24, dtype=torch.int32) + 100,
+        }
+        groups = [
+            SimpleNamespace(kv_cache_group_id=gid)
+            for gid in (0, 1)
+        ]
+        common = SimpleNamespace(
+            num_reqs=3,
+            seq_lens=torch.tensor([1152, 256], dtype=torch.int32),
+            seq_lens_cpu=torch.tensor([1152, 256], dtype=torch.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([1152, 256], dtype=torch.int32),
+            block_table_tensor=None,
+            slot_mapping=None,
+        )
+
+        first = proposer._prepare_dspark_group_metadata(
+            common, groups[0], 18, real_num_reqs=2
+        )
+        second_group = proposer._prepare_dspark_group_metadata(
+            common, groups[1], 18, real_num_reqs=2
+        )
+
+        assert first.block_table_tensor.shape == (3, 9)
+        assert first.block_table_tensor[0, 0].item() == 1
+        assert second_group.block_table_tensor[0, 0].item() == 101
+        assert first.block_table_tensor.data_ptr() != second_group.block_table_tensor.data_ptr()
+        assert first.seq_lens.tolist() == [1024, 256, 1]
+        assert first.seq_lens_cpu.tolist() == [1024, 256, 1]
+        assert first.block_table_tensor[2].count_nonzero().item() == 0
+
+        stable_address = first.block_table_tensor.data_ptr()
+        proposer._per_group_block_table_buffers[0].add_(1000)
+        refreshed = proposer._prepare_dspark_group_metadata(
+            common, groups[0], 18, real_num_reqs=2
+        )
+        assert refreshed.block_table_tensor.data_ptr() == stable_address
+        assert refreshed.block_table_tensor[0, 0].item() == 1001
 
 
 class TestDSparkGraphRuntimePadding(_DSparkProposerTestBase):

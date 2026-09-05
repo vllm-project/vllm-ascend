@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from typing import Any
 
 import torch
@@ -21,7 +22,7 @@ from vllm_ascend.ops.triton.spec_decode.utils import (
     copy_and_expand_dflash_and_dspark_inputs_kernel,
 )
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
-from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+from vllm_ascend.spec_decode.utils import DynamicSpecScheduler, SlidingWindowAdapter
 
 
 class AscendDSparkProposer(AscendDflashProposer):
@@ -223,6 +224,78 @@ class AscendDSparkProposer(AscendDflashProposer):
             attn_group.kv_cache_group_id: torch.zeros(self.max_num_tokens, dtype=torch.int32, device=self.device)
             for attn_group in self.draft_attn_groups
         }
+        if getattr(self, "draft_window_size", None) is not None:
+            group_block_sizes: dict[int, int] = {}
+            for attn_group in self.draft_attn_groups:
+                gid = attn_group.kv_cache_group_id
+                block_size = int(attn_group.kv_cache_spec.block_size)
+                previous = group_block_sizes.setdefault(gid, block_size)
+                if previous != block_size:
+                    raise RuntimeError(
+                        "DSpark attention layers in one KV cache group must "
+                        f"share a block size, but group {gid} has both "
+                        f"{previous} and {block_size}."
+                    )
+            # A FULL graph bucket can contain one virtual remainder request.
+            # Keep a separate persistent output per group so capture and replay
+            # use the same address without cross-group aliasing.
+            self._per_group_sliding_windows = {
+                gid: SlidingWindowAdapter(
+                    self.draft_window_size,
+                    block_size,
+                    self.runner.max_num_reqs + 1,
+                    0,
+                    self.device,
+                )
+                for gid, block_size in group_block_sizes.items()
+            }
+
+    @staticmethod
+    def _pad_metadata_rows(tensor: torch.Tensor, rows: int, value: int) -> torch.Tensor:
+        if tensor.shape[0] >= rows:
+            return tensor[:rows]
+        pad_shape = (rows - tensor.shape[0], *tensor.shape[1:])
+        padding = tensor.new_full(pad_shape, value)
+        return torch.cat((tensor, padding), dim=0)
+
+    def _prepare_dspark_group_metadata(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        attn_group: AttentionGroup,
+        num_input_tokens: int,
+        real_num_reqs: int | None = None,
+    ) -> AscendCommonAttentionMetadata:
+        """Select and window one DSpark KV group's persistent metadata."""
+        common_attn_metadata = copy.copy(common_attn_metadata)
+        gid = attn_group.kv_cache_group_id
+        rows = common_attn_metadata.num_reqs
+        source_rows = rows if real_num_reqs is None else real_num_reqs
+
+        block_table = self._per_group_block_table_buffers[gid][:source_rows]
+        common_attn_metadata.block_table_tensor = self._pad_metadata_rows(
+            block_table, rows, 0
+        )
+        common_attn_metadata.slot_mapping = (
+            self._per_group_query_slot_mapping_buffers[gid][:num_input_tokens]
+        )
+        if getattr(self, "draft_window_size", None) is not None:
+            common_attn_metadata.seq_lens = self._pad_metadata_rows(
+                common_attn_metadata.seq_lens[:source_rows], rows, 1
+            )
+            for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
+                value = getattr(common_attn_metadata, name, None)
+                if value is not None:
+                    setattr(
+                        common_attn_metadata,
+                        name,
+                        self._pad_metadata_rows(value[:source_rows], rows, 1),
+                    )
+            sliding_window = getattr(self, "_per_group_sliding_windows", {}).get(
+                gid, getattr(self, "sliding_window", None)
+            )
+            assert sliding_window is not None
+            sliding_window.apply(common_attn_metadata)
+        return common_attn_metadata
 
     def set_per_group_attn_metadata(
         self,
@@ -464,6 +537,12 @@ class AscendDSparkProposer(AscendDflashProposer):
                     causal=causal,
                     is_prefilling=torch.zeros(num_metadata_reqs, dtype=torch.bool),
                     block_table_tensor=self._per_group_block_table_buffers[gid][:num_reqs],
+                )
+                common_attn_metadata = self._prepare_dspark_group_metadata(
+                    common_attn_metadata,
+                    attn_group,
+                    num_input_tokens,
+                    real_num_reqs=num_reqs,
                 )
                 metadata = attn_group.get_metadata_builder().build_for_graph_capture(
                     common_attn_metadata,

@@ -2773,6 +2773,61 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(ptrs, [aligned_tensor.data_ptr()])
         self.assertEqual(lengths, [tensor_size])
 
+    def test_hybrid_registration_covers_separate_kv_storages(self):
+        worker = object.__new__(MooncakeConnectorWorker)
+        key = torch.empty(128, dtype=torch.int8)
+        value = torch.empty(96, dtype=torch.int8)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    shared_by=["model.dspark.layers.0.self_attn"],
+                    size=key.nbytes + value.nbytes,
+                    offset=0,
+                    block_stride=0,
+                )
+            ]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers_hybrid(
+            {"model.dspark.layers.0.self_attn": (key, value)}
+        )
+
+        regions = list(zip(ptrs, lengths))
+        for tensor in (key, value):
+            storage = tensor.untyped_storage()
+            storage_start = storage.data_ptr()
+            storage_end = storage_start + storage.nbytes()
+            assert any(
+                region_start <= storage_start
+                and region_start + region_length >= storage_end
+                for region_start, region_length in regions
+            )
+
+    def test_hybrid_registration_keeps_packed_layout_path(self):
+        worker = object.__new__(MooncakeConnectorWorker)
+        layer_name = "model.layers.0.self_attn"
+        cache_size = 4096
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    shared_by=[layer_name],
+                    size=cache_size,
+                    offset=128,
+                    block_stride=8192,
+                )
+            ]
+        )
+        cache = MagicMock()
+        cache.data_ptr.return_value = 2 * 1024 * 1024
+        worker._as_kv_cache_tuple = MagicMock(return_value=(cache,))
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers_hybrid(
+            {layer_name: cache}
+        )
+
+        self.assertEqual(ptrs, [2 * 1024 * 1024])
+        self.assertEqual(lengths, [cache_size])
+
     def test_device_id_selection_with_physical_devices(self):
         # Test with physical devices set
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())

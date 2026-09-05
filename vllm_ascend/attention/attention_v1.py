@@ -75,6 +75,15 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+def _get_fia_sparse_config(sliding_window: int | None, causal: bool) -> tuple[int, int, int]:
+    """Return sparse mode and token limits for FIAS graph execution."""
+    if not causal:
+        return 0, SWA_INT_MAX, SWA_INT_MAX
+    if sliding_window is not None:
+        return 4, sliding_window, 0
+    return 3, SWA_INT_MAX, SWA_INT_MAX
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -867,8 +876,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         block_tables = metadata.block_tables
                         attn_count = attn_count + 1
-                        if not metadata.causal:
-                            sparse_mode = 0
+                        sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_config(
+                            sliding_window,
+                            metadata.causal,
+                        )
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
                         seq_lens = attn_metadata[metadata_key].seq_lens_list
@@ -948,9 +959,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        sparse_mode, pre_tokens, next_tokens = _get_fia_sparse_config(
+            self.sliding_window, attn_metadata.causal
+        )
 
         extra_args = {}
         if self.enable_c8_quant and layer is not None:

@@ -29,6 +29,8 @@ from vllm.config import CUDAGraphMode
 from vllm_ascend.spec_decode.llm_base_proposer import (
     AscendSpecDecodeBaseProposer,
     _draft_embed_accepts_mm,
+    _is_glm_model,
+    _supports_spec_decode_graph,
 )
 
 # CUDAGraphMode values whose ``has_full_cudagraphs()`` is True: FULL plus the
