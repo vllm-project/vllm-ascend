@@ -141,6 +141,16 @@ def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     )
 
 
+def should_reuse_topk(config: Any, layer_id: int) -> bool:
+    """Return whether a layer reuses Top-K indices computed earlier."""
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
+    if index_topk_pattern is None:
+        index_topk_freq = getattr(config, "index_topk_freq", 1)
+        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+        return max(layer_id - index_skip_topk_offset + 1, 0) % index_topk_freq != 0
+    return 0 <= layer_id < len(index_topk_pattern) and index_topk_pattern[layer_id] == "S"
+
+
 def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> bool:
     if vllm_config is None:
         from vllm.config import get_current_vllm_config

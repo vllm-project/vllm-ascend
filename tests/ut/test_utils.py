@@ -540,6 +540,13 @@ def test_is_pd_decode_recompute_scheduler_enabled_decode_consumer_disabled():
         assert utils.is_pd_decode_recompute_scheduler_enabled(vllm_config) is False
 
 
+def test_should_reuse_topk_keeps_frequency_logic():
+    config = SimpleNamespace(index_topk_freq=4, index_skip_topk_offset=3)
+
+    assert not utils.should_reuse_topk(config, 2)
+    assert utils.should_reuse_topk(config, 3)
+
+
 def test_check_gdn_layer_supports_kimi_linear_config_property():
     from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
