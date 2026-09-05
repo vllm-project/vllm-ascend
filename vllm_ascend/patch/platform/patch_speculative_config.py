@@ -4,6 +4,7 @@ from pydantic.dataclasses import rebuild_dataclass
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config import VllmConfig
 from vllm.config.speculative import SpeculativeConfig
+from vllm.logger import logger
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
@@ -43,6 +44,13 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
 
 def _dspark_post_init(self):
     _orig_post_init(self)
+    if getattr(self, "skip_parallel_drafting_seq_lens_override", False):
+        logger.warning_once(
+            "skip_parallel_drafting_seq_lens_override is enabled: parallel "
+            "drafting attention will preserve host-side sequence lengths "
+            "instead of using the device-side sequence-length buffers. Enable "
+            "this only when the draft model requires host-side metadata."
+        )
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)
         draft_hf_config = getattr(draft_model_config, "hf_config", None)

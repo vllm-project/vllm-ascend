@@ -1,7 +1,10 @@
+from types import SimpleNamespace
+from unittest.mock import patch
+
 from transformers import Qwen3Config
 from vllm.config.speculative import SpeculativeConfig
 
-import vllm_ascend.patch.platform.patch_speculative_config  # noqa: F401
+import vllm_ascend.patch.platform.patch_speculative_config as patch_speculative_config
 
 
 def test_ascend_speculative_config_field_defaults_to_false():
@@ -9,6 +12,22 @@ def test_ascend_speculative_config_field_defaults_to_false():
 
     assert SpeculativeConfig.__dataclass_fields__[field_name].default is False
     assert SpeculativeConfig.__pydantic_fields__[field_name].default is False
+
+
+def test_seq_lens_override_warns_about_host_side_metadata():
+    config = SimpleNamespace(
+        skip_parallel_drafting_seq_lens_override=True,
+        use_dspark=lambda: False,
+    )
+
+    with (
+        patch.object(patch_speculative_config, "_orig_post_init"),
+        patch.object(patch_speculative_config.logger, "warning_once") as warning,
+    ):
+        patch_speculative_config._dspark_post_init(config)
+
+    warning.assert_called_once()
+    assert "host-side sequence lengths" in warning.call_args.args[0]
 
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
