@@ -37,6 +37,7 @@ def _make_full_attention_spec(
 def _make_vllm_config(num_layers: int, num_shared_buffers: int):
     model_config = MagicMock()
     model_config.get_num_layers.return_value = num_layers
+    model_config.get_total_num_hidden_layers.return_value = num_layers
     return SimpleNamespace(
         kv_transfer_config=SimpleNamespace(
             kv_connector="AscendStoreConnector",
@@ -105,6 +106,22 @@ def test_base_layers_are_merged_into_shared_slots():
         ["model.layers.1.self_attn", "model.layers.3.self_attn", "model.layers.5.self_attn"],
         ["model.layers.2.self_attn", "model.layers.4.self_attn"],
     ]
+
+
+def test_pp_last_stage_uses_global_mtp_index_for_reuse_plan():
+    names = [*(f"model.layers.{layer}.self_attn" for layer in (5, 6, 7)), "model.mtp.0.self_attn"]
+    spec = _make_full_attention_spec()
+    kv_cache_config = SimpleNamespace(
+        kv_cache_tensors=[KVCacheTensor(size=16, shared_by=[name]) for name in names],
+        kv_cache_groups=[SimpleNamespace(layer_names=names, kv_cache_spec=spec)],
+    )
+    config = _make_vllm_config(3, 1)
+    config.model_config.get_total_num_hidden_layers.return_value = 8
+
+    apply_layerwise_kv_cache_plan(kv_cache_config, config)
+
+    # The independent layer is global layer 5, not MTP incorrectly numbered 3.
+    assert [tensor.shared_by for tensor in kv_cache_config.kv_cache_tensors] == [[names[0]], names[1:]]
 
 
 def test_default_layout_keeps_one_buffer_per_layer():

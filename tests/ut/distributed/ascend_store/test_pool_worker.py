@@ -294,6 +294,85 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         self.assertEqual(len(worker.layer_load_tasks), 5)
         self.assertEqual(len(worker.layer_save_tasks), 5)
 
+    def test_layerwise_pp_maps_local_tasks_and_callbacks_to_global_layers(self):
+        import torch
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+            KVCacheStoreLayerRecvingThread,
+        )
+
+        worker = object.__new__(self._make_worker_class())
+        worker.num_layers = 3
+        worker.num_kv_cache_groups = 2
+        worker.hf_config = SimpleNamespace(num_hidden_layers=8)
+        worker.use_gva_layerwise = True
+        worker._extra_config = {"layerwise_num_shared_buffers": 1}
+        main_names = [*(f"model.layers.{layer}.self_attn.attn" for layer in (5, 6, 7)), "model.mtp.0.self_attn.attn"]
+        indexer_names = [f"model.layers.{layer}.self_attn.indexer.k_cache" for layer in (5, 7)]
+        main_spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=8, dtype=torch.float16)
+        indexer_spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=4, dtype=torch.float16)
+        worker.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                SimpleNamespace(layer_names=main_names, kv_cache_spec=main_spec),
+                SimpleNamespace(layer_names=indexer_names, kv_cache_spec=indexer_spec),
+            ],
+        )
+
+        worker._init_layerwise_config()
+
+        self.assertEqual(worker._layerwise_global_layers, (5, 6, 7, 8))
+        self.assertEqual(worker.num_layers, 4)
+        self.assertEqual(worker.independent_layers, [0])
+        self.assertEqual(worker.prefetch_layer_map, {2: 1, 3: 2})
+        self.assertEqual(
+            worker.physical_layer_to_group_layers,
+            {0: [(0, 0), (1, 0)], 1: [(0, 1)], 2: [(0, 2), (1, 1)], 3: [(0, 3)]},
+        )
+        self.assertEqual(len(worker.layer_load_tasks), 4)
+        self.assertEqual(len(worker.layer_save_tasks), 4)
+
+        worker.num_blocks = 2
+        worker.kv_caches = {name: torch.empty(2, 2, 8) for name in main_names + indexer_names}
+        worker.group_kv_caches_base_addr = {}
+        worker.group_block_len = {}
+        worker.group_block_stride = {}
+        worker.group_layer_cache_entry_offsets = {}
+        worker.group_num_layers = {}
+        worker._infer_cache_group_metadata(0, main_names)
+        worker._infer_cache_group_metadata(1, indexer_names)
+        self.assertEqual(worker.group_num_layers, {0: 4, 1: 2})
+        self.assertEqual(worker.group_layer_cache_entry_offsets, {0: [0, 1, 2, 3, 4], 1: [0, 1, 2]})
+
+        # Synchronous layer entry and background prefetch share the adapter.
+        waiter = MagicMock()
+        worker.set_external_slot_release_waiter(waiter)
+        worker.current_layer = 1
+        worker.kv_recv_thread = MagicMock()
+        worker._submit_ready_layer_loads = MagicMock()
+        worker.layer_load_finished_events = [threading.Event() for _ in range(4)]
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.reset_attention_compute_start_gate"
+        ):
+            worker.wait_for_layer_load()
+        waiter.assert_called_once_with(6)
+
+        receiver = object.__new__(KVCacheStoreLayerRecvingThread)
+        receiver.external_slot_release_waiter = worker.external_slot_release_waiter
+        receiver.layer_load_finished_events = worker.layer_load_finished_events
+        receiver.request_queue = MagicMock()
+        task = SimpleNamespace(wait_for_save_layer=None, transfer_tasks=[], layer_id=3, attention_start_gate=None)
+        receiver._handle_request(task)
+        waiter.assert_called_with(8)
+        self.assertTrue(worker.layer_load_finished_events[3].is_set())
+
+        # Failed slot release must not mark the layer safe to overwrite.
+        worker.layer_load_finished_events[3].clear()
+        waiter.side_effect = RuntimeError("read failed")
+        with self.assertRaisesRegex(RuntimeError, "read failed"):
+            receiver._handle_request(task)
+        self.assertFalse(worker.layer_load_finished_events[3].is_set())
+
 
 class TestKVPoolWorkerInit(unittest.TestCase):
     """Test KVPoolWorker initialization with mocked dependencies."""

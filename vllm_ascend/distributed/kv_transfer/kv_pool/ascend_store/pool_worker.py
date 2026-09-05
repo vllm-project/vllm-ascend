@@ -346,12 +346,15 @@ class KVPoolWorker:
         self._allocated_gvas: dict[str, int] = {}
 
     def _init_layerwise_config(self) -> None:
-        # Build mapping: physical_layer -> [(group_id, layer_idx_in_group), ...]
+        # Build mapping: layer -> [(group_id, layer_idx_in_group), ...].
+        # GVA layerwise tasks/events use stage-local layer ordinals; external
+        # slot-release callbacks use the global layer IDs from cache names.
         # layer_idx_in_group is the index of the physical layer within the
         # group (not the index in layer_names). Multiple cache names at the
         # same physical layer are treated as entries of one layer.
         self.physical_layer_to_group_layers: dict[int, list[tuple[int, int]]] = {}
         self._layerwise_reuse_layout: LayerwiseReuseLayout | None = None
+        self._layerwise_global_layers = tuple(range(self.num_layers))
 
         if self.kv_cache_config is not None:
             base_layers = getattr(
@@ -365,7 +368,10 @@ class KVPoolWorker:
                 for layer_name in group_spec.layer_names
             }
             if physical_layers:
-                effective_num_layers = max(self.num_layers, max(physical_layers) + 1)
+                self._layerwise_global_layers = tuple(sorted(physical_layers))
+                effective_num_layers = (
+                    len(physical_layers) if self.use_gva_layerwise else max(self.num_layers, max(physical_layers) + 1)
+                )
                 if effective_num_layers != self.num_layers:
                     logger.info(
                         "KVPoolWorker: updated num_layers %d -> %d from cache group layout.",
@@ -380,12 +386,13 @@ class KVPoolWorker:
                     self._extra_config,
                 )
 
+        physical_to_local = {layer: index for index, layer in enumerate(self._layerwise_global_layers)}
         if self.kv_cache_config is not None and self.num_kv_cache_groups > 1:
             for group_id, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
                 physical_layers = set()
                 for layer_name in group_spec.layer_names:
                     physical_layer = self._extract_physical_layer_index(layer_name)
-                    if physical_layer >= self.num_layers:
+                    if not self.use_gva_layerwise and physical_layer >= self.num_layers:
                         continue
                     physical_layers.add(physical_layer)
                 phys_to_layer_idx = {
@@ -394,7 +401,8 @@ class KVPoolWorker:
 
                 # Add one entry per unique physical layer (no duplicates)
                 for physical_layer, layer_idx_in_group in phys_to_layer_idx.items():
-                    existing = self.physical_layer_to_group_layers.setdefault(physical_layer, [])
+                    layer_id = physical_to_local[physical_layer] if self.use_gva_layerwise else physical_layer
+                    existing = self.physical_layer_to_group_layers.setdefault(layer_id, [])
                     entry = (group_id, layer_idx_in_group)
                     if entry not in existing:
                         existing.append(entry)
@@ -427,8 +435,13 @@ class KVPoolWorker:
                 self.num_prefetch_layers = cache_layout.num_prefetch_layers
             else:
                 self.layerwise_offload = self._layerwise_reuse_layout.has_layer_reuse
-                self.independent_layers = self._layerwise_reuse_layout.independent_layers
-                self.prefetch_layer_map = self._layerwise_reuse_layout.prefetch_layer_map
+                self.independent_layers = [
+                    physical_to_local[layer] for layer in self._layerwise_reuse_layout.independent_layers
+                ]
+                self.prefetch_layer_map = {
+                    physical_to_local[layer]: physical_to_local[previous]
+                    for layer, previous in self._layerwise_reuse_layout.prefetch_layer_map.items()
+                }
                 self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
         else:
             self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
@@ -458,7 +471,12 @@ class KVPoolWorker:
         return builders
 
     def set_external_slot_release_waiter(self, waiter: Callable[[int], None]) -> None:
-        self.external_slot_release_waiter = waiter
+        # Both layer-entry waits and the background prefetch thread call this
+        # adapter, so local ordinals are translated exactly once.
+        def wait_for_local_slot_release(layer_idx: int) -> None:
+            waiter(self._layerwise_global_layers[layer_idx])
+
+        self.external_slot_release_waiter = wait_for_local_slot_release
 
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
@@ -665,7 +683,7 @@ class KVPoolWorker:
         layer_names_by_physical: dict[int, list[str]] = {}
         for layer_name in layer_names:
             phys = self._extract_physical_layer_index(layer_name)
-            if phys >= self.num_layers and self.num_kv_cache_groups > 1:
+            if not self.use_gva_layerwise and phys >= self.num_layers and self.num_kv_cache_groups > 1:
                 continue
             layer_names_by_physical.setdefault(phys, []).append(layer_name)
 
@@ -706,6 +724,10 @@ class KVPoolWorker:
             registered_regions[storage_key] = (new_start, end)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        if self.use_gva_layerwise:
+            self._layerwise_global_layers = tuple(
+                sorted({self._extract_physical_layer_index(name) for name in kv_caches})
+            )
         _, first_kv_cache_tuple = next(iter(kv_caches.items()))
         first_kv_cache_tuple = self._as_cache_tuple(first_kv_cache_tuple)
         first_kv_cache = first_kv_cache_tuple[0]

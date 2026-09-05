@@ -293,7 +293,7 @@ def apply_layerwise_kv_cache_plan(
     layer_specs = get_layerwise_kv_cache_specs(kv_cache_config)
     reuse_layout = build_layerwise_reuse_layout(
         layer_specs,
-        base_layers,
+        vllm_config.model_config.get_total_num_hidden_layers(),
         extra_config,
     )
     actual_layers = len(reuse_layout.layer_cache_specs)
