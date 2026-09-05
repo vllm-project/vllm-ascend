@@ -384,6 +384,79 @@ class _DSparkProposerTestBase:
         return num_query_total, token_indices, cad, extra, next_token_ids, target_hidden_states
 
 
+@pytest.mark.parametrize(
+    ("manager_block_size", "kernel_block_size", "local_blocks", "expected"),
+    [
+        (4, 4, [[3, 7]], [[6, 7, 14, 15]]),
+        (8, 4, [[6, 7]], [[12, 13, 14, 15]]),
+    ],
+)
+def test_dcp_replicated_dspark_block_table_and_slot_mapping(
+    manager_block_size,
+    kernel_block_size,
+    local_blocks,
+    expected,
+) -> None:
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.device = torch.device("cpu")
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=16))
+    proposer._per_group_replication_sizes = {0: 2}
+    proposer._per_group_manager_block_sizes = {0: manager_block_size}
+    proposer._per_group_kernel_block_sizes = {0: kernel_block_size}
+    proposer._replicated_block_table_storage = {}
+    proposer._replicated_block_table_arange = {}
+    proposer._per_group_context_slot_mapping_buffers = {0: torch.empty(16, dtype=torch.int32)}
+
+    replicated = proposer._build_replicated_block_table(
+        0,
+        torch.tensor(local_blocks, dtype=torch.int32),
+        torch.tensor([8], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        replicated,
+        torch.tensor(expected, dtype=torch.int32),
+    )
+    slots = proposer._build_replicated_context_slot_mapping(
+        0,
+        replicated,
+        torch.arange(8, dtype=torch.int32),
+        torch.tensor([0, 8], dtype=torch.int32),
+        num_reqs=1,
+        num_tokens=8,
+    )
+    expected_slots = torch.arange(
+        expected[0][0] * kernel_block_size,
+        expected[0][0] * kernel_block_size + 8,
+        dtype=torch.int32,
+    )
+    torch.testing.assert_close(slots[:8], expected_slots)
+    assert torch.all(slots[8:] == -1)
+
+
+def test_dcp_replicated_dspark_uses_only_active_block_table_rows() -> None:
+    proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
+    proposer.device = torch.device("cpu")
+    proposer.vllm_config = SimpleNamespace(model_config=SimpleNamespace(max_model_len=16))
+    proposer._per_group_replication_sizes = {0: 2}
+    proposer._per_group_manager_block_sizes = {0: 4}
+    proposer._per_group_kernel_block_sizes = {0: 4}
+    proposer._replicated_block_table_storage = {}
+    proposer._replicated_block_table_arange = {}
+
+    block_table_capacity = torch.tensor([[3, 7], [5, 9]], dtype=torch.int32)
+    active_batch_size = 1
+    replicated = proposer._build_replicated_block_table(
+        0,
+        block_table_capacity[:active_batch_size],
+        torch.tensor([8], dtype=torch.int32),
+    )
+
+    torch.testing.assert_close(
+        replicated,
+        torch.tensor([[6, 7, 14, 15]], dtype=torch.int32),
+    )
+
+
 class TestDSparkPositionsFullUnderMultiDp(_DSparkProposerTestBase):
     """Guard: under multi-DP the dspark draft proposer must hand DSA attention a
     full-length positions buffer so ``positions[:num_input_tokens]`` never reads

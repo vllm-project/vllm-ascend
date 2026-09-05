@@ -103,6 +103,26 @@ class TestCommonCP(unittest.TestCase):
         self.assertIs(impl.dcp_device_group, group.device_group)
         mock_get_dcp_group.assert_called_once_with()
 
+    @patch("torch.ops.vllm.sfa_dcp_a2a_fused")
+    def test_impl_mixin_routes_output_merge_to_sfa_triton(self, fused_a2a):
+        impl = DCPImplMixin.__new__(DCPImplMixin)
+        impl.dcp_size = 2
+        impl.dcp_group = MagicMock(unique_name="dcp:0")
+        output = torch.empty(3, 8, 64, dtype=torch.bfloat16)
+        lse = torch.empty(3, 8, 1, dtype=torch.float32)
+        expected = torch.empty(3, 4, 64, dtype=torch.float32)
+        fused_a2a.return_value = expected
+
+        actual = impl._merge_dcp_attention_output(output, lse, 64)
+
+        self.assertIs(actual, expected)
+        fused_a2a.assert_called_once()
+        actual_output, actual_lse, dcp_size, scatter_dim, group_name = fused_a2a.call_args.args
+        torch.testing.assert_close(actual_output, output.float())
+        self.assertEqual(actual_output.dtype, torch.float32)
+        self.assertIs(actual_lse, lse)
+        self.assertEqual((dcp_size, scatter_dim, group_name), (2, 1, "dcp:0"))
+
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_decode_context_model_parallel_world_size")
     @patch("vllm_ascend.attention.context_parallel.common_cp.get_dcp_group")
     @patch("torch.distributed.all_to_all_single")

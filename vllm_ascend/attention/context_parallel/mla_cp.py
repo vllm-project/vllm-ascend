@@ -2,6 +2,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
@@ -71,7 +72,9 @@ class AscendMlaDCPMetadataBuilder(
         metadata_cls: type[AscendMLAMetadata] | None = None,
         supports_dcp_with_varlen: bool = False,
     ):
-        super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, supports_dcp_with_varlen)
+        # This builder handles variable speculative query lengths explicitly
+        # through DCP-local sequence lengths and the per-request query mask.
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device, metadata_cls, True)
         self.cp_local_block_size = vllm_config.parallel_config.cp_kv_cache_interleave_size
         self.cp_virtual_block_size = self.cp_local_block_size * self.dcp_size
         self.block_size = (self.block_size * self.cp_virtual_block_size) // np.gcd(
@@ -300,6 +303,9 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             num_heads = self.num_heads * self.dcp_size
         else:
             num_heads = self.num_heads
+        num_heads_unpadded = num_heads
+        num_heads_padded = 1 << (num_heads - 1).bit_length()
+        head_padding = num_heads_padded - num_heads
         # Use DCP-local computed token counts to build sequence lengths and masks.
         k_nope = k_nope.view(-1, self.num_kv_heads, block_size, self.kv_lora_rank)
         k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
@@ -322,6 +328,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
             q_nope = q_nope.view(num_decodes, -1, q_nope.shape[1], q_nope.shape[-1]).contiguous()
             q_pe = q_pe.view(num_decodes, -1, q_pe.shape[1], q_pe.shape[-1])
+            if head_padding > 0:
+                q_nope = F.pad(q_nope, (0, 0, 0, head_padding), "constant", 0)
+                q_pe = F.pad(q_pe, (0, 0, 0, head_padding), "constant", 0)
+                num_heads = num_heads_padded
             sparse_mode = 0
             spec_attn_mask = attn_metadata.decode.dcp_mtp_attn_mask  # type:ignore
             query_lens = attn_metadata.query_lens
@@ -336,6 +346,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
         else:
             q_nope = q_nope.view(num_tokens, num_heads, 1, -1).contiguous()
             q_pe = q_pe.view(num_tokens, num_heads, 1, -1)
+            if head_padding > 0:
+                q_nope = F.pad(q_nope, (0, 0, 0, 0, 0, head_padding), "constant", 0)
+                q_pe = F.pad(q_pe, (0, 0, 0, 0, 0, head_padding), "constant", 0)
+                num_heads = num_heads_padded
             sparse_mode = 0
             spec_attn_mask = None
 
@@ -433,6 +447,10 @@ class AscendMlaDCPImpl(DCPImplMixin, AscendMLAImpl):
 
             attn_output = attn_output.permute(0, 2, 1, 3).reshape(B_attn * S, N_attn, D)
             softmax_lse = softmax_lse.permute(0, 2, 1, 3).reshape(B_lse * Q_S, N_lse, 1)
+
+        if head_padding > 0:
+            attn_output = attn_output[:, :num_heads_unpadded]
+            softmax_lse = softmax_lse[:, :num_heads_unpadded]
 
         # Update out&lse
         attn_output = self._merge_dcp_attention_output(

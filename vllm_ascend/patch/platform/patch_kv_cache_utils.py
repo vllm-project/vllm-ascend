@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
@@ -22,10 +23,16 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
+)
+
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_unify_kv_cache_spec_page_size = vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 
 
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
@@ -126,9 +133,20 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     ):
         return None
 
-    all_specs = [*target_attention_specs.values(), *draft_attention_specs.values(), *mamba_specs.values()]
-    if len({spec.block_size for spec in all_specs}) != 1 or len({spec.page_size_bytes for spec in all_specs}) != 1:
+    attention_specs = [*target_attention_specs.values(), *draft_attention_specs.values()]
+    if len({spec.block_size for spec in attention_specs}) != 1:
         return None
+
+    base_page_sizes = {spec.page_size_bytes for spec in [*target_attention_specs.values(), *mamba_specs.values()]}
+    if len(base_page_sizes) != 1:
+        return None
+    base_page_size = next(iter(base_page_sizes))
+    for spec in draft_attention_specs.values():
+        if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec):
+            if spec.page_size_bytes != (base_page_size * spec.dcp_replication_size):
+                return None
+        elif spec.page_size_bytes != base_page_size:
+            return None
 
     first_mamba_spec = next(iter(mamba_specs.values()))
     if any(spec != first_mamba_spec for spec in mamba_specs.values()):
@@ -178,6 +196,45 @@ def _get_kv_cache_groups_uniform_page_size(
     if kimi_k3_groups is not None:
         return kimi_k3_groups
     return _orig_get_kv_cache_groups_uniform_page_size(kv_cache_spec)
+
+
+def _unify_kv_cache_spec_page_size(
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> dict[str, KVCacheSpec]:
+    """Align each replicated draft lane, preserving non-rectangular pages."""
+    replicated_specs = {
+        name: spec for name, spec in kv_cache_spec.items() if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
+    }
+    if replicated_specs:
+        # First ask vLLM to align only the target's ordinary pages.  The draft's
+        # DCP multiplier describes additional physical storage, not a larger
+        # scheduler page.  Feeding either the multiplied draft page or its GQA
+        # page into the generic unifier can change the logical block size.
+        ordinary_specs = {name: spec for name, spec in kv_cache_spec.items() if name not in replicated_specs}
+        try:
+            aligned_ordinary_specs = _orig_unify_kv_cache_spec_page_size(ordinary_specs)
+        except NotImplementedError:
+            aligned_ordinary_specs = {}
+        ordinary_page_sizes = {spec.page_size_bytes for spec in aligned_ordinary_specs.values()}
+        if len(ordinary_page_sizes) == 1:
+            base_page_size = next(iter(ordinary_page_sizes))
+            aligned_specs = {
+                name: (
+                    replace(
+                        kv_cache_spec[name],
+                        page_size_padded=base_page_size,
+                    )
+                    if name in replicated_specs
+                    else spec
+                )
+                for name, spec in {
+                    **aligned_ordinary_specs,
+                    **replicated_specs,
+                }.items()
+            }
+            if _get_kimi_k3_dspark_mixed_kv_cache_groups(aligned_specs) is not None:
+                return aligned_specs
+    return _orig_unify_kv_cache_spec_page_size(kv_cache_spec)
 
 
 def _kv_cache_config_has_mamba_layers(self: KVCacheConfig) -> bool:
@@ -374,10 +431,117 @@ def _get_kv_cache_config_deepseek_v4(
     return num_blocks, kv_cache_tensors
 
 
+def _get_kimi_k3_replicated_dspark_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig | None:
+    """Plan the minimal K3 target-sharded / DSpark-replicated layout.
+
+    Target attention pages keep aliasing the balanced Mamba groups. Each
+    replicated draft layer gets one independent DCP-sized tensor, avoiding a
+    rectangular allocation that would pad every target layer to draft size.
+    """
+    if not kv_cache_groups:
+        return None
+    first_group_spec = kv_cache_groups[0].kv_cache_spec
+    if not isinstance(first_group_spec, UniformTypeKVCacheSpecs):
+        return None
+    first_specs = first_group_spec.kv_cache_specs
+    draft_layers = [
+        name
+        for name in kv_cache_groups[0].layer_names
+        if isinstance(
+            first_specs[name],
+            AscendDCPReplicatedDraftAttentionSpec,
+        )
+    ]
+    if not draft_layers:
+        return None
+    target_layers = [name for name in kv_cache_groups[0].layer_names if name not in draft_layers]
+    if not target_layers or any(not isinstance(first_specs[name], FullAttentionSpec) for name in target_layers):
+        return None
+
+    bytes_per_block = sum(first_specs[name].page_size_bytes for name in kv_cache_groups[0].layer_names)
+    if any(
+        sum(
+            group.kv_cache_spec.kv_cache_specs[name].page_size_bytes
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else group.kv_cache_spec.page_size_bytes
+            for name in group.layer_names
+        )
+        > bytes_per_block
+        for group in kv_cache_groups[1:]
+    ):
+        return None
+    num_blocks = may_override_num_blocks(
+        vllm_config,
+        available_memory // bytes_per_block,
+    )
+
+    recurrent_layers_by_group = [list(group.layer_names) for group in kv_cache_groups[1:]]
+    kv_cache_tensors: list[KVCacheTensor] = []
+    for layer_idx, target_layer in enumerate(target_layers):
+        page_size = first_specs[target_layer].page_size_bytes
+        layers = [target_layer]
+        for recurrent_layers in recurrent_layers_by_group:
+            if layer_idx < len(recurrent_layers):
+                layers.append(recurrent_layers[layer_idx])
+        kv_cache_tensors.append(
+            KVCacheTensor(
+                size=page_size * num_blocks,
+                shared_by=layers,
+            )
+        )
+    for draft_layer in draft_layers:
+        page_size = first_specs[draft_layer].page_size_bytes
+        kv_cache_tensors.append(
+            KVCacheTensor(
+                size=page_size * num_blocks,
+                shared_by=[draft_layer],
+            )
+        )
+
+    logger.info(
+        "Using Kimi K3 DCP-replicated DSpark KV layout: %d logical blocks, "
+        "%d target tensors and %d replicated draft tensors",
+        num_blocks,
+        len(target_layers),
+        len(draft_layers),
+    )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+        prefix_cache_retention_interval=(vllm_config.cache_config.prefix_cache_retention_interval),
+    )
+
+
+def _get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    config = _get_kimi_k3_replicated_dspark_kv_cache_config(
+        vllm_config,
+        kv_cache_groups,
+        available_memory,
+    )
+    if config is not None:
+        return config
+    return _orig_get_kv_cache_config_from_groups(
+        vllm_config,
+        kv_cache_groups,
+        available_memory,
+    )
+
+
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils.unify_kv_cache_spec_page_size = _unify_kv_cache_spec_page_size
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
+vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = _get_kv_cache_config_from_groups
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
 # get_kv_cache_config_from_groups now calls _get_kv_cache_config_packed directly, bypassing
 # the alias patch above. Patch the canonical name so Ascend's non-packed layout is used.
