@@ -526,6 +526,7 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     assert situ_call["x"] is gate_up
     assert situ_call["weight_scale"] is gate_up_proj.weight_scale_fp32
     assert situ_call["activation_scale"] is input_scale
+    assert situ_call["group_index"] is None
     assert situ_call["beta"] == 4.0
     assert situ_call["linear_beta"] == 25.0
 
