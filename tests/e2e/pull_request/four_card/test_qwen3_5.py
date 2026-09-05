@@ -65,7 +65,7 @@ def test_qwen3_5_35b_distributed_mp_tp4_full_decode_only_mtp3():
             "cudagraph_capture_sizes": [4, 8, 12, 16],
         },
         speculative_config={
-            "method": "qwen3_5_mtp",
+            "method": "mtp",
             "num_speculative_tokens": 3,
         },
     ) as vllm_model:

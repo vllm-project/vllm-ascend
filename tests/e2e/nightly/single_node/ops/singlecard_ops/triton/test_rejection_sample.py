@@ -121,8 +121,6 @@ def test_sample_recovered_tokens_kernel():
             q,
             vocab_size,
             IS_NGRAM=False,
-            target_indices=None,
-            enable_reduce_sampling=False,
         )
         sample_recovered_tokens_kernel[(batch_size, max_spec_len)](
             output_token_ids_triton,
@@ -130,14 +128,10 @@ def test_sample_recovered_tokens_kernel():
             draft_token_ids,
             draft_probs,
             target_probs,
-            None,
             q,
             vocab_size,
-            vocab_size,
             NO_DRAFT_PROBS=False,
-            ENABLE_REDUCE_SAMPLING=False,
             SUB_BLOCK=8,
-            VOCAB_BLOCK_SIZE=8,
         )
         torch.npu.synchronize()
         assert torch.equal(output_token_ids_ref, output_token_ids_triton), f"iteration {i}"
@@ -204,7 +198,6 @@ def test_rejection_random_sample(synthetic_mode, max_spec_len, vocab_size, batch
         draft_token_ids,
         draft_probs,
         target_probs,
-        None,  # target_indices
         bonus_token_ids,
         recovered_ids,
         uniform_probs,
@@ -217,7 +210,6 @@ def test_rejection_random_sample(synthetic_mode, max_spec_len, vocab_size, batch
         synthetic_conditional_rates,  # synthetic_conditional_rates (None when off)
         NO_ORI_TARGET_PROBS=True,
         NO_DRAFT_PROBS=draft_probs is None,
-        ENABLE_REDUCE_SAMPLING=False,
         SYNTHETIC_MODE=synthetic_mode,
         ENTROPY_VERIFY=False,
         BLOCK_SIZE=block_size,
@@ -465,7 +457,6 @@ def test_rejection_sampler_block_verify_triton_kernel(
         draft_token_ids_ptr=draft_token_ids,
         draft_probs_ptr=draft_probs,
         target_probs_ptr=target_probs,
-        target_indices_ptr=None,
         bonus_token_ids_ptr=bonus_token_ids,
         recovered_token_ids_ptr=recovered_token_ids,
         uniform_probs_ptr=uniform_probs,
@@ -477,7 +468,6 @@ def test_rejection_sampler_block_verify_triton_kernel(
         ori_target_probs_ptr=None,
         NO_ORI_TARGET_PROBS=True,
         NO_DRAFT_PROBS=draft_probs is None,
-        ENABLE_REDUCE_SAMPLING=False,
         BLOCK_SIZE=block_size,
         ENTROPY_VERIFY=False,
         SUB_BLOCK=32,

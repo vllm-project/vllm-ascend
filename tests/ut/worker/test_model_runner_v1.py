@@ -1289,7 +1289,6 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
         """Verify output_token_ids are updated before sampler is called"""
         mock_lmhead_tp_enable.return_value = False
         mock_ascend_config = MagicMock()
-        mock_ascend_config.enable_reduce_sample = False
         mock_get_ascend_config.return_value = mock_ascend_config
 
         # Build input batch with historical sampled tokens

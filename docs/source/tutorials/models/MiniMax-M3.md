@@ -144,8 +144,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
         },
         "multistream_overlap_shared_expert": true,
         "weight_nz_mode": 2,
-        "enable_flashcomm1": true,
-        "enable_reduce_sample": true
+        "enable_flashcomm1": true
     }' \
     --port 11223 > ${LOG_PATH} 2>&1 &
   ```
@@ -182,8 +181,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
       "multistream_overlap_shared_expert": true,
       "enable_shared_expert_dp": true,
       "weight_nz_mode": 2,
-      "enable_flashcomm1": true,
-      "enable_reduce_sample": true
+      "enable_flashcomm1": true
   }' \
   --port 11223 > ${LOG_PATH} 2>&1 &
   ```
