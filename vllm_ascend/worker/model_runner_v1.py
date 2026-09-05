@@ -34,6 +34,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation import breakable_cudagraph
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -59,6 +60,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.extract_hidden_states import CacheOnlyAttentionLayer
 from vllm.model_executor.offloader.base import get_offloader, set_offloader
 from vllm.sequence import IntermediateTensors
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler
@@ -104,12 +106,16 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import copy_num_valid_draft_tokens
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
-from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
+from vllm.v1.worker.gpu_model_runner import (
+    AsyncGPUModelRunnerOutput,
+    GPUModelRunner,
+    nans_to_dict,
+)
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import AttentionGroup, raise_if_nan_logits, select_common_block_size
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -280,6 +286,11 @@ def graph_capture(device: torch.device):
 
 def get_tp_context(drafter):
     return getattr(drafter, "tp_group_context", nullcontext())
+
+
+def _count_nans_per_row(logits: torch.Tensor) -> torch.Tensor:
+    """Count NaNs without the unsupported NPU ``sum(dtype=...)`` overload."""
+    return logits.isnan().sum(dim=-1).to(dtype=torch.int32)
 
 
 class ExecuteModelState(NamedTuple):
@@ -2628,6 +2639,8 @@ class NPUModelRunner(GPUModelRunner):
                     propose_draft_token_ids(sampler_output.sampled_token_ids)
 
         (
+            num_nans_in_logits,
+            num_nans_device,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
@@ -2689,6 +2702,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_connector_output=kv_connector_output,
             pooler_output=[],
             ec_connector_output=ec_connector_output if self.supports_mm_inputs else None,
+            num_nans_in_logits=num_nans_in_logits,
             cudagraph_stats=cudagraph_stats,
             routed_experts=None,
         )
@@ -2756,6 +2770,7 @@ class NPUModelRunner(GPUModelRunner):
             async_output_copy_stream=self.async_output_copy_stream,
             vocab_size=self.input_batch.vocab_size,
             routed_experts=routed_experts_snapshot,
+            num_nans=num_nans_device,
         )
         self.input_batch.set_async_sampled_token_ids(
             async_output.sampled_token_ids_cpu,
@@ -2793,6 +2808,18 @@ class NPUModelRunner(GPUModelRunner):
         )
         return sampler_output
 
+    def _get_nans_in_logits(self, logits: torch.Tensor | None) -> dict[str, int]:
+        """Count NaNs per request with an NPU-compatible reduction."""
+        try:
+            with gpu_sync_allowed():
+                counts = [] if logits is None else _count_nans_per_row(logits).tolist()
+            num_nans_in_logits = nans_to_dict(counts, self.input_batch.req_id_to_index)
+            if envs.VLLM_RAISE_ON_LOGIT_NANS:
+                raise_if_nan_logits(num_nans_in_logits)
+            return num_nans_in_logits
+        except IndexError:
+            return {}
+
     # TODO: remove this func after eagle_proposer is refactored and
     #  _bookkeeping_sync is moved after propose_draft_token_ids
     def _bookkeeping_sync(
@@ -2804,6 +2831,8 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
+        dict[str, int],
+        torch.Tensor | None,
         LogprobsLists | None,
         list[list[int]],
         dict[str, LogprobsTensors | None],
@@ -2811,6 +2840,16 @@ class NPUModelRunner(GPUModelRunner):
         dict[str, int],
         list[int],
     ]:
+        num_nans: torch.Tensor | None = None
+        num_nans_in_logits: dict[str, int] = {}
+        if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
+            if self.use_async_scheduling:
+                # Keep the counts on device; they ride the async output copy
+                # stream rather than blocking here.
+                num_nans = None if logits is None else _count_nans_per_row(logits)
+            else:
+                num_nans_in_logits = self._get_nans_in_logits(logits)
+
         # TODO: implement PR 28597 from vllm
         discard_sampled_tokens_req_indices = self.discard_request_indices.np[: self.num_discarded_requests]
         for i in discard_sampled_tokens_req_indices:
@@ -2925,6 +2964,8 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         return (
+            num_nans_in_logits,
+            num_nans,
             logprobs_lists,
             valid_sampled_token_ids,
             prompt_logprobs_dict,
