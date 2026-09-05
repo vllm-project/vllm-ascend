@@ -767,3 +767,73 @@ jobs:
 
           echo "=== CI Gate: PASSED ==="
 
+  upload-reports:
+    needs:
+      - select-tests
+      - run-selected-tests
+      - run-selected-tests-a5
+    if: >-
+      ${{
+        !cancelled() &&
+        (
+          needs.run-selected-tests.result != 'skipped' ||
+          needs.run-selected-tests-a5.result != 'skipped'
+        )
+      }}
+    runs-on: linux-amd64-cpu-2-hk
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Download all JUnit artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: all-junit
+          pattern: junit-*
+
+      - name: Merge JUnit XML files
+        run: |
+          pip install junitparser --quiet
+          python .github/workflows/scripts/merge_junit_xml.py \
+            --input-dir all-junit \
+            --output merged_junit.xml
+
+      - name: Prepare metadata directory for selected tests
+        run: |
+          python .github/workflows/scripts/prepare_metadata_dir.py \
+            --test-groups '${{ needs.select-tests.outputs.test_groups }}' \
+            --test-groups '${{ needs.select-tests.outputs.test_groups_a5 }}' \
+            --output-dir selected-tests-metadata
+
+      - name: Collect test case metadata
+        id: collect-metadata
+        uses: lb-actions/openlibing-metadata-collect@v1.0.1
+        with:
+          testcase-path: selected-tests-metadata
+          metadata-output-path: metadata_test.xml
+
+      - name: Upload merged test results artifact
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: merged-test-results
+          path: |
+            merged_junit.xml
+            metadata_test.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # - name: Upload reports
+      #   uses: lb-actions/openlibing-upload-reports@v1.0.0
+      #   with:
+      #     files: >
+      #       ${{ steps.collect-metadata.outputs.metadata-output-path }}
+      #       merged_junit.xml
+      #     openlibing-secret: ${{ secrets.scheduler_secret }}
+      #     github-token: ${{ secrets.mytoken }}
+

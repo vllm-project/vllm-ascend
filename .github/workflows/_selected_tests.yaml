@@ -346,6 +346,16 @@ jobs:
           retention-days: 14
           compression-level: 0
 
+      - name: Upload JUnit test results
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }}card-${{ matrix.group.partition }}
+          path: ${{ runner.temp }}/selected-tests-*/*.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
   upload-coverage-to-obs:
       if: ${{ !cancelled() && inputs.enable-coverage }}
       needs: selected-tests
