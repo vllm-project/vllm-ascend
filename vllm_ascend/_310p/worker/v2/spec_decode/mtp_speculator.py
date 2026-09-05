@@ -19,6 +19,8 @@ from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
@@ -93,6 +95,41 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             yield
         finally:
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
+
+    def capture(self) -> None:
+        """Capture draft-prefill FULL graphs with SpecDecoding (splitfuse).
+
+        Default ``AscendInputBatch.make_dummy`` forces DecodeOnly → paged
+        attention, but MTP draft-prefill uses q_len=1+K (SpecDecoding /
+        splitfuse), matching eager. Capturing PA and replaying SpecDecoding
+        (or replaying with stale seq_lens because 310P has no FIA
+        ``graph_task_update``) dropped draft accept to ~59%.
+        """
+        self.last_token_indices.zero_()
+        orig_make_dummy = AscendInputBatch.make_dummy
+
+        @classmethod
+        def make_dummy_spec_decode(
+            cls,
+            num_reqs: int,
+            num_tokens: int,
+            input_buffers: Any,
+            max_query_len: int | None = None,
+        ) -> AscendInputBatch:
+            kwargs: dict[str, Any] = {}
+            if max_query_len is not None:
+                kwargs["max_query_len"] = max_query_len
+            batch = orig_make_dummy(num_reqs, num_tokens, input_buffers, **kwargs)
+            # MTP draft-prefill: more than one token per request → SpecDecoding.
+            if num_reqs > 0 and (num_tokens // num_reqs) > 1:
+                batch.attn_state = AscendAttentionState.SpecDecoding
+            return batch
+
+        AscendInputBatch.make_dummy = make_dummy_spec_decode  # type: ignore[method-assign]
+        try:
+            AscendAutoRegressiveSpeculator.capture(self)
+        finally:
+            AscendInputBatch.make_dummy = orig_make_dummy  # type: ignore[method-assign]
 
     @torch.inference_mode()
     def _run_model(

@@ -207,12 +207,15 @@ def prepare_prefill_inputs_cpu(
         else:
             next_token = int(next_prefill_cpu[req_state_idx].item())
 
+        # After subtracting rejected tokens, only the kept prefix is valid
+        # (match upstream Triton prepare_prefill_inputs).
+        kept_end = query_start + query_len
         if query_len > 1:
-            draft_input_ids_cpu[query_start : query_end - 1] = target_input_ids[query_start + 1 : query_end]
-        last_token_index = query_start + query_len - 1
+            draft_input_ids_cpu[query_start : kept_end - 1] = target_input_ids[query_start + 1 : kept_end]
+        last_token_index = kept_end - 1
         last_token_indices_cpu[req_idx] = last_token_index
         draft_input_ids_cpu[last_token_index] = next_token
-        draft_positions_cpu[query_start:query_end] = target_positions[query_start:query_end]
+        draft_positions_cpu[query_start:kept_end] = target_positions[query_start:kept_end]
         draft_query_start_loc_cpu[req_idx] = query_start
         draft_seq_lens_cpu[req_idx] = seq_len
 

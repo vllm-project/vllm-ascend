@@ -120,10 +120,8 @@ def npu_recurrent_gated_delta_rule_310(
     total_tokens = v.shape[1]
     flat_state_indices = _flatten_state_indices(ssm_state_indices, cu_seqlens, total_tokens)
     actual_seq_lengths = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32).contiguous()
-    flat_state_indices = torch.clamp_min(
-        flat_state_indices,
-        0,
-    ).contiguous()
+    # Do not clamp PAD_SLOT_ID (-1) to 0 — that would write mamba block 0.
+    # Callers must slice away padded requests before invoking this helper.
     accepted_tokens = None
     if num_accepted_tokens is not None:
         accepted_tokens = _mask_padded_recurrent_accepted_tokens(
@@ -263,15 +261,20 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     spec_valid_tokens,
                     token_dim=0,
                 )
+            # Always slice to real spec rows (GPU GDN pattern). FULL-graph pad
+            # tails must not reach npu_causal_conv1d_310 / recurrent kernels —
+            # even with PAD_SLOT_ID, cu_seqlens / accepted desync under MTP
+            # has been observed to poison hybrid state and emit wrong tokens.
+            num_spec = attn_metadata.num_spec_decodes
             mixed_qkv_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
                 mixed_qkv_spec,
                 conv_weights,
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
-                query_start_loc=spec_query_start_loc_device,
-                cache_indices=spec_causal_conv1d_meta.cache_indices,
+                query_start_loc=spec_query_start_loc_device[: num_spec + 1],
+                cache_indices=spec_causal_conv1d_meta.cache_indices[:num_spec],
                 initial_state_mode=None,
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens[:num_spec],
                 activation_mode=activation_num,
                 pad_slot_id=PAD_SLOT_ID,
                 run_mode=1,
@@ -336,6 +339,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
 
             # 2.1: Process the multi-query part
             if spec_sequence_masks is not None:
+                num_spec = attn_metadata.num_spec_decodes
                 core_attn_out_spec = npu_recurrent_gated_delta_rule_310(
                     q=query_spec,
                     k=key_spec,
@@ -343,9 +347,9 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     g=g_spec,
                     beta=beta_spec,
                     state=ssm_state,
-                    cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
-                    ssm_state_indices=spec_state_indices_tensor[: attn_metadata.num_spec_decodes],
-                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
+                    cu_seqlens=spec_query_start_loc[: num_spec + 1],
+                    ssm_state_indices=spec_state_indices_tensor[:num_spec],
+                    num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens[:num_spec],
                     use_qk_l2norm_in_kernel=True,
                 )
             else:

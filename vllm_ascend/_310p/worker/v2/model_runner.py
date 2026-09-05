@@ -135,11 +135,6 @@ class NPUModelRunner310V2(NPUModelRunner):
     ) -> AscendInputBatch:
         # TODO: Refactor this Triton-free input preparation through Triton
         # Dispatcher after vLLM RFC #45133 lands.
-        # ``super().execute_model`` has already run finish/add/update_requests and
-        # ``apply_staged_writes``; sync GPU counts now so mamba preprocess matches
-        # the CPU/np values used for positions and slot mappings.
-        self._sync_num_computed_tokens_gpu_from_np()
-
         num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
         assert num_tokens > 0
@@ -154,7 +149,15 @@ class NPUModelRunner310V2(NPUModelRunner):
                 scheduler_output.scheduled_spec_decode_tokens,
                 self.decode_query_len,
             )
+        # MTP: prior step async-D2Hs GPU→``num_computed_tokens_cpu``. Refresh np
+        # from that buffer BEFORE mirroring np→GPU, otherwise hybrid GDN
+        # preprocess_state sees stale counts and poisons SpecDecoding state.
+        # Non-MTP: ``_update_seq_lens_cpu`` only copies np→cpu for cached reqs.
         self._update_seq_lens_cpu(scheduler_output, req_ids)
+        # ``super().execute_model`` already ran finish/add/update_requests and
+        # ``apply_staged_writes``; sync GPU counts so mamba preprocess matches
+        # the CPU/np values used for positions and slot mappings.
+        self._sync_num_computed_tokens_gpu_from_np()
 
         num_scheduled_tokens = np.fromiter(
             map(num_tokens_per_req.get, req_ids),
