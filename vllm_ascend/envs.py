@@ -71,6 +71,24 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to dispatch eager GQA attention to the pre-built FIA v2 sink
+    # operators (fia_v2_sink_ops wheel + custom OPP package). Requires
+    # ASCEND_CUSTOM_OPP_PATH to contain both delivered custom OPP entries and
+    # the wheel to be installed; when enabled but not deployed this fails fast
+    # at engine start. Layers with sliding_window or sinks never route here.
+    # 0: disable (official FIA path only), 1: enable. Default 0 (off).
+    # NOT run-verified yet (phase A: code-ready only).
+    "VLLM_ASCEND_ENABLE_FIA_V2_SINK": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FIA_V2_SINK", "0"))),
+    # Whether the FIA v2 sink dispatch may also apply while capturing/replaying
+    # aclgraph. KNOWN RISK (F1): AICPU nodes captured inside a graph are not
+    # re-executed at replay on CANN 9.1/9.2, so the captured split-core
+    # metadata goes stale while shapes change. Keep 0 until
+    # tests/aclgraph_decisive_replay_probe.py passes independently.
+    # 0: disable, 1: enable. Default 0 (off).
+    # UNVERIFIED path — do not enable outside controlled experiments.
+    "VLLM_ASCEND_ENABLE_FIA_V2_SINK_GRAPH": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_FIA_V2_SINK_GRAPH", "0"))
+    ),
 }
 
 # end-env-vars-definition
