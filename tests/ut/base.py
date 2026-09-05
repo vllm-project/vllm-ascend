@@ -17,7 +17,8 @@ import unittest
 
 import pytest
 
-from vllm_ascend.utils import adapt_patch, register_ascend_customop
+from vllm_ascend.ops.registry import register_all_custom_ops
+from vllm_ascend.utils import adapt_patch
 
 
 class TestBase(unittest.TestCase):
@@ -25,7 +26,7 @@ class TestBase(unittest.TestCase):
         # adapt patch by default.
         adapt_patch(True)
         adapt_patch()
-        register_ascend_customop()
+        register_all_custom_ops()
         super().setUp()
         super().__init__(*args, **kwargs)
 
@@ -40,4 +41,4 @@ class PytestBase:
     def setup(self):
         adapt_patch(True)
         adapt_patch()
-        register_ascend_customop()
+        register_all_custom_ops()

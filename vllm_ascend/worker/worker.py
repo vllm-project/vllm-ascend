@@ -80,12 +80,12 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.ops.registry import register_all_custom_ops
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
 from vllm_ascend.utils import (
     check_ascend_device_type,
     enable_sp,
-    register_ascend_customop,
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -140,7 +140,7 @@ class NPUWorker(WorkerBase):
         ops.register_dummy_fusion_op()
         if get_current_hardware_profile().supports(HardwareCapability.ATB_EXTENSIONS):
             _register_atb_extensions()
-        register_ascend_customop(vllm_config)
+        register_all_custom_ops(vllm_config)
         # init ascend config and soc version
         init_ascend_config(vllm_config)
         from vllm_ascend.logger import configure_ascend_file_logging
