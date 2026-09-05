@@ -11,6 +11,7 @@ Random weights cannot validate checkpoint loading, QuaRot or acceptance rates.
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import MethodType
 
 import pytest
 import requests
@@ -314,8 +315,8 @@ def k3_models(tmp_path_factory: pytest.TempPathFactory) -> dict[str, str]:
 
 
 @pytest.fixture(autouse=True)
-def k3_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+def k3_runtime(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", getattr(request, "param", "0"))
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     monkeypatch.setenv("HCCL_OP_EXPANSION_MODE", "AIV")
     monkeypatch.setenv("HCCL_BUFFSIZE", "512")
@@ -404,6 +405,152 @@ def test_k3_mla_block5_tp4(k3_models: dict[str, str]) -> None:
         drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
         assert drafts and all(isinstance(m, Counter) for m in drafts)
         assert sum(m.value for m in drafts) > 0, "Requests bypassed speculative decoding"
+
+
+def _token_ids(outputs) -> tuple[tuple[int, ...], ...]:
+    return tuple(tuple(output.outputs[0].token_ids) for output in outputs)
+
+
+def _install_full_graph_replay_counter(worker) -> bool:
+    manager = worker.model_runner.cudagraph_manager
+    assert manager is not None
+    original_run_fullgraph = manager.run_fullgraph
+    manager._k3_test_replay_count = 0
+
+    def tracked_run_fullgraph(self, desc):
+        self._k3_test_replay_count += 1
+        return original_run_fullgraph(desc)
+
+    manager.run_fullgraph = MethodType(tracked_run_fullgraph, manager)
+    return True
+
+
+def _get_full_graph_replay_count(worker) -> int:
+    manager = worker.model_runner.cudagraph_manager
+    assert manager is not None
+    return manager._k3_test_replay_count
+
+
+def _run_k3_mrv2_mla_dspark_eager(
+    k3_models: dict[str, str],
+    *,
+    variant: str,
+    with_draft: bool,
+) -> dict[str, tuple[tuple[int, ...], ...]]:
+    args = _engine_args(k3_models, variant)
+    args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
+    args["enforce_eager"] = True
+    args["compilation_config"] = {"cudagraph_mode": "NONE"}
+    if not with_draft:
+        del args["speculative_config"]
+
+    with VllmRunner(k3_models["target"], **args) as runner:
+        llm = runner.model
+        boundary = _generate(
+            llm,
+            [_prompt(length, salt=i * 137) for i, length in enumerate((127, 128, 129, 769))],
+        )
+
+        prefix = _prompt(PREFIX_CACHE_TOKENS, salt=421)
+        assert llm.reset_prefix_cache()
+        cold = _generate(llm, [prefix])[0]
+        warm = _generate(llm, [prefix])[0]
+        assert llm.reset_prefix_cache()
+        reset = _generate(llm, [prefix])[0]
+        assert _token_ids([cold, warm, reset]) == (_token_ids([cold])[0],) * 3
+        assert cold.num_cached_tokens == 0
+        assert reset.num_cached_tokens == 0
+        if not with_draft:
+            # Prefix-cache hit/reuse is a target-state Gate 1 requirement. The
+            # vLLM 0.27.1 DSpark path recreates the aligned page instead of
+            # reporting a reusable hit, so Gate 2 validates deterministic
+            # draft execution across the same cold/warm/reset traffic without
+            # claiming support for draft + prefix-cache state reuse.
+            assert warm.num_cached_tokens > 0
+
+        if with_draft:
+            drafts = [m for m in llm.get_metrics() if m.name == "vllm:spec_decode_num_drafts"]
+            assert drafts and sum(m.value for m in drafts) > 0, "Requests bypassed MLA DSpark"
+
+        return {
+            "boundary": _token_ids(boundary),
+            "prefix": _token_ids([cold, warm, reset]),
+        }
+
+
+@pytest.mark.parametrize("k3_runtime", ["1"], indirect=True, ids=["mrv2"])
+@pytest.mark.parametrize("variant", ["mla", "mla_block5"])
+def test_k3_mrv2_mla_dspark_eager(k3_models: dict[str, str], variant: str) -> None:
+    no_spec = _run_k3_mrv2_mla_dspark_eager(k3_models, variant=variant, with_draft=False)
+    mla_dspark = _run_k3_mrv2_mla_dspark_eager(k3_models, variant=variant, with_draft=True)
+
+    assert mla_dspark == no_spec
+
+
+def _run_k3_mrv2_target(k3_models: dict[str, str], *, enforce_eager: bool) -> dict[str, tuple[tuple[int, ...], ...]]:
+    args = _engine_args(k3_models, "mla_block5")
+    del args["speculative_config"]
+    args["max_model_len"] = PREFIX_CACHE_MODEL_LEN
+    args["enforce_eager"] = enforce_eager
+    args["compilation_config"] = {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4]}
+    with VllmRunner(k3_models["target"], **args) as runner:
+        llm = runner.model
+        if not enforce_eager:
+            assert all(llm.collective_rpc(_install_full_graph_replay_counter))
+        boundary = _generate(llm, [_prompt(length, salt=i * 137) for i, length in enumerate((127, 128, 129, 769))])
+        # Cross the aligned 1536-token hybrid-cache page and verify that the
+        # restored recurrent state matches both the cold and reset paths.
+        prefix = _prompt(PREFIX_CACHE_TOKENS, salt=421)
+        assert llm.reset_prefix_cache()
+        cold = _generate(llm, [prefix])[0]
+        warm = _generate(llm, [prefix])[0]
+        assert cold.num_cached_tokens == 0
+        assert warm.num_cached_tokens > 0
+        assert cold.outputs[0].token_ids == warm.outputs[0].token_ids
+        assert llm.reset_prefix_cache()
+        reset = _generate(llm, [prefix])[0]
+        assert reset.num_cached_tokens == 0
+        assert cold.outputs[0].token_ids == reset.outputs[0].token_ids
+
+        # Exercise a partial prefix hit rather than only an identical-request
+        # cache hit. The suffix-B output must match its cold/reset oracle even
+        # after suffix-A populated the shared physical prefix blocks.
+        common_prefix = _prompt(1536, salt=811)["prompt_token_ids"]
+        suffix_a = _prompt(32, salt=1201)["prompt_token_ids"]
+        suffix_b = _prompt(32, salt=1601)["prompt_token_ids"]
+        partial_a = {"prompt_token_ids": [*common_prefix, *suffix_a]}
+        partial_b = {"prompt_token_ids": [*common_prefix, *suffix_b]}
+        assert llm.reset_prefix_cache()
+        partial_cold = _generate(llm, [partial_b])[0]
+        assert partial_cold.num_cached_tokens == 0
+        assert llm.reset_prefix_cache()
+        _generate(llm, [partial_a])
+        partial_warm = _generate(llm, [partial_b])[0]
+        assert partial_warm.num_cached_tokens > 0
+        assert partial_cold.outputs[0].token_ids == partial_warm.outputs[0].token_ids
+        assert llm.reset_prefix_cache()
+        partial_reset = _generate(llm, [partial_b])[0]
+        assert partial_reset.num_cached_tokens == 0
+        assert partial_cold.outputs[0].token_ids == partial_reset.outputs[0].token_ids
+
+        result = {
+            "boundary": _token_ids(boundary),
+            "exact_prefix": _token_ids([cold, warm, reset]),
+            "partial_prefix": _token_ids([partial_cold, partial_warm, partial_reset]),
+        }
+        if not enforce_eager:
+            replay_counts = llm.collective_rpc(_get_full_graph_replay_count)
+            assert replay_counts and all(count > 0 for count in replay_counts)
+        return result
+
+
+@pytest.mark.parametrize("k3_runtime", ["1"], indirect=True, ids=["mrv2"])
+def test_k3_mrv2_without_draft(k3_models: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    eager = _run_k3_mrv2_target(k3_models, enforce_eager=True)
+    aclgraph = _run_k3_mrv2_target(k3_models, enforce_eager=False)
+
+    assert eager == aclgraph
 
 
 def _serve_args(args: dict) -> list[str]:

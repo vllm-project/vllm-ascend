@@ -15,7 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""Unit tests for ``AscendDSparkSpeculator.load_draft_model`` fc rotation."""
+"""Unit tests for Ascend DSpark model loading and target contracts."""
 
 from __future__ import annotations
 
@@ -26,6 +26,10 @@ import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
+from vllm_ascend.models.dspark_aux import (
+    DSparkAuxHiddenContract,
+    DSparkAuxHiddenFormat,
+)
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     AscendDSparkSpeculator,
 )
@@ -41,6 +45,7 @@ def _spec(vllm_config: SimpleNamespace) -> AscendDSparkSpeculator:
     ``self.vllm_config`` and the patched parent call."""
     spec = AscendDSparkSpeculator.__new__(AscendDSparkSpeculator)
     spec.vllm_config = vllm_config
+    spec.aux_hidden_contract = None
     return spec
 
 
@@ -68,7 +73,7 @@ def _no_call(*args, **kwargs):
 
 
 class TestLoadDraftModel:
-    """``load_draft_model`` rotates fc for a QuaRot target and is a no-op otherwise."""
+    """Cover QuaRot post-load handling and Aux Hidden negotiation."""
 
     @pytest.fixture
     def captured(self, monkeypatch):
@@ -98,3 +103,44 @@ class TestLoadDraftModel:
         monkeypatch.setattr(_ROT_MATRIX, _no_call)
         draft = _spec(_bf16_config()).load_draft_model(MagicMock(), set())
         assert torch.equal(draft.model.fc.weight.data, captured["before"])
+
+    def test_negotiates_draft_declared_aux_hidden_contract(self, monkeypatch):
+        contract = DSparkAuxHiddenContract(
+            format=DSparkAuxHiddenFormat.RAW_PREFIX_SUM,
+            layer_ids=(1,),
+            capture_point="post_layer_raw_prefix_sum",
+            target_hidden_size=_HIDDEN,
+            dtype=torch.bfloat16,
+        )
+        draft = _fake_draft()
+        draft.get_required_dspark_aux_hidden_state_contract = lambda: contract
+        monkeypatch.setattr(
+            DSparkSpeculator,
+            "load_draft_model",
+            lambda *_args: draft,
+        )
+        target = MagicMock()
+
+        loaded = _spec(_bf16_config()).load_draft_model(target, set())
+
+        assert loaded is draft
+        target.configure_dspark_aux_hidden_state_contract.assert_called_once_with(contract)
+
+    def test_rejects_target_without_required_aux_capability(self, monkeypatch):
+        contract = DSparkAuxHiddenContract(
+            format=DSparkAuxHiddenFormat.RAW_PREFIX_SUM,
+            layer_ids=(1,),
+            capture_point="post_layer_raw_prefix_sum",
+            target_hidden_size=_HIDDEN,
+            dtype=torch.bfloat16,
+        )
+        draft = _fake_draft()
+        draft.get_required_dspark_aux_hidden_state_contract = lambda: contract
+        monkeypatch.setattr(
+            DSparkSpeculator,
+            "load_draft_model",
+            lambda *_args: draft,
+        )
+
+        with pytest.raises(ValueError, match="does not expose"):
+            _spec(_bf16_config()).load_draft_model(SimpleNamespace(), set())

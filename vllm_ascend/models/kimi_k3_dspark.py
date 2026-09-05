@@ -33,6 +33,10 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
     K3DSparkModel as UpstreamK3DSparkModel,
 )
 
+from vllm_ascend.models.dspark_aux import (
+    DSparkAuxHiddenContract,
+    build_k3_mla_aux_hidden_contract,
+)
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiMLAAttention,
 )
@@ -246,6 +250,10 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         assert self.draft_model_config is not None
         self.config = self.draft_model_config.hf_config
+        self._aux_hidden_contract = build_k3_mla_aux_hidden_contract(
+            self.config,
+            vllm_config.model_config.dtype,
+        )
         target_layer_num = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model = AscendK3DSparkModel(
             vllm_config=vllm_config,
@@ -276,6 +284,11 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
     def get_draft_attn_causal(self) -> list[bool]:
         causal = _uses_causal_draft_attention(self.config)
         return [causal] * len(self.model.layers)
+
+    def get_required_dspark_aux_hidden_state_contract(
+        self,
+    ) -> DSparkAuxHiddenContract:
+        return self._aux_hidden_contract
 
     def load_weights(
         self,
