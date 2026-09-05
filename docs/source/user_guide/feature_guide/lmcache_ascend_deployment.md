@@ -35,7 +35,6 @@ docker run -it \
     -p 8000:8000 \
     -p 8001:8001 \
     --name lmcache-ascend-dev \
-    -e ASCEND_VISIBLE_DEVICES=${DEVICE_LIST} \
     -e ASCEND_RT_VISIBLE_DEVICES=${DEVICE_LIST} \
     -e ASCEND_TOTAL_MEMORY_GB=32 \
     -e VLLM_TARGET_DEVICE=npu \
