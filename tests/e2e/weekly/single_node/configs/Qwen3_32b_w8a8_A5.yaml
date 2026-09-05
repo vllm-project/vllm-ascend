@@ -1,0 +1,134 @@
+
+
+
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  TASK_QUEUE_ENABLE: "1"
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+  VLLM_USE_V1: "1"
+  VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"
+  VLLM_ASCEND_ENABLE_PREFETCH_MLP: "1"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--distributed-executor-backend"
+  - "mp"
+  - "--async-scheduling"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--quantization"
+  - "ascend"
+  - "--trust-remote-code"
+  - "--block-size"
+  - "128"
+
+_benchmarks_acc: &benchmarks_acc
+  acc:
+    case_type: accuracy
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/aime2024
+    request_conf: vllm_api_general_chat
+    dataset_conf: aime/aime2024_gen_0_shot_chat_prompt
+    max_out_len: 38912
+    batch_size: 64
+    baseline: 83.33
+    threshold: 7
+    temperature: 0.6
+    ignore_eos: false
+#_benchmarks_perf1: &benchmarks_per1
+#  per:
+#    case_type: performance
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-32B-w8a8-mxfp8_input_3500_lines_400
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 304
+#    max_out_len: 1500
+#    batch_size: 76
+#    request_rate: 0
+#    baseline: 2068
+#    threshold: 0.95
+#    temperature: 0
+#    ignore_eos: True
+#_benchmarks_perf2: &benchmarks_per2
+#  per:
+#    case_type: performance
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-32B-w8a8-mxfp8_input_8192_lines_96
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 4
+#    max_out_len: 1
+#    batch_size: 1
+#    request_rate: 0
+#    baseline: 12.4 #原基线是看护输入吞吐
+#    threshold: 0.9
+#    temperature: 0
+#    ignore_eos: True
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "vllm_Qwen3_32B__w8a8_performance_A3_Accuracy_aime"
+    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-32B-w8a8-mxfp8"
+    envs:
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--tensor-parallel-size"
+      - "4"
+      - "--max-model-len"
+      - "40960"
+      - "--max-num-batched-tokens"
+      - "40960"
+      - "--reasoning-parser"
+      - "qwen3"
+    benchmarks:
+      <<: *benchmarks_acc
+#  - name: "Qwen_pdmix_performance_001"
+#    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-32B-w8a8-mxfp8"
+#    envs:
+#      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+#      OMP_NUM_THREADS: "1"
+#      <<: *envs
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--tensor-parallel-size"
+#      - "4"
+#      - "--max-num-seqs"
+#      - "40"
+#      - "--max-model-len"
+#      - "5500"
+#      - "--max-num-batched-tokens"
+#      - "40960"
+#      - "--reasoning-parser"
+#      - "qwen3"
+#      - "--compilation-config"
+#      - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes": [1, 5, 8, 72, 76, 80, 100, 120, 140, 144, 160, 192, 216, 240, 252, 288, 320, 336, 360, 384, 400, 408, 416, 420, 432, 480, 540, 576, 600]}'
+#    benchmarks:
+#      <<: *benchmarks_per1
+#  - name: "prefix_cache_performance_qwen3_32b_001"
+#    model: "/root/.cache/modelscope/hub/models/vllm-ascend/Qwen3-32B-w8a8-mxfp8"
+#    envs:
+#      VLLM_ASCEND_ENABLE_FLASHCOMM1: "0"
+#      <<: *envs
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--tensor-parallel-size"
+#      - "4"
+#      - "--max-num-seqs"
+#      - "24"
+#      - "--max-model-len"
+#      - "8400"
+#      - "--max-num-batched-tokens"
+#      - "16384"
+#      - "--no-enable-prefix-caching"
+#      - "--compilation-config"
+#      - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+#      - "--additional-config"
+#      - '{"ascend_compilation_config": {"fuse_qknorm_rope": false}}'
+#    benchmarks:
+#      <<: *benchmarks_per2

@@ -1,0 +1,97 @@
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  TASK_QUEUE_ENABLE: "1"
+  OMP_NUM_THREADS: "1"
+
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--data-parallel-size"
+  - "1"
+  - "--async-scheduling"
+  - "--max-num-seqs"
+  - "128"
+  - "--max-model-len"
+  - "70000"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--kv-cache-memory"
+  - "8758775808"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--trust-remote-code"
+
+_benchmarks_perf1: &benchmarks_perf1
+  perf:
+    case_type: performance
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-27B_input_3500_lines_128
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1500
+    batch_size: 32
+    request_rate: 0
+    baseline: 342
+    threshold: 0.95
+    temperature: 0
+    ignore_eos: True
+#_benchmarks_perf2: &benchmarks_perf2
+#  perf:
+#    case_type: performance
+#    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/Qwen3-27B_input_3500_lines_128
+#    request_conf: vllm_api_stream_chat
+#    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+#    num_prompts: 128
+#    max_out_len: 1500
+#    batch_size: 32
+#    request_rate: 0
+#    baseline: 1757.4204 #原基线是和关闭pcp/dcp启动服务化后启动服务话做对比的
+#    threshold: 0.95
+#    temperature: 0
+#    ignore_eos: True
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen36_27B_Eagle3_A5_Acceptance_Rate_02"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--speculative_config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_npugraph_ex":true,"enable_static_kernel":true}'
+    benchmarks:
+      <<: *benchmarks_perf1
+#  - name: "Dflassh_Acceptance_Rate_Test_05"
+#    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+#    envs:
+#      ASCEND_LAUNCH_BLOCKING: "0"
+#      OMP_NUM_THREADS: "100"
+#      <<: *envs
+#    server_cmd: *server_cmd
+#    server_cmd_extra:
+#      - "--speculative_config"
+#      - '{"method":"dflash","model":"/root/.cache/modelscope/hub/models/z-lab/Qwen3.6-27B-DFlash","enforce_eager":true,"num_speculative_tokens":3}'
+#      - "--additional-config"
+#      - '{"enable_cpu_binding":true}'
+#    benchmarks:
+#      <<: *benchmarks_perf2

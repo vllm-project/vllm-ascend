@@ -1,0 +1,112 @@
+
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--tensor-parallel-size"
+  - "4"
+  - "--data-parallel-size"
+  - "1"
+  - "--async-scheduling"
+  - "--max-num-seqs"
+  - "128"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--quantization"
+  - "ascend"
+  - "--allowed-local-media-path"
+  - "/"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--mm-processor-cache-gb"
+  - "0"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--trust-remote-code"
+  - "--additional-config"
+  - '{"ascend_compilation_config":{"enable_npugraph_ex":false},"enable_cpu_binding":true}'
+
+
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen36_27B_FULL_DECODE_ONLY_A5_Single_Accuracy"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "70000"
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
+  - name: "Eagle3_Base_Step_Function_Test_02"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "70000"
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
+  - name: "Eagle3_Base_Step_Function_Test_03"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "70000"
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
+  - name: "Eagle3_Base_Step_Function_Test_04"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "70000"
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":5}'
+  - name: "Eagle3_Base_Acceptance_Rate_Boundary_Test_02"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "70000"
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'
+  - name: "Qwen36_27B_A5_Single_Maximum_Context_Test_01"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.6-27B-w8a8-mxfp8"
+    envs:
+      <<: *envs
+    server_cmd: *server_cmd
+    server_cmd_extra:
+      - "--max-model-len"
+      - "262144"
+      - "--speculative-config"
+      - '{"method":"eagle3","model":"/root/.cache/modelscope/hub/models/Ex0bit/Qwen3.6-27B-PRISM-EAGLE3/full","enforce_eager":true,"num_speculative_tokens":3}'

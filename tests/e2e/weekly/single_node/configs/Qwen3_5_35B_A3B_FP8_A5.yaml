@@ -1,0 +1,67 @@
+
+
+# ==========================================
+# Shared Configurations
+# ==========================================
+
+_envs: &envs
+  ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_BUFFSIZE: "1024"
+
+_server_cmd: &server_cmd
+  - "--port"
+  - "$SERVER_PORT"
+  - "--tensor-parallel-size"
+  - "2"
+  - "--data-parallel-size"
+  - "1"
+  - "--async-scheduling"
+  - "--max-num-seqs"
+  - "32"
+  - "--max-model-len"
+  - "96000"
+  - "--max-num-batched-tokens"
+  - "16384"
+  - "--language-model-only"
+  - "--reasoning-parser"
+  - "qwen3"
+  - "--gpu-memory-utilization"
+  - "0.9"
+  - "--compilation-config"
+  - '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+  - "--trust-remote-code"
+  - "--additional-config"
+  - '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
+_benchmarks_perf1: &benchmarks_perf1
+  perf:
+    case_type: accuracy
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/gpqa
+    request_conf: vllm_api_general_chat
+    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
+    max_out_len: 24000
+    batch_size: 32
+    baseline: 83.33
+    threshold: 5
+    temperature: 1.0
+    top_p: 0.95
+    top_k: 20
+    min_p: 0.0
+    presence_penalty: 1.5
+    repetition_penalty: 1.0
+    ignore_eos: false
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+
+test_cases:
+  - name: "Qwen35_35B_FP8_A5_acc_1"
+    model: "/root/.cache/modelscope/hub/models/Eco-Tech/Qwen3.5-35B-A3B-FP8-dynamic"
+    envs:
+      HCCL_BUFFSIZE: "1024"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      <<: *envs
+    server_cmd: *server_cmd
+    benchmarks:
+      <<: *benchmarks_perf1
