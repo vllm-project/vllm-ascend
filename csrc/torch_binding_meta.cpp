@@ -349,6 +349,13 @@ at::Tensor npu_msa_index_score_meta(
         output_size, query.options().dtype(at::kFloat).device(c10::kMeta));
 }
 
+at::Tensor npu_vector_paged_attention_meta(
+    const at::Tensor &query, const at::Tensor &, const at::Tensor &,
+    const at::Tensor &, const at::Tensor &, int64_t, double)
+{
+    return at::empty_symint(query.sym_sizes(), query.options().device(c10::kMeta));
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attention_meta(
     const at::Tensor &query,
     const at::Tensor &key,
@@ -1979,6 +1986,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_sparse_attention_score_prefill",
              &vllm_ascend::meta::npu_sparse_attention_score_prefill_meta);
     ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
+    ops.impl("npu_vector_paged_attention",
+             &vllm_ascend::meta::npu_vector_paged_attention_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
     // MoE dispatch-ffn-combine
