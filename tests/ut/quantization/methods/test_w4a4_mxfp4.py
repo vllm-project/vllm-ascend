@@ -8,7 +8,9 @@ from tests.ut.quantization.conftest_quantization import create_mock_ascend_confi
 from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
+    _rename_packed_weight_parameter,
 )
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A4MXFP4LinearMethod(TestBase):
@@ -17,11 +19,28 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         mock_vllm.return_value = create_mock_vllm_config()
         self.scheme = AscendW4A4MXFP4DynamicLinearMethod()
 
-    def test_get_weight_various_input_sizes(self):
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    def test_get_weight_various_input_sizes(self, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
         for input_size in [64, 128, 256, 512]:
             result = self.scheme.get_weight(input_size, 128, torch.bfloat16)
             self.assertEqual(result["weight"].shape, (128, input_size // 2))
             self.assertEqual(result["weight"].dtype, torch.uint8)
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    def test_get_weight_compressed_tensors(self, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
+        mock_vllm.return_value.quant_config.get_name.return_value = COMPRESSED_TENSORS_METHOD
+        result = self.scheme.get_weight(128, 128, torch.bfloat16)
+        self.assertIn("weight_packed", result)
+        self.assertNotIn("weight", result)
+
+    def test_rename_packed_weight_parameter(self):
+        layer = nn.Module()
+        layer.weight_packed = nn.Parameter(torch.empty(2, 2), requires_grad=False)
+        _rename_packed_weight_parameter(layer, "weight")
+        self.assertTrue(hasattr(layer, "weight"))
+        self.assertFalse(hasattr(layer, "weight_packed"))
 
     def test_get_pergroup_param_based_on_group_size(self):
         group_sizes = [16, 32, 64]
@@ -67,7 +86,9 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW4A4MXFP4DynamicFusedMoEMethod()
 
-    def test_get_weight_static_method(self):
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    def test_get_weight_static_method(self, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
         result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
         self.assertEqual(result["w13_weight"].dtype, torch.uint8)
         self.assertEqual(result["w2_weight"].dtype, torch.uint8)
@@ -75,6 +96,16 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             result["w13_weight"].shape, (self.num_experts, 2 * self.intermediate_size, self.hidden_size // 2)
         )
         self.assertEqual(result["w2_weight"].shape, (self.num_experts, self.hidden_size, self.intermediate_size // 2))
+
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    def test_get_weight_compressed_tensors(self, mock_vllm):
+        mock_vllm.return_value = create_mock_vllm_config()
+        mock_vllm.return_value.quant_config.get_name.return_value = COMPRESSED_TENSORS_METHOD
+        result = self.scheme.get_weight(self.num_experts, self.intermediate_size, self.hidden_size, torch.bfloat16)
+        self.assertIn("w13_weight_packed", result)
+        self.assertIn("w2_weight_packed", result)
+        self.assertNotIn("w13_weight", result)
+        self.assertNotIn("w2_weight", result)
 
     def test_get_dynamic_quant_param_based_on_group_size(self):
         group_sizes = [16, 32, 64]

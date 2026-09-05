@@ -38,6 +38,18 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         mock.symmetric = symmetric
         return mock
 
+    def _make_mx_quant(self, num_bits=4, dynamic=False):
+        from compressed_tensors.quantization import QuantizationType
+
+        mock = MagicMock()
+        mock.num_bits = num_bits
+        mock.type = QuantizationType.FLOAT
+        mock.strategy = "group"
+        mock.dynamic = dynamic
+        mock.symmetric = True
+        mock.group_size = 32
+        return mock
+
     def test_detect_w8a8_static(self):
         weight = self._make_weight_quant(num_bits=8, strategy="channel", dynamic=False, symmetric=True)
         input_q = self._make_input_quant(num_bits=8, strategy="tensor", dynamic=False, symmetric=True)
@@ -66,6 +78,34 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         weight.type = QuantizationType.INT
         result = self.config._detect_quant_type(weight, None, None)
         self.assertEqual(result, "W4A16")
+
+    def test_detect_mxfp4_dynamic(self):
+        weight = self._make_mx_quant(num_bits=4, dynamic=False)
+        input_q = self._make_mx_quant(num_bits=4, dynamic=True)
+        result = self.config._detect_quant_type(weight, input_q, "mxfp4-pack-quantized")
+        self.assertEqual(result, "W4A4_MXFP4")
+
+    def test_detect_mxfp8_dynamic(self):
+        weight = self._make_mx_quant(num_bits=8, dynamic=False)
+        input_q = self._make_mx_quant(num_bits=8, dynamic=True)
+        result = self.config._detect_quant_type(weight, input_q, "mxfp8-quantized")
+        self.assertEqual(result, "W8A8_MXFP8")
+
+    def test_mixed_precision_preserves_input_activations(self):
+        from compressed_tensors.quantization.quant_scheme import MXFP4
+
+        config = {
+            "format": "mixed-precision",
+            "config_groups": {
+                "group_0": {
+                    "format": "mxfp4-pack-quantized",
+                    "targets": ["Linear"],
+                    **MXFP4,
+                }
+            },
+        }
+        scheme_map = self.config._quantization_scheme_map_from_config(config)
+        self.assertIsNotNone(scheme_map["Linear"]["input_activations"])
 
     def test_detect_unsupported_raises(self):
         weight = self._make_weight_quant(num_bits=2, strategy="channel", dynamic=False, symmetric=True)
