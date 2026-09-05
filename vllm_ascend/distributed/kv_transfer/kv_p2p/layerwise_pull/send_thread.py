@@ -94,6 +94,8 @@ class ProducerSendState:
     num_blocks: int = 0
     pp_rank: int = 0
     tp_rank: int = 0
+    tp_size: int = 1
+    pp_layers: tuple[tuple[int, ...], ...] = ()
 
 
 class LayerwisePullSendingThread(threading.Thread):
@@ -139,6 +141,7 @@ class LayerwisePullSendingThread(threading.Thread):
         self._scheduler_finished_requests: set[str] = set()
         self._completed_requests: set[str] = set()
         self._completion_requests_by_reader: dict[tuple[int, str], set[str]] = {}
+        self._pending_completion_paths: dict[str, set[str]] = {}
         # Per-layer fresh compute-stream events recorded by the producer in
         # save_kv_layer right after KV scatter.
         self._p_save_events: dict[int, Any] = {}
@@ -149,9 +152,13 @@ class LayerwisePullSendingThread(threading.Thread):
         with suppress(BlockingIOError):
             self._task_writer.send(b"\x00")
 
-    def track_requests(self, request_ids: set[str]) -> None:
+    def track_requests(self, request_ids: set[str], endpoints: set[tuple[str, int]]) -> None:
         with self._request_completion_lock:
             self._pending_completion_requests.update(request_ids)
+            for request_id in request_ids:
+                self._pending_completion_paths[request_id] = {
+                    make_zmq_path("tcp", host, port) for host, port in endpoints
+                }
 
     def get_and_clear_finished_requests(self, scheduler_finished_req_ids: set[str]) -> set[str]:
         with self._request_completion_lock:
@@ -165,7 +172,14 @@ class LayerwisePullSendingThread(threading.Thread):
     def _complete_reader(self, reader: tuple[int, str], error: str | None = None) -> None:
         self._ensure_reuse_tracker().complete(reader, error)
         with self._request_completion_lock:
-            self._completed_requests.update(self._completion_requests_by_reader.pop(reader, ()))
+            for request_id in self._completion_requests_by_reader.pop(reader, ()):
+                remaining = self._pending_completion_paths.get(request_id)
+                if remaining is not None:
+                    remaining.discard(reader[1])
+                    if remaining:
+                        continue
+                    self._pending_completion_paths.pop(request_id)
+                    self._completed_requests.add(request_id)
 
     def _ensure_dealer(self, path: str):
         if path not in self._dealers:
@@ -300,6 +314,7 @@ class LayerwisePullSendingThread(threading.Thread):
             tuple[str, int],
             tuple[list[tuple[str, list[list[int]], list[int]]], list[str], list[str]],
         ] = {}
+        endpoint_contributors: dict[tuple[str, int], tuple[int, int]] = {}
         layer_layouts = self._state.layer_layouts[layer_idx]
         layer_group_indices = {layout.group_index for layout in layer_layouts}
 
@@ -312,13 +327,11 @@ class LayerwisePullSendingThread(threading.Thread):
                 source_blocks[group_idx] = rm.local_block_ids[group_idx]
                 start_blocks[group_idx] = rm.chunk_start_blocks[group_idx]
             ext_id = get_external_request_id(req_id)
-            has_endpoint = bool(rm.remote_host) and bool(rm.remote_port)
-            chunk_done = layer_idx == self.last_layer_idx and rm.chunk_finish and has_endpoint
+            endpoint = rm.layer_endpoints.get(layer_idx)
+            chunk_done = layer_idx in rm.terminal_layers and rm.chunk_finish and endpoint is not None
             has_blocks = any(source_blocks[group_idx] for group_idx in layer_group_indices)
-            if (has_blocks or chunk_done) and has_endpoint:
-                assert rm.remote_host is not None
-                assert rm.remote_port is not None
-                endpoint = (rm.remote_host, rm.remote_port)
+            if (has_blocks or chunk_done) and endpoint is not None:
+                endpoint_contributors[endpoint] = (rm.group_member_idx, rm.tp_ratio)
                 read_reqs, done_ext_ids, done_req_ids = endpoint_payloads.setdefault(endpoint, ([], [], []))
                 if has_blocks:
                     read_reqs.append((ext_id, source_blocks, start_blocks))
@@ -335,15 +348,11 @@ class LayerwisePullSendingThread(threading.Thread):
             )
 
         if endpoint_payloads:
-            # Contributor identity is a P-rank attribute, identical for every
-            # request this rank sends; read it once from any request meta.
-            any_meta = next(iter(send_task.send_request.values()))
-            group_member_idx = any_meta.group_member_idx
-            tp_ratio = any_meta.tp_ratio
             registered_readers: list[tuple[int, str]] = []
             sent_readers: set[tuple[int, str]] = set()
             try:
                 for (remote_host, remote_port), (read_reqs, done_ext_ids, done_req_ids) in endpoint_payloads.items():
+                    group_member_idx, tp_ratio = endpoint_contributors[remote_host, remote_port]
                     path = make_zmq_path("tcp", remote_host, remote_port)
                     layer_slots = self._state.layer_storage_slots.get(layer_idx, ())
                     touched_slots = [
@@ -421,7 +430,19 @@ class LayerwisePullSendingThread(threading.Thread):
             }
             for layer_idx, components in self._state.layer_layouts.items()
         }
-        dealer.send(encoder.encode((LAYOUT_META, self._state.p_session, encoder.encode(layouts))))
+        dealer.send(
+            encoder.encode(
+                (
+                    LAYOUT_META,
+                    self._state.p_session,
+                    encoder.encode(layouts),
+                    self._state.pp_layers,
+                    self._state.tp_size,
+                    self._state.pp_rank,
+                    self._state.tp_rank,
+                )
+            )
+        )
         if dealer.poll(timeout=int(self.timeout * 1000)):
             frames = dealer.recv_multipart()
             payload = [f for f in frames if f != b""]

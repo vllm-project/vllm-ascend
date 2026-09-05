@@ -165,29 +165,94 @@ class LayerwisePullReadThread(threading.Thread):
         self._p_layer_layouts: dict[bytes, dict[int, tuple[ComponentLayout, ...]]] = {}
         self._done_requests: set[str] = set()
         self._failed_requests: set[str] = set()
-        self._done_contributors: dict[str, set[int]] = {}
-        self._expected_ratio: dict[str, int] = {}
+        # Unlike the failure notification queue, these IDs survive request
+        # cleanup: another P stage may still send READ_READY after D retries
+        # locally or reuses the blocks. Retain them for this reader's lifetime;
+        # there is no cross-source cancellation/drain handshake.
+        self._failed_request_ids: set[str] = set()
+        self._done_contributors: dict[str, set[tuple[int, int]]] = {}
+        self._expected_sources: dict[str, frozenset[tuple[int, int]]] = {}
+        self._p_completion_sources: dict[bytes, tuple[tuple[int, int], int, frozenset[tuple[int, int]]]] = {}
+        self._terminal_requests: set[str] = set()
         self._lock = threading.Lock()
         self._host = get_ip()
         self._stop_event = threading.Event()
         self.startup_error: BaseException | None = None
 
-    def _record_chunk_done(self, done_ext_ids: list[str], group_member_idx: int, ratio: int) -> None:
+    def _record_chunk_done(
+        self, done_ext_ids: list[str], contributor: tuple[int, int], expected: frozenset[tuple[int, int]]
+    ) -> None:
         with self._lock:
             for ext_id in done_ext_ids:
-                self._expected_ratio.setdefault(ext_id, ratio)
+                if ext_id in self._terminal_requests or ext_id in self._failed_request_ids:
+                    continue
+                if contributor not in expected or self._expected_sources.setdefault(ext_id, expected) != expected:
+                    raise ValueError("Layerwise pull received inconsistent request completion topology")
                 contributors = self._done_contributors.setdefault(ext_id, set())
-                contributors.add(group_member_idx)
-                if len(contributors) >= self._expected_ratio[ext_id]:
+                contributors.add(contributor)
+                if contributors == expected:
                     self._done_requests.add(ext_id)
+                    self._terminal_requests.add(ext_id)
                     self._done_contributors.pop(ext_id, None)
-                    self._expected_ratio.pop(ext_id, None)
+                    self._expected_sources.pop(ext_id, None)
 
     def discard_requests(self, ext_ids: set[str]) -> None:
         with self._lock:
             for ext_id in ext_ids:
                 self._done_contributors.pop(ext_id, None)
-                self._expected_ratio.pop(ext_id, None)
+                self._expected_sources.pop(ext_id, None)
+                self._terminal_requests.discard(ext_id)
+
+    def _register_remote_layout(self, identity: bytes, msg: tuple) -> None:
+        """Establish all expected PP/TP sources before accepting completion."""
+        _, session, encoded_layers, pp_layers, tp_size, pp_rank, tp_rank = msg
+        if not isinstance(session, str):
+            raise ValueError("LAYOUT_META session must be a string")
+        if tp_size < self._state.tp_size or tp_size % self._state.tp_size:
+            raise ValueError("Layerwise pull requires P TP size divisible by D TP size")
+        if not 0 <= pp_rank < len(pp_layers) or not 0 <= tp_rank < tp_size:
+            raise ValueError("Layerwise pull received an invalid producer rank")
+        ratio = tp_size // self._state.tp_size
+        if tp_rank // ratio != self.tp_rank:
+            raise ValueError("Layerwise pull producer connected to the wrong D TP rank")
+        all_layers = [layer for layers in pp_layers for layer in layers]
+        if len(all_layers) != len(set(all_layers)):
+            raise ValueError("Layerwise pull producer PP stages have overlapping layers")
+        local_layers = set(self._state.layer_layouts)
+        if not local_layers.issubset(all_layers):
+            raise ValueError("Layerwise pull producer topology is missing local destination layers")
+        expected = frozenset(
+            (pp, member)
+            for pp, layers in enumerate(pp_layers)
+            if local_layers.intersection(layers)
+            for member in range(ratio)
+        )
+        contributor = (pp_rank, tp_rank % ratio)
+        if contributor not in expected:
+            raise ValueError("Layerwise pull producer has no layers for this D stage")
+        raw_layers = msgspec.msgpack.decode(encoded_layers)
+        if set(raw_layers) != set(pp_layers[pp_rank]):
+            raise ValueError("Layerwise pull producer layout does not match its advertised PP ownership")
+        layouts = {
+            int(layer_idx): tuple(
+                ComponentLayout(
+                    name=component["name"],
+                    group_index=int(component["group_index"]),
+                    block_size=int(component["block_size"]),
+                    dtypes=tuple(component["dtypes"]),
+                    base_addrs=tuple(component["base_addrs"]),
+                    block_strides=tuple(component["block_strides"]),
+                    block_lengths=tuple(component["block_lengths"]),
+                    block_shapes=tuple(tuple(shape) for shape in component["block_shapes"]),
+                    block_size_scales=tuple(component["block_size_scales"]),
+                )
+                for component in raw_layer["components"]
+            )
+            for layer_idx, raw_layer in raw_layers.items()
+        }
+        self._p_sessions[identity] = session
+        self._p_layer_layouts[identity] = layouts
+        self._p_completion_sources[identity] = (contributor, ratio, expected)
 
     def get_and_clear_done(self) -> set[str]:
         with self._lock:
@@ -237,28 +302,7 @@ class LayerwisePullReadThread(threading.Thread):
                         continue
                     msg = decoder.decode(payload[0])
                     if msg[0] == LAYOUT_META:
-                        session = msg[1]
-                        if not isinstance(session, str):
-                            raise ValueError("LAYOUT_META session must be a string")
-                        raw_layers = msgspec.msgpack.decode(msg[2])
-                        layouts: dict[int, tuple[ComponentLayout, ...]] = {}
-                        for raw_layer_idx, raw_layer in raw_layers.items():
-                            layouts[int(raw_layer_idx)] = tuple(
-                                ComponentLayout(
-                                    name=component["name"],
-                                    group_index=int(component["group_index"]),
-                                    block_size=int(component["block_size"]),
-                                    dtypes=tuple(component["dtypes"]),
-                                    base_addrs=tuple(component["base_addrs"]),
-                                    block_strides=tuple(component["block_strides"]),
-                                    block_lengths=tuple(component["block_lengths"]),
-                                    block_shapes=tuple(tuple(shape) for shape in component["block_shapes"]),
-                                    block_size_scales=tuple(component["block_size_scales"]),
-                                )
-                                for component in raw_layer["components"]
-                            )
-                        self._p_sessions[identity] = session
-                        self._p_layer_layouts[identity] = layouts
+                        self._register_remote_layout(identity, msg)
                         sock.send_multipart((identity, b"", b"ACK"))
                         continue
 
@@ -277,6 +321,9 @@ class LayerwisePullReadThread(threading.Thread):
                         source_layouts = self._p_layer_layouts.get(identity)
                         if session is None or source_layouts is None:
                             raise RuntimeError("LAYOUT_META was not received before READ_READY_BATCH")
+                        contributor, expected_ratio, expected = self._p_completion_sources[identity]
+                        if contributor[1] != group_member_idx or expected_ratio != ratio:
+                            raise ValueError("READ_READY_BATCH TP contributor differs from its layout handshake")
                         if read_reqs:
                             self._do_read_batch(
                                 layer_idx,
@@ -289,21 +336,29 @@ class LayerwisePullReadThread(threading.Thread):
                         reply = (
                             (READ_DONE, layer_idx, transfer_id) if transfer_id is not None else (READ_DONE, layer_idx)
                         )
-                        sock.send_multipart((identity, b"", encoder.encode(reply)))
                         if done_ext_ids:
-                            self._record_chunk_done(done_ext_ids, group_member_idx, ratio)
+                            self._record_chunk_done(done_ext_ids, contributor, expected)
+                        sock.send_multipart((identity, b"", encoder.encode(reply)))
                     except Exception as error:
                         logger.error("Layerwise pull read failed for layer %d: %s", layer_idx, error)
+                        failed = {entry[0] for entry in read_reqs}
+                        failed.update(done_ext_ids)
+                        with self._lock:
+                            # The synchronous read has returned. Block all later
+                            # writes before making failure visible to the worker,
+                            # even if sending the error reply itself fails.
+                            self._failed_requests.update(failed - self._failed_request_ids)
+                            self._failed_request_ids.update(failed)
+                            self._done_requests.difference_update(failed)
+                            for ext_id in failed:
+                                self._done_contributors.pop(ext_id, None)
+                                self._expected_sources.pop(ext_id, None)
                         reply = (
                             (READ_FAILED, layer_idx, str(error), transfer_id)
                             if transfer_id is not None
                             else (READ_FAILED, layer_idx, str(error))
                         )
                         sock.send_multipart((identity, b"", encoder.encode(reply)))
-                        failed = {entry[0] for entry in read_reqs}
-                        failed.update(done_ext_ids)
-                        with self._lock:
-                            self._failed_requests.update(failed)
                 except zmq.Again:  # type: ignore[attr-defined]
                     continue
                 except Exception as error:
@@ -332,6 +387,12 @@ class LayerwisePullReadThread(threading.Thread):
         group_member_idx: int = 0,
         ratio: int = 1,
     ) -> None:
+        if self._failed_request_ids:
+            # READ_DONE for skipped requests only releases the P-side source
+            # buffers. _record_chunk_done must not turn them into D successes.
+            read_reqs = [entry for entry in read_reqs if entry[0] not in self._failed_request_ids]
+            if not read_reqs:
+                return
         source_components = source_layouts.get(layer_idx)
         destination_components = self._state.layer_layouts.get(layer_idx)
         if source_components is None or destination_components is None:

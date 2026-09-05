@@ -422,6 +422,7 @@ class LayerwisePullProducerWorker:
         self.last_layer_idx = -1
         self.kv_send_layer_thread: LayerwisePullSendingThread | None = None
         self._pd_dispatched_layers: set[int] = set()
+        self._routes_by_topology: dict[str, tuple[dict[int, tuple[str, int]], frozenset[int]]] = {}
 
     def get_finished(self, finished_req_ids: set[str] | None = None) -> tuple[set[str], set[str]]:
         if self.kv_send_layer_thread is None:
@@ -435,16 +436,20 @@ class LayerwisePullProducerWorker:
     def start_load_kv(self, metadata: KVConnectorMetadata) -> None:
         self.current_layer = 0
         self._pd_dispatched_layers = set()
+        if not metadata.requests:
+            return
+        if len(metadata.producer_pp_layers) != self.pp_size:
+            raise RuntimeError("Layerwise pull producer PP topology has not been initialized")
+        if tuple(metadata.producer_pp_layers[self.pp_rank]) != self._layer_order:
+            raise RuntimeError("Layerwise pull producer layer ownership differs from startup metadata")
+        assert self.kv_send_layer_thread is not None
+        self.kv_send_layer_thread._state.pp_layers = metadata.producer_pp_layers
+        self.kv_send_layer_thread._state.tp_size = self.tp_size
         for req_id, req_meta in getattr(metadata, "requests", {}).items():
-            if req_meta.remote_port is None:
-                continue
             remote_tp_size = req_meta.remote_tp_size or self.tp_size
-            remote_pp_size = req_meta.remote_pp_size or 1
-            if remote_pp_size != self.pp_size:
-                raise ValueError(
-                    "Layerwise pull requires aligned P/D pipeline parallel sizes; "
-                    f"got P={self.pp_size}, D={remote_pp_size}"
-                )
+            topology_id = req_meta.remote_topology_id
+            if not isinstance(topology_id, str) or not topology_id:
+                raise ValueError("Layerwise pull requires the D startup topology ID")
             remote_tp_rank = self._map_prefill_rank_to_decode_rank(
                 prefill_tp_size=self.tp_size,
                 decode_tp_size=remote_tp_size,
@@ -452,13 +457,40 @@ class LayerwisePullProducerWorker:
             )
             req_meta.tp_ratio = self.tp_size // remote_tp_size
             req_meta.group_member_idx = self.tp_rank % req_meta.tp_ratio
-            req_meta.remote_port += self.pp_rank * remote_tp_size + remote_tp_rank
-            _validate_tcp_port(req_meta.remote_port, description="Layerwise pull remote D-side port")
+            route = self._routes_by_topology.get(topology_id)
+            if route is None:
+                endpoints = req_meta.remote_endpoints
+                if not endpoints or len(endpoints) != req_meta.remote_pp_size:
+                    raise ValueError("Layerwise pull requires the complete D worker endpoint table")
+                if any(len(stage) != remote_tp_size for stage in endpoints):
+                    raise ValueError("Layerwise pull D endpoint table does not match its TP size")
+                destination_by_layer = {}
+                for stage in endpoints:
+                    endpoint = stage[remote_tp_rank]
+                    host, port, layers = endpoint["host"], endpoint["port"], endpoint["layer_ids"]
+                    if not host:
+                        raise ValueError("Layerwise pull D endpoint has no host")
+                    _validate_tcp_port(port, description="Layerwise pull remote D-side port")
+                    for layer in layers:
+                        if layer in destination_by_layer:
+                            raise ValueError(f"Layerwise pull D has duplicate ownership of layer {layer}")
+                        destination_by_layer[layer] = (host, port)
+                missing = set(self._layer_order) - destination_by_layer.keys()
+                if missing:
+                    raise ValueError(f"Layerwise pull D is missing destination layers {sorted(missing)}")
+                layer_endpoints = {layer: destination_by_layer[layer] for layer in self._layer_order}
+                last_by_endpoint = {endpoint: layer for layer, endpoint in layer_endpoints.items()}
+                route = (layer_endpoints, frozenset(last_by_endpoint.values()))
+                self._routes_by_topology[topology_id] = route
+            req_meta.layer_endpoints, req_meta.terminal_layers = route
+            # Register every destination before the first terminal-layer ACK
+            # can arrive. A P stage may feed more than one D stage.
+            if req_meta.chunk_finish:
+                self.kv_send_layer_thread.track_requests({req_id}, set(req_meta.layer_endpoints.values()))
             logger.debug(
-                "Layerwise pull P prepared req %s: endpoint=%s:%s, blocks=%s",
+                "Layerwise pull P prepared req %s: layer_endpoints=%s, blocks=%s",
                 req_id,
-                req_meta.remote_host,
-                req_meta.remote_port,
+                req_meta.layer_endpoints,
                 req_meta.local_block_ids,
             )
 
@@ -551,13 +583,13 @@ class LayerwisePullProducerWorker:
     def _has_pull_target(self, metadata: KVConnectorMetadata, layer_idx: int) -> bool:
         group_indices = {component.group_index for component in self.layer_layouts[layer_idx]}
         for req_meta in getattr(metadata, "requests", {}).values():
-            if not req_meta.remote_host or not req_meta.remote_port:
+            if layer_idx not in req_meta.layer_endpoints:
                 continue
             has_blocks = any(
                 group_idx < len(req_meta.local_block_ids) and bool(req_meta.local_block_ids[group_idx])
                 for group_idx in group_indices
             )
-            if has_blocks or (layer_idx == self.last_layer_idx and req_meta.chunk_finish):
+            if has_blocks or (layer_idx in req_meta.terminal_layers and req_meta.chunk_finish):
                 return True
         return False
 
@@ -636,7 +668,7 @@ class LayerwisePullProducerWorker:
                 group_idx < len(req_meta.local_block_ids) and bool(req_meta.local_block_ids[group_idx])
                 for group_idx in group_indices
             )
-            if has_ready_group or (layer_idx == self.last_layer_idx and req_meta.chunk_finish):
+            if has_ready_group or (layer_idx in req_meta.terminal_layers and req_meta.chunk_finish):
                 send_requests[req_id] = req_meta
         if send_requests:
             task = SendTask(
@@ -645,14 +677,6 @@ class LayerwisePullProducerWorker:
                 layer_idx=layer_idx,
                 layer_name=layer_name,
             )
-            if layer_idx == self.last_layer_idx:
-                self.kv_send_layer_thread.track_requests(
-                    {
-                        req_id
-                        for req_id, req_meta in task.send_request.items()
-                        if req_meta.chunk_finish and any(req_meta.local_block_ids)
-                    }
-                )
             self.kv_send_layer_thread.enqueue(task)
         else:
             self.kv_send_layer_thread._signal_layer_done(layer_idx)

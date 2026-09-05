@@ -73,6 +73,7 @@ class LayerwisePullProducerScheduler:
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
         self._reqs_need_send_layerwise: dict[str, _SendReqInfo] = {}
         self._reqs_finalized_layerwise: set[str] = set()
+        self.producer_pp_layers: tuple[tuple[int, ...], ...] = ()
 
     @staticmethod
     def _normalize_block_ids(block_ids: Any) -> list[list[int]]:
@@ -119,18 +120,18 @@ class LayerwisePullProducerScheduler:
 
         logger.debug(
             "Layerwise pull P registered req %s: local_block_ids=%s, "
-            "remote_host=%s, remote_port=%s, remote_tp_size=%s, "
+            "remote_endpoints=%s, remote_tp_size=%s, "
             "remote_cached_tokens=%s",
             request.request_id,
             local_block_ids,
-            params.get("remote_host"),
-            params.get("remote_port"),
+            params.get("remote_endpoints"),
             params.get("remote_tp_size"),
             remote_cache_tokens,
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
         meta = LayerwisePullProducerMetadata()
+        meta.producer_pp_layers = self.producer_pp_layers
         if not self._reqs_need_send_layerwise:
             return meta
         cached_reqs = scheduler_output.scheduled_cached_reqs
@@ -202,7 +203,7 @@ class LayerwisePullProducerScheduler:
                 "Layerwise pull P added transfer task req %s: local_block_ids=%s, "
                 "local_transed_tokens=%s, local_computed_tokens=%s, "
                 "remote_cache_tokens=%s, prompt_len=%s, chunk_finish=%s, "
-                "remote_host=%s, remote_port=%s",
+                "remote_endpoints=%s",
                 req_id,
                 send_req_info.local_block_ids,
                 send_req_info.local_transferred_tokens,
@@ -210,8 +211,7 @@ class LayerwisePullProducerScheduler:
                 request.kv_transfer_params.get("remote_cached_tokens"),
                 len(request.all_token_ids),
                 chunk_finish,
-                request.kv_transfer_params.get("remote_host"),
-                request.kv_transfer_params.get("remote_port"),
+                request.kv_transfer_params.get("remote_endpoints"),
             )
             if chunk_finish:
                 self._reqs_finalized_layerwise.add(req_id)
@@ -263,6 +263,8 @@ class LayerwisePullConsumerScheduler:
         self.block_size = [group_spec.kv_cache_spec.block_size for group_spec in kv_cache_config.kv_cache_groups]
 
         self.side_channel_host = get_ip()
+        self.remote_endpoints: list[list[dict[str, Any]]] | None = None
+        self.remote_topology_id: str | None = None
         # Reserve one PP*TP port range per global DP rank. This MUST
         # use the GLOBAL data_parallel_rank (unique across every D engine that
         # may share a host), never data_parallel_rank_local (per-host, SPMD-only):
@@ -333,6 +335,8 @@ class LayerwisePullConsumerScheduler:
         params = request.kv_transfer_params
         if params is None or not params.get("do_remote_prefill"):
             return
+        if self.remote_endpoints is None or self.remote_topology_id is None:
+            raise RuntimeError("Layerwise pull D worker topology has not been initialized")
 
         block_ids_by_group = LayerwisePullProducerScheduler._normalize_block_ids(blocks.get_block_ids())
         expected_groups = len(self.kv_cache_config.kv_cache_groups)
@@ -353,10 +357,10 @@ class LayerwisePullConsumerScheduler:
             request_id=get_external_request_id(request.request_id),
             do_remote_prefill=False,
             do_remote_decode=True,
-            remote_host=self.side_channel_host,
-            remote_port=self.side_channel_port,
             remote_tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
+            remote_endpoints=self.remote_endpoints,
+            remote_topology_id=self.remote_topology_id,
             remote_cached_tokens=self._local_cached_tokens.pop(request.request_id),
         )
         # Allocation is complete once the rendezvous request is submitted.
@@ -374,11 +378,10 @@ class LayerwisePullConsumerScheduler:
                 message=kv_transfer_params,
             )
         logger.debug(
-            "Layerwise pull D advertised req %s: block_ids=%s, remote_host=%s, remote_port=%s, metaserver=%s",
+            "Layerwise pull D advertised req %s: block_ids=%s, remote_endpoints=%s, metaserver=%s",
             request.request_id,
             block_ids_by_group,
-            self.side_channel_host,
-            self.side_channel_port,
+            self.remote_endpoints,
             metaserver,
         )
 

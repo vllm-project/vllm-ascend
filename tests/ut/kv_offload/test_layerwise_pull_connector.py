@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import queue
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
+from dataclasses import asdict, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -25,8 +26,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import (
     LAYOUT_META,
     READ_DONE,
     READ_FAILED,
+    READ_READY_BATCH,
     ComponentLayout,
     LayerwisePullConsumerMetadata,
+    LayerwisePullHandshakeMetadata,
     LayerwisePullProducerMetadata,
     LayerwisePullProducerReqMeta,
     SendTask,
@@ -132,6 +135,8 @@ def consumer_scheduler():
     ):
         scheduler = LayerwisePullConsumerScheduler(config, True, kv_cache_config)
     scheduler._submit_metaserver_request = MagicMock()
+    scheduler.remote_endpoints = [[{"host": "127.0.0.1", "port": 1234, "layer_ids": [0]}]]
+    scheduler.remote_topology_id = "decode-topology"
     try:
         yield scheduler
     finally:
@@ -156,9 +161,11 @@ def test_consumer_cache_hit_excludes_cached_blocks_from_producer_metadata(consum
     message = consumer_scheduler._submit_metaserver_request.call_args.kwargs["message"]
     assert request.num_computed_tokens == 0
     assert message["remote_cached_tokens"] == hit
+    assert message["remote_topology_id"] == consumer_scheduler.remote_topology_id
     assert request.request_id not in consumer_scheduler._local_cached_tokens
 
     producer = LayerwisePullProducerScheduler.__new__(LayerwisePullProducerScheduler)
+    producer.producer_pp_layers = ((0,),)
     producer.block_size = [16]
     producer._reqs_finalized_layerwise = set()
     producer._reqs_need_send_layerwise = {
@@ -178,6 +185,7 @@ def test_consumer_cache_hit_excludes_cached_blocks_from_producer_metadata(consum
     metadata = producer.build_connector_meta(output).requests["prefill"]
     assert metadata.chunk_start_blocks == [hit // 16]
     assert metadata.local_block_ids == [list(range(10 + hit // 16, 16))]
+    assert metadata.remote_topology_id == consumer_scheduler.remote_topology_id
 
 
 def test_consumer_cleans_cached_tokens_when_cancelled_before_allocation(consumer_scheduler):
@@ -211,6 +219,7 @@ def test_read_thread_plans_arbitrary_components_in_one_backend_read():
         )
     }
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.memfabric(engine)
     thread._state = ConsumerReadState(
@@ -254,6 +263,7 @@ def test_read_batch_reuses_numpy_block_ids_across_tensors(contiguous_requests):
     second_blocks = [7, 8] if contiguous_requests else [9, 11]
     destination_blocks = {"first": [[5, 6]], "second": [second_blocks]}
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.memfabric(engine)
     thread._state = ConsumerReadState(
@@ -303,6 +313,7 @@ def test_read_batch_splits_each_request_before_combining_blocks(
     source = _component("layer.0", 0, 1000, 16)
     destination = replace(source, base_addrs=(2000,))
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._failed_request_ids = set()
     thread.tp_rank = tp_rank
     thread.backend = PullBackend.memfabric(engine)
     thread._state = ConsumerReadState(
@@ -342,6 +353,7 @@ def test_read_batch_splits_each_request_before_combining_blocks(
 def test_read_batch_rejects_incomplete_request_before_planning():
     source = _component("layer.0", 0, 1000, 16)
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._failed_request_ids = set()
     thread.backend = MagicMock()
     thread._state = ConsumerReadState(
         tp_size=1,
@@ -463,6 +475,7 @@ def test_read_thread_rejects_component_layout_mismatch_before_transfer(blocks_re
     source = {0: (_component("layer.0.c0", 0, 1000, 16),)}
     destination = {0: (replace(source[0][0], base_addrs=(2000,), block_lengths=(32,)),)}
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.mooncake(engine)
     thread._state = ConsumerReadState(
@@ -496,6 +509,7 @@ def test_read_thread_rejects_same_size_different_dtype():
         block_size_scales=(1,),
     )
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.mooncake(engine)
     thread._state = ConsumerReadState(
@@ -520,6 +534,7 @@ def test_tp_shared_component_is_read_once_and_split_across_decode_tp():
     source = {0: (_component("layer.0.main", 0, 1000, 16),)}
     destination = {0: (_component("layer.0.main", 0, 2000, 16),)}
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._failed_request_ids = set()
     thread.tp_rank = 1
     thread.backend = PullBackend.memfabric(engine)
     thread._state = ConsumerReadState(
@@ -681,11 +696,10 @@ def test_send_task_keeps_all_groups_when_only_one_component_group_is_ready():
     )
     request = LayerwisePullProducerReqMeta(
         local_block_ids=[[1], [], []],
-        remote_host="decode",
-        remote_port=1234,
         remote_tp_size=1,
         local_computed_tokens=16,
         chunk_start_blocks=[0, 0, 0],
+        layer_endpoints={0: ("decode", 1234)},
     )
     thread = LayerwisePullSendingThread.__new__(LayerwisePullSendingThread)
     thread._state = state
@@ -726,6 +740,7 @@ def test_send_task_keeps_all_groups_when_only_one_component_group_is_ready():
 def test_producer_scheduler_precomputes_chunk_block_ranges(prompt_length, expected_block_ids):
     scheduler = LayerwisePullProducerScheduler.__new__(LayerwisePullProducerScheduler)
     scheduler.block_size = [16, 32]
+    scheduler.producer_pp_layers = ((0,),)
     scheduler._reqs_finalized_layerwise = set()
     request = SimpleNamespace(
         kv_transfer_params={
@@ -771,12 +786,12 @@ def test_source_blocks_are_released_after_both_finish_signals(scheduler_finishes
     request_id = "request123456789"
     request = LayerwisePullProducerReqMeta(
         local_block_ids=[[1]],
-        remote_host="decode",
-        remote_port=1234,
         remote_tp_size=1,
         chunk_finish=True,
         local_computed_tokens=16,
         chunk_start_blocks=[0],
+        layer_endpoints={0: ("decode", 1234)},
+        terminal_layers=frozenset({0}),
     )
     thread = LayerwisePullSendingThread.__new__(LayerwisePullSendingThread)
     thread._state = state
@@ -790,6 +805,7 @@ def test_source_blocks_are_released_after_both_finish_signals(scheduler_finishes
     thread._legacy_readers = {}
     thread._request_completion_lock = threading.Lock()
     thread._pending_completion_requests = {request_id}
+    thread._pending_completion_paths = {request_id: {"tcp://decode:1234"}}
     thread._scheduler_finished_requests = set()
     thread._completed_requests = set()
     thread._completion_requests_by_reader = {}
@@ -895,58 +911,79 @@ def test_prefill_rank_maps_to_decode_contributor_group(prefill_rank, expected_de
     )
 
 
-def test_prefill_routes_to_aligned_decode_pp_and_tp_rank():
+@pytest.mark.parametrize(
+    "producer_layers,decode_layers",
+    [
+        (((0, 1), (2, 3)), ((0, 1), (2, 3))),
+        (((0, 1), (2, 3)), ((0, 1, 2, 3),)),
+        (((0, 1, 2, 3),), ((0, 1), (2, 3))),
+        (((0, 1), (2, 3)), ((0,), (1, 2, 3))),
+        (((0, 1, 2), (3, 4, 5)), ((0, 1, 2, 3), (4, 5))),
+    ],
+)
+@pytest.mark.parametrize("decode_tp_size", [1, 2])
+def test_prefill_routes_by_layer_ownership(producer_layers, decode_layers, decode_tp_size):
     worker = LayerwisePullProducerWorker.__new__(LayerwisePullProducerWorker)
     worker.current_layer = 7
     worker._pd_dispatched_layers = {1}
     worker.tp_size = 2
     worker.tp_rank = 1
-    worker.pp_size = 2
-    worker.pp_rank = 1
+    worker.pp_size = len(producer_layers)
+    worker.kv_send_layer_thread = MagicMock()
+    worker._routes_by_topology = {}
     metadata = LayerwisePullProducerMetadata()
+    metadata.producer_pp_layers = producer_layers
+    endpoints = [
+        [
+            {"host": f"decode-{pp}-{tp}", "port": 4000 + pp * decode_tp_size + tp, "layer_ids": list(layers)}
+            for tp in range(decode_tp_size)
+        ]
+        for pp, layers in enumerate(decode_layers)
+    ]
     metadata.add_new_req(
         "request",
         [[1]],
         {
-            "remote_host": "decode",
-            "remote_port": 4000,
-            "remote_tp_size": 2,
-            "remote_pp_size": 2,
+            "remote_tp_size": decode_tp_size,
+            "remote_pp_size": len(decode_layers),
+            "remote_endpoints": endpoints,
+            "remote_topology_id": "decode-topology",
         },
+        chunk_finish=True,
     )
-
-    worker.start_load_kv(metadata)
-
     request = metadata.requests["request"]
-    assert request.remote_port == 4003
-    assert request.tp_ratio == 1
-    assert request.group_member_idx == 0
-    assert worker.current_layer == 0
-    assert worker._pd_dispatched_layers == set()
-
-
-def test_prefill_rejects_unaligned_decode_pp_size():
-    worker = LayerwisePullProducerWorker.__new__(LayerwisePullProducerWorker)
-    worker.current_layer = 0
-    worker._pd_dispatched_layers = set()
-    worker.tp_size = 1
-    worker.tp_rank = 0
-    worker.pp_size = 2
-    worker.pp_rank = 0
-    metadata = LayerwisePullProducerMetadata()
-    metadata.add_new_req(
-        "request",
-        [[1]],
-        {
-            "remote_host": "decode",
-            "remote_port": 4000,
-            "remote_tp_size": 1,
-            "remote_pp_size": 1,
-        },
-    )
-
-    with pytest.raises(ValueError, match="aligned P/D pipeline parallel sizes"):
+    for pp_rank, layers in enumerate(producer_layers):
+        worker.pp_rank = pp_rank
+        worker._layer_order = layers
+        worker._routes_by_topology.clear()
         worker.start_load_kv(metadata)
+        remote_tp = worker.tp_rank // (worker.tp_size // decode_tp_size)
+        expected = {
+            layer: (endpoints[pp][remote_tp]["host"], endpoints[pp][remote_tp]["port"])
+            for pp, owned in enumerate(decode_layers)
+            for layer in layers
+            if layer in owned
+        }
+        assert request.layer_endpoints == expected
+        assert request.terminal_layers == frozenset({endpoint: layer for layer, endpoint in expected.items()}.values())
+        worker.kv_send_layer_thread.track_requests.assert_called_with({"request"}, set(expected.values()))
+        assert request.tp_ratio == worker.tp_size // decode_tp_size
+        assert request.group_member_idx == worker.tp_rank % request.tp_ratio
+        assert worker.current_layer == 0
+        assert worker._pd_dispatched_layers == set()
+        # Warm lookups must not traverse endpoint/layer tables, even for new
+        # requests or later chunks with separately deserialized metadata.
+        previous = request.layer_endpoints
+        for _ in range(2):
+            warm_metadata = LayerwisePullProducerMetadata()
+            warm_metadata.producer_pp_layers = producer_layers
+            warm_metadata.requests = {
+                str(i): replace(request, remote_endpoints=MagicMock(), layer_endpoints={}) for i in range(128)
+            }
+            worker.start_load_kv(warm_metadata)
+            for warm_request in warm_metadata.requests.values():
+                assert warm_request.layer_endpoints is previous
+                assert warm_request.remote_endpoints.mock_calls == []
 
 
 def test_tp_block_range_rotates_owner_between_chunks():
@@ -959,8 +996,363 @@ def test_tp_block_range_rotates_owner_between_chunks():
 def test_request_metadata_remains_backend_agnostic():
     request = LayerwisePullProducerReqMeta(
         local_block_ids=[[1]],
-        remote_host="decode",
-        remote_port=1234,
         remote_tp_size=1,
     )
     assert not hasattr(request, "transfer_backend")
+
+
+def test_startup_handshake_collects_real_worker_endpoints_and_mtp():
+    connector = LayerwisePullConnector.__new__(LayerwisePullConnector)
+    connector.is_producer = False
+    connector.is_consumer = True
+    connector.connector_scheduler = SimpleNamespace(
+        vllm_config=SimpleNamespace(parallel_config=SimpleNamespace(pipeline_parallel_size=2, tensor_parallel_size=1))
+    )
+    handshake = {
+        (0, 0): LayerwisePullHandshakeMetadata((0, 1, 2), "host-a", 4000),
+        (1, 0): LayerwisePullHandshakeMetadata((3, 4, 5, 6), "host-b", 5000),
+    }
+    connector.set_xfer_handshake_metadata_pp_aware(handshake)
+    assert connector.connector_scheduler.remote_endpoints == [
+        [{"host": "host-a", "port": 4000, "layer_ids": [0, 1, 2]}],
+        [{"host": "host-b", "port": 5000, "layer_ids": [3, 4, 5, 6]}],
+    ]
+    topology_id = connector.connector_scheduler.remote_topology_id
+    connector.set_xfer_handshake_metadata_pp_aware(handshake)
+    assert connector.connector_scheduler.remote_topology_id == topology_id
+    for changed in (
+        replace(handshake[1, 0], host="host-c"),
+        replace(handshake[1, 0], port=5001),
+        replace(handshake[1, 0], layer_ids=(3, 4, 5, 6, 7)),
+    ):
+        connector.set_xfer_handshake_metadata_pp_aware({**handshake, (1, 0): changed})
+        assert connector.connector_scheduler.remote_topology_id != topology_id
+    connector.is_producer, connector.is_consumer = True, False
+    connector.set_xfer_handshake_metadata_pp_aware(handshake)
+    assert connector.connector_scheduler.producer_pp_layers == ((0, 1, 2), (3, 4, 5, 6))
+    with pytest.raises(ValueError, match="complete"):
+        connector.set_xfer_handshake_metadata_pp_aware({(0, 0): handshake[0, 0]})
+    with pytest.raises(ValueError, match="disjoint"):
+        connector.set_xfer_handshake_metadata_pp_aware({**handshake, (1, 0): LayerwisePullHandshakeMetadata((2, 3))})
+
+
+def test_consumer_handshake_requires_ready_listener():
+    connector = LayerwisePullConnector.__new__(LayerwisePullConnector)
+    connector.is_producer = False
+    reader = SimpleNamespace(
+        ready_event=threading.Event(),
+        startup_error=None,
+        _host="worker-host",
+        side_channel_port=4000,
+        tp_rank=1,
+    )
+    connector.connector_worker = SimpleNamespace(layer_layouts={5: (), 6: ()}, _read_thread=reader)
+    with pytest.raises(RuntimeError, match="listener must be ready"):
+        connector.get_handshake_metadata()
+    reader.ready_event.set()
+    assert connector.get_handshake_metadata() == LayerwisePullHandshakeMetadata((5, 6), "worker-host", 4001)
+
+
+@pytest.mark.parametrize(
+    "endpoints,error",
+    [
+        (None, "complete D worker endpoint table"),
+        ([[{"host": "decode", "port": 4000, "layer_ids": [4]}]], "missing destination layers"),
+        ([[{"host": "decode", "port": 4000, "layer_ids": [4, 4, 5]}]], "duplicate ownership"),
+        ([[{"host": "decode", "port": 70000, "layer_ids": [4, 5]}]], "must be in"),
+    ],
+)
+def test_prefill_rejects_invalid_destination_topology_before_sending(endpoints, error):
+    worker = LayerwisePullProducerWorker.__new__(LayerwisePullProducerWorker)
+    worker.pp_rank, worker.pp_size = 1, 2
+    worker.tp_rank, worker.tp_size = 0, 1
+    worker._layer_order = (4, 5)
+    worker._routes_by_topology = {}
+    worker.kv_send_layer_thread = MagicMock()
+    metadata = LayerwisePullProducerMetadata()
+    metadata.producer_pp_layers = ((0, 1, 2, 3), (4, 5))
+    metadata.add_new_req(
+        "request",
+        [[0]],
+        {
+            "remote_endpoints": endpoints,
+            "remote_topology_id": "decode-topology",
+            "remote_pp_size": 1,
+            "remote_tp_size": 1,
+        },
+        chunk_finish=True,
+    )
+    with pytest.raises(ValueError, match=error):
+        worker.start_load_kv(metadata)
+    worker.kv_send_layer_thread.track_requests.assert_not_called()
+    worker.kv_send_layer_thread.enqueue.assert_not_called()
+
+
+def test_consumer_cannot_advertise_before_startup_handshake(consumer_scheduler):
+    consumer_scheduler.remote_endpoints = None
+    request = SimpleNamespace(kv_transfer_params={"do_remote_prefill": True})
+    with pytest.raises(RuntimeError, match="topology has not been initialized"):
+        consumer_scheduler.update_state_after_alloc(request, MagicMock(), 16)
+    consumer_scheduler._submit_metaserver_request.assert_not_called()
+
+
+@pytest.mark.parametrize("local_layers,expected_pp", [([0, 1, 2, 3], {0, 1}), ([1, 2], {0, 1}), ([3], {1})])
+def test_layout_handshake_establishes_all_pp_sources_before_first_completion(local_layers, expected_pp):
+    reader = LayerwisePullReadThread(
+        tp_rank=0,
+        side_channel_port=1,
+        backend=MagicMock(),
+        state=ConsumerReadState(tp_size=1, layer_layouts=dict.fromkeys(local_layers, ()), dest_blocks_by_req={}),
+    )
+    sources = frozenset((pp, member) for pp in expected_pp for member in range(2))
+    # P has PP=2/TP=2. Even the first connection describes all required sources.
+    first_pp = min(expected_pp)
+    remote_layers = {layer: {"components": []} for layer in ((0, 1), (2, 3))[first_pp]}
+    message = (LAYOUT_META, "p-session", msgspec.msgpack.encode(remote_layers), ((0, 1), (2, 3)), 2, first_pp, 0)
+    reader._register_remote_layout(b"p", message)
+    contributor, ratio, expected = reader._p_completion_sources[b"p"]
+    assert expected == sources
+    assert ratio == 2
+    reader._record_chunk_done(["request"], contributor, expected)
+    reader._record_chunk_done(["request"], contributor, expected)
+    assert reader.get_and_clear_done() == set()
+    remaining = sorted(sources - {contributor}, reverse=True)
+    for source in remaining[:-1]:
+        reader._record_chunk_done(["request"], source, expected)
+        assert reader.get_and_clear_done() == set()
+    reader._record_chunk_done(["request"], remaining[-1], expected)
+    assert reader.get_and_clear_done() == {"request"}
+    reader._record_chunk_done(["request"], remaining[-1], expected)
+    assert reader.get_and_clear_done() == set()
+    reader.discard_requests({"request"})
+    assert "request" not in reader._terminal_requests
+
+
+@pytest.mark.parametrize("mixed_batch", [False, True])
+def test_failed_pp_read_cannot_write_after_request_cleanup(mixed_batch):
+    # Exercise the actual failure handler, worker completion/cleanup and late
+    # messages from another PP source. Only the payload backend is mocked.
+    backend = MagicMock()
+    backend.read.side_effect = RuntimeError("P0 read failed")
+    state = ConsumerReadState(
+        tp_size=1,
+        layer_layouts={layer: (_component(f"layer.{layer}", 0, 2000 + 100 * layer, 16),) for layer in (0, 1)},
+        dest_blocks_by_req={"request": [[0]], "healthy": [[1]]},
+    )
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.read_thread.get_ip", return_value="127.0.0.1"
+    ):
+        reader = LayerwisePullReadThread(0, port, backend, state)
+    worker = LayerwisePullConsumerWorker.__new__(LayerwisePullConsumerWorker)
+    worker.tp_size = 1
+    worker._read_thread = reader
+    worker._terminal_ext_ids = set()
+    worker._dest_blocks_by_req = state.dest_blocks_by_req
+    worker._invalid_block_ids = set()
+    worker.request_map = {"request": "request123456789", "healthy": "healthy123456789"}
+    ctx = zmq.Context()
+    dealers = []
+    decoder = msgspec.msgpack.Decoder(type=tuple)
+    reader.start()
+    try:
+        assert reader.ready_event.wait(timeout=2)
+        assert reader.startup_error is None
+        for pp in (0, 1):
+            dealer = ctx.socket(zmq.DEALER)
+            dealers.append(dealer)
+            dealer.setsockopt(zmq.RCVTIMEO, 2000)
+            dealer.connect(f"tcp://127.0.0.1:{port}")
+            layout = {pp: {"components": [asdict(_component(f"layer.{pp}", 0, 1000, 16))]}}
+            dealer.send(
+                msgspec.msgpack.encode((LAYOUT_META, f"P{pp}", msgspec.msgpack.encode(layout), ((0,), (1,)), 1, pp, 0))
+            )
+            assert dealer.recv_multipart() == [b"", b"ACK"]
+        dealers[0].send(
+            msgspec.msgpack.encode((READ_READY_BATCH, 0, "", [("request", [[0]], [0])], ["request"], 0, 1, 0))
+        )
+        reply = decoder.decode(dealers[0].recv_multipart()[-1])
+        assert reply == (READ_FAILED, 0, "P0 read failed", 0)
+        assert worker.get_finished() == (set(), {"request123456789"})
+        assert worker.get_block_ids_with_load_errors() == {0}
+        assert worker.get_finished({"request123456789"}) == (set(), set())
+        assert "request" not in state.dest_blocks_by_req
+        # Even if an address mapping is present again, a late source must not
+        # write to it. Cleanup must not remove the failure tombstone.
+        state.dest_blocks_by_req["request"] = [[2]]
+        backend.read.reset_mock(side_effect=True)
+        late_requests = [("request", [[0]], [0])]
+        terminal_ids = ["request"]
+        if mixed_batch:
+            late_requests.append(("healthy", [[1]], [0]))
+            terminal_ids.append("healthy")
+        for pp in (1, 0):
+            dealers[pp].send(msgspec.msgpack.encode((READ_READY_BATCH, pp, "", late_requests, terminal_ids, 0, 1, 1)))
+            # ACK releases P's slot even when every request was cancelled.
+            assert decoder.decode(dealers[pp].recv_multipart()[-1]) == (READ_DONE, pp, 1)
+        if mixed_batch:
+            assert backend.read.call_count == 2
+            for call, pp in zip(backend.read.call_args_list, (1, 0), strict=True):
+                assert call.args == (f"P{pp}", [2000 + 100 * pp + 16], [1016], [16])
+            assert worker.get_finished() == (set(), {"healthy123456789"})
+        else:
+            backend.read.assert_not_called()
+            assert worker.get_finished() == (set(), set())
+        assert reader.get_and_clear_failed() == set()
+        assert "request" not in reader._done_contributors
+        assert "request" not in reader._expected_sources
+    finally:
+        reader.stop(timeout=2)
+        for dealer in dealers:
+            dealer.close(linger=0)
+        ctx.destroy(linger=0)
+        assert not reader.is_alive()
+
+
+@pytest.mark.parametrize("empty_blocks", [False, True])
+def test_split_stage_sends_terminal_markers_and_waits_for_all_destinations(sending_thread, empty_blocks):
+    thread, _ = sending_thread
+    # Exercise the send implementation synchronously while its run loop is idle.
+    thread._state.layer_layouts = {layer: (_component(f"layer.{layer}", 0, 1000, 16),) for layer in (0, 1)}
+    thread._state.block_sizes = (16,)
+    request = LayerwisePullProducerReqMeta(
+        local_block_ids=[[] if empty_blocks else [1]],
+        remote_tp_size=1,
+        chunk_finish=True,
+        chunk_start_blocks=[0],
+        layer_endpoints={0: ("decode-a", 4000), 1: ("decode-b", 5000)},
+        terminal_layers=frozenset({0, 1}),
+    )
+    paths = ["tcp://decode-a:4000", "tcp://decode-b:5000"]
+    dealers = {path: MagicMock() for path in paths}
+    thread._layout_meta_sent_paths = set(paths)
+    with (
+        patch(
+            "vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.send_thread.make_zmq_path",
+            side_effect=lambda protocol, host, port: f"{protocol}://{host}:{port}",
+        ),
+        patch.object(thread, "_ensure_dealer", side_effect=dealers.__getitem__),
+    ):
+        thread.track_requests({"request"}, set(request.layer_endpoints.values()))
+        for layer in (0, 1):
+            thread.mark_layer_pending(layer)
+            thread._process_send_task(SendTask({"request": request}, layer_idx=layer), msgspec.msgpack.Encoder())
+    for path, dealer in dealers.items():
+        message = msgspec.msgpack.decode(dealer.send.call_args.args[0])
+        assert message[4] == ["request"]
+        assert bool(message[3]) is not empty_blocks
+    assert thread.get_and_clear_finished_requests({"request"}) == set()
+    # The later layer's ACK may arrive first; source blocks must stay held.
+    thread._complete_reader((1, paths[1]))
+    assert thread.get_and_clear_finished_requests(set()) == set()
+    thread._complete_reader((0, paths[0]))
+    assert thread.get_and_clear_finished_requests(set()) == {"request"}
+    thread._complete_reader((0, paths[0]))
+    assert thread.get_and_clear_finished_requests(set()) == set()
+
+
+@pytest.mark.parametrize(
+    "producer_layers,decode_layers",
+    [
+        (((0, 1), (2, 3)), ((0, 1, 2, 3),)),
+        (((0, 1, 2, 3),), ((0, 1), (2, 3))),
+        (((0, 1, 2), (3, 4, 5)), ((0, 1, 2, 3), (4, 5))),
+    ],
+)
+def test_pp_pull_over_real_control_sockets_with_chunked_slot_reuse(producer_layers, decode_layers):
+    # Only the data-transfer backend/NPU events are mocked. Both control
+    # threads, their wire messages, and the slot gates are real.
+    readers = []
+    workers = []
+    endpoints = []
+    with (
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.read_thread.get_ip", return_value="127.0.0.1"),
+        patch("vllm.distributed.get_world_group", return_value=SimpleNamespace(local_rank=0)),
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.send_thread.torch"),
+    ):
+        try:
+            for layers in decode_layers:
+                with socket.socket() as reservation:
+                    reservation.bind(("127.0.0.1", 0))
+                    port = reservation.getsockname()[1]
+                reader = LayerwisePullReadThread(
+                    tp_rank=0,
+                    side_channel_port=port,
+                    backend=MagicMock(),
+                    state=ConsumerReadState(
+                        tp_size=1,
+                        layer_layouts={
+                            layer: (_component(f"layer.{layer}", 0, 2000 + 100 * layer, 16),) for layer in layers
+                        },
+                        dest_blocks_by_req={"request": [[0, 1]]},
+                    ),
+                )
+                readers.append(reader)
+                reader.start()
+                assert reader.ready_event.wait(timeout=2)
+                assert reader.startup_error is None
+                endpoints.append([{"host": "127.0.0.1", "port": port, "layer_ids": list(layers)}])
+            for pp, layers in enumerate(producer_layers):
+                worker = LayerwisePullProducerWorker.__new__(LayerwisePullProducerWorker)
+                worker.pp_rank, worker.pp_size = pp, len(producer_layers)
+                worker.tp_rank, worker.tp_size = 0, 1
+                worker._layer_order = layers
+                worker._routes_by_topology = {}
+                worker.layer_storage_slots = dict.fromkeys(layers, (0,))
+                worker.reused_storage_slots = frozenset({0})
+                worker.kv_send_layer_thread = LayerwisePullSendingThread(
+                    ready_event=threading.Event(),
+                    state=ProducerSendState(
+                        last_layer_idx=layers[-1],
+                        layer_layouts={layer: (_component(f"layer.{layer}", 0, 1000, 16),) for layer in layers},
+                        p_session=f"producer-{pp}",
+                        block_sizes=(16,),
+                        layer_storage_slots=worker.layer_storage_slots,
+                        num_blocks=2,
+                        pp_rank=pp,
+                    ),
+                )
+                workers.append(worker)
+                worker.kv_send_layer_thread.start()
+                assert worker.kv_send_layer_thread.ready_event.wait(timeout=2)
+                assert worker.kv_send_layer_thread.startup_error is None
+            for chunk in (0, 1):
+                for worker in workers:
+                    meta = LayerwisePullProducerMetadata()
+                    meta.producer_pp_layers = producer_layers
+                    meta.add_new_req(
+                        "request",
+                        [[chunk]],
+                        {
+                            "remote_endpoints": endpoints,
+                            "remote_topology_id": "decode-topology",
+                            "remote_pp_size": len(decode_layers),
+                            "remote_tp_size": 1,
+                        },
+                        chunk_finish=chunk == 1,
+                        chunk_start_blocks=[chunk],
+                    )
+                    worker.start_load_kv(meta)
+                    sender = worker.kv_send_layer_thread
+                    for layer in worker._layer_order:
+                        sender.mark_layer_pending(layer)
+                        sender.enqueue(SendTask(meta.requests, layer_idx=layer, layer_name=f"layer.{layer}"))
+                        # Never hang the test if routing or a completion marker
+                        # is broken. Check the real gate before entering waiter.
+                        assert sender.get_storage_send_event(0).wait(timeout=3)
+                        worker.wait_for_slot_release(layer)
+                if chunk == 0:
+                    assert all(reader.get_and_clear_done() == set() for reader in readers)
+            for reader, layers in zip(readers, decode_layers, strict=True):
+                assert reader.get_and_clear_done() == {"request"}
+                assert reader.get_and_clear_failed() == set()
+                assert reader.backend.read.call_count == 2 * len(layers)
+        finally:
+            for worker in workers:
+                worker.kv_send_layer_thread.stop(timeout=2)
+                assert not worker.kv_send_layer_thread.is_alive()
+            for reader in readers:
+                reader.stop(timeout=2)
+                assert not reader.is_alive()

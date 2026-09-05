@@ -80,7 +80,7 @@ P 侧只负责：
 
 ## 4. 最小数据模型
 
-第一版只增加一个通用 layout 类型；READ descriptor 继续使用三组地址/长度数组，不新增辅助类型。
+使用通用 layout 类型及一个小型启动握手类型；READ descriptor 继续使用三组地址/长度数组，不新增辅助类型。
 
 ### 4.1 Component layout
 
@@ -174,16 +174,21 @@ worker 负责初始化 engine、注册内存和建立 session；backend adapter 
 
 ### 6.1 PP metadata 和路由
 
-第一版要求 P/D 的 PP size 和 layer partition 对齐。每个 D PP worker 在自己的端口段监听，P 根据
-`(pp_rank, tp_rank)` 选择目标 endpoint：
+支持同机、多机及 P/D 不同的 PP size 和 layer partition，包括 P 开启 PP 而 D 不开启，以及反向组合。
+启动时复用框架握手收集实际 worker 信息：P 上报本 stage 的全局层号，D 上报全局层号及就绪监听地址。
+各 stage 的 TP worker 必须拥有相同的层集合，PP stage 之间不能重复拥有同一层。
 
 ```text
-(pp_rank, tp_rank) -> session、endpoint、owned layer names、component layouts
+D worker: (pp_rank, tp_rank) -> host、port、owned global layer IDs
+P worker: global layer ID -> D endpoint
 ```
 
-端口范围按 `DP × PP × TP` 划分。每个 P PP worker 只发布本 stage 的实际 layer layout；MTP layer
-使用模型总基础层数作为编号偏移，避免在 PP>1 时与普通 layer 编号冲突。不同 P/D PP 切分尚不支持，
-初始化时会明确拒绝 PP size 不一致的配置。
+端口范围仍按 `DP × PP × TP` 划分，但路由使用 D 实际发布的 host/port，不从单个 scheduler IP 推测。
+D 地址表通过现有 metaserver 参数透传；P 根据层归属及原有 TP 映射生成并缓存逐层路由。
+D 在启动握手完成后对完整地址表计算一次 `remote_topology_id`，随请求透传。P 以此标识查询路由，
+仅首次遇到该拓扑时校验和遍历地址表；后续请求/chunk 不重复构造包含所有层号的缓存 key。
+每个 P worker 只发布本 stage 的实际 component layout；MTP 使用模型总基础层数作为编号偏移。
+TP 仍要求 P TP size 大于等于且整除 D TP size，组件布局约束不变；本次不扩展 PCP/DCP 能力。
 
 ### 6.2 消息和单层流程
 
@@ -197,8 +202,14 @@ READ_FAILED       transfer_id、错误信息
 ```
 
 `transfer_id` 是 P worker 进程内单调递增的整数，用于避免上一 step 的迟到回复错误释放当前
-transfer。回复的 endpoint identity 由控制连接提供。最终 request completion ACK 沿用 scheduler
-side channel，不属于上述 layer worker 协议。第一版不再引入额外 session 状态机。
+transfer。回复的 endpoint identity 由控制连接提供，不增加额外 session 状态机。
+`LAYOUT_META` 同时携带完整 P PP 层归属及 P TP size，使 D 在收到第一个完成标记前就能确定全部
+预期 `(P PP rank, TP contributor)` 来源。P/D 必须使用相同版本的新握手协议，不回退到单 IP 路由。
+
+每个 P stage 向某个 D stage 发送双方重叠的最后一层时，在最终 chunk 的 `READ_READY_BATCH` 中携带
+该来源的请求完成标记。即使本层无需读取 block，也必须保留完成标记。D 等齐全部预期来源后才向框架
+上报完成；P 在模型计算开始前登记全部目标 endpoint，等齐各目标的最终 ACK 及 scheduler finished
+信号后才上报源 block 可释放。逐层 `READ_DONE` 仍及时释放实际读取占用的 slot，不等待其他 PP stage。
 
 单层执行流程如下：
 
@@ -209,7 +220,13 @@ side channel，不属于上述 layer worker 协议。第一版不再引入额外
 5. D 合并同一 layer、同一 remote session 下所有 request/component 的 descriptors，调用一次
    `backend.read()`。
 6. D 读取成功后发送 `READ_DONE`；失败则发送 `READ_FAILED`。
-7. P 更新 source slot 的完成状态；request block 由最终 request completion ACK 释放。
+7. P 更新 source slot 的完成状态；request block 在全部目标的最终读取 ACK 到齐后释放。
+
+D 同步 READ 失败后，先保留失败请求 ID，再向框架上报失败。后续 batch 跳过这些请求的读取及成功
+完成统计，其他请求仍正常批量读取；跳过读取后的 `READ_DONE` 仅表示 P 可以释放本次源 slot。
+失败 ID 不随请求清理或失败通知取走而删除，而是保留到 reader 退出，防止其他 PP 来源的迟到通知
+写入已复用的目标 block。该方案依赖同步 backend 在返回（包括错误返回）后不再写入目标内存；不增加
+跨来源取消协议，也不支持以同一请求 ID 重新发起远端传输，失败后的本地重算不受影响。
 
 D 端只有在请求要求的所有 layer、component 和 contributor 都完成后，才将请求标记为接收完成。
 不同 remote session 或不同 layer 的 descriptor 不做跨边界合并，以保持错误归属和物理 slot 完成
@@ -318,7 +335,10 @@ reader 集合为空时设置完成 event。
 - P/D group 顺序不同时，各自使用本地 `group_index`；
 - equal/unequal TP、SFA indexer scale 和不同 block-size scale 地址映射；
 - 不同 DP rank 的 PP/TP worker metadata 不会发生 key 冲突；
-- P/D 使用相同 PP partition 时，各 stage 都能按 layer name 找到正确 producer；
+- P/D 使用相同或不同 PP partition 时，各层都能找到正确目标 worker；
+- P2→D1、P1→D2、多机地址和非均匀切分能正确路由；
+- PP/TP 完成标记乱序、重复或 block 切片为空时，不提前完成或遗漏完成；
+- 一个 P stage 向多个 D stage 传输时，源 block 等齐全部最终 ACK 才释放；
 - 不同 P PP worker 的 descriptor 不会进入同一个 batch；
 - 单个 P worker 的 slot 完成不依赖无关 PP stage 的全局 barrier；
 - 连续 descriptor 被正确合并，任一端不连续时不合并；

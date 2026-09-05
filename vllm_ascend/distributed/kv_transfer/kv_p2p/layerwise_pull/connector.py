@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Backend-independent layerwise pull KV-transfer connector."""
 
+import hashlib
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
     SupportsHMA,
@@ -16,6 +20,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.protocol import LayerwisePullHandshakeMetadata
 from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.scheduler import (
     LayerwisePullConsumerScheduler,
     LayerwisePullProducerScheduler,
@@ -23,6 +28,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.scheduler import 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker import (
     LayerwisePullConsumerWorker,
     LayerwisePullProducerWorker,
+    _validate_tcp_port,
 )
 
 if TYPE_CHECKING:
@@ -87,6 +93,62 @@ class LayerwisePullConnector(KVConnectorBase_V1, SupportsHMA):
     # ------------------------------------------------------------------
     # Scheduler side
     # ------------------------------------------------------------------
+    def get_handshake_metadata(self) -> LayerwisePullHandshakeMetadata:
+        worker = self.connector_worker
+        assert worker is not None
+        if self.is_producer:
+            return LayerwisePullHandshakeMetadata(tuple(sorted(worker.layer_layouts)))
+        reader = worker._read_thread
+        if reader is None or not reader.ready_event.is_set() or reader.startup_error is not None:
+            raise RuntimeError("Layerwise pull D listener must be ready before publishing its endpoint")
+        return LayerwisePullHandshakeMetadata(
+            tuple(sorted(worker.layer_layouts)), reader._host, reader.side_channel_port + reader.tp_rank
+        )
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: Mapping[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        scheduler = self.connector_scheduler
+        assert scheduler is not None
+        pc = scheduler.vllm_config.parallel_config
+        expected = {(pp, tp) for pp in range(pc.pipeline_parallel_size) for tp in range(pc.tensor_parallel_size)}
+        if set(metadata) != expected:
+            raise ValueError(
+                "Layerwise pull requires complete (PP, TP) worker handshake metadata; PCP is not supported"
+            )
+        endpoints = []
+        pp_layers = []
+        owned_layers: set[int] = set()
+        for pp in range(pc.pipeline_parallel_size):
+            stage = []
+            layers = None
+            for tp in range(pc.tensor_parallel_size):
+                info = metadata[pp, tp]
+                if not isinstance(info, LayerwisePullHandshakeMetadata):
+                    raise TypeError("Unexpected layerwise pull worker handshake metadata")
+                if not info.layer_ids or len(set(info.layer_ids)) != len(info.layer_ids):
+                    raise ValueError("Layerwise pull workers must publish nonempty, unique layer IDs")
+                if layers is None:
+                    layers = tuple(sorted(info.layer_ids))
+                elif tuple(sorted(info.layer_ids)) != layers:
+                    raise ValueError("Layerwise pull requires identical layer ownership within each TP group")
+                if self.is_consumer:
+                    if not info.host:
+                        raise ValueError("Layerwise pull D worker published an empty host")
+                    _validate_tcp_port(info.port, description="Layerwise pull D worker endpoint")
+                stage.append({"host": info.host, "port": info.port, "layer_ids": list(layers)})
+            if owned_layers.intersection(layers):
+                raise ValueError("Layerwise pull PP stages must own disjoint layers")
+            owned_layers.update(layers)
+            pp_layers.append(layers)
+            endpoints.append(stage)
+        if self.is_producer:
+            scheduler.producer_pp_layers = tuple(pp_layers)
+        else:
+            scheduler.remote_endpoints = endpoints
+            # Hash once at startup, not once per request/chunk on every P worker.
+            scheduler.remote_topology_id = hashlib.sha256(msgspec.msgpack.encode(endpoints)).hexdigest()
+
     def get_num_new_matched_tokens(self, request: "Request", num_computed_tokens: int) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(request, num_computed_tokens)

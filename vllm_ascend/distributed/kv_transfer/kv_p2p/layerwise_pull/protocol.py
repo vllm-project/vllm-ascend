@@ -3,10 +3,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
 
@@ -15,6 +16,14 @@ LAYOUT_META = b"layout_meta"
 READ_READY_BATCH = b"read_ready_batch"
 READ_DONE = b"read_done"
 READ_FAILED = b"read_failed"
+
+
+@dataclass(frozen=True)
+class LayerwisePullHandshakeMetadata(KVConnectorHandshakeMetadata):
+    layer_ids: tuple[int, ...]
+    host: str = ""
+    # Only D workers listen for READ_READY; P workers publish layer ownership.
+    port: int = 0
 
 
 @dataclass(frozen=True)
@@ -50,8 +59,6 @@ class ComponentLayout:
 @dataclass
 class LayerwisePullProducerReqMeta:
     local_block_ids: list[list[int]]
-    remote_host: str | None
-    remote_port: int | None
     remote_tp_size: int | None
     remote_pp_size: int | None = None
     chunk_finish: bool = False
@@ -64,11 +71,16 @@ class LayerwisePullProducerReqMeta:
     # ratio == 1 (equal TP) degenerates to a single contributor.
     tp_ratio: int = 1
     group_member_idx: int = 0
+    remote_endpoints: list[list[dict[str, Any]]] | None = None
+    remote_topology_id: str | None = None
+    layer_endpoints: dict[int, tuple[str, int]] = field(default_factory=dict)
+    terminal_layers: frozenset[int] = frozenset()
 
 
 class LayerwisePullProducerMetadata(KVConnectorMetadata):
     def __init__(self) -> None:
         self.requests: dict[str, LayerwisePullProducerReqMeta] = {}
+        self.producer_pp_layers: tuple[tuple[int, ...], ...] = ()
 
     def add_new_req(
         self,
@@ -83,10 +95,10 @@ class LayerwisePullProducerMetadata(KVConnectorMetadata):
     ) -> None:
         self.requests[request_id] = LayerwisePullProducerReqMeta(
             local_block_ids=local_block_ids,
-            remote_host=kv_transfer_params.get("remote_host"),
-            remote_port=kv_transfer_params.get("remote_port"),
             remote_tp_size=kv_transfer_params.get("remote_tp_size"),
             remote_pp_size=kv_transfer_params.get("remote_pp_size"),
+            remote_endpoints=kv_transfer_params.get("remote_endpoints"),
+            remote_topology_id=kv_transfer_params.get("remote_topology_id"),
             chunk_finish=chunk_finish,
             remote_cache_tokens=remote_cache_tokens,
             local_computed_tokens=local_computed_tokens,
