@@ -3813,6 +3813,7 @@ class NPUModelRunner(GPUModelRunner):
             if debug_dump_path is not None:
                 from vllm.compilation.fx_graph_dump import wrap_backend_with_fx_dump
 
+                logger.info("Using external FX backend for STOCK_TORCH_COMPILE")
                 backend = wrap_backend_with_fx_dump(
                     backend, debug_dump_path / "fx_graphs", "model"
                 )
