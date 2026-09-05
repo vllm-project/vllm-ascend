@@ -1034,7 +1034,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             if q_c is None:
                 raise RuntimeError("npu_mla_prolog_v3 did not return query_norm for SFA indexer.")
             q_c = q_c.view(-1, self.q_lora_rank)
-            if q_c_scale is not None:
+            # The quantized path in indexer_select_post_process reads
+            # wq_b.weight_scale, so gate on wq_b, not on the trunk's q_c_scale.
+            if q_c_scale is not None and getattr(self.wq_b, "weight_scale", None) is not None:
                 if qt is AscendW8A8MXFP8DynamicLinearMethod:
                     q_c_scale = q_c_scale.view(-1, q_c_scale.shape[-1])
                     q_c = (q_c, q_c_scale)
