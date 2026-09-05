@@ -219,7 +219,7 @@ jobs:
 
           pip install --no-cache-dir --no-deps \
             -i https://mirrors.aliyun.com/pypi/simple/ \
-            mooncake-transfer-engine-npu==0.3.11.post1
+            mooncake-transfer-engine-npu==0.3.12.post1
 
           pip show mooncake-transfer-engine-npu || true
 

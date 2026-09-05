@@ -117,6 +117,11 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
             if not self.use_layerwise and vllm_config.parallel_config.rank == 0:
                 self.lookup_server = LookupKeyServer(self.connector_worker, vllm_config)
 
+    def shutdown(self) -> None:
+        worker = getattr(self, "connector_worker", None)
+        if worker is not None:
+            worker.close()
+
     ############################################################
     # Scheduler Side Methods
     ############################################################
