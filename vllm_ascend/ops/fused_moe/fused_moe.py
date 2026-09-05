@@ -138,12 +138,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         layer.w2_weight.data = w2_data
 
-        # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
-        # Therefore, we must cast weights to NZ when fusion is enabled.
-        # Once the underlying dispatch_ffn_combine/mega_moe operator is updated to support
-        # ND format (or other formats), remove this specific 'if' check and the forced
-        # npu_format_cast. At that point, the operator should be able to handle weights
-        # in their native format without explicit casting here.
+        # MegaMoe consumes one ND tensor per BF16 expert, while the legacy
+        # dispatch_ffn_combine path requires a single FRACTAL_NZ tensor.
         enable_fused_mc2 = get_ascend_config().enable_fused_mc2
         if enable_fused_mc2:
             use_megamoe = use_cann_megamoe(get_current_vllm_config())
@@ -243,16 +239,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             activation = "swigluoai_uninterleave"
 
         moe_comm_method = _EXTRA_CTX.moe_comm_method
-        # NOTE: In the MoECommType.FUSED_MC2 branch, we wrap weights (w1, w2) into lists
-        # and provide dummy scales (w1_scale, w2_scale). This is required because:
-        # The underlying Ascend fused operator (e.g., dispatch_ffn_combine/mega_moe) expects
-        # inputs in a list format.
-        # TODO: Passing an empty tensor as scale for float (BF16) cases is semantically
-        # incorrect. The ideal solution is to pass None. However, if the underlying
-        # dispatch_ffn_combine/mega_moe C++ operator does not support None for the scale argument
-        # (due to signature constraints), we are forced to use a placeholder empty tensor.
-        # This TODO tracks the requirement to update the C++ operator to accept Optional[Tensor]
-        # or None for scales in non-quantized scenarios.
+        # Both fused paths consume expert weight lists. MegaMoe accepts None scales for BF16;
+        # only the legacy dispatch_ffn_combine interface needs placeholder scale tensors.
         w13_weight_list = getattr(layer, "w13_weight_list", None)
         w2_weight_list = getattr(layer, "w2_weight_list", None)
         has_split_weight_lists = isinstance(w13_weight_list, list) and isinstance(w2_weight_list, list)
