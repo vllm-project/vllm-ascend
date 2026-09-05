@@ -102,6 +102,15 @@ void batch_matmul_transpose(const at::Tensor &tensor_a, const at::Tensor &tensor
 {
     return;
 }
+
+void gather_pa_kv_cache(const at::Tensor &key_cache, const at::Tensor &value_cache,
+                        const at::Tensor &block_tables, const at::Tensor &seq_lens,
+                        at::Tensor &key, at::Tensor &value,
+                        const c10::optional<at::Tensor> &seq_offset, c10::string_view cache_mode,
+                        bool is_seq_lens_cumsum)
+{
+    return;
+}
 #endif
 
 void device_print_meta(c10::string_view msg)
@@ -1961,6 +1970,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("mla_preprocess", &vllm_ascend::meta::mla_preprocess);
     // batch_matmul_transpose
     ops.impl("batch_matmul_transpose", &vllm_ascend::meta::batch_matmul_transpose);
+    // gather_pa_kv_cache
+    ops.impl("gather_pa_kv_cache", &vllm_ascend::meta::gather_pa_kv_cache);
 #endif
     // grouped_matmul_swiglu_quant_weight_nz meta implementation
     ops.impl("grouped_matmul_swiglu_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_swiglu_quant);

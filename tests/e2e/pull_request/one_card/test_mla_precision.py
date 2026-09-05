@@ -18,6 +18,9 @@ from tests.e2e.pull_request.one_card.attention_utils import (
     create_vllm_config,
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
 
 
 @pytest.fixture(autouse=True)

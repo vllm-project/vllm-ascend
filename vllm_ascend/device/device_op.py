@@ -304,14 +304,14 @@ class BaseDeviceAdaptor:
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
-        torch_npu.npu_gather_pa_kv_cache(
+        torch.ops._C_ascend.gather_pa_kv_cache(
             cache_kv_c,
             cache_k_pe,
             block_table,
             context_seq_len_npu.contiguous(),
+            key,
+            value,
             seq_offset=seq_starts,
-            key=key,
-            value=value,
         )
 
     @staticmethod
@@ -1471,6 +1471,18 @@ class Ascend310PDeviceAdaptor(BaseDeviceAdaptor):
             key_cache=key_cache,
             value_cache=value_cache,
             slot_indices=slot_mapping,
+        )
+
+    @staticmethod
+    def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
+        torch_npu.npu_gather_pa_kv_cache(
+            cache_kv_c,
+            cache_k_pe,
+            block_table,
+            context_seq_len_npu.contiguous(),
+            seq_offset=seq_offset,
+            key=key,
+            value=value,
         )
 
     @staticmethod

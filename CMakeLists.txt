@@ -58,16 +58,19 @@ set(VLLM_ASCEND_CUSTOM_OP
     ${KERNEL_FILES}
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gather_pa_kv_cache/op_kernel/gather_pa_kv_cache_kernel.cpp
 )
 
 set(VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/mla_preprocess/op_kernel/mla_preprocess_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_kernel/batch_matmul_transpose_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gather_pa_kv_cache/op_kernel/gather_pa_kv_cache_kernel.cpp
 )
 
 if(SOC_VERSION MATCHES "ascend950")
     message(STATUS "A5 hardware detected: disabling MLAPO operators")
     message(STATUS "A5 hardware detected: excluding batch_matmul_transpose operators")
+    message(STATUS "A5 hardware detected: excluding gather_pa_kv_cache operators")
     list(REMOVE_ITEM VLLM_ASCEND_CUSTOM_OP ${VLLM_ASCEND_CUSTOM_OP_EXCLUDE_ASCEND950})
 endif()
 
@@ -99,6 +102,7 @@ include_directories(
   ${TORCH_NPU_PATH}/include
   ${ASCEND_HOME_PATH}/include
   ${CMAKE_CURRENT_SOURCE_DIR}/csrc/batch_matmul_transpose/op_host
+  ${CMAKE_CURRENT_SOURCE_DIR}/csrc/gather_pa_kv_cache/op_host
 )
 
 set(
