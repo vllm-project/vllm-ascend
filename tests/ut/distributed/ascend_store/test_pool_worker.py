@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import queue
 import threading
 import unittest
 from types import SimpleNamespace
@@ -727,6 +728,109 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         )
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
+
+    def test_sync_load_failure_records_invalid_blocks_under_lock(self):
+        # The synchronous load path in start_load_kv() updated _invalid_block_ids
+        # without holding _invalid_block_ids_lock, unlike every other mutation site.
+        worker = self._make_worker()
+        worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
+        worker.m_store.get = MagicMock(return_value=[1])
+
+        lock = worker._invalid_block_ids_lock
+        lock_held_on_update: list[bool] = []
+
+        class LockObservingSet(set):
+            def update(self, *args, **kwargs):
+                lock_held_on_update.append(lock.locked())
+                return super().update(*args, **kwargs)
+
+        worker._invalid_block_ids = LockObservingSet()
+
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[3],
+            block_hashes=["h0"],
+            load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+        )
+        meta = AscendConnectorMetadata(set())
+        meta.add_request(req)
+        worker.start_load_kv(meta)
+
+        self.assertTrue(lock_held_on_update, "sync load failure did not record any invalid block")
+        self.assertTrue(all(lock_held_on_update), "invalid blocks were recorded outside the lock")
+        self.assertEqual(worker.get_block_ids_with_load_errors(), {3})
+
+    @patch(
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
+        autospec=True,
+    )
+    def test_concurrent_load_failures_and_queries_stay_consistent(self, start_thread):
+        # Concurrent load failures reported from receiving threads while the main
+        # thread drains, driven through the real start_load_kv() -> queue ->
+        # _handle_request() -> get_block_ids_with_load_errors() path.
+        num_requests = 200
+        worker = self._make_worker(kv_role="kv_consumer", extra_config={"load_async": True})
+        worker.token_database.set_group_buffers({0: [1000]}, {0: [160]})
+        worker.m_store.get = MagicMock(return_value=[1])
+        start_thread.side_effect = lambda thread: thread.ready_event.set()
+        worker._start_kv_transfer_threads()
+        recv_thread = worker.kv_recv_thread
+
+        meta = AscendConnectorMetadata(set())
+        for block_id in range(num_requests):
+            meta.add_request(
+                ReqMeta(
+                    req_id=f"r{block_id}",
+                    token_len_chunk=16,
+                    block_ids=[block_id],
+                    block_hashes=[f"h{block_id}"],
+                    load_spec=LoadSpec(0, 16, can_load=True, token_len=16),
+                )
+            )
+        worker.start_load_kv(meta)
+
+        errors: list[BaseException] = []
+        drained_batches: list[set[int]] = []
+        stop = threading.Event()
+
+        def consume() -> None:
+            # Mirrors KVTransferThread.run(): pull one request, handle it.
+            while True:
+                try:
+                    request = recv_thread.request_queue.get_nowait()
+                except queue.Empty:
+                    return
+                try:
+                    recv_thread._handle_request(request)
+                except BaseException as exc:  # noqa: BLE001 - reported below
+                    errors.append(exc)
+                    return
+
+        def drain() -> None:
+            while not stop.is_set():
+                batch = worker.get_block_ids_with_load_errors()
+                if batch:
+                    drained_batches.append(batch)
+
+        reader = threading.Thread(target=drain)
+        reader.start()
+        consumers = [threading.Thread(target=consume) for _ in range(4)]
+        for consumer in consumers:
+            consumer.start()
+        for consumer in consumers:
+            consumer.join()
+        stop.set()
+        reader.join()
+        tail = worker.get_block_ids_with_load_errors()
+        if tail:
+            drained_batches.append(tail)
+
+        self.assertEqual(errors, [])
+        drained = [block_id for batch in drained_batches for block_id in batch]
+        self.assertEqual(len(drained), len(set(drained)), "a block id was reported more than once")
+        self.assertEqual(set(drained), set(range(num_requests)), "a block id was lost")
+        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
     def test_wait_for_save_waits_for_save(self):
         worker = self._make_worker()
