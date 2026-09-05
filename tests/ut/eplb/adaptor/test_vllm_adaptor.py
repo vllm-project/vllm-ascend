@@ -78,6 +78,30 @@ class TestVllmAdaptor(unittest.TestCase):
 
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_init_w4a8_mxfp(self, mock_get_config, mock_func):
+        self.mock_layer.quant_type = QuantType.W4A8MXFP
+        self.mock_layer.w13_weight_scale = torch.randn(self.mock_layer.local_num_experts, 2, 2)
+        self.mock_layer.w2_weight_scale = torch.randn(self.mock_layer.local_num_experts, 2, 2)
+
+        for enable_fused_mc2 in (0, 1):
+            mock_config = MagicMock()
+            mock_config.enable_fused_mc2 = enable_fused_mc2
+            mock_get_config.return_value = mock_config
+
+            adaptor = VllmEplbAdaptor(self.model)
+
+            expert_weight_key = (QuantType.W4A8MXFP, bool(enable_fused_mc2))
+            self.assertEqual(adaptor.expert_weight_key_per_layer[0], expert_weight_key)
+            expert_params = adaptor.expert_param_per_layer[0][0]
+            self.assertEqual(
+                expert_params[0].untyped_storage().data_ptr(), self.mock_layer.w13_weight.untyped_storage().data_ptr()
+            )
+            self.assertEqual(
+                len(adaptor.buffer_tensor_list[expert_weight_key][0]), len(EPLB_EXPERT_WEIGHT_NAMES[expert_weight_key])
+            )
+
+    @patch("torch.empty_like", return_value=torch.zeros(16, 32))
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_language_model_w8a8(self, mock_get_config, mock_func):
         mock_config = MagicMock()
         mock_config.enable_fused_mc2 = 0
