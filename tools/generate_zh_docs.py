@@ -12,6 +12,15 @@ Usage:
 import sys
 from pathlib import Path
 
+# Running this file directly prepends ``tools/`` to ``sys.path``. That makes
+# Python resolve ``import bisect`` to ``tools/bisect`` instead of the standard
+# library module when one of our dependencies imports ``random``. This script
+# has no local ``tools`` imports, so remove the script directory before loading
+# third-party dependencies.
+TOOLS_DIR = Path(__file__).resolve().parent
+if sys.path and Path(sys.path[0]).resolve() == TOOLS_DIR:
+    sys.path.pop(0)
+
 import regex as re
 
 SOURCE_DIR = Path("docs/source")
