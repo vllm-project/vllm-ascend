@@ -1,0 +1,38 @@
+{
+  "config": {
+    "model": "DeepSeek-V4-Flash-w8a8-mtp",
+    "parallel": "PP=2 x TP=4 (8x Ascend 910B3)",
+    "kv_connector": "AscendStoreConnector",
+    "backend": "memcache (host_shm)",
+    "use_layerwise": true,
+    "layerwise_prefetch_layers": 3,
+    "role": "kv_both single instance",
+    "max_model_len": 4096,
+    "max_num_seqs": 4
+  },
+  "benchmark": {
+    "num_prompts": 50,
+    "concurrency": 16,
+    "input_len": 512,
+    "output_len": 128,
+    "sampling": "greedy"
+  },
+  "results": {
+    "total_time": 420.05,
+    "success": "50/50",
+    "request_throughput": 0.12,
+    "output_token_throughput": 15.24,
+    "latency_avg": 114.0,
+    "latency_p50": 129.6,
+    "latency_p99": 130.62
+  },
+  "evidence": {
+    "pp_structure": ["PP0_TP0-3", "PP1_TP0-3"],
+    "global_layer_addressing": [
+      "stage 0/2 writes global layers [0, 22) (total 43)",
+      "stage 1/2 writes global layers [21, 42) (total 43)"
+    ],
+    "memcache_ranks_joined": 6,
+    "kv_transfer_errors": 0
+  }
+}

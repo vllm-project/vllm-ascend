@@ -124,15 +124,22 @@ class PoolKey:
             f"@{self.chunk_hash}"
         )
 
-    def split_layers(self, num_layers: int) -> list[LayerPoolKey]:
-        """Split the key into multiple keys for each layer"""
+    def split_layers(self, num_layers: int, layer_offset: int = 0) -> list[LayerPoolKey]:
+        """Split the key into multiple keys for each layer.
+
+        ``layer_offset`` shifts the emitted layer ids so that pipeline-parallel
+        stages can address their local layers with global layer ids (e.g. PP
+        stage 1 holding local layers 0..20 emits global ids 22..42 when its
+        offset is 22). With the default offset of 0 the behavior is identical
+        to the previous releases.
+        """
         keys = []
         for layer_id in range(num_layers):
             keys.append(
                 LayerPoolKey(
                     self.key_metadata,
                     self.chunk_hash,
-                    layer_id,
+                    layer_id + layer_offset,
                 )
             )
         return keys
@@ -157,6 +164,14 @@ class LayerPoolKey(PoolKey):
                 self.chunk_hash,
                 self.layer_id,
             )
+        )
+
+    def replace_layer_id(self, layer_id: int) -> "LayerPoolKey":
+        """Return a copy of this key with a different layer id."""
+        return LayerPoolKey(
+            self.key_metadata,
+            self.chunk_hash,
+            layer_id,
         )
 
     def to_string(self):
