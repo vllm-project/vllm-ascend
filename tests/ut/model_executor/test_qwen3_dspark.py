@@ -23,6 +23,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -109,3 +110,29 @@ def test_quarot_loads_missing_target_vocab_shards(tmp_path) -> None:
         torch.testing.assert_close(layer.weight, expected)
     assert model.has_own_embed_tokens
     assert model.has_own_lm_head
+
+
+class TestQwen3DSparkRotationPath:
+    
+    def test_uses_legacy_quarot_path_when_metadata_is_incomplete(self, tmp_path) -> None:
+        """Honor ModelSlim's is_rot_used marker for legacy A5 checkpoints."""
+        target_path = tmp_path / "target"
+        rotation_path = target_path / "optional" / "quarot.safetensors"
+        rotation_path.parent.mkdir(parents=True)
+        rotation_path.touch()
+        vllm_config = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description={"is_rot_used": True, "optional": {}}),
+            model_config=SimpleNamespace(model=str(target_path)),
+        )
+
+        assert qwen3_dspark.get_dspark_rotation_path(vllm_config) == rotation_path
+
+    def test_fails_fast_when_rotated_target_has_no_dspark_matrix(self, tmp_path) -> None:
+        """Do not silently run an unrotated DSpark draft against a rotated target."""
+        vllm_config = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description={"is_rot_used": True, "optional": {}}),
+            model_config=SimpleNamespace(model=str(tmp_path / "target")),
+        )
+
+        with pytest.raises(FileNotFoundError, match="is_rot_used=true"):
+            qwen3_dspark.get_dspark_rotation_path(vllm_config)
