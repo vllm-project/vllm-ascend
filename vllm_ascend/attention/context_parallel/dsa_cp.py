@@ -59,6 +59,34 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
+# AscendC fused op (aclnnDsaLocalMetadata) that replaces build_local_metadata_triton.
+# Lazy resolution: the _C_ascend namespace may not be populated at import time.
+# Note: module-level variables must not carry type annotations (annotations are
+# evaluated eagerly at import time and may raise NameError if typing imports
+# are not guaranteed).
+_dsa_local_metadata_op = None
+_dsa_local_metadata_op_resolved = False
+
+
+def _get_dsa_local_metadata_op():
+    global _dsa_local_metadata_op, _dsa_local_metadata_op_resolved
+    if not _dsa_local_metadata_op_resolved:
+        _dsa_local_metadata_op_resolved = True
+        try:
+            _dsa_local_metadata_op = torch.ops._C_ascend.npu_dsa_local_metadata
+            # The op mutates its output tensors in place; mark it as having
+            # side effects so FX/Inductor does not DCE or reorder it.
+            torch.fx.node.has_side_effect(_dsa_local_metadata_op)
+        except (AttributeError, RuntimeError):
+            _dsa_local_metadata_op = None
+            logger.debug_once(
+                "npu_dsa_local_metadata op is unavailable; "
+                "falling back to triton/torch implementation of "
+                "_build_local_token_metadata."
+            )
+    return _dsa_local_metadata_op
+
+
 # =============================================================================
 # Legacy DSA-CP implementation (TP/SP group)
 # =============================================================================
@@ -1089,7 +1117,27 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             local_query_start_loc.fill_(0)
             local_seq_lens.fill_(0)
 
-        if query_start_loc.device.type != "cpu" and HAS_TRITON:
+        if query_start_loc.device.type != "cpu":
+            dsa_local_metadata_op = _get_dsa_local_metadata_op()
+        else:
+            dsa_local_metadata_op = None
+
+        if dsa_local_metadata_op is not None:
+            assert local_query_start_loc is not None and local_seq_lens is not None
+            # num_reqs is passed as a runtime attribute (not a constexpr shape),
+            # so no re-specialization/recompilation is triggered across steps.
+            dsa_local_metadata_op(
+                query_start_loc,
+                seq_lens,
+                local_query_start_loc,
+                local_seq_lens,
+                start_pos_out if start_pos_out is not None else self._zero_i32,
+                local_start,
+                local_end,
+                num_reqs,
+                start_pos_out is not None,
+            )
+        elif query_start_loc.device.type != "cpu" and HAS_TRITON:
             assert local_query_start_loc is not None and local_seq_lens is not None
             # Use next-power-of-2 block size to avoid wasted compute.
             build_local_metadata_triton[(1,)](
