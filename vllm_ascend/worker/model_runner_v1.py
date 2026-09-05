@@ -231,7 +231,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
-    get_storage_block_size,
 )
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -4863,7 +4862,7 @@ class NPUModelRunner(GPUModelRunner):
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                        num_blocks, get_storage_block_size(current_kv_cache_spec),
+                        num_blocks, current_kv_cache_spec.storage_block_size,
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size)
                     kv_cache_shape_list = [kv_cache_shape]
@@ -4873,13 +4872,13 @@ class NPUModelRunner(GPUModelRunner):
                     if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
                         indexer_k_shape = kv_cache_shape
                         indexer_scale_shape = self.attn_backend.get_kv_cache_shape(
-                                                num_blocks, get_storage_block_size(current_kv_cache_spec),
+                                                num_blocks, current_kv_cache_spec.storage_block_size,
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim
                                                 )
                         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
                             indexer_full_shape = self.attn_backend.get_kv_cache_shape(
-                                num_blocks, get_storage_block_size(current_kv_cache_spec),
+                                num_blocks, current_kv_cache_spec.storage_block_size,
                                 current_kv_cache_spec.num_kv_heads,
                                 current_kv_cache_spec.head_size
                                 + current_kv_cache_spec.scale_dim
@@ -4960,7 +4959,9 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     num_blocks = raw_tensor.numel() // page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    storage_block_size = get_storage_block_size(current_kv_cache_spec)
+                    storage_block_size = getattr(
+                        current_kv_cache_spec, "storage_block_size", current_kv_cache_spec.block_size
+                    )
                     try:
                         kv_cache_shape = attn_backend.get_kv_cache_shape(
                             num_blocks,

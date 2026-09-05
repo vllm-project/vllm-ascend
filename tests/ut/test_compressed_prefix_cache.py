@@ -28,7 +28,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.request import Request
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
@@ -114,7 +114,7 @@ def test_compressed_spec_separates_logical_and_storage_blocks(
     logical_block_size = physical_block_size * compress_ratio
 
     assert spec.block_size == logical_block_size
-    assert get_storage_block_size(spec) == physical_block_size
+    assert spec.storage_block_size == physical_block_size
     assert spec.page_size_bytes == physical_block_size * torch.tensor([], dtype=torch.float32).element_size()
     assert isinstance(manager, FullAttentionManager)
 

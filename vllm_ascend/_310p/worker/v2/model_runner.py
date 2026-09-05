@@ -39,7 +39,6 @@ from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
-from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
@@ -624,7 +623,7 @@ class NPUModelRunner310V2(NPUModelRunner):
                 if isinstance(kv_cache_spec, AttentionSpec):
                     backend = layer_backends[layer_name]
                     group_id = layer_group_ids[layer_name]
-                    storage_block_size = get_storage_block_size(kv_cache_spec)
+                    storage_block_size = getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
                     kernel_block_size = (
                         storage_block_size
                         if storage_block_size != kv_cache_spec.block_size
