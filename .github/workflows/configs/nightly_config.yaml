@@ -36,6 +36,9 @@ a2:
       - name: Qwen3.8-27B-w8a8-A2
         os: linux-aarch64-a2b3-2
         config_file_path: Qwen3.8-27B-w8a8-A2.yaml
+      - name: Qwen3.8-27B-w8a8-A2-accuracy
+        os: linux-aarch64-a2b3-2
+        config_file_path: Qwen3.8-27B-w8a8-A2-accuracy.yaml
       - name: rejection-sample
         os: linux-aarch64-a2b3-1
         tests: tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_rejection_sample.py
