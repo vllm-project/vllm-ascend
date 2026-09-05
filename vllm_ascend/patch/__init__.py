@@ -48,6 +48,65 @@
 #    Future Plan:
 #       Remove this patch when vLLM merge the PR.
 #
+# ** 2. File: platform/patch_deepseek_v4_frontend.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tokenizers.deepseek_v4.get_deepseek_v4_tokenizer`
+#      `vllm.parser.deepseek_v4.DeepSeekV4Parser.__init__` (legacy vLLM only)
+#    Why:
+#       vLLM v0.27.1 inserts request tools before an existing system message,
+#       defaults the parser to content mode, and does not expose the current
+#       reasoning-effort prompt mapping. The pre-0731 checkpoint and post-0731
+#       (dspark_*) checkpoint use different effort mappings.
+#    How:
+#       Bind one wrapper to each returned tokenizer instance, attach tools to a
+#       shallow copy of the first system message (or insert one when absent),
+#       and use inspect-based behavior detection for legacy renderer/parser
+#       compatibility. Checkpoints without dspark_* use the Preview mapping:
+#       default/high have no prefix and max/xhigh use Absolute maximum. The
+#       dspark_* mapping keeps the post-Preview low/high/max behavior.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/issues/51829
+#       https://github.com/vllm-project/vllm/pull/51856
+#       https://github.com/vllm-project/vllm/pull/52255
+#       https://github.com/vllm-project/vllm/pull/51296
+#       https://github.com/vllm-project/vllm-ascend/pull/14952
+#    Future Plan:
+#       Remove this patch once both behaviors are in the supported vLLM.
+#
+# ** 3. File: platform/patch_deepseek_v4_tool_streaming.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.parser.deepseek_v4.DeepSeekV4Parser._compute_arg_delta`
+#    Why:
+#       The supported vLLM skips argument conversion for DeepSeek V4 parameter-body
+#       deltas without `>`. A long string is consequently emitted only when
+#       `</parameter>` arrives instead of streaming incrementally.
+#    How:
+#       After the original converter confirms an in-progress, schema-stable
+#       string parameter, JSON-escape and emit plain body deltas directly.
+#       Structural deltas and final conversion remain on the original path.
+#       Skip installation once upstream removes the structural-character filter.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/52865
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #52865.
+#
+# ** 4. File: platform/patch_deepseek_v4_trailing_system.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.tokenizers.deepseek_v4_encoding.render_message`
+#    Why:
+#       The supported vLLM version does not append the assistant transition
+#       after a trailing DeepSeek V4 system message. Generation then starts at
+#       an invalid prompt boundary and can return empty content or raw tags.
+#    How:
+#       Append the existing assistant/thinking transition after a trailing
+#       system message or before an assistant history turn. A system message
+#       followed by a user or latest-reminder message remains unchanged. The
+#       patch is skipped when a behavior probe detects the upstream fix.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/51262
+#    Future Plan:
+#       Remove this patch once the supported vLLM version contains PR #51262.
+#
 # ** 2. File: platform/patch_deepseek_v4_vision.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.transformers_utils.model_arch_config_convertor.MODEL_ARCH_CONFIG_CONVERTORS`
