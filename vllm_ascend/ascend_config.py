@@ -525,6 +525,28 @@ class FinegrainedTPConfig:
         self.mlp_tensor_parallel_size = finegrained_tp_config.get("mlp_tensor_parallel_size", 0)
         self.olora_tensor_parallel_size = finegrained_tp_config.get("olora_tensor_parallel_size", 0)
 
+        self._validate_sizes()
+        self._validate_preconditions(vllm_config)
+
+    def _validate_sizes(self):
+        size_fields = (
+            "oproj_tensor_parallel_size",
+            "lmhead_tensor_parallel_size",
+            "embedding_tensor_parallel_size",
+            "mlp_tensor_parallel_size",
+            "olora_tensor_parallel_size",
+        )
+        self.max_finegrained_tp_size = 1
+        for field_name in size_fields:
+            value = getattr(self, field_name)
+            if value < 0:
+                raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
+            self.max_finegrained_tp_size = max(self.max_finegrained_tp_size, value)
+
+        return self
+
+    def _validate_preconditions(self, vllm_config: Any):
+        vc = vllm_config
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
             enabled_configs.append(f"oproj_tensor_parallel_size={self.oproj_tensor_parallel_size}")

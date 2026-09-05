@@ -234,6 +234,7 @@ def _w4a8_situ_apply_mlp(
             dst_type=SITU_MX_DST_TYPE_E4M3FN,
         )
     else:
+        #TODO: adapt group_list to skip padding token
         hidden_states, situ_out_scale = torch.ops._C_ascend.dequant_situ_quant(
             x=gate_up_out,
             weight_scale=None,
