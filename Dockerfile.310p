@@ -116,8 +116,6 @@ RUN echo '#!/bin/bash' > /usr/local/bin/entrypoint.sh && \
     echo '    su - HwHiAiUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /lib/ld-linux-aarch64.so.1 /var/slogd -d >/dev/null &"' >> /usr/local/bin/entrypoint.sh && \
     echo '    su - HwDmUser -c "export LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/:/usr/lib64 && /var/dmp_daemon -I -M -U 8087 &"' >> /usr/local/bin/entrypoint.sh && \
     echo '    ' >> /usr/local/bin/entrypoint.sh && \
-    echo '    rm -rf /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
-    echo '    ln -sf /lib/ld-linux-aarch64.so.1 /lib64/ld-linux-aarch64.so.1' >> /usr/local/bin/entrypoint.sh && \
     echo 'fi' >> /usr/local/bin/entrypoint.sh && \
     echo '' >> /usr/local/bin/entrypoint.sh && \
     echo 'exec "$@"' >> /usr/local/bin/entrypoint.sh && \
