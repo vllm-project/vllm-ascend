@@ -18,14 +18,24 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
+)
+
+from vllm_ascend.core.kv_cache_interface import (
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
 )
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
+_orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
+_orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
+_orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 
 
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
@@ -46,6 +56,173 @@ if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_
     UniformTypeKVCacheSpecs.max_num_blocks_per_req = (  # type: ignore[method-assign]
         _uniform_type_max_num_blocks_per_req
     )
+
+
+def _partition_mla_regular_swa_specs(
+    kv_cache_specs: dict[str, KVCacheSpec],
+) -> tuple[dict[str, KVCacheSpec], dict[str, KVCacheSpec]] | None:
+    """Recognize GLM MLA/indexer target caches plus regular DSpark SWA."""
+    target_specs: dict[str, KVCacheSpec] = {}
+    draft_specs: dict[str, KVCacheSpec] = {}
+    has_main_mla = False
+    has_indexer = False
+    for layer_name, spec in kv_cache_specs.items():
+        if isinstance(spec, AscendMLAAttentionSpec):
+            # A compressed target cache needs CompressAttentionManager.  Do
+            # not alter its grouping/representative as part of this narrowly
+            # scoped DSpark SWA fix.
+            if spec.compress_ratio != 1:
+                return None
+            target_specs[layer_name] = spec
+            has_main_mla = True
+        elif isinstance(spec, AscendSFAIndexerCacheSpec):
+            target_specs[layer_name] = spec
+            has_indexer = True
+        elif isinstance(spec, SlidingWindowSpec) and not isinstance(
+            spec, SlidingWindowMLASpec
+        ):
+            draft_specs[layer_name] = spec
+        else:
+            return None
+    if not (has_main_mla and has_indexer and draft_specs):
+        return None
+    # The scheduler uses the first spec in a UniformType group as its manager
+    # representative. Preserve the model's target-spec order so this wrapper
+    # does not change the already validated target-cache manager semantics.
+    return target_specs, draft_specs
+
+
+def _is_mla_regular_swa_groups(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    if len(kv_cache_groups) != 2:
+        return False
+    if not all(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for group in kv_cache_groups
+    ):
+        return False
+    combined_specs: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        if set(group.layer_names) != set(group_spec.kv_cache_specs):
+            return False
+        combined_specs.update(group_spec.kv_cache_specs)
+    return _partition_mla_regular_swa_specs(combined_specs) is not None
+
+
+def _dspark_native_layout_enabled(vllm_config: VllmConfig) -> bool:
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    use_dspark = getattr(speculative_config, "use_dspark", None)
+    return (
+        callable(use_dspark)
+        and use_dspark()
+        and scheduler_config is not None
+        and not scheduler_config.disable_hybrid_kv_cache_manager
+    )
+
+
+def _use_dspark_native_layout(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    return _dspark_native_layout_enabled(vllm_config) and _is_mla_regular_swa_groups(
+        kv_cache_groups
+    )
+
+
+def _native_layout_bytes_per_block(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    total = 0
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        total += sum(
+            group_spec.kv_cache_specs[layer_name].page_size_bytes
+            for layer_name in group.layer_names
+        )
+    assert total > 0
+    return total
+
+
+def _ascend_get_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_specs: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    partition = _partition_mla_regular_swa_specs(kv_cache_specs)
+    if partition is None or not _dspark_native_layout_enabled(vllm_config):
+        return _orig_get_kv_cache_groups(vllm_config, kv_cache_specs)
+
+    target_specs, draft_specs = partition
+    target_uniform = UniformTypeKVCacheSpecs.from_specs(target_specs)
+    draft_uniform = UniformTypeKVCacheSpecs.from_specs(draft_specs)
+    if target_uniform is None or draft_uniform is None:
+        return _orig_get_kv_cache_groups(vllm_config, kv_cache_specs)
+    return [
+        KVCacheGroupSpec(list(target_specs), target_uniform),
+        KVCacheGroupSpec(list(draft_specs), draft_uniform),
+    ]
+
+
+def _ascend_get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    if not _use_dspark_native_layout(vllm_config, kv_cache_groups):
+        return _orig_get_kv_cache_config_from_groups(
+            vllm_config, kv_cache_groups, available_memory
+        )
+
+    bytes_per_block = _native_layout_bytes_per_block(kv_cache_groups)
+    num_blocks = max(available_memory // bytes_per_block, 0)
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+    kv_cache_tensors: list[KVCacheTensor] = []
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        for layer_name in group.layer_names:
+            layer_spec = group_spec.kv_cache_specs[layer_name]
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=layer_spec.page_size_bytes * num_blocks,
+                    shared_by=[layer_name],
+                )
+            )
+    return KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=kv_cache_tensors,
+        kv_cache_groups=kv_cache_groups,
+    )
+
+
+def _ascend_pool_bytes_per_block(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    if _use_dspark_native_layout(vllm_config, kv_cache_groups):
+        return _native_layout_bytes_per_block(kv_cache_groups)
+    return _orig_pool_bytes_per_block(vllm_config, kv_cache_groups)
+
+
+def _ascend_max_memory_usage_bytes_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    if not _use_dspark_native_layout(vllm_config, kv_cache_groups):
+        return _orig_max_memory_usage_bytes_from_groups(
+            vllm_config, kv_cache_groups
+        )
+    bytes_per_block = _native_layout_bytes_per_block(kv_cache_groups)
+    blocks_needed = 0
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        blocks_needed += group_spec.max_memory_usage_pages(vllm_config)
+    return bytes_per_block * blocks_needed
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -375,6 +552,14 @@ def _get_kv_cache_config_deepseek_v4(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _ascend_get_kv_cache_groups
+vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups = (
+    _ascend_get_kv_cache_config_from_groups
+)
+vllm.v1.core.kv_cache_utils._pool_bytes_per_block = _ascend_pool_bytes_per_block
+vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups = (
+    _ascend_max_memory_usage_bytes_from_groups
+)
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
