@@ -35,6 +35,12 @@ def _store_fp8_e4m3(dst_ptr, offsets, vals_fp32, mask, FP8_MAX: tl.constexpr):
     tl.store(dst_ptr + offsets, vals.to(dst_ptr.dtype.element_ty), mask=mask)
 
 
+def _get_block_size_head(n_q_head: int, n_kv_head: int, is_neox_style: bool) -> int:
+    max_block_size = 64 if is_neox_style else 32
+    actual_head_size = triton.next_power_of_2(max(n_q_head, n_kv_head))
+    return min(max_block_size, actual_head_size)
+
+
 @triton.jit
 def _triton_rope(
     q_ptr,
@@ -448,16 +454,7 @@ def rope_forward_triton(
 
     num_tokens, n_q_head, head_dim = q.shape
     n_kv_head = k.shape[1]
-    # TODO: use a more robust method to get BLOCK_SIZE_HEAD
-    if is_neox_style:
-        BLOCK_SIZE_HEAD = 64
-    else:
-        BLOCK_SIZE_HEAD = 32
-    # Large head_dim RoPE can overflow UB with the default tile on A2/A3.
-    # Keep the original tile for common head_dim models.
-    large_head_dim_threshold, large_head_block_size = 256, 16
-    if head_dim >= large_head_dim_threshold:
-        BLOCK_SIZE_HEAD = min(BLOCK_SIZE_HEAD, large_head_block_size)
+    BLOCK_SIZE_HEAD = _get_block_size_head(n_q_head, n_kv_head, is_neox_style)
     num_vectorcore = get_vectorcore_num()
     n_row = min(num_tokens, num_vectorcore)
 

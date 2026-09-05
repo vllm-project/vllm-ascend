@@ -80,6 +80,27 @@ _HIDDEN_STATE_DRAFTER_TYPES = (
 )
 
 
+def build_per_group_layer_attn_metadata(
+    draft_attn_groups,
+    common_attn_metadata: CommonAttentionMetadata,
+    per_group_block_tables: dict[int, torch.Tensor] | None,
+    num_reqs: int,
+    build_attn_metadata: Callable,
+) -> dict[str, Any]:
+    """Build draft metadata with the KV block table owned by each group."""
+    per_layer_attn_metadata: dict[str, Any] = {}
+    for attn_group in draft_attn_groups:
+        group_common_metadata = common_attn_metadata
+        group_id = attn_group.kv_cache_group_id
+        if per_group_block_tables is not None and group_id in per_group_block_tables:
+            group_common_metadata = copy.copy(common_attn_metadata)
+            group_common_metadata.block_table_tensor = per_group_block_tables[group_id][:num_reqs]
+        attn_metadata = build_attn_metadata(group_common_metadata, attn_group)
+        for layer_name in attn_group.layer_names:
+            per_layer_attn_metadata[layer_name] = attn_metadata
+    return per_layer_attn_metadata
+
+
 def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     tp_group = get_tp_group()
     B, V_local = logits.shape
@@ -261,6 +282,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             torch.zeros(slot_mapping_lens, dtype=torch.int32, device=device, pin_memory=self.runner.pin_memory)
             for _ in range(self.num_speculative_tokens)
         ]
+        # ACL graphs must capture the same persistent slot-mapping address
+        # that runtime uses for each speculative step and KV-cache group.
+        # Sharing one buffer lets the final group overwrite earlier groups.
+        self._per_group_slot_mapping_groups: dict[tuple[int, int], torch.Tensor] = {}
 
         # dsv32 needs seq_lens and query_start_loc persistent tensors for full graph mode
         self.seq_lens_group = [
@@ -350,14 +375,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         with self.maybe_eager_context:
             self.model = self._get_model()
 
-        if self.supports_mm_inputs:
-            # Match upstream: a multimodal target can use a text-only drafter.
+        if getattr(self, "supports_mm_inputs", False):
+            # A multimodal target may use a text-only assistant, as Gemma4 does.
             try:
                 dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
                 self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
             except (NotImplementedError, AttributeError, TypeError):
                 logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
-                self.supports_mm_inputs: bool = False
+                self.supports_mm_inputs = False
 
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
@@ -735,15 +760,15 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     common_attn_metadata.context_parallel_metadata = dcp_manager.long_seq_metadata
 
                 assert len(self.draft_attn_groups) > 0
-                builder = self.draft_attn_groups[0].get_metadata_builder()
+                capture_block_tables = {
+                    attn_group.kv_cache_group_id: self.runner.input_batch.block_table[
+                        attn_group.kv_cache_group_id
+                    ].get_device_tensor()
+                    for attn_group in self.draft_attn_groups
+                }
                 # update the tensor's address for each step.
                 for draft_index in range(self.num_speculative_tokens):
                     common_attn_metadata = self.shallow_copy_metadata(common_attn_metadata)
-                    extra_attn_metadata_args: dict = {}
-                    if self.use_compress:
-                        extra_attn_metadata_args.update(
-                            common_ratio_to_sas_metadata=dict(),
-                        )
                     # Set the real slot_mapping.
                     slot_mapping_lens = common_attn_metadata.slot_mapping.shape[0]
                     self.slot_mapping_group[draft_index][:slot_mapping_lens].copy_(common_attn_metadata.slot_mapping)
@@ -758,23 +783,50 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     if self.dcp_size > 1 and draft_index > 0:
                         assert self.block_table_tensor_clone is not None, "block_table_tensor_clone is not init"
                         common_attn_metadata.block_table_tensor = self.block_table_tensor_clone[:num_reqs]
-                    if not self.use_compress or draft_index == 0:
-                        attn_metadata_eagle = builder.build_for_graph_capture(
-                            common_attn_metadata,
-                            AscendAttentionState.SpecDecoding
-                            if self.method == "mtp"
-                            else AscendAttentionState.ChunkedPrefill,
-                            **extra_attn_metadata_args,
-                        )
-                    else:
-                        attn_metadata_eagle = builder.build_for_drafting(
-                            common_attn_metadata,
+
+                    def _build_capture_attn_metadata(group_common_metadata, attn_group, draft_index=draft_index):
+                        group_common_metadata = copy.copy(group_common_metadata)
+                        group_id = attn_group.kv_cache_group_id
+                        buffer_key = (draft_index, group_id)
+                        slot_mapping_buffer = self._per_group_slot_mapping_groups.get(buffer_key)
+                        if slot_mapping_buffer is None:
+                            slot_mapping_buffer = torch.empty_like(self.slot_mapping_group[draft_index])
+                            self._per_group_slot_mapping_groups[buffer_key] = slot_mapping_buffer
+                        slot_mapping_len = group_common_metadata.slot_mapping.shape[0]
+                        slot_mapping_buffer[:slot_mapping_len].copy_(group_common_metadata.slot_mapping)
+                        slot_mapping_buffer[slot_mapping_len:].fill_(PADDING_SLOT_ID)
+                        group_common_metadata.slot_mapping = slot_mapping_buffer
+
+                        extra_attn_metadata_args: dict = {}
+                        if self.use_compress:
+                            extra_attn_metadata_args.update(
+                                prefill_ratio_to_sas_metadata=dict(),
+                                decode_ratio_to_sas_metadata=dict(),
+                                common_ratio_to_sas_metadata=dict(),
+                                block_size=attn_group.kv_cache_spec.block_size,
+                            )
+                        builder = attn_group.get_metadata_builder()
+                        if not self.use_compress or draft_index == 0:
+                            return builder.build_for_graph_capture(
+                                group_common_metadata,
+                                AscendAttentionState.SpecDecoding
+                                if self.method == "mtp"
+                                else AscendAttentionState.ChunkedPrefill,
+                                **extra_attn_metadata_args,
+                            )
+                        return builder.build_for_drafting(
+                            group_common_metadata,
                             draft_index,
                             **extra_attn_metadata_args,
                         )
-                    per_layer_attn_metadata = dict()
-                    for layer_name in self.attn_layer_names:
-                        per_layer_attn_metadata[layer_name] = attn_metadata_eagle
+
+                    per_layer_attn_metadata = build_per_group_layer_attn_metadata(
+                        self.draft_attn_groups,
+                        common_attn_metadata,
+                        capture_block_tables,
+                        num_reqs,
+                        _build_capture_attn_metadata,
+                    )
                     multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
         model_positions = self._get_positions(num_tokens)
@@ -1121,7 +1173,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         **draft_cp_kwargs,
                         attn_group=attn_group,
                     )
-                    for layer_name in self.attn_layer_names:
+                    for layer_name in attn_group.layer_names:
                         per_layer_attn_metadata[layer_name] = attn_metadata
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
@@ -1808,6 +1860,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
 
+        per_group_block_tables = getattr(self, "_per_group_block_tables", None)
+        group_id = attn_group.kv_cache_group_id
+        if per_group_block_tables is not None and group_id in per_group_block_tables:
+            common_attn_metadata.block_table_tensor = per_group_block_tables[group_id][:batch_size]
+
+        slot_mapping_buffer = self.slot_mapping_group[draft_index]
+        if per_group_block_tables is not None:
+            buffer_key = (draft_index, group_id)
+            slot_mapping_buffer = self._per_group_slot_mapping_groups.get(buffer_key)
+            if slot_mapping_buffer is None:
+                slot_mapping_buffer = torch.empty_like(self.slot_mapping_group[draft_index])
+                self._per_group_slot_mapping_groups[buffer_key] = slot_mapping_buffer
+
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
                 common_attn_metadata.num_reqs = input_batch_size
@@ -1918,9 +1983,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # update slot_mapping
             slot_indices += 1
             slot_mapping = mtp_slot_mapping[slot_indices]
-            self.slot_mapping_group[draft_index][:batch_size] = slot_mapping
-            self.slot_mapping_group[draft_index][batch_size:].fill_(PADDING_SLOT_ID)
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+            slot_mapping_buffer[:batch_size] = slot_mapping
+            slot_mapping_buffer[batch_size:].fill_(PADDING_SLOT_ID)
+            common_attn_metadata.slot_mapping = slot_mapping_buffer
         else:
             # NOTE: In vllm, `block_size = attn_metadata_builder.kv_cache_spec.block_size`.
             # However, in vllm-ascend, the above value can be multiple of `kernel_block_size`,
@@ -1933,12 +1998,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Compute the slot mapping.
             # When sliding window is enabled, block_table_tensor may be cropped
             # for attention, but slot mapping needs the full block table to
-            # address the absolute KV cache positions. (self.sliding_window is
-            # None for MTP - the adapter is not constructed for it.)
-            if self.sliding_window is not None:
+            # address the absolute KV cache positions.
+            if per_group_block_tables is not None and group_id in per_group_block_tables:
+                block_table_for_slot = per_group_block_tables[group_id][:batch_size]
+            elif self.draft_window_size is not None:
                 block_table_for_slot = self.sliding_window.full_block_table
             else:
-                block_table_for_slot = old_common_metadata.block_table_tensor
+                block_table_for_slot = common_attn_metadata.block_table_tensor
 
             if self.uses_mrope:
                 block_numbers = clamped_positions[0] // block_size
@@ -1955,10 +2021,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Otherwise, the KV cache will be inadvertently updated with the
             # padding tokens.
             slot_mapping.masked_fill_(exceeds_max_model_len, PADDING_SLOT_ID)
-            self.slot_mapping_group[draft_index][: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
-            self.slot_mapping_group[draft_index][slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
-            # Set the address of the attn_metadata.slot_mapping to the self.slot_mapping_group[idx]
-            common_attn_metadata.slot_mapping = self.slot_mapping_group[draft_index]
+            slot_mapping_buffer[: slot_mapping.shape[0]].copy_(slot_mapping.to(torch.int32))
+            slot_mapping_buffer[slot_mapping.shape[0] :].fill_(PADDING_SLOT_ID)
+            common_attn_metadata.slot_mapping = slot_mapping_buffer
 
         self.seq_lens_group[draft_index][: common_attn_metadata.seq_lens.shape[0]].copy_(common_attn_metadata.seq_lens)
         self.seq_lens_group[draft_index][common_attn_metadata.seq_lens.shape[0] :].fill_(0)
@@ -2404,16 +2469,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         assert len(self.draft_attn_groups) > 0
         per_layer_attn_metadata: dict[str, Any] = {}
-        # One DSA cache dict shared by all attn groups within this decode step.
-        # DSpark draft layers span multiple kv-cache groups; every group gets
-        # its own build_for_drafting call but most of the drafted metadata
-        # (RoPE tables, local token metadata, SAS metadata) only depends
-        # on group-invariant fields of common_attn_metadata, so it is computed
-        # by the first group and reused by the remaining ones. Only the DSA
-        # metadata builder (used by dspark) understands this kwarg; the generic
-        # GQA builder used by dflash/eagle does not accept **kwargs, so leave
-        # the cache empty in the non-compression path to avoid passing an
-        # unexpected argument.
         shared_dsa_draft_cache: dict = dict(common_ratio_to_sas_metadata=dict()) if self.use_compress else {}
         device_metadata_tasks: list[DeviceMetadataTask] = []
         device_metadata_executor = (
@@ -2425,6 +2480,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             else None
         )
+        per_group_block_tables = getattr(self, "_per_group_block_tables", None)
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
             device_metadata_provider = (
@@ -2432,36 +2488,48 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if device_metadata_executor is not None and isinstance(builder, DeviceMetadataTaskProvider)
                 else None
             )
+            group_common_metadata = common_attn_metadata
+            group_id = attn_group.kv_cache_group_id
+            if per_group_block_tables is not None and group_id in per_group_block_tables:
+                group_common_metadata = copy.copy(common_attn_metadata)
+                group_common_metadata.block_table_tensor = per_group_block_tables[group_id][
+                    : common_attn_metadata.num_reqs
+                ]
+            if per_group_block_tables is not None:
+                if group_common_metadata is common_attn_metadata:
+                    group_common_metadata = copy.copy(common_attn_metadata)
+                buffer_key = (0, group_id)
+                slot_mapping_buffer = self._per_group_slot_mapping_groups.get(buffer_key)
+                if slot_mapping_buffer is None:
+                    slot_mapping_buffer = torch.empty_like(self.slot_mapping_group[0])
+                    self._per_group_slot_mapping_groups[buffer_key] = slot_mapping_buffer
+                slot_mapping_len = common_attn_metadata.slot_mapping.shape[0]
+                slot_mapping_buffer[:slot_mapping_len].copy_(common_attn_metadata.slot_mapping)
+                slot_mapping_buffer[slot_mapping_len:].fill_(PADDING_SLOT_ID)
+                group_common_metadata.slot_mapping = slot_mapping_buffer
             extra_attn_metadata_args: dict = dict(shared_dsa_draft_cache)
             if self.use_compress:
                 extra_attn_metadata_args["block_size"] = attn_group.kv_cache_spec.block_size
             if self.method == "dspark":
                 gid = attn_group.kv_cache_group_id
-                common_attn_metadata = copy.copy(common_attn_metadata)
+                group_common_metadata = copy.copy(group_common_metadata)
                 block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
                 if block_table is not None:
-                    common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
+                    group_common_metadata.block_table_tensor = block_table[: group_common_metadata.num_reqs]
                 slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
                 if slot_mapping is not None:
-                    common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
-                # Apply the sliding window to the per-group block_table + seq_lens
-                # that DSpark's draft FIA actually reads. This branch overwrites
-                # common_attn_metadata.block_table_tensor with the full per-group
-                # table, so the window applied earlier (line 922) is bypassed; we
-                # skipped it there for dspark and re-apply here on the per-group
-                # table so FIA reads the recent-blocks clone instead of block 0.
-                # (dspark only - self.sliding_window is None for MTP.)
-                if self.sliding_window is not None:
-                    self.sliding_window.apply(common_attn_metadata)
+                    group_common_metadata.slot_mapping = slot_mapping[:num_input_tokens]
                 attn_metadata = builder.build_for_drafting(
-                    common_attn_metadata, draft_index=1, **extra_attn_metadata_args
+                    group_common_metadata, draft_index=1, **extra_attn_metadata_args
                 )
                 if device_metadata_provider is not None:
                     device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             else:
                 attn_metadata = builder.build(
-                    0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
+                    0, group_common_metadata, self.runner.get_model(), **extra_attn_metadata_args
                 )
+            if self.method == "mtp":
+                attn_metadata.attn_state = AscendAttentionState.SpecDecoding
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
 
