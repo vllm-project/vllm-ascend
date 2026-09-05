@@ -3753,13 +3753,7 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded=num_reqs_padded,
                     max_query_len=max_query_len,
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
-                    # FULL replay reuses capture-time graph metadata buffers.
-                    # Rebuild them for dummy execution instead of deriving
-                    # request state from the previous real DP batch.
-                    for_cudagraph_capture=(
-                        is_graph_capturing
-                        or cudagraph_runtime_mode == CUDAGraphMode.FULL
-                    ),
+                    for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
