@@ -25,6 +25,7 @@ from vllm.distributed.kv_events import KVCacheEvent
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
+    LookupKeyServer,
 )
 
 # isort: on
@@ -381,6 +382,55 @@ class TestAscendStoreConnector(unittest.TestCase):
         for events, expected_type in (([], type(None)), ([MagicMock()], AscendStoreKVEvents)):
             mock_worker_cls.return_value.get_kv_events.return_value = events
             self.assertIsInstance(connector.get_kv_connector_kv_cache_events(), expected_type)
+
+
+class TestLookupKeyServer(unittest.TestCase):
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.threading.Thread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.make_zmq_socket")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.zmq")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.MsgpackDecoder")
+    def test_legacy_hex_hashes_are_converted_to_bytes(
+        self,
+        mock_decoder_cls,
+        mock_zmq,
+        mock_make_socket,
+        mock_thread_cls,
+    ):
+        config = MagicMock()
+        config.parallel_config.data_parallel_rank = 0
+        config.kv_transfer_config.kv_connector_extra_config = {}
+
+        block_hash = bytes(range(32))
+        mock_decoder_cls.return_value.decode.side_effect = [
+            [0],
+            [block_hash.hex()],
+        ]
+        mock_socket = mock_make_socket.return_value
+        mock_socket.recv_multipart.return_value = [
+            (16).to_bytes(4, "big"),
+            b"groups",
+            (0).to_bytes(4, "big"),
+            b"hashes",
+        ]
+        pool_worker = MagicMock()
+        server = LookupKeyServer(pool_worker, config)
+
+        def lookup_scheduler(*args, **kwargs):
+            server.running = False
+            return 16
+
+        pool_worker.lookup_scheduler.side_effect = lookup_scheduler
+        process_request = mock_thread_cls.call_args.kwargs["target"]
+        process_request()
+
+        pool_worker.lookup_scheduler.assert_called_once_with(
+            16,
+            [block_hash],
+            [0],
+            use_layerwise=False,
+            hbm_hit_tokens=0,
+        )
+        mock_socket.send.assert_called_once_with((16).to_bytes(4, "big"))
 
 
 class TestAscendStoreConnectorLayerwise(unittest.TestCase):

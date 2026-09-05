@@ -346,6 +346,16 @@ class LookupKeyServer:
                 kv_group_ids = self.decoder.decode([all_frames[1]])
                 hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
                 hashes_str = self.decoder.decode(all_frames[3:])
+                # Fix lookup TypeError: ZMQ lookup delivers hex strings; downstream grouped
+                # hashing (kv_cache_utils BlockHash join) requires bytes-like elements.
+                hashes_str = [
+                    (
+                        bytes.fromhex(h)
+                        if isinstance(h, str) and len(h) == 64
+                        else (h.encode() if isinstance(h, str) else h)
+                    )
+                    for h in hashes_str
+                ]
                 result = self.pool_worker.lookup_scheduler(
                     token_len,
                     hashes_str,
