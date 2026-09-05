@@ -50,7 +50,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
         self._single_lora_slot = (
-            ascend_device_type == AscendDeviceType.A3
+            ascend_device_type in {AscendDeviceType.A2, AscendDeviceType.A3}
             and self.lora_config is not None
             and self.lora_config.max_loras == 1
             and not self.lora_config.fully_sharded_loras
