@@ -70,32 +70,6 @@ class AscendSFAPCPImpl(AscendSFAImpl):
 
         return super().exec_kv(kv_no_split, cos, sin, kv_cache, slots, attn_metadata)
 
-    def _write_indexer_cache(
-        self,
-        k_li: torch.Tensor,
-        k_li_scale: torch.Tensor | None,
-        slot_mapping: torch.Tensor,
-        kv_cache: tuple,
-        attn_metadata: M,
-    ) -> None:
-        num_decode_tokens = attn_metadata.num_decode_tokens or 0
-        tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
-        gathered_tensors, gathered_slot_mapping = _gather_prefill_cache_inputs(tensors, slot_mapping, num_decode_tokens)
-        k_li = gathered_tensors[0]
-        assert gathered_slot_mapping.numel() == k_li.shape[0], (
-            "SFA PCP indexer cache write requires one slot per gathered token: "
-            f"tokens={k_li.shape[0]}, slots={gathered_slot_mapping.numel()}."
-        )
-        if k_li_scale is not None:
-            k_li_scale = gathered_tensors[1]
-        super()._write_indexer_cache(
-            k_li,
-            k_li_scale,
-            gathered_slot_mapping,
-            kv_cache,
-            attn_metadata,
-        )
-
 
 @dataclass
 class DSACPContext:
@@ -406,19 +380,20 @@ class AscendSFADSACPImpl(AscendSFAImpl):
             ]
         else:
             parts = [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1])]
-            if self.has_indexer and not self.enable_sparse_li_c8:
-                assert k_li is not None
+            # With the indexer k computed inside ``indexer.forward`` right
+            # before the cache write, k_li no longer joins this fused gather:
+            # the indexer backend gathers it separately. The branches below
+            # stay for callers that still pass k_li explicitly.
+            if k_li is not None and not self.enable_sparse_li_c8:
                 parts.append(k_li.view(-1, k_li.shape[-1]))
         fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=async_op)
         if handle is not None:
             handles.append(handle)
-        if self.has_indexer and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
-            assert k_li is not None
+        if k_li is not None and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
             k_li, handle = all_gather_async(k_li, get_tp_group(), async_op=async_op)
             if handle is not None:
                 handles.append(handle)
-        if self.has_indexer and self.enable_sparse_li_c8:
-            assert k_li_scale is not None
+        if k_li is not None and k_li_scale is not None and self.enable_sparse_li_c8:
             k_li_scale, handle = all_gather_async(k_li_scale, get_tp_group(), async_op=async_op)
             if handle is not None:
                 handles.append(handle)
@@ -460,7 +435,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
                 k_pe = k_nope = None
             elif not self.has_indexer:
                 k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
-            elif not self.enable_sparse_li_c8:
+            elif k_li is not None and not self.enable_sparse_li_c8:
                 k_pe, k_nope, k_li = fused_kv_no_split.split(
                     [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1
                 )
