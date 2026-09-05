@@ -1984,6 +1984,7 @@ std::tuple<at::Tensor, at::Tensor> dequant_situ_quant_meta(
 
 std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     const at::Tensor& x,
+    const c10::optional<at::Tensor>& group_list,
     double beta,
     double linear_beta,
     bool activate_left,
@@ -2007,6 +2008,7 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
 
     (void)linear_beta;
     (void)activate_left;
+    (void)group_list;
 
     c10::SymDimVector y_shape(x.sym_sizes().begin(), x.sym_sizes().end());
     y_shape.back() = y_shape.back() / 2;
