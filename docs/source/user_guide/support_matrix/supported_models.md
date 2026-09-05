@@ -165,6 +165,7 @@ Get the latest info here: <https://github.com/vllm-project/vllm-ascend/issues/16
 | LLaVA-Next                     | 🔵            |                                                                      | A2/A3 |
 | LLaVA-Next-Video               | 🔵            |                                                                      | A2/A3 |
 | MiniCPM-V                      | 🔵            |                                                                      | A2/A3 |
+| MiniCPM-o 4.5                  | 🔵            | Verified on 910C, see [MiniCPM-o-4_5](../../tutorials/models/MiniCPM-o-4_5.md) | A2/A3 |
 | Mistral3                       | 🔵            |                                                                      | A2/A3 |
 | Phi-3-Vision/Phi-3.5-Vision    | 🔵            |                                                                      | A2/A3 |
 | Gemma3                         | 🔵            |                                                                      | A2/A3 |

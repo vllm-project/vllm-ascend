@@ -259,6 +259,7 @@ nav:
         - tutorials/models/Qwen2.5-Math-RM-72B.md
         - tutorials/models/InternVL3.5.md
         - tutorials/models/Dots3-Note.md
+        - tutorials/models/MiniCPM-o-4_5.md
     - Feature Tutorials:
         - tutorials/features/index.md
         - tutorials/features/pd_colocated_mooncake_multi_instance.md
