@@ -1345,6 +1345,66 @@ def _is_ascend_config_initialized(config: AscendConfig | None) -> bool:
     return hasattr(config, "ascend_compilation_config") and hasattr(config, "eplb_config")
 
 
+# Top-level additional_config keys accepted as legacy aliases of their nested
+# sub-config key, folded in before the strict AscendConfig validation. Kept so
+# configs written before sub-config nesting was enforced (e.g. CI YAMLs passing
+# '{"enable_npugraph_ex": false}') keep working; new configs should use the
+# nested form documented in AscendConfig's docstring.
+_LEGACY_TOP_LEVEL_SUBCONFIG_KEYS = {"enable_npugraph_ex": "ascend_compilation_config"}
+
+
+def _lax_equal(left: Any, right: Any) -> bool:
+    """Equality under pydantic lax bool coercion (e.g. ``"false"`` == False).
+
+    Falls back to strict inequality for values that are not bool-coercible,
+    so non-bool options never compare equal by accident.
+    """
+    if left == right:
+        return True
+    try:
+        return TypeAdapter(bool).validate_python(left) == TypeAdapter(bool).validate_python(right)
+    except ValueError:
+        return False
+
+
+def _hoist_legacy_top_level_subconfig_keys(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Fold legacy top-level keys into their nested sub-config dict.
+
+    Returns a new dict; the caller's ``additional_config`` is never mutated.
+    A key set to conflicting values both at the top level and inside its
+    sub-config is rejected so one option has exactly one source of truth. An
+    identical value in both places is an idempotent re-set: platform hooks
+    (``_update_compilation_modes`` / ``_setup_compile_backend``) write the
+    resolved sub-config back into additional_config for worker processes,
+    which then re-run this hoist with both copies present.
+    """
+    hoisted = dict(kwargs)
+    for key, subconfig_key in _LEGACY_TOP_LEVEL_SUBCONFIG_KEYS.items():
+        if key not in hoisted:
+            continue
+        nested = hoisted.get(subconfig_key)
+        if nested is None:
+            nested = {}
+        elif not isinstance(nested, dict):
+            raise ValueError(f"additional_config.{subconfig_key} must be a dictionary.")
+        if key in nested and not _lax_equal(hoisted[key], nested[key]):
+            raise ValueError(
+                f"additional_config.{key}={hoisted[key]!r} conflicts with "
+                f"additional_config.{subconfig_key}.{key}={nested[key]!r}; "
+                f"set it only in additional_config.{subconfig_key}.{key}."
+            )
+        merged = dict(nested)
+        merged[key] = hoisted.pop(key)
+        hoisted[subconfig_key] = merged
+        logger.warning(
+            'additional_config.%s is deprecated; use additional_config.%s.{"%s": ...} instead.',
+            key,
+            subconfig_key,
+            key,
+        )
+    return hoisted
+
+
 def init_ascend_config(vllm_config):
     additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
     if "enable_flashcomm1" in additional_config or os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1") is not None:
@@ -1418,6 +1478,7 @@ def init_ascend_config(vllm_config):
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
+    kwargs = _hoist_legacy_top_level_subconfig_keys(kwargs)
     unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())
     # vLLM-Omni shares this mapping with the platform plugin. Preserve its
     # extension keys on VllmConfig while excluding them from Ascend validation.

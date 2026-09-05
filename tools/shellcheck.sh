@@ -66,3 +66,4 @@ for file in "$@"; do
 
     shellcheck "${shellcheck_args[@]}" "$file"
 done
+# test: skip pre-commit hooks
