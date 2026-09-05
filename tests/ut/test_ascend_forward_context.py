@@ -115,6 +115,7 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     layer.side_effect = lambda _positions, hidden_states, *_args, **_kwargs: (hidden_states, None)
     model = SimpleNamespace(
         hc_mult=1,
+        use_sequence_parallel_moe=False,
         layers=[layer],
         start_layer=0,
         end_layer=1,
@@ -147,17 +148,8 @@ def test_deepseek_v4_forward_passes_input_ids_to_layers(monkeypatch):
     assert "input_ids" not in forward_context.additional_kwargs
 
 
-def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank(monkeypatch):
-    monkeypatch.setattr(
-        afc,
-        "get_ascend_config",
-        lambda: SimpleNamespace(
-            enable_prefill_mc2=False,
-            enable_fused_mc2=0,
-            scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
-        ),
-    )
-    vllm_config = _make_vllm_config(tensor_parallel_size=6, kv_role="kv_consumer")
+def test_set_mc2_tokens_capacity_without_cudagraph_aligns_per_tp_rank():
+    vllm_config = _make_vllm_config(tensor_parallel_size=6)
 
     afc.set_mc2_tokens_capacity(vllm_config, max_num_reqs=200, uniform_decode_query_len=3)
 

@@ -556,7 +556,7 @@ Key Parameter Descriptions:
 - `--speculative-config` configures speculative decoding. Use `mtp` for the preview MTP checkpoint and `dspark` for `DeepSeek-V4-Pro-0813-w4a8`. For DSpark, use the value declared by the checkpoint; the example uses five speculative tokens, and all ranks must use the same value.
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.
 - `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.
-- `enable_flashcomm1: true` in `--additional-config` enables the FlashComm1 communication optimization. This is the recommended replacement for the deprecated `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable. Configure it explicitly whenever `enable_dsa_cp` is enabled.
+- `enable_flashcomm1: true` in `--additional-config` enables the FlashComm1 communication optimization. This is the recommended replacement for the deprecated `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable. It is auto-enabled whenever `enable_dsa_cp` is enabled.
 - `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` retains prefix-cache checkpoints every 4096 tokens. It takes effect only when prefix caching is enabled and must be a non-negative multiple of `--block-size`; `4096` matches the DSpark example's block size of `32`.
 
 Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
@@ -1367,7 +1367,7 @@ Key Parameter Descriptions:
 - `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.
 - `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.
 - `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.
-- `enable_dsa_cp: true` enables DSA context parallelism on Prefill nodes. DSA-CP depends on FlashComm1, so the same `--additional-config` object must also set `"enable_flashcomm1": true`.
+- `enable_dsa_cp: true` enables DSA context parallelism on Prefill nodes. DSA-CP depends on FlashComm1, which is auto-enabled when DSA-CP is on, so there is no need to set `"enable_flashcomm1": true` in the same `--additional-config` object.
 - `--kv-transfer-config` configures KV cache transfer between the prefill producer and decode consumer in PD separation.
 - `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.
 - `additional_config.enable_fused_mc2=1`: enables the Fused MC2 fusion operator to accelerate communication on Prefill nodes (A3 series).

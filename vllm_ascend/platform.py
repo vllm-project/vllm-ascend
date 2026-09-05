@@ -1157,14 +1157,6 @@ def _setup_compile_backend(
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
     additional_config = vllm_config.additional_config or {}
-    if (
-        not additional_config.get("enable_flashcomm1", False)
-        and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
-    ):
-        vllm_config.parallel_config.all2all_backend = (
-            "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
-        )
-        logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
     requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
@@ -1249,15 +1241,6 @@ def _setup_worker_and_scheduler(
     # Select worker class and refresh block size
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
-        additional_config = vllm_config.additional_config or {}
-        if (
-            not additional_config.get("enable_flashcomm1", False)
-            and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
-        ):
-            parallel_config.all2all_backend = (
-                "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
-            )
-            logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         hardware_profile = get_current_hardware_profile()
         if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(
             HardwareCapability.STANDARD_WORKER_PATCHES
