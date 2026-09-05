@@ -6,7 +6,7 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated
+from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, AscendRMSNorm
 from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -110,10 +110,26 @@ def test_FusedRMSNormGated_dispatches_to_ascend_kernel(default_vllm_config):
     )
 
 
-@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
+def test_shieldstral_uses_native_add_rms_norm(
+    dummy_tensor,
+    default_vllm_config,
+):
+    config = default_vllm_config
+    config.model_config.hf_config.model_type = "mistral3"
+    config.model_config.hf_config.text_config.model_type = "ministral3"
+    config.quant_config = None
+
+    layer = AscendRMSNorm(hidden_size=8)
+    with patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm):
+        result = layer(dummy_tensor, torch.zeros_like(dummy_tensor))
+        assert torch.allclose(result[0], 2 * dummy_tensor)
+        assert torch.allclose(result[1], torch.zeros_like(dummy_tensor))
+
+
 @pytest.mark.parametrize("residual", [None, torch.randn(4, 8, dtype=torch.float16)])
 @patch("torch_npu.npu_rms_norm", side_effect=mock_rms_norm)
 @patch("torch_npu.npu_add_rms_norm", side_effect=mock_add_rms_norm)
+@pytest.mark.skipif(not is_310p_hw(), reason="310P device unittest case.")
 def test_RMSNorm_forward_310p(mock_add_rmsnorm, mock_rmsnorm, residual, dummy_tensor, default_vllm_config):
     layer = RMSNorm(hidden_size=8, eps=1e-05)
     if residual is not None:
