@@ -1,0 +1,53 @@
+name: Experimental CANN 9.2 beta2 A3
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/experiment_cann_920beta2.yaml'
+      - 'tools/cann_920beta2_experiment/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cann-920beta2-experiment-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  reproduce:
+    # Draft experiment only; execution remains subject to the normal fork approval gate.
+    if: github.repository == 'vllm-project/vllm-ascend' && github.head_ref == 'experiment/cann-920beta2-ardqv2'
+    runs-on: linux-aarch64-nightly-a3-16
+    timeout-minutes: 150
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-ci-main-a3
+    defaults:
+      run:
+        shell: bash --noprofile --norc -eo pipefail {0}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          path: experiment
+      - name: Checkout the failing job's vllm-ascend revision
+        uses: actions/checkout@v7
+        with:
+          repository: vllm-project/vllm-ascend
+          ref: 60162f1046750d35c325d0449fcbbcd4af28d488
+          submodules: recursive
+          persist-credentials: false
+          path: baseline
+      - name: Install matched toolkit and A3 ops, then reproduce
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/evidence"
+          bash experiment/tools/cann_920beta2_experiment/run.sh \
+            "$GITHUB_WORKSPACE/baseline" "$GITHUB_WORKSPACE/evidence" \
+            2>&1 | tee "$GITHUB_WORKSPACE/evidence/experiment.log"
+      - name: Upload experiment evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cann-920beta2-a3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
