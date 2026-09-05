@@ -46,6 +46,8 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult, setup_moe_comm_method
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.quantization.methods.base import get_moe_num_logical_experts
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicLinearMethod
+from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
@@ -54,6 +56,13 @@ from vllm_ascend.utils import (
     shared_expert_dp_enabled,
     shared_experts_calculation_stream,
 )
+
+
+def _linear_uses_quant_method(linear: torch.nn.Module, method_type: type) -> bool:
+    """Check a linear's concrete scheme, unwrapping AscendLinearMethod."""
+    quant_method = getattr(linear, "quant_method", None)
+    quant_method = getattr(quant_method, "quant_method", quant_method)
+    return isinstance(quant_method, method_type)
 
 
 def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
@@ -839,29 +848,56 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._shared_experts.down_proj, "weight_scale"
             )
             shared_uses_situ = isinstance(self._shared_experts.act_fn, AscendSituAndMul)
-            if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            # Per-channel W4A8 shared-expert Linear methods expose floating-
+            # point scales after converting INT4 weights to the single-expert
+            # GMM layout. Reuse those methods with already-quantized
+            # activations, avoiding the incompatible QuantMatmul WeightNZ ABI.
+            shared_is_w4a8 = all(
+                _linear_uses_quant_method(proj, AscendW4A8DynamicLinearMethod)
+                for proj in (self._shared_experts.gate_up_proj, self._shared_experts.down_proj)
+            )
+            shared_is_w8a8 = all(
+                _linear_uses_quant_method(proj, AscendW8A8DynamicLinearMethod)
+                for proj in (self._shared_experts.gate_up_proj, self._shared_experts.down_proj)
+            )
+            has_per_channel_w4a8_situ_shared = (
+                shared_is_w4a8
+                and shared_uses_situ
+                and all(
+                    hasattr(proj, "weight_scale_fp32")
+                    for proj in (self._shared_experts.gate_up_proj, self._shared_experts.down_proj)
+                )
+            )
+            if has_quantized_shared and (shared_is_w8a8 or has_per_channel_w4a8_situ_shared):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
-                hidden_states = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self._shared_experts.gate_up_proj.weight,
-                    self._shared_experts.gate_up_proj.weight_scale,
-                    pertoken_scale=None,
-                    bias=None,
-                    output_dtype=torch.int32,
-                )
+                if has_per_channel_w4a8_situ_shared:
+                    hidden_states = self._shared_experts.gate_up_proj((quantized_x, pertoken_scale))[0]
+                else:
+                    hidden_states = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self._shared_experts.gate_up_proj.weight,
+                        self._shared_experts.gate_up_proj.weight_scale,
+                        pertoken_scale=None,
+                        bias=None,
+                        output_dtype=torch.int32,
+                    )
                 # Execute activation concurrently with gmm2.
 
                 maybe_wait_event(fused_moe_evts.before_gmm2)
                 if shared_uses_situ:
                     quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
                         x=hidden_states,
-                        weight_scale=self._shared_experts.gate_up_proj.weight_scale_fp32,
-                        activation_scale=pertoken_scale,
+                        weight_scale=(
+                            None
+                            if has_per_channel_w4a8_situ_shared
+                            else self._shared_experts.gate_up_proj.weight_scale_fp32
+                        ),
+                        activation_scale=None if has_per_channel_w4a8_situ_shared else pertoken_scale,
                         bias=None,
                         quant_scale=None,
                         quant_offset=None,
@@ -890,14 +926,17 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 # Execute the down projection concurrently with the combine
                 # communication.
                 maybe_wait_event(fused_moe_evts.before_combine)
-                shared_out = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self._shared_experts.down_proj.weight,
-                    self._shared_experts.down_proj.weight_scale,
-                    pertoken_scale=swiglu_out_scale,
-                    bias=None,
-                    output_dtype=original_dtype,
-                )
+                if has_per_channel_w4a8_situ_shared:
+                    shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
+                else:
+                    shared_out = torch_npu.npu_quant_matmul(
+                        quantized_x,
+                        self._shared_experts.down_proj.weight,
+                        self._shared_experts.down_proj.weight_scale,
+                        pertoken_scale=swiglu_out_scale,
+                        bias=None,
+                        output_dtype=original_dtype,
+                    )
             elif has_quantized_shared and self.quant_type in (QuantType.W8A8MXFP, QuantType.W4A8MXFP):
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
@@ -934,6 +973,8 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
+                # Per-group W4A8 shared experts use this path. Per-channel
+                # W4A8 shared experts take the fused branch above.
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)
