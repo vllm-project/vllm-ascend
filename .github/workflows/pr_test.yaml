@@ -199,6 +199,9 @@ jobs:
           chmod +x .github/workflows/scripts/gitleaks.sh
           .github/workflows/scripts/gitleaks.sh
 
+      - name: Test CPU batch routing
+        run: python3 -m unittest discover -s .github/workflows/scripts/tests -v
+
       - name: Get pre-commit config hash
         id: get_hash
         run: |
