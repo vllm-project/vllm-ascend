@@ -506,6 +506,76 @@ def test_dsa_cp_device_metadata_tasks(
         builder._build_qli_metadata.assert_not_called()
 
 
+def test_dsa_cp_builds_and_slices_vision_swa_indices():
+    builder = _make_cp_builder(compressor_ratio=1)
+    builder.num_prefills = 1
+    builder.num_actual_tokens = 4
+    builder.seq_lens = torch.tensor([4], dtype=torch.int32)
+    builder.seq_lens_cpu = builder.seq_lens
+    builder.block_table = torch.tensor([[1, 2]], dtype=torch.int32)
+    builder.slot_mapping = torch.zeros((4, 2), dtype=torch.int32)
+    builder.model_config.hf_config.vision_n_layers = 1
+    builder.model_config.hf_config.vision_max_n_token = 3
+    builder.model_config.hf_config.sliding_window = 2
+    builder.common_ratio_to_sas_metadata = {
+        "_cpu_local": {
+            "qsl_cpu": torch.tensor([0, 3], dtype=torch.int32),
+            "sl_cpu": torch.tensor([3], dtype=torch.int32),
+        }
+    }
+    builder._ensure_device_local_metadata = MagicMock(
+        return_value=(
+            3,
+            6,
+            3,
+            6,
+            torch.tensor([0, 3], dtype=torch.int32),
+            torch.tensor([3], dtype=torch.int32),
+            None,
+        )
+    )
+    builder._get_cmp_seqlens_for_metadata = MagicMock(return_value=None)
+    builder._build_sas_metadata = MagicMock(return_value=builder.req_sas_metadata)
+    global_indices = torch.arange(12, dtype=torch.int32).view(4, 1, 3)
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=1,
+        query_start_loc=torch.tensor([0, 4], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 4], dtype=torch.int32),
+        mm_req_doc_ranges={0: [(1, 2)]},
+    )
+
+    with patch(
+        "vllm_ascend.attention.context_parallel.dsa_cp.build_vision_bidirectional_swa_indices",
+        return_value=(global_indices, None),
+    ) as build_vision_indices:
+        req_metadata = builder.build_req_metadata(
+            common_attn_metadata,
+            input_positions=None,
+            num_input_tokens=4,
+            num_actual_reqs=1,
+            attn_state=MagicMock(),
+            cos=MagicMock(),
+            sin=MagicMock(),
+        )
+
+    build_vision_indices.assert_called_once()
+    vision_kwargs = build_vision_indices.call_args.kwargs
+    assert torch.equal(vision_kwargs["block_table"], builder.block_table)
+    assert vision_kwargs["window_size"] == 2
+    assert vision_kwargs["max_image_tokens"] == 3
+    assert vision_kwargs["block_size"] == builder.storage_block_size
+    assert torch.equal(
+        vision_kwargs["query_start_loc"],
+        common_attn_metadata.query_start_loc,
+    )
+    assert torch.equal(vision_kwargs["seq_lens"], builder.seq_lens)
+    assert vision_kwargs["mm_prefix_ranges"] == (common_attn_metadata.mm_req_doc_ranges)
+    assert vision_kwargs["num_tokens"] == 4
+    expected = torch.full((3, 1, 3), -1, dtype=torch.int32)
+    expected[0] = global_indices[3]
+    assert torch.equal(req_metadata.vision_swa_indices, expected)
+
+
 def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
     cache: dict[str, dict[str, torch.Tensor]] = {}
 
@@ -656,6 +726,7 @@ def _make_dsa_cp_metadata(sas_metadata: torch.Tensor) -> AscendDSACPMetadata:
         cu_cmp_seqlen_list=torch.tensor([0, 1], dtype=torch.int32),
         start_pos=torch.zeros(1, dtype=torch.int32),
         dspark_swa_indices=None,
+        vision_swa_indices=None,
         ori_win_left=None,
         ori_win_right=None,
     )
@@ -761,6 +832,8 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
     swa_sas = torch.zeros(1024, dtype=torch.int32)
     compressor_sas = torch.ones(1024, dtype=torch.int32)
     swa_metadata = _make_dsa_cp_metadata(swa_sas)
+    vision_swa_indices = torch.tensor([[[3, 4, -1]]], dtype=torch.int32)
+    swa_metadata.req_metadata.vision_swa_indices = vision_swa_indices
     compressor_metadata = _make_dsa_cp_metadata(compressor_sas)
     layer_metadata = AscendDSACPLayerMetadata(
         swa=swa_metadata,
@@ -778,6 +851,7 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
 
     def run_attention(*args, **kwargs):
         assert events == ["wait", "record"]
+        assert kwargs["ori_sparse_indices"] is vision_swa_indices
         events.append("attention")
         return (torch.ones((1, 1, 2)),)
 

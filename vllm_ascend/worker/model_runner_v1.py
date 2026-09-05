@@ -3661,7 +3661,6 @@ class NPUModelRunner(GPUModelRunner):
         if num_tokens_across_dp is not None and num_tokens_padded != num_tokens:
             # pad is needed if the pad of `num_tokens` is triggered inside CudagraphDispatcher
             num_tokens_across_dp[:] = num_tokens_padded
-            num_scheduled_tokens = num_scheduled_tokens.repeat(num_reqs_padded)
 
         if self.dynamic_eplb:
             self.update_eplb_heat_collection_status(num_tokens_padded)
@@ -3707,16 +3706,23 @@ class NPUModelRunner(GPUModelRunner):
                 self.seq_lens.copy_(self.optimistic_seq_lens_cpu, non_blocking=True)
 
                 cum_num_tokens = self._get_cumsum_and_arange(
-                num_scheduled_tokens, self.query_pos.np)
-                self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
+                    num_scheduled_tokens, self.query_pos.np
+                )
+                self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+                self.query_start_loc.np[
+                    num_reqs + 1 : num_reqs_padded + 1
+                ].fill(cum_num_tokens[-1])
                 self.query_start_loc.copy_to_gpu()
                 if self._has_gdn:
                     if skip_gdn_state_update:
                         self.gdn_query_start_loc.np.fill(0)
                     else:
+                        self.gdn_query_start_loc.np[1 : num_reqs + 1] = (
+                            cum_num_tokens
+                        )
                         self.gdn_query_start_loc.np[
-                            1 : num_reqs_padded + 1
-                        ] = cum_num_tokens
+                            num_reqs + 1 : num_reqs_padded + 1
+                        ].fill(cum_num_tokens[-1])
                     self.gdn_query_start_loc.copy_to_gpu()
 
                 if not profile_cpp:

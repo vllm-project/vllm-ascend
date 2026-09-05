@@ -24,6 +24,7 @@ from vllm_ascend.attention.dsa_v1 import (
     _dsa_swa_only_cmp_ratio,
     _has_weight_scale,
     build_dspark_swa_indices,
+    build_vision_bidirectional_swa_indices,
     get_dspark_sparse_sas_window,
 )
 from vllm_ascend.attention.utils import (
@@ -133,6 +134,7 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int = 0
     dspark_swa_indices: torch.Tensor | None = None
+    vision_swa_indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -906,6 +908,41 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_compressed_tokens = None
             slot_mapping = self.slot_mapping[: self.num_actual_tokens]
 
+        vision_swa_indices = None
+        mm_ranges = getattr(common_attn_metadata, "mm_req_doc_ranges", None)
+        hf_config = self.model_config.hf_config
+        max_image_tokens = (
+            getattr(hf_config, "vision_max_n_token", 0) if getattr(hf_config, "vision_n_layers", 0) > 0 else 0
+        )
+        if has_prefill and max_image_tokens > 0 and mm_ranges:
+            assert num_actual_reqs is not None
+            assert self.num_actual_tokens is not None
+            global_vision_indices, _ = build_vision_bidirectional_swa_indices(
+                block_table=self.block_table[:num_actual_reqs],
+                window_size=hf_config.sliding_window,
+                max_image_tokens=max_image_tokens,
+                block_size=self.storage_block_size,
+                query_start_loc=query_start_loc[: num_actual_reqs + 1],
+                seq_lens=self.seq_lens[:num_actual_reqs],
+                mm_prefix_ranges=mm_ranges,
+                num_tokens=self.num_actual_tokens,
+            )
+            pad_rows = num_tokens_pad - global_vision_indices.shape[0]
+            if pad_rows < 0:
+                raise ValueError(
+                    "Vision DSA-CP metadata has fewer padded query rows than "
+                    "actual rows: "
+                    f"num_tokens_pad={num_tokens_pad}, "
+                    f"actual={global_vision_indices.shape[0]}"
+                )
+            if pad_rows:
+                global_vision_indices = F.pad(
+                    global_vision_indices,
+                    (0, 0, 0, 0, 0, pad_rows),
+                    value=-1,
+                )
+            vision_swa_indices = global_vision_indices[local_start:local_end_with_pad].contiguous()
+
         # --- SAS metadata (all requests combined) ---
         num_heads = self.model_config.hf_config.num_attention_heads
         index_topk = self.model_config.hf_config.index_topk
@@ -1006,6 +1043,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata=qli_metadata,
             device_local_metadata_group_id=device_local_metadata_group_id,
             cu_cmp_seqlen_list=cu_cmp_seqlens,
+            vision_swa_indices=vision_swa_indices,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None
@@ -1933,6 +1971,8 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             kv_plan.add_dsa_sparse_attn_extra_kwargs(extra_attn_kwargs, cu_seqlens_ori_kv=local_seq_lengths_query)
         if swa_req_metadata.dspark_swa_indices is not None:
             extra_attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
+        if swa_req_metadata.vision_swa_indices is not None:
+            extra_attn_kwargs["ori_sparse_indices"] = swa_req_metadata.vision_swa_indices
 
         ori_win_left = self.window_size - 1 if swa_req_metadata.ori_win_left is None else swa_req_metadata.ori_win_left
         ori_win_right = 0 if swa_req_metadata.ori_win_right is None else swa_req_metadata.ori_win_right
