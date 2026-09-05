@@ -350,50 +350,34 @@ vllm serve ${WEIGHT_PATH} \
 
 ### 5.3 Multi-Node PD Separation Deployment
 
-PD (Prefill-Decode) separation splits Prefill and Decode across two nodes. The following 1P1D configuration is validated for `MiniMax-M3-MXFP8` with EAGLE3 on **Ascend 950DT**.
+PD (Prefill-Decode) separation splits the Prefill and Decode phases across different nodes for better throughput. The following 1P1D configuration is validated for `MiniMax-M3-MXFP8` with EAGLE3.
 
-**Hardware**: 2 × 8-NPU Ascend 950DT nodes. Both Prefill and Decode use **DP2TP4**.
+**Hardware**: 2× 8-NPU nodes, one for Prefill (DP2TP4) and one for Decode (DP2TP4).
 
-- Prefill container: HTTP `31050` / `31051`
-- Decode container: HTTP `31060` / `31061`
-- Proxy: `http://<prefill_ip>:30088`
+**Common Issues Tip:** For PD separation specific issues such as KV transfer timeouts or Mooncake connection errors, please refer to the [Public FAQs](../../faqs.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
-Containers must use `--network=host --privileged` and mount the host HiXLEP files:
+First, prepare `launch_online_dp.py` on each node:
 
-```bash
--v /etc/hixlep:/etc/hixlep
-```
+[launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py)
 
-On 950DT, also confirm `/lib/route.conf` and `/etc/hccl_rootinfo.json`. If `/etc/hixlep` is missing, generate it with the [HiXLEP configuration file generation guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) (D2D scenario). `net_instance_id` in `/etc/hixlep/ub_endpoint_npu_*.json` must be the **same string** on the Prefill and Decode nodes; otherwise KV transfer fails with `EndpointMatcher::MatchEndpoints`.
+Then prepare `run_dp_template.sh` on each node.
 
-**Common Issues Tip:** For PD KV timeouts or Mooncake connection errors, see the [Public FAQs](../../faqs.md) and [Chapter 10 FAQ](#10-faq).
-
-First, copy [launch_online_dp.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/external_online_dp/launch_online_dp.py) into each container, then create `run_dp_template.sh` on that node. `$1`–`$7` are filled by `launch_online_dp.py`.
-
-**Prefill container** `run_dp_template.sh` (set `nic_name` and `local_ip` to the Prefill node):
+**Prefill node** (set `nic_name` and `local_ip` to your own):
 
 ```bash
-unset ftp_proxy
-unset https_proxy
-unset http_proxy
+unset http_proxy https_proxy ftp_proxy
 
 nic_name="<your_nic_name>"
-local_ip="<prefill_ip>"
+local_ip="<your_ip>"
 
 export HCCL_BUFFSIZE=1024
 export HCCL_IF_IP=$local_ip
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
-# Must match the protocol field in /etc/hixlep (usually ub_ctp, not uboe).
-export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["ub_ctp:device"]}'
-export ASCEND_CONNECT_TIMEOUT=20000
-export ASCEND_TRANSFER_TIMEOUT=20000
 
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-fi
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
@@ -420,60 +404,36 @@ vllm serve /path/to/weight/MiniMax-M3-MXFP8 \
     --quantization mxfp8 \
     --kv-cache-dtype fp8 \
     --kv-cache-dtype-skip-layers 0 1 2 \
-    --additional-config '{
-        "enable_cpu_binding": true,
-        "ascend_compilation_config": {
-            "fuse_qknorm_rope": false,
-            "fuse_norm_quant": false,
-            "enable_static_kernel": false
-        },
-        "multistream_overlap_shared_expert": true,
-        "enable_shared_expert_dp": true,
-        "enable_reduce_sample": false
-    }' \
-    --speculative-config '{
-        "method": "eagle3",
-        "model": "/path/to/weight/MiniMax-M3-EAGLE3",
-        "num_speculative_tokens": 3,
-        "kv_cache_dtype": "bfloat16"
-    }' \
-    --kv-transfer-config '{
-        "kv_connector": "MooncakeConnectorV1",
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_qknorm_rope":false, "fuse_norm_quant":false, "enable_static_kernel":false}, "multistream_overlap_shared_expert":true, "enable_shared_expert_dp":true, "enable_reduce_sample":false}' \
+    --speculative-config '{"method":"eagle3", "model":"/path/to/weight/MiniMax-M3-EAGLE3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
+    --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_producer",
         "kv_port": "30000",
         "engine_id": "0",
         "kv_connector_extra_config": {
-            "use_ascend_direct": true,
-            "ascend_local_comm_res_path": "/etc/hixlep",
-            "prefill": {"dp_size": 2, "tp_size": 4},
-            "decode": {"dp_size": 2, "tp_size": 4}
-        }
-    }'
+             "use_ascend_direct": true,
+             "prefill": {"dp_size": 2, "tp_size": 4},
+             "decode":  {"dp_size": 2, "tp_size": 4}
+        }}'
 ```
 
-**Decode container** `run_dp_template.sh` (set `nic_name` and `local_ip` to the Decode node):
+**Decode node** (set `nic_name` and `local_ip` to your own):
 
 ```bash
-unset ftp_proxy
-unset https_proxy
-unset http_proxy
+unset http_proxy https_proxy ftp_proxy
 
 nic_name="<your_nic_name>"
-local_ip="<decode_ip>"
+local_ip="<your_ip>"
 
 export HCCL_BUFFSIZE=2048
 export HCCL_IF_IP=$local_ip
 export HCCL_OP_EXPANSION_MODE="AIV"
 export HCCL_SOCKET_IFNAME=$nic_name
 export ASCEND_RT_VISIBLE_DEVICES=$1
-export ASCEND_GLOBAL_RESOURCE_CONFIG='{"comm_resource_config.protocol_desc":["ub_ctp:device"]}'
-export ASCEND_CONNECT_TIMEOUT=20000
-export ASCEND_TRANSFER_TIMEOUT=20000
 
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
-if [ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]; then
-  export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
-fi
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
 export GLOO_SOCKET_IFNAME=$nic_name
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 export PYTHONHASHSEED=0
@@ -501,38 +461,24 @@ vllm serve /path/to/weight/MiniMax-M3-MXFP8 \
     --quantization mxfp8 \
     --kv-cache-dtype fp8 \
     --kv-cache-dtype-skip-layers 0 1 2 \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
-    --speculative-config '{"method":"eagle3","model":"/path/to/weight/MiniMax-M3-EAGLE3","num_speculative_tokens":3,"kv_cache_dtype": "bfloat16"}' \
-    --additional-config '{
-        "enable_cpu_binding": true,
-        "ascend_compilation_config": {
-            "enable_static_kernel": false,
-            "fuse_norm_quant": false
-        },
-        "multistream_overlap_shared_expert": true,
-        "enable_shared_expert_dp": true,
-        "enable_flashcomm1": false,
-        "enable_reduce_sample": false
-    }' \
-    --kv-transfer-config '{
-        "kv_connector": "MooncakeConnectorV1",
+    --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
+    --speculative-config '{"method":"eagle3", "model":"/path/to/weight/MiniMax-M3-EAGLE3", "num_speculative_tokens":3, "kv_cache_dtype":"bfloat16"}' \
+    --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"enable_static_kernel":false, "fuse_norm_quant":false}, "multistream_overlap_shared_expert":true, "enable_shared_expert_dp":true, "enable_flashcomm1":false, "enable_reduce_sample":false}' \
+    --kv-transfer-config \
+        '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
         "kv_port": "26900",
         "engine_id": "1",
         "kv_connector_extra_config": {
-            "use_ascend_direct": true,
-            "ascend_local_comm_res_path": "/etc/hixlep",
-            "prefill": {"dp_size": 2, "tp_size": 4},
-            "decode": {"dp_size": 2, "tp_size": 4}
-        }
-    }'
+             "use_ascend_direct": true,
+             "prefill": {"dp_size": 2, "tp_size": 4},
+             "decode":  {"dp_size": 2, "tp_size": 4}
+        }}'
 ```
 
-`kv_connector_extra_config.prefill` / `decode` must match the `launch_online_dp.py` topology. Do not add a trailing comma in `--additional-config` JSON.
+Once the scripts are ready, start the servers on each node.
 
-After both templates are in place, start Prefill first, then Decode. Run these commands **inside the corresponding container**.
-
-**Prefill container:**
+**Prefill node:**
 
 ```bash
 python launch_online_dp.py \
@@ -542,7 +488,7 @@ python launch_online_dp.py \
     --vllm-start-port 31050
 ```
 
-**Decode container:**
+**Decode node:**
 
 ```bash
 python launch_online_dp.py \
@@ -552,17 +498,15 @@ python launch_online_dp.py \
     --vllm-start-port 31060
 ```
 
-Wait until each side prints `Application startup complete` twice and `/v1/models` returns HTTP 200 on `31050`/`31051` and `31060`/`31061`.
-
 #### Request Forwarding
 
-Run the proxy **once** on the Prefill node (or any host that can reach both nodes). Use one host+port pair per DP rank. Get the script from [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
+Run the proxy on any machine that can reach both nodes. You can get the proxy script from the repository: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py).
 
 ```bash
-unset ftp_proxy https_proxy http_proxy
+unset http_proxy https_proxy
 
 python load_balance_proxy_server_example.py \
-    --port 30088 \
+    --port 8009 \
     --host <prefill_ip> \
     --prefiller-hosts \
        <prefill_ip> <prefill_ip> \
@@ -574,21 +518,7 @@ python load_balance_proxy_server_example.py \
        31060 31061
 ```
 
-Health check should report `prefill_instances: 2` and `decode_instances: 2`. Starting `proxy.sh` again while port `30088` is already bound returns `[Errno 98] address already in use`; use the existing process.
-
-The service is then accessible at `http://<prefill_ip>:30088`:
-
-```bash
-curl http://<prefill_ip>:30088/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "minimax-m3",
-    "messages": [{"role": "user", "content": "who are you?"}],
-    "max_tokens": 32,
-    "stream": false,
-    "chat_template_kwargs": {"thinking_mode": "disabled"}
-  }'
-```
+The service is then accessible at `http://<proxy_ip>:8009`.
 
 ### 5.4 Multimodal and ViT DP (Optional)
 
@@ -965,20 +895,6 @@ Please refer to the [Public Performance Tuning Documentation](../../developer_gu
 Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
-
-- **Q: Prefill and Decode are up, but chat through the proxy returns HTTP 500?**
-
-  A: On 950DT this is usually a KV/UB mismatch, not an HTTP firewall issue. Check the Decode log for `EndpointMatcher::MatchEndpoints` or Mooncake `103900`. Confirm:
-
-  - `/etc/hixlep` is mounted into both containers and `ascend_local_comm_res_path` is `/etc/hixlep`.
-  - `net_instance_id` is the **same string** on Prefill and Decode:
-
-    ```bash
-    python3 -c "import json; print(json.load(open('/etc/hixlep/ub_endpoint_npu_0.json'))['net_instance_id'])"
-    ```
-
-  - `ASCEND_GLOBAL_RESOURCE_CONFIG` uses the protocol in those JSON files (typically `ub_ctp:device`). `uboe:device` fails when the files only list `ub_ctp`.
-  - `kv_connector_extra_config.prefill` / `decode` match the launch topology (both `{dp_size: 2, tp_size: 4}` in this tutorial).
 
 - **Q: How can I reinstall vLLM Ascend?**
 
