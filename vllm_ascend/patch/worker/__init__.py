@@ -25,6 +25,7 @@ if HAS_TRITON:
 
 
 import vllm_ascend.patch.worker.patch_distributed  # noqa
+import vllm_ascend.patch.worker.patch_qwen3_moe_pruning  # noqa
 import vllm_ascend.patch.worker.patch_minimax_m2  # noqa
 import vllm_ascend.patch.worker.patch_mamba_utils  # noqa
 import vllm_ascend.patch.worker.patch_bind_kv_cache  # noqa
