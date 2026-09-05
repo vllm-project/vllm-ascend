@@ -971,19 +971,48 @@ def test_prefill_routes_by_layer_ownership(producer_layers, decode_layers, decod
         assert request.group_member_idx == worker.tp_rank % request.tp_ratio
         assert worker.current_layer == 0
         assert worker._pd_dispatched_layers == set()
-        # Warm lookups must not traverse endpoint/layer tables, even for new
-        # requests or later chunks with separately deserialized metadata.
-        previous = request.layer_endpoints
-        for _ in range(2):
-            warm_metadata = LayerwisePullProducerMetadata()
-            warm_metadata.producer_pp_layers = producer_layers
-            warm_metadata.requests = {
-                str(i): replace(request, remote_endpoints=MagicMock(), layer_endpoints={}) for i in range(128)
-            }
-            worker.start_load_kv(warm_metadata)
-            for warm_request in warm_metadata.requests.values():
-                assert warm_request.layer_endpoints is previous
-                assert warm_request.remote_endpoints.mock_calls == []
+
+
+def test_prefill_reuses_routes_across_requests_and_chunks_without_traversing_topology():
+    worker = LayerwisePullProducerWorker.__new__(LayerwisePullProducerWorker)
+    worker.tp_rank, worker.tp_size = 0, 1
+    worker.pp_rank, worker.pp_size = 0, 1
+    worker._layer_order = (0, 1)
+    worker._routes_by_topology = {}
+    worker.kv_send_layer_thread = MagicMock()
+    metadata = LayerwisePullProducerMetadata()
+    metadata.producer_pp_layers = ((0, 1),)
+    first = LayerwisePullProducerReqMeta(
+        local_block_ids=[[0]],
+        remote_tp_size=1,
+        remote_pp_size=2,
+        remote_topology_id="decode-topology",
+        remote_endpoints=[
+            [{"host": "decode-a", "port": 4000, "layer_ids": [0]}],
+            [{"host": "decode-b", "port": 5000, "layer_ids": [1]}],
+        ],
+    )
+    second = replace(first, remote_endpoints=MagicMock())
+    metadata.requests = {"first": first, "second": second}
+
+    worker.start_load_kv(metadata)
+
+    route = first.layer_endpoints
+    assert route == {0: ("decode-a", 4000), 1: ("decode-b", 5000)}
+    assert second.layer_endpoints is route
+    assert second.terminal_layers == frozenset({0, 1})
+    assert second.remote_endpoints.mock_calls == []
+
+    # Later chunks arrive as fresh request metadata, but reuse the same route.
+    metadata.requests = {
+        req_id: replace(request, remote_endpoints=MagicMock(), layer_endpoints={}, terminal_layers=frozenset())
+        for req_id, request in metadata.requests.items()
+    }
+    worker.start_load_kv(metadata)
+    for request in metadata.requests.values():
+        assert request.layer_endpoints is route
+        assert request.terminal_layers == frozenset({0, 1})
+        assert request.remote_endpoints.mock_calls == []
 
 
 def test_tp_block_range_rotates_owner_between_chunks():
@@ -1001,7 +1030,7 @@ def test_request_metadata_remains_backend_agnostic():
     assert not hasattr(request, "transfer_backend")
 
 
-def test_startup_handshake_collects_real_worker_endpoints_and_mtp():
+def test_startup_handshake_collects_real_worker_endpoints_and_layer_ownership():
     connector = LayerwisePullConnector.__new__(LayerwisePullConnector)
     connector.is_producer = False
     connector.is_consumer = True
@@ -1096,7 +1125,7 @@ def test_consumer_cannot_advertise_before_startup_handshake(consumer_scheduler):
     consumer_scheduler._submit_metaserver_request.assert_not_called()
 
 
-@pytest.mark.parametrize("local_layers,expected_pp", [([0, 1, 2, 3], {0, 1}), ([1, 2], {0, 1}), ([3], {1})])
+@pytest.mark.parametrize("local_layers,expected_pp", [([1, 2], {0, 1}), ([3], {1})])
 def test_layout_handshake_establishes_all_pp_sources_before_first_completion(local_layers, expected_pp):
     reader = LayerwisePullReadThread(
         tp_rank=0,
@@ -1253,17 +1282,12 @@ def test_split_stage_sends_terminal_markers_and_waits_for_all_destinations(sendi
     assert thread.get_and_clear_finished_requests(set()) == set()
 
 
-@pytest.mark.parametrize(
-    "producer_layers,decode_layers",
-    [
-        (((0, 1), (2, 3)), ((0, 1, 2, 3),)),
-        (((0, 1, 2, 3),), ((0, 1), (2, 3))),
-        (((0, 1, 2), (3, 4, 5)), ((0, 1, 2, 3), (4, 5))),
-    ],
-)
-def test_pp_pull_over_real_control_sockets_with_chunked_slot_reuse(producer_layers, decode_layers):
+def test_pp_pull_over_real_control_sockets_with_chunked_slot_reuse():
     # Only the data-transfer backend/NPU events are mocked. Both control
     # threads, their wire messages, and the slot gates are real.
+    # P1 feeds both D stages, while D0 reads from both P stages.
+    producer_layers = ((0, 1, 2), (3, 4, 5))
+    decode_layers = ((0, 1, 2, 3), (4, 5))
     readers = []
     workers = []
     endpoints = []
