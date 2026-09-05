@@ -606,6 +606,13 @@ class KVTransferThread(threading.Thread):
             return self.token_database.decode_adaptor_prefill_pp(keys, addrs, sizes)
 
 
+class KVCacheStoreBatch:
+    """FIFO fence for a batch of asynchronous KV store requests."""
+
+    def __init__(self) -> None:
+        self.done = threading.Event()
+
+
 class KVCacheStoreSendingThread(KVTransferThread):
     def __init__(
         self,
@@ -632,6 +639,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.completed_events_lock = threading.Lock()
         self.completed_events: dict[int, int] = {}
         self.worker = worker
+
+    def add_stored_request(self, req_id: str):
+        with self.done_task_lock:
+            # A later chunk of the same request starts a new save lifecycle.
+            # Do not let a completion from an earlier chunk release it early.
+            self.finished_requests.discard(req_id)
+            self.stored_requests[req_id] += 1
+
+    def add_save_batch(self, requests: list[ReqMeta]) -> KVCacheStoreBatch:
+        """Queue requests followed by a fence that completes after the batch."""
+        save_batch = KVCacheStoreBatch()
+        # Register the entire batch before exposing any request to the send
+        # thread. Otherwise duplicate req_ids could transiently reach zero and
+        # be reported as finished between two chunks in the same batch.
+        for request in requests:
+            self.add_stored_request(request.req_id)
+        for request in requests:
+            self.request_queue.put(request)
+        self.request_queue.put(save_batch)
+        return save_batch
 
     def is_stored_request(self, req_id: str) -> bool:
         with self.done_task_lock:
@@ -662,7 +689,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 self.dec_stored_request(req_id)
         self.request_queue.task_done()
 
-    def _handle_request(self, req_meta: ReqMeta):
+    def _handle_request(self, req_meta: ReqMeta | KVCacheStoreBatch):
+        if isinstance(req_meta, KVCacheStoreBatch):
+            req_meta.done.set()
+            self.request_queue.task_done()
+            return
+
         if self.worker is not None and getattr(self.worker, "tp_mismatch", False):
             req_id = req_meta.req_id
             try:
