@@ -45,6 +45,7 @@ from vllm_ascend.ops.linear_op import get_parallel_op, get_replicated_op
 from vllm_ascend.quantization.tp_weight_switch import TPWeightGatherSpec, TPWeightSwitchMixin
 from vllm_ascend.utils import (
     maybe_trans_nz,
+    update_tensor_inplace,
 )
 
 
@@ -94,7 +95,10 @@ class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            new_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
+            # keep the captured graph's weight reference to the updated weight
+            # during RL weight updates.
+            update_tensor_inplace(layer, "weight_fp32", new_fp32)
         if "conv1d" not in layer.prefix:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
