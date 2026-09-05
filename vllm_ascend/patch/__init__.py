@@ -910,6 +910,20 @@
 #    Future Plan:
 #       Remove this patch when all ops in _forward_core support both Qwen3_5 and Qwen3Next.
 #
+# ** 14b. File: worker/patch_qwen4_exp.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.models.qwen4_exp.nvidia.low_latency_gemm.enable_qwen4_exp_low_latency_gemm`
+#   2. `vllm.models.qwen4_exp.nvidia.qsa.Qwen4ExpQSAAttention._project_qkv_gate`
+#    Why:
+#       Qwen4Exp (Qwen3.8-Flash-Next) ships CUDA-only decode GEMM hooks and reuses
+#       Qwen3Next QKV/RoPE paths for QSA owners. GDN layers already use
+#       `QwenGatedDeltaNetAttention`, patched by `patch_qwen3_5.py`.
+#    How:
+#       No-op the CUDA skinny GEMM hook on NPU and route QSA QKV projection through
+#       the Ascend Qwen3Next RoPE path. QSA/PLE/HyperConnection kernels remain upstream.
+#    Future Plan:
+#       Add dedicated NPU QSA/PLE backends and remove eager fallbacks once validated.
+#
 # ** 15. File: worker/patch_qwen3_dflash.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.qwen3_dflash.DFlashQwen3Model.precompute_and_store_context_kv`
