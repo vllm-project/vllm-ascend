@@ -983,15 +983,6 @@ class TestCoreFunctionality(unittest.TestCase):
         self.thread.remote_te_port = {"remote_engine": {6666: 7777}}
         self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[1024]]
 
-    def _configure_mock_mamba_transfer(self):
-        self.thread.kv_group2layeridx = {0: ({"kv_cache_spec_type": "MambaSpec"}, [0])}
-        self.thread.kv_caches_base_addr["local_engine"][5555] = [[0x1000, 0x2000]]
-        self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000, 0x4000]]}
-        self.thread.block_len_per_addr = [[100, 200]]
-        self.thread.block_stride_per_addr = [[128, 256]]
-        self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1, 1]]}
-        self.thread.remote_block_stride_per_addr["remote_engine"][6666] = [[160, 512]]
-
     @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
     @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
     def test_handle_request(self, mock_send, mock_transfer):
@@ -1035,62 +1026,6 @@ class TestCoreFunctionality(unittest.TestCase):
         self.assertIsInstance(call_args[3], list)
         self.assertEqual(len(call_args[1]), len(call_args[2]))
         self.assertEqual(len(call_args[1]), len(call_args[3]))
-        mock_get_meta.assert_not_called()
-
-    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
-    def test_transfer_mamba_uses_normalized_prompt_state_block(self, mock_get_meta):
-        # Pure metadata/address arithmetic: no NPU tensor or torch.npu call.
-        self._configure_mock_mamba_transfer()
-        self.thread.mamba_cache_mode = "align"
-        self.thread.num_speculative_tokens = 7
-        req = dict(self.test_req)
-        # The aligned allocator returns the running-state destination first,
-        # followed by speculative blocks. The transfer must target block 2.
-        req["local_block_ids"] = [[2, 20, 21, 22, 23, 24, 25, 26]]
-        req["remote_block_ids"] = [[3]]
-        req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)]
-
-        self.thread._transfer_kv_cache_all_groups(req)
-
-        call_args, _ = self.engine.batch_transfer_sync_read.call_args
-        self.assertEqual(call_args[1], [0x1000 + 2 * 128, 0x2000 + 2 * 256])
-        self.assertEqual(call_args[2], [0x3000 + 3 * 160, 0x4000 + 3 * 512])
-        self.assertEqual(call_args[3], [100, 200])
-        mock_get_meta.assert_not_called()
-
-    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
-    def test_transfer_mamba_rejects_unnormalized_remote_blocks(self, mock_get_meta):
-        self._configure_mock_mamba_transfer()
-        self.thread.mamba_cache_mode = "align"
-        req = dict(self.test_req)
-        req["local_block_ids"] = [[2]]
-        # The old token-count based selector crashed for one to three blocks
-        # and silently wrapped for four to seven blocks. Reject both forms.
-        req["remote_block_ids"] = [[3, 4, 5]]
-        req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)]
-
-        with self.assertRaisesRegex(RuntimeError, "exactly one normalized remote state block"):
-            self.thread._transfer_kv_cache_all_groups(req)
-        self.engine.batch_transfer_sync_read.assert_not_called()
-        mock_get_meta.assert_not_called()
-
-    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
-    def test_transfer_mamba_non_aligned_selects_prompt_state_before_draft_blocks(self, mock_get_meta):
-        # Pure metadata/address arithmetic: no NPU tensor or torch.npu call.
-        self._configure_mock_mamba_transfer()
-        self.thread.mamba_cache_mode = "none"
-        self.thread.num_speculative_tokens = 7
-        req = dict(self.test_req)
-        req["local_block_ids"] = [[2, 20, 21, 22, 23, 24, 25, 26]]
-        req["remote_block_ids"] = [[3, 30, 31, 32, 33, 34, 35, 36]]
-        req["group_pulls"] = [GroupPull(group_id=0, remote_tp_offset=0, num_group_pulls=1, is_group_transfer_end=True)]
-
-        self.thread._transfer_kv_cache_all_groups(req)
-
-        call_args, _ = self.engine.batch_transfer_sync_read.call_args
-        self.assertEqual(call_args[1], [0x1000 + 2 * 128, 0x2000 + 2 * 256])
-        self.assertEqual(call_args[2], [0x3000 + 3 * 160, 0x4000 + 3 * 512])
-        self.assertEqual(call_args[3], [100, 200])
         mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
@@ -2089,22 +2024,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
 
         self.assertEqual(block_ids, ([10, 11, 12],))
 
-    def test_get_transfer_block_ids_selects_aligned_prompt_state_block(self):
-        self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
-        self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
-                tokens_per_block=16,
-                blocks_per_window=0,
-                is_state_group=True,
-            )
-        ]
-
-        block_ids = self.scheduler._get_transfer_block_ids(([20, 21, 22, 23, 24],), prompt_len=33)
-
-        self.assertEqual(block_ids, ([22],))
-
-    def test_get_transfer_block_ids_keeps_non_aligned_state_group(self):
-        self.scheduler.vllm_config.cache_config.mamba_cache_mode = "none"
+    def test_get_transfer_block_ids_keeps_state_group(self):
         self.scheduler.group_transfer_info = [
             types.SimpleNamespace(  # type: ignore[list-item]
                 tokens_per_block=16,
@@ -2116,19 +2036,6 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         block_ids = self.scheduler._get_transfer_block_ids(([20, 21, 22, 23],), prompt_len=16)
 
         self.assertEqual(block_ids, ([20, 21, 22, 23],))
-
-    def test_get_transfer_block_ids_rejects_short_aligned_state_metadata(self):
-        self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
-        self.scheduler.group_transfer_info = [
-            types.SimpleNamespace(  # type: ignore[list-item]
-                tokens_per_block=16,
-                blocks_per_window=0,
-                is_state_group=True,
-            )
-        ]
-
-        with self.assertRaisesRegex(RuntimeError, "Invalid aligned Mamba state block metadata"):
-            self.scheduler._get_transfer_block_ids(([20, 21],), prompt_len=48)
 
     def test_get_transfer_block_ids_uses_compressed_prompt_len(self):
         self.scheduler.group_transfer_info = [
@@ -2291,7 +2198,6 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertIn("req_mtp_swa", self.scheduler._reqs_need_send)
 
     def test_request_finished_handles_mtp_swa_and_state_groups_together(self):
-        self.scheduler.vllm_config.cache_config.mamba_cache_mode = "align"
         self.scheduler.group_transfer_info = [
             types.SimpleNamespace(
                 tokens_per_block=16,
@@ -2328,7 +2234,7 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
             (
                 [100, 101, 102, 103],
                 [200, 201, 202],
-                [303],
+                [300, 301, 302, 303, 304],
             ),
         )
         self.assertEqual(params["num_prompt_blocks"], 4)
