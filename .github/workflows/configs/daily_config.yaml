@@ -1,0 +1,53 @@
+# Single source of truth for the Daily Regression pipeline (schedule_daily_regression.yaml).
+#
+# Goal: high-frequency "broken window" detection on main. Each scheduled run
+# executes the SAME fast subset so any breakage is surfaced within ~3h.
+# All tests are pytest paths curated from tests/e2e/pull_request/ (PR E2E
+# smoke) and tests/e2e/nightly/single_node/ops/ (nightly high-freq subset).
+# Durations are taken from the real `estimated_times` in test_config.yaml so
+# every slot stays well under 90 min (tests + ~20 min checkout+install+compile overhead).
+#
+# -- Maintenance model --------------------------------------------------
+# This file is a LIVING config maintained by build engineers. The test
+# selection is NOT fixed -- it should be regularly refreshed based on:
+#   1. Recent high-frequency failure cases (regression-prone tests that
+#      break repeatedly on main should be promoted here for tight gating).
+#   2. Hot-path coverage of actively-developed modules (attention, ops,
+#      distributed, spec-decode, quant, MoE routing).
+#   3. Per-slot runtime budget (<90 min). Trim when a slot overruns; the
+#      `estimated_times` in test_config.yaml are the source of truth.
+#
+# Cadence: review biweekly (or after any major regression) and trim/append
+# entries below. Adding a `- name:` entry automatically adds a matrix job
+# in the next daily run -- no workflow edit needed.
+# -----------------------------------------------------------------------
+
+daily:
+  # --- A2: nightly high‑freq subset (pytest‑driven, runs on a2b3‑1) ---
+  a2_nightly_hf:
+    - name: Qwen3.5-27B-w8a8-A2
+      os: linux-aarch64-a2b3-2
+      config_file_path: Qwen3.5-27B-w8a8-A2.yaml
+      changed_files:
+        - tests/
+        - vllm_ascend/
+    - name: a2-nightly-hf
+      os: linux-aarch64-a2b3-1
+      changed_files:
+        - tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+        - vllm_ascend/
+        - .github/workflows/configs/daily_config.yaml
+      tests: >-
+        tests/e2e/nightly/single_node/ops/singlecard_ops/test_fused_moe.py
+
+  # --- A3: nightly high‑freq subset (pytest‑driven, runs on a3‑2) ---
+  a3_nightly_hf:
+    - name: a3-nightly-hf
+      os: linux-aarch64-a3-2
+      changed_files:
+        - tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
+        - tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
+        - vllm_ascend/
+      tests: >-
+        tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_w4a8.py
+        tests/e2e/nightly/single_node/ops/multicard_ops_a3/test_dispatch_ffn_combine_bf16.py
