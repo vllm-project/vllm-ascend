@@ -358,7 +358,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             draft_index,
         )
 
-        if get_ascend_config().c8_enable_reshape_optim:
+        if get_ascend_config().c8_reshape_optim_enabled:
             torch.ops._C_ascend.store_kv_block_metadata(
                 slot_mapping,
                 common_attn_metadata.group_len,
@@ -1266,7 +1266,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _use_li_c8_reshape_optim(self) -> bool:
         """Whether this layer can use the LI C8 cache-write operator."""
-        return self.enable_sparse_li_c8 and get_ascend_config().c8_enable_reshape_optim
+        return self.enable_sparse_li_c8 and get_ascend_config().c8_reshape_optim_enabled
 
     def _execute_sparse_flash_attention_process(
         self,

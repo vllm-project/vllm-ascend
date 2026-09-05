@@ -468,7 +468,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8": true,"c8_enable_reshape_optim":true,"enable_fused_mc2":1}' \
+            --additional-config '{"enable_dsa_cp":true,"enable_sparse_li_c8": true,"enable_fused_mc2":1}' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \
@@ -535,7 +535,7 @@ Before you start, please
             --seed 1024 \
             --served-model-name glm-5 \
             --max-model-len 133120 \
-            --additional-config '{"enable_dsa_cp":true, "enable_sparse_li_c8": true,"c8_enable_reshape_optim":true,"enable_fused_mc2":1}' \
+            --additional-config '{"enable_dsa_cp":true, "enable_sparse_li_c8": true,"enable_fused_mc2":1}' \
             --max-num-batched-tokens 8192 \
             --trust-remote-code \
             --max-num-seqs 64 \

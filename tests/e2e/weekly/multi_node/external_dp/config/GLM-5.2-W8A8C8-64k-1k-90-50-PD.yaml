@@ -88,7 +88,7 @@ templates:
       - --max-model-len
       - "133120"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code
@@ -152,7 +152,7 @@ templates:
       - --max-model-len
       - "133120"
       - --additional-config
-      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "c8_enable_reshape_optim":true,"enable_fused_mc2":0}'
+      - '{"ascend_compilation_config": {"fuse_muls_add": true},"recompute_scheduler_enable" : false,"multistream_overlap_shared_expert": true, "enable_dsa_cp":true,"enable_sparse_sfa_c8": false, "enable_sparse_li_c8": true, "enable_fused_mc2":0}'
       - --max-num-batched-tokens
       - "8192"
       - --trust-remote-code

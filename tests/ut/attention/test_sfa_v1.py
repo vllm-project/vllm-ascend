@@ -258,9 +258,9 @@ class TestAscendSFACacheComposition(TestBase):
                     self.assertIs(actual_tensor, expected_tensor)
 
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
-    def test_li_c8_reshape_optim_requires_layer_li_c8(self, mock_get_ascend_config):
+    def test_li_c8_reshape_optim_uses_initialized_config(self, mock_get_ascend_config):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        mock_get_ascend_config.return_value.c8_enable_reshape_optim = True
+        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
 
         impl.enable_sparse_li_c8 = False
         self.assertFalse(impl._use_li_c8_reshape_optim())
@@ -268,7 +268,7 @@ class TestAscendSFACacheComposition(TestBase):
         impl.enable_sparse_li_c8 = True
         self.assertTrue(impl._use_li_c8_reshape_optim())
 
-        mock_get_ascend_config.return_value.c8_enable_reshape_optim = False
+        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
         self.assertFalse(impl._use_li_c8_reshape_optim())
 
     @patch(
@@ -522,7 +522,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher.start()
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.c8_enable_reshape_optim = False
+        mock_ascend_config.c8_reshape_optim_enabled = False
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_shared_expert_dp = False
         self.ascend_config_patcher = patch(
@@ -707,7 +707,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
-    def test_ascend_sfa_metadata_builder_build_with_c8_reshape_optim(
+    def test_ascend_sfa_metadata_builder_automatically_builds_li_c8_metadata_on_prefill_node(
         self,
         store_kv_block_metadata,
         mock_get_cos_and_sin_mla,
@@ -729,14 +729,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_role="kv_producer",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        )
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         device = torch.device("cpu")
-
-        builder = AscendSFAMetadataBuilder(
-            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
-        )
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
@@ -759,8 +760,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         with patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as mock_get_ascend_config:
             mock_ascend_config = MagicMock()
-            mock_ascend_config.c8_enable_reshape_optim = True
+            mock_ascend_config.c8_reshape_optim_enabled = True
             mock_get_ascend_config.return_value = mock_ascend_config
+
+            builder = AscendSFAMetadataBuilder(
+                kv_cache_spec=kv_cache_spec,
+                layer_names=layer_names,
+                vllm_config=vllm_config,
+                device=device,
+            )
 
             metadata = builder.build(
                 common_prefix_len=10,
