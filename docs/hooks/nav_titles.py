@@ -197,6 +197,10 @@ TITLES = {
         "zh": "动态分块流水线并行",
     },
     "user_guide/feature_guide/epd_disaggregation.md": {"en": "EPD Disaggregation", "zh": "EPD 分离"},
+    "user_guide/feature_guide/encoder_cache_cpu_offload.md": {
+        "en": "Encoder Cache CPU Offload",
+        "zh": "编码器缓存 CPU 卸载",
+    },
     "user_guide/feature_guide/expert_parallelism_load_balancer.md": {
         "en": "Expert Parallelism Load Balancer",
         "zh": "专家并行负载均衡",
