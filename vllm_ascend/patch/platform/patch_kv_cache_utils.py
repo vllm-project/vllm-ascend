@@ -81,6 +81,23 @@ def _ascend_resolve_kv_cache_block_sizes(
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
 
+    # In Mamba "none" mode, the recurrent group owns one full-sequence
+    # block while attention groups retain the regular cache block size. The
+    # upstream fallback uses the LCM for both scheduling and hashing, which
+    # makes the hash block larger than an attention block and violates the
+    # coordinator's divisibility invariant. Keep the LCM for scheduling, but
+    # hash at the GCD shared by every group.
+    connector_enabled = vllm_config.kv_transfer_config is not None
+    if cache_config.enable_prefix_caching or connector_enabled:
+        group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+        has_divergent_mamba_group = any(
+            isinstance(g.kv_cache_spec, MambaSpec)
+            and g.kv_cache_spec.block_size != cache_config.block_size
+            for g in groups
+        )
+        if has_divergent_mamba_group:
+            return math.lcm(*group_block_sizes), math.gcd(*group_block_sizes)
+
     return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
 
 
