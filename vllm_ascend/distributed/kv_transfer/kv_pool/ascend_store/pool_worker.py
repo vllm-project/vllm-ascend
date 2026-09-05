@@ -913,13 +913,11 @@ class KVPoolWorker:
                 def chunk_filter(start: int, group_id=group_id, load_masks=load_masks) -> bool:
                     return self.token_database.mask_allows_chunk(load_masks, group_id, start)
 
-                for (
-                    start,
-                    end,
-                    key,
-                    _block_hash,
-                    block_id,
-                ) in self.token_database.process_token_key_strings_with_block_ids(
+                group_starts: list[int] = []
+                group_ends: list[int] = []
+                group_keys: list[str] = []
+                group_block_ids: list[int] = []
+                token_iter = self.token_database.process_token_key_strings_with_block_ids(
                     token_len,
                     request.block_hashes,
                     block_ids,
@@ -927,18 +925,22 @@ class KVPoolWorker:
                     kv_cache_group_id=group_id,
                     skip_null_blocks=skip_null,
                     chunk_filter=chunk_filter,
-                ):
-                    addr, size, block_id = self.token_database.prepare_value(
-                        start,
-                        end,
-                        block_ids,
-                        kv_cache_group_id=group_id,
-                        block_id=block_id,
-                    )
-                    key_list.append(key)
-                    addr_list.append(addr)
-                    size_list.append(size)
-                    block_id_list.append(block_id)
+                )
+                for start, end, key, _block_hash, block_id in token_iter:
+                    group_starts.append(start)
+                    group_ends.append(end)
+                    group_keys.append(key)
+                    group_block_ids.append(block_id)
+                group_addrs, group_sizes = self.token_database.prepare_values(
+                    group_starts,
+                    group_ends,
+                    group_block_ids,
+                    kv_cache_group_id=group_id,
+                )
+                key_list.extend(group_keys)
+                addr_list.extend(group_addrs)
+                size_list.extend(group_sizes)
+                block_id_list.extend(group_block_ids)
             if not key_list:
                 continue
             key_list_c = _circular_shift(key_list, self.tp_rank % len(key_list))
@@ -1921,15 +1923,17 @@ class KVPoolWorker:
         group_addrs = self.group_kv_caches_base_addr[0]
         group_block_len = self.group_block_len[0]
         group_block_stride = self.group_block_stride[0]
-        for base_addr, entry_block_len, entry_block_stride in zip(
-            group_addrs, group_block_len, group_block_stride, strict=True
-        ):
-            entry_per_token_bytes = entry_block_len // self.block_size
-            block_base = base_addr + block_id * entry_block_stride
-            for t in range(token_count):
-                addrs.append(block_base + t * entry_per_token_bytes + head_offset_bytes)
-                sizes.append(self.sub_size_bytes)
-        return addrs, sizes
+        if not group_addrs or token_count <= 0:
+            return addrs, sizes
+
+        base_addrs = np.asarray(group_addrs, dtype=np.int64)
+        block_lens = np.asarray(group_block_len, dtype=np.int64)
+        block_strides = np.asarray(group_block_stride, dtype=np.int64)
+        entry_per_token_bytes = block_lens // self.block_size
+        block_bases = base_addrs + block_id * block_strides + head_offset_bytes
+        token_offsets = np.arange(token_count, dtype=np.int64)[None, :] * entry_per_token_bytes[:, None]
+        addrs_array = block_bases[:, None] + token_offsets
+        return addrs_array.ravel().tolist(), [self.sub_size_bytes] * addrs_array.size
 
     def _build_tp_mismatch_keys_and_addrs(
         self,
@@ -1949,10 +1953,7 @@ class KVPoolWorker:
         all_sizes: list[list[int]] = []
         all_block_ids: list[int] = []
         for start, end, base_key, _block_hash, block_id in self.token_database.process_token_key_strings_with_block_ids(
-            token_len,
-            block_hashes,
-            block_ids,
-            mask_num=mask_num,
+            token_len, block_hashes, block_ids, mask_num=mask_num
         ):
             token_count = end - start
             for sub_idx in range(self.num_sub_keys):
