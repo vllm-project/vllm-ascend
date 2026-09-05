@@ -44,6 +44,9 @@ import vllm_ascend.patch.platform.patch_dyntra_lb_core  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
 
+# Must follow patch_speculative_config: it chains that module's __post_init__.
+import vllm_ascend.patch.platform.patch_uno_speculative_config  # noqa
+
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa

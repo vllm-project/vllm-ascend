@@ -31,6 +31,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.uno_proposer import AscendUnoProposer
 
 
 def get_spec_decode_method(method, vllm_config, device, runner):
@@ -44,6 +45,8 @@ def get_spec_decode_method(method, vllm_config, device, runner):
         return AscendMedusaProposer(vllm_config, device)
     elif method == "dspark":
         return AscendDSparkProposer(vllm_config, device, runner)
+    elif method == "uno":
+        return AscendUnoProposer(vllm_config, device, runner)
     elif method in ("eagle", "eagle3", "mtp"):
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None and speculative_config.use_step3p5_mtp():

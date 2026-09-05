@@ -843,6 +843,15 @@ class NPUWorker(WorkerBase):
             except Exception as e:
                 logger.warning("Bind cpus failed in rank%s: %s Skip binding cpu.", self.local_rank, e)
 
+        # Warmup and graph capture both end by removing every LoRA adapter, and
+        # UNO's draft adapter is engine-internal so no request will ever bring
+        # it back. Re-register it here, while a failure is still a failed server
+        # start rather than a crash inside the first decode step.
+        # `NPUModelRunnerV2` is a separate class that does not implement UNO.
+        reload_uno_adapter = getattr(self.model_runner, "reload_uno_draft_adapter", None)
+        if reload_uno_adapter is not None:
+            reload_uno_adapter()
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)

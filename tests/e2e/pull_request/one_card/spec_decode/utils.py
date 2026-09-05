@@ -33,6 +33,15 @@ DSPARK = {
     }
 }
 
+# UNO ships one bundle: the frozen verifier at the repository root and the gated
+# draft LoRA under adapter/. There is no separate draft checkpoint.
+UNO = {
+    "uno": {
+        "main": "s-sahoo/uno-qwen3-8B",
+        "adapter": "s-sahoo/uno-qwen3-8B/adapter",
+    }
+}
+
 BASELINES = {
     "eagle": [0.74, 0.44, 0.29],
     "eagle3": [0.68, 0.40, 0.18],
@@ -47,6 +56,10 @@ BASELINES = {
     # 3-6 exceed the no-window "dspark" baseline because the single-block
     # drafter relies on the most recent context, which the window keeps.
     "dspark_sliding_window": [0.88, 0.88, 0.88, 0.88, 0.75, 0.75, 0.62],
+    # No 'uno' entry: its acceptance profile has not been measured on CI
+    # hardware yet. test_uno.py asserts the structural invariants instead
+    # (position-0 acceptance ~1.0, greedy parity with AR decoding), which
+    # are derivable from the algorithm rather than tuned to a machine.
 }
 
 

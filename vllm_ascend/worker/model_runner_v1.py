@@ -169,6 +169,7 @@ from vllm_ascend.spec_decode.ngram_proposer import AscendNgramProposer
 from vllm_ascend.spec_decode.ngram_proposer_npu import AscendNgramProposerNPU
 from vllm_ascend.spec_decode.step3p5 import AscendStep3p5MTPProposer
 from vllm_ascend.spec_decode.suffix_proposer import AscendSuffixDecodingProposer
+from vllm_ascend.spec_decode.uno_proposer import AscendUnoProposer, log_uno_configuration, uno_owns_lora_slot
 from vllm_ascend.spec_decode.utils import (
     correct_optimistic_seq_lens_cpu,
     update_num_computed_tokens_for_batch_change,
@@ -648,6 +649,7 @@ class NPUModelRunner(GPUModelRunner):
             | AscendSuffixDecodingProposer
             | AscendMedusaProposer
             | AscendExtractHiddenStatesProposer
+            | AscendUnoProposer
             | None
         ) = None
         self.actual_seq_lengths_q: list[int] = []
@@ -667,6 +669,11 @@ class NPUModelRunner(GPUModelRunner):
                 elif self.speculative_config.use_dspark():
                     assert isinstance(self.drafter, AscendDSparkProposer)
                     self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.method == "uno":
+                    assert isinstance(self.drafter, AscendUnoProposer)
+                    # UNO re-runs the whole target for its draft pass, so it
+                    # needs no auxiliary hidden states.
+                    log_uno_configuration(self.speculative_config, self.model_config, self.max_num_reqs)
                 self.rejection_sampler = AscendRejectionSampler(
                     self.sampler, self.speculative_config, self.device
                 )
@@ -1815,6 +1822,26 @@ class NPUModelRunner(GPUModelRunner):
                 self._num_valid_draft_tokens,
                 batch_size,
             )
+        elif isinstance(self.drafter, AscendUnoProposer):
+            # UNO's draft pass is a second forward of the *target* model with a
+            # gated LoRA, so it wants exactly what the verify step already
+            # built: the spec-decode common attention metadata (for the block
+            # table and the pre-acceptance frontier) and the GPU-side sampled
+            # tokens (for the seed, without a host sync).
+            assert isinstance(valid_sampled_token_ids, torch.Tensor), (
+                "UNO requires the padded drafter batch; sampled_token_ids must be a device tensor."
+            )
+            draft_token_ids = self.drafter.propose(
+                num_speculative_tokens=scheduler_output.num_spec_tokens_to_schedule,
+                sampled_token_ids=valid_sampled_token_ids,
+                common_attn_metadata=spec_decode_common_attn_metadata,
+                sampling_metadata=sampling_metadata,
+                spec_decode_metadata=spec_decode_metadata,
+            )
+            draft_probs = self.drafter.take_last_draft_probs()
+            if draft_probs is not None:
+                self._draft_probs = draft_probs
+                self._draft_prob_req_ids = self.input_batch.req_ids.copy()
         elif isinstance(self.drafter, AscendMedusaProposer):
             draft_token_ids = self.drafter.propose(
                 # Dynamic SD: forward the scheduled K (equals the configured
@@ -2615,6 +2642,11 @@ class NPUModelRunner(GPUModelRunner):
                 or self.speculative_config.uses_draft_model()
                 or self.speculative_config.uses_extract_hidden_states()
                 or self.speculative_config.use_ngram_gpu()
+                # UNO drafts on device: its seed token and its post-acceptance
+                # frontier both come from the GPU sampled-token tensor, so it
+                # must run before the bookkeeping sync like the other
+                # device-side drafters.
+                or self.speculative_config.method == "uno"
             ) and not self.speculative_config.disable_padded_drafter_batch
             early_pp_padded_drafter = (
                 use_pp_spec_decode
@@ -3767,7 +3799,20 @@ class NPUModelRunner(GPUModelRunner):
             # TODO: The next line is a temporary workaround
             # to fix the accuracy issue of test_llama32_lora.py,
             # which is introduced by vllm-project/vllm#32005
-            num_active_loras=(self.lora_config.max_loras if self.lora_config is not None else num_active_loras),
+            #
+            # The workaround forces the dummy adapters on so that the LoRA ops
+            # are always present in a captured graph, where the `-1` sentinel
+            # then routes rows back to base weights. UNO must not take it: its
+            # LoRA is engine-internal, no request can select one, and the ops
+            # baked into a graph captured with an adapter live would keep
+            # applying it on the verify forward, which has to run on base
+            # weights. `_get_lora_cases` is patched to match, so the only case
+            # captured for UNO is the no-LoRA one.
+            num_active_loras=(
+                num_active_loras
+                if uno_owns_lora_slot(self.speculative_config)
+                else (self.lora_config.max_loras if self.lora_config is not None else num_active_loras)
+            ),
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_padded <= self.max_num_tokens
@@ -4033,6 +4078,19 @@ class NPUModelRunner(GPUModelRunner):
 
             if self.lora_config:
                 self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
+                if isinstance(self.drafter, AscendUnoProposer):
+                    # UNO's gated draft adapter has to exist before the first
+                    # decode step. It cannot be loaded in the drafter's own
+                    # `load_model` (which runs above, before the LoRA manager
+                    # exists), and loading it lazily inside `propose` would stall
+                    # that step and turn a bad adapter path into an engine-core
+                    # crash instead of a failed server start.
+                    #
+                    # This registration does not survive warmup -- every dummy
+                    # run ends in `remove_all_adapters()` -- so the worker calls
+                    # `reload_uno_draft_adapter()` again once warmup is done.
+                    # Doing it here as well is what makes a bad path fail now.
+                    self.drafter.load_lora_adapter()
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB", m.consumed_memory / float(2**30))
 
@@ -5458,13 +5516,70 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_aclgraph:
             set_graph_params(capture_sizes)
             if self.speculative_config:
-                set_draft_graph_params(capture_sizes)
+                draft_capture_sizes = (
+                    self.drafter.graph_capture_sizes(capture_sizes)
+                    if isinstance(self.drafter, AscendUnoProposer)
+                    else capture_sizes
+                )
+                set_draft_graph_params(draft_capture_sizes)
+
+    def add_lora(self, lora_request) -> bool:
+        """Refuse request-selectable adapters while UNO owns the LoRA slot.
+
+        Rejecting `--enable-lora` at config time is not enough: `add_lora` is
+        also reachable through the runtime API (`collective_rpc("add_lora")`,
+        `LLM.generate(lora_request=...)`). A request adapter here would be
+        applied to the *verify* forward, which has to run on base weights, and
+        at `max_loras=1` it would evict UNO's own adapter. It would also break
+        the assumption the aclgraph capture rests on -- graphs are captured with
+        LoRA switched off entirely, so a request adapter would simply never be
+        applied on a captured decode step, silently.
+        """
+        if uno_owns_lora_slot(self.speculative_config):
+            raise NotImplementedError(
+                "UNO speculative decoding owns the engine's single LoRA slot; "
+                "request-selectable LoRA adapters cannot be added while it is enabled."
+            )
+        return super().add_lora(lora_request)
+
+    def reload_uno_draft_adapter(self) -> None:
+        """Re-register UNO's draft adapter after warmup evicted it.
+
+        Every dummy run exits through `maybe_setup_dummy_loras`, which calls
+        `remove_all_adapters()`, and `_capture_cudagraphs` does it once more.
+        Nothing re-adds UNO's adapter, because no *request* ever names it -- so
+        without this the first `propose` would re-read it from disk (or the hub)
+        in the middle of a decode step. Called by the worker at the end of
+        `compile_or_warm_up_model`; a no-op for every other configuration.
+        """
+        drafter = getattr(self, "drafter", None)
+        if isinstance(drafter, AscendUnoProposer):
+            drafter.load_lora_adapter()
 
     def capture_model(self) -> int:
         """Capture NPU graphs and return actual graph pool memory bytes consumed."""
         parent_module_name = _get_gpu_model_runner_module_name(self)
         with _torch_cuda_wrapper(), _replace_gpu_model_runner_function_wrapper(parent_module_name):
             cuda_graph_size = GPUModelRunner.capture_model(self)
+
+        if (
+            isinstance(self.drafter, AscendUnoProposer)
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        ):
+            # Target capture evicts warmup LoRAs. Record the gated draft only
+            # after that lifecycle finishes, with separate F-row graph buckets.
+            from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+
+            torch.npu.synchronize()
+            free_before = torch.npu.mem_get_info()[0]
+            set_cudagraph_capturing_enabled(True)
+            try:
+                with graph_capture(self.device):
+                    self.drafter.capture_model()
+                torch.npu.synchronize()
+            finally:
+                set_cudagraph_capturing_enabled(False)
+            cuda_graph_size += max(0, free_before - torch.npu.mem_get_info()[0])
 
         mgr = self.encoder_cudagraph_manager
         if mgr is not None and self.update_stream is not None:

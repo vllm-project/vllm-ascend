@@ -52,6 +52,11 @@ def register_model():
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"
     )
     ModelRegistry.register_model("Qwen3DSparkModel", "vllm_ascend.models.qwen3_dspark:AscendQwen3DSparkForCausalLM")
+    # UNO bundles ship their frozen verifier as an SDAR checkpoint, which is
+    # Qwen3 for inference purposes. The config class registered in
+    # vllm_ascend/models/sdar.py already rewrites `architectures`; this alias
+    # is a safety net for configs that reach the registry unrewritten.
+    ModelRegistry.register_model("SDARForCausalLM", "vllm.model_executor.models.qwen3:Qwen3ForCausalLM")
     ModelRegistry.register_model(
         "DFlash2DraftModel",
         "vllm_ascend.models.qwen3_dflash2:DFlash2Qwen3ForCausalLM",

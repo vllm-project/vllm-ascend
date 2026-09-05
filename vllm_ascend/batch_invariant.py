@@ -67,9 +67,10 @@ def reduce_sum(x: torch.Tensor, dim: int | None = None, keepdim: bool = False) -
     doesn't require it, so we set dim to -1 by default if dim is None and x.dim()==1.
     """
     dim = -1 if dim is None and x.dim() == 1 else dim
-    if x.device.type == "npu" and dim is not None:
+    if x.device.type == "npu" and dim is not None and x.dtype in (torch.float16, torch.float32, torch.bfloat16):
         return torch.ops.batch_invariant_ops.npu_reduce_sum_batch_invariant(x, dim, keepdim)
-    # cpu tensor can't use npu_reduce_sum_batch_invariant, so we use torch.sum instead.
+    # The custom operator only accepts these floating dtypes. In particular,
+    # logprob ranking sums a boolean comparison and needs native int64 promotion.
     return torch_sum(x, dim, keepdim)
 
 
