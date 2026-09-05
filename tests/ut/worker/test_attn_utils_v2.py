@@ -496,20 +496,34 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
 
 
 class _PrefillStateBuilder:
-    def build(self, common_prefix_len, common_attn_metadata):
+    def __init__(self):
+        self.extra_kwargs = None
+
+    def build(self, common_prefix_len, common_attn_metadata, **kwargs):
         assert common_prefix_len == 0
+        self.extra_kwargs = kwargs
         return common_attn_metadata.is_prefilling
 
 
-def test_build_attn_metadata_propagates_prefill_state():
+class _CaptureStateBuilder(_PrefillStateBuilder):
+    def build_for_cudagraph_capture(self, common_attn_metadata, **kwargs):
+        self.extra_kwargs = kwargs
+        return common_attn_metadata.is_prefilling
+
+
+@pytest.mark.parametrize("for_cudagraph_capture", [False, True])
+def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for_cudagraph_capture):
+    monkeypatch.setattr(attn_utils, "AscendSFAMetadataBuilder", _PrefillStateBuilder)
+    builder = _CaptureStateBuilder() if for_cudagraph_capture else _PrefillStateBuilder()
     attn_group = SimpleNamespace(
         layer_names=["layer.0"],
-        get_metadata_builder=lambda _: _PrefillStateBuilder(),
+        get_metadata_builder=lambda _: builder,
     )
     kv_cache_config = SimpleNamespace(
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())],
     )
     is_prefilling = torch.tensor([True])
+    pcp_context = object()
 
     metadata = attn_utils.build_attn_metadata(
         attn_groups=[[attn_group]],
@@ -524,8 +538,14 @@ def test_build_attn_metadata_propagates_prefill_state():
         slot_mappings=(torch.zeros(1, dtype=torch.int64),),
         kv_cache_config=kv_cache_config,
         is_prefilling=is_prefilling,
+        pcp_context=pcp_context,
         seq_lens_np=np.array([1], dtype=np.int32),
         positions=torch.tensor([0], dtype=torch.int64),
+        for_cudagraph_capture=for_cudagraph_capture,
     )
 
     assert metadata["layer.0"] is is_prefilling
+    assert builder.extra_kwargs == {
+        "pcp_context": pcp_context,
+        "pcp_cache_group_idx": 0,
+    }

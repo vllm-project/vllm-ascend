@@ -283,6 +283,8 @@ def test_attention_context_collects_global_pcp_data():
     manager._global_batch_slot_mappings = global_slot_mappings
     hidden_restore_idx = torch.arange(input_batch.num_tokens, dtype=torch.int64)
     manager._hidden_restore_idx = hidden_restore_idx
+    manager._padded_gather_idx = None
+    manager._gathered_kv_write_mask = None
 
     actual = manager.build_attention_context()
 
@@ -293,6 +295,8 @@ def test_attention_context_collects_global_pcp_data():
         global_slot_mappings[:, : input_batch.num_tokens_after_padding],
     )
     assert actual.hidden_restore_idx is hidden_restore_idx
+    assert actual.padded_gather_idx is None
+    assert actual.gathered_kv_write_mask is None
     gather_block_tables.assert_called_once_with(
         input_batch.idx_mapping,
         input_batch.num_reqs_after_padding,
@@ -635,8 +639,6 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
         hidden_states=None,
         aux_hidden_states=None,
         finished_req_ids=set(),
-        ec_connector_output=None,
-        routed_experts=None,
     )
     grammar_output = object()
     expected_output = object()
@@ -652,3 +654,54 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     assert runner.execute_model_state.input_batch is expected_batch
     assert actual_output is expected_output
     parent_sample_tokens.assert_called_once_with(grammar_output)
+
+
+def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    manager.vllm_config = object()
+    manager._input_buffers = AscendInputBuffers(
+        max_num_reqs=8,
+        max_num_tokens=16,
+        device=torch.device("cpu"),
+    )
+    manager._input_buffers.dcp_local_seq_lens.fill_(777)
+    manager._input_buffers.dcp_local_seq_lens[:2].copy_(torch.tensor([4, 5], dtype=torch.int32))
+    manager._hidden_restore_idx = torch.arange(8, dtype=torch.int64)
+
+    local_batch = _make_local_pcp_batch()
+    local_batch.num_reqs = 2
+    local_batch.num_tokens = 6
+    local_batch.num_tokens_after_padding = 6
+    local_batch.is_prefilling_np = np.array([False, False])
+    local_batch.dcp_local_seq_lens = manager._input_buffers.dcp_local_seq_lens[:2]
+    global_batch = SimpleNamespace(
+        num_draft_tokens=0,
+        num_tokens=6,
+        num_tokens_after_padding=8,
+        num_reqs_after_padding=8,
+        query_start_loc_np=np.array([0, 1, 2, 2, 2, 2, 2, 2, 2], dtype=np.int32),
+        is_prefilling_np=np.array([False, False]),
+    )
+
+    with (
+        patch.object(
+            vllm_model_runner.pcp.PCPManager,
+            "partition_batch",
+            return_value=local_batch,
+        ),
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
+            return_value=object(),
+        ),
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu",
+            side_effect=_mock_async_copy_to_cpu,
+        ),
+    ):
+        result = manager.partition_batch(global_batch)
+
+    assert result.dcp_local_seq_lens is not None
+    torch.testing.assert_close(
+        result.dcp_local_seq_lens,
+        torch.tensor([4, 5, 0, 0, 0, 0, 0, 0], dtype=torch.int32),
+    )

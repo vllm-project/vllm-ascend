@@ -113,7 +113,7 @@ class AscendSFABackend(AttentionBackend):
             return AscendSFAKVOffloadMetadataBuilder
         from vllm_ascend.attention.context_parallel.sfa_cp import resolve_sfa_metadata_builder
 
-        return resolve_sfa_metadata_builder()
+        return resolve_sfa_metadata_builder(get_current_vllm_config())
 
     @staticmethod
     def get_kv_cache_shape(
@@ -386,6 +386,17 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             group_key_idx=common_attn_metadata.group_key_idx,
             group_key_cache_idx=common_attn_metadata.group_key_cache_idx,
             **parallel_metadata,
+        )
+
+    def build_for_cudagraph_capture(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        **kwargs: Any,
+    ) -> AscendSFAMetadata:
+        return self.build(
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **kwargs,
         )
 
     def build_for_graph_capture(
