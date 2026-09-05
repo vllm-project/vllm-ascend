@@ -28,7 +28,7 @@ from tests.e2e.common.kv_pool.config import MemcacheKVPoolConfig
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.nightly.single_node.models.scripts.kv_pool_runtime import SingleNodeMemcacheManager
 
-MODEL = "Qwen/Qwen3.5-0.8B"
+MODEL = "Qwen/Qwen3.5-27B"
 TRANSFER_TIMEOUT_SECONDS = 60
 
 
@@ -98,7 +98,7 @@ def test_ascend_store_multiprocess_memcache_roundtrip(monkeypatch) -> None:
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
             max_model_len=1024,
-            gpu_memory_utilization=0.5,
+            gpu_memory_utilization=0.9,
             enable_prefix_caching=True,
             enforce_eager=True,
             kv_transfer_config=kv_transfer_config,
