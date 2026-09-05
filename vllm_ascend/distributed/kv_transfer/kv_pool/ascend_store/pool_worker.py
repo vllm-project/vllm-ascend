@@ -2038,19 +2038,23 @@ class KVPoolWorker:
                     if isinstance(req_meta.original_block_size, list)
                     else req_meta.original_block_size
                 )
+                group_block_size = self.token_database.get_block_size(0)
+                group_block_hashes = get_block_hashes(
+                    req_meta.block_hashes,
+                    group_block_size,
+                    getattr(self.token_database, "hash_block_size", group_block_size),
+                )
+                all_hashes = [maybe_convert_block_hash(bh) for bh in group_block_hashes]
                 stored_events: list[BlockStored] = []
-                prev_key = None
-                for idx, (start, end, _base_key) in enumerate(
-                    self.token_database.process_tokens(token_len, req_meta.block_hashes)
-                ):
-                    if idx >= len(req_meta.block_hashes):
-                        break
-                    block_hash = maybe_convert_block_hash(req_meta.block_hashes[idx])
+                for start, end, _base_key in self.token_database.process_tokens(token_len, req_meta.block_hashes):
+                    block_idx = start // group_block_size
+                    if block_idx >= len(all_hashes):
+                        continue
                     token_ids = req_meta.token_ids[start:end] if req_meta.token_ids is not None else None
                     stored_events.append(
                         BlockStored(
-                            block_hashes=[block_hash],
-                            parent_block_hash=prev_key,
+                            block_hashes=[all_hashes[block_idx]],
+                            parent_block_hash=all_hashes[block_idx - 1] if block_idx > 0 else None,
                             token_ids=token_ids,
                             block_size=event_block_size,
                             lora_id=None,
@@ -2058,7 +2062,6 @@ class KVPoolWorker:
                             lora_name=None,
                         )
                     )
-                    prev_key = block_hash
                 if stored_events:
                     send_thread.update_kv_event(stored_events)  # type: ignore[attr-defined]
         finally:
