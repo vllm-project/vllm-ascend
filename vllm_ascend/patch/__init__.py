@@ -34,7 +34,8 @@
 # token-input reconstruction. Installation runs after platform/config imports,
 # rebuilds nested request schemas, and skips versions with native is_embed.
 # Remove this compatibility patch once every supported vLLM version preserves
-# the mask. The request-local input builder leaves concurrent requests isolated.
+# the mask. The placeholder builder and serving method follow the upstream fix;
+# no function cloning or request-scoped module-global overrides are used.
 # --------------------------------
 # * Platform Patch:
 # =================
