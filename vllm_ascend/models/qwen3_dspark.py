@@ -25,6 +25,19 @@ TARGET_LM_HEAD_WEIGHT_NAMES = (
 )
 
 
+def _get_draft_rotation_path(vllm_config: VllmConfig, config) -> Path | None:
+    injected_rotation_path = getattr(
+        config,
+        "_ascend_target_rotation_path",
+        None,
+    )
+    if injected_rotation_path is not None:
+        return Path(injected_rotation_path)
+    if vllm_config.quant_config is None:
+        return None
+    return get_rotation_path(vllm_config)
+
+
 # Process the first linear weight with rotation matrix, if the target model uses rotary quantization
 def process_weight(linear_weight: torch.Tensor, rotation_weight: torch.Tensor):
     assert linear_weight.shape[1] % rotation_weight.shape[0] == 0, (
@@ -69,6 +82,10 @@ class DSparkConfidenceHead(nn.Module):
 
 
 class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
+    # Qwen3 GQA DSpark consumes the materialized input to each selected
+    # target layer instead of Kimi K3's raw/prefix-sum residual stream.
+    dspark_aux_hidden_state_format = "materialized"
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -80,7 +97,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 config=config,
                 prefix=maybe_prefix(model_prefix, "confidence_head"),
             )
-        self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
+        self.rotation_path = _get_draft_rotation_path(vllm_config, self.config)
         self.target_model_path = Path(vllm_config.model_config.model)
 
     @staticmethod

@@ -225,15 +225,24 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+class AscendFullAttentionManager(FullAttentionManager):
+    """Keep custom Ascend attention specs in KV block-zeroing lifecycle."""
+
+    def __init__(self, kv_cache_spec: KVCacheSpec, **kwargs) -> None:
+        super().__init__(kv_cache_spec, **kwargs)
+        # Upstream's exact-type whitelist omits Ascend MLA/indexer specs.
+        self._record_new_block_ids = kwargs.get("needs_kv_cache_zeroing", False)
+
+
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
-        manager_class=FullAttentionManager,
+        manager_class=AscendFullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSFAIndexerCacheSpec,
-        manager_class=FullAttentionManager,
+        manager_class=AscendFullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )
     KVCacheSpecRegistry.register(

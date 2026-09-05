@@ -27,6 +27,7 @@ def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
     assert normalized.architectures == ["Qwen3DSparkModel"]
     assert normalized.mask_token_id == 163824
     assert normalized.target_layer_ids == [7, 23, 51, 67, 83]
+    assert normalized.dspark_aux_hidden_state_format == "materialized"
     assert normalized.block_size == 7
 
 

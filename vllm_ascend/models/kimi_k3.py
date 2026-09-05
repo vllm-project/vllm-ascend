@@ -19,6 +19,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -78,8 +79,11 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
+
+logger = init_logger(__name__)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
@@ -87,6 +91,49 @@ if HAS_TRITON:
     )
 else:
     apply_attn_res = None  # type: ignore[assignment]
+
+
+def _get_kimi_k3_num_loaded_experts(
+    total_num_experts: int,
+    num_experts_per_token: int,
+    expert_parallel_size: int,
+) -> int:
+    """Return a valid routed-expert count for functional debug loading."""
+    requested_raw = envs_ascend.VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS
+    try:
+        requested = int(requested_raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS must be an integer in "
+            f"[0, {total_num_experts}], got {requested_raw!r}"
+        ) from exc
+    if requested == 0:
+        return total_num_experts
+    if not num_experts_per_token <= requested <= total_num_experts:
+        raise ValueError(
+            "VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS must be 0 or in "
+            f"[{num_experts_per_token}, {total_num_experts}], got {requested}"
+        )
+    if requested % expert_parallel_size != 0:
+        raise ValueError(
+            "VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS must be divisible by "
+            f"expert parallel size {expert_parallel_size}, got {requested}"
+        )
+    return requested
+
+
+def _get_expert_id_from_weight_name(weight_name: str) -> int | None:
+    """Extract a routed-expert ID from an inner or multimodal checkpoint key."""
+    expert_prefix = ".experts."
+    prefix_idx = weight_name.find(expert_prefix)
+    if prefix_idx < 0:
+        return None
+    expert_id_start = prefix_idx + len(expert_prefix)
+    expert_id_end = weight_name.find(".", expert_id_start)
+    if expert_id_end < 0:
+        return None
+    expert_id_text = weight_name[expert_id_start:expert_id_end]
+    return int(expert_id_text) if expert_id_text.isdecimal() else None
 
 
 def _apply_ascend_attn_res(
@@ -540,9 +587,35 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
+        parallel_config = vllm_config.parallel_config
+        assert config.num_experts is not None
+        assert config.num_experts_per_token is not None
+        self.num_checkpoint_experts = config.num_experts
+        expert_parallel_size = 1
+        if parallel_config.enable_expert_parallel:
+            expert_parallel_size = (
+                parallel_config.tensor_parallel_size
+                * parallel_config.data_parallel_size
+                * parallel_config.prefill_context_parallel_size
+            )
+        self.num_loaded_experts = _get_kimi_k3_num_loaded_experts(
+            self.num_checkpoint_experts,
+            config.num_experts_per_token,
+            expert_parallel_size,
+        )
+        if self.num_loaded_experts != self.num_checkpoint_experts:
+            config = copy(config)
+            config.num_experts = self.num_loaded_experts
+            logger.warning_once(
+                "Kimi K3 expert-reduced functional mode is enabled: loading "
+                "routed experts [0, %d) out of %d for every MoE layer. Router "
+                "and correction-bias rows are reduced consistently. Generated "
+                "results are not model-quality valid.",
+                self.num_loaded_experts,
+                self.num_checkpoint_experts,
+            )
         self.config = config
         self.vocab_size = config.vocab_size
-        parallel_config = vllm_config.parallel_config
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.
@@ -599,8 +672,14 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
 
     def load_weights(self, weights):
-        """Route mixed-precision KDA gates through vLLM's packed loader."""
+        """Route KDA gates and consistently reduce routed-expert weights."""
         params_dict = dict(self.named_parameters())
+        num_checkpoint_experts = getattr(self, "num_checkpoint_experts", None)
+        num_loaded_experts = getattr(
+            self,
+            "num_loaded_experts",
+            num_checkpoint_experts,
+        )
         gate_mapping = (
             (".b_proj.weight", ".fused_bfg_proj.weight", 0),
             (".f_a_proj.weight", ".fused_bfg_proj.f_a_weight", None),
@@ -611,6 +690,19 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         def remap_mixed_gate_weights():
             for args in weights:
                 name, loaded_weight = args[:2]
+                expert_id = _get_expert_id_from_weight_name(name)
+                if (
+                    expert_id is not None
+                    and num_loaded_experts is not None
+                    and expert_id >= num_loaded_experts
+                ):
+                    continue
+                if num_loaded_experts is not None and num_loaded_experts != num_checkpoint_experts and (
+                    name.endswith(".block_sparse_moe.gate.weight")
+                    or name.endswith(".block_sparse_moe.gate.e_score_correction_bias")
+                ):
+                    loaded_weight = loaded_weight[:num_loaded_experts]
+                    args = (name, loaded_weight, *args[2:])
                 for source, target, shard_id in gate_mapping:
                     if source not in name:
                         continue
@@ -779,6 +871,9 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM):
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.model.dspark_aux_capture_materialized = enabled
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model._set_aux_hidden_state_layers(layers)
+
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
     """Kimi projector with the optional ModelSlim output rotation."""
@@ -877,3 +972,6 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
 
     def set_dspark_aux_capture_materialized(self, enabled: bool) -> None:
         self.language_model.set_dspark_aux_capture_materialized(enabled)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.set_aux_hidden_state_layers(layers)

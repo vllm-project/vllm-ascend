@@ -11,6 +11,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
@@ -35,6 +37,38 @@ from vllm_ascend.models.deepseek_v4 import indexer as deepseek_v4_indexer
 from vllm_ascend.models.deepseek_v4 import model as deepseek_v4_model
 from vllm_ascend.worker.v2 import attn_utils
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
+
+
+def test_normalize_mamba_kv_cache_config_unwraps_identical_specs():
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((4, 8),),
+        dtypes=(torch.float32,),
+    )
+    grouped_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "model.layers.0.mixer": mamba_spec,
+            "model.layers.1.mixer": mamba_spec,
+        },
+    )
+    group = KVCacheGroupSpec(
+        layer_names=list(grouped_spec.kv_cache_specs),
+        kv_cache_spec=grouped_spec,
+    )
+    config = KVCacheConfig(
+        num_blocks=8,
+        kv_cache_tensors=[],
+        kv_cache_groups=[group],
+    )
+
+    normalized = attn_utils.normalize_mamba_kv_cache_config(config)
+
+    assert normalized is not config
+    assert normalized.num_blocks == config.num_blocks
+    assert normalized.kv_cache_tensors is config.kv_cache_tensors
+    assert normalized.kv_cache_groups[0].layer_names == group.layer_names
+    assert normalized.kv_cache_groups[0].kv_cache_spec == mamba_spec
 
 
 @pytest.mark.parametrize(
