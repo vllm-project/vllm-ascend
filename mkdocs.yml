@@ -246,6 +246,7 @@ nav:
         - tutorials/models/Kimi-K3.md
         - tutorials/models/PaddleOCR-VL.md
         - tutorials/models/MiniMax-M2.md
+        - tutorials/models/MiniMax-H3.md
         - tutorials/models/MiniMax-M3.md
         - tutorials/models/Hunyuan-A13B-Instruct.md
         - tutorials/models/Hy3-preview.md
