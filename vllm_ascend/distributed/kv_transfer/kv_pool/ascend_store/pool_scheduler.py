@@ -52,6 +52,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
+)
 
 
 class KVPoolScheduler:
@@ -141,6 +144,7 @@ class KVPoolScheduler:
         self._unfinished_requests: dict[str, tuple[Request, list[list[int]]]] = {}
         self._loading_req_ids: set[str] = set()
         self._delayed_free_req_ids: set[str] = set()
+        self._kv_stats = AscendStoreKVConnectorStats()
 
         self._block_pool: BlockPool | None = None
         self.sending_event_id = 0
@@ -837,7 +841,7 @@ class KVPoolScheduler:
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
             self._loading_req_ids.discard(req_id)
-            self._delayed_free_req_ids.discard(req_id)
+            self._set_delayed_free(req_id, False)
 
         meta = AscendConnectorMetadata(
             scheduler_output.preempted_req_ids,
@@ -927,6 +931,8 @@ class KVPoolScheduler:
         """
         hand the connector_output, free non-null mamba blocks and so on.
         """
+        self.update_finished_sending(connector_output.finished_sending)
+
         meta = connector_output.kv_connector_worker_meta
         if not isinstance(meta, AscendStoreKVConnectorWorkerMetadata) or self._block_pool is None:
             return
@@ -957,21 +963,19 @@ class KVPoolScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
-            self._delayed_free_req_ids.discard(request.request_id)
+            self._set_delayed_free(request.request_id, False)
             return False, None
         if self.use_layerwise:
-            self._delayed_free_req_ids.discard(request.request_id)
+            self._set_delayed_free(request.request_id, False)
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None or tracker.num_saved_tokens <= 0:
-            self._delayed_free_req_ids.discard(request.request_id)
+            self._set_delayed_free(request.request_id, False)
             return False, None
         delay_free_blocks = len(block_ids) > 0
+        self._set_delayed_free(request.request_id, delay_free_blocks)
         if delay_free_blocks:
-            self._delayed_free_req_ids.add(request.request_id)
             logger.debug("Delaying free of %d blocks for request %s", len(block_ids), request.request_id)
-        else:
-            self._delayed_free_req_ids.discard(request.request_id)
         return delay_free_blocks, None
 
     def request_finished_all_groups(
@@ -981,28 +985,26 @@ class KVPoolScheduler:
     ) -> tuple[bool, dict[str, Any] | None]:
         """HMA path for hybrid KV cache groups."""
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
-            self._delayed_free_req_ids.discard(request.request_id)
+            self._set_delayed_free(request.request_id, False)
             return False, None
         if self.use_layerwise:
             # Free now: layerwise records no sending event, so delay-free would leak.
-            self._delayed_free_req_ids.discard(request.request_id)
+            self._set_delayed_free(request.request_id, False)
             return False, None
         tracker = self._request_trackers.get(request.request_id)
         if tracker is not None and tracker.num_saved_tokens <= 0:
-            self._delayed_free_req_ids.discard(request.request_id)
+            self._set_delayed_free(request.request_id, False)
             return False, None
         block_ids = cast(tuple[list[int], ...], self.get_sw_clipped_blocks(block_ids))
         valid_group_block_ids = [group_block_ids for group_block_ids in block_ids if group_block_ids]
         delay_free_blocks = bool(valid_group_block_ids)
+        self._set_delayed_free(request.request_id, delay_free_blocks)
         if delay_free_blocks:
-            self._delayed_free_req_ids.add(request.request_id)
             logger.debug(
                 "Delaying free of %d KV cache groups for request %s",
                 len(valid_group_block_ids),
                 request.request_id,
             )
-        else:
-            self._delayed_free_req_ids.discard(request.request_id)
         return delay_free_blocks, None
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
@@ -1010,11 +1012,30 @@ class KVPoolScheduler:
 
     def update_finished_sending(self, finished_sending: set[str] | None) -> None:
         if finished_sending:
-            self._delayed_free_req_ids.difference_update(finished_sending)
+            for req_id in finished_sending:
+                self._set_delayed_free(req_id, False)
 
     def update_finished_recving(self, finished_recving: set[str] | None) -> None:
         if finished_recving:
             self._loading_req_ids.difference_update(finished_recving)
+
+    def _set_delayed_free(self, req_id: str, delayed: bool) -> None:
+        if delayed:
+            if req_id in self._delayed_free_req_ids:
+                return
+            self._delayed_free_req_ids.add(req_id)
+        else:
+            if req_id not in self._delayed_free_req_ids:
+                return
+            self._delayed_free_req_ids.discard(req_id)
+        self._kv_stats.set_delayed_release_requests(len(self._delayed_free_req_ids))
+
+    def get_stats(self) -> AscendStoreKVConnectorStats | None:
+        if self._kv_stats.is_empty():
+            return None
+        stats = self._kv_stats
+        self._kv_stats = AscendStoreKVConnectorStats()
+        return stats
 
 
 class LookupKeyClient:
