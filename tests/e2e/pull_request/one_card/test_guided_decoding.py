@@ -37,14 +37,6 @@ GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
 REGEX_COMPILATION_TIMEOUT_ENV = {"VLLM_REGEX_COMPILATION_TIMEOUT_S": "30"}
 
 
-@pytest.fixture(params=[False, True], ids=["v1", "v2"])
-def model_runner_env(request):
-    use_v2_model_runner = request.param
-
-    with patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0"}):
-        yield
-
-
 @pytest.fixture(scope="module")
 def sample_regex():
     return (
@@ -251,5 +243,43 @@ def test_guided_json_completion_outlines(sample_json_schema, request):
             generated_text = output.outputs[0].text
             assert generated_text is not None
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+            output_json = json.loads(generated_text)
+            jsonschema.validate(instance=output_json, schema=sample_json_schema)
+
+
+@pytest.mark.timeout(1000)
+@pytest.mark.model(
+    model_name=MODEL_NAME,
+    compilation_config={"cudagraph_capture_sizes": [1, 2, 4, 8]},
+    extra_kwargs={"seed": 0, "structured_outputs_config": {"backend": "xgrammar"}},
+)
+def test_guided_json_completion_xgrammar_model_runner_v2(sample_json_schema, request):
+    """Guard xgrammar guided decoding on the V2 model runner.
+    TODO: Remove this test once the V2 model runner is the default.
+    """
+    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    # The VllmRunner ModelCache key is derived from the model marker kwargs,
+    # so tag it with the env to give this test its own engine (the other
+    # xgrammar tests in this module run with the env unset).
+    model_marker = request.node.get_closest_marker("model")
+    model_marker.kwargs["env_vars"] = env
+    with patch.dict(os.environ, env):
+        vllm_runner = request.getfixturevalue("vllm_runner")
+        assert vllm_runner.model.llm_engine.vllm_config.use_v2_model_runner is True
+
+        sampling_params = SamplingParams(
+            temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
+        )
+        prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
+        inputs = vllm_runner.get_inputs(prompts)
+        outputs = vllm_runner.model.generate(inputs, sampling_params=sampling_params)
+
+        assert outputs is not None
+        for output in outputs:
+            assert output is not None
+            assert isinstance(output, RequestOutput)
+            generated_text = output.outputs[0].text
+            assert generated_text is not None
+            print(f"Prompt: {output.prompt!r}, Generated text: {generated_text!r}")
             output_json = json.loads(generated_text)
             jsonschema.validate(instance=output_json, schema=sample_json_schema)
