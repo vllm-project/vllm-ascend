@@ -1204,6 +1204,24 @@
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
 #
+# ** 28.1. File: worker/patch_v2/patch_topk_topp_sampler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.ops.topk_topp_sampler.apply_top_k_top_p`
+#   2. `vllm.v1.worker.gpu.sample.sampler.apply_top_k_top_p`
+#   3. `vllm.v1.worker.gpu.sample.states.apply_top_k_top_p`
+#    Why:
+#       V2 nightly validation: force the PyTorch path by disabling upstream
+#       `current_platform.is_cpu()` and `HAS_TRITON and batch>=8` branches.
+#       V2 binds apply_top_k_top_p at import time in sampler (hot path) and
+#       states, so the source module and both local names must be rebound.
+#    How：
+#       Replace all three bindings so they always call `apply_top_k_top_p_pytorch`.
+#       Loaded after `patch_v2/patch_triton.py` under HAS_TRITON.
+#    Related PR (if no, explain why):
+#       Experimental patch for V2 nightly; not intended as a long-term Ascend change.
+#    Future Plan:
+#       Remove this patch once the upstream V2 sampling path is confirmed or fixed.
+#
 # ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
