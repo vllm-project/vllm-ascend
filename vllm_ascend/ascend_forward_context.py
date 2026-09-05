@@ -140,11 +140,7 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        moe_comm_type = select_moe_comm_method(
-            max_num_tokens,
-            vllm_config,
-            is_draft_model=is_draft_model,
-        )
+        moe_comm_type = select_moe_comm_method(max_num_tokens, vllm_config)
 
         forward_context.moe_comm_type = moe_comm_type
         forward_context.moe_comm_method = get_moe_comm_method(moe_comm_type)
@@ -215,7 +211,7 @@ def set_ascend_forward_context(
             dp_meta = forward_context.dp_metadata
             max_tokens_across_dp = dp_meta.num_tokens_across_dp_cpu.max().item()
             if forward_context.flash_comm_v1_enabled:
-                padded_length = (max_tokens_across_dp + tp_world_size - 1) // tp_world_size * tp_world_size
+                padded_length = (num_tokens + tp_world_size - 1) // tp_world_size * tp_world_size
                 pad_size = padded_length - num_tokens
                 forward_context.padded_length = padded_length
                 forward_context.pad_size = pad_size
