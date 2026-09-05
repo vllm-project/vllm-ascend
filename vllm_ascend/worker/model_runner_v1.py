@@ -4226,7 +4226,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.sparse_kv_offload_config,
             )
             self.sparse_kv_offload_manager.prepare_host_kv_allocation(
-                device_id=torch_npu.npu.current_device(),
+                device_id=torch.npu.current_device(),
                 dp_rank=int(self.dp_rank),
             )
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
