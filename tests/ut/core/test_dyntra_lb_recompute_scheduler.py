@@ -10,7 +10,7 @@ from tests.ut.core.test_dyntra_lb_scheduler import (
     create_dyntra_lb_scheduler,
     make_dyntra_test_config,
 )
-from tests.ut.distributed.kv_transfer.kv_p2p.utils import (
+from tests.ut.kv_offload.utils import (
     create_model_runner_output,
     create_request,
 )

@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from pathlib import Path
+import os
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -79,7 +79,7 @@ def create_vllm_config(
     block_size: int = 128,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
-    fake_weight_path = str(Path(__file__).resolve().parents[3] / "_fake_weight")
+    fake_weight_path = os.path.join(os.path.dirname(__file__), "..", "_fake_weight")
     model_info = _fake_opt_model_info()
     # ModelConfig inspects OPTForCausalLM in a subprocess that needs NPU tooling.
     with patch.object(

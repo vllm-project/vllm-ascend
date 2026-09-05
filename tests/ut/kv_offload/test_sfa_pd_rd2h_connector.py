@@ -1,12 +1,9 @@
 """Regression tests for SFA PD transfer into SparseKVOffloadManager."""
 
 import asyncio
-import importlib.util
-import sys
 import threading
 import time
 from concurrent.futures import Future
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,6 +17,12 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (  # noqa: E402
     KVConnectorFactory,
 )
 
+from examples.disaggregated_prefill_v1 import (  # noqa: E402
+    load_balance_proxy_layerwise_server_example as proxy_example,
+)
+from examples.disaggregated_prefill_v1.load_balance_proxy_layerwise_server_example import (  # noqa: E402
+    get_api_request_ids,
+)
 from vllm_ascend.distributed.kv_transfer import register_connector  # noqa: E402
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.connector import (  # noqa: E402
     SfaRemoteD2HConnector,
@@ -51,24 +54,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.worker import (  # n
 from vllm_ascend.distributed.kv_transfer.utils.memfabric_transfer_engine import (  # noqa: E402
     BACKEND_MEMFABRIC,
 )
-
-
-def _load_proxy_example():
-    # vLLM also owns an "examples" package; resolve this repository's script.
-    path = (
-        Path(__file__).resolve().parents[6]
-        / "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
-    )
-    spec = importlib.util.spec_from_file_location("pd_ut_layerwise_proxy_example", path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-proxy_example = _load_proxy_example()
-get_api_request_ids = proxy_example.get_api_request_ids
 
 
 def test_sfa_remote_d2h_connector_is_registered():

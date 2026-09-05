@@ -245,7 +245,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--pd-unit",
         action="store_true",
-        help="Run PD control-plane UT without registering unrelated model/worker patches or NPU operators.",
+        help="Run Mooncake V1 CPU UT without unrelated model/worker patches or NPU operators.",
     )
 
 
@@ -275,15 +275,13 @@ def pytest_collection_modifyitems(config, items):
     if not config.getoption("--pd-unit"):
         return
     allowed = (
-        "tests/ut/distributed/kv_transfer/kv_p2p/",
-        "tests/ut/distributed/kv_transfer/test_ascend_multi_connector.py::",
-        "tests/ut/distributed/kv_transfer/utils/test_memfabric_transfer_engine.py::",
-        "tests/ut/core/test_dyntra_lb_scheduler.py::",
-        "tests/ut/core/test_dyntra_lb_recompute_scheduler.py::",
+        "tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py::",
+        "tests/ut/distributed/kv_transfer/kv_p2p/test_remote_decode_lifecycle.py::",
+        "tests/ut/distributed/kv_transfer/kv_p2p/test_remote_prefill_lifecycle.py::",
     )
     outside_pd = [item.nodeid for item in items if not item.nodeid.startswith(allowed)]
     if outside_pd:
-        raise pytest.UsageError("--pd-unit is restricted to PD control-plane tests: " + outside_pd[0])
+        raise pytest.UsageError("--pd-unit is restricted to Mooncake V1 control-plane tests: " + outside_pd[0])
 
 
 # Clean up any stale mock modules that may have been installed by

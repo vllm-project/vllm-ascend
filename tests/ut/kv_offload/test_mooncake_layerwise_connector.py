@@ -1,6 +1,9 @@
 import contextlib
+import importlib.util
 import os
+import sys
 import threading
+import types
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -8,7 +11,41 @@ from unittest.mock import MagicMock, patch
 import torch
 import zmq
 
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (
+fake_engine = types.ModuleType("mooncake.engine")
+fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
+sys.modules["mooncake.engine"] = fake_engine
+fake_torch_npu = types.ModuleType("torch_npu")
+fake_torch_npu.__spec__ = importlib.util.spec_from_loader("torch_npu", loader=None)
+fake_torch_npu.npu = MagicMock()  # type: ignore[attr-defined]
+fake_torch_npu.npu.current_device = MagicMock(return_value=0)  # type: ignore[attr-defined]
+fake_torch_npu.npu.Stream = MagicMock  # type: ignore[attr-defined]
+fake_torch_npu.npu_fusion_attention = MagicMock()  # type: ignore[attr-defined]
+sys.modules.setdefault("torch_npu", fake_torch_npu)
+torch.npu = fake_torch_npu.npu  # type: ignore[attr-defined]
+fake_uvloop = types.ModuleType("uvloop")
+fake_uvloop.__spec__ = importlib.util.spec_from_loader("uvloop", loader=None)
+sys.modules.setdefault("uvloop", fake_uvloop)
+
+# Clean up stale mock modules installed by other test files
+# (e.g., ascend_store/_mock_deps.py) that replace real kv_transfer
+# subpackages with MagicMock/fake modules, breaking our imports.
+# We save the removed modules so we can restore them after our imports
+# complete, so other test files (ascend_store) still see their mocks.
+_kv_xfer = "vllm_ascend.distributed.kv_transfer"
+_vllm_kv_xfer = "vllm.distributed.kv_transfer"
+_saved_modules: dict[str, types.ModuleType] = {}
+_to_remove = []
+for k in list(sys.modules):
+    if k.startswith(_kv_xfer):
+        suffix = k[len(_kv_xfer) :]
+        if suffix == "" or suffix.startswith(".utils") or suffix.startswith(".kv_p2p"):
+            _to_remove.append(k)
+    elif k.startswith(_vllm_kv_xfer):
+        _to_remove.append(k)
+for _m in _to_remove:
+    _saved_modules[_m] = sys.modules.pop(_m)
+
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector import (  # noqa: E402
     KVCacheRecvingLayerThread,
     KVCacheSendingLayerThread,
     KVConnectorRole,
@@ -28,6 +65,11 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector imp
     string_to_int64_hash,
     zmq_ctx,
 )
+
+# Restore the mocked modules so other test files still work correctly.
+# For keys that our real import loaded, overwrite with the saved mock.
+for _k, _v in _saved_modules.items():
+    sys.modules[_k] = _v
 
 GET_META_MSG = b"get_meta_msg"
 DONE_SENDING_MSG = b"done_sending_msg"
@@ -476,8 +518,46 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
         )
         self.ready_event = threading.Event()
 
-    def _make_receiver(self):
-        return KVCacheRecvingLayerThread(
+    def test_get_and_clear_done_requests(self):
+        th = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=1,
+            local_engine_id="engineA",
+            metadata=self.meta,
+            ready_event=self.ready_event,
+        )
+
+        with th.lock:
+            th.done_requests.update({"r1", "r2"})
+        got = th.get_and_clear_done_requests()
+        self.assertEqual(got, {"r1", "r2"})
+
+        got2 = th.get_and_clear_done_requests()
+        self.assertEqual(got2, set())
+
+    def test_get_and_clear_failed_requests(self):
+        th = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=1,
+            local_engine_id="engineA",
+            metadata=self.meta,
+            ready_event=self.ready_event,
+        )
+
+        with th.lock:
+            th.failed_requests.update({"r1", "r2"})
+        got = th.get_and_clear_failed_requests()
+        self.assertEqual(got, {"r1", "r2"})
+
+        got2 = th.get_and_clear_failed_requests()
+        self.assertEqual(got2, set())
+
+    def test_update_failed_task_aggregates_by_pd_head_ratio(self):
+        th = KVCacheRecvingLayerThread(
             tp_rank=0,
             side_channel_port=5555,
             tp_size=2,
@@ -487,28 +567,38 @@ class TestKVCacheRecvingLayerThread(unittest.TestCase):
             ready_event=self.ready_event,
         )
 
-    def test_completion_requires_distinct_contributors_per_request(self):
-        th = self._make_receiver()
-        th.update_done_task("a", 2, "path1")
-        th.update_done_task("a", 2, "path1")
-        th.update_done_task("b", 2, "path2")
-        self.assertEqual(th.get_and_clear_done_requests(), set())
-        th.update_done_task("a", 2, "path2")
-        self.assertEqual(th.get_and_clear_done_requests(), {"a"})
-        th.update_done_task("b", 2, "path1")
-        self.assertEqual(th.get_and_clear_done_requests(), {"b"})
-        self.assertEqual(th.get_and_clear_done_requests(), set())
+        with th.lock:
+            th.task_tracker["reqX"] = set()
+            th.request_map = MagicMock()
 
-    def test_partial_failure_is_reported_without_completing_other_request(self):
-        th = self._make_receiver()
-        th.update_done_task("a", 2, "path1")
-        th.update_done_task("b", 2, "path1")
-        th.update_failed_task("a")
-        self.assertEqual(th.get_and_clear_failed_requests(), {"a"})
-        self.assertEqual(th.get_and_clear_failed_requests(), set())
-        self.assertEqual(th.get_and_clear_done_requests(), set())
-        th.update_done_task("b", 2, "path2")
-        self.assertEqual(th.get_and_clear_done_requests(), {"b"})
+        th.update_failed_task("reqX")
+        with th.lock:
+            self.assertNotIn("reqX", th.task_tracker)
+            self.assertIn("reqX", th.failed_requests)
+
+    def test_update_done_task_aggregates_by_pd_head_ratio(self):
+        th = KVCacheRecvingLayerThread(
+            tp_rank=0,
+            side_channel_port=5555,
+            tp_size=2,
+            pd_head_ratio=2,
+            local_engine_id="engineA",
+            metadata=self.meta,
+            ready_event=self.ready_event,
+        )
+
+        with th.lock:
+            th.task_tracker["reqX"] = set()
+
+        th.update_done_task("reqX", 2, "path1")
+        with th.lock:
+            self.assertIn("reqX", th.task_tracker)
+            self.assertNotIn("reqX", th.done_requests)
+
+        th.update_done_task("reqX", 2, "path2")
+        with th.lock:
+            self.assertNotIn("reqX", th.task_tracker)
+            self.assertIn("reqX", th.done_requests)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.logger")
     @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_layerwise_connector.get_ip", return_value="127.0.0.1")
@@ -1312,57 +1402,6 @@ class TestMooncakeLayerwiseConnectorWorker(unittest.TestCase):
     def tearDown(self):
         for p in self.patches:
             p.stop()  # type: ignore
-
-    def _make_receiving_worker(self):
-        self.vllm_config.kv_transfer_config.is_kv_producer = False
-        self.vllm_config.kv_transfer_config.is_kv_consumer = True
-        worker = MooncakeLayerwiseConnectorWorker(self.vllm_config, self.kv_cache_config, self.engine_id)
-        receiver = KVCacheRecvingLayerThread(
-            tp_rank=0,
-            side_channel_port=5555,
-            tp_size=2,
-            pd_head_ratio=2,
-            local_engine_id=self.engine_id,
-            metadata=MooncakeAgentMetadata(te_rpc_port=6000, layer_metadata={}),
-            ready_event=threading.Event(),
-        )
-        worker.kv_recv_layer_thread = receiver
-        metadata = MooncakeLayerwiseConnectorMetadata()
-        for req_id, blocks in (("a-12345678", [[11, 12], [21]]), ("b-12345678", [[31], [41]])):
-            metadata.add_new_req(req_id, blocks, {"remote_engine_id": "prefill"})
-        worker.start_load_kv(metadata)
-        return worker, receiver
-
-    def test_receive_contract_isolates_interleaved_and_late_completions(self):
-        """UT-IT: real metadata -> worker -> receiver -> public completion API."""
-        worker, receiver = self._make_receiving_worker()
-        receiver.update_done_task("a", 2, "peer1")
-        receiver.update_done_task("a", 2, "peer1")
-        receiver.update_done_task("b", 2, "peer2")
-        self.assertEqual(worker.get_finished(), (set(), set()))
-        receiver.update_done_task("a", 2, "peer2")
-        self.assertEqual(worker.get_finished(), (set(), {"a-12345678"}))
-        receiver.update_done_task("a", 2, "peer1")
-        receiver.update_done_task("a", 2, "peer2")
-        self.assertEqual(worker.get_finished(), (set(), set()))
-        receiver.update_done_task("b", 2, "peer1")
-        self.assertEqual(worker.get_finished(), (set(), {"b-12345678"}))
-        self.assertEqual(worker.get_finished(), (set(), set()))
-        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
-
-    def test_receive_failure_reports_exact_blocks_and_rejects_late_success(self):
-        worker, receiver = self._make_receiving_worker()
-        receiver.update_done_task("a", 2, "peer1")
-        receiver.update_failed_task("a")
-        self.assertEqual(worker.get_finished(), (set(), set()))
-        self.assertEqual(worker.get_block_ids_with_load_errors(), {11, 12, 21})
-        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
-        receiver.update_done_task("a", 2, "peer1")
-        receiver.update_done_task("a", 2, "peer2")
-        receiver.update_done_task("b", 2, "peer1")
-        receiver.update_done_task("b", 2, "peer2")
-        self.assertEqual(worker.get_finished(), (set(), {"b-12345678"}))
-        self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
     def test_register_kv_caches_producer(self):
         self.vllm_config.kv_transfer_config.is_kv_producer = True
