@@ -1,13 +1,19 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from transformers import Qwen3Config
 from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.speculative import SpeculativeConfig
 
-import vllm_ascend.patch.platform.patch_speculative_config  # noqa: F401
+from vllm_ascend.patch.platform import patch_speculative_config
 from vllm_ascend.patch.platform.patch_speculative_config import (
     _normalize_deepseek_v4_dspark_draft,
+)
+
+_UPSTREAM_K3_DSPARK_DCP_ERROR = (
+    patch_speculative_config._UPSTREAM_K3_DSPARK_DCP_ERROR_FRAGMENT
+    + "; set decode_context_parallel_size=1."
 )
 
 
@@ -76,3 +82,59 @@ def test_deepseek_v4_vision_dspark_restores_draft_architecture():
     assert draft_model_config.model_arch_config.is_mm_prefix_lm is False
     assert draft_model_config._architecture == "DSparkDraftModel"
     registry.inspect_model_cls.assert_called_once_with(["DSparkDraftModel"], draft_model_config)
+
+
+def _make_k3_dspark_config(dcp_size: int = 8):
+    draft_hf_config = SimpleNamespace(
+        ptd_token_id=163839,
+        dspark_noise_token_id=163839,
+        mask_token_id=None,
+    )
+    return SimpleNamespace(
+        method="dspark",
+        target_parallel_config=SimpleNamespace(
+            decode_context_parallel_size=dcp_size,
+        ),
+        draft_model_config=SimpleNamespace(
+            architectures=["K3DSparkModel"],
+            hf_config=draft_hf_config,
+        ),
+        use_dspark=lambda: True,
+    )
+
+
+def test_k3_dspark_dcp_bypasses_upstream_gpu_guard(monkeypatch):
+    config = _make_k3_dspark_config()
+
+    def raise_upstream_guard(_config):
+        raise ValueError(_UPSTREAM_K3_DSPARK_DCP_ERROR)
+
+    monkeypatch.setattr(
+        patch_speculative_config, "_orig_post_init", raise_upstream_guard
+    )
+
+    patch_speculative_config._dspark_post_init(config)
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        (
+            _make_k3_dspark_config(dcp_size=1),
+            _UPSTREAM_K3_DSPARK_DCP_ERROR,
+        ),
+        (_make_k3_dspark_config(), "some other speculative config error"),
+    ],
+)
+def test_k3_dspark_dcp_does_not_hide_other_validation_errors(
+    monkeypatch, config, message
+):
+    def raise_validation_error(_config):
+        raise ValueError(message)
+
+    monkeypatch.setattr(
+        patch_speculative_config, "_orig_post_init", raise_validation_error
+    )
+
+    with pytest.raises(ValueError, match=message):
+        patch_speculative_config._dspark_post_init(config)
