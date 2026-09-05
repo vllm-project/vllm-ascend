@@ -27,6 +27,14 @@
 # ----------------------------------------------------------------------------------
 
 # What's Patched and how it works:
+#
+# platform/patch_mm_placeholder_mask.py backports
+# https://github.com/vllm-project/vllm/pull/54548. It preserves sparse
+# PlaceholderRange.is_embed masks through render/derender serialization and
+# token-input reconstruction. Installation runs after platform/config imports,
+# rebuilds nested request schemas, and skips versions with native is_embed.
+# Remove this compatibility patch once every supported vLLM version preserves
+# the mask. The request-local input builder leaves concurrent requests isolated.
 # --------------------------------
 # * Platform Patch:
 # =================
