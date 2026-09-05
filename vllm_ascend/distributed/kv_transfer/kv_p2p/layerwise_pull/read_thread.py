@@ -163,6 +163,9 @@ class LayerwisePullReadThread(threading.Thread):
         self.ready_event = threading.Event()
         self._p_sessions: dict[bytes, str] = {}
         self._p_layer_layouts: dict[bytes, dict[int, tuple[ComponentLayout, ...]]] = {}
+        self._component_pairs_by_source: dict[
+            bytes, dict[int, tuple[tuple[ComponentLayout, ComponentLayout], ...]]
+        ] = {}
         self._done_requests: set[str] = set()
         self._failed_requests: set[str] = set()
         # Unlike the failure notification queue, these IDs survive request
@@ -253,6 +256,7 @@ class LayerwisePullReadThread(threading.Thread):
         self._p_sessions[identity] = session
         self._p_layer_layouts[identity] = layouts
         self._p_completion_sources[identity] = (contributor, ratio, expected)
+        self._component_pairs_by_source.pop(identity, None)
 
     def get_and_clear_done(self) -> set[str]:
         with self._lock:
@@ -326,6 +330,7 @@ class LayerwisePullReadThread(threading.Thread):
                             raise ValueError("READ_READY_BATCH TP contributor differs from its layout handshake")
                         if read_reqs:
                             self._do_read_batch(
+                                identity,
                                 layer_idx,
                                 read_reqs,
                                 session,
@@ -378,21 +383,12 @@ class LayerwisePullReadThread(threading.Thread):
         if self.is_alive():
             logger.warning("Layerwise pull read thread did not stop within %.1f seconds", timeout)
 
-    def _do_read_batch(
+    def _match_components(
         self,
         layer_idx: int,
-        read_reqs: list[tuple[str, list[list[int]], list[int]]],
-        session: str,
         source_layouts: dict[int, tuple[ComponentLayout, ...]],
-        group_member_idx: int = 0,
-        ratio: int = 1,
-    ) -> None:
-        if self._failed_request_ids:
-            # READ_DONE for skipped requests only releases the P-side source
-            # buffers. _record_chunk_done must not turn them into D successes.
-            read_reqs = [entry for entry in read_reqs if entry[0] not in self._failed_request_ids]
-            if not read_reqs:
-                return
+    ) -> tuple[tuple[ComponentLayout, ComponentLayout], ...]:
+        """Validate fixed layouts once before caching their component pairs."""
         source_components = source_layouts.get(layer_idx)
         destination_components = self._state.layer_layouts.get(layer_idx)
         if source_components is None or destination_components is None:
@@ -444,10 +440,33 @@ class LayerwisePullReadThread(threading.Thread):
                         f"Layerwise pull tensor size differs for {source.name}[{tensor_idx}]: "
                         f"source={source_length}, destination={destination_length}"
                     )
+        return tuple((source, destination_by_name[source.name]) for source in source_components)
+
+    def _do_read_batch(
+        self,
+        identity: bytes,
+        layer_idx: int,
+        read_reqs: list[tuple[str, list[list[int]], list[int]]],
+        session: str,
+        source_layouts: dict[int, tuple[ComponentLayout, ...]],
+        group_member_idx: int = 0,
+        ratio: int = 1,
+    ) -> None:
+        if self._failed_request_ids:
+            # READ_DONE for skipped requests only releases the P-side source
+            # buffers. _record_chunk_done must not turn them into D successes.
+            read_reqs = [entry for entry in read_reqs if entry[0] not in self._failed_request_ids]
+            if not read_reqs:
+                return
+        pairs_by_layer = self._component_pairs_by_source.setdefault(identity, {})
+        component_pairs = pairs_by_layer.get(layer_idx)
+        if component_pairs is None:
+            component_pairs = self._match_components(layer_idx, source_layouts)
+            pairs_by_layer[layer_idx] = component_pairs
 
         # Gather paired IDs across requests before doing NumPy work per tensor.
         blocks_by_component: dict[str, tuple[list[int], list[int]]] = {
-            source.name: ([], []) for source in source_components
+            source.name: ([], []) for source, _ in component_pairs
         }
         for ext_req_id, source_blocks_by_group, start_blocks_by_group in read_reqs:
             destination_blocks_by_group = self._state.dest_blocks_by_req.get(ext_req_id)
@@ -463,8 +482,7 @@ class LayerwisePullReadThread(threading.Thread):
                     if destination_blocks_by_group is None:
                         raise RuntimeError(f"Layerwise pull has no D blocks for request {ext_req_id}")
 
-            for source in source_components:
-                destination = destination_by_name[source.name]
+            for source, destination in component_pairs:
                 try:
                     source_block_ids = source_blocks_by_group[source.group_index]
                     start_block = int(start_blocks_by_group[source.group_index])
@@ -506,11 +524,10 @@ class LayerwisePullReadThread(threading.Thread):
         local_addrs: list[int] = []
         remote_addrs: list[int] = []
         lengths: list[int] = []
-        for source in source_components:
+        for source, destination in component_pairs:
             batch_source_blocks, batch_destination_blocks = blocks_by_component[source.name]
             if not batch_source_blocks:
                 continue
-            destination = destination_by_name[source.name]
             source_ids = np.asarray(batch_source_blocks, dtype=np.int64)
             destination_ids = np.asarray(batch_destination_blocks, dtype=np.int64)
             for tensor_idx, (remote_base, local_base) in enumerate(

@@ -114,6 +114,10 @@ D layout 的 `group_index`，remote block IDs 使用 P layout 的 `group_index`�
 
 ### 4.3 批量地址生成
 
+D 按来源控制连接和 layer 缓存校验通过的 component 配对，dtype、shape 和 tensor length 等静态
+布局只在首次读取时校验。收到该来源的新 `LAYOUT_META` 后清除其配对缓存；请求 block IDs 和
+READ 地址仍逐 batch 生成，不缓存请求相关地址。
+
 地址 planner 不应退化成 Python 逐 block 构造 descriptor。现有 `LayerwisePullConnector` 使用
 NumPy 批量计算地址，并在 local 和 remote 两端都连续时合并相邻 descriptor，这部分应保留：
 
@@ -227,6 +231,13 @@ D 同步 READ 失败后，先保留失败请求 ID，再向框架上报失败。
 失败 ID 不随请求清理或失败通知取走而删除，而是保留到 reader 退出，防止其他 PP 来源的迟到通知
 写入已复用的目标 block。该方案依赖同步 backend 在返回（包括错误返回）后不再写入目标内存；不增加
 跨来源取消协议，也不支持以同一请求 ID 重新发起远端传输，失败后的本地重算不受影响。
+
+D 请求取消时，scheduler 的 finished 通知不代表接收已结束。worker 保留仍在接收的请求映射和
+PP 完成计数，等全部本地 TP worker 的接收结束后再清理，并照常上报 `finished_recving`，让 vLLM
+释放取消请求的目标 block。接收先结束的正常请求仍在 scheduler 通知请求结束时清理。
+
+已知限制：P 的非最终 chunk 派发后若被提前取消，尚未按在途 reader 延迟释放源 block。当前示例
+代理通过 `asyncio.shield` 保持 P 派发任务运行，但这不等同于支持任意 P 端取消；该路径后续单独适配。
 
 D 端只有在请求要求的所有 layer、component 和 contributor 都完成后，才将请求标记为接收完成。
 不同 remote session 或不同 layer 的 descriptor 不做跨边界合并，以保持错误归属和物理 slot 完成

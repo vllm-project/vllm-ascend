@@ -119,6 +119,8 @@ class LayerwisePullConsumerWorker:
         self._dest_blocks_by_req: dict[str, list[list[int]]] = {}
         self._dest_blocks_condition = threading.Condition()
         self._terminal_ext_ids: set[str] = set()
+        self._pending_recv_req_ids: set[str] = set()
+        self._deferred_cleanup_req_ids: set[str] = set()
         self.layer_layouts: dict[int, tuple[ComponentLayout, ...]] = {}
 
     def _ensure_engine(self) -> tuple[Any, PullBackend]:
@@ -306,6 +308,7 @@ class LayerwisePullConsumerWorker:
                 block_ids = [list(group) for group in getattr(request, "block_ids_by_group", [])]
                 self.request_map[ext_id] = req_id
                 self._dest_blocks_by_req[ext_id] = block_ids
+                self._pending_recv_req_ids.add(req_id)
             self._dest_blocks_condition.notify_all()
 
     def save_kv_layer(
@@ -371,8 +374,17 @@ class LayerwisePullConsumerWorker:
                     "D-side internal request mapping was registered"
                 )
             done_recving.add(internal)
+        # A scheduler finish notification can be a cancellation while READs
+        # are still active. vLLM keeps those blocks until finished_recving;
+        # preserve their lookup and PP completion counts for the same duration.
+        self._pending_recv_req_ids.difference_update(done_recving)
+        cleanup_req_ids = self._deferred_cleanup_req_ids & done_recving
         if finished_req_ids:
-            self._cleanup_request_state(finished_req_ids)
+            cleanup_req_ids.update(finished_req_ids - self._pending_recv_req_ids)
+            self._deferred_cleanup_req_ids.update(finished_req_ids & self._pending_recv_req_ids)
+        if cleanup_req_ids:
+            self._deferred_cleanup_req_ids.difference_update(cleanup_req_ids)
+            self._cleanup_request_state(cleanup_req_ids)
         return set(), done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:

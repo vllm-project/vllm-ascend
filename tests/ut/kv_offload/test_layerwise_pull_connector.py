@@ -219,6 +219,7 @@ def test_read_thread_plans_arbitrary_components_in_one_backend_read():
         )
     }
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._component_pairs_by_source = {}
     thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.memfabric(engine)
@@ -229,6 +230,7 @@ def test_read_thread_plans_arbitrary_components_in_one_backend_read():
     )
 
     thread._do_read_batch(
+        b"prefill",
         0,
         [("request", [[1, 2], [3, 4]], [0, 0]), ("second", [[5], [8]], [0, 0])],
         "prefill-session",
@@ -263,6 +265,7 @@ def test_read_batch_reuses_numpy_block_ids_across_tensors(contiguous_requests):
     second_blocks = [7, 8] if contiguous_requests else [9, 11]
     destination_blocks = {"first": [[5, 6]], "second": [second_blocks]}
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._component_pairs_by_source = {}
     thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.memfabric(engine)
@@ -276,7 +279,7 @@ def test_read_batch_reuses_numpy_block_ids_across_tensors(contiguous_requests):
         "vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.read_thread.plan_block_reads",
         wraps=plan_block_reads,
     ) as planner:
-        thread._do_read_batch(0, requests, "prefill-session", {0: (source,)})
+        thread._do_read_batch(b"prefill", 0, requests, "prefill-session", {0: (source,)})
 
     assert planner.call_count == 2
     first, second = planner.call_args_list
@@ -313,6 +316,7 @@ def test_read_batch_splits_each_request_before_combining_blocks(
     source = _component("layer.0", 0, 1000, 16)
     destination = replace(source, base_addrs=(2000,))
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._component_pairs_by_source = {}
     thread._failed_request_ids = set()
     thread.tp_rank = tp_rank
     thread.backend = PullBackend.memfabric(engine)
@@ -327,6 +331,7 @@ def test_read_batch_splits_each_request_before_combining_blocks(
         wraps=plan_block_reads,
     ) as planner:
         thread._do_read_batch(
+            b"prefill",
             0,
             [("first", [[1, 2]], [0]), ("second", [[3, 4]], [1]), ("empty", [[]], [0])],
             "prefill-session",
@@ -353,6 +358,7 @@ def test_read_batch_splits_each_request_before_combining_blocks(
 def test_read_batch_rejects_incomplete_request_before_planning():
     source = _component("layer.0", 0, 1000, 16)
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._component_pairs_by_source = {}
     thread._failed_request_ids = set()
     thread.backend = MagicMock()
     thread._state = ConsumerReadState(
@@ -365,6 +371,7 @@ def test_read_batch_rejects_incomplete_request_before_planning():
         pytest.raises(RuntimeError, match="D block range is incomplete"),
     ):
         thread._do_read_batch(
+            b"prefill",
             0,
             [("first", [[1, 2]], [0]), ("second", [[3, 4]], [0])],
             "prefill-session",
@@ -377,6 +384,8 @@ def test_read_batch_rejects_incomplete_request_before_planning():
 @pytest.fixture
 def destination_registration():
     worker = LayerwisePullConsumerWorker.__new__(LayerwisePullConsumerWorker)
+    worker._pending_recv_req_ids = set()
+    worker._deferred_cleanup_req_ids = set()
     worker.request_map = {}
     worker._dest_blocks_by_req = {}
     worker._dest_blocks_condition = threading.Condition()
@@ -391,6 +400,10 @@ def destination_registration():
         return_value="127.0.0.1",
     ):
         thread = LayerwisePullReadThread(0, 1234, MagicMock(), state)
+    worker.tp_size = 1
+    worker._read_thread = thread
+    worker._terminal_ext_ids = set()
+    worker._invalid_block_ids = set()
     metadata = LayerwisePullConsumerMetadata()
     metadata.add_request("request123456789", [[5, 6]])
     return worker, thread, metadata
@@ -411,7 +424,9 @@ def test_read_waits_for_destination_registration(destination_registration, regis
     if registered_before_read:
         worker.start_load_kv(metadata)
     with patch.object(condition, "wait", side_effect=wait), ThreadPoolExecutor(1) as executor:
-        future = executor.submit(thread._do_read_batch, 0, [("request", [[1, 2]], [0])], "prefill-session", source)
+        future = executor.submit(
+            thread._do_read_batch, b"prefill", 0, [("request", [[1, 2]], [0])], "prefill-session", source
+        )
         try:
             if not registered_before_read:
                 assert waiting.wait(timeout=1)
@@ -424,6 +439,69 @@ def test_read_waits_for_destination_registration(destination_registration, regis
     thread.backend.read.assert_called_once_with("prefill-session", [2080], [1016], [32])
 
 
+def test_component_pairs_are_cached_per_source_and_layer(destination_registration):
+    worker, reader, metadata = destination_registration
+    metadata.add_request("second123456789", [[8]])
+    worker.start_load_kv(metadata)
+    reader._state.layer_layouts[1] = (_component("layer.1", 0, 3000, 16),)
+    source = {layer: (_component(f"layer.{layer}", 0, 1000 + 100 * layer, 16),) for layer in (0, 1)}
+    with patch.object(reader, "_match_components", wraps=reader._match_components) as match:
+        reader._do_read_batch(b"P0", 0, [("request", [[0]], [0])], "P0", source)
+        reader.backend.read.assert_called_with("P0", [2080], [1000], [16])
+        cached = reader._component_pairs_by_source[b"P0"][0]
+        # A new request and a later chunk reuse only the static layouts, not
+        # block IDs or the resulting transfer addresses.
+        reader._do_read_batch(b"P0", 0, [("second", [[3]], [0])], "P0", source)
+        reader.backend.read.assert_called_with("P0", [2128], [1048], [16])
+        reader._do_read_batch(b"P0", 0, [("request", [[2]], [1])], "P0", source)
+        reader.backend.read.assert_called_with("P0", [2096], [1032], [16])
+        assert match.call_count == 1
+        assert reader._component_pairs_by_source[b"P0"][0] is cached
+
+        reader._do_read_batch(b"P0", 1, [("request", [[0]], [0])], "P0", source)
+        reader.backend.read.assert_called_with("P0", [3080], [1100], [16])
+        other_source = {0: (replace(source[0][0], base_addrs=(4000,)),)}
+        reader._do_read_batch(b"P1", 0, [("request", [[0]], [0])], "P1", other_source)
+        reader.backend.read.assert_called_with("P1", [2080], [4000], [16])
+        assert match.call_count == 3
+
+
+@pytest.mark.parametrize("incompatible_layout", [False, True])
+def test_layout_update_invalidates_only_its_source_component_pairs(destination_registration, incompatible_layout):
+    worker, reader, metadata = destination_registration
+    worker.start_load_kv(metadata)
+    source = _component("layer.0", 0, 1000, 16)
+    encoded = msgspec.msgpack.encode({0: {"components": [asdict(source)]}})
+    for identity in (b"P0", b"P1"):
+        reader._register_remote_layout(identity, (LAYOUT_META, "session", encoded, ((0,),), 1, 0, 0))
+        reader._do_read_batch(identity, 0, [("request", [[0]], [0])], "session", reader._p_layer_layouts[identity])
+    unaffected_pairs = reader._component_pairs_by_source[b"P1"][0]
+    replacement = replace(source, base_addrs=(4000,))
+    if incompatible_layout:
+        replacement = replace(replacement, dtypes=("torch.float16",))
+    encoded = msgspec.msgpack.encode({0: {"components": [asdict(replacement)]}})
+    reader._register_remote_layout(b"P0", (LAYOUT_META, "new-session", encoded, ((0,),), 1, 0, 0))
+    assert b"P0" not in reader._component_pairs_by_source
+    assert reader._component_pairs_by_source[b"P1"][0] is unaffected_pairs
+
+    reader.backend.read.reset_mock()
+    with patch.object(reader, "_match_components", wraps=reader._match_components) as match:
+        if incompatible_layout:
+            with pytest.raises(RuntimeError, match="dtype differs"):
+                reader._do_read_batch(
+                    b"P0", 0, [("request", [[0]], [0])], "new-session", reader._p_layer_layouts[b"P0"]
+                )
+            reader.backend.read.assert_not_called()
+            assert 0 not in reader._component_pairs_by_source[b"P0"]
+        else:
+            reader._do_read_batch(b"P0", 0, [("request", [[0]], [0])], "new-session", reader._p_layer_layouts[b"P0"])
+            reader.backend.read.assert_called_once_with("new-session", [2080], [4000], [16])
+        assert match.call_count == 1
+        reader._do_read_batch(b"P1", 0, [("request", [[0]], [0])], "session", reader._p_layer_layouts[b"P1"])
+        reader.backend.read.assert_called_with("session", [2080], [1000], [16])
+        assert match.call_count == 1
+
+
 def test_read_times_out_without_destination_registration(destination_registration):
     _, thread, _ = destination_registration
     with (
@@ -434,6 +512,7 @@ def test_read_times_out_without_destination_registration(destination_registratio
         pytest.raises(RuntimeError, match="has no D blocks"),
     ):
         thread._do_read_batch(
+            b"prefill",
             0,
             [("request", [[1]], [0])],
             "prefill-session",
@@ -455,6 +534,7 @@ def test_stop_wakes_destination_registration_wait(destination_registration):
     with patch.object(condition, "wait", side_effect=wait), ThreadPoolExecutor(1) as executor:
         future = executor.submit(
             thread._do_read_batch,
+            b"prefill",
             0,
             [("request", [[1]], [0])],
             "prefill-session",
@@ -475,6 +555,7 @@ def test_read_thread_rejects_component_layout_mismatch_before_transfer(blocks_re
     source = {0: (_component("layer.0.c0", 0, 1000, 16),)}
     destination = {0: (replace(source[0][0], base_addrs=(2000,), block_lengths=(32,)),)}
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._component_pairs_by_source = {}
     thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.mooncake(engine)
@@ -486,6 +567,7 @@ def test_read_thread_rejects_component_layout_mismatch_before_transfer(blocks_re
 
     with pytest.raises(RuntimeError, match="tensor size differs"):
         thread._do_read_batch(
+            b"prefill",
             0,
             [("request", [[1]], [0])],
             "prefill-session",
@@ -509,6 +591,7 @@ def test_read_thread_rejects_same_size_different_dtype():
         block_size_scales=(1,),
     )
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._component_pairs_by_source = {}
     thread._failed_request_ids = set()
     thread.tp_rank = 0
     thread.backend = PullBackend.mooncake(engine)
@@ -520,6 +603,7 @@ def test_read_thread_rejects_same_size_different_dtype():
 
     with pytest.raises(RuntimeError, match="dtype differs"):
         thread._do_read_batch(
+            b"prefill",
             0,
             [("request", [[1]], [0])],
             "prefill-session",
@@ -534,6 +618,7 @@ def test_tp_shared_component_is_read_once_and_split_across_decode_tp():
     source = {0: (_component("layer.0.main", 0, 1000, 16),)}
     destination = {0: (_component("layer.0.main", 0, 2000, 16),)}
     thread = LayerwisePullReadThread.__new__(LayerwisePullReadThread)
+    thread._component_pairs_by_source = {}
     thread._failed_request_ids = set()
     thread.tp_rank = 1
     thread.backend = PullBackend.memfabric(engine)
@@ -545,6 +630,7 @@ def test_tp_shared_component_is_read_once_and_split_across_decode_tp():
     )
 
     thread._do_read_batch(
+        b"prefill",
         0,
         [("request", [[0, 1, 2, 3]], [0])],
         "prefill-session",
@@ -870,6 +956,8 @@ def test_backend_selection_requires_explicit_supported_backend():
 
 def test_consumer_start_load_keeps_all_destination_groups():
     worker = LayerwisePullConsumerWorker.__new__(LayerwisePullConsumerWorker)
+    worker._pending_recv_req_ids = set()
+    worker._deferred_cleanup_req_ids = set()
     worker.request_map = {}
     worker._dest_blocks_by_req = {}
     worker._dest_blocks_condition = threading.Condition()
@@ -883,6 +971,8 @@ def test_consumer_start_load_keeps_all_destination_groups():
 
 def test_consumer_rejects_completed_request_without_internal_mapping():
     worker = LayerwisePullConsumerWorker.__new__(LayerwisePullConsumerWorker)
+    worker._pending_recv_req_ids = set()
+    worker._deferred_cleanup_req_ids = set()
     worker.tp_size = 1
     worker._read_thread = MagicMock()
     worker._read_thread.get_and_clear_done.return_value = {"request"}
@@ -894,6 +984,66 @@ def test_consumer_rejects_completed_request_without_internal_mapping():
 
     with pytest.raises(RuntimeError, match="internal request mapping"):
         worker.get_finished()
+
+
+@pytest.mark.parametrize(
+    "finish_timing", ["before_first_source", "between_sources", "with_completion", "after_completion"]
+)
+def test_consumer_defers_cleanup_until_receive_finishes(destination_registration, finish_timing):
+    worker, reader, metadata = destination_registration
+    worker.start_load_kv(metadata)
+    req_id = metadata.requests[0].req_id
+    finished = {req_id}
+    expected = frozenset({(0, 0), (1, 0)})
+    if finish_timing == "before_first_source":
+        assert worker.get_finished(finished) == (set(), set())
+    reader._record_chunk_done(["request"], (0, 0), expected)
+    if finish_timing == "between_sources":
+        assert worker.get_finished(finished) == (set(), set())
+
+    # Cancellation must preserve both completed PP contributors and the
+    # destination mapping needed by the remaining reads.
+    assert reader._done_contributors["request"] == {(0, 0)}
+    assert worker.request_map == {"request": req_id}
+    assert worker._dest_blocks_by_req == {"request": [[5, 6]]}
+    reader._do_read_batch(b"P1", 0, [("request", [[0, 1]], [0])], "P1", {0: (_component("layer.0", 0, 1000, 16),)})
+    reader.backend.read.assert_called_once_with("P1", [2080], [1000], [32])
+    reader._record_chunk_done(["request"], (1, 0), expected)
+
+    assert worker.get_finished(finished if finish_timing == "with_completion" else None) == (set(), finished)
+    if finish_timing == "after_completion":
+        assert worker.request_map == {"request": req_id}
+        assert worker.get_finished(finished) == (set(), set())
+    assert worker.get_finished() == (set(), set())
+    assert worker.request_map == {}
+    assert worker._dest_blocks_by_req == {}
+    assert worker._pending_recv_req_ids == set()
+    assert worker._deferred_cleanup_req_ids == set()
+    assert reader._done_contributors == {}
+    assert reader._expected_sources == {}
+    assert reader._terminal_requests == set()
+
+
+def test_cancelled_receive_waits_for_other_tp_before_cleanup(destination_registration):
+    worker, reader, metadata = destination_registration
+    worker.start_load_kv(metadata)
+    req_id = metadata.requests[0].req_id
+    reader._record_chunk_done(["request"], (0, 0), frozenset({(0, 0)}))
+    with patch.object(
+        worker,
+        "_gather_tp_read_status",
+        side_effect=[
+            [({"request"}, set()), (set(), set())],
+            [({"request"}, set()), ({"request"}, set())],
+        ],
+    ):
+        assert worker.get_finished({req_id}) == (set(), set())
+        assert worker.request_map == {"request": req_id}
+        assert worker._dest_blocks_by_req == {"request": [[5, 6]]}
+        assert worker.get_finished() == (set(), {req_id})
+    assert worker.request_map == {}
+    assert worker._pending_recv_req_ids == set()
+    assert worker._deferred_cleanup_req_ids == set()
 
 
 @pytest.mark.parametrize(
@@ -1157,8 +1307,8 @@ def test_layout_handshake_establishes_all_pp_sources_before_first_completion(loc
     assert "request" not in reader._terminal_requests
 
 
-@pytest.mark.parametrize("mixed_batch", [False, True])
-def test_failed_pp_read_cannot_write_after_request_cleanup(mixed_batch):
+@pytest.mark.parametrize("mixed_batch,cancel_before_failure", [(False, False), (True, False), (False, True)])
+def test_failed_pp_read_cannot_write_after_request_cleanup(mixed_batch, cancel_before_failure):
     # Exercise the actual failure handler, worker completion/cleanup and late
     # messages from another PP source. Only the payload backend is mocked.
     backend = MagicMock()
@@ -1176,12 +1326,15 @@ def test_failed_pp_read_cannot_write_after_request_cleanup(mixed_batch):
     ):
         reader = LayerwisePullReadThread(0, port, backend, state)
     worker = LayerwisePullConsumerWorker.__new__(LayerwisePullConsumerWorker)
+    worker._pending_recv_req_ids = set()
+    worker._deferred_cleanup_req_ids = set()
     worker.tp_size = 1
     worker._read_thread = reader
     worker._terminal_ext_ids = set()
     worker._dest_blocks_by_req = state.dest_blocks_by_req
     worker._invalid_block_ids = set()
     worker.request_map = {"request": "request123456789", "healthy": "healthy123456789"}
+    worker._pending_recv_req_ids = set(worker.request_map.values())
     ctx = zmq.Context()
     dealers = []
     decoder = msgspec.msgpack.Decoder(type=tuple)
@@ -1199,6 +1352,9 @@ def test_failed_pp_read_cannot_write_after_request_cleanup(mixed_batch):
                 msgspec.msgpack.encode((LAYOUT_META, f"P{pp}", msgspec.msgpack.encode(layout), ((0,), (1,)), 1, pp, 0))
             )
             assert dealer.recv_multipart() == [b"", b"ACK"]
+        if cancel_before_failure:
+            assert worker.get_finished({"request123456789"}) == (set(), set())
+            assert "request" in worker._dest_blocks_by_req
         dealers[0].send(
             msgspec.msgpack.encode((READ_READY_BATCH, 0, "", [("request", [[0]], [0])], ["request"], 0, 1, 0))
         )
@@ -1208,6 +1364,8 @@ def test_failed_pp_read_cannot_write_after_request_cleanup(mixed_batch):
         assert worker.get_block_ids_with_load_errors() == {0}
         assert worker.get_finished({"request123456789"}) == (set(), set())
         assert "request" not in state.dest_blocks_by_req
+        assert "request123456789" not in worker._pending_recv_req_ids
+        assert worker._deferred_cleanup_req_ids == set()
         # Even if an address mapping is present again, a late source must not
         # write to it. Cleanup must not remove the failure tombstone.
         state.dest_blocks_by_req["request"] = [[2]]
