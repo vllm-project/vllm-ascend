@@ -141,8 +141,8 @@ def _get_cann_mega_moe_quant_settings(quant_type: QuantType) -> tuple[int, int |
         return (_CANN_MEGA_MOE_QUANT_MODE_None, None, None)
 
     raise RuntimeError(
-        "MegaMoe integration supports W8A8/W4A8 INT on A2/A3 and MXFP on FP8-capable "
-        "MegaMoe platforms. "
+        "MegaMoe integration supports W8A8/W4A8 INT, BF16 (none quant), and MXFP "
+        "on supported A2/A3 platforms. "
         f"Unsupported quant type: {quant_type}."
     )
 
