@@ -17,7 +17,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 import vllm_ascend.core.dyntra_lb_scheduler as dyntra_lb_scheduler_module
-from tests.ut.kv_offload.utils import (
+from tests.ut.distributed.kv_transfer.kv_p2p.utils import (
     create_model_runner_output,
     create_request,
     create_vllm_config,

@@ -18,9 +18,11 @@ from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_c
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    KVCacheTensor,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_layout import KVCacheLayout
 from vllm.v1.request import RequestStatus
 
 fake_engine = types.ModuleType("mooncake.engine")
@@ -395,23 +397,23 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         )
         vllm_config = MockVllmConfig()
         vllm_config.cache_config.num_gpu_blocks_override = None
+        vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBHNC
         num_blocks = 10
         allocated_config = get_kv_cache_config_from_groups(
             vllm_config,
             [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
             available_memory=uniform_spec.page_size_bytes * num_blocks,
         )
-        allocated_sizes = {
-            get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
-        }
+        placements = {layer: tensor for tensor in allocated_config.kv_cache_tensors for layer in tensor.layers}
         self.assertEqual(allocated_config.num_blocks, num_blocks)
-        # vLLM #51718: on main every layer tensor in a KV cache group shares
-        # one allocation sized by the group's total bytes-per-block
-        # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
-        # tensor.size is the sum of the two page sizes times num_blocks.
-        group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
-        self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
-        self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
+        self.assertEqual(set(placements), {main_layer, index_layer})
+        # Both placements share the allocation; each keeps its own page stride.
+        self.assertEqual(placements[main_layer].block_stride, main_spec.page_size_bytes)
+        self.assertEqual(placements[index_layer].block_stride, index_spec.page_size_bytes)
+        self.assertEqual(placements[main_layer].offset, 0)
+        self.assertEqual(placements[index_layer].offset, main_spec.page_size_bytes * num_blocks)
+        for placement in placements.values():
+            self.assertEqual(placement.size, uniform_spec.page_size_bytes * num_blocks)
 
         kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
@@ -1717,8 +1719,8 @@ class TestMainThreadLoop(unittest.TestCase):
         )
         self.thread.request_queue = queue.Queue()
 
-    @patch.object(KVCacheRecvingThread, "_handle_request")
-    def test_run_loop_normal(self, mock_handle):
+    @patch.object(KVCacheRecvingThread, "_submit_request")
+    def test_run_loop_normal(self, mock_submit):
         test_request = {
             "request_id": "req1",
             "local_block_ids": [1, 2],
@@ -1732,16 +1734,15 @@ class TestMainThreadLoop(unittest.TestCase):
             "all_task_done": False,
         }
 
-        self.thread.request_queue.put(test_request)
-        self.thread.request_queue.put(None)
-
-        self.thread.start()
-        time.sleep(0.1)
-        self.thread.join(timeout=1.0)
-
+        self.thread.request_queue = MagicMock(spec=queue.Queue)
+        self.thread.request_queue.get.side_effect = [test_request, None, SystemExit]
+        # None is an ignored queue item, not a shutdown command. Drive the
+        # loop synchronously and stop at a controlled boundary without a leak.
+        with self.assertRaises(SystemExit):
+            self.thread.run()
         self.assertTrue(self.thread.ready_event.is_set())
-        mock_handle.assert_called_once_with(test_request)
-        self.assertTrue(self.thread.request_queue.empty())
+        mock_submit.assert_called_once_with(test_request)
+        self.thread.request_queue.task_done.assert_called_once_with()
 
 
 class MockVllmConfig:
@@ -1842,21 +1843,28 @@ class TestKVCacheTaskTracker(unittest.TestCase):
         self.assertEqual(len(result_delayed), 0)
 
     def test_retrieve_expired_requests(self):
-        current_time = time.time()
-        self.tracker.add_req_to_process("req_1")
-        self.tracker.add_req_to_process("req_2")
-        self.tracker.add_delayed_request("req_1", current_time - 100000)
-        self.tracker.add_delayed_request("req_2", current_time)
-        result = self.tracker._retrieve_expired_requests()
-        self.assertEqual(
-            result,
-            {
-                "req_1",
-            },
-        )
-        result_delay = self.tracker.delayed_free_requests
-        self.assertEqual(len(result_delay), 1)
-        self.assertIn("req_2", result_delay)
+        """Timeout boundary, late DONE and interleaved requests use one clock."""
+        module = sys.modules[KVCacheTaskTracker.__module__]
+        with (
+            patch.object(module.time, "time", return_value=100.0) as clock,
+            patch.object(module.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 10),
+        ):
+            self.tracker.add_req_to_process("expired")
+            self.tracker.add_delayed_request("expired", 90.0)
+            self.tracker.add_req_to_process("active")
+            self.tracker.add_delayed_request("active", 100.0)
+            self.assertEqual(self.tracker.get_and_clear_finished_requests(), set())
+            clock.return_value = 100.001
+            self.assertEqual(self.tracker.get_and_clear_finished_requests(), {"expired"})
+            self.tracker.update_done_task_count("expired")
+            self.tracker.add_delayed_request("expired", 100.001)
+            self.assertEqual(self.tracker.get_and_clear_finished_requests(), set())
+            self.tracker.update_done_task_count("active")
+            self.assertEqual(self.tracker.get_and_clear_finished_requests(), {"active"})
+            clock.return_value = 200.0
+            self.assertEqual(self.tracker.get_and_clear_finished_requests(), set())
+            self.assertEqual(self.tracker.reqs_to_process, set())
+            self.assertEqual(dict(self.tracker.delayed_free_requests), {})
 
     def test_duplicate_task_update(self):
         self.tracker.add_req_to_process("req1")
@@ -1866,9 +1874,69 @@ class TestKVCacheTaskTracker(unittest.TestCase):
 
         finished = self.tracker.get_and_clear_finished_requests()
         self.assertEqual(finished, {"req1"})
+        # A duplicate after consuming completion must not republish it.
+        self.tracker.update_done_task_count("req1")
+        self.tracker.add_delayed_request("req1", 0.0)
+        self.assertEqual(self.tracker.get_and_clear_finished_requests(), set())
+        self.assertEqual(dict(self.tracker.delayed_free_requests), {})
 
 
 class TestMooncakeConnectorMetadata(unittest.TestCase):
+    def test_missing_required_field_does_not_publish_partial_request(self):
+        params = {
+            "remote_block_ids": ([4, 5],),
+            "remote_engine_id": "producer",
+            "remote_request_id": "producer-request",
+            "remote_host": "127.0.0.1",
+            "remote_port": 5000,
+        }
+        for missing in params:
+            with self.subTest(missing=missing):
+                meta = MooncakeConnectorMetadata()
+                meta.add_new_req("healthy", ([1, 2],), 32, params)
+                invalid = {key: value for key, value in params.items() if key != missing}
+                with self.assertRaises(KeyError) as error:
+                    meta.add_new_req("invalid", ([3, 4],), 32, invalid)
+                self.assertEqual(error.exception.args, (missing,))
+                self.assertEqual(set(meta.requests), {"healthy"})
+                self.assertEqual(meta.requests["healthy"].remote_request_id, "producer-request")
+
+    def test_grouped_metadata_preserves_prefix_and_topology_contract(self):
+        # Schema samples, not a Cartesian product of model names.
+        for pcp, dcp, ptp, prefix in ((1, 1, 2, 0), (2, 1, 4, 16), (1, 2, 4, 32)):
+            with self.subTest(pcp=pcp, dcp=dcp, ptp=ptp, prefix=prefix):
+                meta = MooncakeConnectorMetadata()
+                meta.add_new_req(
+                    "decode-request",
+                    ([11, 12], [21]),
+                    32,
+                    {
+                        "remote_block_ids": ([1, 2, 3], [7]),
+                        "remote_engine_id": "producer",
+                        "remote_request_id": "prefill-request",
+                        "remote_host": "127.0.0.1",
+                        "remote_port": 5000,
+                        "remote_pcp_size": pcp,
+                        "remote_dcp_size": dcp,
+                        "remote_ptp_size": ptp,
+                        "num_computed_tokens": prefix,
+                        "num_prompt_blocks": 3,
+                        "remote_block_size": 16,
+                    },
+                    local_full_block_ids=([10, 11, 12], [21]),
+                )
+                request = meta.requests["decode-request"]
+                self.assertEqual(request.local_block_ids, ([11, 12], [21]))
+                self.assertEqual(request.remote_block_ids, ([1, 2, 3], [7]))
+                self.assertEqual(request.local_full_block_ids, ([10, 11, 12], [21]))
+                self.assertEqual(request.num_computed_tokens, prefix)
+                self.assertEqual(request.num_external_tokens, 32)
+                self.assertEqual(request.remote_request_id, "prefill-request")
+                self.assertEqual(
+                    (request.remote_pcp_size, request.remote_dcp_size, request.remote_ptp_size), (pcp, dcp, ptp)
+                )
+                self.assertEqual(request.remote_block_size, 16)
+
     def test_add_new_req(self):
         meta = MooncakeConnectorMetadata()
         self.assertEqual(len(meta.requests), 0)
@@ -2746,7 +2814,9 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.num_blocks = 1579
         worker._layer_specs = {layer_name: MagicMock()}
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
+            kv_cache_tensors=[
+                KVCacheTensor(size=tensor_size, layers=[layer_name], layer_stride=tensor_size, block_stride=128)
+            ]
         )
 
         self.assertEqual(aligned_tensor.data_ptr() % alignment, 0)
@@ -2767,7 +2837,14 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=tensor_size,
+                    layers=[layer_name],
+                    layer_stride=tensor_size,
+                    block_stride=128,
+                )
+            ]
         )
 
         # Subtracting a stale one-group padding value from this view would

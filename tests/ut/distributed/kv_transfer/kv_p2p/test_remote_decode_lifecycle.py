@@ -21,7 +21,7 @@ import copy
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
 
-from tests.ut.kv_offload.utils import (
+from tests.ut.distributed.kv_transfer.kv_p2p.utils import (
     assert_scheduler_empty,
     create_model_runner_output,
     create_request,
