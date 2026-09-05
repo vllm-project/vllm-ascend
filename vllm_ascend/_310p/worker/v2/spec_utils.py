@@ -119,20 +119,16 @@ def greedy_rejection_sample_cpu(
     """Greedy (temperature=0) rejection sampling for MTP verify.
 
     Argmax runs on-device so we only D2H token ids (not the full vocab logits).
+    Acceptance bookkeeping stays on CPU to avoid per-element NPU syncs.
     """
     cu_np = cu_num_logits.detach().cpu().numpy()
     num_reqs = cu_np.shape[0] - 1
     max_tokens = num_speculative_steps + 1
-    sampled = torch.full(
-        (num_reqs, max_tokens),
-        -1,
-        dtype=torch.int32,
-        device=target_logits.device,
-    )
-    num_sampled = torch.zeros(num_reqs, dtype=torch.int32, device=target_logits.device)
+    sampled_cpu = torch.full((num_reqs, max_tokens), -1, dtype=torch.int32)
+    num_sampled_cpu = torch.zeros(num_reqs, dtype=torch.int32)
     # Avoid full-vocab logits D2H (dominant cost on 310P MTP verify).
-    target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu()
-    draft_cpu = draft_sampled.detach().cpu().to(dtype=torch.int32)
+    target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu().numpy()
+    draft_cpu = draft_sampled.detach().cpu().to(dtype=torch.int32).numpy()
 
     for req_idx in range(num_reqs):
         start = int(cu_np[req_idx])
@@ -145,23 +141,26 @@ def greedy_rejection_sample_cpu(
         # logits[i] predicts token i+1, which is draft_sampled[i+1] (upstream
         # rejection_sampler_utils loads draft_sampled_ptr + logit_idx + 1).
         for logit_idx in range(start, end):
-            target_token = int(target_argmax_cpu[logit_idx].item())
+            target_token = int(target_argmax_cpu[logit_idx])
             is_bonus = logit_idx >= end - 1
             if accepted < num_speculative_steps and not is_bonus:
-                draft_token = int(draft_cpu[logit_idx + 1].item())
+                draft_token = int(draft_cpu[logit_idx + 1])
                 if draft_token == target_token:
-                    sampled[req_idx, accepted] = target_token
+                    sampled_cpu[req_idx, accepted] = target_token
                     accepted += 1
                     continue
-            sampled[req_idx, accepted] = target_token
+            sampled_cpu[req_idx, accepted] = target_token
             accepted += 1
             break
         if accepted == 0:
-            sampled[req_idx, 0] = int(target_argmax_cpu[start].item())
+            sampled_cpu[req_idx, 0] = int(target_argmax_cpu[start])
             accepted = 1
-        num_sampled[req_idx] = accepted
+        num_sampled_cpu[req_idx] = accepted
 
-    return sampled, num_sampled
+    return (
+        sampled_cpu.to(device=target_logits.device, non_blocking=True),
+        num_sampled_cpu.to(device=target_logits.device, non_blocking=True),
+    )
 
 
 def prepare_prefill_inputs_cpu(

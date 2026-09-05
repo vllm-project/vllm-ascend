@@ -572,3 +572,49 @@ def test_greedy_rejection_sample_rejects_when_target_argmax_mismatches_draft() -
     assert int(num_sampled[0].item()) == 1
     assert int(sampled[0, 0].item()) == 4
     assert int(sampled[0, 1].item()) == -1
+
+
+@pytest.mark.parametrize("num_speculative_steps", [2, 3])
+def test_greedy_rejection_sample_accepts_multi_step_drafts(num_speculative_steps: int) -> None:
+    """K=2/3: accept all draft tokens then emit the bonus token."""
+    from vllm_ascend._310p.worker.v2.spec_utils import greedy_rejection_sample_cpu
+
+    # draft_sampled = [last_sampled, draft_0, ..., draft_{K-1}]
+    # logits has K draft verifies + 1 bonus = K+1 rows.
+    num_logits = num_speculative_steps + 1
+    vocab = 16
+    draft_ids = list(range(10, 10 + num_speculative_steps))
+    bonus_id = 7
+    logits = torch.zeros(num_logits, vocab)
+    for i, tok in enumerate(draft_ids):
+        logits[i, tok] = 10.0
+    logits[-1, bonus_id] = 10.0
+    draft_sampled = torch.tensor([3, *draft_ids], dtype=torch.int32)
+    cu_num_logits = torch.tensor([0, num_logits], dtype=torch.int32)
+
+    sampled, num_sampled = greedy_rejection_sample_cpu(logits, draft_sampled, cu_num_logits, num_speculative_steps)
+    assert int(num_sampled[0].item()) == num_speculative_steps + 1
+    assert sampled[0, : num_speculative_steps + 1].tolist() == [*draft_ids, bonus_id]
+
+
+@pytest.mark.parametrize("num_speculative_steps", [2, 3])
+def test_greedy_rejection_sample_rejects_mid_multi_step_draft(num_speculative_steps: int) -> None:
+    """K=2/3: reject at draft_1 and keep only the corrected target token."""
+    from vllm_ascend._310p.worker.v2.spec_utils import greedy_rejection_sample_cpu
+
+    num_logits = num_speculative_steps + 1
+    vocab = 16
+    draft_ids = list(range(10, 10 + num_speculative_steps))
+    logits = torch.zeros(num_logits, vocab)
+    # Accept draft_0, reject draft_1 (target prefers 4).
+    logits[0, draft_ids[0]] = 10.0
+    logits[1, 4] = 10.0
+    for i in range(2, num_logits):
+        logits[i, 7] = 10.0
+    draft_sampled = torch.tensor([3, *draft_ids], dtype=torch.int32)
+    cu_num_logits = torch.tensor([0, num_logits], dtype=torch.int32)
+
+    sampled, num_sampled = greedy_rejection_sample_cpu(logits, draft_sampled, cu_num_logits, num_speculative_steps)
+    assert int(num_sampled[0].item()) == 2
+    assert sampled[0, :2].tolist() == [draft_ids[0], 4]
+    assert int(sampled[0, 2].item()) == -1

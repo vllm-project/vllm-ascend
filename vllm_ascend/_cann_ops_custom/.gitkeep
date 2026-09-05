@@ -1,0 +1,3 @@
+# This folder is reserved for the installation of custom aclnn operators tailored for vLLM-Ascend.
+# Source code of the operators can be found in the `src` folder.
+# The operators are compiled into a custom CANN software package and installed to this folder automatically.

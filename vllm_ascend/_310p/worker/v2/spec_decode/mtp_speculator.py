@@ -77,10 +77,11 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         idx_mapping_np = idx_mapping.detach().cpu().numpy()
         query_start_loc_np = query_start_loc.detach().cpu().numpy()
         positions_np = positions.detach().cpu().numpy()
+        # 310P BlockTables path accepts host ndarrays (CPU slot-map builder).
         slot_mappings = self.block_tables.compute_slot_mappings(
-            idx_mapping_np,
-            query_start_loc_np,
-            positions_np,
+            idx_mapping_np,  # type: ignore[arg-type]
+            query_start_loc_np,  # type: ignore[arg-type]
+            positions_np,  # type: ignore[arg-type]
             num_tokens_padded=num_tokens_padded,
         )
         return build_slot_mappings_by_layer(slot_mappings, self.kv_cache_config)
@@ -121,11 +122,11 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     ) -> None:
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-            return
+        """Eager non-fused multi-step with 310P CPU slot mappings.
 
+        Draft-decode ACLGraphs are not captured on 310P (see Ascend capture());
+        always run ``_generate_draft`` eagerly with per-step host slot maps.
+        """
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
@@ -156,5 +157,5 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                 attn_metadata,
                 slot_mappings_by_layer,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=batch_desc.cg_mode,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
             )

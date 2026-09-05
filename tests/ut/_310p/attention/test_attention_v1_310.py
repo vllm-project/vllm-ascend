@@ -34,6 +34,7 @@ class TestAscendAttentionBackend310(TestBase):
         self.mock_config = MagicMock()
         self.utils_patcher = patch("vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_config)
         self.utils_patcher.start()
+        self.addCleanup(self.utils_patcher.stop)
 
     def test_get_impl_cls(self):
         self.assertEqual(AscendAttentionBackend310.get_impl_cls(), AscendAttentionBackendImpl310)
@@ -54,6 +55,11 @@ class TestAscendAttentionBackendImpl310(TestBase):
         self.attn_metadata = MagicMock()
         self.attn_metadata.return_value = "1"
         self.mock_vllm_config = MagicMock()
+        self.utils_patcher = patch(
+            "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
+        )
+        self.utils_patcher.start()
+        self.addCleanup(self.utils_patcher.stop)
         self.layer_no_quant = MagicMock(spec=["layer_name", "_k_scale_float", "_v_scale_float"])
         self.layer_no_quant.layer_name = "test_layer"
         self.layer_no_quant._k_scale_float = 1.0
@@ -62,6 +68,7 @@ class TestAscendAttentionBackendImpl310(TestBase):
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
         self.config_patcher.start()
+        self.addCleanup(self.config_patcher.stop)
         self.impl = AscendAttentionBackendImpl310(
             num_heads=8,
             head_size=128,
