@@ -25,62 +25,103 @@ from vllm.v1.outputs import LogprobsTensors
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-@triton.jit
-def _topk_log_softmax_kernel(
-    output_ptr,
-    logits_ptr,
-    logits_stride,
-    topk_ids_ptr,
-    topk,
+@triton.jit 
+def _topk_log_softmax_kernel( 
+    output_ptr, 
+    logits_ptr, 
+    logits_stride, 
+    topk_ids_ptr, 
+    topk, 
     vocab_size,
-    BLOCK_SIZE: tl.constexpr,
-    PADDED_TOPK: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    row_ptr = logits_ptr + req_idx * logits_stride
+    full_vocab_size,
+    BLOCK_SIZE: tl.constexpr, 
+    PADDED_TOPK: tl.constexpr, 
+): 
+    req_idx = tl.program_id(0) 
+    row_ptr = logits_ptr + req_idx * logits_stride 
+ 
+    running_max = float("-inf")
+    running_sum = 0.0
 
-    max_val = float("-inf")
-    for i in range(0, vocab_size, BLOCK_SIZE):
+    for i in range(0, full_vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
-        max_val = tl.max(tl.maximum(logits, max_val, propagate_nan=tl.PropagateNan.ALL))
-    max_val = max_val.to(tl.float32)  # type: ignore
+        logits = tl.load(row_ptr + block)
 
-    se = 0.0
-    for i in range(0, vocab_size, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
+        block_max = tl.max(logits)
+        block_max = block_max.to(tl.float32)  # type: ignore
+        new_max = tl.maximum(
+            block_max,
+            running_max,
+            propagate_nan=tl.PropagateNan.ALL,
+        )
+
         logits = logits.to(tl.float32)
-        e = tl.exp(logits - max_val)
-        se += tl.sum(e)
-    lse = tl.log(se)
+        old_scale = tl.exp(running_max - new_max)
+        block_sum = tl.sum(tl.exp(logits - new_max))
 
-    k_offset = tl.arange(0, PADDED_TOPK)
-    k_mask = k_offset < topk
-    topk_ids = tl.load(topk_ids_ptr + req_idx * topk + k_offset, mask=k_mask, other=0)
+        running_sum = running_sum * old_scale + block_sum
+        running_max = new_max
 
-    logits = tl.load(row_ptr + topk_ids, mask=k_mask)
-    logits = logits.to(tl.float32)
-    o = logits - lse - max_val
-    tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
-
-
-def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor:
-    batch_size, vocab_size = logits.shape
-    token_ids = token_ids.to(torch.int64)
-    num_logprobs = token_ids.shape[1]
-    logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
-    _topk_log_softmax_kernel[(batch_size,)](
-        logprobs,
-        logits,
-        logits.stride(0),
-        token_ids,
-        num_logprobs,
-        vocab_size,
-        BLOCK_SIZE=12944,
-        PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2),
-        multibuffer=False,
+    block = full_vocab_size + tl.arange(0, BLOCK_SIZE)
+    logits = tl.load(
+        row_ptr + block,
+        mask=block < vocab_size,
+        other=float("-inf"),
     )
+
+    block_max = tl.max(logits)
+    block_max = block_max.to(tl.float32)  # type: ignore
+    new_max = tl.maximum(
+        block_max,
+        running_max,
+        propagate_nan=tl.PropagateNan.ALL,
+    )
+
+    logits = logits.to(tl.float32)
+    old_scale = tl.exp(running_max - new_max)
+    block_sum = tl.sum(tl.exp(logits - new_max))
+
+    running_sum = running_sum * old_scale + block_sum
+    running_max = new_max
+
+    lse = running_max + tl.log(running_sum)
+ 
+    k_offset = tl.arange(0, PADDED_TOPK) 
+    k_mask = k_offset < topk 
+    topk_ids = tl.load(
+        topk_ids_ptr + req_idx * topk + k_offset,
+        mask=k_mask,
+        other=0,
+    )
+ 
+    logits = tl.load(row_ptr + topk_ids, mask=k_mask) 
+    logits = logits.to(tl.float32) 
+    o = logits - lse
+    tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask) 
+ 
+ 
+def compute_token_logprobs(logits: torch.Tensor, token_ids: torch.Tensor) -> torch.Tensor: 
+    batch_size, vocab_size = logits.shape 
+    token_ids = token_ids.to(torch.int64) 
+    num_logprobs = token_ids.shape[1] 
+    logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
+
+    full_vocab_size = (
+        vocab_size // (15 * 1024)
+    ) * (15 * 1024)
+
+    _topk_log_softmax_kernel[(batch_size,)]( 
+        logprobs, 
+        logits, 
+        logits.stride(0), 
+        token_ids, 
+        num_logprobs, 
+        vocab_size,
+        full_vocab_size,
+        BLOCK_SIZE=15 * 1024, 
+        PADDED_TOPK=max(triton.next_power_of_2(num_logprobs), 2), 
+        multibuffer=True, 
+    ) 
     return logprobs
 
 
