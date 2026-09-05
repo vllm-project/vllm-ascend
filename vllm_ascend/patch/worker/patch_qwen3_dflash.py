@@ -68,6 +68,59 @@ def precompute_and_store_context_kv(
 
 DFlashQwen3Model.precompute_and_store_context_kv = precompute_and_store_context_kv
 
+
+def _apply_dflash_structural_swa(self) -> None:
+    """Enable per-layer structural SWA on the Ascend FIA impl for DFlash
+    drafts whose config marks some layers as ``sliding_attention``.
+
+    The DFlash draft builds every layer as a full-attention layer
+    (``Attention.sliding_window`` is None -> ``FullAttentionSpec``, i.e. a
+    single KV-cache group). Mixed sliding/full DFlash checkpoints such as
+    ``Qwen3.6-35B-A3B-DFlash-SW`` (``layer_types = [sliding_attention x5,
+    full_attention]``, ``sliding_window = 4096``) need the sliding layers to
+    run causal-band sliding-window attention.
+
+    Ascend V1 draft attention only plumbs a single KV-cache group, so we
+    cannot split the layers into ``SlidingWindowSpec`` + ``FullAttentionSpec``
+    groups (that is the V2-only path in upstream vLLM PR #47914). Instead we
+    keep one ``FullAttentionSpec`` group and set ``sliding_window`` directly
+    on each sliding layer's FIA impl. Ascend FIA then runs ``sparse_mode=4``
+    (``pre_tokens=window``, ``next_tokens=0`` == causal band) for those
+    layers -- exactly what upstream assigns them (SWA layers default causal
+    in PR #47914 ``_resolve_layer_attention``). Full layers keep
+    ``sliding_window=None`` -> ``sparse_mode=0`` (non-causal). Applying the
+    causal-band mask over the fully-retained cache is numerically equivalent
+    to the upstream windowed-cache path. See ``swa-dflash-design.md``.
+    """
+    cfg = getattr(self, "config", None)
+    if cfg is None:
+        return
+    layer_types = getattr(cfg, "layer_types", None)
+    sliding_window = getattr(cfg, "sliding_window", None)
+    # Only mixed/structural SWA configs need this; an absent layer_types or
+    # sliding_window (the "standard" all-full DFlash) is left untouched.
+    if not layer_types or not sliding_window:
+        return
+    for i, layer in enumerate(self.layers):
+        if i >= len(layer_types):
+            break
+        if layer_types[i] == "sliding_attention":
+            # Attention.impl is created eagerly in Attention.__init__; setting
+            # sliding_window here (model construction, before ACL-graph
+            # capture) makes FIA bake sparse_mode=4 into the captured graph.
+            layer.self_attn.attn.impl.sliding_window = sliding_window
+
+
+_orig_dflash_model_init = DFlashQwen3Model.__init__
+
+
+def _patched_dflash_model_init(self, *args, **kwargs) -> None:
+    _orig_dflash_model_init(self, *args, **kwargs)
+    _apply_dflash_structural_swa(self)
+
+
+DFlashQwen3Model.__init__ = _patched_dflash_model_init
+
 _orig_read_mask_embedding = DFlashQwen3ForCausalLM._read_mask_embedding
 
 

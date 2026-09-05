@@ -867,7 +867,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         actual_seq_lengths_q = metadata.actual_seq_lengths_q
                         block_tables = metadata.block_tables
                         attn_count = attn_count + 1
-                        if not metadata.causal:
+                        # Preserve SWA (band) draft layers: their sparse_mode=4
+                        # and 2048 band-mask were baked at capture. Forcing
+                        # sparse_mode=0 here (as for non-causal full layers)
+                        # replays the baked mask with sparse_mode=0, which NPU
+                        # FIA rejects ("When attnMask is provided, sparseMode
+                        # must be 3 or 4"). Only fall back to unmasked full
+                        # (sparse_mode=0) for non-SWA draft layers.
+                        if not metadata.causal and sparse_mode != 4:
                             sparse_mode = 0
                     else:
                         metadata_key = layer_name if layer_name is not None and layer_name in attn_metadata else key
@@ -948,6 +955,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
         attn_mask = attn_metadata.attn_mask
+        # NPU FIA sparse_mode=4 (band) requires a fixed 2048x2048 lower-
+        # triangular causal template mask (sparse_mode 2/3/4 must carry one;
+        # passing None is rejected with "sparseMode must be 0"). The DFlash
+        # structural-SWA draft carries no attn_mask, so supply the template
+        # for sliding layers here (the band itself still comes from
+        # pre_tokens/next_tokens below). Target SWA layers already receive a
+        # mask from the metadata builder, so this only fires when the mask is
+        # None. See swa-dflash-optionA-impl.md.
+        if attn_mask is None and self.sliding_window is not None:
+            attn_mask = AttentionMaskBuilder(query.device).get_splitfuse_attn_mask()
         sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
         pre_tokens = self.sliding_window or SWA_INT_MAX
         next_tokens = 0 if self.sliding_window else SWA_INT_MAX
