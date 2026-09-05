@@ -686,6 +686,34 @@ def get_partial_block_index(
     return None
 
 
+def masked_block_runs(
+    mask: Sequence[bool] | None,
+    start_block: int,
+    end_block: int,
+) -> list[tuple[int, int]]:
+    """Split [start_block, end_block) into maximal runs of mask-allowed blocks.
+
+    A None mask (or blocks at or beyond the mask length) disables filtering,
+    so callers never transfer fewer blocks than the mask actually covers.
+    """
+    if end_block <= start_block:
+        return []
+    if mask is None:
+        return [(start_block, end_block)]
+    runs: list[tuple[int, int]] = []
+    run_start: int | None = None
+    for block_idx in range(start_block, end_block):
+        allowed = block_idx >= len(mask) or mask[block_idx]
+        if allowed and run_start is None:
+            run_start = block_idx
+        elif not allowed and run_start is not None:
+            runs.append((run_start, block_idx))
+            run_start = None
+    if run_start is not None:
+        runs.append((run_start, end_block))
+    return runs
+
+
 class _LazyGroupedBlockHashList(Sequence[BlockHash | str]):
     def __init__(self, block_hashes: Sequence[BlockHash | str], scale_factor: int) -> None:
         self._block_hashes = block_hashes
@@ -977,6 +1005,11 @@ class ReqMeta:
     load_block_gvas_by_group_np: list[np.ndarray] | None = None
     partial_save_gva_per_group: list[int] = field(default_factory=list)
     partial_load_gva_per_group: list[int] = field(default_factory=list)
+    # Per-group reachable masks for the layerwise transfer, computed once per
+    # scheduler step (None = no filtering, e.g. full-attention groups or when
+    # the coordinator is unavailable).
+    store_masks: tuple[Sequence[bool] | None, ...] | None = None
+    load_masks: tuple[Sequence[bool] | None, ...] | None = None
 
     @staticmethod
     def from_request_tracker(
