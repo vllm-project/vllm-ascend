@@ -142,22 +142,6 @@ deployment:
         --tool-call-parser kimi_k3
 
 benchmarks:
-  acc_gpqa:
-    case_type: accuracy
-    dataset_path: vllm-ascend/gpqa
-    request_conf: vllm_api_general_chat
-    dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-    # Start with a deterministic subset of GPQA's 198 questions for nightly.
-    num_prompts: 64
-    max_out_len: 65536
-    batch_size: 16
-    work_dir: /root/.cache/benchmark_results/${BENCHMARK_JOB_NAME}/aisbench
-    temperature: 1.0
-    top_p: 1.0
-    thinking: true
-    verify: false
-    # Add a baseline and threshold after repeated A3 CI calibration runs.
-
   perf_16k_prefix0:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K_prefix0_in16384_bs200_kimi
@@ -167,6 +151,6 @@ benchmarks:
     max_out_len: 1024
     batch_size: 4
     request_rate: 0
-    # Calibrate this value from repeated A3 CI runs before enabling a regression gate.
-    baseline: 1
-    threshold: 0
+    baseline: 40
+    threshold: 0.95
+    tpot_threshold: 90
