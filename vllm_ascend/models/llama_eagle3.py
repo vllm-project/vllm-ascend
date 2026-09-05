@@ -60,10 +60,10 @@ def load_quarot_target_layer(
     layer: nn.Module,
     target_model_path: Path | str,
     weight_names: tuple[str, ...],
-    rotation: torch.Tensor,
+    rotation: torch.Tensor | None,
     label: str,
 ) -> None:
-    """Load one target vocab shard into the draft's unrotated hidden basis."""
+    """Load one target vocab shard, optionally aligning its hidden basis."""
     target_model_path = Path(target_model_path)
     shard_path, weight_name = _find_safetensors_weight(
         target_model_path,
@@ -80,20 +80,24 @@ def load_quarot_target_layer(
     with safe_open(shard_path, framework="pt", device="cpu") as shard:
         target_weight = shard.get_slice(weight_name)[start_index:end_index]
 
-    rotation = rotation.to(
-        device=layer.weight.device,
-        dtype=torch.float32,
-    )
-    target_weight = target_weight.to(
-        device=layer.weight.device,
-        dtype=torch.float32,
-    )
-    aligned_weight = torch.matmul(target_weight, rotation.T)
+    if rotation is None:
+        aligned_weight = target_weight.to(device=layer.weight.device)
+    else:
+        rotation = rotation.to(
+            device=layer.weight.device,
+            dtype=torch.float32,
+        )
+        target_weight = target_weight.to(
+            device=layer.weight.device,
+            dtype=torch.float32,
+        )
+        aligned_weight = torch.matmul(target_weight, rotation.T)
     loaded_rows = aligned_weight.shape[0]
     layer.weight.data[:loaded_rows].copy_(aligned_weight.to(layer.weight.dtype))
     layer.weight.data[loaded_rows:].zero_()
     logger.info(
-        "[spec_decode/quarot] Loaded and aligned %s from %s (%s).",
+        "[spec_decode] Loaded%s %s from %s (%s).",
+        " and aligned" if rotation is not None else "",
         label,
         shard_path.name,
         tuple(layer.weight.shape),

@@ -311,7 +311,7 @@ def _patch_model_config_validation() -> None:
             arch.startswith("Eagle") or arch.endswith("Eagle3") for arch in architectures
         )
         is_mtp_drafter = model_type in mtp_model_types
-        is_dspark_drafter = "DSparkDraftModel" in architectures
+        is_dspark_drafter = any(arch.endswith("DSparkModel") for arch in architectures)
         if (
             getattr(self, "runner", None) == "draft"
             and (is_eagle_drafter or is_mtp_drafter or is_dspark_drafter)

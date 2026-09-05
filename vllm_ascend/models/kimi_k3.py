@@ -80,6 +80,14 @@ from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
+from vllm_ascend.worker.v2.pp_utils import (
+    PPTransportDataType,
+    add_pp_transport_tensors,
+    get_pp_transport_tensors,
+)
+from vllm_ascend.worker.v2.pp_utils import (
+    make_empty_intermediate_tensors as make_pp_empty_intermediate_tensors,
+)
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
@@ -597,6 +605,10 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
 
         world_size = get_tensor_model_parallel_world_size()
         assert config.num_attention_heads % world_size == 0, "num_attention_heads must be divisible by world_size"
+        self.make_empty_intermediate_tensors = make_pp_empty_intermediate_tensors(  # type: ignore[has-type]
+            self,
+            self.make_empty_intermediate_tensors,
+        )
 
     def load_weights(self, weights):
         """Route mixed-precision KDA gates through vLLM's packed loader."""
@@ -642,7 +654,8 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 **kwargs,
             )
 
-        if get_pp_group().is_first_rank:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             hidden_states = inputs_embeds if inputs_embeds is not None else self.embed_input_ids(input_ids)
             residual = None
         else:
@@ -661,11 +674,13 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             hidden_states = sp_shard(hidden_states)
             assert residual is None, "Sequence parallelism is not supported with pipeline parallelism"
 
-        if self.dspark_aux_capture_materialized:
-            aux_hidden_states: list[torch.Tensor] = []
-        else:
-            aux_hidden_states = self._maybe_add_hidden_state(
-                [],
+        aux_hidden_states = get_pp_transport_tensors(
+            intermediate_tensors,
+            PPTransportDataType.AUX_HIDDEN_STATES,
+        )
+        if not self.dspark_aux_capture_materialized and pp_group.is_first_rank:
+            self._maybe_add_hidden_state(
+                aux_hidden_states,
                 self.start_layer,
                 hidden_states,
                 residual,
@@ -710,13 +725,18 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                     residual,
                 )
 
-        if not get_pp_group().is_last_rank:
+        if not pp_group.is_last_rank:
             assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
-            return IntermediateTensors(
+            intermediate_tensors = IntermediateTensors(
                 {
                     "hidden_states": hidden_states,
                     "residual": residual,
                 }
+            )
+            return add_pp_transport_tensors(
+                intermediate_tensors,
+                PPTransportDataType.AUX_HIDDEN_STATES,
+                aux_hidden_states,
             )
 
         hidden_states = _apply_ascend_attn_res(
