@@ -94,6 +94,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             cls._fused_chunk_available = False
         return cls._fused_chunk_available
 
+    @classmethod
+    def _can_use_fused_chunk(cls, query: torch.Tensor | None) -> bool:
+        """Whether the fused operator is available for the input dtype.
+
+        The current ACLNN implementation accepts BF16 query/key/value tensors
+        only. The probe intentionally uses BF16, so checking only its result
+        would incorrectly enable the fused path for FP16 inputs.
+        """
+        return query is not None and query.dtype == torch.bfloat16 and cls._probe_fused_chunk()
+
     @staticmethod
     def _chunk_gated_delta_rule_fused(
         q: torch.Tensor,
@@ -524,7 +534,9 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # Use the fused CANN operator when available (probed once, cached on
             # the class) and applicable. It only supports the non-PCP case; fall
             # back to the Triton pipeline under PCP or if the op is unavailable.
-            use_fused_chunk = AscendGatedDeltaNetAttention._probe_fused_chunk() and get_pcp_group().world_size == 1
+            use_fused_chunk = (
+                AscendGatedDeltaNetAttention._can_use_fused_chunk(query_non_spec) and get_pcp_group().world_size == 1
+            )
             if use_fused_chunk:
                 # The fused op's state layout [N, Nv, Dv, Dk] matches ssm_state
                 # directly, so no transpose is needed. Advanced indexing already
