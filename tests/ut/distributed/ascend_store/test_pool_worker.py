@@ -30,6 +30,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import
     ReqMeta,
     SharedBlockData,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
+    KVCacheStoreBatch,
+    KVCacheStoreSendingThread,
+)
 
 
 class TestKVPoolWorkerHelpers(unittest.TestCase):
@@ -717,27 +721,90 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         kwargs["invalid_block_ids"].add(7)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
 
-    def test_wait_for_save_waits_for_save(self):
+    def test_wait_for_save_pipelines_one_step(self):
         worker = self._make_worker()
-        worker.kv_send_thread = MagicMock()
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        first_batch = KVCacheStoreBatch([])
+        second_batch = KVCacheStoreBatch([])
+        send_thread.prepare_save_batch.side_effect = [first_batch, second_batch]
+        worker.kv_send_thread = send_thread
 
-        req = ReqMeta(
+        first_req = ReqMeta(
             req_id="r1",
             token_len_chunk=16,
             block_ids=[0],
             block_hashes=["h0"],
             can_save=True,
         )
+        first_meta = AscendConnectorMetadata(set(), set())
+        first_meta.add_request(first_req)
+        worker.prepare_save(first_meta)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.torch.npu",
+            create=True,
+        ):
+            worker.wait_for_save(first_meta)
+
+        send_thread.commit_save_batch.assert_called_once()
+        send_thread.wait_for_batch.assert_not_called()
+
+        second_req = ReqMeta(
+            req_id="r2",
+            token_len_chunk=16,
+            block_ids=[1],
+            block_hashes=["h1"],
+            can_save=True,
+        )
+        second_batch.requests = [second_req]
+        second_meta = AscendConnectorMetadata(set(), set())
+        second_meta.add_request(second_req)
+        worker.prepare_save(second_meta)
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.torch.npu",
+            create=True,
+        ):
+            worker.wait_for_save(second_meta)
+
+        send_thread.wait_for_batch.assert_called_once_with(first_batch)
+        self.assertIs(worker._previous_save_batch, second_batch)
+
+        send_thread.wait_for_batch.reset_mock()
+        worker.wait_for_preempted_saves({"r2"})
+        send_thread.wait_for_batch.assert_called_once_with(second_batch)
+        self.assertIsNone(worker._previous_save_batch)
+
+    def test_partial_save_forces_current_step_fence(self):
+        worker = self._make_worker()
+        send_thread = MagicMock(spec=KVCacheStoreSendingThread)
+        batch = KVCacheStoreBatch([])
+        send_thread.prepare_save_batch.return_value = batch
+        worker.kv_send_thread = send_thread
+
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=15,
+            save_end_token=15,
+            block_ids=[0],
+            block_hashes=["h0"],
+            can_save=True,
+        )
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
-        worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_called_with("r1")
-        worker.kv_send_thread.add_request.assert_called_once()
-        worker.kv_send_thread.request_queue.join.assert_called_once()
+        worker.prepare_save(meta)
+        self.assertTrue(send_thread.prepare_save_batch.call_args.kwargs["force_current_step"])
+
+        batch.force_current_step = True
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.torch.npu",
+            create=True,
+        ):
+            worker.wait_for_save(meta)
+        send_thread.wait_for_batch.assert_called_once_with(batch)
+        self.assertIsNone(worker._previous_save_batch)
 
     def test_wait_for_save_skip_non_save(self):
         worker = self._make_worker()
-        worker.kv_send_thread = MagicMock()
+        worker.kv_send_thread = MagicMock(spec=KVCacheStoreSendingThread)
 
         req = ReqMeta(
             req_id="r1",
@@ -749,8 +816,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta = AscendConnectorMetadata(set(), set())
         meta.add_request(req)
         worker.wait_for_save(meta)
-        worker.kv_send_thread.add_stored_request.assert_not_called()
-        worker.kv_send_thread.request_queue.join.assert_not_called()
+        worker.kv_send_thread.prepare_save_batch.assert_not_called()
+        worker.kv_send_thread.wait_for_batch.assert_not_called()
 
     def test_get_finished_producer(self):
         worker = self._make_worker(kv_role="kv_producer")
