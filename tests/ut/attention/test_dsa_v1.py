@@ -555,13 +555,12 @@ def test_dsa_cp_device_local_metadata_is_deferred_and_reused():
 
 def test_dsa_cp_qli_metadata_uses_host_maxima():
     builder = _make_cp_builder()
-    seq_lens = MagicMock()
-    seq_lens.clone.return_value = torch.tensor([8, 6], dtype=torch.int32)
+    seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     generated_metadata = torch.arange(1024, dtype=torch.int32)
 
     with patch.object(
         torch.ops._C_ascend,
-        "npu_vllm_quant_lightning_indexer_metadata",
+        "npu_quant_lightning_indexer_v2_metadata",
         create=True,
         return_value=generated_metadata,
     ) as metadata_op:
@@ -573,9 +572,11 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
             max_seqlen_k=8,
         )
 
-    seq_lens.max.assert_not_called()
     assert metadata_op.call_args.kwargs["max_seqlen_q"] == 2
-    assert metadata_op.call_args.kwargs["max_seqlen_k"] == 8
+    assert metadata_op.call_args.kwargs["max_seqlen_k"] == 8 // 4
+    # QLI v2 derives seqused_k / cmp_residual_k on the host from seq_lens.
+    assert torch.equal(builder.qli_seqused_k[:2], torch.tensor([2, 1], dtype=torch.int32))
+    assert torch.equal(builder.qli_cmp_residual_k[:2], torch.tensor([0, 2], dtype=torch.int32))
 
 
 def test_build_compressor_metadata_out_uses_fixed_outputs():
@@ -699,6 +700,9 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
     indexer_cache = SimpleNamespace(
         req_metadata=SimpleNamespace(
             qli_metadata=qli_metadata,
+            qli_cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([1], dtype=torch.int32),
+            qli_cmp_residual_k=torch.tensor([0], dtype=torch.int32),
             block_table=torch.zeros((1, 1), dtype=torch.int32),
         ),
         hadamard=torch.eye(2),
@@ -727,7 +731,7 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
     for name in ("prepare_dsa_indexer_weights", "prepare_dsa_indexer_query_scale", "prepare_dsa_indexer_key_scale"):
         monkeypatch.setattr(DeviceOperator, name, lambda value: value)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *_, **__: None, raising=False)
-    monkeypatch.setattr(torch.ops._C_ascend, "npu_vllm_quant_lightning_indexer", run_indexer, raising=False)
+    monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2", run_indexer, raising=False)
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.rotate_activation", lambda value, _: value)
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata", record_wait)
     impl._indexer_select_topk(
@@ -737,8 +741,6 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
         metadata=layer_metadata,
         cos=torch.ones((1, 1, 1, 2)),
         sin=torch.zeros((1, 1, 1, 2)),
-        actual_seq_lengths_query=torch.tensor([0, 1], dtype=torch.int32),
-        actual_seq_lengths_key=torch.tensor([1], dtype=torch.int32),
     )
 
     assert waited
