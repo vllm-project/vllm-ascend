@@ -22,7 +22,9 @@ import torch
 import torch_npu
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.distributed import get_ep_group
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
@@ -35,6 +37,8 @@ from .base import (
     TPWeightGatherSpec,
 )
 from .registry import register_scheme
+
+ENABLE_GMM_SITU_QUANT = bool(envs.VLLM_ASCEND_ENABLE_GMM_SITU_QUANT)
 
 
 @register_scheme("W4A8_MXFP", "linear")
@@ -189,22 +193,25 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
-        # Restore the MX semantic dtype BEFORE the format-29 (NZ) cast, using
-        # the NATIVE torch dtype: torch_npu's own float4_e2m1fn_x2 has broken
-        # itemsize metadata on this build and view() against it always fails
-        # with "shape '[296]' is invalid". After the cast the dtype sticks, so
-        # downstream view() calls are no longer needed.
+        # Only GMSQ needs native FP4 Tensor metadata. Keep the legacy loader
+        # for other activations and for W2, which is consumed by ordinary GMM2.
+        w13 = layer.w13_weight.data
+        w13_input_dtype = torch_npu.float4_e2m1fn_x2
+        if ENABLE_GMM_SITU_QUANT and layer.activation in (MoEActivation.SITU, "situ"):
+            # view(dtype) requires a torch.dtype, not torch_npu's integer type ID.
+            w13 = w13.view(torch.float4_e2m1fn_x2)
+            w13_input_dtype = torch.float4_e2m1fn_x2
         layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data.view(torch.float4_e2m1fn_x2),
+            w13,
             29,
             customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch.float4_e2m1fn_x2,
+            input_dtype=w13_input_dtype,
         )
         layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data.view(torch.float4_e2m1fn_x2),
+            layer.w2_weight.data,
             29,
             customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch.float4_e2m1fn_x2,
+            input_dtype=torch_npu.float4_e2m1fn_x2,
         )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)

@@ -2,6 +2,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.nn as nn
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
@@ -105,6 +106,7 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
+    @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.ENABLE_GMM_SITU_QUANT", False)
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.torch_npu")
     def test_process_weights_transposes_weights(self, mock_npu):
         # npu_format_cast returns the input tensor (mocked as identity)
@@ -121,6 +123,49 @@ class TestAscendW4A8MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w2_weight.shape, (8, 128, 128))
         self.assertEqual(layer.w13_weight_scale.shape, (8, 2, 256, 2))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 4, 128, 2))
+
+    @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.torch_npu")
+    def test_native_fp4_is_limited_to_gmsq_w13(self, mock_npu):
+        # This checks loader dispatch only; real NZ conversion needs an NPU test.
+        mock_npu.npu_format_cast.side_effect = lambda x, *a, **kw: x
+        mock_npu.float4_e2m1fn_x2 = 296
+        for enabled in (False, True):
+            for activation in ("situ", MoEActivation.SITU, "silu", MoEActivation.SILU):
+                with self.subTest(enabled=enabled, activation=activation):
+                    mock_npu.npu_format_cast.reset_mock()
+                    layer = nn.Module()
+                    layer.activation = activation
+                    layer.w13_weight = nn.Parameter(torch.zeros(2, 128, 64, dtype=torch.uint8), requires_grad=False)
+                    layer.w2_weight = nn.Parameter(torch.zeros(2, 128, 32, dtype=torch.uint8), requires_grad=False)
+                    layer.w13_weight_scale = nn.Parameter(
+                        torch.zeros(2, 128, 4, dtype=torch.uint8), requires_grad=False
+                    )
+                    layer.w2_weight_scale = nn.Parameter(torch.zeros(2, 128, 2, dtype=torch.uint8), requires_grad=False)
+                    w13_ptr = layer.w13_weight.data_ptr()
+                    w2_ptr = layer.w2_weight.data_ptr()
+                    with patch("vllm_ascend.quantization.methods.w4a8_mxfp4.ENABLE_GMM_SITU_QUANT", enabled):
+                        self.scheme.process_weights_after_loading(layer)
+                    native_w13 = enabled and activation in ("situ", MoEActivation.SITU)
+                    expected_dtype = torch.float4_e2m1fn_x2 if native_w13 else torch.uint8
+                    expected_input_dtype = torch.float4_e2m1fn_x2 if native_w13 else 296
+                    self.assertEqual(mock_npu.npu_format_cast.call_count, 2)
+                    w13_call, w2_call = mock_npu.npu_format_cast.call_args_list
+                    self.assertEqual(w13_call.args[0].dtype, expected_dtype)
+                    self.assertEqual(w13_call.kwargs["input_dtype"], expected_input_dtype)
+                    self.assertEqual(w2_call.args[0].dtype, torch.uint8)
+                    self.assertEqual(w2_call.kwargs["input_dtype"], 296)
+                    self.assertEqual(w13_call.args[1], 29)
+                    self.assertEqual(w2_call.args[1], 29)
+                    self.assertEqual(w13_call.kwargs["customize_dtype"], torch.float8_e4m3fn)
+                    self.assertEqual(w2_call.kwargs["customize_dtype"], torch.float8_e4m3fn)
+                    self.assertEqual(layer.w13_weight.dtype, expected_dtype)
+                    self.assertEqual(layer.w2_weight.dtype, torch.uint8)
+                    self.assertEqual(layer.w13_weight.data_ptr(), w13_ptr)
+                    self.assertEqual(layer.w2_weight.data_ptr(), w2_ptr)
+                    self.assertEqual(layer.w13_weight.shape, (2, 64, 128))
+                    self.assertEqual(layer.w2_weight.shape, (2, 32, 128))
+                    self.assertEqual(layer.w13_weight_scale.shape, (2, 2, 128, 2))
+                    self.assertEqual(layer.w2_weight_scale.shape, (2, 1, 128, 2))
 
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4.torch_npu")
     @patch("vllm_ascend.quantization.methods.w4a8_mxfp4._EXTRA_CTX")
