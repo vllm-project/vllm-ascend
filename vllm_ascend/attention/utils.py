@@ -365,6 +365,30 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
         )
 
 
+def align_block_table_for_slot_mapping(
+    cad: "AscendCommonAttentionMetadata",
+) -> "AscendCommonAttentionMetadata":
+    """Return a cad whose block_table row count matches the qsl request count.
+
+    The spec-decode cad handed to the drafter comes from
+    AscendCommonAttentionMetadata.unpadded(), which slices query_start_loc
+    to the real request count but intentionally keeps the FULL-graph-padded
+    block_table (slicing it there breaks reshape_and_cache). When a
+    shrinking batch falls between FULL-graph capture buckets (e.g. 5 reqs x
+    (K+1)=6 tokens = 30, no bucket 30 -> padded to 36), the padded
+    block_table carries phantom request rows while qsl does not. Upstream
+    compute_new_slot_mapping derives batch_size from block_table rows, so
+    the disagreement crashes repeat_interleave. Slice the block table for
+    this computation only; downstream metadata keeps the padded block
+    table for graph replay.
+    """
+    qsl_num_reqs = cad.query_start_loc.numel() - 1
+    bt_num_rows = cad.block_table_tensor.shape[0]
+    if bt_num_rows > qsl_num_reqs:
+        return cad.replace(block_table_tensor=cad.block_table_tensor[:qsl_num_reqs])
+    return cad
+
+
 def filter_chunked_req_indices(
     seq_len: torch.Tensor,
     mask_for_non_zero_chunk: list[bool] | None,

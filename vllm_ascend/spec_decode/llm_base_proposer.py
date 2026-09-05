@@ -45,7 +45,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, align_block_table_for_slot_mapping
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.device.device_op import DeviceOperator
@@ -1727,7 +1727,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
 
             new_slot_mapping = compute_new_slot_mapping(
-                cad=cad,
+                cad=align_block_table_for_slot_mapping(cad),
                 new_positions=self.positions[:total_num_output_tokens],
                 is_rejected_token_mask=self.is_rejected_token_mask[:total_num_output_tokens],
                 block_size=block_size,
