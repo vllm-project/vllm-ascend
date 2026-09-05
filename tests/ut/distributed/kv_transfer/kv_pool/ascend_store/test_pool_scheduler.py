@@ -16,13 +16,25 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.outputs import KVConnectorOutput
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    AscendStoreKVConnectorWorkerMetadata,
     LoadSpec,
+    ReqMeta,
     RequestTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
@@ -66,6 +78,346 @@ def make_config(kv_role="kv_producer", extra_config=None, block_size=16):
     config.model_config.get_total_num_kv_heads.return_value = 1
     config.model_config.get_num_layers.return_value = 2
     return config
+
+
+@pytest.fixture
+def scheduler():
+    config = make_config(block_size=4)
+    config.model_config.hf_config = SimpleNamespace()
+    config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+    config.speculative_config = None
+    config.kv_events_config = None
+    config.cache_config.prefix_match_unit = 4
+    return KVPoolScheduler(config, False)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_hybrid_group_inference_and_mamba_mode_validation(wrapped):
+    config = make_config(block_size=4)
+    config.scheduler_config.disable_hybrid_kv_cache_manager = False
+    config.model_config.hf_config = SimpleNamespace()
+    config.speculative_config = None
+    full = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=2, dtype=torch.int8)
+    sliding = SlidingWindowSpec(block_size=4, num_kv_heads=1, head_size=2, dtype=torch.int8, sliding_window=6)
+    mamba = MambaSpec(block_size=4, shapes=((2,),), dtypes=(torch.int8,), mamba_cache_mode="align")
+    specs = [full, sliding, mamba]
+    groups = []
+    for i, spec in enumerate(specs):
+        names = [f"a{i}", f"b{i}"]
+        group_spec = (
+            UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs=dict.fromkeys(names, spec)) if wrapped else spec
+        )
+        groups.append(KVCacheGroupSpec(names, group_spec))
+    cache = SimpleNamespace(kv_cache_groups=groups)
+    actual = KVPoolScheduler(config, False, cache)
+    assert actual.mamba_group_ids == [2]
+    assert actual.num_swa_blocks == [0, 3, 0]
+    assert actual.get_sw_clipped_blocks(([1, 2, 3, 4], [5, 6, 7, 8], [9])) == ([1, 2, 3, 4], [6, 7, 8], [9])
+    bad = MambaSpec(block_size=4, shapes=((2,),), dtypes=(torch.int8,), mamba_cache_mode="all")
+    with pytest.raises(NotImplementedError, match="mamba_cache_mode='align'"):
+        KVPoolScheduler(config, False, SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["bad"], bad)]))
+
+
+def test_bulk_mamba_store_pins_blocks_until_every_worker_completes(scheduler):
+    scheduler.use_hybrid = True
+    scheduler.mamba_group_ids = [1]
+    scheduler._expected_worker_count = 2
+    pool = BlockPool(8, False, 4)
+    blocks = pool.get_new_blocks(2)
+    scheduler.bind_gpu_block_pool(pool)
+    meta = ReqMeta("r", block_ids_by_group=[[7], [0, blocks[0].block_id, blocks[1].block_id]], can_save=True)
+    scheduler.touch_sending_mamba_blocks(meta)
+    assert meta.event_id == 0
+    assert scheduler.sending_blocks == {0: [b.block_id for b in blocks]}
+    assert all(b.ref_cnt == 2 for b in blocks)
+    output = KVConnectorOutput(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({0: 1, 99: 1}))
+    scheduler.update_connector_output(output)
+    assert scheduler.sending_events == {0: 1}
+    assert all(b.ref_cnt == 2 for b in blocks)
+    scheduler.update_connector_output(output)
+    assert scheduler.sending_events == scheduler.sending_blocks == {}
+    assert all(b.ref_cnt == 1 for b in blocks)
+
+
+@pytest.mark.parametrize("case", ["new", "preempted", "running_no_tracker", "running_no_request"])
+def test_scheduled_request_requires_corresponding_bookkeeping(scheduler, case):
+    output = SimpleNamespace(num_scheduled_tokens={"r": 4})
+    if case == "new":
+        with pytest.raises(ValueError, match="_unfinished_requests"):
+            scheduler._process_new_request(SimpleNamespace(req_id="r", num_computed_tokens=0), output, False)
+    elif case == "preempted":
+        with pytest.raises(ValueError, match="preempted cached request"):
+            scheduler._process_preempted_cached_request([1], "r", 0, None, output, False)
+    else:
+        if case == "running_no_request":
+            scheduler._request_trackers["r"] = RequestTracker("r", 0)
+        with pytest.raises(ValueError, match="scheduled to be cached"):
+            scheduler._process_running_cached_request([1], "r", 0, None, output, False)
+
+
+@pytest.mark.parametrize("previous", [False, True])
+def test_resumed_request_rebuilds_tracker_and_preserves_existing_gvas(scheduler, previous):
+    scheduler.enable_kv_events = True
+    request = SimpleNamespace(num_computed_tokens=4, prompt_token_ids=list(range(12)), block_hashes=[b"a", b"b", b"c"])
+    scheduler._unfinished_requests["r"] = (request, [[1]])
+    scheduler._preempted_req_ids.add("r")
+    if previous:
+        scheduler._request_trackers["r"] = RequestTracker("r", 4, block_gvas=[100], gva_block_offset=1)
+    result = scheduler._process_preempted_cached_request(
+        ([2, 3],), "r", 0, None, SimpleNamespace(num_scheduled_tokens={"r": 4}), False
+    )
+    tracker = scheduler._request_trackers["r"]
+    assert tracker.token_len == 8
+    assert tracker.token_ids == list(range(8))
+    assert tracker.allocated_block_ids_by_group == [[2, 3]]
+    assert tracker.block_gvas == ([100] if previous else [])
+    assert tracker.gva_block_offset == (1 if previous else 0)
+    assert "r" not in scheduler._preempted_req_ids
+    assert result.req_id == "r"
+
+
+@pytest.mark.parametrize("tokens", [7, 8])
+def test_async_load_recovers_last_prompt_token_and_preserves_gvas(scheduler, tokens):
+    request = SimpleNamespace(prompt_token_ids=list(range(8)), block_hashes=[b"a", b"b"])
+    scheduler.load_specs["r"] = LoadSpec(0, tokens, True)
+    previous = RequestTracker("r", 0, block_gvas=[100, 200], gva_block_offset=1)
+    scheduler._request_trackers["r"] = previous
+    result = scheduler._process_async_load_request("r", request, [[1, 2]])
+    assert result.load_spec.kvpool_cached_tokens == tokens
+    assert scheduler._request_trackers["r"].token_len == 8
+    assert scheduler._request_trackers["r"].block_gvas == [100, 200]
+    assert scheduler._request_trackers["r"].block_gvas is not previous.block_gvas
+    assert scheduler.load_specs == {}
+    assert scheduler._process_async_load_request("r", request, [[1, 2]]) is None
+
+
+def test_decode_without_offload_or_save_opt_in_skips_new_metadata(scheduler):
+    scheduler._unfinished_requests["r"] = (SimpleNamespace(num_computed_tokens=8, num_prompt_tokens=8), [[1, 2]])
+    assert scheduler._process_running_cached_request(None, "r", 0, None, SimpleNamespace(), False) is None
+
+
+@pytest.mark.parametrize(
+    "mode", ["consumer", "no_blocks", "resume", "resume_no_blocks", "async", "async_no_spec", "decode"]
+)
+def test_metadata_aggregation_routes_cached_and_async_requests(scheduler, mode):
+    request = SimpleNamespace(
+        request_id="r",
+        num_computed_tokens=0,
+        num_prompt_tokens=8,
+        prompt_token_ids=list(range(8)),
+        all_token_ids=list(range(8)),
+        block_hashes=[b"a", b"b"],
+    )
+    scheduler._unfinished_requests["r"] = (request, [[2, 3]])
+    scheduler._request_trackers["r"] = RequestTracker("r", 0, allocated_block_ids_by_group=[[2]], token_ids=[])
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[],
+        num_scheduled_tokens={"r": 4},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=["r"], new_block_ids=[([3],)]),
+    )
+    if mode == "consumer":
+        scheduler.kv_role, scheduler.consumer_is_to_put = "kv_consumer", False
+    elif mode in {"no_blocks", "resume_no_blocks"}:
+        output.scheduled_cached_reqs.new_block_ids = [None]
+    if mode.startswith("resume"):
+        scheduler._preempted_req_ids.add("r")
+        scheduler.layerwise_offload = True
+    if mode.startswith("async"):
+        output.scheduled_cached_reqs.req_ids = []
+        if mode == "async":
+            scheduler.load_specs["r"] = LoadSpec(0, 8, True)
+    if mode == "decode":
+        request.num_computed_tokens = request.num_prompt_tokens
+        scheduler.save_decode_cache = scheduler.layerwise_offload = False
+    metadata = scheduler.build_connector_meta(output)
+    if mode in {"resume", "async"}:
+        assert [meta.req_id for meta in metadata.requests] == ["r"]
+        assert metadata.requests[0].block_ids_by_group == ([[3]] if mode == "resume" else [[2, 3]])
+    else:
+        assert metadata.requests == []
+    if mode == "resume":
+        assert "r" not in scheduler._preempted_req_ids
+    if mode == "resume_no_blocks":
+        assert "r" in scheduler._preempted_req_ids
+    if mode == "async":
+        assert scheduler.load_specs == {}
+
+
+def test_last_chunk_keeps_partial_tokens_when_configured(scheduler):
+    scheduler._discard_partial_chunks = False
+    assert scheduler._get_last_chunk_tokens_num(list(range(7))) == 7
+    scheduler.use_hybrid = scheduler.use_layerwise = True
+    scheduler.mamba_group_ids = [0]
+    scheduler.touch_sending_mamba_blocks(ReqMeta("r", can_save=True, block_ids=[1]))
+    assert scheduler.sending_events == {}
+    assert scheduler.sending_blocks == {}
+
+
+def test_mamba_completion_without_pinned_blocks_cleans_event(scheduler):
+    scheduler.bind_gpu_block_pool(BlockPool(8, False, 4))
+    scheduler.sending_events = {3: 0}
+    scheduler.sending_blocks = {3: []}
+    scheduler.update_connector_output(
+        KVConnectorOutput(kv_connector_worker_meta=AscendStoreKVConnectorWorkerMetadata({3: 1}))
+    )
+    assert scheduler.sending_events == scheduler.sending_blocks == {}
+
+
+def test_layerwise_request_finish_never_delays_block_free(scheduler):
+    scheduler.use_layerwise = True
+    scheduler._delayed_free_req_ids = {"r"}
+    request = SimpleNamespace(request_id="r")
+    assert scheduler.request_finished(request, [1]) == (False, None)
+    assert scheduler.request_finished_all_groups(request, ([1],)) == (False, None)
+    assert scheduler._delayed_free_req_ids == set()
+
+
+@pytest.mark.parametrize("reuse_config", [False, True])
+def test_layerwise_scheduler_resolves_mtp_layout_and_mla_replication(reuse_config):
+    config = make_config(
+        extra_config={"backend": "memcache", "use_layerwise": True, "layerwise_num_shared_buffers": 1}, block_size=4
+    )
+    config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+    config.model_config.use_mla = True
+    config.model_config.hf_text_config = SimpleNamespace(compress_ratios=[1, 1, 1])
+    config.model_config.hf_config = config.model_config.hf_text_config
+    config.parallel_config.tensor_parallel_size = 2
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=2, dtype=torch.int8)
+    cache = (
+        SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec(["model.layers.0", "model.layers.1", "model.mtp.0"], spec)])
+        if reuse_config
+        else None
+    )
+    actual = KVPoolScheduler(config, True, cache)
+    assert actual.num_kv_head == 1
+    assert actual.put_step == 2
+    assert actual.use_mla is True
+    assert actual.num_layers == (3 if reuse_config else 2)
+    assert actual.layerwise_offload == reuse_config
+
+
+def test_layerwise_scheduler_with_no_cache_layers_preserves_model_layer_count():
+    config = make_config(
+        extra_config={
+            "backend": "memcache",
+            "use_layerwise": True,
+            "layerwise_num_shared_buffers": 1,
+            "layerwise_independent_layers": [],
+        },
+        block_size=4,
+    )
+    config.kv_transfer_config.kv_connector = "AscendStoreConnector"
+    config.model_config.hf_config = SimpleNamespace()
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=2, dtype=torch.int8)
+    cache = SimpleNamespace(kv_cache_groups=[KVCacheGroupSpec([], spec)])
+
+    actual = KVPoolScheduler(config, True, cache)
+
+    assert actual.num_layers == 2
+    assert actual.layerwise_offload is False
+
+
+def test_short_new_request_keeps_tracker_without_emitting_transfer(scheduler):
+    request = SimpleNamespace(req_id="short", num_computed_tokens=0, block_ids=([7],), prompt_token_ids=[1, 2])
+    scheduler._unfinished_requests["short"] = (SimpleNamespace(block_hashes=[]), [[]])
+    output = SimpleNamespace(
+        finished_req_ids=set(),
+        preempted_req_ids=set(),
+        scheduled_new_reqs=[request],
+        num_scheduled_tokens={"short": 2},
+        scheduled_cached_reqs=SimpleNamespace(req_ids=[]),
+    )
+
+    metadata = scheduler.build_connector_meta(output)
+
+    assert metadata.requests == []
+    assert scheduler._request_trackers["short"].token_len == 2
+    assert "short" in scheduler._unfinished_requests
+
+
+def test_scheduler_rejects_unknown_backend():
+    with pytest.raises(ValueError, match="Unsupported KV pool backend"):
+        KVPoolScheduler(make_config(extra_config={"backend": "unknown"}), False)
+
+
+def test_store_lookup_empty_input_and_sdk_error_are_distinct(scheduler):
+    request = SimpleNamespace(request_id="r", block_hashes=[])
+    assert scheduler._get_store_lookup_hit_tokens(request, 8, 0) == 0
+    scheduler.store_scheduler.batch_is_exist.assert_not_called()
+    request.block_hashes = [b"a", b"b"]
+    scheduler.store_scheduler.batch_is_exist.return_value = [-1, -1]
+    with pytest.raises(RuntimeError, match="exists check failed"):
+        scheduler._get_store_lookup_hit_tokens(request, 8, 0)
+
+
+@pytest.mark.parametrize("reply", ["empty", "missing", "hit"])
+def test_layerwise_lookup_reports_absent_incomplete_and_valid_key_info(reply):
+    config = make_config(extra_config={"backend": "memcache"}, block_size=4)
+    actual = KVPoolScheduler(config, True)
+    request = SimpleNamespace(request_id="r", block_hashes=[] if reply == "empty" else [b"a"])
+    actual.store_scheduler.batch_get_key_info.return_value = (
+        [] if reply != "hit" else [MagicMock(size=MagicMock(return_value=64))]
+    )
+    assert actual._get_layerwise_hit_tokens(request, 4, 0) == (4 if reply == "hit" else 0)
+    assert "r" in actual._request_trackers
+    assert actual._get_or_create_request_tracker("r") is actual._request_trackers["r"]
+
+
+def test_store_lookup_rejects_truncated_existence_result(scheduler):
+    scheduler.store_scheduler.batch_is_exist.return_value = [1]
+    request = SimpleNamespace(request_id="r", block_hashes=[b"a", b"b"])
+    with pytest.raises(RuntimeError, match="expected=2, actual=1"):
+        scheduler._get_store_lookup_hit_tokens(request, 8, 0)
+
+
+def test_mtp_interior_hit_keeps_external_prefix(scheduler):
+    scheduler.use_layerwise = scheduler.use_eagle = True
+    scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 0, 0, 0, 0, 0, 0, 0, 0]
+    request = SimpleNamespace(request_id="r", num_tokens=20, prompt_token_ids=list(range(20)), block_hashes=[b"a"] * 5)
+    assert scheduler.get_num_new_matched_tokens(request, 0) == (4, False)
+    assert scheduler.load_specs["r"].kvpool_cached_tokens == 4
+
+
+def test_running_chunk_without_new_token_ids_keeps_existing_tracker_tokens(scheduler):
+    request = SimpleNamespace(
+        num_computed_tokens=0,
+        num_prompt_tokens=8,
+        all_token_ids=[],
+        prompt_token_ids=list(range(8)),
+        block_hashes=[b"a", b"b"],
+    )
+    scheduler._unfinished_requests["r"] = (request, [[2]])
+    tracker = RequestTracker("r", 0, allocated_block_ids_by_group=[[2]], token_ids=[9])
+    scheduler._request_trackers["r"] = tracker
+    scheduler._process_running_cached_request(None, "r", 0, None, SimpleNamespace(num_scheduled_tokens={"r": 4}), False)
+    assert tracker.token_ids == [9]
+    assert tracker.token_len == 4
+
+
+@pytest.mark.parametrize("mode", ["retention", "computed", "miss", "partial", "key_layerwise"])
+def test_lookup_short_circuits_and_partial_prompt_routing(scheduler, mode):
+    request = SimpleNamespace(request_id="r", prompt_token_ids=list(range(9)), num_tokens=9, block_hashes=[b"a", b"b"])
+    client = MagicMock(lookup=MagicMock(return_value=0))
+    scheduler.client = client
+    computed = 0
+    if mode == "retention":
+        scheduler.retention_interval = 8
+    elif mode == "computed":
+        computed = 8
+    elif mode == "partial":
+        scheduler._discard_partial_chunks = False
+    elif mode == "key_layerwise":
+        scheduler.use_layerwise = True
+        scheduler.store_scheduler.batch_is_exist.return_value = [0] * 4
+    assert scheduler.get_num_new_matched_tokens(request, computed) == (0, False)
+    if mode in {"retention", "computed", "key_layerwise"}:
+        client.lookup.assert_not_called()
+    elif mode == "partial":
+        assert client.lookup.call_args.args[0] == 9
+    else:
+        assert client.lookup.call_args.args[0] == 8
 
 
 class TestGetZmqRpcPathLookup(unittest.TestCase):

@@ -17,8 +17,13 @@
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import pytest
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import metadata as module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     AscendConnectorMetadata,
     ChunkedTokenDatabase,
@@ -36,6 +41,161 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     uses_hybrid_kv_cache,
 )
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, 3), ("invalid", 3), (0, 3), (-1, 3), ("2", 2)])
+def test_positive_integer_fallback(value, expected):
+    assert module._as_positive_int(value, 3) == expected
+
+
+def test_tp_mismatch_without_mapping_uses_local_topology():
+    result = module.infer_tp_mismatch_info("kv_both", None, 2, 8, False)
+    assert result == module.TPMismatchInfo(False, 2, 2, 4, 4, 1)
+
+
+@pytest.mark.parametrize(("ratio", "family"), [(None, "default"), (0, "c1"), (1, "c1"), (4, "c4")])
+def test_compression_ratio_family(ratio, family):
+    assert module.infer_cache_family_from_ratio(ratio) == family
+
+
+def test_group_families_prefer_spec_then_layer_configuration():
+    groups = [
+        SimpleNamespace(kv_cache_spec=SimpleNamespace(compress_ratio=4)),
+        SimpleNamespace(kv_cache_spec=SimpleNamespace()),
+        SimpleNamespace(
+            kv_cache_spec=SimpleNamespace(
+                kv_cache_specs={"a": SimpleNamespace(compress_ratio=1), "b": SimpleNamespace(compress_ratio=4)}
+            )
+        ),
+        SimpleNamespace(layer_names=[]),
+        SimpleNamespace(layer_names=["model.layers.0.attn"]),
+        SimpleNamespace(layer_names=["model.layers.0.attn", "model.layers.1.attn"]),
+    ]
+    assert module.infer_group_cache_families(groups, [1, 4]) == ["c4", "default", "mixed", "default", "c1", "mixed"]
+    assert module.infer_group_cache_families(None, None) == ["default"]
+    assert module.infer_group_cache_families([groups[-1]], None) == ["default"]
+    assert module._get_layer_compress_ratio("model.layers.0.attn", None) is None
+
+
+def test_uniform_group_block_size_uses_member_spec():
+    spec = FullAttentionSpec(block_size=8, num_kv_heads=1, head_size=2, dtype=torch.int8)
+    group = SimpleNamespace(kv_cache_spec=UniformTypeKVCacheSpecs(block_size=8, kv_cache_specs={"a": spec}))
+    assert infer_group_block_sizes(16, [group]) == [8]
+
+
+def test_dsv4_mtp_family_uses_physical_layer_index():
+    config = SimpleNamespace(model_type="deepseek_v4", num_hidden_layers=2, compress_ratios=[1, 4, 8])
+    groups = [SimpleNamespace(layer_names=["model.layers.1.attn"]), SimpleNamespace(layer_names=["model.mtp.0.attn"])]
+    assert module.infer_group_cache_families(groups, config.compress_ratios, config) == ["c4", "c8"]
+
+
+@pytest.fixture
+def token_db():
+    db = ChunkedTokenDatabase([KeyMetadata("model", 0, 0, 0, 0)], [4], None)
+    db.set_group_buffers({0: [100, 200]}, {0: [8, 16]}, group_num_layers={0: 2})
+    return db
+
+
+def test_database_coordinator_delegation_and_mask_boundaries(token_db):
+    token_db.cache_coordinator = MagicMock()
+    hashes = [b"a"]
+    assert token_db.store_mask(8, 6) is token_db.cache_coordinator.store_mask.return_value
+    token_db.cache_coordinator.store_mask.assert_called_once_with(8, 6)
+    assert token_db.load_mask(hashes, 4) is token_db.cache_coordinator.load_mask.return_value
+    token_db.cache_coordinator.load_mask.assert_called_once_with(hashes, 4)
+    assert token_db.mask_allows_chunk(([True, False],), 0, 0) is True
+    assert token_db.mask_allows_chunk(([True, False],), 0, 4) is False
+    assert token_db.mask_allows_chunk(([True, False],), 0, 8) is False
+    assert token_db.mask_allows_chunk(([],), 1, 0) is True
+    assert token_db.get_block_size(3) == 4
+
+
+def test_state_buffers_do_not_overwrite_kv_buffers_and_prefix_cache_invalidates(token_db):
+    first = token_db._get_key_prefix(0)
+    assert token_db._get_key_prefix(0) is first
+    token_db.set_group_buffers({0: [999]}, {0: [99]}, cache_role="state", group_cache_families={0: "c4"})
+    assert token_db.group_kv_caches_base_addr == {0: [100, 200]}
+    assert token_db._key_prefix_cache == {}
+    assert "@cache_role:state@cache_family:c4@" in token_db._get_key_prefix(0, "state")
+    assert token_db.prepare_value(0, 4, [2], cache_role="state") == ([], [], 2)
+    assert token_db.prepare_value(8, 12, [2]) == ([], [], 0)
+    assert token_db.prepare_value_layer(8, 12, [2], 0) == ([], [], 0)
+    assert token_db.prepare_value_layer(0, 4, [2], 2) == ([], [], 0)
+
+
+def test_chunk_iteration_filters_null_blocks_and_incomplete_hash_groups(token_db):
+    assert list(token_db._iter_token_chunks(12, ["a", "b", "c"], block_ids=[1, 0, 2], skip_null_blocks=True)) == [
+        (0, 4, "a", 1),
+        (8, 12, "c", 2),
+    ]
+    token_db.hash_block_size = 2
+    assert list(token_db._iter_token_chunks(2, ["a"])) == []
+
+
+def test_grouped_hash_sequence_negative_slice_and_invalid_indices():
+    hashes = module._LazyGroupedBlockHashList(["a", "b", "c", "d"], 2)
+    assert hashes[-1] == "d"
+    assert hashes[::-1] == ["d", "b"]
+    for index in (-3, 2):
+        with pytest.raises(IndexError):
+            hashes[index]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"), [("f" * 64, b"\xff" * 32), ("z" * 64, b"z" * 64), ("abc", b"abc"), (b"a", b"a")]
+)
+def test_hash_encoding_accepts_binary_hex_and_opaque_strings(value, expected):
+    assert module.block_hash_to_bytes(value) == expected
+
+
+def test_metadata_alias_setters_normalize_grouped_blocks():
+    tracker = RequestTracker("r", 0)
+    tracker.allocated_block_ids = [1, 2]
+    assert tracker.allocated_block_ids_by_group == [[1, 2]]
+    assert tracker.allocated_block_ids == [1, 2]
+    meta = LayerMultiBlockReqMeta("r", [], [], [], block_ids_by_group=[])
+    assert meta.block_ids == []
+    meta.block_ids = [[3], [4]]
+    assert meta.block_ids_by_group == [[3], [4]]
+    assert meta.block_ids == [3]
+    request = ReqMeta.from_request_tracker(
+        RequestTracker("r", 4, allocated_block_ids=[1], last_block_gva=100), 4, block_hashes=[b"a"]
+    )
+    assert request.partial_block_index is None
+    request.block_ids = [[5], [6]]
+    assert request.block_ids_by_group == [[5], [6]]
+    assert request.block_ids == [5]
+
+
+def test_explicit_family_overrides_registered_prefix_family(token_db):
+    assert "@cache_family:c8@" in token_db._get_key_prefix(0, cache_family="c8")
+
+
+def test_partial_snapshot_preserves_gva_and_logical_block_index():
+    tracker = RequestTracker("r", 9, allocated_block_ids=[1, 2, 3], last_block_gva=100)
+    meta = ReqMeta.from_request_tracker(tracker, 4, block_hashes=[b"a", b"b"], save_partial_block=True)
+    assert meta.partial_block_index == 2
+    assert meta.last_block_gva == 100
+
+
+@pytest.mark.parametrize(("incoming", "spec_count"), [([], 1), ([4], 0)])
+def test_mamba_update_without_speculative_reuse(incoming, spec_count):
+    tracker = RequestTracker(
+        "r", 8, allocated_block_ids=[[1, 2, 3]], mamba_group_ids=[0], num_speculative_blocks=spec_count, block_sizes=[4]
+    )
+    tracker.update(incoming, num_computed_tokens=4)
+    assert tracker.allocated_block_ids == [1, 2, 3] + incoming
+
+
+def test_worker_metadata_aggregates_disjoint_and_shared_events_without_mutation():
+    left = module.AscendStoreKVConnectorWorkerMetadata({1: 2, 2: 1})
+    right = module.AscendStoreKVConnectorWorkerMetadata({2: 3, 3: 1})
+    result = left.aggregate(right)
+    assert result.completed_events == {1: 2, 2: 4, 3: 1}
+    assert left.completed_events == {1: 2, 2: 1}
+    assert right.completed_events == {2: 3, 3: 1}
+    with pytest.raises(AssertionError, match="aggregate worker metadata"):
+        left.aggregate(object())
 
 
 class TestCacheLayoutHelpers(unittest.TestCase):

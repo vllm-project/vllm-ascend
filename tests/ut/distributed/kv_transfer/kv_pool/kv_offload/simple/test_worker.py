@@ -2,98 +2,109 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
-from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
-    SimpleCPUOffloadConnector,
-)
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import (
-    simple_cpu_offload_connector as connector_module,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple import worker as worker_module
-from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector import (
-    AscendSimpleCPUOffloadConnector,
-)
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.worker import (
     SimpleCPUOffloadNPUWorker,
     _flatten_kv_value,
 )
 
 
-def test_factory_registration_uses_consolidated_package(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from vllm_ascend.distributed.kv_transfer import register_connector
-
-    registrations: dict[str, tuple[str, str]] = {}
-
-    def capture_registration(cls, name: str, module_path: str, class_name: str) -> None:
-        registrations[name] = (module_path, class_name)
-
-    # Keep the test independent of whether the vLLM plugin was already loaded
-    # by the current pytest environment.
-    monkeypatch.setattr(KVConnectorFactory, "_registry", {})
-    monkeypatch.setattr(
-        KVConnectorFactory,
-        "register_connector",
-        classmethod(capture_registration),
-    )
-    register_connector()
-
-    assert registrations["SimpleCPUOffloadConnector"] == (
-        "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.simple.simple_cpu_offload_connector",
-        "AscendSimpleCPUOffloadConnector",
-    )
+def make_empty_worker():
+    worker = SimpleCPUOffloadNPUWorker.__new__(SimpleCPUOffloadNPUWorker)
+    worker._backend = MagicMock()
+    worker._connector_metadata = None
+    worker._store_compute_done = None
+    worker._pending_load_event_indices = set()
+    worker._pending_store_event_indices = set()
+    worker._completed_store_events = {}
+    worker._load_events = []
+    worker._store_events = []
+    worker._load_hwm = worker._store_hwm = -1
+    return worker
 
 
-@pytest.mark.parametrize(
-    ("role", "has_upstream_worker", "expect_npu_worker"),
-    [
-        (KVConnectorRole.WORKER, True, True),
-        (KVConnectorRole.WORKER, False, False),
-        (KVConnectorRole.SCHEDULER, False, False),
-    ],
-)
-def test_connector_only_replaces_enabled_worker(
-    monkeypatch: pytest.MonkeyPatch,
-    role: KVConnectorRole,
-    has_upstream_worker: bool,
-    expect_npu_worker: bool,
-) -> None:
-    upstream_worker = SimpleNamespace(cpu_capacity_bytes=512) if has_upstream_worker else None
+def test_initialization_installs_npu_dma_backend(monkeypatch):
+    base_init = MagicMock(return_value=None)
+    monkeypatch.setattr(worker_module.SimpleCPUOffloadWorker, "__init__", base_init)
+    config, caches = object(), object()
+    worker = SimpleCPUOffloadNPUWorker(config, caches, 64)
+    base_init.assert_called_once_with(config, caches, 64)
+    assert isinstance(worker._backend, worker_module.NPUDmaCopyBackend)
+    worker._backend.shutdown()
 
-    def fake_upstream_init(self, vllm_config, connector_role, kv_cache_config):
-        self.worker_handler = upstream_worker
 
-    created: list[tuple[object, object, int]] = []
-    npu_worker = object()
+def test_empty_registration_does_not_initialize_dma():
+    worker = make_empty_worker()
+    worker.register_kv_caches({})
+    worker._backend.init.assert_not_called()
 
-    def fake_npu_worker(vllm_config, kv_cache_config, cpu_capacity):
-        created.append((vllm_config, kv_cache_config, cpu_capacity))
-        return npu_worker
 
-    monkeypatch.setattr(SimpleCPUOffloadConnector, "__init__", fake_upstream_init)
-    monkeypatch.setattr(
-        connector_module,
-        "SimpleCPUOffloadNPUWorker",
-        fake_npu_worker,
-    )
+def test_aliasing_layers_share_one_cpu_mirror(monkeypatch):
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: False)
+    worker = make_empty_worker()
+    worker.cpu_capacity_bytes = 0
+    worker.kv_cache_config = SimpleNamespace(num_blocks=3)
+    tensor = torch.zeros(3, 8)
+    worker.register_kv_caches({"a": tensor, "b": tensor})
+    assert list(worker.gpu_kv_caches) == ["a"]
+    assert worker.num_cpu_blocks == 1
+    assert worker.cpu_kv_caches["a"].shape == (1, 32)
+    worker._backend.init.assert_called_once()
 
-    config = object()
-    kv_cache_config = object()
-    connector = AscendSimpleCPUOffloadConnector(config, role, kv_cache_config)
 
-    if expect_npu_worker:
-        assert connector.worker_handler is npu_worker
-        assert created == [(config, kv_cache_config, 512)]
-    else:
-        assert connector.worker_handler is upstream_worker
-        assert not created
+@pytest.mark.parametrize("shape", [(), (2,), (1, 2, 4)])
+def test_invalid_block_dimensions_fail_explicitly(shape):
+    with pytest.raises(RuntimeError, match="cannot locate blocks dim"):
+        SimpleCPUOffloadNPUWorker._build_block_views("layer", torch.zeros(shape), 4)
+
+
+@pytest.mark.parametrize("metadata_present", [False, True])
+def test_completed_events_release_only_finished_jobs(metadata_present):
+    worker = make_empty_worker()
+    worker._pending_load_event_indices = {1, 2, 3}
+    worker._pending_store_event_indices = {4, 5}
+    done = MagicMock(query=MagicMock(return_value=True))
+    pending = MagicMock(query=MagicMock(return_value=False))
+    worker._load_events = [(1, done), (2, done), (3, pending)]
+    worker._store_events = [(4, done), (5, pending)]
+    worker._connector_metadata = SimpleCPUOffloadMetadata(load_event_to_reqs={1: {"r1"}}) if metadata_present else None
+    assert worker.get_finished(set()) == (None, {"r1"} if metadata_present else None)
+    assert worker._pending_load_event_indices == {3}
+    assert worker._pending_store_event_indices == {5}
+    assert worker._completed_store_events == {4: 1}
+    worker._backend.launch_copy.assert_not_called()
+
+
+def test_store_barrier_is_reused_across_steps():
+    worker = make_empty_worker()
+    worker._connector_metadata = SimpleCPUOffloadMetadata(store_gpu_blocks=[1], store_cpu_blocks=[2], store_event=7)
+    worker.get_finished(set())
+    barrier = worker._store_compute_done
+    worker.get_finished(set())
+    assert worker._store_compute_done is barrier
+    assert torch.npu.Event.call_count == 1
+    assert barrier.record.call_count == 2
+    assert worker._backend.launch_copy.call_count == 2
+
+
+def test_registration_requests_pinned_host_memory_when_available(monkeypatch):
+    worker = make_empty_worker()
+    worker.kv_cache_config = SimpleNamespace(num_blocks=2)
+    worker.cpu_capacity_bytes = 16
+    zeros = torch.zeros
+    allocator = MagicMock(side_effect=lambda *args, **kwargs: zeros(*args, **{**kwargs, "pin_memory": False}))
+    monkeypatch.setattr(torch, "zeros", allocator)
+    monkeypatch.setattr(worker_module, "is_pin_memory_available", lambda: True)
+    worker.register_kv_caches({"a": torch.arange(8, dtype=torch.int8).reshape(2, 4)})
+    assert worker.cpu_kv_caches["a"].shape == (4, 4)
+    assert allocator.call_args.kwargs["pin_memory"] is True
+    worker._backend.init.assert_called_once()
 
 
 def test_flatten_kv_value_preserves_separate_kv_tensors() -> None:
