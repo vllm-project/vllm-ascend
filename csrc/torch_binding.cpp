@@ -646,10 +646,17 @@ at::Tensor npu_causal_conv1d_custom(
     const c10::optional<at::Tensor>& cache_indices_opt,
     const c10::optional<at::Tensor>& initial_state_mode_opt,
     const c10::optional<at::Tensor>& num_accepted_tokens_opt,
-    int64_t  activation_mode,
-    int64_t  pad_slot_id,
-    int64_t  run_mode)
+    int64_t activation_mode,
+    int64_t pad_slot_id,
+    int64_t null_block_id,
+    int64_t run_mode,
+    int64_t max_query_len)
 {
+    TORCH_CHECK(activation_mode == 0 || activation_mode == 1,
+                "activation_mode must be 0 (none) or 1 (silu), got ", activation_mode);
+    const std::string activation = activation_mode == 0 ? "none" : "silu";
+    char *activation_ptr = const_cast<char *>(activation.c_str());
+    const c10::optional<at::IntArrayRef> metadata_cpu = c10::nullopt;
     EXEC_NPU_CMD(aclnnCausalConv1d,
                     x,
                     weight,
@@ -659,9 +666,16 @@ at::Tensor npu_causal_conv1d_custom(
                     cache_indices_opt,
                     initial_state_mode_opt,
                     num_accepted_tokens_opt,
-                    activation_mode,
+                    metadata_cpu,
+                    metadata_cpu,
+                    metadata_cpu,
+                    metadata_cpu,
+                    activation_ptr,
                     pad_slot_id,
+                    null_block_id,
                     run_mode,
+                    0,
+                    max_query_len,
                     output
                 );
 
@@ -2312,7 +2326,9 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                         Tensor? num_accepted_tokens_opt, "
         "                         int activation_mode, "
         "                         int pad_slot_id, "
-        "                         int run_mode"
+        "                         int null_block_id=-1, "
+        "                         int run_mode=0, "
+        "                         int max_query_len=-1"
         ") -> (Tensor output)");
     ops.impl("npu_causal_conv1d_custom", torch::kPrivateUse1, &vllm_ascend::npu_causal_conv1d_custom);
     ops.def(

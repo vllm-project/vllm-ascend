@@ -1,16 +1,15 @@
 /**
- * This program is free software, you can redistribute it and/or modify it.
- * Copyright (c) 2025 Huawei Technologies Co., Ltd.
- * This file is a part of the CANN Open Software.
- * Licensed under CANN Open Software License Agreement Version 2.0 (the "License").
+ * Copyright (c) 2025 Tianjin University, Ltd.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
- * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING
- * BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
- * See LICENSE in the root of the software repository for the full text of the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  */
 
 /*!
  * \file causal_conv1d_tiling_data.h
+ * \brief CausalConv1d tiling data structure.
  */
 
 #ifndef CAUSAL_CONV1D_TILING_DATA_H_
@@ -26,13 +25,17 @@ enum FnExecutionPlan : int64_t {
 
 inline constexpr int64_t ResolveFnExecutionPlan(int64_t baseDimCnt)
 {
-    return (baseDimCnt <= 0) ? FN_EXECUTION_PLAN_INVALID
-        : (baseDimCnt <= 1) ? FN_EXECUTION_PLAN_CUTBS
-        :                     FN_EXECUTION_PLAN_CUTBSD;
+    if (baseDimCnt <= 0) {
+        return FN_EXECUTION_PLAN_INVALID;
+    }
+    if (baseDimCnt <= 1) {
+        return FN_EXECUTION_PLAN_CUTBS;
+    }
+    return FN_EXECUTION_PLAN_CUTBSD;
 }
 
-
 struct CausalConv1dTilingData {
+
     int64_t dim;
     int64_t cuSeqlen;
     int64_t seqLen;
@@ -42,27 +45,48 @@ struct CausalConv1dTilingData {
 
     int64_t stateLen;
     int64_t numCacheLines;
+    int64_t convStateStride0;
+    int64_t convStateStride1;
+
     int64_t batch;
+
     int64_t activationMode;
     int64_t padSlotId;
     int64_t hasBias;
+    int64_t headNum;
+    int64_t headDim;
+
     int64_t baseDim;
     int64_t baseDimCnt;
+
     int64_t hasNumAcceptedTokens;
-    int64_t hasQueryStartLoc;
+
     int64_t hasCacheIndices;
-    int64_t hasInitialStateMode;
-    int64_t queryStartLocUseInt64;
+    int64_t hasInitialState;
+
+    int64_t hasInitStateWorkspace;
+
+    int64_t queryStartLocUseCpu;
+    int64_t cacheIndicesUseCpu;
+    int64_t hasInitialStateUseCpu;
+    int64_t numAcceptedTokensUseCpu;
+    int64_t queryStartLocDtype;
+    int64_t cacheIndicesDtype;
     int64_t cacheIndicesStride;
-    int64_t cacheIndicesUseInt64;
-    int64_t initialStateModeDtype;
-    int64_t numAcceptedTokensUseInt64;
+    int64_t hasInitialStateDtype;
+    int64_t numAcceptedTokensDtype;
+
     int64_t tokenBlockSize;
     int64_t tokenBlockCnt;
+
     int64_t hasExplicitTokenSeqRanges;
     int64_t explicitTokenSeqRangeCount;
     int64_t tokenTileStartSeq[128];
     int64_t tokenTileEndSeq[128];
-    int64_t hasInitStateWorkspace;
+
+    int64_t hasNullBlock;
+    int64_t nullBlockId;
+    int64_t maxQueryLen;
+
 };
-#endif // CAUSAL_CONV1D_TILING_DATA_H_
+#endif
