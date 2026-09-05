@@ -1347,29 +1347,32 @@ class TestEagleProposerPropose:
             assert captured_common_attn_metadata.max_query_len == 1
             assert captured_common_attn_metadata.max_seq_len == 0
             assert captured_common_attn_metadata._seq_lens_cpu is None
+            # Later draft steps consume the exact NPU seq_lens with rejected
+            # tokens removed. The CPU mirror intentionally remains an
+            # optimistic upper bound to avoid an NPU-to-CPU synchronization.
             if model_type == 'qwen_dense':
                 if graphmode == 'full':
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19] + [0]*13))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15] + [0]*13))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 0, 0, 0, 0, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 else:
-                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([23, 19, 19]))
+                    assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([23, 19, 19]))
                     assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([19, 15, 15]))
                     assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([20, 18, 18, 20, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                             2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([148, 274, 402]), torch.full((8701,), -1)]))
             if model_type == 'qwen_moe':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([21, 19, 19]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([18, 17, 17]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([145, 272, 400]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([21, 19, 19]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([17, 15, 15]))
                 assert torch.equal(captured_common_attn_metadata.positions, torch.tensor([17, 16, 16, 18, 13, 14, 15, 16, 13, 14, 15, 16, 8, 9, 10, 11, 12, 0, 1,
                                                                                           2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] + [0]*(8704-30), dtype=torch.int64))
             if model_type == 'deepseek':
-                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([16, 15, 16]))
+                assert torch.equal(captured_common_attn_metadata.seq_lens, torch.tensor([15, 13, 13]))
                 assert torch.equal(captured_common_attn_metadata.slot_mapping, torch.cat([torch.tensor([142, 268, 396]), torch.full((8701,), -1)]))
                 assert torch.equal(captured_common_attn_metadata.seq_lens_cpu, torch.tensor([16, 15, 16]))
                 assert torch.equal(captured_common_attn_metadata.num_computed_tokens_cpu, torch.tensor([12, 11, 12]))
