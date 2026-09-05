@@ -194,7 +194,7 @@ FULL_FEATURE_MODEL_CASES = [
     {
         "HCCL_BUFFSIZE": "768",
         "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_USE_V2_MODEL_RUNNER": "0",
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
