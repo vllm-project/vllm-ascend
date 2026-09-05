@@ -19,23 +19,15 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
-from vllm_ascend.utils import (
-    ASCEND_QUANTIZATION_METHOD,
-    COMPRESSED_TENSORS_METHOD,
-    dispose_tensor,
-    maybe_trans_nz,
-)
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, COMPRESSED_TENSORS_METHOD, maybe_trans_nz
 
 from ..base import AscendMoEScheme, QuantType
 from ..registry import register_scheme
@@ -114,8 +106,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
     supports_eplb = True
     # Declare the quantization type for this scheme
     quant_type: QuantType = QuantType.W4A8
-    act_quant_type: torch.dtype = torch.int8
-    fused_activations = frozenset({"silu", "situ"})
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -126,8 +116,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 "switch to Per‑Channel quantized weights."
             )
 
-        # Only per-channel W4A8 is supported, this parameter will be removed soon.
-        self.is_per_channel_weight = True
         self.quant_method = vllm_config.quant_config.get_name()
         self.tp_size = (
             1 if vllm_config.parallel_config.enable_expert_parallel else get_tensor_model_parallel_world_size()
@@ -212,13 +200,53 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        topk_weights = topk_weights.to(x.dtype)
+
+        w1_scale_bias: list[torch.Tensor] | None
+        w2_scale_bias: list[torch.Tensor] | None
+
+        if self.use_expert_weight_list:
+            if _EXTRA_CTX.use_mega_moe:
+                # EPLB rearranges these lists in place. MegaMoE must consume
+                # their original INT8/NZ tensors instead of the INT32 views
+                # used by the legacy dynamic-EPLB kernels.
+                w1 = layer.w13_weight_list
+                w1_scale = [t.reshape(-1) for t in layer.w13_weight_scale_list]
+                w2 = layer.w2_weight_list
+                w2_scale = [t.reshape(-1) for t in layer.w2_weight_scale_list]
+                w1_scale_bias = [t.reshape(-1) for t in layer.w13_scale_bias_list]
+                w2_scale_bias = [t.reshape(-1) for t in layer.w2_scale_bias_list]
+            else:
+                w1 = [i.view(torch.int32) for i in layer.w13_weight_list]
+                w1_scale = layer.w13_weight_scale_list
+                w2 = [i.view(torch.int32) for i in layer.w2_weight_list]
+                w2_scale = layer.w2_weight_scale_list
+                w1_scale_bias = layer.w13_scale_bias_list
+                w2_scale_bias = layer.w2_scale_bias_list
+        elif _EXTRA_CTX.use_mega_moe:
+            w1 = layer.cann_mega_moe_w13_weight_list
+            w1_scale = layer.cann_mega_moe_w13_weight_scale_list
+            w2 = layer.cann_mega_moe_w2_weight_list
+            w2_scale = layer.cann_mega_moe_w2_weight_scale_list
+
+            w1_scale_bias = layer.cann_mega_moe_w13_scale_bias_list
+            w2_scale_bias = layer.cann_mega_moe_w2_scale_bias_list
+        else:
+            w1 = [layer.w13_weight]
+            w1_scale = [layer.w13_weight_scale]
+            w2 = [layer.w2_weight]
+            w2_scale = [layer.w2_weight_scale]
+            w1_scale_bias = [layer.w13_scale_bias.detach()] if hasattr(layer, "w13_scale_bias") else None
+            w2_scale_bias = [layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None
+
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                layer=layer,
+                w1=w1,
+                w2=w2,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.use_expert_weight_list,
                 expert_map=layer.ascend_expert_map,
@@ -227,9 +255,12 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 pertoken_scale=layer.ascend_pertoken_scale,
                 activation=layer.activation,
-                is_per_channel_weight=self.is_per_channel_weight,
-            ),
-            quant_method=self,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_scale_bias=w1_scale_bias,
+                w2_scale_bias=w2_scale_bias,
+                is_per_channel_weight=True,
+            )
         )
 
     @staticmethod
@@ -366,185 +397,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # Packs 2 int4 into 1 int8 on-the-fly to mirror the modelslim path
         layer.w13_weight.data = self._pack_int4_to_int8(layer.w13_weight.data)
         layer.w2_weight.data = self._pack_int4_to_int8(layer.w2_weight.data)
-
-    def _get_mlp_weights(self, layer):
-        """Return (w1, w1_scale, w2, w2_scale) in the standard MLP layout."""
-        if self.use_expert_weight_list:
-            return (
-                [w.view(torch.int32) for w in layer.w13_weight_list],
-                layer.w13_weight_scale_list,
-                [w.view(torch.int32) for w in layer.w2_weight_list],
-                layer.w2_weight_scale_list,
-            )
-        return (
-            [layer.w13_weight],
-            [layer.w13_weight_scale],
-            [layer.w2_weight],
-            [layer.w2_weight_scale],
-        )
-
-    def _get_mlp_scale_bias(self, layer):
-        if self.use_expert_weight_list:
-            return layer.w13_scale_bias_list, layer.w2_scale_bias_list
-        w1_scale_bias = getattr(layer, "w13_scale_bias", None)
-        w2_scale_bias = getattr(layer, "w2_scale_bias", None)
-        if w1_scale_bias is not None:
-            w1_scale_bias = [w1_scale_bias]
-        if w2_scale_bias is not None:
-            w2_scale_bias = [w2_scale_bias]
-        return w1_scale_bias, w2_scale_bias
-
-    def _maybe_convert_group_list(self, mlp_compute_input):
-        """scale_bias prelude: group_list 0->1 conversion and output dtype."""
-        group_list = mlp_compute_input.group_list
-        group_list_type = mlp_compute_input.group_list_type
-        if group_list_type == 0:
-            group_list = torch.cat([group_list[:1], torch.diff(group_list, dim=0)])
-            group_list_type = 1
-        return group_list, group_list_type
-
-    def get_fused_mc2_weights(self, layer):
-        """Normalized weight payload for the FUSED_MC2 comm path."""
-        use_mega_moe = _EXTRA_CTX.use_mega_moe
-
-        if self.use_expert_weight_list:
-            if use_mega_moe:
-                return MoEWeights(
-                    w1=layer.w13_weight_list,
-                    w2=layer.w2_weight_list,
-                    w1_scale=[t.reshape(-1) for t in layer.w13_weight_scale_list],
-                    w2_scale=[t.reshape(-1) for t in layer.w2_weight_scale_list],
-                    w1_scale_bias=[t.reshape(-1) for t in layer.w13_scale_bias_list],
-                    w2_scale_bias=[t.reshape(-1) for t in layer.w2_scale_bias_list],
-                )
-            else:
-                return MoEWeights(
-                    w1=[w.view(torch.int32) for w in layer.w13_weight_list],
-                    w2=[w.view(torch.int32) for w in layer.w2_weight_list],
-                    w1_scale=layer.w13_weight_scale_list,
-                    w2_scale=layer.w2_weight_scale_list,
-                    w1_scale_bias=layer.w13_scale_bias_list,
-                    w2_scale_bias=layer.w2_scale_bias_list,
-                )
-        if use_mega_moe:
-            return MoEWeights(
-                w1=layer.cann_mega_moe_w13_weight_list,
-                w1_scale=layer.cann_mega_moe_w13_weight_scale_list,
-                w2=layer.cann_mega_moe_w2_weight_list,
-                w2_scale=layer.cann_mega_moe_w2_weight_scale_list,
-                w1_scale_bias=layer.cann_mega_moe_w13_scale_bias_list,
-                w2_scale_bias=layer.cann_mega_moe_w2_scale_bias_list,
-            )
-        return MoEWeights(
-            w1=[layer.w13_weight],
-            w2=[layer.w2_weight],
-            w1_scale=[layer.w13_weight_scale],
-            w2_scale=[layer.w2_weight_scale],
-            w1_scale_bias=[layer.w13_scale_bias.detach()] if hasattr(layer, "w13_scale_bias") else None,
-            w2_scale_bias=[layer.w2_scale_bias.detach()] if hasattr(layer, "w2_scale_bias") else None,
-        )
-
-    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
-        layer = mlp_compute_input.layer
-        w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
-        bias1, _ = self._get_mlp_scale_bias(layer)
-        group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
-
-        if mlp_compute_input.activation == MoEActivation.SITU:
-            # SituAndMul: run the dequantized gmm1 first, then fuse the situ
-            # activation with dynamic output quantization (Kimi K3 W4A8).
-            # W4A8 only supports per-channel weights (is_per_channel_weight is
-            # always True), so the A8W4 gmm scale must always be in [E, 1, N]
-            # layout (unsqueeze -2); otherwise the kernel tiling treats the
-            # flattened per-channel scale as the quant group count and fails.
-            scale = [item.to(w2_scale[0].dtype) if item.dtype != w2_scale[0].dtype else item for item in w1_scale]
-            scale = [item.unsqueeze(-2) for item in scale]
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=w1 if isinstance(w1, list) else [w1],
-                scale=scale,
-                bias=bias1,
-                per_token_scale=[pertoken_scale],
-                split_item=2,
-                group_type=0,
-                group_list=group_list,
-                group_list_type=group_list_type,
-                output_dtype=torch.bfloat16 if bias1 is not None else w2_scale[0].dtype,
-            )[0]
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
-                x=hidden_states,
-                weight_scale=None,
-                activation_scale=None,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                group_index=None,
-                beta=1.0 if mlp_compute_input.activation_situ_beta is None else mlp_compute_input.activation_situ_beta,
-                linear_beta=mlp_compute_input.activation_situ_linear_beta or 0.0,
-                activate_left=True,
-                quant_mode="dynamic",
-            )
-            dispose_tensor(mlp_compute_input.hidden_states)
-            return hidden_states, swiglu_out_scale
-
-        hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
-            x=hidden_states,
-            weight=w1,
-            weight_scale=w1_scale,
-            x_scale=pertoken_scale,
-            group_list=group_list,
-            weight_assist_matrix=bias1,
-            dequant_mode=0,
-            group_list_type=group_list_type,
-            swiglu_limit=mlp_compute_input.swiglu_limit,
-        )
-        dispose_tensor(mlp_compute_input.hidden_states)
-        return hidden_states, swiglu_out_scale
-
-    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
-        hidden_states = mlp_compute_input.hidden_states
-        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
-        layer = mlp_compute_input.layer
-        w1, w1_scale, _, w2_scale = self._get_mlp_weights(layer)
-        bias1, _ = self._get_mlp_scale_bias(layer)
-        group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
-        scale = [w1_scale[0].to(w2_scale[0].dtype)]
-        hidden_states = torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=w1 if isinstance(w1, list) else [w1],
-            scale=scale,
-            bias=bias1,
-            per_token_scale=[pertoken_scale],
-            split_item=2,
-            group_type=0,
-            group_list=group_list,
-            group_list_type=group_list_type,
-            output_dtype=torch.bfloat16,
-        )[0]
-        dispose_tensor(mlp_compute_input.hidden_states)
-        return hidden_states
-
-    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
-        return torch_npu.npu_dynamic_quant(hidden_states, dst_type=torch.int8)
-
-    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
-        _, _, w2, w2_scale = self._get_mlp_weights(mlp_compute_input.layer)
-        _, bias2 = self._get_mlp_scale_bias(mlp_compute_input.layer)
-        group_list, group_list_type = self._maybe_convert_group_list(mlp_compute_input)
-        return torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=w2,
-            scale=w2_scale,
-            bias=bias2,
-            per_token_scale=[act_out_scale],
-            split_item=2,
-            group_list_type=group_list_type,
-            group_type=0,
-            group_list=group_list,
-            output_dtype=torch.bfloat16,
-        )[0]
 
     def process_weights_after_loading_modelslim(self, layer):
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
