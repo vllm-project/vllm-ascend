@@ -580,6 +580,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker import KVPoolWorker
 
         worker = KVPoolWorker(config, use_layerwise=use_layerwise)
+        worker._uses_vllm_mooncake_connector = MagicMock(return_value=False)
         return worker
 
     def setUp(self):
@@ -1615,6 +1616,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         worker = self._make_worker(
             tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
         )
+        worker._uses_vllm_mooncake_connector = MagicMock(return_value=False)
         fake_cache = MagicMock()
         fake_cache.shape = [100, 16, 4, 64]
         fake_cache.__getitem__.return_value.numel.return_value = 16 * 4 * 64
