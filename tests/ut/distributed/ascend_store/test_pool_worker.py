@@ -614,6 +614,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         self.assertEqual(send_thread.call_args.args[2], worker.grouped_block_size)
         self.assertEqual(recv_thread.call_args.args[2], worker.grouped_block_size)
+        self.assertIsNone(send_thread.call_args.kwargs["worker"])
+        self.assertIsNone(recv_thread.call_args.kwargs["worker"])
         event.return_value.wait.assert_called()
 
     def test_register_kv_caches_initializes_layerwise_memcache(self):
@@ -1610,6 +1612,78 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         self.assertEqual(worker.local_heads_per_rank, 4)
         self.assertEqual(worker.effective_heads_per_rank, 2)
         self.assertEqual(worker.num_sub_keys, 2)
+
+    def test_tp_mismatch_detected_for_both_roles_and_tp_directions(self):
+        cases = [
+            ("kv_consumer", 2, "prefill_tp_size", 4, 2),
+            ("kv_consumer", 4, "prefill_tp_size", 2, 1),
+            ("kv_producer", 2, "decode_tp_size", 4, 2),
+            ("kv_producer", 4, "decode_tp_size", 2, 1),
+        ]
+        for kv_role, local_tp, peer_key, peer_tp, expected_sub_keys in cases:
+            with self.subTest(kv_role=kv_role, local_tp=local_tp, peer_tp=peer_tp):
+                worker = self._make_worker(
+                    tp_size=local_tp,
+                    kv_role=kv_role,
+                    extra_config={"backend": "mooncake", peer_key: peer_tp},
+                    num_kv_heads=8,
+                )
+                self.assertTrue(worker.tp_mismatch)
+                self.assertEqual(worker.effective_tp_size, 4)
+                self.assertEqual(worker.num_sub_keys, expected_sub_keys)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.threading.Event")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread")
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreSendingThread")
+    def test_transfer_threads_receive_worker_when_tp_mismatch(self, send_thread, recv_thread, event):
+        worker = self._make_worker(
+            tp_size=2,
+            kv_role="kv_consumer",
+            extra_config={
+                "backend": "mooncake",
+                "prefill_tp_size": 4,
+                "consumer_is_to_put": True,
+                "load_async": True,
+            },
+            num_kv_heads=8,
+        )
+
+        worker._start_kv_transfer_threads()
+
+        self.assertIs(send_thread.call_args.kwargs["worker"], worker)
+        self.assertIs(recv_thread.call_args.kwargs["worker"], worker)
+        event.return_value.wait.assert_called()
+
+    def test_start_load_kv_sync_dispatches_tp_mismatch_reader(self):
+        worker = self._make_strided_worker()
+        worker.grouped_block_size = [4]
+        worker.m_store = MagicMock()
+        worker._load_kv_tp_mismatch = MagicMock()
+        load_spec = LoadSpec(
+            vllm_cached_tokens=4,
+            kvpool_cached_tokens=8,
+            can_load=True,
+            token_len=8,
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=8,
+            block_ids_by_group=[[10, 11]],
+            block_hashes=[b"h0", b"h1"],
+            load_spec=load_spec,
+        )
+        metadata = AscendConnectorMetadata(set())
+        metadata.add_request(request)
+
+        worker.start_load_kv(metadata)
+
+        worker._load_kv_tp_mismatch.assert_called_once_with(
+            [b"h0", b"h1"],
+            [10, 11],
+            8,
+            4,
+        )
+        worker.m_store.get.assert_not_called()
 
     def test_register_kv_caches_initializes_tp_mismatch_strides(self):
         worker = self._make_worker(
