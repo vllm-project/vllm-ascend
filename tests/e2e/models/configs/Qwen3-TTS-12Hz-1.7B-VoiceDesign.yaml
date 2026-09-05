@@ -1,0 +1,24 @@
+model_name: "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+model_type: "vllm-tts"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 1
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.8
+  trust_remote_code: true
+
+tasks:
+- name: "tts_synthesis"
+  metrics:
+  - name: "audio_generation_success"
+    value: 1.0
+  - name: "rtf_average"
+    value: 1.5
+  - name: "sample_rate"
+    value: 24000
+
+num_fewshot: 0
+apply_chat_template: false
+batch_size: 1
