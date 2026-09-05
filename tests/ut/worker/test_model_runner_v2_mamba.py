@@ -3,7 +3,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import torch
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -95,6 +97,49 @@ def test_prepare_inputs_propagates_padded_request_count():
     padded_count = keywords["num_reqs_after_padding"]
     assert isinstance(padded_count, ast.Name)
     assert padded_count.id == "num_reqs_padded"
+
+
+@patch("vllm_ascend.worker.v2.model_states.mamba_hybrid.build_attn_metadata")
+def test_prepare_attn_marks_uniform_full_graph_padding_as_spec(mock_build_attn_metadata):
+    expected_metadata = {"gdn": object()}
+    mock_build_attn_metadata.return_value = expected_metadata
+    state = SimpleNamespace(
+        vllm_config=SimpleNamespace(num_speculative_tokens=3),
+        num_accepted_tokens_gpu=torch.tensor([2, 3], dtype=torch.int32),
+        max_model_len=1024,
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=4,
+        num_tokens=8,
+        num_tokens_after_padding=16,
+        is_prefilling_np=np.array([False, False]),
+        idx_mapping=torch.tensor([0, 1]),
+        num_draft_tokens_per_req=np.array([3, 3], dtype=np.int32),
+        num_scheduled_tokens=np.array([4, 4], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 4, 8, 12, 16], dtype=torch.int32),
+        query_start_loc_np=np.array([0, 4, 8, 12, 16], dtype=np.int32),
+        seq_lens=None,
+        dcp_local_seq_lens=None,
+        seq_lens_np=np.ones(4, dtype=np.int32),
+        positions=None,
+        attn_state=None,
+    )
+
+    metadata = AscendMambaHybridModelState.prepare_attn(
+        state,
+        input_batch=input_batch,
+        cudagraph_mode=CUDAGraphMode.FULL,
+        block_tables=(),
+        slot_mappings=torch.empty(0, dtype=torch.int64),
+        attn_groups=[],
+        kv_cache_config=MagicMock(),
+    )
+
+    assert metadata is expected_metadata
+    model_metadata = mock_build_attn_metadata.call_args.kwargs["model_specific_attn_metadata"]
+    assert model_metadata.num_decode_draft_tokens_cpu.tolist() == [3, 3, 3, 3]
+    assert model_metadata.num_accepted_tokens.tolist() == [2, 3, 1, 1]
 
 
 @patch(
