@@ -80,6 +80,7 @@ class FusedMoEResult:
 class FusedMoEEvents:
     before_routed_experts: torch.npu.Event
     after_routed_experts: torch.npu.Event | None = field(default=None)
+    shared_input_ready: torch.npu.Event | None = field(default=None)
     before_dispatch: torch.npu.Event | None = field(default=None)
     before_gmm2: torch.npu.Event | None = field(default=None)
     before_combine: torch.npu.Event | None = field(default=None)
@@ -830,9 +831,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap_shared_expert):
             # FlashComm1 switches the token axis between complete TP blocks.
-            # Gather the sequence shard before entering a TP-sharded shared MLP.
-            torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-            hidden_states = self._prepare_shared_expert_input(hidden_states)
+            # The sequence-shard all-gather for the TP-sharded shared MLP runs
+            # on the DEFAULT stream (see shared_forward_impl) before the routed
+            # path is enqueued: issuing a TP-group collective here would run it
+            # concurrently with the routed path's EP-group collectives and can
+            # deadlock HCCL under multistream overlap. Wait for it before
+            # consuming the gathered input.
+            torch.npu.current_stream().wait_event(
+                fused_moe_evts.shared_input_ready or fused_moe_evts.before_routed_experts
+            )
 
             # Only used for int quantization
             has_quantized_shared = hasattr(self._shared_experts.gate_up_proj, "weight_scale") and hasattr(
@@ -972,6 +979,15 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             before_routed_experts = torch.npu.current_stream().record_event()
             after_routed_experts = None
 
+        # FlashComm1 + TP-sharded shared experts (sed_dp=false): gather the
+        # full sequence for the shared MLP on the DEFAULT stream, BEFORE the
+        # routed path is enqueued, so all collectives stay on one stream
+        # (multistream-safe); the shared-experts stream remains compute-only.
+        shared_input_ready = None
+        if self._shared_experts is not None:
+            shared_hidden_states = self._prepare_shared_expert_input(shared_hidden_states)
+            shared_input_ready = torch.npu.current_stream().record_event()
+
         fused_moe_results = self.no_shared_forward_impl(
             hidden_states,
             router_logits,
@@ -987,6 +1003,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             FusedMoEEvents(
                 after_routed_experts=after_routed_experts,
                 before_routed_experts=before_routed_experts,
+                shared_input_ready=shared_input_ready,
                 before_dispatch=fused_moe_results.before_dispatch_evt,
                 before_gmm2=fused_moe_results.before_gmm2_evt,
                 before_combine=fused_moe_results.before_combine_evt,
