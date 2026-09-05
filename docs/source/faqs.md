@@ -241,7 +241,7 @@ failed to register layer: ApplyLayer exit status 1 stdout: stderr: archive/tar: 
 
 This is often due to system compatibility issues. You can resolve this by using an offline loading method with a second machine.
 
-1. On a separate host machine (e.g., a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
+1. On a separate host machine (e.g. a standard Ubuntu server), pull the image for the target ARM64 architecture and package it into a `.tar` file.
 
    ```bash
    export IMAGE_TAG=v0.10.0rc1-310p
@@ -305,3 +305,28 @@ Single-node deployment is recommended when the model fits within the memory of a
 ### 25. What is the difference between FIA and PA operators for attention?
 
 FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
+
+### 26. How should I choose Docker NPU device mappings and decide whether to use `--rm`?
+
+Before starting the container, inspect the NPU device nodes and inventory on the host:
+
+```bash
+ls -l /dev/davinci*
+npu-smi info
+```
+
+Map only the `/dev/davinciN` devices allocated to the deployment. After entering the container, run `npu-smi info` again and confirm that the expected devices are visible before starting `vllm serve`. The `--tensor-parallel-size` value must not exceed the number of devices visible inside the container, and the selected model must support the requested tensor-parallel degree. On shared or virtualized systems, follow the device allocation provided by the platform administrator rather than inferring the physical topology from device-node numbers alone.
+
+A typical persistent cache mount is:
+
+```bash
+-v /root/.cache:/root/.cache
+```
+
+Use a host directory appropriate for the environment when model weights are stored elsewhere. Mounting the model or cache directory prevents downloads and converted artifacts from being lost when a container is recreated.
+
+The `--rm` option automatically deletes the container when it exits. It is useful for disposable serving environments, but it also removes container-local logs and filesystem changes. Omit `--rm` while troubleshooting or when the stopped container needs to be restarted. With a named persistent container, it can later be resumed with:
+
+```bash
+docker start -ai vllm-ascend
+```
