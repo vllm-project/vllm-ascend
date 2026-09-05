@@ -16,6 +16,7 @@ from vllm_ascend.quantization.quant_type import QuantType
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_reserved_mc2_mask", None)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
