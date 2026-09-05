@@ -116,7 +116,10 @@ def greedy_rejection_sample_cpu(
     cu_num_logits: torch.Tensor,
     num_speculative_steps: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Greedy (temperature=0) rejection sampling for MTP verify."""
+    """Greedy (temperature=0) rejection sampling for MTP verify.
+
+    Argmax runs on-device so we only D2H token ids (not the full vocab logits).
+    """
     cu_np = cu_num_logits.detach().cpu().numpy()
     num_reqs = cu_np.shape[0] - 1
     max_tokens = num_speculative_steps + 1
@@ -127,8 +130,9 @@ def greedy_rejection_sample_cpu(
         device=target_logits.device,
     )
     num_sampled = torch.zeros(num_reqs, dtype=torch.int32, device=target_logits.device)
-    draft_cpu = draft_sampled.detach().cpu()
-    logits_cpu = target_logits.detach().cpu()
+    # Avoid full-vocab logits D2H (dominant cost on 310P MTP verify).
+    target_argmax_cpu = target_logits.argmax(dim=-1).to(dtype=torch.int32).detach().cpu()
+    draft_cpu = draft_sampled.detach().cpu().to(dtype=torch.int32)
 
     for req_idx in range(num_reqs):
         start = int(cu_np[req_idx])
@@ -141,7 +145,7 @@ def greedy_rejection_sample_cpu(
         # logits[i] predicts token i+1, which is draft_sampled[i+1] (upstream
         # rejection_sampler_utils loads draft_sampled_ptr + logit_idx + 1).
         for logit_idx in range(start, end):
-            target_token = int(logits_cpu[logit_idx].argmax().item())
+            target_token = int(target_argmax_cpu[logit_idx].item())
             is_bonus = logit_idx >= end - 1
             if accepted < num_speculative_steps and not is_bonus:
                 draft_token = int(draft_cpu[logit_idx + 1].item())
@@ -153,7 +157,7 @@ def greedy_rejection_sample_cpu(
             accepted += 1
             break
         if accepted == 0:
-            sampled[req_idx, 0] = int(logits_cpu[start].argmax().item())
+            sampled[req_idx, 0] = int(target_argmax_cpu[start].item())
             accepted = 1
         num_sampled[req_idx] = accepted
 

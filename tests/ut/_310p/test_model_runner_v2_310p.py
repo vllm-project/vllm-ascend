@@ -376,6 +376,8 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     runner.cache_config = SimpleNamespace(cache_dtype="auto")
     runner.kernel_block_sizes = [64]
     runner.attn_groups = [[SimpleNamespace(backend=FakeBackend, layer_names=["model.layers.0.self_attn"])]]
+    runner._attn_kv_storage_ptrs = set()
+    runner._attn_kv_copy_params = []
 
     allocations = []
 

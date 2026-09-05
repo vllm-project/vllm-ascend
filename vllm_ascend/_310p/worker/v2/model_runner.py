@@ -83,6 +83,10 @@ class NPUModelRunner310V2(NPUModelRunner):
         self._force_eager_pc_batch = False
         self._force_eager_spec_batch = False
         self._spec_dummy_capture = False
+        # Populated in initialize_kv_cache; also set here so UT can call
+        # ``_allocate_kv_cache_tensors`` without going through that path.
+        self._attn_kv_copy_params: list[tuple[torch.Tensor, torch.Tensor, int]] = []
+        self._attn_kv_storage_ptrs: set[int] = set()
 
     @staticmethod
     def _validate_config(vllm_config: VllmConfig) -> None:
@@ -751,8 +755,8 @@ class NPUModelRunner310V2(NPUModelRunner):
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
         shared_layers = get_shared_kv_cache_layers(self.vllm_config)
-        self._attn_kv_copy_params: list[tuple[torch.Tensor, torch.Tensor, int]] = []
-        self._attn_kv_storage_ptrs: set[int] = set()
+        self._attn_kv_copy_params = []
+        self._attn_kv_storage_ptrs = set()
         kv_caches_dict = self._allocate_kv_cache_tensors(kv_cache_config, shared_layers)
         self.kv_caches: list[Any] = []
         bind_kv_cache(
