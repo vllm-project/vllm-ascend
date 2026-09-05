@@ -610,9 +610,11 @@ __aicore__ inline void SASVectorBlock<SAST>::CopyInKv(int64_t &mte2Size, int64_t
         keySrcStride = ((keyOffset1 > keyOffset2 ? (keyOffset1 - keyOffset2) :
 	                    (keyOffset2 - keyOffset1)) - constInfo.sparseBlockSize) * constInfo.headDim * sizeof(KV_T);
     }
+    constexpr bool isPagedLayout = (KV_LAYOUT_T == SAS_LAYOUT::PA_ND);
     if (unlikely(keySrcStride >= INT32_MAX || keySrcStride < 0 ||
         realS2Idx1 + constInfo.sparseBlockSize >= s2IdLimit ||
-        realS2Idx2 + constInfo.sparseBlockSize >= s2IdLimit)) {
+        realS2Idx2 + constInfo.sparseBlockSize >= s2IdLimit ||
+        (isPagedLayout && keyOffset1 >= 0 && keyOffset2 >= 0 && keyOffset2 < keyOffset1))) {
         // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令
         // 因为需要拷贝两块
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx1, keyOffset1, s2IdLimit, runInfo);
