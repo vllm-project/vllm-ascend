@@ -143,8 +143,8 @@ def _record_cos_and_sin_cache_interleaved(cos_sin_cache):
         return
     hidden_dim = cos_sin_cache.shape[-1] // 2
     cos_cache, sin_cache = cos_sin_cache.view(-1, 2, hidden_dim).repeat(1, 1, 2).chunk(2, dim=1)
-    _cos_cache = cos_cache.squeeze(1)
-    _sin_cache = sin_cache.squeeze(1)
+    _cos_cache = cos_cache.squeeze(1).contiguous()
+    _sin_cache = sin_cache.squeeze(1).contiguous()
 
 
 def update_cos_sin(positions):
