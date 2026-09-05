@@ -5,11 +5,13 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.triton_utils import triton
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.v1.spec_decode.utils import PADDING_SLOT_ID
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.context_parallel.common_cp import get_dcp_local_seq_lens
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, AscendDCPMetadata
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_properties_triton
 from vllm_ascend.spec_decode.eagle_proposer import AscendEagleProposer
@@ -128,6 +130,9 @@ class AscendDflashProposer(AscendEagleProposer):
         )
 
         has_num_rejected = num_rejected_tokens_gpu is not None
+        total_cp_world_size = self.dcp_size
+        current_cp_rank = self.dcp_rank
+        cp_kv_cache_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size
 
         copy_and_expand_dflash_and_dspark_inputs_kernel[(_compute_num_programs(num_context, num_query_total),)](
             # Inputs
@@ -156,6 +161,10 @@ class AscendDflashProposer(AscendEagleProposer):
             total_input_tokens=num_context,
             batch_size=batch_size,
             HAS_NUM_REJECTED=has_num_rejected,
+            total_cp_world_size=total_cp_world_size,
+            current_cp_rank=current_cp_rank,
+            cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+            PAD_ID=PADDING_SLOT_ID,
         )
 
         query_slot_mapping = self._slot_mapping_buffer[:num_query_total]
@@ -184,7 +193,28 @@ class AscendDflashProposer(AscendEagleProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        if cad.is_prefilling is not None:
+            cad.is_prefilling = torch.zeros_like(cad.is_prefilling)
+        long_seq_args = None
+        if self.dcp_size > 1:
+            seq_lens_cpu = cad.seq_lens_cpu
+            if cad._seq_lens_cpu is not None:
+                cad._seq_lens_cpu = seq_lens_cpu
+            cad.max_seq_len = int(seq_lens_cpu.max().item())
+            local_seq_lens = get_dcp_local_seq_lens(
+                seq_lens_cpu,
+                self.dcp_size,
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+            )
+            cad.context_parallel_metadata = AscendDCPMetadata(
+                num_computed_tokens_of_dcp=local_seq_lens.numpy(),
+                query_lens_cpu=None,
+                max_query_len=0,
+                dcp_mtp_attn_mask=None,
+            )
+            long_seq_args = (None, None)  
+
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
 
     @torch.inference_mode()
     def dummy_run(
@@ -198,7 +228,9 @@ class AscendDflashProposer(AscendEagleProposer):
         is_profile=False,
         **kwargs,
     ) -> None:
-        num_query_tokens = min(num_tokens, self.max_query_tokens)
+        num_query_per_req = 1 + self.num_speculative_tokens
+        num_query_total = num_reqs * num_query_per_req if num_reqs > 0 else num_tokens
+        num_query_tokens = num_query_total
 
         (
             num_input_tokens,
@@ -208,8 +240,20 @@ class AscendDflashProposer(AscendEagleProposer):
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
-        num_query_per_req = 1 + self.num_speculative_tokens
-        num_query_total = num_reqs * num_query_per_req
+        if (
+            self.dcp_size > 1
+            and self.use_cuda_graph
+            and not is_profile
+            and self.block_table_tensor_clone is None
+        ):
+            self.block_table_tensor_clone = torch.zeros(
+                (
+                    self.runner.max_num_tokens + 2 * self.runner.max_num_reqs,
+                    self.runner.input_batch.block_table[0].get_device_tensor().shape[1],
+                ),
+                dtype=torch.int32,
+                device=self.device,
+            )
 
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
@@ -217,6 +261,23 @@ class AscendDflashProposer(AscendEagleProposer):
         multi_steps_attn_metadata = []
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and len(self.runner.attn_groups) > 0:
             builder = self.draft_attn_groups[0].get_metadata_builder()
+            cp_metadata = None
+            if self.dcp_size > 1:
+                query_lens_cpu = torch.full(
+                    (num_reqs,), 
+                    num_query_per_req, 
+                    dtype=torch.int32,
+                )
+                local_seq_lens = get_dcp_local_seq_lens(
+                    self.runner.optimistic_seq_lens[:num_reqs],
+                    self.dcp_size,
+                    self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
+                )
+                cp_metadata = AscendDCPMetadata(
+                    num_computed_tokens_of_dcp=local_seq_lens.numpy(),
+                    query_lens_cpu=query_lens_cpu,
+                    max_query_len=num_query_per_req
+                )
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.arange_dflash[: num_reqs + 1] * num_query_per_req,
                 query_start_loc_cpu=torch.from_numpy(self.token_arange_np[: num_reqs + 1]).clone() * num_query_per_req,
@@ -234,6 +295,7 @@ class AscendDflashProposer(AscendEagleProposer):
                 block_table_tensor=self.runner.input_batch.block_table[self.kv_cache_gid].get_device_tensor()[
                     :num_reqs
                 ],
+                context_parallel_metadata=cp_metadata,
             )
 
             attn_metadata_dflash = builder.build_for_graph_capture(
@@ -266,8 +328,8 @@ class AscendDflashProposer(AscendEagleProposer):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)
                 self.model(
-                    input_ids=self.input_ids[:num_input_tokens],
-                    positions=self._get_positions(num_input_tokens),
+                    input_ids=self.input_ids[:num_query_tokens],
+                    positions=self._get_positions(num_query_tokens),
                     inputs_embeds=None,
                 )
 
@@ -285,7 +347,7 @@ class AscendDflashProposer(AscendEagleProposer):
 
             forward_context = get_forward_context()
             if forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL and not _EXTRA_CTX.capturing:
-                self._update_full_graph_params(forward_context, num_tokens, multi_steps_attn_metadata)
+                self._update_full_graph_params(forward_context, num_input_tokens, multi_steps_attn_metadata)
 
     def build_model_inputs_first_pass(
         self,
