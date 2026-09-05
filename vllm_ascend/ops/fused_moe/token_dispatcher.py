@@ -422,10 +422,17 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         )
 
     def token_combine(self, hidden_states, combine_metadata, bias=None):
+        probs = combine_metadata.topk_weights
+        # aclnnMoeTokenUnpermute only accepts FP16/BF16/FP32 probs. On the
+        # W4A4 MXFP4 packed path (uint8 activations), topk_weights is carried
+        # as uint8 after the routed-expert dtype cast, so restore a float
+        # dtype here.
+        if probs.dtype == torch.uint8:
+            probs = probs.to(torch.float32)
         final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=combine_metadata.expanded_row_idx,
-            probs=combine_metadata.topk_weights,
+            probs=probs,
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
