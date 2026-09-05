@@ -127,6 +127,11 @@ def _configure_backend(
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
             options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            options["super_kernel_optimize"] = True
+            options["super_kernel_optimize_options"] = {
+                "dcci_after_kernel_end": [".*"],
+            }
+            options["super_kernel_debug_options"] = {}
         process_kwargs_options(config, {"options": options})
     else:
         # torchair (reduce-overhead): use nested config structure directly.
