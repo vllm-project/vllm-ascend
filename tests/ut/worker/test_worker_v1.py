@@ -530,6 +530,8 @@ class TestNPUWorker(TestBase):
             worker.parallel_config.data_parallel_size = 1
             worker.parallel_config.assigned_physical_gpu_ids = None
             worker.parallel_config.distributed_executor_backend = "ray"
+            worker.parallel_config.enable_fault_tolerance = False
+            worker.use_v2_model_runner = False
             worker.vllm_config = MagicMock()
             worker.vllm_config.kv_transfer_config = None
             worker.cache_config = MagicMock()

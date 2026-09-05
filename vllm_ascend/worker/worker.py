@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+import os
 from types import NoneType
 from typing import Any
 
@@ -39,7 +40,8 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorHandshakeMetadata
-from vllm.distributed.parallel_state import Handle, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import Handle, _groups, get_pp_group, get_tp_group
+from vllm.distributed.utils import get_cpu_distributed_timeout_or_none
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
@@ -89,6 +91,7 @@ from vllm_ascend.utils import (
     setup_ascend_local_comm_res,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.sentinel.npu_worker_sentinel import WorkerSentinel
 
 torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
@@ -181,6 +184,8 @@ class NPUWorker(WorkerBase):
         if "UnquantizedLinearMethod" in WEIGHT_LOADER_V2_SUPPORTED:
             WEIGHT_LOADER_V2_SUPPORTED.remove("UnquantizedLinearMethod")
 
+        self.worker_sentinel: WorkerSentinel | None = None
+
         self.use_v2_model_runner = self.vllm_config.use_v2_model_runner
         self._pp_send_work: list[Handle] = []
 
@@ -201,6 +206,10 @@ class NPUWorker(WorkerBase):
 
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
+
+    def handle_ft_command(self, ft_request):
+        assert self.worker_sentinel is not None
+        return self.worker_sentinel.handle_command(ft_request)
 
     def uninstall_static_kernel(self):
         import fcntl
@@ -381,6 +390,37 @@ class NPUWorker(WorkerBase):
         # shift self.local_rank by dp_local_rank * tp_pp_world_size so
         # that each DP group binds to a distinct set of NPUs.
         parallel_config = self.parallel_config
+        if self.parallel_config.enable_fault_tolerance:
+            if self.use_v2_model_runner:
+                # Model Runner V2 + fault tolerance task queue
+                # (TASK_QUEUE_ENABLE) hangs abnormally; force it off.
+                os.environ["TASK_QUEUE_ENABLE"] = "0"
+                logger.warning(
+                    "Fault tolerance with Model Runner V2 does not support the "
+                    "task queue (TASK_QUEUE_ENABLE); forcing TASK_QUEUE_ENABLE=0."
+                )
+
+            if parallel_config.tensor_parallel_size > 1:
+                # TP>1 relies on collective HCCL comms; disable HCCL's async
+                # error handling so it cannot abort the process out-of-band
+                # during fault-tolerance recovery.
+                os.environ["HCCL_ASYNC_ERROR_HANDLING"] = "0"
+
+            abort_timeout = get_ascend_config().ft_communication_abort_timeout
+            if abort_timeout > 0:
+                # User-provided HCCL timeouts win; otherwise derive them
+                # from the config value. HCCL_EVENT_TIMEOUT must be
+                # greater than HCCL_EXEC_TIMEOUT, hence EXEC defaults to
+                # abort_timeout - 1.
+                os.environ.setdefault("HCCL_EVENT_TIMEOUT", str(abort_timeout))
+                os.environ.setdefault("HCCL_EXEC_TIMEOUT", str(abort_timeout - 1))
+                if int(os.environ["HCCL_EVENT_TIMEOUT"]) <= int(os.environ["HCCL_EXEC_TIMEOUT"]):
+                    raise ValueError(
+                        f"HCCL_EVENT_TIMEOUT ({os.environ['HCCL_EVENT_TIMEOUT']}) "
+                        "must be greater than HCCL_EXEC_TIMEOUT "
+                        f"({os.environ['HCCL_EXEC_TIMEOUT']})"
+                    )
+                torch.npu.set_op_timeout_ms(abort_timeout * 1000)
         if (
             parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
             and parallel_config.data_parallel_backend != "ray"
@@ -472,6 +512,8 @@ class NPUWorker(WorkerBase):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
+        if self.parallel_config.enable_fault_tolerance:
+            self.worker_sentinel = WorkerSentinel(worker=self, device=device)
         # Set random seed.
         set_random_seed(self.model_config.seed)
         # Initialize device properties used by triton kernels.
@@ -1114,6 +1156,20 @@ class NPUWorker(WorkerBase):
         )
         init_ascend_model_parallel(self.parallel_config)
         ensure_ec_transfer_initialized(self.vllm_config)
+        self._apply_cpu_distributed_timeout()
+
+    def _apply_cpu_distributed_timeout(self) -> None:
+        # Apply the user-configured CPU (gloo) distributed timeout only after
+        # all process groups exist: passing it at group creation would make the
+        # group-creation barrier itself abort on slow multi-rank startup.
+        timeout = get_cpu_distributed_timeout_or_none()
+        if timeout is None:
+            return
+        for group_ref in _groups.values():
+            group = group_ref()
+            cpu_group = getattr(group, "cpu_group", None) if group is not None else None
+            if cpu_group is not None:
+                cpu_group.set_timeout(timeout)
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
