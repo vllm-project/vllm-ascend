@@ -589,6 +589,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         context_length = kv_length - attn_metadata.num_actual_tokens
         if context_length < 0 or kv_length > SFA_INDEXER_SPARSE_COUNT:
             return None
+        # This view aliases the per-device table shared by layers and requests.
+        # Consumers must preserve it, including rows outside this request.
         return self._full_visible_index_table[context_length + 1 : kv_length + 1].unsqueeze(1)
 
     @property
@@ -1322,6 +1324,9 @@ class AscendSFAImpl(MLAAttentionImpl):
         if topk_indices_to_cache.dim() == 3 and topk_indices_buffer.dim() == 2:
             assert topk_indices_to_cache.shape[1] == 1
             topk_indices_to_cache = topk_indices_to_cache.squeeze(1)
+        # Model constructors allocate this destination separately from the
+        # full-visible table. squeeze only changes the source view; copy_ writes
+        # the destination. Keep that non-aliasing contract when wiring buffers.
         topk_indices_buffer.copy_(topk_indices_to_cache)
 
     def _use_li_c8_reshape_optim(self) -> bool:
