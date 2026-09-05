@@ -25,6 +25,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata 
     RecomputeCPUOffloadMetadata,
     RecomputeCPUOffloadWorkerMetadata,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -153,18 +154,30 @@ class RecomputeCPUOffloadScheduler:
         assert gpu_config.kv_cache_tensors
         gpu_kv_cache_tensors = []
         for t in gpu_config.kv_cache_tensors:
-            if t.shared_by:
+            if get_kv_cache_tensor_layers(t):
                 gpu_kv_cache_tensors.append(t)
         gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
-        cpu_tensors = [
-            KVCacheTensor(
-                size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
-            )
-            for t in gpu_kv_cache_tensors
-        ]
+        if vllm_version_is("0.27.1"):
+            cpu_tensors = [
+                KVCacheTensor(
+                    size=t.size // num_gpu_blocks * num_cpu_blocks,
+                    shared_by=list(t.shared_by),
+                )
+                for t in gpu_kv_cache_tensors
+            ]
+        else:
+            cpu_tensors = [
+                KVCacheTensor(
+                    size=t.size // num_gpu_blocks * num_cpu_blocks,
+                    layers=list(t.layers),
+                    layer_stride=t.layer_stride,
+                    block_stride=t.block_stride,
+                    offset=t.offset,
+                )
+                for t in gpu_kv_cache_tensors
+            ]
         return KVCacheConfigCls(
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,

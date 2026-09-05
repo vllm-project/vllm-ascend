@@ -106,6 +106,11 @@ def _use_ascend_pcp_manager_for_vllm_0271():
 class NPUModelRunner(GPUModelRunner):
     """Model runner for Ascend NPUs."""
 
+    # vLLM #51718 overlays hybrid Attention/Mamba groups in one standardized
+    # backing allocation. Ascend MRV2 preserves that layout in
+    # allocate_kv_cache_main and exposes contiguous backend-specific views.
+    supports_standardized_shared_kv_backing = True
+
     execute_model_state: ExecuteModelState | None
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -347,7 +352,7 @@ class NPUModelRunner(GPUModelRunner):
             so we need to prepare seq_lens_cpu here.
             """
             num_tokens = scheduler_output.total_num_scheduled_tokens
-            num_tokens_after_padding = batch_desc.num_tokens
+            num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
             assert num_tokens > 0
             num_tokens_per_req = scheduler_output.num_scheduled_tokens
             num_reqs = len(num_tokens_per_req)
@@ -552,7 +557,10 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state=attn_state,
             )
 
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+            )
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)
@@ -572,7 +580,7 @@ class NPUModelRunner(GPUModelRunner):
             so we need to prepare seq_lens_cpu here.
             """
             num_tokens = batch_req_state.num_tokens
-            num_tokens_after_padding = batch_desc.num_tokens
+            num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
             assert num_tokens > 0
 
             req_ids = batch_req_state.req_ids
@@ -773,7 +781,11 @@ class NPUModelRunner(GPUModelRunner):
                 attn_state=attn_state,
             )
 
-            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(self.pcp_manager, input_batch)
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,
+            )
 
             # For mla/sfa, update cos/sin. Here is for execute_model.
             update_cos_sin(input_batch.positions)

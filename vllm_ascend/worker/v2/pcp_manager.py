@@ -23,11 +23,14 @@ import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
+from vllm.v1.worker.gpu.states import RequestState
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
 
 @dataclass(frozen=True)
@@ -45,6 +48,47 @@ class AscendPCPManager(PCPManager):
     """PCP manager that refreshes Ascend-only local-batch metadata."""
 
     vllm_config: VllmConfig
+
+    def __init__(
+        self,
+        pcp_world_size: int,
+        pcp_rank: int,
+        device: torch.device,
+        req_states: RequestState | None = None,
+        max_num_reqs: int | None = None,
+        max_num_tokens: int | None = None,
+        block_tables: BlockTables | None = None,
+        dcp_world_size: int = 1,
+        dcp_rank: int = 0,
+        cp_interleave: int = 1,
+    ) -> None:
+        super().__init__(
+            pcp_world_size=pcp_world_size,
+            pcp_rank=pcp_rank,
+            device=device,
+            req_states=req_states,
+            max_num_reqs=max_num_reqs,
+            max_num_tokens=max_num_tokens,
+            block_tables=block_tables,
+            dcp_world_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            cp_interleave=cp_interleave,
+        )
+
+        # vLLM #53515 made the PCP-local buffers persistent and uses them for
+        # graph capture. Preserve that ownership while providing the extra CPU
+        # and NumPy sequence-length views required by AscendInputBatch.
+        if max_num_reqs is not None and max_num_tokens is not None:
+            self._input_buffers = AscendInputBuffers(
+                max_num_reqs=2 * max_num_reqs,
+                max_num_tokens=max_num_tokens,
+                device=device,
+            )
+            # The upstream PCP manager copies exactly max_num_reqs + 1
+            # offsets into the whole query_start_loc tensor. AscendInputBuffers
+            # normally reserves one additional FIA padding slot, but PCP never
+            # uses that slot; expose the exact upstream-sized view here.
+            self._input_buffers.query_start_loc = self._input_buffers.query_start_loc[:-1]
 
     @property
     def global_batch(self) -> AscendInputBatch:
@@ -147,21 +191,41 @@ class AscendPCPManager(PCPManager):
             num_draft_tokens_per_req=local_draft_counts,
         )
 
-    def partition_batch(self, input_batch: AscendInputBatch) -> AscendInputBatch:
+    def partition_batch(
+        self,
+        input_batch: AscendInputBatch,
+        padded_num_tokens: int | None = None,
+    ) -> AscendInputBatch:
         """Partition the batch and update Ascend-specific local metadata."""
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
-        else:
+        elif vllm_version_is("0.27.1"):
             local_batch = super().partition_batch(global_batch)
-            assert isinstance(local_batch, AscendInputBatch)
+        else:
+            local_batch = super().partition_batch(
+                global_batch,
+                padded_num_tokens=padded_num_tokens,
+            )
+        assert isinstance(local_batch, AscendInputBatch)
 
         # PCP builds the local layout from actual tokens, but a FULL decode
         # graph replays a fixed padded layout on every rank.
         graph_num_tokens = global_batch.num_tokens_after_padding
-        graph_num_reqs = global_batch.num_reqs_after_padding
         is_decode_only = not bool(global_batch.is_prefilling_np.any())
-        if is_decode_only and graph_num_tokens > local_batch.num_tokens_after_padding:
+        # FULL_DECODE_ONLY graphs capture one token for every padded request.
+        # Other graph modes may pad tokens without padding request metadata.
+        is_full_decode_graph = (
+            is_decode_only and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        )
+        graph_num_reqs = graph_num_tokens if is_full_decode_graph else global_batch.num_reqs_after_padding
+        # On newer vLLM, the base PCP manager may already honor
+        # ``padded_num_tokens`` while leaving request-shaped metadata at the
+        # actual request count. Pad when either extent is still short so the
+        # runtime metadata matches the fixed graph capture layout.
+        needs_token_padding = graph_num_tokens > local_batch.num_tokens_after_padding
+        needs_request_padding = graph_num_reqs > local_batch.num_reqs_after_padding
+        if is_decode_only and (needs_token_padding or needs_request_padding):
             assert self._input_buffers is not None
             input_buffers = self._input_buffers
             actual_tokens = local_batch.num_tokens
@@ -212,22 +276,21 @@ class AscendPCPManager(PCPManager):
                 is_padding=input_buffers.is_padding[:graph_num_tokens],
             )
 
-        local_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
+        actual_seq_lens_np = local_batch.num_computed_tokens_np + local_batch.num_scheduled_tokens
         if local_batch.num_reqs_after_padding > local_batch.num_reqs:
-            padded_seq_lens_np = np.zeros(
-                local_batch.num_reqs_after_padding,
-                dtype=local_seq_lens_np.dtype,
-            )
-            padded_seq_lens_np[: local_batch.num_reqs] = local_seq_lens_np
-            local_seq_lens_np = padded_seq_lens_np
-
-        local_batch.seq_lens_np = local_seq_lens_np
+            assert self._input_buffers is not None
+            seq_lens_np = self._input_buffers.seq_lens_np
+            seq_lens_np[: local_batch.num_reqs] = actual_seq_lens_np
+            seq_lens_np[local_batch.num_reqs : local_batch.num_reqs_after_padding] = 0
+            local_batch.seq_lens_np = seq_lens_np[: local_batch.num_reqs_after_padding]
+        else:
+            local_batch.seq_lens_np = actual_seq_lens_np
         num_valid_tokens = local_batch.num_scheduled_tokens
         if local_batch.num_draft_tokens_per_req is not None:
             num_valid_tokens = num_valid_tokens - local_batch.num_draft_tokens_per_req
         local_batch.attn_state = build_attn_state(
             self.vllm_config,
-            local_batch.seq_lens_np,
+            actual_seq_lens_np,
             local_batch.num_reqs,
             local_batch.num_scheduled_tokens,
             num_valid_tokens,
@@ -266,6 +329,25 @@ class AscendPCPManager(PCPManager):
         local_num_tokens_padded = self._padded_gather_idx.shape[0] // self.pcp_world_size
         restored_hidden_states = self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
         hidden_states[: restored_hidden_states.shape[0]].copy_(restored_hidden_states)
+
+    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+        """Return capture views backed by the persistent PCP-local tables.
+
+        FULL graph replay cannot rebind SFA's captured block-table pointer, so
+        capture must use the same storage that ``prepare_attn`` updates at
+        runtime instead of the model runner's global block-table buffers.
+        """
+        if self._local_block_tables is None:
+            raise RuntimeError("PCP-local block tables are not initialized.")
+
+        dummy_block_tables = []
+        for block_table in self._local_block_tables:
+            if num_reqs > block_table.shape[0]:
+                raise RuntimeError(
+                    f"PCP graph request count exceeds the local block table: {num_reqs} > {block_table.shape[0]}."
+                )
+            dummy_block_tables.append(block_table[:num_reqs].zero_())
+        return tuple(dummy_block_tables)
 
     def prepare_slot_mappings(self) -> torch.Tensor:
         """Pad PCP slot mappings to the fixed FULL-decode graph layout.
