@@ -280,7 +280,6 @@ def test_config_rejects_non_tp_parallelism(setting: str) -> None:
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
-        ("speculative_config", object(), "Speculative decoding"),
         ("kv_transfer_config", object(), "KV cache transfer"),
         ("lora_config", object(), "LoRA"),
     ],
@@ -290,8 +289,19 @@ def test_config_rejects_out_of_scope_features(field, value, message) -> None:
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
 
 
+def test_config_accepts_mtp_speculative_config() -> None:
+    spec = SimpleNamespace(method="mtp", num_speculative_tokens=1)
+    NPUModelRunner310V2._validate_config(_make_vllm_config(speculative_config=spec))
+
+
+def test_config_rejects_non_mtp_speculative_config() -> None:
+    spec = SimpleNamespace(method="eagle", num_speculative_tokens=1)
+    with pytest.raises(NotImplementedError, match="only supports MTP"):
+        NPUModelRunner310V2._validate_config(_make_vllm_config(speculative_config=spec))
+
+
 def test_sampler_rejects_random_sampling_parameters() -> None:
-    sampler = Ascend310PSampler()
+    sampler = Ascend310PSampler(max_num_reqs=4, device=torch.device("cpu"))
     sampler.add_request(0, 4, SamplingParams(temperature=0))
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
         sampler.add_request(1, 4, SamplingParams(temperature=1))
@@ -366,6 +376,8 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     runner.cache_config = SimpleNamespace(cache_dtype="auto")
     runner.kernel_block_sizes = [64]
     runner.attn_groups = [[SimpleNamespace(backend=FakeBackend, layer_names=["model.layers.0.self_attn"])]]
+    runner._attn_kv_storage_ptrs = set()
+    runner._attn_kv_copy_params = []
 
     allocations = []
 
@@ -389,6 +401,8 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
 def test_model_state_uses_greedy_sampler() -> None:
     model_state = object.__new__(Ascend310PModelState)
     model_state.rope_state = None
+    model_state.max_num_reqs = 8
+    model_state.device = torch.device("cpu")
 
     model_inputs = model_state.prepare_inputs(SimpleNamespace(), req_states=None)
     sampler, speculator = model_state.custom_sampler(object())
@@ -469,3 +483,138 @@ def test_worker_selects_v2_runner_on_310p() -> None:
     with patch("vllm_ascend._310p.worker.v2.model_runner.NPUModelRunner310V2") as runner_cls:
         worker.model_runner = worker._create_model_runner()
     runner_cls.assert_called_once_with(worker.vllm_config, worker.device)
+
+
+def test_dedupe_kv_cache_block_copies_drops_hybrid_duplicates() -> None:
+    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+
+    copies = [
+        KVCacheBlockCopy(src_block_id=1, dst_block_id=10),
+        KVCacheBlockCopy(src_block_id=2, dst_block_id=11),
+        KVCacheBlockCopy(src_block_id=1, dst_block_id=10),
+        KVCacheBlockCopy(src_block_id=3, dst_block_id=12),
+        KVCacheBlockCopy(src_block_id=2, dst_block_id=11),
+    ]
+    deduped = NPUModelRunner310V2._dedupe_kv_cache_block_copies(copies)
+    assert deduped == [
+        KVCacheBlockCopy(src_block_id=1, dst_block_id=10),
+        KVCacheBlockCopy(src_block_id=2, dst_block_id=11),
+        KVCacheBlockCopy(src_block_id=3, dst_block_id=12),
+    ]
+
+
+def test_copy_kv_cache_blocks_310p_copies_nz_attention_slices() -> None:
+    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+
+    runner = object.__new__(NPUModelRunner310V2)
+    blocks_per_kv_block = 2
+    k_cache = torch.arange(24, dtype=torch.float32).view(6, 4)
+    v_cache = torch.arange(100, 124, dtype=torch.float32).view(6, 4)
+    runner._attn_kv_copy_params = [(k_cache, v_cache, blocks_per_kv_block)]
+    runner.kv_caches = []
+    runner.kv_cache_config = SimpleNamespace(num_blocks=3)
+
+    copies = [KVCacheBlockCopy(src_block_id=1, dst_block_id=2)]
+    with patch(
+        "vllm_ascend._310p.worker.v2.model_runner.copy_kv_cache_blocks_inplace",
+    ) as generic_copy:
+        runner._copy_kv_cache_blocks_310p(copies)
+
+    assert torch.equal(k_cache[4:6], k_cache[2:4])
+    assert torch.equal(v_cache[4:6], v_cache[2:4])
+    generic_copy.assert_not_called()
+
+
+def test_copy_kv_cache_blocks_310p_delegates_mamba_to_generic_copy() -> None:
+    from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+
+    runner = object.__new__(NPUModelRunner310V2)
+    runner._attn_kv_copy_params = []
+    mamba_state = [torch.zeros(4, 2)]
+    runner.kv_caches = [mamba_state]
+    runner.kv_cache_config = SimpleNamespace(num_blocks=2)
+    copies = [KVCacheBlockCopy(src_block_id=0, dst_block_id=1)]
+
+    with patch(
+        "vllm_ascend._310p.worker.v2.model_runner.copy_kv_cache_blocks_inplace",
+    ) as generic_copy:
+        runner._copy_kv_cache_blocks_310p(copies)
+
+    generic_copy.assert_called_once_with([mamba_state], 2, copies)
+
+
+def test_greedy_rejection_sample_accepts_draft_at_shifted_index() -> None:
+    """draft_sampled[i] is the current token; draft to verify is draft_sampled[i+1]."""
+    from vllm_ascend._310p.worker.v2.spec_utils import greedy_rejection_sample_cpu
+
+    # logits[0] predicts draft token 5; logits[1] is the bonus token 7.
+    logits = torch.zeros(2, 8)
+    logits[0, 5] = 10.0
+    logits[1, 7] = 10.0
+    draft_sampled = torch.tensor([3, 5], dtype=torch.int32)  # [last_sampled, draft]
+    cu_num_logits = torch.tensor([0, 2], dtype=torch.int32)
+
+    sampled, num_sampled = greedy_rejection_sample_cpu(logits, draft_sampled, cu_num_logits, 1)
+    assert int(num_sampled[0].item()) == 2
+    assert sampled[0, :2].tolist() == [5, 7]
+
+
+def test_greedy_rejection_sample_rejects_when_target_argmax_mismatches_draft() -> None:
+    from vllm_ascend._310p.worker.v2.spec_utils import greedy_rejection_sample_cpu
+
+    logits = torch.zeros(2, 8)
+    logits[0, 4] = 10.0
+    logits[1, 7] = 10.0
+    draft_sampled = torch.tensor([3, 5], dtype=torch.int32)
+    cu_num_logits = torch.tensor([0, 2], dtype=torch.int32)
+
+    sampled, num_sampled = greedy_rejection_sample_cpu(logits, draft_sampled, cu_num_logits, 1)
+    assert int(num_sampled[0].item()) == 1
+    assert int(sampled[0, 0].item()) == 4
+    assert int(sampled[0, 1].item()) == -1
+
+
+@pytest.mark.parametrize("num_speculative_steps", [2, 3])
+def test_greedy_rejection_sample_accepts_multi_step_drafts(num_speculative_steps: int) -> None:
+    """K=2/3: accept all draft tokens then emit the bonus token."""
+    from vllm_ascend._310p.worker.v2.spec_utils import greedy_rejection_sample_cpu
+
+    # draft_sampled = [last_sampled, draft_0, ..., draft_{K-1}]
+    # logits has K draft verifies + 1 bonus = K+1 rows.
+    num_logits = num_speculative_steps + 1
+    vocab = 16
+    draft_ids = list(range(10, 10 + num_speculative_steps))
+    bonus_id = 7
+    logits = torch.zeros(num_logits, vocab)
+    for i, tok in enumerate(draft_ids):
+        logits[i, tok] = 10.0
+    logits[-1, bonus_id] = 10.0
+    draft_sampled = torch.tensor([3, *draft_ids], dtype=torch.int32)
+    cu_num_logits = torch.tensor([0, num_logits], dtype=torch.int32)
+
+    sampled, num_sampled = greedy_rejection_sample_cpu(logits, draft_sampled, cu_num_logits, num_speculative_steps)
+    assert int(num_sampled[0].item()) == num_speculative_steps + 1
+    assert sampled[0, : num_speculative_steps + 1].tolist() == [*draft_ids, bonus_id]
+
+
+@pytest.mark.parametrize("num_speculative_steps", [2, 3])
+def test_greedy_rejection_sample_rejects_mid_multi_step_draft(num_speculative_steps: int) -> None:
+    """K=2/3: reject at draft_1 and keep only the corrected target token."""
+    from vllm_ascend._310p.worker.v2.spec_utils import greedy_rejection_sample_cpu
+
+    num_logits = num_speculative_steps + 1
+    vocab = 16
+    draft_ids = list(range(10, 10 + num_speculative_steps))
+    logits = torch.zeros(num_logits, vocab)
+    # Accept draft_0, reject draft_1 (target prefers 4).
+    logits[0, draft_ids[0]] = 10.0
+    logits[1, 4] = 10.0
+    for i in range(2, num_logits):
+        logits[i, 7] = 10.0
+    draft_sampled = torch.tensor([3, *draft_ids], dtype=torch.int32)
+    cu_num_logits = torch.tensor([0, num_logits], dtype=torch.int32)
+
+    sampled, num_sampled = greedy_rejection_sample_cpu(logits, draft_sampled, cu_num_logits, num_speculative_steps)
+    assert int(num_sampled[0].item()) == 2
+    assert sampled[0, :2].tolist() == [draft_ids[0], 4]
+    assert int(sampled[0, 2].item()) == -1

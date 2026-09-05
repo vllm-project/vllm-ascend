@@ -158,6 +158,38 @@ class TestAscendAttentionBackendImpl310(TestBase):
 
         mock_npu_paged_attention_splitfuse.assert_called_once()
 
+    @patch("vllm_ascend._310p.attention.attention_v1.AttentionMaskBuilder310.get_splitfuse_mask")
+    @patch("torch_npu._npu_paged_attention_splitfuse")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_chunked_prefill_uses_precomputed_mask_during_capture(
+        self,
+        mock_get_forward_context,
+        mock_npu_paged_attention_splitfuse,
+        mock_get_splitfuse_mask,
+    ):
+        query = torch.randn(5, 8, 64)
+        output = torch.empty_like(query)
+        metadata = self.attn_metadata
+        metadata.attn_state = AscendAttentionState.ChunkedPrefill
+        metadata.attn_mask = torch.randn(1, 128, 16, 16)
+        metadata.seq_lens = torch.tensor([1, 4])
+        metadata.query_start_loc = torch.tensor([0, 1, 5])
+        metadata.block_tables = torch.zeros(1, 5, dtype=torch.long)
+        metadata.num_actual_tokens = 5
+        from vllm_ascend._310p.attention.metadata_builder import set_query_lens_cpu
+
+        set_query_lens_cpu(metadata, torch.tensor([1, 4], dtype=torch.int32))
+        self.impl.support_compressed_mask = False
+        mock_get_forward_context.return_value = MagicMock(capturing=True)
+        mock_npu_paged_attention_splitfuse.return_value = torch.ones(5, 8, 64)
+
+        with patch("vllm_ascend.ascend_forward_context._EXTRA_CTX") as mock_ctx:
+            mock_ctx.capturing = True
+            self.impl.forward_chunked_prefill_310(query, metadata, output)
+
+        mock_get_splitfuse_mask.assert_not_called()
+        mock_npu_paged_attention_splitfuse.assert_called_once()
+
     @patch("torch_npu.npu_format_cast", return_value=torch.randn((1, 128, 16, 16), dtype=torch.float16))
     @patch("torch_npu._npu_reshape_and_cache")
     @patch("torch_npu._npu_paged_attention_splitfuse")
@@ -266,6 +298,17 @@ class TestAscendAttentionMetadataBuilder310(TestBase):
         torch.testing.assert_close(result2, expected)
         assert result1.data_ptr() != builder._query_lens_cpu_buffer[:3].data_ptr()
         assert result2.data_ptr() != builder._query_lens_cpu_buffer[:3].data_ptr()
+
+    def test_bind_splitfuse_mask_reuses_stable_buffer(self):
+        builder = AscendMetadataBuilder310Direct.__new__(AscendMetadataBuilder310Direct)
+        builder._splitfuse_mask_buffers = {}
+        first = torch.arange(6, dtype=torch.float16).reshape(1, 2, 3)
+        bound = builder._bind_splitfuse_mask(first)
+        self.assertIs(bound, first)
+        second = torch.ones_like(first)
+        rebound = builder._bind_splitfuse_mask(second)
+        self.assertIs(rebound, first)
+        torch.testing.assert_close(first, second)
 
     def test_build_for_drafting_calls_build_with_is_drafting_true(self):
         builder = object.__new__(AscendMetadataBuilder310Direct)

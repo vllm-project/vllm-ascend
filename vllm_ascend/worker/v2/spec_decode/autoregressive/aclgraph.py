@@ -125,7 +125,17 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
             CudaGraphManager.capture(self, create_forward_fn, progress_bar_desc=progress_bar_desc)
 
     def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
-        """Replay the draft ACL graph and update its attention parameters."""
+        """Replay draft ACL graph with 310P-safe buffer refresh.
+
+        On 310P, attention kernels are captured as direct NPU ops (no FIA
+        ``graph_task`` handles), so ``update_full_graph_params`` is a no-op.
+        Mirror target ``prepare_attn``: refresh capture-bound ``seq_lens``
+        in-place, then pure replay. Non-310P keeps graph_task_update.
+        """
+        from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+
+        from vllm_ascend.device.device_config import is_310p
+
         num_tokens = desc.num_tokens
         if self.is_draft_model_prefill:
             logger.info_once(
@@ -134,13 +144,21 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
         else:
             logger.info_once("AutoRegressiveAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
+        if is_310p():
+            # 310P: no graph_task handles. Refresh seq_lens buffers recorded at
+            # capture (same contract as target ModelState.prepare_attn).
+            ms = self.speculator.model_state
+            runtime_seq_lens = self.speculator.target_input_buffers.seq_lens
+            refresh = getattr(ms, "_refresh_capture_seq_lens", None)
+            if callable(refresh):
+                refresh(runtime_seq_lens)
+            return CudaGraphManager.run_fullgraph(self, desc)
+
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             desc.num_tokens,
             self.is_draft_model_prefill,
         )
-        self.update_stream.wait_stream(torch.npu.current_stream())
-        ret = super().run_fullgraph(desc)
 
         # Mirror vLLM's DP graph-replay token-count metadata.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
@@ -180,4 +198,6 @@ class AutoRegressiveAclGraphManager(SpeculatorCudaGraphManager):
                 self.speculator.speculative_config,
                 draft_attn_metadatas=draft_attn_metadatas,
             )
-        return ret
+
+        torch.npu.current_stream().wait_stream(self.update_stream)
+        return super().run_fullgraph(desc)

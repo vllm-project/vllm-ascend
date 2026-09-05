@@ -313,7 +313,20 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if self.num_speculative_steps == 1:
             return
 
-        # Capture all decode draft generation steps as a single graph.
+        # Fused multi-step: one ACLGraph for the whole decode loop.
+        # Non-fused (310P CUSTOM attn): skip draft-decode capture. Between
+        # steps we rebuild slot maps / attn metadata with host D2H, and the
+        # 310P ``update_draft_inputs_cpu`` path also syncs — both are illegal
+        # inside ACLGraph capture (aclrtMemcpy 107030 / stream sync 107027).
+        # Target + draft-prefill FULL graphs still apply; draft multi-step
+        # decode runs eagerly (dispatch returns NONE when nothing was captured).
+        if not self.use_fused_multi_step_decode:
+            logger.info(
+                "Skipping draft-decode ACLGraph capture for non-fused multi-step "
+                "(host slot-map / draft-input updates are required between steps)."
+            )
+            return
+
         assert self.decode_cudagraph_manager is not None
         with (
             disable_target_pcp_for_replicated_draft(self),
@@ -328,6 +341,17 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 self.kv_cache_config,
                 progress_bar_desc="Capturing decode CUDA graphs",
             )
+
+    def _multi_step_decode(  # type: ignore[misc]
+        self,
+        num_reqs: int,
+        skip_attn: bool,
+        batch_desc: BatchExecutionDescriptor,
+        num_tokens_across_dp: torch.Tensor | None,
+        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+    ) -> None:
+        """Fused capture path only; non-fused uses the 310P override."""
+        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
 
     @torch.inference_mode()
     def _run_model(
@@ -372,28 +396,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         )
         if attn_metadata is not None:
             self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
-
-    def _multi_step_decode(  # type: ignore[misc]
-        self,
-        num_reqs: int,
-        skip_attn: bool,
-        batch_desc: BatchExecutionDescriptor,
-        num_tokens_across_dp: torch.Tensor | None,
-        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
-    ) -> None:
-        """Minimal override to handle the merged multi-step graph in FULL mode.
-
-        In FULL mode the captured graph already contains all speculative
-        steps, so ``run_fullgraph`` is called once instead of once per
-        step.  For PIECEWISE / NONE modes we delegate to the upstream
-        ``_multi_step_decode`` which iterates over steps and calls
-        ``_generate_draft`` per step.
-        """
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-            return
-        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
 
     def _prefill(
         self,

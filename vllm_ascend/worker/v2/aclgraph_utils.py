@@ -276,6 +276,9 @@ class ModelWithContext(nn.Module):
         # draft model has `compute_logits`, which is not in ModelWithContext
         return self.original_model.compute_logits(hidden_states)
 
+    def embed_input_ids(self, input_ids: torch.Tensor, **kwargs):
+        return self.original_model.embed_input_ids(input_ids, **kwargs)
+
     def compute_draft_logits(self, hidden_states: torch.Tensor):
         return self.original_model.compute_draft_logits(hidden_states)
 

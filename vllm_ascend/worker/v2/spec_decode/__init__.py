@@ -46,6 +46,14 @@ def init_speculator(
         and not speculative_config.use_gemma4_mtp()
         and not speculative_config.use_step3p5_mtp()
     ):
+        from vllm_ascend.device.device_config import is_310p
+
+        if is_310p():
+            from vllm_ascend._310p.worker.v2.spec_decode.mtp_speculator import (
+                AscendMTPSpeculator310,
+            )
+
+            return AscendMTPSpeculator310(vllm_config, device)
         from vllm_ascend.worker.v2.spec_decode.mtp.speculator import (
             AscendMTPSpeculator,
         )
