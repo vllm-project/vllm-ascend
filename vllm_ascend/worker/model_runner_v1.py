@@ -5317,6 +5317,12 @@ class NPUModelRunner(GPUModelRunner):
                             spec = replace(spec, indexes_kv_by_block_stride=True)
                         kv_cache_spec[layer_name] = spec
                     continue
+                if not getattr(
+                    getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
+                    "runtime_has_indexer",
+                    True,
+                ):
+                    continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for
                 # SFA, but keeps Ascend-specific shape/block-size accounting.
                 # Remove this special case once the generic vLLM spec/backend
