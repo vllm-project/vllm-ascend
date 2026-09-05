@@ -288,6 +288,9 @@ class ModelWithContext(nn.Module):
     def map_draft_to_target(self, draft_ids: torch.Tensor):
         return self.original_model.map_draft_to_target(draft_ids)
 
+    def embed_input_ids(self, *args, **kwargs):
+        return self.original_model.embed_input_ids(*args, **kwargs)
+
 
 @contextmanager
 def model_capture_wrapper(speculator, is_draft_model_prefill):
