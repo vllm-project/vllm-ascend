@@ -235,6 +235,139 @@ PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
 
+@dataclass(frozen=True)
+class _HybridMLAMambaAliasConflict:
+    mla_layer_name: str
+    mamba_layer_name: str
+    mla_block_id: int
+    mamba_block_id: int
+    overlap_bytes: int
+    mla_k_base_addr: int
+    mamba_state_base_addr: int
+    mla_k_block_stride_bytes: int
+    mamba_state_block_stride_bytes: int
+
+
+def _first_cross_group_block_overlap(
+    mla_k_cache: torch.Tensor,
+    mamba_state: torch.Tensor,
+) -> tuple[int, int, int, int, int] | None:
+    """Find the first overlapping MLA/Mamba physical range with different IDs."""
+    num_blocks = mamba_state.shape[0]
+    if num_blocks <= 0 or mla_k_cache.shape[0] % num_blocks != 0:
+        return None
+
+    kernel_blocks_per_manager_block = mla_k_cache.shape[0] // num_blocks
+    mla_element_size = mla_k_cache.element_size()
+    mla_block_stride_bytes = (
+        mla_k_cache.stride(0)
+        * mla_element_size
+        * kernel_blocks_per_manager_block
+    )
+    mla_block_data_bytes = mla_k_cache.numel() * mla_element_size // num_blocks
+
+    mamba_element_size = mamba_state.element_size()
+    mamba_block_stride_bytes = mamba_state.stride(0) * mamba_element_size
+    mamba_block_data_bytes = mamba_state[0].numel() * mamba_element_size
+
+    mla_base = mla_k_cache.data_ptr()
+    mamba_base = mamba_state.data_ptr()
+    mla_block_id = 0
+    mamba_block_id = 0
+    while mla_block_id < num_blocks and mamba_block_id < num_blocks:
+        mla_start = mla_base + mla_block_id * mla_block_stride_bytes
+        mla_end = mla_start + mla_block_data_bytes
+        mamba_start = mamba_base + mamba_block_id * mamba_block_stride_bytes
+        mamba_end = mamba_start + mamba_block_data_bytes
+        overlap_bytes = min(mla_end, mamba_end) - max(mla_start, mamba_start)
+        if overlap_bytes > 0 and mla_block_id != mamba_block_id:
+            return (
+                mla_block_id,
+                mamba_block_id,
+                overlap_bytes,
+                mla_block_stride_bytes,
+                mamba_block_stride_bytes,
+            )
+        if mla_end <= mamba_end:
+            mla_block_id += 1
+        else:
+            mamba_block_id += 1
+    return None
+
+
+def _find_hybrid_mla_mamba_alias_conflicts(
+    kv_cache_config: KVCacheConfig,
+    kv_caches: dict[str, Any],
+    layer_kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[_HybridMLAMambaAliasConflict]:
+    """Detect unsafe cross-ID aliasing in shared MLA/Mamba backing tensors."""
+    conflicts: list[_HybridMLAMambaAliasConflict] = []
+    for tensor_config in kv_cache_config.kv_cache_tensors:
+        mla_layers = [
+            layer_name
+            for layer_name in tensor_config.shared_by
+            if isinstance(
+                layer_kv_cache_spec.get(layer_name),
+                AscendMLAAttentionSpec,
+            )
+        ]
+        mamba_layers = [
+            layer_name
+            for layer_name in tensor_config.shared_by
+            if isinstance(layer_kv_cache_spec.get(layer_name), MambaSpec)
+        ]
+        for mla_layer_name in mla_layers:
+            mla_cache = kv_caches.get(mla_layer_name)
+            if not isinstance(mla_cache, (list, tuple)) or not mla_cache:
+                continue
+            mla_k_cache = mla_cache[0]
+            if not isinstance(mla_k_cache, torch.Tensor):
+                continue
+            for mamba_layer_name in mamba_layers:
+                mamba_cache = kv_caches.get(mamba_layer_name)
+                if not isinstance(mamba_cache, (list, tuple)) or not mamba_cache:
+                    continue
+                mamba_states = [
+                    state for state in mamba_cache
+                    if isinstance(state, torch.Tensor) and state.ndim > 1
+                ]
+                if not mamba_states:
+                    continue
+                # Hybrid alignment uses the largest Mamba state page. For KDA
+                # this is the recurrent state, not the short-convolution state.
+                mamba_state = max(
+                    mamba_states,
+                    key=lambda state: state[0].numel() * state.element_size(),
+                )
+                overlap = _first_cross_group_block_overlap(
+                    mla_k_cache,
+                    mamba_state,
+                )
+                if overlap is None:
+                    continue
+                (
+                    mla_block_id,
+                    mamba_block_id,
+                    overlap_bytes,
+                    mla_stride,
+                    mamba_stride,
+                ) = overlap
+                conflicts.append(
+                    _HybridMLAMambaAliasConflict(
+                        mla_layer_name=mla_layer_name,
+                        mamba_layer_name=mamba_layer_name,
+                        mla_block_id=mla_block_id,
+                        mamba_block_id=mamba_block_id,
+                        overlap_bytes=overlap_bytes,
+                        mla_k_base_addr=mla_k_cache.data_ptr(),
+                        mamba_state_base_addr=mamba_state.data_ptr(),
+                        mla_k_block_stride_bytes=mla_stride,
+                        mamba_state_block_stride_bytes=mamba_stride,
+                    )
+                )
+    return conflicts
+
+
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -3908,6 +4041,33 @@ class NPUModelRunner(GPUModelRunner):
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+
+        layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
+        self.hybrid_mla_mamba_alias_conflicts = (
+            _find_hybrid_mla_mamba_alias_conflicts(
+                kv_cache_config,
+                kv_caches,
+                layer_kv_cache_spec,
+            )
+        )
+        for conflict in self.hybrid_mla_mamba_alias_conflicts[:1]:
+            logger.error(
+                "HYBRID_MLA_MAMBA_ALIAS_CONFLICT: mla_layer=%s "
+                "mamba_layer=%s mla_block_id=%d mamba_block_id=%d "
+                "overlap_bytes=%d total_conflicts=%d mla_k_base_addr=%d "
+                "mamba_state_base_addr=%d mla_k_block_stride_bytes=%d "
+                "mamba_state_block_stride_bytes=%d",
+                conflict.mla_layer_name,
+                conflict.mamba_layer_name,
+                conflict.mla_block_id,
+                conflict.mamba_block_id,
+                conflict.overlap_bytes,
+                len(self.hybrid_mla_mamba_alias_conflicts),
+                conflict.mla_k_base_addr,
+                conflict.mamba_state_base_addr,
+                conflict.mla_k_block_stride_bytes,
+                conflict.mamba_state_block_stride_bytes,
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
