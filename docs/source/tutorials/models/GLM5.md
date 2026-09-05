@@ -20,9 +20,9 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5`(BF16 version): [Download model weight](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
-- `GLM-5-w4a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
-- `GLM-5-w8a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
+- `GLM-5`(BF16 version): [AtomGit](https://ai.atomgit.com/zai-org/GLM-5) / [ModelScope](https://www.modelscope.cn/models/ZhipuAI/GLM-5).
+- `GLM-5-w4a8`(Quantized version): [AtomGit](https://ai.atomgit.com/Eco-Tech/GLM-5-w4a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w4a8).
+- `GLM-5-w8a8`(Quantized version): [AtomGit](https://ai.atomgit.com/Eco-Tech/GLM-5-w8a8) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
 - `GLM-5.1`(BF16 version): [Download model weight](https://huggingface.co/zai-org/GLM-5.1).
 - `GLM-5.1-w4a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
 - `GLM-5.1-w8a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8).

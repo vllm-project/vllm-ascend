@@ -10,7 +10,7 @@ This document describes the main verification steps of the model, including supp
 
 ### Model Weight
 
-`Minitron-8B-Base`(BF16 version): requires 1 Ascend 910B (with 1 x 64GB NPUs). [Download model weight](https://www.modelscope.cn/models/nv-community/Minitron-8B-Base)
+`Minitron-8B-Base`(BF16 version): requires 1 Ascend 910B (with 1 x 64GB NPUs). [AtomGit](https://ai.atomgit.com/hf_mirrors/nvidia/Minitron-8B-Base) / [ModelScope](https://www.modelscope.cn/models/nv-community/Minitron-8B-Base)
 
 It is recommended to place the model weight in a shared cache directory, such as `/root/.cache/` or a local model path like `/data/vllm-workspace/models/Minitron-8B-Base`.
 

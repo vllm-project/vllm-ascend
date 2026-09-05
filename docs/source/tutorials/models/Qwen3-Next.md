@@ -18,7 +18,7 @@ Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model Weight](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
+`Qwen3-Next-80B-A3B-Instruct`: requires **8 cards in 1 Atlas 800 A3 (64GB × 16) node** or **8 cards in 1 Atlas 800 A2 (64GB × 8) node**. [Model Weight](https://ai.atomgit.com/hf_mirrors/Qwen/Qwen3-Next-80B-A3B-Instruct) / [ModelScope](https://www.modelscope.cn/models/Qwen/Qwen3-Next-80B-A3B-Instruct)
 
 ## 4 Installation
 

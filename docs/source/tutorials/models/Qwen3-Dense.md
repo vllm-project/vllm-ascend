@@ -36,15 +36,15 @@ The following model variants are available. It is recommended to download the mo
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
 | Qwen3-32B-W4A4 | W4A4 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W4A4) |
-| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [Download](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
+| Qwen3-32B-W8A8 | W8A8 | 1 Atlas A3 inference products (64GB × 16) or 1 Atlas A2 inference products (64GB × 8) | [AtomGit](https://ai.atomgit.com/hf_mirrors/vllm-ascend/Qwen3-32B-W8A8) / [ModelScope](https://www.modelscope.cn/models/vllm-ascend/Qwen3-32B-W8A8) |
 
 **Quantized Versions for Atlas 300I DUO:**
 
 | Model | Quantization | Hardware Requirement | Download |
 |-------|-------------|---------------------|----------|
-| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
-| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
-| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I DUO (TP4) | [Download](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
+| Qwen3-8B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-8B-w8a8sc-310-vllm) |
+| Qwen3-14B-W8A8SC | W8A8SC | Atlas 300I DUO (TP1) | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-14B-w8a8sc-310-vllm) |
+| Qwen3-32B-W8A8SC | W8A8SC | Atlas 300I DUO (TP4) | [AtomGit](https://ai.atomgit.com/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) / [ModelScope](https://www.modelscope.cn/models/Eco-Tech/Qwen3-32B-w8a8sc-310-vllm) |
 
 These are the recommended numbers of cards, which can be adjusted according to the actual situation.
 
