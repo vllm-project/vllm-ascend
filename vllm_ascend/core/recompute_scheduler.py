@@ -1189,6 +1189,18 @@ class RecomputeScheduler(Scheduler):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+                if request.spec_decode_metrics is not None:
+                    # Exclude grammar-invalidated drafts from the proposed
+                    # count, mirroring make_spec_decoding_stats; the accepted
+                    # bucket (j) is unaffected.
+                    adj_draft_tokens = num_draft_tokens
+                    if scheduler_output.num_invalid_spec_tokens:
+                        adj_draft_tokens -= scheduler_output.num_invalid_spec_tokens.get(req_id, 0)
+                    request.spec_decode_metrics.observe(
+                        num_draft_tokens=adj_draft_tokens,
+                        num_accepted=num_accepted,
+                        detailed=self.spec_decode_metrics_level == "detailed",
+                    )
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -1312,6 +1324,7 @@ class RecomputeScheduler(Scheduler):
                         stop_reason=request.stop_reason,
                         events=request.take_events(),
                         prefill_stats=prefill_stats,
+                        spec_decode_metrics=(request.spec_decode_metrics if finish_reason is not None else None),
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
