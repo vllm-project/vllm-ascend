@@ -746,7 +746,7 @@ def test_forward_attention_routes_unified_req_metadata(
         patch.object(
             impl,
             "_mla_prolog_multistream",
-            return_value=(q, torch.empty(0), None),
+            return_value=(q, torch.empty(0), None, None),
         ) as mla_prolog,
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.notify_kv_cache_written"),
