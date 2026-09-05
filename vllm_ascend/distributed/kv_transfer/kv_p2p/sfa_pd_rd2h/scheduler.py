@@ -115,7 +115,12 @@ class SFAPDRD2HProducerScheduler:
             request.kv_transfer_params = params
 
         local_block_ids = self._normalize_block_ids(blocks.get_block_ids())
-        remote_cache_tokens = params["remote_cached_tokens"]
+        # The proxy only fills in remote_cached_tokens in the D-first flow
+        # (via the metaserver). Fall back to 0 so a P-first proxy that omits
+        # the key gets a full transfer instead of a KeyError. setdefault also
+        # keeps the .get() in build_connector_meta from handing None to the
+        # transfer metadata.
+        remote_cache_tokens = params.setdefault("remote_cached_tokens", 0)
         send_req_info = _SendReqInfo(
             local_block_ids=local_block_ids,
             local_transferred_tokens=remote_cache_tokens,
