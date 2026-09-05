@@ -21,6 +21,7 @@ import copy
 import gc
 import inspect
 import logging
+import os
 from types import NoneType
 from typing import Any
 
@@ -122,6 +123,40 @@ class NPUWorker(WorkerBase):
         # Additional parameters for compatibility with vllm
         **kwargs,
     ):
+        # For Ray backend, set ASCEND_RT_VISIBLE_DEVICES to the assigned
+        # physical devices before any aclInit() call. aclInit() uses
+        # logical device 0 (the first entry in ASCEND_RT_VISIBLE_DEVICES)
+        # as the default device. If the env var is unset or points to a
+        # non-existent physical device 0, aclInit() fails with error
+        # 107001. Ray workers get device assignment via
+        # assigned_physical_gpu_ids, so we set the env var to match those
+        # IDs, making logical device 0 map to the first assigned physical
+        # device. This must happen before check_ascend_device_type() below,
+        # which triggers aclInit() via torch_npu.npu.get_soc_version().
+        parallel_config = vllm_config.parallel_config
+        is_ray_backend = (
+            parallel_config.distributed_executor_backend in ("ray", "external_launcher")
+            or parallel_config.data_parallel_backend == "ray"
+        )
+        logger.info(
+            "NPUWorker init: is_ray_backend=%s, "
+            "distributed_executor_backend=%s, data_parallel_backend=%s, "
+            "assigned_physical_gpu_ids=%s",
+            is_ray_backend,
+            parallel_config.distributed_executor_backend,
+            parallel_config.data_parallel_backend,
+            parallel_config.assigned_physical_gpu_ids,
+        )
+        if is_ray_backend and parallel_config.assigned_physical_gpu_ids is not None:
+            evar = current_platform.device_control_env_var
+            new_val = ",".join(str(d) for d in parallel_config.assigned_physical_gpu_ids)
+            old_val = os.environ.get(evar)
+            os.environ[evar] = new_val
+            logger.info(
+                "Set %s='%s' for Ray backend (was '%s'); "
+                "assigned_physical_gpu_ids=%s",
+                evar, new_val, old_val, parallel_config.assigned_physical_gpu_ids,
+            )
         """Initialize the worker for Ascend."""
         if not envs_ascend.COMPILE_CUSTOM_KERNELS:
             logger.warning(
