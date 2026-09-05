@@ -14,13 +14,16 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num, init_device_
 @triton.jit
 def _pack_sfa_dcp_output_lse_kernel(
     output_ptr,
-    lse_ptr,
+    lse_or_max_ptr,
+    sum_ptr,
     send_ptr,
     output_stride_t,
     output_stride_h,
     output_stride_d,
-    lse_stride_t,
-    lse_stride_h,
+    lse_or_max_stride_t,
+    lse_or_max_stride_h,
+    sum_stride_t,
+    sum_stride_h,
     send_stride_rank,
     send_stride_scatter,
     send_stride_replicated,
@@ -30,6 +33,7 @@ def _pack_sfa_dcp_output_lse_kernel(
     num_heads,
     total_rows,
     SCATTER_TOKENS: tl.constexpr,
+    INPUT_MAX_SUM: tl.constexpr,
     LSE_PACK_DIM: tl.constexpr,
     BLOCK_D: tl.constexpr,
 ):
@@ -58,7 +62,15 @@ def _pack_sfa_dcp_output_lse_kernel(
         output = tl.load(output_ptr + output_offsets, mask=d_mask, other=0.0)
         tl.store(send_ptr + send_base + d_offsets * send_stride_d, output, mask=d_mask)
 
-        lse = tl.load(lse_ptr + token_idx * lse_stride_t + head_idx * lse_stride_h).to(tl.float32)
+        statistic_offset = token_idx * lse_or_max_stride_t + head_idx * lse_or_max_stride_h
+        lse = tl.load(lse_or_max_ptr + statistic_offset).to(tl.float32)
+        if INPUT_MAX_SUM:
+            summation = tl.load(sum_ptr + token_idx * sum_stride_t + head_idx * sum_stride_h).to(tl.float32)
+            finite_max = (lse == lse) & (lse != float("inf")) & (lse != -float("inf"))
+            finite_sum = (summation == summation) & (summation != float("inf")) & (summation != -float("inf"))
+            valid_statistics = finite_max & finite_sum & (summation > 0.0)
+            safe_sum = tl.where(valid_statistics, summation, 1.0)
+            lse = tl.where(valid_statistics, lse + tl.log(safe_sum), -float("inf"))
         if LSE_PACK_DIM == 1:
             tl.store(
                 send_ptr + send_base + head_dim * send_stride_d,
@@ -284,8 +296,11 @@ def pack_sfa_dcp_output_lse(
     _pack_sfa_dcp_output_lse_kernel[(grid_size,)](
         sfa_output,
         softmax_lse,
+        softmax_lse,
         send,
         *sfa_output.stride(),
+        softmax_lse.stride(0),
+        softmax_lse.stride(1),
         softmax_lse.stride(0),
         softmax_lse.stride(1),
         *send.stride(),
@@ -294,6 +309,68 @@ def pack_sfa_dcp_output_lse(
         num_heads,
         total_rows,
         SCATTER_TOKENS=scatter_dim == 0,
+        INPUT_MAX_SUM=False,
+        LSE_PACK_DIM=lse_pack_dim,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+    )
+    return send
+
+
+def pack_sfa_dcp_output_max_sum(
+    sfa_output: torch.Tensor,
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+    dcp_size: int,
+    scatter_dim: int,
+) -> torch.Tensor:
+    """Pack SFA output and PA_BSND FP32 max/sum without materializing LSE."""
+    expected_statistics_shape = (1, *sfa_output.shape[:2])
+    if softmax_max.shape != expected_statistics_shape or softmax_sum.shape != expected_statistics_shape:
+        raise RuntimeError(
+            "SFA DCP fused A2A expects PA_BSND max/sum [1, tokens, heads] "
+            f"matching output, got {tuple(sfa_output.shape)}, "
+            f"{tuple(softmax_max.shape)}, and {tuple(softmax_sum.shape)}."
+        )
+    if softmax_max.dtype != torch.float32 or softmax_sum.dtype != torch.float32:
+        raise TypeError(
+            f"SFA DCP fused A2A requires float32 PA_BSND max/sum, got {softmax_max.dtype} and {softmax_sum.dtype}."
+        )
+    if sfa_output.device != softmax_max.device or sfa_output.device != softmax_sum.device:
+        raise RuntimeError(
+            "SFA DCP fused A2A requires output and max/sum on the same device, "
+            f"got {sfa_output.device}, {softmax_max.device}, and {softmax_sum.device}."
+        )
+
+    max_lse_view = softmax_max.permute(1, 2, 0)
+    num_tokens, num_heads, head_dim, local_scatter_size, replicated_size = _validate_sfa_dcp_inputs(
+        sfa_output, max_lse_view, dcp_size, scatter_dim
+    )
+    lse_pack_dim = _lse_pack_dim(sfa_output.dtype)
+    send = torch.empty(
+        (dcp_size, local_scatter_size, replicated_size, head_dim + lse_pack_dim),
+        dtype=sfa_output.dtype,
+        device=sfa_output.device,
+    )
+    total_rows = num_tokens * num_heads
+    init_device_properties_triton()
+    grid_size = min(total_rows, get_vectorcore_num())
+    _pack_sfa_dcp_output_lse_kernel[(grid_size,)](
+        sfa_output,
+        softmax_max,
+        softmax_sum,
+        send,
+        *sfa_output.stride(),
+        softmax_max.stride(1),
+        softmax_max.stride(2),
+        softmax_sum.stride(1),
+        softmax_sum.stride(2),
+        *send.stride(),
+        local_scatter_size,
+        head_dim,
+        num_heads,
+        total_rows,
+        SCATTER_TOKENS=scatter_dim == 0,
+        INPUT_MAX_SUM=True,
         LSE_PACK_DIM=lse_pack_dim,
         BLOCK_D=triton.next_power_of_2(head_dim),
     )
@@ -370,6 +447,27 @@ def sfa_dcp_a2a_fused_combine(
     return fused_sfa_dcp_lse_combine(recv, sfa_output.shape[-1], scatter_dim)
 
 
+def sfa_dcp_a2a_fused_max_sum_combine(
+    sfa_output: torch.Tensor,
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+    dcp_size: int,
+    scatter_dim: int,
+    group: dist.ProcessGroup,
+) -> torch.Tensor:
+    """Pack PA_BSND max/sum, run one HCCL All2All, and combine."""
+    send = pack_sfa_dcp_output_max_sum(
+        sfa_output,
+        softmax_max,
+        softmax_sum,
+        dcp_size,
+        scatter_dim,
+    )
+    recv = torch.empty_like(send)
+    dist.all_to_all_single(recv, send, group=group)
+    return fused_sfa_dcp_lse_combine(recv, sfa_output.shape[-1], scatter_dim)
+
+
 def sfa_dcp_a2a_fused(
     sfa_output: torch.Tensor,
     softmax_lse: torch.Tensor,
@@ -416,10 +514,62 @@ def sfa_dcp_a2a_fused_fake(
     return torch.empty(output_shape, dtype=sfa_output.dtype, device=sfa_output.device)
 
 
+def sfa_dcp_a2a_fused_max_sum(
+    sfa_output: torch.Tensor,
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+    dcp_size: int,
+    scatter_dim: int,
+    group_name: str,
+) -> torch.Tensor:
+    """Custom-op entry point consuming PA_BSND max/sum statistics."""
+    group_ref = _groups.get(group_name)
+    if group_ref is None:
+        raise RuntimeError(f"SFA DCP fused A2A group {group_name!r} is not registered.")
+    group = group_ref()
+    if group is None or group.device_group is None:
+        raise RuntimeError(f"SFA DCP fused A2A group {group_name!r} is unavailable.")
+    if group.world_size != dcp_size:
+        raise RuntimeError(
+            f"SFA DCP fused A2A group size does not match dcp_size: group={group.world_size}, dcp_size={dcp_size}."
+        )
+    return sfa_dcp_a2a_fused_max_sum_combine(
+        sfa_output,
+        softmax_max,
+        softmax_sum,
+        dcp_size,
+        scatter_dim,
+        group.device_group,
+    )
+
+
+def sfa_dcp_a2a_fused_max_sum_fake(
+    sfa_output: torch.Tensor,
+    softmax_max: torch.Tensor,
+    softmax_sum: torch.Tensor,
+    dcp_size: int,
+    scatter_dim: int,
+    group_name: str,
+) -> torch.Tensor:
+    """Propagate local output metadata for the PA_BSND max/sum custom op."""
+    del softmax_max, softmax_sum, group_name
+    output_shape = list(sfa_output.shape)
+    output_shape[scatter_dim] //= dcp_size
+    return torch.empty(output_shape, dtype=sfa_output.dtype, device=sfa_output.device)
+
+
 direct_register_custom_op(
     op_name="sfa_dcp_a2a_fused",
     op_func=sfa_dcp_a2a_fused,
     fake_impl=sfa_dcp_a2a_fused_fake,
+    mutates_args=[],
+    dispatch_key="PrivateUse1",
+)
+
+direct_register_custom_op(
+    op_name="sfa_dcp_a2a_fused_max_sum",
+    op_func=sfa_dcp_a2a_fused_max_sum,
+    fake_impl=sfa_dcp_a2a_fused_max_sum_fake,
     mutates_args=[],
     dispatch_key="PrivateUse1",
 )

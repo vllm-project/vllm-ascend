@@ -1044,12 +1044,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         _, pack_order = torch.sort(pack_keys, dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
-    def _merge_dcp_outputs(
+    def _dcp_output_scatter_dim(
         self,
         sfa_output: torch.Tensor,
-        softmax_lse: torch.Tensor,
         dsa_cp_context: DSACPContext | None = None,
-    ) -> torch.Tensor:
+    ) -> int:
         scatter_dim = 1
         if dsa_cp_context is not None:
             # DSA-CP keeps heads replicated and shards tokens. The All2All
@@ -1076,10 +1075,39 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                 )
             scatter_dim = 0
 
+        return scatter_dim
+
+    def _merge_dcp_outputs(
+        self,
+        sfa_output: torch.Tensor,
+        softmax_lse: torch.Tensor,
+        dsa_cp_context: DSACPContext | None = None,
+    ) -> torch.Tensor:
+        scatter_dim = self._dcp_output_scatter_dim(sfa_output, dsa_cp_context)
+
         assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
         return torch.ops.vllm.sfa_dcp_a2a_fused(
             sfa_output,
             softmax_lse,
+            self.dcp_size,
+            scatter_dim,
+            self.dcp_group.unique_name,
+        )
+
+    def _merge_dcp_outputs_max_sum(
+        self,
+        sfa_output: torch.Tensor,
+        softmax_max: torch.Tensor,
+        softmax_sum: torch.Tensor,
+        dsa_cp_context: DSACPContext | None = None,
+    ) -> torch.Tensor:
+        scatter_dim = self._dcp_output_scatter_dim(sfa_output, dsa_cp_context)
+
+        assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
+        return torch.ops.vllm.sfa_dcp_a2a_fused_max_sum(
+            sfa_output,
+            softmax_max,
+            softmax_sum,
             self.dcp_size,
             scatter_dim,
             self.dcp_group.unique_name,
@@ -1247,12 +1275,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             sparse_mode=0,
             return_lse=True,
         )
-        softmax_lse = softmax_max + torch.log(softmax_sum)
-        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
         output_dtype = sfa_output.dtype
-        output = self._merge_dcp_outputs(
+        output = self._merge_dcp_outputs_max_sum(
             sfa_output,
-            softmax_lse,
+            softmax_max,
+            softmax_sum,
             getattr(attn_metadata, "dsa_cp_context", None),
         )
         return output.to(output_dtype)
