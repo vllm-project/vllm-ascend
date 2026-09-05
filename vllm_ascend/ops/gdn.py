@@ -20,6 +20,7 @@ import torch_npu
 from einops import rearrange
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
@@ -200,11 +201,24 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             a = a.contiguous()
         else:
             if not self.gqa_interleaved_layout:
-                mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-                num_tokens = mixed_qkvz.size(0)
                 qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
                 z_size = self.value_dim // self.tp_size
-                mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                # ModelSlim leaves Qwen3.5 GDN projections as FLOAT while the
+                # surrounding MoE layers are quantized. In that case the
+                # unquantized method may pack the weight as FRACTAL_NZ, so
+                # F.linear cannot be relied on to consume the stored matrix.
+                use_weight_split = (
+                    getattr(self, "quant_config", None) is None
+                    and isinstance(getattr(self.in_proj_qkvz, "quant_method", None), UnquantizedLinearMethod)
+                )
+                if use_weight_split:
+                    qkvz_weight = self.in_proj_qkvz.weight
+                    mixed_qkv = torch.nn.functional.linear(hidden_states, qkvz_weight[:qkv_size])
+                    z = torch.nn.functional.linear(hidden_states, qkvz_weight[qkv_size:])
+                else:
+                    mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+                    mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
+                num_tokens = mixed_qkv.size(0)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 ba, _ = self.in_proj_ba(hidden_states)
                 b, a = self._split_ba_for_tp(ba)
