@@ -2,6 +2,7 @@ from types import SimpleNamespace
 from typing import TypeVar
 from unittest.mock import patch
 
+import pytest
 import torch
 from vllm.config import VllmConfig
 from vllm.model_executor.models import ModelRegistry
@@ -26,6 +27,8 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     DyntraLBPolicyMixin,
     DyntraLBScheduler,
     diagnostics_enabled,
+    get_dyntra_lb_block_size,
+    get_dyntra_lb_request_block_num,
     print_scheduler_summary,
 )
 
@@ -1194,6 +1197,10 @@ def test_diagnostics_enabled_reads_nested_dyntra_lb_config():
 def test_diagnostics_enabled_is_false_for_missing_or_invalid_config():
     assert diagnostics_enabled(SimpleNamespace(additional_config=None)) is False
     assert diagnostics_enabled(SimpleNamespace(additional_config={})) is False
+    assert diagnostics_enabled(SimpleNamespace(additional_config={"scheduler_config": "bad"})) is False
+    assert (
+        diagnostics_enabled(SimpleNamespace(additional_config={"scheduler_config": {"dyntra_lb_config": []}})) is False
+    )
     assert (
         diagnostics_enabled(
             SimpleNamespace(
@@ -1208,3 +1215,152 @@ def test_diagnostics_enabled_is_false_for_missing_or_invalid_config():
         )
         is False
     )
+
+
+def test_get_dyntra_lb_block_helpers_reject_invalid_and_round_up():
+    valid = SimpleNamespace(cache_config=SimpleNamespace(block_size=8))
+    assert get_dyntra_lb_block_size(valid) == 8
+    assert get_dyntra_lb_request_block_num(valid, SimpleNamespace(all_token_ids=list(range(9)))) == 2
+    for block_size in (0, -1, None, "16"):
+        with pytest.raises(RuntimeError, match="Invalid DyntraLB block size"):
+            get_dyntra_lb_block_size(SimpleNamespace(cache_config=SimpleNamespace(block_size=block_size)))
+
+
+def test_print_scheduler_summary_counts_structured_output_waiting(monkeypatch):
+    grammar_status = getattr(RequestStatus, "WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR", None)
+    if grammar_status is None:
+        pytest.skip("WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR is not available")
+    messages = []
+    monkeypatch.setattr(
+        dyntra_lb_scheduler_module.logger,
+        "info",
+        lambda message, *args: messages.append(message % args if args else message),
+    )
+    print_scheduler_summary(
+        SimpleNamespace(
+            running=[],
+            waiting=[],
+            skipped_waiting=[_diagnostic_request("fsm", grammar_status, 9)],
+            block_size=8,
+            cache_config=SimpleNamespace(block_size=8),
+        ),
+        SimpleNamespace(num_scheduled_tokens={}),
+    )
+    assert "schedule() | scheduler req num: [0, 1, 0, 0, 1, 0]" in "\n".join(messages)
+
+
+def _sync_scheduler(**config_kwargs):
+    vllm_config = make_dyntra_test_config(**config_kwargs)
+    vllm_config.kv_transfer_config = None
+    return create_dyntra_lb_scheduler(vllm_config, scheduler_cls=DyntraLBScheduler)
+
+
+def test_dyntra_lb_waiting_order_fcfs_and_priority_remainder():
+    scheduler = _sync_scheduler()
+    skipped = create_request(request_id=1)
+    waiting = create_request(request_id=2)
+    scheduler.skipped_waiting.add_request(skipped)
+    scheduler.waiting.add_request(waiting)
+    assert scheduler._waiting_requests_in_schedule_order() == [skipped, waiting]
+
+    vllm_config = make_dyntra_test_config()
+    vllm_config.scheduler_config.policy = "priority"
+    priority_scheduler = create_dyntra_lb_scheduler(vllm_config, scheduler_cls=DyntraLBScheduler)
+    highest = create_request(request_id=1)
+    middle = create_request(request_id=2)
+    lowest = create_request(request_id=3)
+    highest.priority, middle.priority, lowest.priority = 0, 1, 2
+    highest.arrival_time, middle.arrival_time, lowest.arrival_time = 3.0, 2.0, 1.0
+    priority_scheduler.waiting.add_request(highest)
+    priority_scheduler.skipped_waiting.add_request(middle)
+    priority_scheduler.skipped_waiting.add_request(lowest)
+    assert priority_scheduler._waiting_requests_in_schedule_order() == [highest, middle, lowest]
+
+
+def test_dyntra_lb_prefetch_skips_ineligible_requests(monkeypatch):
+    scheduler = create_dyntra_lb_scheduler(make_dyntra_test_config(), scheduler_cls=DyntraLBScheduler)
+    scheduler._lb_kv_prefetch_enabled = True
+    scheduler.connector = None
+    assert scheduler._run_lb_kv_prefetch() == set()
+
+    scheduler = create_dyntra_lb_scheduler(make_dyntra_test_config(), scheduler_cls=DyntraLBScheduler)
+    scheduler._lb_kv_prefetch_enabled = True
+    blocked = create_request(request_id=1)
+    blocked.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    computed = create_request(request_id=2)
+    computed.status = RequestStatus.PREEMPTED
+    computed.num_computed_tokens = 4
+    idle = create_request(request_id=3)
+    scheduler.skipped_waiting.add_request(blocked)
+    scheduler.waiting.add_request(computed)
+    scheduler.add_request(idle)
+    monkeypatch.setattr(scheduler.connector, "get_num_new_matched_tokens", lambda *args: (0, False))
+    assert scheduler._run_lb_kv_prefetch() == set()
+    assert idle.status == RequestStatus.WAITING
+    assert idle in scheduler.waiting
+
+
+def test_dyntra_lb_freeze_and_newly_added_out_blk():
+    scheduler = _sync_scheduler(max_num_seqs=2)
+    first = create_request(request_id=1)
+    second = create_request(request_id=2)
+    scheduler.add_request(first)
+    scheduler.add_request(second)
+    output = scheduler.schedule()
+    scheduler.update_from_output(output, create_model_runner_output([first, second]))
+    second.lb_newly_added = True
+    block_num = (len(second.all_token_ids) + scheduler.block_size - 1) // scheduler.block_size
+    scheduler.prepare_dyntra_lb_step()
+    scheduler.modifications = {"out_blk": [block_num], "in_blk": [block_num], "freeze": True}
+    scheduler.schedule()
+    assert second.status == RequestStatus.PREEMPTED
+    assert second.request_id in scheduler._lb_paused_req_ids
+    assert first in scheduler.running
+    assert scheduler.lb_freeze is True
+    assert scheduler._lb_admit_req_ids == set()
+
+    scheduler.lb_freeze = True
+    scheduler.modifications = None
+    scheduler._apply_load_balance_modifications()
+    assert scheduler.lb_freeze is False
+    assert scheduler._lb_admit_req_ids is None
+    assert scheduler._can_admit_waiting_request(first) is True
+
+
+def test_dyntra_lb_lifecycle_hooks_clear_paused_state(monkeypatch):
+    scheduler = _sync_scheduler()
+    stale = SimpleNamespace(request_id="stale", num_stale_output_tokens=1)
+    legacy = SimpleNamespace(request_id="legacy")
+    scheduler._lb_paused_req_ids = {"stale", "legacy", "paused", "free"}
+    preempt_calls = []
+    monkeypatch.setattr(
+        Scheduler,
+        "_preempt_request",
+        lambda self, request, timestamp, *args, **kwargs: preempt_calls.append((request.request_id, args, kwargs)),
+    )
+    scheduler._preempt_request(stale, 1.0, drop_stale_output=True)
+    scheduler._preempt_request(legacy, 2.0)
+    assert preempt_calls == [("stale", (), {"drop_stale_output": True}), ("legacy", (), {})]
+    assert scheduler._lb_paused_req_ids == {"paused", "free"}
+
+    paused = create_request(request_id=1)
+    paused.status = RequestStatus.PREEMPTED
+    scheduler.skipped_waiting.add_request(paused)
+    monkeypatch.setattr(Scheduler, "_handle_stopped_request", lambda self, request: True)
+    assert scheduler._handle_stopped_request(paused) is True
+    assert paused not in scheduler.skipped_waiting
+
+    running = create_request(request_id=2)
+    running.status = RequestStatus.RUNNING
+    monkeypatch.setattr(Scheduler, "_handle_stopped_request", lambda self, request: False)
+    assert scheduler._handle_stopped_request(running) is False
+
+    free_req = create_request(request_id=3)
+    scheduler._lb_paused_req_ids.add(free_req.request_id)
+    monkeypatch.setattr(
+        Scheduler,
+        "_free_request",
+        lambda self, request, delay_free_blocks=False: {"ok": delay_free_blocks},
+    )
+    assert scheduler._free_request(free_req, delay_free_blocks=True) == {"ok": True}
+    assert free_req.request_id not in scheduler._lb_paused_req_ids
