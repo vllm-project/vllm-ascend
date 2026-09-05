@@ -1220,30 +1220,48 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         # W4A8 mxfp
         if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[x],
-                weight=[weight],
-                scale=None,
-                antiquant_scale=[weight_scale],
-                scale_dtype=None,
-                per_token_scale=[x_scale],
-                per_token_scale_dtype=torch.float8_e8m0fnu,
-                split_item=2,
-                group_type=0,
-                group_list=group_list,
-                x_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch_npu.float4_e2m1fn_x2,
-                output_dtype=torch.bfloat16,
-            )[0]
-            # DSV4 need swiglu_limit input
-            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                hidden_states,
-                topk_weight=None,
-                group_index=None,
-                dst_type=torch.float8_e4m3fn,
-                quant_mode=2,
-                clamp_value=swiglu_limit,
-            )
+            if swiglu_limit > 0:
+                # v2 has no swiglu_limit input, use two-stage path for clamped SwiGLU
+                hidden_states = torch_npu.npu_grouped_matmul(
+                    x=[x],
+                    weight=[weight],
+                    scale=None,
+                    antiquant_scale=[weight_scale],
+                    scale_dtype=None,
+                    per_token_scale=[x_scale],
+                    per_token_scale_dtype=torch.float8_e8m0fnu,
+                    split_item=2,
+                    group_type=0,
+                    group_list=group_list,
+                    x_dtype=torch.float8_e4m3fn,
+                    weight_dtype=torch_npu.float4_e2m1fn_x2,
+                    output_dtype=torch.bfloat16,
+                )[0]
+                # DSV4 need swiglu_limit input
+                out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                    hidden_states,
+                    topk_weight=None,
+                    group_index=None,
+                    dst_type=torch.float8_e4m3fn,
+                    quant_mode=2,
+                    clamp_value=swiglu_limit,
+                )
+            else:
+                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+                    x=x,
+                    weight=[weight],
+                    group_list=group_list,
+                    weight_scale=[weight_scale],
+                    x_scale=x_scale,
+                    dequant_mode=2,
+                    quant_mode=2,
+                    dequant_dtype=torch.float32,
+                    quant_dtype=act_quant_type,
+                    x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
+                    weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
+                    weight_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                    x_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
+                )
         elif mxfp_quant_dtype == QuantType.W4A16MXFP:
             hidden_states = torch_npu.npu_grouped_matmul(
                 x=[x],
