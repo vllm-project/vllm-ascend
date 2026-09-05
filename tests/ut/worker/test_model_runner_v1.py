@@ -30,6 +30,56 @@ from vllm_ascend.utils import AscendDeviceType
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
+class TestRawTokenMultimodalCompileSelection(unittest.TestCase):
+    def test_cached_image_prefill_skips_text_only_compiled_graph(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False, requires_raw_input_tokens=True)
+        image = SimpleNamespace(mm_position=SimpleNamespace(offset=81, length=344))
+        runner.requests = {"image": SimpleNamespace(num_computed_tokens=0, mm_features=[image])}
+        for encoder_inputs in ({}, {"image": [0]}):
+            for start, count, expected in (
+                (0, 452, True),
+                (0, 81, False),
+                (81, 1, True),
+                (200, 32, True),
+                (424, 1, True),
+                (425, 27, False),
+                (452, 1, False),
+            ):
+                with self.subTest(encoder_inputs=encoder_inputs, start=start, count=count):
+                    runner.requests["image"].num_computed_tokens = start
+                    output = SimpleNamespace(
+                        scheduled_encoder_inputs=encoder_inputs,
+                        num_scheduled_tokens={"image": count},
+                    )
+                    self.assertEqual(runner._should_skip_compiled_for_mm(output), expected)
+
+    def test_text_decode_and_non_raw_models_keep_compiled_path(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False, requires_raw_input_tokens=True)
+        runner.requests = {"text": SimpleNamespace(num_computed_tokens=0, mm_features=[])}
+        output = SimpleNamespace(scheduled_encoder_inputs={}, num_scheduled_tokens={"text": 100})
+        self.assertFalse(runner._should_skip_compiled_for_mm(output))
+        runner.model_config.requires_raw_input_tokens = False
+        output.scheduled_encoder_inputs = {"text": [0]}
+        self.assertFalse(runner._should_skip_compiled_for_mm(output))
+        runner.model_config.is_encoder_decoder = True
+        self.assertTrue(runner._should_skip_compiled_for_mm(output))
+
+    def test_mixed_decode_and_cached_image_batch(self):
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False, requires_raw_input_tokens=True)
+        runner.requests = {
+            "text": SimpleNamespace(num_computed_tokens=100, mm_features=[]),
+            "image": SimpleNamespace(
+                num_computed_tokens=0,
+                mm_features=[SimpleNamespace(mm_position=SimpleNamespace(offset=81, length=344))],
+            ),
+        }
+        output = SimpleNamespace(scheduled_encoder_inputs={}, num_scheduled_tokens={"text": 1, "image": 452})
+        self.assertTrue(runner._should_skip_compiled_for_mm(output))
+
+
 class TestDummyRunSlotInvalidation(unittest.TestCase):
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
