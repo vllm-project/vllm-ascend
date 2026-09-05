@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, Any
 
 from vllm.config.speculative import SpeculativeConfig
+from vllm.logger import init_logger
 from vllm.transformers_utils.configs.speculators import algos as speculator_algos
 from vllm.utils.import_utils import LazyLoader
 
@@ -10,6 +11,10 @@ from vllm_ascend.transformers_utils.configs.kimi_k3 import (
 )
 
 _orig_post_init = SpeculativeConfig.__post_init__
+logger = init_logger(__name__)
+
+_MAX_FIA_TND_DECODE_QUERY_LEN = 16
+_MAX_FIA_TND_SPECULATIVE_TOKENS = _MAX_FIA_TND_DECODE_QUERY_LEN - 1
 
 if TYPE_CHECKING:
     import vllm.model_executor.layers.quantization as me_quant
@@ -205,6 +210,34 @@ def _dspark_post_init(self):
             draft_hf_config.model_type = K3DSparkConfig.model_type
             draft_hf_config.architectures = ["K3DSparkModel"]
             self.update_arch_()
+        architectures = getattr(draft_hf_config, "architectures", ()) or ()
+        is_qwen3_vl_dspark = (
+            getattr(draft_hf_config, "model_type", None) == "qwen3_vl_dflash" and "Qwen3VLDSparkModel" in architectures
+        )
+        if is_qwen3_vl_dspark:
+            block_size = getattr(draft_hf_config, "block_size", None)
+            if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size <= 0:
+                raise ValueError("Qwen3-VL DSpark requires a positive integer block_size in the draft config.")
+            if self.num_speculative_tokens > block_size:
+                raise ValueError(
+                    "Qwen3-VL DSpark requires num_speculative_tokens to be no "
+                    f"greater than the trained block_size ({block_size}); got "
+                    f"{self.num_speculative_tokens}."
+                )
+            if self.num_speculative_tokens > _MAX_FIA_TND_SPECULATIVE_TOKENS:
+                logger.warning(
+                    "Ascend FIA TND supports at most %d query tokens during "
+                    "decode. Reducing Qwen3-VL DSpark "
+                    "num_speculative_tokens from %d to %d so the verification "
+                    "query (draft tokens + 1) stays within the kernel limit. "
+                    "The checkpoint supports truncation up to its trained "
+                    "block_size=%d.",
+                    _MAX_FIA_TND_DECODE_QUERY_LEN,
+                    self.num_speculative_tokens,
+                    _MAX_FIA_TND_SPECULATIVE_TOKENS,
+                    block_size,
+                )
+                self.num_speculative_tokens = _MAX_FIA_TND_SPECULATIVE_TOKENS
 
 
 SpeculativeConfig.hf_config_override = hf_config_override
