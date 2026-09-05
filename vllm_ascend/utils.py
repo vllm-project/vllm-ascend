@@ -296,10 +296,46 @@ def _should_trans_nz(weight: torch.Tensor) -> bool:
 # - non-310P: follow additional_config.weight_nz_mode
 # - FP32: never convert
 # - meta tensor: never convert
-def maybe_trans_nz(weight: torch.Tensor) -> torch.Tensor:
+def maybe_trans_nz(
+    weight: torch.Tensor,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> torch.Tensor:
     if not _should_trans_nz(weight):
         return weight
-    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ)
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    return torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+
+
+def maybe_trans_nz_with_scale(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    transpose_dims: tuple[int, ...],
+    *,
+    customize_dtype: torch.dtype | None = None,
+    input_dtype: torch.dtype | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Transpose weight/scale and convert to FRACTAL_NZ when NZ applies.
+
+    Preserves the pre-NZ non-contiguous layout when NZ is disabled.
+    """
+    weight = weight.transpose(*transpose_dims)
+    weight_scale = weight_scale.transpose(*transpose_dims)
+    if not _should_trans_nz(weight):
+        return weight, weight_scale
+    weight = weight.contiguous()
+    weight_scale = weight_scale.contiguous()
+    kwargs = {}
+    if customize_dtype is not None:
+        kwargs["customize_dtype"] = customize_dtype
+    if input_dtype is not None:
+        kwargs["input_dtype"] = input_dtype
+    weight = torch_npu.npu_format_cast(weight, ACL_FORMAT_FRACTAL_NZ, **kwargs)
+    return weight, weight_scale
 
 
 def _round_up(x: int, align: int):
