@@ -17,6 +17,7 @@ from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
     DCPMetadataBuilderMixin,
     get_dcp_local_seq_lens,
+    write_cp_output,
 )
 from vllm_ascend.attention.sfa_v1 import (
     AscendSFAImpl,
@@ -528,14 +529,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
             )
             try:
                 local_output = self._apply_o_proj_full_weight(attn_output)
-                full_output = get_tp_group().all_gather(local_output.contiguous(), dim=0)
-                if full_output.shape[0] < output.shape[0] or full_output.shape[1:] != output.shape[1:]:
-                    raise RuntimeError(
-                        "SFA DSA-CP gathered output does not match the replicated "
-                        f"model state, got {tuple(full_output.shape)} and expected "
-                        f"{tuple(output.shape)}."
-                    )
-                output[...] = full_output[: output.shape[0]]
+                write_cp_output(local_output, output, self.o_proj.reduce_results)
             finally:
                 linear_method.switch_tp_weight(
                     self.o_proj,

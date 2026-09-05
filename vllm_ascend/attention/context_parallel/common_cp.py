@@ -3,9 +3,26 @@ from typing import Any
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import get_dcp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
+
+
+def write_cp_output(
+    local_output: torch.Tensor,
+    output: torch.Tensor,
+    reduce_results: bool,
+) -> None:
+    """Return complete tokens or disjoint contributions for the caller's TP sum."""
+    tp_group = get_tp_group()
+    if reduce_results:
+        full_output = tp_group.all_gather(local_output.contiguous(), dim=0)
+        output.copy_(full_output[: output.shape[0]])
+    else:
+        output.zero_()
+        start = tp_group.rank_in_group * local_output.shape[0]
+        count = max(0, min(local_output.shape[0], output.shape[0] - start))
+        output[start : start + count].copy_(local_output[:count])
 
 
 def get_dcp_local_seq_lens(
