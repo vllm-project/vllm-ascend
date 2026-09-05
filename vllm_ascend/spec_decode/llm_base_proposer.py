@@ -55,7 +55,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
-from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
+from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel, prepare_next_token_ids_padded
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
 from vllm_ascend.spec_decode.utils import (
@@ -2012,6 +2012,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         gpu_input_batch: InputBatch,
         discard_request_indices: torch.Tensor,
         num_discarded_requests: int,
+        discard_request_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         This function is used to prepare the inputs for speculative decoding.
@@ -2022,8 +2023,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         This function must use device functions to operate on the inputs, and
         should not introduce any blocking CPU-GPU synchronization.
         """
-        # TODO(Ben): Combine this into a custom fused kernel
-
         # Precompute get_token_id for when there is no valid next token
         num_reqs = gpu_input_batch.num_reqs
         seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
@@ -2031,6 +2030,14 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
+
+        if HAS_TRITON and sampled_token_ids.device.type != "cpu" and discard_request_mask is not None:
+            return prepare_next_token_ids_padded(
+                sampled_token_ids,
+                self.backup_next_token_ids.gpu[:num_reqs],
+                discard_request_mask,
+                gpu_input_batch.vocab_size,
+            )
 
         # Mask out the sampled tokens indices that should not be sampled.
         discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]

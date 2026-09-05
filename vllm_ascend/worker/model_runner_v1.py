@@ -1880,13 +1880,14 @@ class NPUModelRunner(GPUModelRunner):
                 assert isinstance(sampled_token_ids, torch.Tensor), (
                     "sampled_token_ids should be a torch.Tensor whenpadded-batch is enabled."
                 )
-                assert self.drafter is not None
+                assert isinstance(self.drafter, AscendEagleProposer | AscendDraftModelProposer)
                 next_token_ids, valid_sampled_tokens_count = self.drafter.prepare_next_token_ids_padded(
                     sampled_token_ids,
                     self.requests,
                     self.input_batch,
                     self.discard_request_indices.gpu,
                     self.num_discarded_requests,
+                    self.discard_request_mask.gpu[: self.input_batch.num_reqs],
                 )
                 self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
