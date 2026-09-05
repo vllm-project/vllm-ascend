@@ -928,8 +928,10 @@ __aicore__ inline void SFAVectorService<SFAT>::CopyInKv(int64_t &mte2Size, int64
     if (unlikely(keySrcStride >= INT32_MAX || keySrcStride < 0 ||
         (!PAGE_ATTENTION && (keyRopeSrcStride >= INT32_MAX || keyRopeSrcStride < 0)) ||
         realS2Idx1 + constInfo.sparseBlockSize >= s2IdLimit ||
-        realS2Idx2 + constInfo.sparseBlockSize >= s2IdLimit)) {
-        // stride溢出、stride为负数、s2超长等异常场景，还原成2条搬运指令
+        realS2Idx2 + constInfo.sparseBlockSize >= s2IdLimit ||
+        (PAGE_ATTENTION && keyOffset1 >= 0 && keyOffset2 >= 0 && keyOffset2 < keyOffset1))) {
+        // stride溢出、stride为负数、s2超长、或（paged attention模式下）物理顺序与逻辑顺序不一致等异常场景，
+        // 还原成2条搬运指令以保持逻辑 token 顺序
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx1, keyOffset1, s2IdLimit, runInfo);
         CopyInSingleKv(mte2Size, mte3Size, mergeMte3Idx, realS2Idx2, keyOffset2, s2IdLimit, runInfo);
     } else {
