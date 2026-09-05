@@ -102,6 +102,15 @@ class NPUModelRunner310(NPUModelRunner):
         )
         self._acl_format = ACL_FORMAT_FRACTAL_NZ
         logger.info_once("Weight layout uses FRACTAL_NZ.")
+
+    def load_model(self) -> None:
+        super().load_model()
+        # Optional vocab-pruned fp16 lm_head (decode is lm_head-read-bound on
+        # 310P; see lmhead_prune.py). No-op without VLLM_LMHEAD_PRUNE_PACK.
+        from vllm_ascend._310p.lmhead_prune import maybe_prune_lm_head
+
+        drafter_model = getattr(getattr(self, "drafter", None), "model", None)
+        maybe_prune_lm_head(self.model, drafter_model)
         self.sampler = AscendSampler310()
         if getattr(self, "rejection_sampler", None) is not None:
             self.rejection_sampler = AscendRejectionSampler310(self.sampler)
