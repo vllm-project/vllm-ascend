@@ -673,6 +673,34 @@
 #       (model architecture, Triton, feature checks) without crashes or
 #       degraded functionality.
 #
+# ** 22a. File: platform/patch_v1_dflash2_support.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.vllm.VllmConfig._get_v1_model_runner_unsupported_features`
+#    Why:
+#       Upstream lists `dflash2 drafts` as unsupported on the v1 model runner,
+#       because its v1 proposer never calls the DFlash2 candidate selector and
+#       would silently degrade the draft to DFlash1. On Ascend the reverse is
+#       true: `get_spec_decode_method` routes DFlash2 checkpoints to
+#       `AscendDflash2Proposer`, which runs the selector, while the NPU v2
+#       speculator carries no DFlash2 path. Without this patch, serving a
+#       DFlash2 drafter (e.g. incoai/GLM-5.3-Flash-DFlash2) fails config
+#       validation on the only runner that supports it.
+#    How：
+#       Wrap `_get_v1_model_runner_unsupported_features` and drop the
+#       `dflash2 drafts` entry from the list it returns. The wrapper is only
+#       installed when the attribute exists, so vLLM versions predating the
+#       v1/v2 runner split are left untouched. Neither 0.27.1 nor the commit in
+#       `.github/vllm-main-verified.commit` has the gate, so today the patch
+#       installs nothing on both CI axes; it starts mattering the moment that
+#       pin moves past the vLLM commit that introduced the gate.
+#    Related PR (if no, explain why):
+#       No, the upstream blocker describes the GPU v1 proposer; the NPU v1
+#       proposer implements the selector it is missing.
+#    Future Plan:
+#       Remove this patch once the NPU v2 speculator supports DFlash2 and
+#       vllm-ascend no longer drafts DFlash2 on the v1 runner, or once upstream
+#       lets a platform declare v1 DFlash2 support.
+#
 # * Worker Patch:
 # ===============
 # Entries are listed in alphabetical order by file name.
