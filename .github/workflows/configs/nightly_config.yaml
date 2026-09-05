@@ -286,13 +286,42 @@ a3:
         os: linux-aarch64-nightly-a3-4
         tests: tests/e2e/nightly/test_qwen3_32b_bf16_gpqa_accuracy.py
         testcase_timeout: 240
-
 a3-560t:
   single_node:
     test_config:
       - name: mtpx-deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MTPX-DeepSeek-R1-0528-W8A8.yaml
+      - name: qwen_3_6_27b_w8a8_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: qwen_3_6_27b_w8a8_A3.yaml
+      - name: Qwq_32b_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Qwq_32b_A3.yaml
+      - name: Qwen3_32b_W8A8_wl_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
+      - name: Deepseek_R1_W8A8_Reasoning_output_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
+      - name: MiniMax-M3-BF16-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MiniMax-M3-BF16-A3.yaml
+      - name: Deepseek_R1_W8A8_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Deepseek_R1_W8A8_A3.yaml
+      - name: MiniMax-M3-W8A8-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MiniMax-M3-W8A8-A3.yaml
+      - name: Minimax_m2.7_w8a8_A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Minimax_m2.7_w8a8_A3.yaml
+      - name: mtpx-deepseek-r1-0528-w8a8-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MTPX-DeepSeek-R1-0528-W8A8-PCP.yaml
+      - name: eagle3-qwen3-8b-bf16-pcp
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Eagle3-Qwen3-8B-BF16-PCP.yaml
       - name: deepseek-r1-0528-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-R1-0528-W8A8.yaml
@@ -329,6 +358,18 @@ a3-560t:
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
+      - name: DeepSeek-V3.2-W8A8-DCP
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-V3.2-W8A8-DCP.yaml
+      - name: DeepSeek-V4-Flash-W8A8-A3-Breakable
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-V4-Flash-W8A8-A3-Breakable.yaml
+      - name: Hy3-preview
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Hy3-preview.yaml
+      - name: Kimi-K2.6-w4a8-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: Kimi-K2.6-w4a8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
@@ -336,6 +377,15 @@ a3-560t:
         os: linux-aarch64-a3-4-cn12-001
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
       # YAML-driven tests
+      - name: Qwen3.8-27B-w8a8-A3
+        os: linux-aarch64-a3-2-cn12-001
+        config_file_path: Qwen3.8-27B-w8a8-A3.yaml
+      - name: Qwen3_32b_w8a8_ml_A3
+        os: linux-aarch64-a3-4-cn12-001
+        config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
+      - name: MiniMax-M2.5-w8a8-QuaRot-A3
+        os: linux-aarch64-a3-8-cn12-001
+        config_file_path: MiniMax-M2.5-w8a8-QuaRot-A3.yaml
       - name: Qwen3.5-27B-w8a8-A3
         os: linux-aarch64-a3-2-cn12-001
         config_file_path: Qwen3.5-27B-w8a8-A3.yaml
