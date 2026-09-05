@@ -1,0 +1,41 @@
+# Accuracy / e2e config for IQuest-Coder-V1-40B-Instruct on Ascend (Atlas A2 / 910B3)
+#
+# The model is a LLaMA-family model (GQA, head_dim=128, standard LLaMA weight
+# naming; clip_qkv and sliding_window are both disabled in its config). It is
+# served as `LlamaForCausalLM` via the vllm-ascend registry alias
+# (vllm_ascend/patch/platform/patch_iquestcoder_config.py), so NO `--hf-overrides`
+# is required. The custom config & tokenizer classes still need
+# `trust_remote_code: true`.
+#
+# NOTE: the `value` fields below are *preliminary estimates* for the Instruct
+# variant on Ascend 910B3 (bf16). Replace them with the numbers measured by the
+# nightly accuracy run (the e2e harness asserts |measured - value| within RTOL=0.05).
+# Measurement command (run inside the vllm-ascend repo):
+#   pytest tests/e2e/models/test_lm_eval_correctness.py \
+#     --config tests/e2e/models/configs/IQuest-Coder-V1-40B-Instruct.yaml --tp-size 2
+model_name: "IQuestLab/IQuest-Coder-V1-40B-Instruct"
+model_type: "vllm"
+hardware: "Atlas A2 Series"
+
+serve:
+  tensor_parallel_size: 2
+  dtype: auto
+  max_model_len: 4096
+  gpu_memory_utilization: 0.9
+  trust_remote_code: true
+  enforce_eager: true
+
+tasks:
+- name: "humaneval"
+  metrics:
+  - name: "pass_at_1"
+    value: 0.84
+- name: "mbpp"
+  metrics:
+  - name: "pass_at_1"
+    value: 0.89
+
+num_fewshot: 0
+apply_chat_template: false
+fewshot_as_multiturn: false
+batch_size: "auto"
