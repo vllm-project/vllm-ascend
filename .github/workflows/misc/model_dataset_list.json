@@ -567,7 +567,8 @@
             "z-lab/Kimi-K2.5-DFlash",
             "z-lab/Qwen3-8B-DFlash-b16",
             "zai-org/GLM-4.1V-9B-Thinking",
-            "zai-org/GLM-Image"
+            "zai-org/GLM-Image",
+            "Eco-Tech/GLM-5.2-w8a8c8"
         ],
         "a5": [
             "Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4",

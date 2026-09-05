@@ -231,6 +231,10 @@ def build_attn_metadata(
     if num_actual_reqs is None:
         num_actual_reqs = num_reqs
 
+    # positions will not be used directly in graph modes, so it is saft to create it here.
+    if positions is None:
+        positions = torch.zeros(num_input_tokens, dtype=torch.int64, device=query_start_loc_gpu.device)
+
     attn_metadata: dict[str, Any] = {}
     # Share request-level DSA metadata across cache groups in one execution.
     common_ratio_to_sas_metadata: dict[Any, Any] = {}

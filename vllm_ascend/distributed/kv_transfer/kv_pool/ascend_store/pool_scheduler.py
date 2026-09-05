@@ -529,7 +529,7 @@ class KVPoolScheduler:
         else:
             need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
-        logger.debug(
+        logger.info(
             "Reqid: %s, Total tokens %d, kvpool hit tokens: %d, need to load: %d",
             request.request_id,
             request.num_tokens,
@@ -761,7 +761,7 @@ class KVPoolScheduler:
         else:
             raise ValueError(f"Request {req_id} is not in _unfinished_requests, but it is scheduled to be cached")
         if new_block_ids is not None:
-            request_tracker.update(new_block_ids)
+            request_tracker.update(new_block_ids, request.num_computed_tokens)
         load_spec = None
         if self.layerwise_offload and num_current_tokens > 0:
             load_spec = LoadSpec(

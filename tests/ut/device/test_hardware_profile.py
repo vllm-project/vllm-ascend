@@ -72,7 +72,6 @@ _EXPECTED_CAPABILITIES = {
             HardwareCapability.CHUNKED_PREFILL_PHASE_SPLIT,
             HardwareCapability.CLUSTER_CPU_TOPOLOGY,
             HardwareCapability.DSA_C128_STATE_SMALL_BLOCK_SIZES,
-            HardwareCapability.DSA_O_PROJ_TP,
             HardwareCapability.DSV4_COMPRESSED_CACHE,
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION,
             HardwareCapability.DYNAMIC_MX_QUANT_SCALE_ALG_ONE,

@@ -456,6 +456,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module, DeepseekV2MixtureOfExperts, Support
             if name.endswith(".scale"):
                 name = name.replace(".scale", ".weight_scale")
 
+            # The multimodal checkpoint also contains one vision-router bias
+            # for each MTP/DSpark layer.  DSpark runs only during text decode,
+            # so draft MoE gates intentionally do not expose ``bias_vl``.
+            # Do not alias it to the text correction bias: that would change
+            # text routing whenever speculative decoding is enabled.
+            if name.endswith(".e_score_correction_bias_vl") and name not in params_dict:
+                logger.info_once("Ignoring vision-only router bias while loading the text-only DSpark drafter")
+                continue
+
             if ".experts." in name:
                 for param_name, weight_name, expert_id, shard_id in expert_mapping:
                     if weight_name not in name:

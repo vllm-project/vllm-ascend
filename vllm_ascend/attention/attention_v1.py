@@ -538,6 +538,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
             else:
                 graph_params = get_graph_params()
             with torch.npu.stream(update_stream):
+                # The workspace size depends only on shapes and seq_lens, which
+                # are shared by all layers within one graph-param update pass,
+                # so one get_workspace call per pass is sufficient. Reuse the
+                # workspace across layers and re-query only when any
+                # size-relevant input changes. This mirrors the FIA path, which already
+                # reuses graph_params.workspaces[num_tokens], and removes the
+                # redundant per-layer get_workspace calls (each backed by a
+                # ~36-54MB buffer allocation) per decode step.
+                step_ws_key = None
+                workspace = None
                 for key, param, handle, event in zip(
                     forward_context.attn_metadata,
                     graph_params.attn_params[num_tokens],
@@ -557,17 +567,39 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     ) = param
                     seq_lens = forward_context.attn_metadata[key].seq_lens
 
-                    workspace = torch_npu._npu_paged_attention_get_workspace(
-                        query=query,
-                        key_cache=key_cache,
-                        value_cache=value_cache,
-                        num_kv_heads=num_kv_heads,
-                        num_heads=num_heads,
-                        scale_value=scale,
-                        block_table=block_table,
-                        context_lens=seq_lens,
-                        out=output,
+                    # The key covers every size-relevant input, so models
+                    # with heterogeneous layer configs simply trigger a
+                    # re-query instead of reusing a wrong-sized workspace.
+                    ws_key = (
+                        seq_lens.data_ptr(),
+                        tuple(seq_lens.shape),
+                        query.shape,
+                        query.dtype,
+                        key_cache.shape,
+                        key_cache.dtype,
+                        value_cache.shape,
+                        value_cache.dtype,
+                        block_table.shape if block_table is not None else None,
+                        block_table.dtype if block_table is not None else None,
+                        output.shape,
+                        output.dtype,
+                        num_kv_heads,
+                        num_heads,
+                        scale,
                     )
+                    if step_ws_key != ws_key:
+                        workspace = torch_npu._npu_paged_attention_get_workspace(
+                            query=query,
+                            key_cache=key_cache,
+                            value_cache=value_cache,
+                            num_kv_heads=num_kv_heads,
+                            num_heads=num_heads,
+                            scale_value=scale,
+                            block_table=block_table,
+                            context_lens=seq_lens,
+                            out=output,
+                        )
+                        step_ws_key = ws_key
                     torch.npu.graph_task_update_begin(update_stream, handle)
                     torch_npu._npu_paged_attention(
                         query=query,

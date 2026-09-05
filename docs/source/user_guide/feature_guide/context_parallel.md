@@ -22,7 +22,7 @@ PCP support is experimental and available only with ModelRunner V2. The followin
 | MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |
 | GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (Eagle3, eager and `FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |
 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
-| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility |
+| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility | — Not applicable | 🟠 Partial compatibility (MTP, eager and `FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |
 
 - ✅ **Full compatibility**: The basic path or feature combination is supported.
 - 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.

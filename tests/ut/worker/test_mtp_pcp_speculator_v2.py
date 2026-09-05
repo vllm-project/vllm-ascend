@@ -286,23 +286,40 @@ def test_prefill_rebuilds_replicated_pcp_metadata_before_filtering() -> None:
     assert parent_args[3] is global_slot_mappings
 
 
-def test_graph_prefill_reuses_model_state_metadata() -> None:
+@pytest.mark.parametrize("replicated_pcp", [False, True])
+def test_graph_prefill_builds_draft_metadata(replicated_pcp: bool) -> None:
     speculator = object.__new__(AscendMTPSpeculator)
+    speculator.replicated_pcp = replicated_pcp
     speculator.draft_attn_layer_names = {"draft.layer"}
-    draft_metadata = object()
+    local_draft_metadata = object()
+    global_draft_metadata = object()
     speculator.model_state = SimpleNamespace(
         attn_metadata={
-            "draft.layer": draft_metadata,
+            "draft.layer": local_draft_metadata,
             "target.layer": object(),
         }
+    )
+    prepared_draft_metadata = global_draft_metadata if replicated_pcp else local_draft_metadata
+    speculator._prepare_replicated_prefill_attn = MagicMock(
+        return_value=(
+            {"draft.layer": prepared_draft_metadata},
+            None,
+        )
     )
 
     actual = speculator.build_draft_attn_metadatas(
         num_reqs_padded=4,
+        num_tokens_padded=8,
         is_draft_model_prefill=True,
     )
 
-    assert actual == [{"draft.layer": draft_metadata}]
+    assert actual == [{"draft.layer": prepared_draft_metadata}]
+    speculator._prepare_replicated_prefill_attn.assert_called_once_with(
+        {"draft.layer": local_draft_metadata},
+        None,
+        4,
+        8,
+    )
 
 
 def test_propose_disables_target_pcp_manager_for_replicated_draft() -> None:

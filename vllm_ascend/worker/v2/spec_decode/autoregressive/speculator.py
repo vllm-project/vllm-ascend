@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
-from vllm.config import VllmConfig, replace
+from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -261,17 +261,19 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         target_input_buffers: InputBuffers,
         target_attn_groups: list[list[AttentionGroup]],
     ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
+        # Initialize the draft attention backend with its PCP=1 config.
+        with set_current_vllm_config(self.attn_vllm_config):
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
 
-        # Use the first executable draft attention layer as the architecture
-        # discriminator and cache it for ACL graph parameter updates.
-        self.attn_backend = _get_graph_update_backend(self.attn_groups)
+            # Use the first executable draft attention layer as the architecture
+            # discriminator and cache it for ACL graph parameter updates.
+            self.attn_backend = _get_graph_update_backend(self.attn_groups)
         if issubclass(self.attn_backend, AscendDSABackend):
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
@@ -461,7 +463,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 metadata.attn_state = AscendAttentionState.DecodeOnly
         return attn_metadata
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, is_draft_model_prefill):
+    def build_draft_attn_metadatas(
+        self,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        is_draft_model_prefill: bool,
+    ):
         """Build draft_attn_metadatas for partial-merged draft graph."""
         attn_metadata = self.model_state.attn_metadata
         attn_metadata = {
@@ -469,7 +476,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         }
 
         if is_draft_model_prefill:
-            return [attn_metadata]
+            prepared_attn_metadata, _ = self._prepare_replicated_prefill_attn(
+                attn_metadata,
+                None,
+                num_reqs_padded,
+                num_tokens_padded,
+            )
+            assert prepared_attn_metadata is not None
+            return [prepared_attn_metadata]
 
         draft_attn_metadatas = self._init_decode_draft_attn_metadatas(attn_metadata, num_reqs_padded)
 
