@@ -1037,7 +1037,12 @@ class TestKVPoolWorkerGetGroupTpSize(unittest.TestCase):
         worker = self._make_worker()
         worker.use_mla = True
         worker.group_uses_align_state = [False]
-        # _get_group_num_kv_heads returns 1 for MLA
+        self.assertEqual(worker.get_group_tp_size(0), 1)
+
+    def test_get_group_tp_size_sparse(self):
+        worker = self._make_worker()
+        worker.use_sparse = True
+        worker.group_uses_align_state = [False]
         self.assertEqual(worker.get_group_tp_size(0), 1)
 
 
