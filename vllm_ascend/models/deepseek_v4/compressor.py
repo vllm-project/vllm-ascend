@@ -144,6 +144,10 @@ class Compressor(nn.Module):
             return_bias=False,
         )
 
+        # The custom compressor op consumes ND weights directly.
+        self.wkv.skip_weight_nz_conversion = True
+        self.wgate.skip_weight_nz_conversion = True
+
         # A5 compressor kernel needs float for norm_weight input
         norm_dtype = (
             torch.float32 if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE) else None
