@@ -15,6 +15,7 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 @pytest.fixture(autouse=True)
 def reset_mc2_tokens_capacity(monkeypatch):
     monkeypatch.setattr(afc, "_mc2_tokens_capacity", None)
+    monkeypatch.setattr(afc, "_reserved_mc2_mask", None)
     monkeypatch.setattr(
         afc,
         "get_ascend_config",
