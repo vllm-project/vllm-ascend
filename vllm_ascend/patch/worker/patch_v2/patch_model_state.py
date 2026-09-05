@@ -18,9 +18,14 @@
 #
 
 from vllm.v1.worker.gpu import model_runner
+from vllm.v1.worker.gpu.model_states import interface
 
+from vllm_ascend.worker.encoder_acl_graph import EncoderAclGraphManager
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 
 # prepare_attn in AscendModelState is different from vllm,
 # we need to override init_model_state.
 model_runner.init_model_state = init_asecnd_model_state
+# ModelState imports the manager class into its own module namespace. Replace
+# that exact binding so MRV2 constructs an NPU-aware encoder graph manager.
+interface.EncoderCudaGraphManager = EncoderAclGraphManager
