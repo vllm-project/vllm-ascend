@@ -251,6 +251,7 @@ nav:
         - tutorials/models/Hy3-preview.md
         - tutorials/models/Hy4-preview.md
         - tutorials/models/Minitron-8B-Base.md
+        - tutorials/models/HRM-Text-1B.md
         - tutorials/models/LLaVA-OneVision-Qwen2-0.5B-OV.md
         - tutorials/models/gpt-oss-120b.md
         - tutorials/models/Mixtral-8x7B-Instruct-v0.1.md

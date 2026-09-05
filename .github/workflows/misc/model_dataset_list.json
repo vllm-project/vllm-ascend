@@ -207,6 +207,7 @@
             "qwen/Qwen1.5-0.5B-Chat",
             "rhymes-ai/Aria",
             "riverclouds/qwen_image_random",
+            "sapientinc/HRM-Text-1B",
             "sentence-transformers/all-MiniLM-L12-v2",
             "swift/Qwen3-235B-A22B-Instruct-2507-AWQ",
             "tclf90/Qwen3-VL-235B-A22B-Instruct-AWQ",
