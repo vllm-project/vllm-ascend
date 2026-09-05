@@ -1279,3 +1279,16 @@
 #       Remove this patch once vllm-ascend's bundled PyTorch >= 2.13.0
 #       (which, like upstream, allows eps >= 0 for inference).
 #
+# ** 35. File: platform/patch_partial_wake_up.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.wake_up`
+#    Why:
+#       Ascend CaMem can restore weights and KV cache in separate wake stages.
+#       Upstream resumes scheduling after every wake call, so a weights-only
+#       wake can dispatch partial-rollout requests before KV cache is remapped.
+#    How:
+#       Keep scheduling paused while allocation tags remain asleep. Resume only
+#       after all tags are awake, or on an explicit scheduling-only wake.
+#    Future Plan:
+#       Remove this patch once upstream supports staged allocation-tag wake-up.
+#

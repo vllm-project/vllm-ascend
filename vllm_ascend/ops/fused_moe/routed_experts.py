@@ -96,6 +96,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         w2_data = self._maybe_pad_weight(layer.w2_weight.data).transpose(1, 2).contiguous()
         replace_parameter(layer, "w2_weight", w2_data)
+        layer._weights_in_execution_layout = True
 
         # TODO: Current dispatch_ffn_combine/mega_moe fusion operator ONLY supports NZ format.
         # Therefore, we must cast weights to NZ when fusion is enabled.
@@ -332,6 +333,41 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
 
     moe_counter = -1
 
+    def _prepare_unquantized_weights_for_loading(self) -> None:
+        """Restore checkpoint layout before an online ``load_weights`` call.
+
+        Ascend transposes unquantized MoE weights after loading for execution:
+        ``w13: [E, 2I/TP, H] -> [E, H, 2I/TP]`` and
+        ``w2: [E, H, I/TP] -> [E, I/TP, H]``.  RL frameworks update the
+        already-initialized model through ``model.load_weights()``.  In that
+        path the upstream expert loader expects checkpoint layout, otherwise
+        it tries to copy checkpoint shards into the transposed execution
+        tensors and fails with a hidden/intermediate dimension mismatch.
+
+        Use transpose views so the operation does not allocate another copy of
+        the expert weights. ``replace_parameter`` also preserves the attached
+        expert-aware ``weight_loader``.
+        """
+        if self.quant_config is not None or not getattr(self, "_weights_in_execution_layout", False):
+            return
+
+        hidden_size = self.hidden_size
+        w13_weight = getattr(self, "w13_weight", None)
+        if w13_weight is not None and w13_weight.ndim == 3 and w13_weight.shape[1] == hidden_size:
+            replace_parameter(self, "w13_weight", w13_weight.transpose(1, 2))
+
+        w2_weight = getattr(self, "w2_weight", None)
+        if w2_weight is not None and w2_weight.ndim == 3 and w2_weight.shape[2] == hidden_size:
+            replace_parameter(self, "w2_weight", w2_weight.transpose(1, 2))
+        self._weights_in_execution_layout = False
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> Iterable[str]:
+        # Initial checkpoint loading already uses checkpoint layout and is a
+        # no-op here. Online RL updates arrive after Ascend has converted the
+        # parameters to execution layout, so restore the loadable views first.
+        self._prepare_unquantized_weights_for_loading()
+        yield from super().load_weights(weights)
+
     def __init__(
         self,
         *args,
@@ -341,6 +377,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
     ):
         object.__setattr__(self, "tid2eid", tid2eid)
         super().__init__(*args, **kwargs)
+        self._weights_in_execution_layout = False
         if self.quant_config is None:
             # Preserve the pre-refactor BF16 lifecycle: let upstream create
             # weights first, then install the Ascend execution method.

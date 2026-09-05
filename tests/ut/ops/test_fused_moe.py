@@ -68,6 +68,45 @@ def _build_unquantized_method(*, dynamic_eplb: bool = False):
     return method
 
 
+def test_prepare_unquantized_weights_for_online_loading():
+    layer = AscendRoutedExperts.__new__(AscendRoutedExperts)
+    nn.Module.__init__(layer)
+    layer.quant_config = None
+    layer.hidden_size = 4
+    layer._weights_in_execution_layout = True
+    layer.w13_weight = nn.Parameter(torch.arange(48).reshape(2, 4, 6).float())
+    layer.w2_weight = nn.Parameter(torch.arange(24).reshape(2, 3, 4).float())
+    w13_loader = MagicMock()
+    w2_loader = MagicMock()
+    layer.w13_weight.weight_loader = w13_loader
+    layer.w2_weight.weight_loader = w2_loader
+
+    original_w13 = layer.w13_weight.detach().clone()
+    original_w2 = layer.w2_weight.detach().clone()
+    storage_ptrs = (
+        layer.w13_weight.untyped_storage().data_ptr(),
+        layer.w2_weight.untyped_storage().data_ptr(),
+    )
+
+    layer._prepare_unquantized_weights_for_loading()
+
+    assert layer.w13_weight.shape == (2, 6, 4)
+    assert layer.w2_weight.shape == (2, 4, 3)
+    torch.testing.assert_close(layer.w13_weight, original_w13.transpose(1, 2))
+    torch.testing.assert_close(layer.w2_weight, original_w2.transpose(1, 2))
+    assert layer.w13_weight.untyped_storage().data_ptr() == storage_ptrs[0]
+    assert layer.w2_weight.untyped_storage().data_ptr() == storage_ptrs[1]
+    assert layer.w13_weight.weight_loader is w13_loader
+    assert layer.w2_weight.weight_loader is w2_loader
+    assert layer._weights_in_execution_layout is False
+
+    # Repeated buckets in one online update must not transpose the weights
+    # back to execution layout.
+    layer._prepare_unquantized_weights_for_loading()
+    assert layer.w13_weight.shape == (2, 6, 4)
+    assert layer.w2_weight.shape == (2, 4, 3)
+
+
 @pytest.mark.parametrize(
     ("dynamic_eplb", "policy_type", "collection_interval", "expected"),
     [
@@ -264,6 +303,7 @@ def test_process_weights_after_loading_uses_version_specific_layout(
     assert layer.w2_weight.is_contiguous() is True
     assert layer.w13_weight.weight_loader is w13_loader
     assert layer.w2_weight.weight_loader is w2_loader
+    assert layer._weights_in_execution_layout is True
 
 
 def test_process_weights_after_loading_splits_lists_for_dynamic_eplb(monkeypatch):
