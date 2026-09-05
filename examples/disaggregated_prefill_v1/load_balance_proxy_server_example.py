@@ -11,7 +11,7 @@
 #
 # Features:
 # - Load balances requests to multiple prefiller and decoder servers.
-# - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
+# - Supports OpenAI-compatible /v1/models, /v1/completions and /v1/chat/completions endpoints.
 # - Streams responses from backend servers to clients.
 #
 # Prerequisites:
@@ -1276,6 +1276,27 @@ async def adjust_instances_impl(adjust_mode: str, request: Request):
 
 def parse_server_addresses(instances: list[str]) -> list[tuple[str, int]]:
     return [(host, int(port)) for host, port in (instance.split(":") for instance in instances)]
+
+
+@app.get("/v1/models")
+async def list_models(request: Request):
+    """Forward GET /v1/models to any live prefiller/decoder backend."""
+    runtime = get_runtime()
+    await runtime.sync_clients()
+    snapshot = runtime.scheduler.get_snapshot()
+    candidates = [(ServerRole.PREFILL, inst) for inst in snapshot["prefill_instances"]] + [
+        (ServerRole.DECODE, inst) for inst in snapshot["decode_instances"]
+    ]
+    for role, server in candidates:
+        key = server_key(server["host"], server["port"])
+        try:
+            client = await runtime.get_client(role, key)
+            resp = await client.get("/models", headers=auth_headers(next_req_id()))
+            resp.raise_for_status()
+            return JSONResponse(status_code=resp.status_code, content=resp.json())
+        except Exception as exc:
+            logger.warning("Failed to fetch /v1/models from %s: %s", key, exc)
+    return JSONResponse(status_code=503, content={"detail": "No available backend instances"})
 
 
 @app.post("/v1/completions")
