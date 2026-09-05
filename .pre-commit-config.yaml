@@ -1,3 +1,7 @@
+ci:
+  autofix_prs: true # true：自动修复回推PR； false：PR仅检查不提交；可在PR下评论或打上标签pre-commit.ci autofix，手动触发自动修复
+  autoupdate_schedule: weekly # 按周期自动更新钩子版本；可选：'weekly'（默认）, 'monthly', 'quarterly'
+  
 default_install_hook_types:
   - pre-commit
   - prepare-commit-msg
