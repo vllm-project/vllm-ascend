@@ -3164,6 +3164,7 @@ class NPUModelRunner(GPUModelRunner):
         for_cudagraph_capture: bool = False,
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
+        dcp_dummy_num_computed_tokens_cpu: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         skip_gdn_state_update: bool = False,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
@@ -3211,7 +3212,13 @@ class NPUModelRunner(GPUModelRunner):
                 return None, block_table_tensor
 
             fixed_decode_seq_lens_cpu = None
-            if self.use_async_spec_decode:
+            if dcp_dummy_num_computed_tokens_cpu is not None:
+                assert num_scheduled_tokens_np is not None
+                fixed_decode_seq_lens_cpu = (
+                    dcp_dummy_num_computed_tokens_cpu[:num_reqs]
+                    + num_scheduled_tokens_np[:num_reqs]
+                )
+            elif self.use_async_spec_decode:
                 fixed_decode_seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs].numpy()
 
             assert num_reqs_padded is not None
@@ -3263,14 +3270,27 @@ class NPUModelRunner(GPUModelRunner):
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
         self.long_seq_metadata, block_table_gid_0 = _get_dcp_metadata(block_table_gid_0)
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
-        is_prefilling[num_reqs:] = False
+        if dcp_dummy_num_computed_tokens_cpu is not None:
+            # A DCP dummy decode must not inherit request state from the
+            # previous real batch. Keep this local to metadata construction so
+            # the persistent input batch is not modified.
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ].clone()
+            num_computed_tokens_cpu.zero_()
+            num_computed_tokens_cpu[:num_reqs].copy_(
+                torch.from_numpy(dcp_dummy_num_computed_tokens_cpu[:num_reqs])
+            )
+            is_prefilling = torch.zeros_like(num_computed_tokens_cpu, dtype=torch.bool)
+        else:
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+            is_prefilling[num_reqs:] = False
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         if self.use_async_spec_decode:
             # GPU tensors are authoritative in async mode.
@@ -3639,16 +3659,7 @@ class NPUModelRunner(GPUModelRunner):
             force_has_lora=num_active_loras > 0,
             force_num_active_loras=num_active_loras,
         )
-        if self.use_dcp:
-            self.dcp_manager.init_batch_info(
-                num_scheduled_tokens,
-                num_reqs,
-                self.input_batch.num_computed_tokens_cpu,
-                self.input_batch.num_prompt_tokens,
-            )
-            if self.speculative_config:
-                self.dcp_manager.query_lens_full.cpu[:num_reqs] = torch.from_numpy(num_scheduled_tokens)
-                self.dcp_manager.query_lens_full.copy_to_gpu()
+        dcp_dummy_num_computed_tokens_cpu = None
         if cudagraph_runtime_mode is None:
             cudagraph_runtime_mode = _cudagraph_mode
         else:
@@ -3701,6 +3712,32 @@ class NPUModelRunner(GPUModelRunner):
                         if is_graph_capturing and using_paged_attention(num_tokens, self.vllm_config)
                         else max_query_len
                     )  # type: ignore[assignment]
+
+                if self.use_dcp:
+                    dcp_num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu
+                    dcp_num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens
+                    if uniform_decode:
+                        # Dummy execution has no scheduler-owned requests. Give
+                        # every synthetic request a non-empty context so DCP,
+                        # common attention metadata and MLA all classify it as
+                        # decode. Derive the context from the same post-query
+                        # seq_len used below to keep all metadata consistent.
+                        dummy_seq_len = int(seq_lens)
+                        max_dummy_query_len = int(num_scheduled_tokens[:num_reqs].max())
+                        if dummy_seq_len <= max_dummy_query_len:
+                            dummy_seq_len = max_dummy_query_len + 1
+                            seq_lens = dummy_seq_len
+                        dcp_dummy_num_computed_tokens_cpu = (
+                            dummy_seq_len - num_scheduled_tokens[:num_reqs]
+                        ).astype(np.int32, copy=False)
+                        dcp_num_computed_tokens_cpu = dcp_dummy_num_computed_tokens_cpu
+                        dcp_num_prompt_tokens_cpu = dcp_dummy_num_computed_tokens_cpu
+                    self.dcp_manager.init_batch_info(
+                        num_scheduled_tokens,
+                        num_reqs,
+                        dcp_num_computed_tokens_cpu,
+                        dcp_num_prompt_tokens_cpu,
+                    )
 
                 self.optimistic_seq_lens_cpu[:num_reqs] = seq_lens
                 self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
@@ -3755,6 +3792,7 @@ class NPUModelRunner(GPUModelRunner):
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                     for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
+                    dcp_dummy_num_computed_tokens_cpu=dcp_dummy_num_computed_tokens_cpu,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     skip_gdn_state_update=skip_gdn_state_update,

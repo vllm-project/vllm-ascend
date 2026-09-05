@@ -13,8 +13,9 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.context_parallel.common_cp import get_dcp_local_seq_lens
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import enable_pcp
+from vllm_ascend.attention.utils import AscendDCPMetadata, enable_pcp
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
@@ -240,6 +241,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         num_query_total = batch_size * self.num_query_per_req
         num_sample_total = batch_size * self.num_speculative_tokens
         has_num_rejected = num_rejected_tokens_gpu is not None
+        dcp_size = getattr(self, "dcp_size", 1)
+        dcp_rank = getattr(self, "dcp_rank", 0)
+        cp_interleave_size = self.vllm_config.parallel_config.cp_kv_cache_interleave_size if dcp_size > 1 else 1
+        long_seq_args = None
         primary_gid = getattr(self, "kv_cache_gid", 0)
         self._per_group_block_table_buffers = {
             attn_group.kv_cache_group_id: self._per_group_block_tables[attn_group.kv_cache_group_id]
@@ -292,6 +297,9 @@ class AscendDSparkProposer(AscendDflashProposer):
                 batch_size=batch_size,
                 HAS_NUM_REJECTED=has_num_rejected,
                 SAMPLE_FROM_ANCHOR=self.sample_from_anchor,
+                DCP_SIZE=dcp_size,
+                DCP_RANK=dcp_rank,
+                CP_INTERLEAVE_SIZE=cp_interleave_size,
             )
         # to compute self._context_slot_mapping_buffers from dict to list
         self._context_slot_mapping_buffers = [
@@ -336,7 +344,28 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_mask = None
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
-        return num_query_total, token_indices_to_sample, cad, None
+        if dcp_size > 1:
+            seq_lens_cpu = getattr(cad, "_seq_lens_cpu", None)
+            if seq_lens_cpu is None:
+                seq_lens_cpu = cad.seq_lens.cpu()
+            local_seq_lens = get_dcp_local_seq_lens(
+                seq_lens_cpu - self.num_query_per_req,
+                dcp_size,
+                cp_interleave_size,
+            )
+            cad.context_parallel_metadata = AscendDCPMetadata(
+                num_computed_tokens_of_dcp=local_seq_lens.numpy(),
+                query_lens_cpu=torch.full(
+                    (batch_size,),
+                    self.num_query_per_req,
+                    dtype=torch.int32,
+                ),
+                max_query_len=self.num_query_per_req,
+                dcp_mtp_attn_mask=None,
+            )
+            long_seq_args = (None, None)
+
+        return num_query_total, token_indices_to_sample, cad, long_seq_args
 
     @torch.inference_mode()
     def dummy_run(
