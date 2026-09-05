@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -382,6 +383,199 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         runner.attn_backend = backend
         return runner
 
+    def test_hybrid_noncontiguous_reshape_uses_per_group_kernel_sizes(self):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner.cache_config = SimpleNamespace(cache_dtype="auto")
+        runner._update_hybrid_attention_mamba_layout = MagicMock()
+
+        attention_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=2,
+            dtype=torch.float16,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((3,), (5,)),
+            dtypes=(torch.float16, torch.float16),
+            page_size_padded=32,
+            mamba_cache_mode="align",
+        )
+        attention_backend = MagicMock()
+        attention_backend.get_kv_cache_shape.return_value = (2, 4, 4, 1, 2)
+        groups = [
+            SimpleNamespace(
+                kv_cache_group_id=0,
+                kv_cache_spec=attention_spec,
+                backend=attention_backend,
+                layer_names=["full_attn"],
+            ),
+            SimpleNamespace(
+                kv_cache_group_id=1,
+                kv_cache_spec=mamba_spec,
+                backend=MagicMock(),
+                layer_names=["linear_attn"],
+            ),
+        ]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+        raw_caches = {
+            "full_attn": torch.zeros(2 * attention_spec.page_size_bytes, dtype=torch.uint8),
+            "linear_attn": torch.zeros(2 * mamba_spec.page_size_bytes, dtype=torch.uint8),
+        }
+
+        caches = runner._reshape_kv_cache_tensors(SimpleNamespace(), raw_caches, [4, 8])
+
+        assert caches["full_attn"].shape == (2, 4, 4, 1, 2)
+        conv_state, ssm_state = caches["linear_attn"]
+        assert conv_state.shape == (2, 3)
+        assert ssm_state.shape == (2, 5)
+        assert conv_state.stride() == (16, 1)
+        assert ssm_state.stride() == (16, 1)
+        assert conv_state.storage_offset() == 0
+        assert ssm_state.storage_offset() == 3
+        attention_backend.get_kv_cache_shape.assert_called_once_with(
+            4,
+            4,
+            1,
+            2,
+            cache_dtype_str="auto",
+        )
+        runner._update_hybrid_attention_mamba_layout.assert_called_once_with(caches, [4, 8])
+
+    def test_hybrid_reshape_skips_groups_without_kernel_size(self):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner._update_hybrid_attention_mamba_layout = MagicMock()
+        groups = [SimpleNamespace(kv_cache_group_id=group_id) for group_id in (1, 3)]
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter(groups)
+
+        caches = runner._reshape_kv_cache_tensors(SimpleNamespace(), {}, [128])
+
+        assert caches == {}
+        runner._update_hybrid_attention_mamba_layout.assert_called_once_with(caches, [128])
+
+    def test_hybrid_reshape_skips_runner_only_attention_layers(self):
+        runner = self._build_runner()
+        runner.hybrid_with_attn_and_mamba = True
+        runner.runner_only_attn_layers = {"encoder_attn"}
+        runner.cache_config = SimpleNamespace(cache_dtype="auto")
+        runner._update_hybrid_attention_mamba_layout = MagicMock()
+        attention_spec = FullAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=2,
+            dtype=torch.float16,
+        )
+        group = SimpleNamespace(
+            kv_cache_group_id=0,
+            kv_cache_spec=attention_spec,
+            backend=MagicMock(),
+            layer_names=["encoder_attn"],
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: iter([group])
+
+        caches = runner._reshape_kv_cache_tensors(SimpleNamespace(), {}, [8])
+
+        assert caches == {}
+        runner._update_hybrid_attention_mamba_layout.assert_called_once_with(caches, [8])
+
+    def _build_reinitialize_runner(self):
+        runner = self._build_runner()
+        runner.cache_config = SimpleNamespace(block_size=128)
+        runner.max_model_len = 1024
+        runner.max_encoder_len = 256
+        runner.max_num_reqs = 4
+        runner.max_num_tokens = 64
+        runner.pin_memory = False
+        runner.model_config.get_vocab_size.return_value = 32000
+        runner.is_pooling_model = False
+        runner.input_batch = SimpleNamespace(logitsprocs=object())
+        runner.offload_config = SimpleNamespace(uva=SimpleNamespace(cpu_offload_gb=0))
+        runner.vllm_config.speculative_config = None
+        runner.vllm_config.reasoning_config = None
+        runner.parallel_config = SimpleNamespace(cp_kv_cache_interleave_size=1)
+        return runner
+
+    @staticmethod
+    def _cache_config_with_block_sizes(*block_sizes):
+        groups = []
+        for index, block_size in enumerate(block_sizes):
+            spec = MagicMock(name=f"spec_{index}")
+            spec.block_size = block_size
+            spec.max_num_blocks_per_req.return_value = 10 + index
+            groups.append(
+                SimpleNamespace(
+                    kv_cache_spec=spec,
+                    layer_names=[f"layer_{index}"],
+                )
+            )
+        return SimpleNamespace(kv_cache_groups=groups)
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_matching_single_group_keeps_existing_input_batch(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        original_input_batch = runner.input_batch
+        config = self._cache_config_with_block_sizes(128)
+
+        runner.may_reinitialize_input_batch(config, [128])
+
+        input_batch_cls.assert_not_called()
+        assert runner.input_batch is original_input_batch
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_kernel_size_change_reinitializes_with_flat_values(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        config = self._cache_config_with_block_sizes(384)
+        replacement = input_batch_cls.return_value
+
+        runner.may_reinitialize_input_batch(config, [128])
+
+        assert runner.input_batch is replacement
+        input_batch_cls.assert_called_once_with(
+            max_num_reqs=4,
+            max_model_len=1024,
+            max_num_batched_tokens=64,
+            device=torch.device("cpu"),
+            pin_memory=False,
+            vocab_size=32000,
+            block_sizes=[384],
+            is_spec_decode=False,
+            logitsprocs=unittest.mock.ANY,
+            is_pooling_model=False,
+            num_speculative_tokens=0,
+            kernel_block_sizes=[128],
+            max_num_blocks_per_req=[10],
+            kv_cache_groups=config.kv_cache_groups,
+            cp_kv_cache_interleave_size=1,
+            reasoning_config=None,
+        )
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_multiple_groups_reinitialize_even_when_sizes_match(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        config = self._cache_config_with_block_sizes(128, 128)
+
+        runner.may_reinitialize_input_batch(config, [128, 128])
+
+        assert input_batch_cls.call_args.kwargs["block_sizes"] == [128, 128]
+        assert input_batch_cls.call_args.kwargs["kernel_block_sizes"] == [128, 128]
+        assert input_batch_cls.call_args.kwargs["max_num_blocks_per_req"] == [10, 11]
+
+    @patch("vllm_ascend.worker.model_runner_v1.NPUInputBatch")
+    def test_reinitialize_rejects_cpu_offload(self, input_batch_cls):
+        runner = self._build_reinitialize_runner()
+        runner.offload_config.uva.cpu_offload_gb = 1
+        config = self._cache_config_with_block_sizes(384)
+
+        with self.assertRaisesRegex(
+            AssertionError,
+            "Cannot re-initialize the input batch when CPU weight offloading is enabled",
+        ):
+            runner.may_reinitialize_input_batch(config, [128])
+
+        input_batch_cls.assert_not_called()
+
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()
         runner.sparse_kv_offload_enabled = False
@@ -578,7 +772,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             )
         ]
 
-        kv_caches = runner._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        kv_caches = runner._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors, [kv_cache_spec.block_size])
         k_cache, v_cache = kv_caches["draft_attn"]
 
         self.assertEqual(k_cache.shape, (2, 16, 8, 64))
@@ -659,6 +853,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         k_cache, v_cache = runner._reshape_kv_cache_tensors(
             kv_cache_config,
             {layer_name: (raw_k_cache, raw_v_cache)},
+            [kernel_block_size],
         )[layer_name]
 
         num_kernel_blocks = num_physical_blocks * physical_block_size // kernel_block_size
@@ -827,7 +1022,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             ),
         ]
 
-        caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)
+        caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches, [runner.block_size])
         k_cache, v_cache = caches[attn_layer_name]
         (indexer_cache,) = caches[indexer_layer_name]
 
@@ -948,7 +1143,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 )
 
                 raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
-                caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)
+                caches = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches, [runner.block_size])
 
                 main_cache = caches[attn_layer_name]
                 self.assertEqual(len(main_cache), 1 if enable_sfa_c8 else 2)
@@ -1109,7 +1304,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             )
         ]
 
-        indexer_k_cache, indexer_scale_cache = runner._reshape_kv_cache_tensors(kv_cache_config, raw_caches)[layer_name]
+        indexer_k_cache, indexer_scale_cache = runner._reshape_kv_cache_tensors(
+            kv_cache_config, raw_caches, [indexer_spec.block_size]
+        )[layer_name]
         self.assertEqual(indexer_k_cache.shape, (2, 16, 1, 128))
         self.assertEqual(indexer_k_cache.dtype, torch.int8)
         self.assertEqual(indexer_scale_cache.shape, (2, 16, 1, 1))
