@@ -102,8 +102,20 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
+      - name: DeepSeek-V4-Pro-w4a8-1M-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-1M-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
       - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DeepSeek-V4-Pro-w4a8-mtp-prefix-cache-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-mtp-prefix-cache-PD-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 4
+      - name: DeepSeek-V4-Pro-w4a8-prefix-cache-PD-MRV2
+        config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD-MRV2.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.1-w8a8c8-128k-1k-90-50-PD
@@ -165,6 +177,10 @@ a3:
         config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 2
+      - name: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2
+        config_file_path: DeepSeek-V4-flash-w8a8-PD-prefix-MRV2.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
       - name: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD
         config_file_path: Kimi-K2.6-W4A8-64k-1k-TPOT50-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
@@ -186,6 +202,9 @@ a3:
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
+      - name: DeepSeek-V4-Flash-W8A8-A3-MRV2
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: DeepSeek-V4-Flash-W8A8-A3-MRV2.yaml
       - name: kimi-k2-thinking
         os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2-Thinking.yaml
@@ -299,6 +318,9 @@ a3-560t:
       - name: DeepSeek-V4-Flash-W8A8-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: DeepSeek-V4-Flash-W8A8-A3.yaml
+      - name: DeepSeek-V4-Flash-W8A8-A3-MRV2
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-V4-Flash-W8A8-A3-MRV2.yaml
       - name: kimi-k2-thinking
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Kimi-K2-Thinking.yaml
