@@ -92,9 +92,11 @@ RUN cd /vllm-workspace/vllm && \
     python3 -m pip install setuptools-rust && \
     ./build_rust.sh
 
-# Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
-RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc
-RUN echo "export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib" >> ~/.bashrc
+# Make runtime library settings available to non-interactive processes.
+RUN ln -sf "/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2" \
+    /usr/local/lib/libjemalloc.so.2
+ENV LD_PRELOAD="/usr/local/lib/libjemalloc.so.2"
+ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib"
 
 # ===== Conditional installation based on BUILD_TYPE =====
 # All ARG definitions are in the same stage for better maintainability
