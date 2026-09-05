@@ -13,15 +13,16 @@ Provides two logging mechanisms:
 import logging
 import os
 import sys
-from datetime import datetime
 
 from vllm import envs
 from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
+from vllm_ascend.common.utils.log_file import DEFAULT_LOG_DIR, setup_log_dir_and_basename
+
 _FORMAT = "%(levelname)s %(asctime)s [%(fileinfo)s:%(lineno)d] %(message)s"
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
-_LOG_DIR = os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
+_LOG_DIR = DEFAULT_LOG_DIR
 _LOG_MAX_BYTES = 20 * 1024 * 1024
 
 
@@ -103,12 +104,11 @@ class RotatingAscendFileHandler(logging.FileHandler):
         vllm_ascend_{timestamp}_{pid}_003.log       <- third file
     """
 
-    def __init__(self, log_dir: str, max_bytes: int = _LOG_MAX_BYTES) -> None:
+    def __init__(self, log_dir: str, base_name: str, max_bytes: int = _LOG_MAX_BYTES) -> None:
         self._log_dir = log_dir
         self._max_bytes = max_bytes
         self._sequence = 1
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self._base_name = f"vllm_ascend_{timestamp}_{os.getpid()}"
+        self._base_name = base_name
         log_file = os.path.join(log_dir, f"{self._base_name}.log")
         super().__init__(log_file, encoding="utf-8")
 
@@ -138,9 +138,8 @@ def _setup_file_logging(log_dir: str | None = None) -> None:
     global _file_logging_configured, _file_handler
     if _file_logging_configured:
         return
-    target_dir = log_dir or _LOG_DIR
-    os.makedirs(target_dir, exist_ok=True)
-    file_handler = RotatingAscendFileHandler(target_dir)
+    target_dir, base_name = setup_log_dir_and_basename(log_dir)
+    file_handler = RotatingAscendFileHandler(target_dir, base_name)
     vllm_logger = logging.getLogger("vllm")
     ascend_logger = logging.getLogger("vllm_ascend")
     log_level = logging.INFO

@@ -181,12 +181,14 @@ class TestLoggerModule(TestBase):
         from datetime import datetime
         from unittest.mock import patch
 
+        from vllm_ascend.common.utils.log_file import setup_log_dir_and_basename
         from vllm_ascend.logger import RotatingAscendFileHandler
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            with patch("vllm_ascend.logger.datetime") as mock_datetime:
+            with patch("vllm_ascend.common.utils.log_file.datetime") as mock_datetime:
                 mock_datetime.now.return_value = datetime(2026, 8, 6, 0, 27, 15)
-                handler = RotatingAscendFileHandler(tmpdir, max_bytes=100)
+                log_dir, base_name = setup_log_dir_and_basename(tmpdir)
+                handler = RotatingAscendFileHandler(log_dir, base_name, max_bytes=100)
             base_filename = os.path.basename(handler.baseFilename)
             rotated_filename = f"{base_filename.removesuffix('.log')}_002.log"
             self.assertIn("_002715_", base_filename)
