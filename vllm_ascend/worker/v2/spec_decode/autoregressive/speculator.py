@@ -125,15 +125,17 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
-        parallel_config = replace(
+        # This is a runtime view of the already configured model. Rebuilding
+        # VllmConfig re-runs platform defaults for the draft and can overwrite
+        # the target's shared cache config (e.g. Qwen3.5 MTP resets 1536 to 128).
+        draft_config = copy(self.vllm_config)
+        draft_config.model_config = self.draft_model_config
+        draft_config.cache_config = copy(self.vllm_config.cache_config)
+        draft_config.parallel_config = replace(
             self.vllm_config.parallel_config,
             pipeline_parallel_size=1,
         )
-        return replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
-        )
+        return draft_config
 
     @property
     def draft_prefill_attn_groups(self) -> list[list[AttentionGroup]]:
