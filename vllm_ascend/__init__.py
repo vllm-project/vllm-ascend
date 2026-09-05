@@ -84,9 +84,11 @@ def register_connector():
 def register_model_loader():
     _ensure_global_patch()
 
+    from .model_loader.bigtensorloader import register_bigtensor_loader
     from .model_loader.netloader import register_netloader
     from .model_loader.rfork import register_rforkloader
 
+    register_bigtensor_loader()
     register_netloader()
     register_rforkloader()
 
