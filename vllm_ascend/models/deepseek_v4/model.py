@@ -87,6 +87,8 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     extract_dsv4_layer_index,
     get_dsv4_compress_ratio,
+    olora_tp_enable,
+    oproj_tp_enable,
 )
 from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
@@ -526,6 +528,9 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_a",
             return_bias=False,
         )
+        # DSA paths that bypass the Linear method use
+        # npu_transpose_batchmatmul, whose weight must remain ND.
+        self.wo_a.skip_weight_nz_conversion = oproj_tp_enable() or not olora_tp_enable()
         self.wo_b = RowParallelLinear(
             self.n_groups * config.o_lora_rank,
             self.dim,
