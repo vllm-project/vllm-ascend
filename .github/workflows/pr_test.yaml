@@ -49,6 +49,7 @@ jobs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       # Short hash used only for job-name display.
       main_commit_short: ${{ steps.vllm.outputs.main_commit_short }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
     steps:
@@ -96,6 +97,13 @@ jobs:
           # Short form is for display only (job names); main_commit keeps the
           # full hash for checkout refs and artifact names.
           echo "main_commit_short=${main_commit:0:7}" >> "$GITHUB_OUTPUT"
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${release_tag}" == "v0.27.1" ]] || {
+            echo "::error::Temporary dual-version validation requires v0.27.1"
+            exit 1
+          }
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "Validating main=${main_commit} and release=${release_tag}"
 
       - name: cp problem matchers
         run: |
@@ -224,11 +232,21 @@ jobs:
   cpu-ut:
     needs: pre-commit
     if: ${{ needs.pre-commit.result == 'success' }}
+    name: cpu-ut (vllm@${{ matrix.vllm_version_short }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - vllm_version: ${{ needs.pre-commit.outputs.main_commit }}
+            vllm_version_short: ${{ needs.pre-commit.outputs.main_commit_short }}
+          - vllm_version: ${{ needs.pre-commit.outputs.release_tag }}
+            vllm_version_short: ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
-      vllm: ${{ needs.pre-commit.outputs.main_commit }}
+      vllm: ${{ matrix.vllm_version }}
       ref: ${{ github.event.pull_request.head.sha }}
       base_ref: ${{ github.base_ref }}
+      base_sha: ${{ github.event.pull_request.base.sha }}
       test_groups: >-
         [{"partition_name":"cpu-ut","runner":"linux-amd64-cpu-8-hk","image_tag":"9.1.0-910b-ubuntu22.04-py3.12","npu_type":"cpu","num_npus":0,"tests":"tests/ut"}]
       enable-coverage: false
@@ -579,12 +597,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # vllm_version keeps the full hash (it becomes the checkout ref in
-        # _selected_tests.yaml); only the job name shows the short form.
-        vllm_version:
-          - ${{ needs.pre-commit.outputs.main_commit }}
-        vllm_version_short:
-          - ${{ needs.pre-commit.outputs.main_commit_short }}
+        include:
+          - vllm_version: ${{ needs.pre-commit.outputs.main_commit }}
+            vllm_version_short: ${{ needs.pre-commit.outputs.main_commit_short }}
+          - vllm_version: ${{ needs.pre-commit.outputs.release_tag }}
+            vllm_version_short: ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
