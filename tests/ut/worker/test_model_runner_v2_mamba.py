@@ -14,15 +14,37 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import (
     _allocate_kv_cache,
     _reshape_kv_cache_v2,
     get_kv_cache_spec,
 )
+from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.model_states import init_asecnd_model_state
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
     AscendMambaHybridModelState,
 )
+
+
+def _make_kv_cache_tensor(
+    size: int,
+    layer_names: list[str],
+    page_size: int = 0,
+    *,
+    layer_stride: int | None = None,
+    offset: int = 0,
+) -> KVCacheTensor:
+    """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.27.1"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
+    return KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=page_size if layer_stride is None else layer_stride,
+        block_stride=page_size,
+        offset=offset,
+    )
 
 
 def _mamba_spec() -> MambaSpec:
@@ -41,10 +63,11 @@ def _kv_cache_config(
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=[
-            KVCacheTensor(
-                size=num_blocks * spec.page_size_bytes,
-                shared_by=["linear_attn"],
-            )
+            _make_kv_cache_tensor(
+                num_blocks * spec.page_size_bytes,
+                ["linear_attn"],
+                spec.page_size_bytes,
+            ),
         ],
         kv_cache_groups=[
             KVCacheGroupSpec(
@@ -67,6 +90,10 @@ def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+
+
+def test_mrv2_advertises_standardized_shared_kv_backing():
+    assert NPUModelRunner.supports_standardized_shared_kv_backing is True
 
 
 def test_prepare_inputs_propagates_padded_request_count():
@@ -159,17 +186,32 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert attention_spec.page_size_bytes == 20
     assert mamba_spec.page_size_bytes == 20
 
+    if vllm_version_is("0.27.1"):
+        kv_cache_tensors = [
+            _make_kv_cache_tensor(40, ["full_attn", "linear_attn"], 20),
+            _make_kv_cache_tensor(40, ["mtp_attn"], 20),
+        ]
+    else:
+        kv_cache_tensors = [
+            _make_kv_cache_tensor(
+                80,
+                ["full_attn", "mtp_attn"],
+                20,
+                layer_stride=40,
+            ),
+            # Every descriptor aliases the same backing. The Mamba group starts
+            # at byte zero and overlays the first attention-layer region.
+            _make_kv_cache_tensor(
+                80,
+                ["linear_attn"],
+                20,
+                layer_stride=40,
+            ),
+        ]
+
     kv_cache_config = KVCacheConfig(
         num_blocks=2,
-        kv_cache_tensors=[
-            KVCacheTensor(
-                size=40,
-                shared_by=["full_attn", "linear_attn"],
-            ),
-            # Hybrid models can have an attention-only slot (for example an
-            # MTP layer). It must still use the common single-tensor layout.
-            KVCacheTensor(size=40, shared_by=["mtp_attn"]),
-        ],
+        kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=[
             KVCacheGroupSpec(
                 layer_names=["full_attn", "mtp_attn"],
@@ -188,8 +230,18 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     )
     raw_cache = raw_caches["linear_attn"]
     assert isinstance(raw_cache, torch.Tensor)
-    assert raw_caches["full_attn"] is raw_cache
-    assert isinstance(raw_caches["mtp_attn"], torch.Tensor)
+    full_attn_raw = raw_caches["full_attn"]
+    mtp_attn_raw = raw_caches["mtp_attn"]
+    assert isinstance(full_attn_raw, torch.Tensor)
+    assert isinstance(mtp_attn_raw, torch.Tensor)
+    if vllm_version_is("0.27.1"):
+        assert full_attn_raw is raw_cache
+    else:
+        assert full_attn_raw.data_ptr() == raw_cache.data_ptr()
+        backing_ptr = raw_cache.untyped_storage().data_ptr()
+        assert full_attn_raw.untyped_storage().data_ptr() == backing_ptr
+        assert mtp_attn_raw.untyped_storage().data_ptr() == backing_ptr
+        assert mtp_attn_raw.data_ptr() - backing_ptr == 40
 
     backend = MagicMock()
     backend.get_kv_cache_shape.return_value = (2, 2, 4, 1, 1)
@@ -230,6 +282,9 @@ def test_hybrid_cache_exposes_attention_views_and_mamba_states(_mock_config):
     assert value_cache.is_contiguous()
     assert mtp_key_cache.shape == key_cache.shape
     assert mtp_value_cache.shape == value_cache.shape
+    if not vllm_version_is("0.27.1"):
+        assert mtp_key_cache.data_ptr() - key_cache.data_ptr() == 40
+        assert mtp_value_cache.data_ptr() - value_cache.data_ptr() == 40
 
 
 @patch(
@@ -279,10 +334,11 @@ def test_attention_cache_reshape_uses_virtual_kernel_block_count(
         kv_cache_config=KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[
-                KVCacheTensor(
-                    size=raw_cache.numel(),
-                    shared_by=["mla_attn"],
-                )
+                _make_kv_cache_tensor(
+                    raw_cache.numel(),
+                    ["mla_attn"],
+                    spec.page_size_bytes,
+                ),
             ],
             kv_cache_groups=[
                 KVCacheGroupSpec(
@@ -348,7 +404,12 @@ def test_mamba_spec_follows_aligned_attention_spec(
 
     assert list(specs) == ["full_attn", "linear_attn"]
     assert specs["full_attn"].page_size_bytes == 20
-    assert specs["full_attn"].indexes_kv_by_block_stride is True
+    # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main;
+    # page_size_padded carries the padded/block-stride-indexed page there.
+    if vllm_version_is("0.27.1"):
+        assert specs["full_attn"].indexes_kv_by_block_stride is True
+    else:
+        assert specs["full_attn"].page_size_padded == 20
 
 
 @patch("vllm_ascend.worker.v2.attn_utils.get_layers_from_vllm_config")
@@ -398,8 +459,16 @@ def test_get_kv_cache_spec_aligns_nondivisible_attention_and_mamba_pages(
     specs = get_kv_cache_spec(MagicMock())
 
     assert {spec.page_size_bytes for spec in specs.values()} == {80}
-    assert specs["small_attn"].indexes_kv_by_block_stride is True
-    assert specs["large_attn"].indexes_kv_by_block_stride is True
+    # vLLM #51718 removed AttentionSpec.indexes_kv_by_block_stride on main.
+    # The marker is gone, so the main-lane assertions verify the observable
+    # alignment effect instead: the under-sized spec is padded to the common
+    # page, and the already-aligned spec reports the common page size.
+    if vllm_version_is("0.27.1"):
+        assert specs["small_attn"].indexes_kv_by_block_stride is True
+        assert specs["large_attn"].indexes_kv_by_block_stride is True
+    else:
+        assert specs["small_attn"].page_size_padded == 80
+        assert specs["large_attn"].page_size_bytes == 80
     assert specs["linear_attn"].page_size_padded == 80
 
 
