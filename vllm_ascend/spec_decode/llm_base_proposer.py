@@ -43,7 +43,7 @@ from vllm.v1.spec_decode.utils import (
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context, set_draft_moe_quant_type
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
@@ -358,6 +358,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             except (NotImplementedError, AttributeError, TypeError):
                 logger.warning("Draft model does not support multimodal inputs, falling back to text-only mode")
                 self.supports_mm_inputs: bool = False
+
+        # Cache the draft model's MoE quantization type at process level so
+        # select_moe_comm_method can decide mega moe vs original MoE for the
+        # draft forward without consulting the layer graph on every step.
+        set_draft_moe_quant_type(self.model)
 
         # Find draft layers (attention layers added by draft model)
         all_attn_layers = get_layers_from_vllm_config(
