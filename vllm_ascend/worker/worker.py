@@ -134,6 +134,14 @@ class NPUWorker(WorkerBase):
 
         adapt_patch()
 
+        # Worker processes receive a pickled VllmConfig, so the platform config
+        # hook (NPUPlatform.check_and_update_config) never runs here. Re-apply the
+        # Ascend V2 model runner overrides so the worker resolves the same
+        # runner version as the engine. Idempotent.
+        from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
+
+        apply_v2_model_runner_config_patch()
+
         # Register ops when worker init.
         from vllm_ascend import ops
 

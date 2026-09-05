@@ -21,7 +21,13 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
 @pytest.fixture(autouse=True)
-def default_vllm_config():
+def default_vllm_config(monkeypatch):
+    # Qwen3 now defaults to the V2 model runner, whose forward-context hook
+    # (NPUPlatform.set_additional_forward_context) queries TP/DP groups. This
+    # suite drives attention backends in a single process with no engine, so
+    # mock the group accessors, mirroring patch_distributed_groups above.
+    monkeypatch.setattr("vllm.distributed.get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr("vllm.distributed.get_dp_group", lambda: MagicMock(world_size=1))
     mock_config = MagicMock()
     mock_config.compilation_config = MagicMock()
     mock_config.compilation_config.custom_ops = ["all"]

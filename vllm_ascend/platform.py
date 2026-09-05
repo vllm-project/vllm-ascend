@@ -39,6 +39,7 @@ from vllm_ascend.device.hardware_profile import (
     QuantizationBackendFamily,
     get_current_hardware_profile,
 )
+from vllm_ascend.mrv2_utils import apply_v2_model_runner_config_patch
 
 # isort: off
 from vllm_ascend.utils import (
@@ -297,7 +298,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def pre_register_and_update(cls, parser: FlexibleArgumentParser | None = None) -> None:
-        # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
 
         adapt_patch(is_global_patch=True)
@@ -454,7 +454,18 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # Lazy import vllm/vllm-ascend to avoid circular import
+        # NOTE: This still monkey-patches VllmConfig by replacing the
+        # use_v2_model_runner property (the "patch way"). It is kept here
+        # because upstream vLLM does not yet expose a platform hook to
+        # customize the default V2 model runner decision; the whitelist
+        # logic itself lives in vllm_ascend.mrv2_utils.
+        # The upstream V2 validation is also neutralized, since Ascend fully
+        # owns the V2 enablement decision (e.g. it runs on 310P without
+        # Triton, which the upstream validation would reject).
+        # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
+        # override the default, and contribute the whitelist upstream.
+        apply_v2_model_runner_config_patch()
+
         from vllm_ascend.quantization.utils import maybe_auto_detect_quantization
         from vllm_ascend.logger import configure_ascend_file_logging, configure_ascend_logging
 

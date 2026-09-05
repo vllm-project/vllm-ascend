@@ -648,31 +648,6 @@
 #    Future Plan:
 #       Remove this patch once the supported vLLM version contains PR #44105.
 #
-# ** 22. File: platform/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       Upstream vLLM enables the v2 model runner not only via the
-#       VLLM_USE_V2_MODEL_RUNNER env var but also based on model
-#       architecture whitelists, Triton availability, and feature
-#       compatibility checks. On Ascend the NPU v2 runner is not yet
-#       compatible with all upstream-defaulted models and features, so
-#       enabling by model architecture can crash. We override the
-#       property to read only VLLM_USE_V2_MODEL_RUNNER, deferring
-#       model/framework checks to the NPU runner itself.
-#    How:
-#       Monkey-patch VllmConfig.use_v2_model_runner to return
-#       envs.VLLM_USE_V2_MODEL_RUNNER (defaulting to False when unset).
-#       worker/patch_v2/patch_use_v2_model_runner.py reuses this platform
-#       patch so EngineCore and worker processes share the same behavior.
-#    Related PR (if no, explain why):
-#       1. https://github.com/vllm-project/vllm-ascend/pull/11389
-#    Future Plan:
-#       Remove this patch once vllm-ascend fully supports the v2 model
-#       runner and can rely on upstream's default enablement heuristics
-#       (model architecture, Triton, feature checks) without crashes or
-#       degraded functionality.
-#
 # * Worker Patch:
 # ===============
 # Entries are listed in alphabetical order by file name.
@@ -1203,22 +1178,6 @@
 #    Future Plan:
 #       Remove this patch once vLLM selects the Triton libdevice through a
 #       backend-dispatch mechanism.
-#
-# ** 29. File: worker/patch_v2/patch_use_v2_model_runner.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.vllm.VllmConfig.use_v2_model_runner`
-#    Why:
-#       EngineCore subprocesses only load global/platform patches, while workers
-#       also import this compatibility module. The actual monkey-patch is defined
-#       in `platform/patch_use_v2_model_runner.py`.
-#    How：
-#       Reuse the platform patch so EngineCore and worker processes share the
-#       same `use_v2_model_runner` behavior.
-#    Related PR (if no, explain why):
-#       See platform/patch_use_v2_model_runner.py.
-#    Future Plan:
-#       Remove this module together with the platform patch once vllm-ascend
-#       fully supports the v2 model runner.
 #
 # ** 30. File: worker/patch_v2/patch_uva.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
