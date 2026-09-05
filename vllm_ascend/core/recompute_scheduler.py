@@ -1315,6 +1315,7 @@ class RecomputeScheduler(Scheduler):
                         kv_transfer_params=kv_transfer_params,
                         ec_transfer_params=ec_transfer_params,
                         trace_headers=request.trace_headers,
+                        prefill_stats=request.take_prefill_stats(),
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
