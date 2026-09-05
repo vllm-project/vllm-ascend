@@ -155,7 +155,7 @@ def test_a5_mla_preprocess_only_decode_supports_native_bf16_weights(use_mla_rope
     assert call_kwargs["cache_index"].shape == (num_tokens,)
 
 
-def test_reshape_and_cache_makes_scatter_inputs_contiguous():
+def test_reshape_and_cache_uses_legacy_op_without_copies():
     key = torch.randn(2, 3, 4).transpose(0, 1)
     value = torch.randn(2, 3, 4).transpose(0, 1)
     slot_mapping = torch.arange(8, dtype=torch.int32)[::2]
@@ -166,23 +166,20 @@ def test_reshape_and_cache_makes_scatter_inputs_contiguous():
     assert not value.is_contiguous()
     assert not slot_mapping.is_contiguous()
 
-    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_pa_kv_cache") as mock_scatter:
+    with (
+        mock.patch("vllm_ascend.device.device_op.torch_npu._npu_reshape_and_cache") as mock_reshape,
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_scatter_pa_kv_cache") as mock_scatter,
+    ):
         BaseDeviceAdaptor.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping)
 
-    mock_scatter.assert_called_once()
-    call_kwargs = mock_scatter.call_args.kwargs
-    assert call_kwargs["key"] is not key
-    assert call_kwargs["value"] is not value
-    assert call_kwargs["slot_mapping"] is not slot_mapping
-    assert call_kwargs["key"].is_contiguous()
-    assert call_kwargs["value"].is_contiguous()
-    assert call_kwargs["slot_mapping"].is_contiguous()
-    torch.testing.assert_close(call_kwargs["key"], key)
-    torch.testing.assert_close(call_kwargs["value"], value)
-    torch.testing.assert_close(call_kwargs["slot_mapping"], slot_mapping)
+    mock_reshape.assert_called_once()
+    mock_scatter.assert_not_called()
+    call_kwargs = mock_reshape.call_args.kwargs
+    assert call_kwargs["key"] is key
+    assert call_kwargs["value"] is value
+    assert call_kwargs["slot_indices"] is slot_mapping
     assert call_kwargs["key_cache"] is key_cache
     assert call_kwargs["value_cache"] is value_cache
-    assert call_kwargs["cache_mode"] == "Norm"
 
 
 def test_kv_cache_load_makes_seq_lens_contiguous():
