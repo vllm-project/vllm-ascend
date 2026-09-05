@@ -242,34 +242,40 @@ class AscendSharedExperts:
             shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(shared_out, dim=0)
 
-    def prepare_input_before_routed_experts(
+    def start_input_all_gather(
         self,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.npu.Event | None]:
-        """Start the SP-only input all-gather on the shared-expert stream."""
+        """Start an SP gather that can overlap the routed input transform."""
         if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
             return hidden_states, None
 
         input_ready = torch.npu.current_stream().record_event()
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
             torch.npu.current_stream().wait_event(input_ready)
-            hidden_states = self._gather_sp_input(hidden_states)
+            # Keep TP padding across the custom-op boundary; the shared MLP
+            # trims it before computation.
+            hidden_states = tensor_model_parallel_all_gather(hidden_states, dim=0)
             all_gather_done = torch.npu.current_stream().record_event()
         return hidden_states, all_gather_done
+
+    def wait_for_output(self) -> None:
+        """Join a deferred SP shared-output collective on the current stream."""
+        torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         fused_moe_evts: FusedMoEEvents,
         input_is_gathered: bool = False,
+        defer_output_wait: bool = False,
     ):
         mode = self.parallel_mode()
         local_dp_metadata = None
-        down_projection_ready = (
-            fused_moe_evts.after_routed_finalize
-            if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
-            else fused_moe_evts.before_combine
-        )
+        # The down projection only depends on the shared-expert activation and
+        # should overlap the routed-expert combine.  The later shared-output
+        # collective is the operation that must wait for routed finalization.
+        down_projection_ready = fused_moe_evts.before_combine
 
         def maybe_wait_event(evt: torch.npu.Event | None):
             if evt is not None:
@@ -405,8 +411,11 @@ class AscendSharedExperts:
                 maybe_wait_event(fused_moe_evts.after_routed_finalize)
                 shared_out = self._pad_and_reduce_scatter(shared_out)
 
-        # Make sure the default stream waits for the shared experts stream to finish.
-        if self.multistream_overlap:
+        # Defer only when a routed output transform can overlap this collective;
+        # otherwise preserve the original join point for non-latent models.
+        if self.multistream_overlap and (
+            mode is not SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY or not defer_output_wait
+        ):
             torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
 
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
