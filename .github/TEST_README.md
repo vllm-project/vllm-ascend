@@ -10,9 +10,42 @@ This document describes the CI workflows for `vllm-ascend`, how to add tests, an
 | `_selected_tests.yaml` | Called by `pr_test.yaml` | Runs tests selected by `select_tests.py` |
 | `_parse_trigger.yaml` | PR comment `/e2e` | Parses comment to run specific E2E tests |
 | `_pre_commit.yml` | Called by `pr_test.yaml` | Lint and format checks |
-| `schedule_nightly_test_a2.yaml` | Cron | Nightly E2E on A2 runners |
-| `schedule_nightly_test_a3.yaml` | Cron | Nightly E2E on A3 runners |
+| `nightly_image_build.yaml` | Cron (12:00 UTC) + dispatch | Builds `nightly-ci-main-{a2,a3,310p}` images; daily build/compile gate |
+| `schedule_daily_regression.yaml` | Cron (4x/day) + dispatch | High-freq regression: build gate + A2/A3 PR E2E smoke + nightly high-freq subset |
+| `_e2e_daily_tests.yaml` | Called by `schedule_daily_regression.yaml` | Checks out main HEAD, reinstalls, runs curated pytest subset |
+| `schedule_nightly_test_a2.yaml` | `workflow_dispatch` / `/nightly` | Full nightly E2E on A2 runners |
+| `schedule_nightly_test_a3.yaml` | `workflow_dispatch` / `/nightly` | Full nightly E2E on A3 runners |
 | `schedule_weekly_test_a3.yaml` | Cron | Weekly E2E on A3 runners |
+
+## Daily Regression Pipeline
+
+`schedule_daily_regression.yaml` runs **4x/day** during daytime (01:00, 04:00, 07:00,
+10:00 UTC = 09:00, 12:00, 15:00, 18:00 Beijing) to catch "broken window" regressions on
+`main` within ~3h. Each slot executes the **same curated fast subset** so any breakage is
+surfaced quickly and consistently. The 09:00 Beijing slot verifies the overnight nightly-ci
+image; the 18:00 Beijing slot ends before the 20:00 Beijing nightly image build.
+
+| Stage | Workflow / Job | Cadence | Budget |
+|-------|----------------|---------|--------|
+| Build / compile gate | `nightly_image_build.yaml` (scheduled) + `verify-image` job | 1x/day image build + per-slot smoke import | ~10 min |
+| A2 PR E2E smoke | `_e2e_daily_tests.yaml` (1-card subset) | 4x/day | ~42 min |
+| A3 PR E2E smoke | `_e2e_daily_tests.yaml` (two-card + four-card subsets) | 4x/day | ~28 min |
+| Nightly high-freq subset | `_e2e_daily_tests.yaml` (A2 + A3 nightly high-freq cases) | 4x/day | ~5 min |
+| Failure notification | `notify-failure` job (one tracking issue per day, deduplicated) | on failure | -- |
+
+The fast subset is defined in `.github/workflows/configs/daily_config.yaml` and resolved via the
+existing `resolve_nightly_tests.py --mode=matrix`. All jobs use the SAME lightweight executor
+(`_e2e_daily_tests.yaml`): checkout main HEAD → reinstall → pytest. Test selection is driven by
+the real `estimated_times` in `test_config.yaml` so every slot stays under 90 min (tests + ~20 min
+checkout+install+compile overhead).
+
+**To tune the subset:** edit `daily_config.yaml` -- append/trim `- name:` entries under
+`daily.a2_pr_e2e` / `daily.a3_pr_e2e_two_card` / `daily.a3_pr_e2e_four_card` /
+`daily.a2_nightly_hf` / `daily.a3_nightly_hf`. No workflow edit required.
+
+**Resource note:** A3 pool is constrained (max 5*16 NPUs). A3 matrices use `max-parallel: 2`
+to avoid starving the nightly/PR pool. Reduce cron frequency in `schedule_daily_regression.yaml`
+if A3 contention rises.
 
 ## Selective Testing System
 
