@@ -2030,7 +2030,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i]) for i in range(num_reqs)]
         )
-        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        # CpuGpuBuffer.copy_to_gpu uses non_blocking=True; on torch_npu the
+        # pinned H2D rides the SDMA engine, whose ordering w.r.t. subsequent
+        # compute kernels on the launch stream is not guaranteed. When the
+        # race is lost, the torch.where below consumes uninitialized memory
+        # (0xa5a5a5a5 marker) and the garbage ids reach the drafter's
+        # vocab-sized embedding gather, faulting the vector core (aivec MTE
+        # invalid GM address, EE9999, engine death). Payload is num_reqs
+        # int32 (<1KB) - a blocking copy is effectively free.
+        self.backup_next_token_ids.gpu[:num_reqs].copy_(
+            self.backup_next_token_ids.cpu[:num_reqs], non_blocking=False
+        )
 
         # Mask out the sampled tokens indices that should not be sampled.
         discard_sampled_tokens_req_indices = discard_request_indices[:num_discarded_requests]
