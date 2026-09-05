@@ -27,12 +27,38 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | :--- | :--- |
 | `lookup_rpc_port` | Port for RPC Communication Between Pooling Scheduler Process and Worker Process: Each Instance Requires a Unique Port Configuration. |
 | `load_async` | Whether to Enable Asynchronous Loading. The default value is false. |
+| `use_multiprocess` | Run block-level KV transfers in a worker-owned subprocess. The default value is false. See the mode details below. |
 | `backend` | Set the storage backend for kvpool (`mooncake`, `memcache`, `yuanrong`), with the default being `mooncake`. |
 | `consumer_is_to_put` | Whether Decode node put KV Cache into KV Pool. The default value is false. |
 | `consumer_is_to_load` | Whether Decode node load KV cache from KV Pool. The default value is false. |
 | `use_layerwise` | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the `memcache` backend. The default value is false. |
 | `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
 | `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
+
+### Multiprocess block transfers
+
+Set `"use_multiprocess": true` in `kv_connector_extra_config` to move the
+ordinary sending and receiving handlers out of the model worker. Each model
+worker starts and stops one transfer process automatically. The existing
+`AscendStoreConnector`, storage configuration and `load_async` setting still
+apply; no additional server command or port is required.
+
+Hybrid/Mamba caches, compressed caches and producer/consumer TP mismatch keep
+the existing block-transfer behavior in the subprocess. Layerwise transfer
+uses its existing layer threads because it does not use the ordinary sending
+and receiving handlers targeted by this option.
+
+Mooncake `0.3.12` or later is required when the multiprocess path uses the
+shared transfer engine. These versions support
+`register_memory(address, length, location)` for imported NPU memory. Mooncake
+SSD offload keeps its existing model-worker thread path because its setup uses
+the model worker's distributed rank. Backend and hardware combinations require
+separate NPU validation.
+
+When the process path is active, it owns the backend and its buffer
+registrations. Model workers retain their original KV allocations and ordering
+events until the transfers finish. A subprocess failure or operation timeout
+is reported as an error; timed-out writes are not automatically replayed.
 
 ### Environment Variable Configuration
 

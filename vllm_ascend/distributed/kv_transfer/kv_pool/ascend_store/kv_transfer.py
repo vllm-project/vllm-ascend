@@ -6,8 +6,10 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import Future
 from typing import Any
 
+import msgspec
 import numpy as np
 import torch
 from vllm.distributed.kv_events import BlockStored
@@ -1020,6 +1022,91 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             self.set_finished_request(req_id)
         finally:
             self.request_queue.task_done()
+
+
+class _ProcessTransferMixin(KVTransferThread):
+    """Keep request bookkeeping local while the child executes the handler."""
+
+    _operation: str
+
+    def __init__(self, *args, process, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._process = process
+        self._pending: set[Future] = set()
+        self._pending_condition = threading.Condition()
+        self._generations: dict[str, object] = {}
+
+    def add_request(self, request: ReqMeta) -> None:
+        self.raise_if_failed()
+        req_id, event_id = request.req_id, request.event_id
+        with self.done_task_lock:
+            generation = self._generations.setdefault(req_id, object())
+        future = self._process.submit_request(self._operation, request)
+        with self._pending_condition:
+            self._pending.add(future)
+        future.add_done_callback(lambda f: self._complete(f, req_id, event_id, generation))
+
+    def _complete(self, future: Future, req_id: str, event_id: int | None, generation: object) -> None:
+        try:
+            result = future.result()
+            with self.done_task_lock:
+                if generation is self._generations.get(req_id):
+                    if isinstance(self, KVCacheStoreRecvingThread):
+                        with self._invalid_block_ids_lock:
+                            self._invalid_block_ids.update(result["invalid_blocks"])
+                    if self._operation == "store":
+                        if req_id in self.stored_requests:
+                            self.stored_requests[req_id] -= 1
+                            if self.stored_requests[req_id] == 0:
+                                del self.stored_requests[req_id]
+                                self.finished_requests.add(req_id)
+                                self._generations.pop(req_id, None)
+                    elif result["finished"]:
+                        self.finished_requests.add(req_id)
+                        self._generations.pop(req_id, None)
+            self.update_kv_event([msgspec.convert(item, BlockStored) for item in result["events"]])
+            if isinstance(self, KVCacheStoreSendingThread) and event_id is not None:
+                with self.completed_events_lock:
+                    self.completed_events[event_id] = 1
+        except Exception as exc:
+            self._fatal_error = exc
+        finally:
+            with self._pending_condition:
+                self._pending.discard(future)
+                self._pending_condition.notify_all()
+
+    def discard_finished_requests(self, req_ids: set[str]) -> None:
+        with self.done_task_lock:
+            self.finished_requests -= req_ids
+            for req_id in req_ids:
+                self._generations.pop(req_id, None)
+
+    def raise_if_failed(self) -> None:
+        self._process.channel.raise_if_failed()
+        super().raise_if_failed()
+
+    def wait_for_pending(self) -> None:
+        deadline = time.monotonic() + self._process.channel.timeout
+        with self._pending_condition:
+            while self._pending:
+                self.raise_if_failed()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("Timed out waiting for KV transfer callbacks")
+                self._pending_condition.wait(remaining)
+        self.raise_if_failed()
+
+
+class KVCacheStoreSendingProcess(_ProcessTransferMixin, KVCacheStoreSendingThread):
+    """Parent-side sending state; no transfer thread runs in this process."""
+
+    _operation = "store"
+
+
+class KVCacheStoreRecvingProcess(_ProcessTransferMixin, KVCacheStoreRecvingThread):
+    """Parent-side receiving state and failed-block reporting."""
+
+    _operation = "load"
 
 
 class KVCacheStoreKeyLayerSendingThread(KVTransferThread):

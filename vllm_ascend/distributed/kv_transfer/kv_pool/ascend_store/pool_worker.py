@@ -42,7 +42,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
+    KVCacheStoreRecvingProcess,
     KVCacheStoreRecvingThread,
+    KVCacheStoreSendingProcess,
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
@@ -122,8 +124,8 @@ class KVPoolWorker:
         self._init_kv_transfer_config(vllm_config, extra_config, use_layerwise, kv_cache_config)
         self._init_key_head_config(model_config, parallel_config)
         self._init_metadata(model_config, vllm_config, extra_config)
-        self._init_backend(parallel_config, extra_config)
         self._init_kv_events(vllm_config)
+        self._init_backend(parallel_config, extra_config)
         self._init_state_vars()
         self._init_layerwise_config()
 
@@ -148,6 +150,9 @@ class KVPoolWorker:
 
     def _init_kv_transfer_config(self, vllm_config, extra_config, use_layerwise, kv_cache_config) -> None:
         self._extra_config = extra_config
+        self.use_multiprocess = extra_config.get("use_multiprocess", False)
+        if not isinstance(self.use_multiprocess, bool):
+            raise ValueError("use_multiprocess must be a boolean")
         self.use_layerwise = use_layerwise
         self.kv_role = vllm_config.kv_transfer_config.kv_role
         self.load_async = extra_config.get("load_async", False)
@@ -314,6 +319,31 @@ class KVPoolWorker:
         self.token_database.cache_coordinator = self.cache_coordinator
 
     def _init_backend(self, parallel_config, extra_config) -> None:
+        self.transfer_process = None
+        self.m_store: Any
+        use_transfer_process = self.use_multiprocess and not self.use_layerwise
+        if use_transfer_process:
+            from .mp.transfer_backend import requires_model_worker_backend
+
+            use_transfer_process = not requires_model_worker_backend(self.backend_name)
+        if use_transfer_process:
+            from .mp.transfer import KVTransferProcess
+
+            self.transfer_process = KVTransferProcess(
+                dict(
+                    backend=self.backend_name,
+                    device_index=torch.npu.current_device(),
+                    tp_rank=self.tp_rank,
+                    tp_size=self.tp_size,
+                    dcp_size=self.dcp_size,
+                    put_step=self.put_step,
+                    kv_role=self.kv_role,
+                    enable_kv_events=self.enable_kv_events,
+                    lazy_init=self.use_compress,
+                )
+            )
+            self.m_store = self.transfer_process
+            return
         backend = backend_map.get(self.backend.lower())
         assert backend is not None
         backend_path = backend.get("path")
@@ -481,6 +511,33 @@ class KVPoolWorker:
 
     def _start_kv_transfer_threads(self) -> None:
         if self._transfer_threads_started:
+            return
+
+        if self.transfer_process is not None:
+            common = dict(
+                m_store=self.m_store,
+                token_database=self.token_database,
+                block_size=self.grouped_block_size,
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                dcp_size=self.dcp_size,
+                process=self.transfer_process,
+            )
+            if self.kv_role in ["kv_producer", "kv_both"] or self.consumer_is_to_put:
+                self.kv_send_thread = KVCacheStoreSendingProcess(
+                    **common,
+                    put_step=self.put_step,
+                    kv_role=self.kv_role,
+                    group_uses_align_state=self.group_uses_align_state,
+                    enable_kv_event=self.enable_kv_events,
+                )
+            if self.load_async:
+                self.kv_recv_thread = KVCacheStoreRecvingProcess(
+                    **common,
+                    invalid_block_ids=self._invalid_block_ids,
+                    invalid_block_ids_lock=self._invalid_block_ids_lock,
+                )
+            self._transfer_threads_started = True
             return
 
         if self.use_layerwise:
@@ -841,7 +898,11 @@ class KVPoolWorker:
         # directly here (like main) — no separate init_backend handshake.
         if self.use_layerwise_transfer:
             self.m_store.ensure_initialized()
-        self.m_store.register_buffer(ptrs, lengths)
+        process = self.transfer_process
+        if process is not None:
+            process.register_kv_caches(self, kv_caches, ptrs, lengths)
+        else:
+            self.m_store.register_buffer(ptrs, lengths)
         self._start_kv_transfer_threads()
 
     def start_load_kv(self, metadata: AscendConnectorMetadata):
@@ -1749,7 +1810,9 @@ class KVPoolWorker:
             if can_save is None or not can_save:
                 continue
             if current_event is None:
-                current_event = torch.npu.Event()
+                current_event = (
+                    torch.npu.Event(interprocess=True) if self.transfer_process is not None else torch.npu.Event()
+                )
                 current_event.record()
             request.skip_null_blocks_by_group = self.group_uses_align_state
             request.current_event = current_event
@@ -1757,7 +1820,15 @@ class KVPoolWorker:
             send_thread.add_request(request)
 
         if current_event is not None:
-            send_thread.request_queue.join()
+            if isinstance(send_thread, KVCacheStoreSendingProcess):
+                send_thread.wait_for_pending()
+            else:
+                send_thread.request_queue.join()
+
+    def close(self) -> None:
+        process = self.transfer_process
+        if process is not None:
+            process.close()
 
     def retrieve_layer(
         self,
@@ -2065,6 +2136,12 @@ class KVPoolWorker:
             send_thread.dec_stored_request(req_id)  # type: ignore[attr-defined]
 
     def get_finished(self, finished_req_ids: set[str], meta: AscendConnectorMetadata) -> tuple[set[str], set[str]]:
+        process = self.transfer_process
+        if process is not None:
+            process.channel.raise_if_failed()
+            for transfer in (self.kv_send_thread, self.kv_recv_thread):
+                if transfer is not None:
+                    transfer.raise_if_failed()
         if self.kv_send_thread is not None:
             send_thread = self.kv_send_thread
             for req_id in meta.preempted_req_ids:
