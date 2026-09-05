@@ -32,12 +32,17 @@ import sys
 import types
 from unittest.mock import MagicMock
 
-try:
-    # Note: do not import torch here for cpu env, which will lead to circle import error.
-    subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
-    _npu_available = True
-except (subprocess.CalledProcessError, FileNotFoundError):
+if "--pd-unit" in sys.argv:
+    # This must happen before torch/platform imports. The CLI option is
+    # registered below; explicit PD UT never probes or uses an available NPU.
     _npu_available = False
+else:
+    try:
+        # Note: do not import torch here for cpu env, which will lead to circle import error.
+        subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
+        _npu_available = True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        _npu_available = False
 
 if not _npu_available:
     triton_runtime = MagicMock()
@@ -235,24 +240,51 @@ if not _npu_available:
         return_value=(MagicMock(), MagicMock())
     )
 
-adapt_patch()
-adapt_patch(True)
 
-# register Ascend CustomOp here because uts will use this
-register_ascend_customop()
+def pytest_addoption(parser):
+    parser.addoption(
+        "--pd-unit",
+        action="store_true",
+        help="Run PD control-plane UT without registering unrelated model/worker patches or NPU operators.",
+    )
 
-if not _npu_available:
-    import torch
 
-    from tests.ut.helpers.golden_copy_and_expand import npu_copy_and_expand_eagle_inputs_stub
+def pytest_configure(config):
+    # PD control-plane tests exercise real connectors and dependency types, not
+    # model execution. Importing every model patch here couples their collection
+    # to unrelated model APIs. Keep the default full UT setup unchanged.
+    if config.getoption("--pd-unit"):
+        return
+    adapt_patch()
+    adapt_patch(True)
+    register_ascend_customop()
 
-    enable_custom_op()
-    if hasattr(torch.ops, "_C_ascend") and not hasattr(torch.ops._C_ascend, "npu_copy_and_expand_eagle_inputs"):
-        torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs = npu_copy_and_expand_eagle_inputs_stub
-    # Re-sync after enable_custom_op / adapt_patch so @patch("torch.npu.*") hits
-    # the same object production code uses via `torch.npu`.
-    torch.npu.current_device = MagicMock(return_value="cpu")
-    sys.modules["torch.npu"] = torch.npu
+    if not _npu_available:
+        import torch
+
+        from tests.ut.helpers.golden_copy_and_expand import npu_copy_and_expand_eagle_inputs_stub
+
+        enable_custom_op()
+        if hasattr(torch.ops, "_C_ascend") and not hasattr(torch.ops._C_ascend, "npu_copy_and_expand_eagle_inputs"):
+            torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs = npu_copy_and_expand_eagle_inputs_stub
+        torch.npu.current_device = MagicMock(return_value="cpu")
+        sys.modules["torch.npu"] = torch.npu
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--pd-unit"):
+        return
+    allowed = (
+        "tests/ut/distributed/kv_transfer/kv_p2p/",
+        "tests/ut/distributed/kv_transfer/test_ascend_multi_connector.py::",
+        "tests/ut/distributed/kv_transfer/utils/test_memfabric_transfer_engine.py::",
+        "tests/ut/core/test_dyntra_lb_scheduler.py::",
+        "tests/ut/core/test_dyntra_lb_recompute_scheduler.py::",
+    )
+    outside_pd = [item.nodeid for item in items if not item.nodeid.startswith(allowed)]
+    if outside_pd:
+        raise pytest.UsageError("--pd-unit is restricted to PD control-plane tests: " + outside_pd[0])
+
 
 # Clean up any stale mock modules that may have been installed by
 # other test files (e.g., ascend_store/_mock_deps.py) which replace
@@ -267,28 +299,55 @@ for _m in _stale_modules:
 
 
 @pytest.fixture(autouse=True)
+def _pd_unit_network_boundary(request, monkeypatch):
+    """Fail closed if a PD UT accidentally opens a server or real connection."""
+    if not request.config.getoption("--pd-unit"):
+        yield
+        return
+    import socket
+
+    import zmq
+
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+
+    def reject_network(*args, **kwargs):
+        raise AssertionError("PD UT must fake the transport boundary; real bind/connect/listen is forbidden")
+
+    for method in ("bind", "connect", "connect_ex", "listen"):
+        monkeypatch.setattr(socket.socket, method, reject_network)
+    for method in ("bind", "connect"):
+        monkeypatch.setattr(zmq.Socket, method, reject_network)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_enable_sp_before_test():
     clear_enable_sp()
     yield
 
 
 @pytest.fixture(autouse=True)
-def _reset_stream_globals_before_test():
+def _reset_stream_globals_before_test(request):
     """Avoid cross-test leakage from utils.current_stream() caching."""
-    import vllm_ascend.ops.fused_moe.moe_utils as moe_utils_mod
     import vllm_ascend.utils as utils_mod
+
+    moe_utils_mod = None
+    if not request.config.getoption("--pd-unit"):
+        import vllm_ascend.ops.fused_moe.moe_utils as moe_utils_mod
 
     utils_mod._CURRENT_STREAM = None
     utils_mod._GLOBAL_STREAM = None
     if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
         utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    if moe_utils_mod is not None:
+        moe_utils_mod.COMM_STREAM = None
     yield
     utils_mod._CURRENT_STREAM = None
     utils_mod._GLOBAL_STREAM = None
     if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
         utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    if moe_utils_mod is not None:
+        moe_utils_mod.COMM_STREAM = None
 
 
 @pytest.fixture(autouse=True)

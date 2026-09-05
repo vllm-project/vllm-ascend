@@ -2464,6 +2464,7 @@ class MooncakeConnectorWorker:
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
         lengths: list[int] = []
+        registered_regions: set[tuple[int, int]] = set()
         private_layer_tensors: list[torch.Tensor] = []
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
@@ -2494,6 +2495,10 @@ class MooncakeConnectorWorker:
                 continue
             if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
                 raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
+            region = (base_addr, kv_cache_tensor.size)
+            if region in registered_regions:
+                continue
+            registered_regions.add(region)
             ptrs.append(base_addr)
             lengths.append(kv_cache_tensor.size)
 
@@ -2534,6 +2539,10 @@ class MooncakeConnectorWorker:
     def _get_registered_kv_tensor_buffers_hybrid(
         self, kv_caches: dict[str, torch.Tensor]
     ) -> tuple[list[int], list[int]]:
+        if self.kv_cache_config.kv_cache_tensors and hasattr(self.kv_cache_config.kv_cache_tensors[0], "layers"):
+            # Multiple placements can alias one allocation, with logical views
+            # at non-zero offsets. Recover and deduplicate that backing region.
+            return self._get_registered_kv_tensor_buffers(kv_caches)
         ptrs: list[int] = []
         lengths: list[int] = []
 

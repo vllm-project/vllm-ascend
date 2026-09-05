@@ -1,4 +1,3 @@
-import sys
 import threading
 import time
 import types
@@ -9,14 +8,9 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
+from vllm.v1.request import RequestStatus
 
-fake_engine = types.ModuleType("mooncake.engine")
-fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
-sys.modules["mooncake.engine"] = fake_engine
-
-from vllm.v1.request import RequestStatus  # noqa: E402
-
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (  # noqa: E402
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import (
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
     MooncakeConnectorScheduler,
