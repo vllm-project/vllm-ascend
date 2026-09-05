@@ -14,8 +14,12 @@ from vllm_ascend._310p.fused_moe.fused_moe import (
     AscendUnquantizedFusedMoEMethod310,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
+    PreparedSharedExpertInput,
+    RoutedMoEMilestones,
+)
 from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
-from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedMoEEvents
+from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts
 
 
 def _build_runner() -> AscendMoERunner310:
@@ -229,19 +233,14 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
+    prepared_shared_input = PreparedSharedExpertInput(hidden_states)
     ascend_shared_experts = SimpleNamespace(
-        prepare_input_before_routed_experts=MagicMock(return_value=(hidden_states, None)),
+        prepare_input_async=MagicMock(return_value=prepared_shared_input),
         forward=MagicMock(return_value=shared_out),
     )
-    routed_events = FusedMoEEvents(
-        before_routed_experts=None,
-        after_routed_experts=None,
-        before_dispatch=None,
-        before_gmm2=None,
-        before_combine=None,
-    )
+    milestones = RoutedMoEMilestones()
     runner.routed_experts = SimpleNamespace(
-        forward_impl=MagicMock(return_value=(routed_out, routed_events) if has_shared_experts else routed_out)
+        forward_impl=MagicMock(return_value=(routed_out, milestones) if has_shared_experts else routed_out)
     )
     runner.ascend_shared_experts = ascend_shared_experts if has_shared_experts else None
     runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
@@ -260,7 +259,10 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
         )
         assert result[0] is shared_out
         assert result[1] is routed_out
-        ascend_shared_experts.forward.assert_called_once()
+        ascend_shared_experts.forward.assert_called_once_with(
+            prepared_shared_input,
+            milestones,
+        )
     else:
         runner.routed_experts.forward_impl.assert_called_once_with(
             hidden_states=hidden_states,

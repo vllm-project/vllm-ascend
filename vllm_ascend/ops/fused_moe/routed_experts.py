@@ -36,10 +36,10 @@ from vllm_ascend.eplb.core.eplb_utils import init_eplb_config
 from vllm_ascend.lora.fused_moe import sync_lora_context
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights, build_fused_experts_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import RoutedMoEMilestones
 from vllm_ascend.ops.fused_moe.force_eplb import get_force_eplb_topk
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl, FusedExpertsResult
 from vllm_ascend.ops.fused_moe.moe_utils import get_moe_num_logical_experts
-from vllm_ascend.ops.fused_moe.shared_experts import FusedMoEEvents
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, maybe_trans_nz
 
@@ -699,12 +699,10 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             sync_lora_context(self.quant_method, None)
 
         if self.return_with_event:
-            return routed_out, FusedMoEEvents(
-                before_routed_experts=None,
-                after_routed_experts=None,
-                before_dispatch=fused_experts_results.before_dispatch_evt,
-                before_gmm2=fused_experts_results.before_gmm2_evt,
-                before_combine=fused_experts_results.before_combine_evt,
+            return routed_out, RoutedMoEMilestones(
+                routed_dispatch_start=fused_experts_results.before_dispatch_evt,
+                routed_gmm2_start=fused_experts_results.before_gmm2_evt,
+                routed_combine_start=fused_experts_results.before_combine_evt,
             )
 
         # The vLLM FusedMoE forward_impl does not return events.

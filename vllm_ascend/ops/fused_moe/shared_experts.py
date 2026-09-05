@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import wraps
 
@@ -30,24 +29,15 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.fused_moe import has_lora
-from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import (
-    npu_stream_switch,
-    shared_experts_calculation_stream,
+from vllm_ascend.ops.fused_moe.dataclass.shared_experts import (
+    PreparedSharedExpertInput,
+    RoutedMoEMilestones,
 )
+from vllm_ascend.quantization.quant_type import QuantType
+from vllm_ascend.utils import npu_stream_switch, shared_experts_calculation_stream
 
 # CANN uses 36 to select FP8 E4M3FN output for situ_mx_quant.
 SITU_MX_DST_TYPE_E4M3FN = 36
-
-
-@dataclass
-class FusedMoEEvents:
-    before_routed_experts: torch.npu.Event
-    after_routed_experts: torch.npu.Event | None = field(default=None)
-    before_dispatch: torch.npu.Event | None = field(default=None)
-    before_gmm2: torch.npu.Event | None = field(default=None)
-    before_combine: torch.npu.Event | None = field(default=None)
-    after_routed_finalize: torch.npu.Event | None = field(default=None)
 
 
 class SharedExpertParallelMode(Enum):
@@ -57,6 +47,14 @@ class SharedExpertParallelMode(Enum):
     SHARED_EXPERT_DATA_PARALLEL_ONLY = auto()  # Full activations, replicated weights (DP only).
     SEQUENCE_PARALLEL_ONLY = auto()  # Sharded activations, TP-sharded weights (SP only).
     SEQUENCE_PARALLEL_SEDP = auto()  # Sharded activations, replicated weights (SP + DP).
+
+
+class SharedExpertMLPPath(Enum):
+    """Shared MLP implementation selected for a quantization scenario."""
+
+    A8_INT_FUSED = auto()  # W8A8/W4A8: explicit A8 quant + fused activation quant.
+    A8_MXFP_FUSED = auto()  # W4A8MXFP: explicit MXFP8 activation pipeline.
+    LINEAR_WRAPPER = auto()  # Dense, other quant schemes, or any active LoRA.
 
 
 class AscendSharedExperts:
@@ -155,7 +153,19 @@ class AscendSharedExperts:
         return shared_gate_up
 
     def part2(self, hidden_states: torch.Tensor, shared_gate_up: torch.Tensor):
-        shared_act = self.layer.act_fn(shared_gate_up)  # type: ignore
+        shared_act = self._activate(shared_gate_up)
+        return self._down_project(hidden_states, shared_act)
+
+    def _activate(self, shared_gate_up: torch.Tensor) -> torch.Tensor:
+        """Run the Vector stage between the two shared-expert projections."""
+        return self.layer.act_fn(shared_gate_up)  # type: ignore
+
+    def _down_project(
+        self,
+        hidden_states: torch.Tensor,
+        shared_act: torch.Tensor,
+    ) -> torch.Tensor:
+        """Run the second Cube stage and the optional output gate."""
         shared_out, _ = self.layer.down_proj(shared_act)  # type: ignore
 
         # Qwen3-Next specific gating mechanism
@@ -242,172 +252,291 @@ class AscendSharedExperts:
             shared_out = F.pad(shared_out, (0, 0, 0, pad_size))
         return tensor_model_parallel_reduce_scatter(shared_out, dim=0)
 
-    def prepare_input_before_routed_experts(
+    def prepare_input_async(
         self,
         hidden_states: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.npu.Event | None]:
+    ) -> PreparedSharedExpertInput:
         """Start the SP-only input all-gather on the shared-expert stream."""
         if not (self.multistream_overlap and self.parallel_mode() is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY):
-            return hidden_states, None
+            return PreparedSharedExpertInput(hidden_states=hidden_states)
 
         input_ready = torch.npu.current_stream().record_event()
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
             torch.npu.current_stream().wait_event(input_ready)
             hidden_states = self._gather_sp_input(hidden_states)
             all_gather_done = torch.npu.current_stream().record_event()
-        return hidden_states, all_gather_done
+        return PreparedSharedExpertInput(
+            hidden_states=hidden_states,
+            is_gathered=True,
+            ready_event=all_gather_done,
+        )
+
+    def _wait_for_milestone(
+        self,
+        event: torch.npu.Event | None,
+        name: str,
+    ) -> None:
+        """Wait for a required routed milestone when multistream is enabled."""
+        if not self.multistream_overlap:
+            return
+        if event is None:
+            raise RuntimeError(f"Missing {name} event while shared-expert multistream is enabled.")
+        torch.npu.current_stream().wait_event(event)
+
+    def _prepare_execution_input(
+        self,
+        prepared_input: PreparedSharedExpertInput,
+        milestones: RoutedMoEMilestones,
+        mode: SharedExpertParallelMode,
+    ) -> tuple[torch.Tensor, tuple[int, int] | None]:
+        self._wait_for_milestone(
+            milestones.shared_input_ready,
+            "shared_input_ready",
+        )
+        hidden_states = prepared_input.hidden_states
+        local_dp_metadata = None
+        if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
+            # Full activations + replicated weights: shard tokens locally,
+            # run the MLP, then gather its complete output.
+            hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
+        elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY and not prepared_input.is_gathered:
+            # TP-sharded weights require full activations. Multistream starts
+            # this gather in prepare_input_async; the serial path does it here.
+            hidden_states = self._gather_sp_input(hidden_states)
+        return hidden_states, local_dp_metadata
+
+    def _run_a8_int_mlp(
+        self,
+        hidden_states: torch.Tensor,
+        milestones: RoutedMoEMilestones,
+        down_projection_ready: torch.npu.Event | None,
+        down_projection_milestone: str,
+    ) -> torch.Tensor:
+        original_dtype = hidden_states.dtype
+        # Vector dynamic quant overlaps the Cube-heavy router gate.
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+        self._wait_for_milestone(
+            milestones.router_output_ready,
+            "router_output_ready",
+        )
+        # Gate-up is Cube-heavy. From router_output_ready it overlaps the
+        # routed AllGather prepare communication, or All2All preprocessing and
+        # its forward exchange.
+        gate_up = torch_npu.npu_quant_matmul(
+            quantized_x,
+            self.layer.gate_up_proj.weight,
+            self.layer.gate_up_proj.weight_scale,
+            pertoken_scale=None,
+            bias=None,
+            output_dtype=torch.int32,
+        )
+
+        self._wait_for_milestone(
+            milestones.routed_gmm2_start,
+            "routed_gmm2_start",
+        )
+        if self.situ_activation is not None:
+            quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
+                x=gate_up,
+                weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
+                activation_scale=pertoken_scale,
+                bias=None,
+                quant_scale=None,
+                quant_offset=None,
+                group_index=None,
+                beta=self.situ_activation.beta,
+                linear_beta=self.situ_activation.linear_beta or 0.0,
+                activate_left=True,
+                quant_mode="dynamic",
+            )
+        else:
+            quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+                x=gate_up,
+                weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
+                activation_scale=pertoken_scale,
+                bias=None,
+                quant_scale=None,
+                quant_offset=None,
+                group_index=None,
+                activate_left=True,
+                quant_mode=1,
+                swiglu_mode=1,
+                clamp_limit=self.swiglu_limit,
+                **(
+                    {}
+                    if not get_current_hardware_profile().supports(HardwareCapability.FUSED_SWIGLU_TUNING_ARGS)
+                    else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
+                ),
+            )
+        self._wait_for_milestone(
+            down_projection_ready,
+            down_projection_milestone,
+        )
+        return torch_npu.npu_quant_matmul(
+            quantized_x,
+            self.layer.down_proj.weight,
+            self.layer.down_proj.weight_scale,
+            pertoken_scale=swiglu_out_scale,
+            bias=None,
+            output_dtype=original_dtype,
+        )
+
+    def _run_a8_mxfp_mlp(
+        self,
+        hidden_states: torch.Tensor,
+        milestones: RoutedMoEMilestones,
+        down_projection_ready: torch.npu.Event | None,
+        down_projection_milestone: str,
+    ) -> torch.Tensor:
+        quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
+            hidden_states,
+            dst_type=torch.float8_e4m3fn,
+        )
+        self._wait_for_milestone(
+            milestones.router_output_ready,
+            "router_output_ready",
+        )
+        gate_up = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
+
+        self._wait_for_milestone(
+            milestones.routed_gmm2_start,
+            "routed_gmm2_start",
+        )
+        if self.situ_activation is not None:
+            quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
+                x=gate_up,
+                beta=self.situ_activation.beta,
+                linear_beta=self.situ_activation.linear_beta or 0.0,
+                activate_left=True,
+                dst_type=SITU_MX_DST_TYPE_E4M3FN,
+            )
+        else:
+            quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
+                gate_up,
+                topk_weight=None,
+                group_index=None,
+                dst_type=torch.float8_e4m3fn,
+                quant_mode=2,
+                clamp_value=self.swiglu_limit,
+            )
+        self._wait_for_milestone(
+            down_projection_ready,
+            down_projection_milestone,
+        )
+        return self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
+
+    def _run_linear_wrapped_mlp(
+        self,
+        hidden_states: torch.Tensor,
+        milestones: RoutedMoEMilestones,
+        down_projection_ready: torch.npu.Event | None,
+        down_projection_milestone: str,
+    ) -> torch.Tensor:
+        self._wait_for_milestone(
+            milestones.router_output_ready,
+            "router_output_ready",
+        )
+        gate_up = self.part1(hidden_states)
+
+        if self.multistream_overlap:
+            # CV parallelism: overlap the shared-expert Vector activation
+            # with the routed-expert GMM2 Cube work.  Keep both projections
+            # behind their communication windows so two Cube-heavy kernels
+            # are not deliberately launched at the same milestone.
+            self._wait_for_milestone(
+                milestones.routed_gmm2_start,
+                "routed_gmm2_start",
+            )
+            shared_act = self._activate(gate_up)
+            self._wait_for_milestone(
+                down_projection_ready,
+                down_projection_milestone,
+            )
+            return self._down_project(hidden_states, shared_act)
+
+        self._wait_for_milestone(
+            down_projection_ready,
+            down_projection_milestone,
+        )
+        return self.part2(hidden_states, gate_up)
+
+    def _run_shared_mlp(
+        self,
+        hidden_states: torch.Tensor,
+        milestones: RoutedMoEMilestones,
+        mode: SharedExpertParallelMode,
+    ) -> torch.Tensor:
+        if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+            down_projection_ready = milestones.routed_finalize_done
+            down_projection_milestone = "routed_finalize_done"
+        else:
+            down_projection_ready = milestones.routed_combine_start
+            down_projection_milestone = "routed_combine_start"
+
+        path = self._select_mlp_path()
+        if path is SharedExpertMLPPath.A8_INT_FUSED:
+            return self._run_a8_int_mlp(
+                hidden_states,
+                milestones,
+                down_projection_ready,
+                down_projection_milestone,
+            )
+        if path is SharedExpertMLPPath.A8_MXFP_FUSED:
+            return self._run_a8_mxfp_mlp(
+                hidden_states,
+                milestones,
+                down_projection_ready,
+                down_projection_milestone,
+            )
+        return self._run_linear_wrapped_mlp(
+            hidden_states,
+            milestones,
+            down_projection_ready,
+            down_projection_milestone,
+        )
+
+    def _select_mlp_path(self) -> SharedExpertMLPPath:
+        """Select a path without changing the quantization scheme's math.
+
+        Only schemes with a proven split activation-quant pipeline bypass the
+        registered linear wrappers.  W8A8MXFP, W8A8FP, W4A4MXFP and other
+        schemes continue through those wrappers.  Active LoRA always needs the
+        wrapper path so its adapter computation is preserved.
+        """
+        has_quantized_shared_without_lora = (
+            not has_lora(self.lora_context)
+            and hasattr(self.layer.gate_up_proj, "weight_scale")
+            and hasattr(self.layer.down_proj, "weight_scale")
+        )
+        if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            return SharedExpertMLPPath.A8_INT_FUSED
+        if has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
+            return SharedExpertMLPPath.A8_MXFP_FUSED
+        return SharedExpertMLPPath.LINEAR_WRAPPER
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
-        fused_moe_evts: FusedMoEEvents,
-        input_is_gathered: bool = False,
-    ):
+        prepared_input: PreparedSharedExpertInput,
+        milestones: RoutedMoEMilestones,
+    ) -> torch.Tensor:
         mode = self.parallel_mode()
-        local_dp_metadata = None
-        down_projection_ready = (
-            fused_moe_evts.after_routed_finalize
-            if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
-            else fused_moe_evts.before_combine
-        )
-
-        def maybe_wait_event(evt: torch.npu.Event | None):
-            if evt is not None:
-                torch.npu.current_stream().wait_event(evt)
-
+        shared_done = None
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
-            if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
-                # Full activations + replicated weights: shard tokens locally,
-                # run the MLP, then gather its complete output.
-                maybe_wait_event(fused_moe_evts.before_routed_experts)
-                hidden_states, local_dp_metadata = self._prepare_local_dp_input(hidden_states)
-            elif mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
-                # Sharded activations + TP-sharded weights: gather the SP
-                # shard to full activations before the MLP; the output is
-                # padded and reduce-scattered back below.
-                if not input_is_gathered:
-                    maybe_wait_event(fused_moe_evts.before_routed_experts)
-                    hidden_states = self._gather_sp_input(hidden_states)
-            # Only used for int quantization
-            has_quantized_shared_without_lora = (
-                not has_lora(self.lora_context)
-                and hasattr(self.layer.gate_up_proj, "weight_scale")
-                and hasattr(self.layer.down_proj, "weight_scale")
+            hidden_states, local_dp_metadata = self._prepare_execution_input(
+                prepared_input,
+                milestones,
+                mode,
             )
-            if has_quantized_shared_without_lora and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
-                original_dtype = hidden_states.dtype
-                # Execute dynamic quant concurrently with MoE gate.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-                quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
-                # Execute the gate projection and activation concurrently with the
-                # dispatch communication.
-                maybe_wait_event(fused_moe_evts.after_routed_experts)
-                hidden_states = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self.layer.gate_up_proj.weight,
-                    self.layer.gate_up_proj.weight_scale,
-                    pertoken_scale=None,
-                    bias=None,
-                    output_dtype=torch.int32,
-                )
-                # Execute activation concurrently with gmm2.
-
-                maybe_wait_event(fused_moe_evts.before_gmm2)
-                if self.situ_activation is not None:
-                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.dequant_situ_quant(
-                        x=hidden_states,
-                        weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
-                        activation_scale=pertoken_scale,
-                        bias=None,
-                        quant_scale=None,
-                        quant_offset=None,
-                        group_index=None,
-                        beta=self.situ_activation.beta,
-                        linear_beta=self.situ_activation.linear_beta or 0.0,
-                        activate_left=True,
-                        quant_mode="dynamic",
-                    )
-                else:
-                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
-                        x=hidden_states,
-                        weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
-                        activation_scale=pertoken_scale,
-                        bias=None,
-                        quant_scale=None,
-                        quant_offset=None,
-                        group_index=None,
-                        activate_left=True,
-                        quant_mode=1,
-                        swiglu_mode=1,
-                        clamp_limit=self.swiglu_limit,
-                        **(
-                            {}
-                            if not get_current_hardware_profile().supports(HardwareCapability.FUSED_SWIGLU_TUNING_ARGS)
-                            else {"glu_alpha": self.swiglu_alpha, "glu_bias": self.swiglu_beta}
-                        ),
-                    )
-                maybe_wait_event(down_projection_ready)
-                shared_out = torch_npu.npu_quant_matmul(
-                    quantized_x,
-                    self.layer.down_proj.weight,
-                    self.layer.down_proj.weight_scale,
-                    pertoken_scale=swiglu_out_scale,
-                    bias=None,
-                    output_dtype=original_dtype,
-                )
-            elif has_quantized_shared_without_lora and self.quant_type == QuantType.W4A8MXFP:
-                original_dtype = hidden_states.dtype
-                # Execute dynamic quant concurrently with MoE gate.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-                quantized_x, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
-                    hidden_states, dst_type=torch.float8_e4m3fn
-                )
-                # Execute the gate projection and activation concurrently with the
-                # dispatch communication.
-                maybe_wait_event(fused_moe_evts.before_dispatch)
-                hidden_states = self.layer.gate_up_proj((quantized_x, pertoken_scale))[0]
-                # Execute activation concurrently with gmm2.
-                maybe_wait_event(fused_moe_evts.before_gmm2)
-                if self.situ_activation is not None:
-                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.situ_mx_quant(
-                        x=hidden_states,
-                        beta=self.situ_activation.beta,
-                        linear_beta=self.situ_activation.linear_beta or 0.0,
-                        activate_left=True,
-                        dst_type=SITU_MX_DST_TYPE_E4M3FN,
-                    )
-                else:
-                    quantized_x, swiglu_out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                        hidden_states,
-                        topk_weight=None,
-                        group_index=None,
-                        dst_type=torch.float8_e4m3fn,
-                        quant_mode=2,
-                        clamp_value=self.swiglu_limit,
-                    )
-                maybe_wait_event(down_projection_ready)
-                shared_out = self.layer.down_proj((quantized_x, swiglu_out_scale))[0]
-            else:
-                # Ensure the shared experts wait for hidden_states to be ready.
-                torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
-                # Execute the gate projection and activation concurrently with the
-                # dispatch communication.
-                maybe_wait_event(fused_moe_evts.before_dispatch)
-                part1_out = self.part1(hidden_states)
-                maybe_wait_event(down_projection_ready)
-                shared_out = self.part2(hidden_states, part1_out)
-
-        if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
-            # Keep the shared-expert output collective on the auxiliary stream,
-            # but start it only after routed dispatch/combine/finalize
-            # communication has completed.
-            with npu_stream_switch(shared_experts_calculation_stream(), enabled=True):
-                maybe_wait_event(fused_moe_evts.after_routed_finalize)
+            shared_out = self._run_shared_mlp(hidden_states, milestones, mode)
+            if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY:
+                # Down projection already waits for routed_finalize_done. Keep
+                # the output collective ordered behind it on the same stream.
                 shared_out = self._pad_and_reduce_scatter(shared_out)
+            if self.multistream_overlap:
+                shared_done = torch.npu.current_stream().record_event()
 
-        # Make sure the default stream waits for the shared experts stream to finish.
-        if self.multistream_overlap:
-            torch.npu.current_stream().wait_stream(shared_experts_calculation_stream())
+        if shared_done is not None:
+            torch.npu.current_stream().wait_event(shared_done)
 
         if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
             assert local_dp_metadata is not None
