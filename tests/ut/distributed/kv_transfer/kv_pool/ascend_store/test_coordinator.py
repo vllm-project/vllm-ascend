@@ -17,12 +17,16 @@
 
 import unittest
 from dataclasses import dataclass, replace
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 # isort: off
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import coordinator as module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import get_block_hashes
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
     AscendStoreCoordinator,
@@ -63,35 +67,25 @@ class _FakeCompressedSpec:
         return replace(self, block_size=block_size)
 
 
-class _FakeCompressedManager:
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes,
-        max_length,
-        kv_cache_group_ids,
-        block_pool,
-        kv_cache_spec,
-        drop_eagle_block=False,
-        alignment_tokens=16,
-        **kwargs,
-    ):
-        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
-        logical_block_size = kv_cache_spec.block_size
-        if logical_block_size != block_pool.hash_block_size:
-            scale_factor = logical_block_size // block_pool.hash_block_size
-            block_hashes = [
-                block_hashes[index + scale_factor - 1]
-                for index in range(0, len(block_hashes) // scale_factor * scale_factor, scale_factor)
-            ]
-        max_blocks = max_length // logical_block_size
-        for block_hash in list(block_hashes)[:max_blocks]:
-            cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
-            if not cached:
-                break
-            for blocks, block in zip(computed, cached):
-                blocks.append(block)
-        return computed, len(computed[0]) * logical_block_size
+@dataclass(frozen=True)
+class _CompressedFullSpec(FullAttentionSpec):
+    compress_ratio: int = 1
+
+
+def test_empty_eagle_groups_and_legacy_spec_copy():
+    coordinator = AscendStoreCoordinator([], 4, 4, [], [], use_eagle=True)
+    assert coordinator.attention_groups == []
+    assert coordinator.eagle_attn_group_indices == set()
+    assert coordinator.eagle_reachable_group_ids == set()
+
+    @dataclass(frozen=True)
+    class LegacySpec:
+        block_size: int
+        other: str
+
+    original = LegacySpec(4, "preserved")
+    assert module._copy_spec_with_block_size(original, 8) == LegacySpec(8, "preserved")
+    assert original.block_size == 4
 
 
 class TestAscendStoreCoordinator(unittest.TestCase):
@@ -120,14 +114,17 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
         with patch(
             "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
-            return_value=_FakeCompressedManager,
+            return_value=FullAttentionManager,
         ):
             coord = AscendStoreCoordinator(
                 [
                     KVCacheGroupSpec(
                         ["layer.0"],
-                        _FakeCompressedSpec(
+                        _CompressedFullSpec(
                             block_size=128 * 128,
+                            num_kv_heads=1,
+                            head_size=1,
+                            dtype=torch.float32,
                             compress_ratio=128,
                         ),
                     )
@@ -259,3 +256,98 @@ class TestAscendStoreCoordinator(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_external_pool_requires_every_requested_group():
+    pool = ExternalCachedBlockPool(4, {(0, b"a"), (1, b"a")})
+    assert pool.get_cached_block(b"a", [0, 1]) == [pool._present_block, pool._present_block]
+    assert pool.get_cached_block(b"a", [0, 2]) is None
+    assert pool.get_cached_block(b"b", [0]) is None
+    assert pool.get_cached_block(b"b", []) == []
+
+
+def test_spec_unwrapping_and_copy_preserve_original():
+    spec = _full_spec(4)
+    wrapped = UniformTypeKVCacheSpecs(block_size=4, kv_cache_specs={"a": spec})
+    assert module._unwrap_spec(wrapped) is spec
+    assert module._copy_spec_with_block_size(spec, 4) is spec
+    assert module._copy_spec_with_block_size(spec, 8).block_size == 8
+    legacy = _FakeCompressedSpec(4, 8)
+    assert module._copy_spec_with_block_size(legacy, 8) == _FakeCompressedSpec(8, 8)
+    assert legacy.block_size == 4
+
+
+@pytest.mark.parametrize("registry_status", ["missing_module", "missing_registry", "miss"])
+def test_manager_registry_falls_back_to_legacy_map_and_caches(monkeypatch, registry_status):
+    spec = _full_spec(4)
+    manager = object()
+    registry = SimpleNamespace(get_manager_class=MagicMock(return_value=None))
+
+    def import_dependency(name):
+        if name == "vllm.v1.kv_cache_spec_registry":
+            if registry_status == "missing_module":
+                raise ImportError(name)
+            return SimpleNamespace(KVCacheSpecRegistry=registry if registry_status == "miss" else None)
+        assert name == "vllm.v1.core.single_type_kv_cache_manager"
+        return SimpleNamespace(spec_manager_map={type(spec): manager})
+
+    importer = MagicMock(side_effect=import_dependency)
+    monkeypatch.setattr(module, "import_module", importer)
+    monkeypatch.setattr(module._get_manager_class, "_manager_class_cache", {}, raising=False)
+    assert module._get_manager_class(spec) is manager
+    assert module._get_manager_class(spec) is manager
+    assert importer.call_count == 2
+
+
+@pytest.mark.parametrize("failure", ["import", "lookup"])
+def test_manager_registry_reports_missing_spec_with_original_cause(monkeypatch, failure):
+    monkeypatch.setattr(module._get_manager_class, "_manager_class_cache", {"registry": None}, raising=False)
+    importer = MagicMock(return_value=SimpleNamespace(spec_manager_map={}))
+    if failure == "import":
+        importer.side_effect = ImportError("old vllm")
+    monkeypatch.setattr(module, "import_module", importer)
+    with pytest.raises(AssertionError, match="No manager registered") as error:
+        module._get_manager_class(_full_spec(4))
+    assert isinstance(error.value.__cause__, (ImportError, KeyError))
+
+
+@pytest.mark.parametrize("unsupported", ["retention_interval", "num_prompt_tokens", "other_option"])
+def test_reachability_wrapper_retries_legacy_signature_with_required_arguments(unsupported):
+    reach = MagicMock(side_effect=[TypeError(f"unexpected keyword {unsupported}"), [False, True]])
+    manager = SimpleNamespace(reachable_block_mask=reach)
+    spec = _sliding_spec(4, 8)
+    kwargs = dict(
+        start_block=0,
+        end_block=2,
+        alignment_tokens=4,
+        kv_cache_spec=spec,
+        use_eagle=True,
+        retention_interval=8,
+        num_prompt_tokens=16,
+    )
+    assert module._reachable_block_mask(manager, **kwargs) == [False, True]
+    assert reach.call_args_list[0].kwargs == kwargs
+    assert reach.call_args_list[1].kwargs == dict(
+        start_block=0, end_block=2, alignment_tokens=4, kv_cache_spec=spec, use_eagle=True
+    )
+    assert kwargs["retention_interval"] == 8
+    assert module._reachable_block_mask(SimpleNamespace(), **kwargs) is None
+
+
+@pytest.mark.parametrize("with_full", [False, True])
+@pytest.mark.parametrize("eagle", [False, True])
+def test_hybrid_hit_converges_across_real_cache_managers(with_full, eagle):
+    specs = [_sliding_spec(4, 8), _sliding_spec(4, 12)]
+    if with_full:
+        specs.insert(0, _full_spec(4))
+    groups = [KVCacheGroupSpec([f"layer.{i}"], spec) for i, spec in enumerate(specs)]
+    coord = AscendStoreCoordinator(groups, 4, 4, [4] * len(groups), ["c1"] * len(groups), use_eagle=eagle)
+    hashes = _hashes(6)
+    exists = {(g, h) for g in range(len(groups)) for h in hashes[:4]}
+    masks, length = coord.find_longest_cache_hit(hashes, 24, ExternalCachedBlockPool(4, exists))
+    assert length == (12 if eagle else 16)
+    assert len(masks) == len(groups)
+    assert all(len(mask) == length // 4 for mask in masks)
+    load_masks = coord.load_mask(hashes, 16)
+    assert len(load_masks) == len(groups)
+    assert all(len(mask) == 4 and mask[-1] for mask in load_masks)

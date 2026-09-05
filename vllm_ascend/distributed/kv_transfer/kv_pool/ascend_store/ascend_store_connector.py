@@ -335,13 +335,18 @@ class LookupKeyServer:
             zmq.REP,  # type: ignore[attr-defined]
             bind=True,
         )
+        # Periodically observe close() even when no scheduler is connected.
+        self.socket.setsockopt(zmq.RCVTIMEO, 100)
 
         self.pool_worker = pool_worker
         self.running = True
 
         def process_request():
             while self.running:
-                all_frames = self.socket.recv_multipart(copy=False)
+                try:
+                    all_frames = self.socket.recv_multipart(copy=False)
+                except zmq.Again:
+                    continue
                 token_len = int.from_bytes(all_frames[0], byteorder="big")
                 kv_group_ids = self.decoder.decode([all_frames[1]])
                 hbm_hit_tokens = int.from_bytes(all_frames[2], byteorder="big")
@@ -366,4 +371,10 @@ class LookupKeyServer:
         self.thread.start()
 
     def close(self):
+        self.running = False
+        self.thread.join(timeout=1)
+        if self.thread.is_alive():
+            # Do not close a ZeroMQ socket while its owning thread is using it.
+            raise TimeoutError("KV pool lookup thread did not stop within one second")
         self.socket.close(linger=0)
+        self.ctx.term()

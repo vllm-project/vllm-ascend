@@ -201,6 +201,8 @@ class KVPoolWorker:
     def _init_key_head_config(self, model_config, parallel_config) -> None:
         self.current_layer = 0
         self.num_layers = model_config.get_num_layers(parallel_config)
+        # MTP cache discovery may expand num_layers; keep its base index stable.
+        self._base_num_layers = self.num_layers
 
         if self.use_mla:
             self.num_kv_head = 1
@@ -362,7 +364,7 @@ class KVPoolWorker:
             base_layers = getattr(
                 self.hf_config,
                 "num_hidden_layers",
-                self.num_layers,
+                self._base_num_layers,
             )
             physical_layers = {
                 self._extract_physical_layer_index(layer_name)
@@ -622,7 +624,7 @@ class KVPoolWorker:
         )
 
     def _infer_group_uses_align_state(self) -> list[bool]:
-        if self.kv_cache_config is None:
+        if self.kv_cache_config is None or not self.kv_cache_config.kv_cache_groups:
             return [False]
 
         group_uses_align_state: list[bool] = []
@@ -680,7 +682,7 @@ class KVPoolWorker:
         base_layers = getattr(
             self.hf_config,
             "num_hidden_layers",
-            self.num_layers,
+            self._base_num_layers,
         )
         return get_layerwise_physical_layer_index(layer_name, base_layers)
 

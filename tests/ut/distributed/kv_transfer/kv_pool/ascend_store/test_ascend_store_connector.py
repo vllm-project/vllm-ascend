@@ -1,33 +1,162 @@
-#
-# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-# isort: off
-import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+import pytest
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.v1.serial_utils import MsgpackEncoder
+
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store import ascend_store_connector as connector_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector import (
     AscendStoreConnector,
     AscendStoreKVEvents,
 )
 
-# isort: on
+
+@pytest.fixture
+def lookup_server(monkeypatch):
+    context, socket, thread = MagicMock(), MagicMock(), MagicMock()
+    thread.is_alive.return_value = False
+    constructor = MagicMock(return_value=thread)
+    monkeypatch.setattr(connector_module.zmq, "Context", MagicMock(return_value=context))
+    monkeypatch.setattr(connector_module, "make_zmq_socket", MagicMock(return_value=socket))
+    monkeypatch.setattr(connector_module.threading, "Thread", constructor)
+    config = types.SimpleNamespace(
+        parallel_config=types.SimpleNamespace(data_parallel_rank=0),
+        kv_transfer_config=types.SimpleNamespace(kv_connector_extra_config={}),
+    )
+    worker = MagicMock(lookup_scheduler=MagicMock(return_value=12))
+    server = connector_module.LookupKeyServer(worker, config)
+    return server, worker, socket, context, thread, constructor
+
+
+def test_lookup_server_decodes_frames_and_encodes_hit_length(lookup_server):
+    server, worker, socket, context, thread, constructor = lookup_server
+    encoder = MsgpackEncoder()
+    socket.recv_multipart.return_value = [
+        (16).to_bytes(4, "big"),
+        encoder.encode([0, 1])[0],
+        (8).to_bytes(4, "big"),
+        *encoder.encode([b"a", b"b"]),
+    ]
+    socket.send.side_effect = lambda response: setattr(server, "running", False)
+    constructor.call_args.kwargs["target"]()
+    worker.lookup_scheduler.assert_called_once_with(16, [b"a", b"b"], [0, 1], use_layerwise=False, hbm_hit_tokens=8)
+    socket.send.assert_called_once_with((12).to_bytes(4, "big"))
+    thread.start.assert_called_once_with()
+    server.close()
+    socket.close.assert_called_once_with(linger=0)
+
+
+def test_lookup_server_close_stops_thread_and_releases_context(lookup_server):
+    server, _, socket, context, thread, _ = lookup_server
+    thread.is_alive.return_value = False
+    server.close()
+    assert server.running is False
+    thread.join.assert_called_once()
+    socket.close.assert_called_once_with(linger=0)
+    context.term.assert_called_once_with()
+
+
+def test_lookup_server_receive_timeout_observes_shutdown(lookup_server):
+    server, worker, socket, context, thread, constructor = lookup_server
+
+    def timeout():
+        server.running = False
+        raise connector_module.zmq.Again()
+
+    socket.recv_multipart.side_effect = lambda **kwargs: timeout()
+    constructor.call_args.kwargs["target"]()
+    worker.lookup_scheduler.assert_not_called()
+    socket.setsockopt.assert_called_once_with(connector_module.zmq.RCVTIMEO, 100)
+    server.close()
+    context.term.assert_called_once_with()
+
+
+def test_lookup_server_close_does_not_destroy_socket_used_by_pending_lookup(lookup_server):
+    server, _, socket, context, thread, _ = lookup_server
+    thread.is_alive.return_value = True
+    with pytest.raises(TimeoutError, match="lookup thread did not stop"):
+        server.close()
+    thread.join.assert_called_once_with(timeout=1)
+    socket.close.assert_not_called()
+    context.term.assert_not_called()
+    thread.is_alive.return_value = False
+    server.close()
+    socket.close.assert_called_once_with(linger=0)
+    context.term.assert_called_once_with()
+
+
+def test_connector_scheduler_and_worker_metadata_delegation():
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    connector.connector_scheduler = MagicMock()
+    connector.connector_worker = MagicMock()
+    request, pool = object(), object()
+    assert (
+        connector.request_finished_all_groups(request, ([1], [2]))
+        is connector.connector_scheduler.request_finished_all_groups.return_value
+    )
+    connector.connector_scheduler.request_finished_all_groups.assert_called_once_with(request, ([1], [2]))
+    connector.bind_gpu_block_pool(pool)
+    connector.connector_scheduler.bind_gpu_block_pool.assert_called_once_with(pool)
+    assert (
+        connector.build_connector_worker_meta() is connector.connector_worker.build_connector_worker_meta.return_value
+    )
+
+
+def test_connector_mamba_copy_failure_clears_buffers():
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    buffers = object()
+    connector._mamba_copy_bufs = buffers
+    with (
+        patch.object(
+            connector_module.mamba_utils, "finish_mamba_copy_by_layer", side_effect=RuntimeError("copy failed")
+        ),
+        pytest.raises(RuntimeError, match="copy failed"),
+    ):
+        connector.finish_mamba_state_copy()
+    assert connector._mamba_copy_bufs is None
+    connector.finish_mamba_state_copy()
+
+
+def test_worker_connector_ignores_empty_output_and_repeated_finish_without_forward():
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    connector.connector_scheduler = None
+    connector._kv_cache_events = None
+    connector.update_connector_output(types.SimpleNamespace(kv_cache_events=None))
+    assert connector._kv_cache_events is None
+    connector.connector_worker = MagicMock(get_finished=MagicMock(return_value=({"a"}, {"b"})))
+    connector._connector_metadata = object()
+    connector._current_step_has_real_forward = False
+    assert connector.get_finished({"a"}) == ({"a"}, {"b"})
+    connector.connector_worker.ensure_store_initialized.assert_not_called()
+
+
+def test_legacy_connector_name_keeps_scheduler_configuration(monkeypatch):
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+    config = TestAscendStoreConnector()._make_vllm_config()
+    config.kv_transfer_config.kv_connector = "MooncakeConnectorStoreV1"
+    scheduler = MagicMock()
+    monkeypatch.setattr(connector_module, "KVPoolScheduler", scheduler)
+    connector = AscendStoreConnector(config, KVConnectorRole.SCHEDULER, types.SimpleNamespace())
+    assert connector.connector_scheduler is scheduler.return_value
+    assert scheduler.call_args.args[0] is config
+
+
+def test_connector_store_initialization_failure_resets_forward_flag():
+    connector = AscendStoreConnector.__new__(AscendStoreConnector)
+    connector.connector_worker = MagicMock()
+    connector._connector_metadata = object()
+    connector._current_step_has_real_forward = True
+    connector.connector_worker.ensure_store_initialized.side_effect = RuntimeError("init failed")
+    with pytest.raises(RuntimeError, match="init failed"):
+        connector.get_finished(set())
+    assert connector._current_step_has_real_forward is False
+    connector.connector_worker.get_finished.assert_not_called()
 
 
 def _mock_events(num_workers=1):
@@ -508,5 +637,15 @@ class TestAscendStoreConnectorLayerwise(unittest.TestCase):
             self.assertFalse(connector.prepare_mamba_state_copy(MagicMock()))
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestAscendStoreConnectorContract(unittest.TestCase):
+    """Regression tests for connector-level load failure reporting."""
+
+    def test_get_block_ids_with_load_errors_forwards_to_worker(self):
+        connector = AscendStoreConnector.__new__(AscendStoreConnector)
+        connector.connector_worker = MagicMock()
+        connector.connector_worker.get_block_ids_with_load_errors.return_value = {3, 7}
+
+        result = connector.get_block_ids_with_load_errors()
+
+        self.assertEqual(result, {3, 7})
+        connector.connector_worker.get_block_ids_with_load_errors.assert_called_once_with()

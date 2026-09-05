@@ -577,3 +577,65 @@ def test_packed_cache_tensor_descriptors_are_rejected():
             kv_cache_config,
             _make_vllm_config(3, 1),
         )
+
+
+@pytest.mark.parametrize("connector", [None, "OtherConnector", "MultiConnector"])
+def test_absent_or_unrecognized_reuse_configuration(connector):
+    config = SimpleNamespace(
+        kv_connector=connector,
+        kv_connector_extra_config={"connectors": [None, "invalid", {}]},
+    )
+    assert get_layerwise_reuse_config(config) is None
+    assert get_layerwise_reuse_config(None) is None
+
+
+@pytest.mark.parametrize(
+    ("layers", "extra", "error", "message"),
+    [
+        (0, None, ValueError, "num_layers"),
+        (3, {"layerwise_num_shared_buffers": "bad"}, TypeError, "must be an integer"),
+        (3, {"layerwise_num_shared_buffers": []}, TypeError, "must be an integer"),
+        (3, {"layerwise_prefetch_layers": 0}, ValueError, "at least 1"),
+        (3, {"layerwise_independent_layers": [-4]}, ValueError, "out-of-range"),
+        (3, {"layerwise_independent_layers": [3]}, ValueError, "out-of-range"),
+    ],
+)
+def test_layout_rejects_invalid_boundaries(layers, extra, error, message):
+    with pytest.raises(error, match=message):
+        build_layerwise_cache_layout(layers, extra)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_plan_without_connector_or_with_one_tensor_keeps_identity(enabled):
+    tensors = [KVCacheTensor(size=16, shared_by=["model.layers.0.attn"])]
+    config = SimpleNamespace(kv_cache_tensors=tensors)
+    vllm_config = _make_vllm_config(1, 1)
+    if not enabled:
+        vllm_config.kv_transfer_config = None
+
+    apply_layerwise_kv_cache_plan(config, vllm_config)
+
+    assert config.kv_cache_tensors is tensors
+    vllm_config.model_config.get_num_layers.assert_not_called()
+
+
+@pytest.mark.parametrize("mismatch", ["size", "indexer_spec"])
+def test_merge_rejects_incompatible_components_without_mutating_plan(mismatch):
+    main = _make_sfa_main_spec()
+    indexer = _make_sfa_indexer_spec()
+    specs = {f"model.layers.{i}.attn": main for i in range(3)}
+    specs.update({f"model.layers.{i}.indexer.k_cache": indexer for i in (1, 2)})
+    if mismatch == "indexer_spec":
+        specs["model.layers.2.indexer.k_cache"] = _make_full_attention_spec()
+    tensors = [KVCacheTensor(size=16, shared_by=[name]) for name in specs]
+    if mismatch == "size":
+        tensors[2].size = 32
+    config = SimpleNamespace(
+        kv_cache_tensors=tensors,
+        kv_cache_groups=[SimpleNamespace(layer_names=[name], kv_cache_spec=spec) for name, spec in specs.items()],
+    )
+
+    with pytest.raises(ValueError, match="Layers sharing layerwise KV buffers"):
+        apply_layerwise_kv_cache_plan(config, _make_vllm_config(3, 1))
+
+    assert config.kv_cache_tensors is tensors

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -10,138 +11,113 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
-from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheTensor, MambaSpec, UniformTypeKVCacheSpecs
 from vllm.v1.kv_offload.base import CanonicalKVCaches
-from vllm.v1.kv_offload.config import (
-    OffloadingCacheConfig,
-    OffloadingConfig,
-    OffloadingGroupConfig,
-    OffloadingModelConfig,
-    OffloadingParallelConfig,
-)
-from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu import (
-    NPUOffloadingWorker,
-)
-from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu import NPUOffloadingSpec
+from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native import offloading_connector as module
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
     AscendOffloadingConnector,
     AscendOffloadingConnectorWorker,
     _canonicalize_split_attention_cache,
+    _make_int8_block_view,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
-def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
-    return OffloadingConfig(
-        groups=(
-            OffloadingGroupConfig(
-                tokens_per_block=16,
-                layer_names=("model.layers.0.self_attn",),
-            ),
-        ),
-        worker_kv_bytes_per_block=64,
-        enable_kv_cache_events=False,
-        extra_config=extra_config,
-        engine_id="test-engine",
-        model=OffloadingModelConfig(
-            name="test-model",
-            dtype="bfloat16",
-        ),
-        cache=OffloadingCacheConfig(
-            tokens_per_hash=16,
-            blocks_per_chunk=2,
-        ),
-        parallel=OffloadingParallelConfig(
-            rank=0,
-            world_size=2,
-            tp_size=2,
-            pp_size=1,
-            pcp_size=1,
-            dcp_size=1,
-            data_parallel_index=0,
-            is_parallelism_agnostic=True,
-            **(
-                {}
-                if vllm_version_is("0.27.1")
-                else {
-                    "data_parallel_size": 1,
-                    "data_parallel_rank_local": None,
-                }
-            ),
-        ),
+@pytest.mark.parametrize(("shape", "blocks"), [((), 1), ((1, 4), 2)])
+def test_block_view_rejects_insufficient_physical_blocks(shape, blocks):
+    with pytest.raises(ValueError, match="too few physical blocks"):
+        _make_int8_block_view(torch.empty(shape, dtype=torch.int8), blocks, 1, 4)
+
+
+@pytest.mark.parametrize(("factor", "stride", "message"), [(1, 2, "overlap"), (2, 8, "Cannot coalesce")])
+def test_block_view_rejects_overlapping_or_padded_coalesced_storage(factor, stride, message):
+    tensor = torch.empty(64, dtype=torch.int8).as_strided((4, 4), (stride, 1))
+    with pytest.raises(ValueError, match=message):
+        _make_int8_block_view(tensor, 2, factor, 4)
+
+
+@pytest.mark.parametrize("parts", [[], [None]])
+def test_split_cache_requires_nonempty_tensor_sequence(parts):
+    with pytest.raises(TypeError, match="one or more tensors"):
+        _canonicalize_split_attention_cache(parts, 2, 8)
+
+
+def test_split_cache_rejects_empty_payload_and_incomplete_page():
+    with pytest.raises(ValueError, match="non-empty"):
+        _canonicalize_split_attention_cache([torch.empty(2, 0)], 2, 8)
+    with pytest.raises(ValueError, match="do not cover one logical page"):
+        _canonicalize_split_attention_cache([torch.empty(2, 3, dtype=torch.int8)], 2, 8)
+
+
+def make_adapter(groups, descriptors=()):
+    worker = AscendOffloadingConnectorWorker.__new__(AscendOffloadingConnectorWorker)
+    worker.kv_cache_config = SimpleNamespace(num_blocks=2, kv_cache_groups=groups, kv_cache_tensors=descriptors)
+    worker._init_worker = MagicMock()
+    return worker
+
+
+@pytest.mark.parametrize("packed", [False, True])
+def test_mixed_tensor_and_split_layout_deduplicates_shared_references(packed):
+    spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=2, dtype=torch.int8)
+    tensor = torch.arange(48, dtype=torch.int8).as_strided((2, 8), (16, 1), 4)
+    part = torch.arange(16, dtype=torch.int8).reshape(4, 4)
+    uniform = UniformTypeKVCacheSpecs(block_size=2, kv_cache_specs={"plain": spec, "split": spec, "alias": spec})
+    groups = [
+        SimpleNamespace(layer_names=["plain", "split", "alias"], kv_cache_spec=uniform),
+        SimpleNamespace(layer_names=["split"], kv_cache_spec=spec),
+    ]
+    descriptor = KVCacheTensor(size=48, shared_by=["plain"], block_stride=16 if packed else 0)
+    worker = make_adapter(groups, [descriptor])
+    worker.register_kv_caches({"plain": tensor, "split": (part, part), "alias": (part, part)})
+    result = worker._init_worker.call_args.args[0]
+    assert len(result.tensors) == 2
+    assert result.tensors[0].tensor.data_ptr() == tensor.data_ptr()
+    assert result.tensors[0].tensor.stride(0) == (16 if packed else 8)
+    assert [ref.tensor_idx for ref in result.group_data_refs[0]] == [0, 1, 1]
+    assert [ref.tensor_idx for ref in result.group_data_refs[1]] == [1]
+
+
+def test_compatible_groups_delegate_to_upstream_without_adaptation(monkeypatch):
+    spec = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=2, dtype=torch.int8)
+    groups = [
+        SimpleNamespace(layer_names=["a", "b"], kv_cache_spec=spec),
+        SimpleNamespace(layer_names=[], kv_cache_spec=spec),
+    ]
+    worker = make_adapter(groups)
+    upstream = MagicMock()
+    monkeypatch.setattr(module.OffloadingConnectorWorker, "register_kv_caches", upstream)
+    caches = {"a": torch.empty(2, 8), "b": torch.empty(2, 8)}
+    worker.register_kv_caches(caches)
+    upstream.assert_called_once_with(caches)
+    worker._init_worker.assert_not_called()
+
+
+@pytest.mark.parametrize("case", ["attention_type", "empty_mamba", "tuple_mamba", "mamba_size", "unsupported"])
+def test_adapter_rejects_invalid_layout_before_initializing_worker(case):
+    attention = FullAttentionSpec(block_size=2, num_kv_heads=1, head_size=2, dtype=torch.int8)
+    mamba = MambaSpec(block_size=2, shapes=((2,),), dtypes=(torch.int8,))
+    spec, value, error = {
+        "attention_type": (attention, object(), TypeError),
+        "empty_mamba": (mamba, [], TypeError),
+        "tuple_mamba": (mamba, (torch.empty(2, 2),), TypeError),
+        "mamba_size": (mamba, [torch.empty(2, 3, dtype=torch.int8)], ValueError),
+        "unsupported": (SimpleNamespace(), torch.empty(2, 2), NotImplementedError),
+    }[case]
+    worker = make_adapter(
+        [
+            SimpleNamespace(layer_names=["trigger"], kv_cache_spec=attention),
+            SimpleNamespace(layer_names=["invalid"], kv_cache_spec=spec),
+        ]
     )
+    with pytest.raises(error):
+        worker.register_kv_caches({"trigger": [torch.empty(2, 8, dtype=torch.int8)], "invalid": value})
+    worker._init_worker.assert_not_called()
 
 
-def test_npu_offloading_spec_uses_upstream_cpu_manager() -> None:
-    bytes_per_chunk = 64 * 2 * 2
-    aligned_bytes_per_chunk = round_up(
-        bytes_per_chunk,
-        NPUOffloadingSpec.BLOCK_SIZE_ALIGNMENT,
-    )
-    spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 10 * aligned_bytes_per_chunk}))
-
-    assert spec.num_blocks == 10
-    assert isinstance(spec.get_manager(), CPUOffloadingManager)
-
-
-def test_npu_offloading_spec_supports_legacy_num_cpu_blocks() -> None:
-    extra_config: dict[str, object] = {"num_cpu_blocks": 10}
-    spec = NPUOffloadingSpec(_make_config(extra_config))
-    aligned_bytes_per_chunk = round_up(
-        64 * 2 * 2,
-        NPUOffloadingSpec.BLOCK_SIZE_ALIGNMENT,
-    )
-
-    assert spec.num_blocks == 10
-    assert spec.extra_config["cpu_bytes_to_use"] == 10 * aligned_bytes_per_chunk
-    assert "cpu_bytes_to_use" not in extra_config
-
-
-def test_legacy_num_cpu_blocks_is_preserved_on_scheduler() -> None:
-    config = _make_config({"num_cpu_blocks": 10})
-    object.__setattr__(config, "worker_kv_bytes_per_block", 0)
-
-    spec = NPUOffloadingSpec(config)
-
-    assert spec.num_blocks == 10
-
-
-def test_npu_offloading_spec_loads_through_vllm_factory() -> None:
-    spec_cls = OffloadingSpecFactory.get_spec_cls(
-        {
-            "spec_name": "NPUOffloadingSpec",
-            "spec_module_path": "vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu",
-        }
-    )
-
-    assert spec_cls is NPUOffloadingSpec
-
-
-def test_npu_worker_reuses_upstream_worker_protocol() -> None:
-    assert issubclass(NPUOffloadingWorker, CPUOffloadingWorker)
-
-
-def test_npu_spec_caches_worker_without_upstream_platform_gate(monkeypatch) -> None:
-    spec = NPUOffloadingSpec(_make_config({"cpu_bytes_to_use": 1024}))
-    worker = object()
-    create_calls = 0
-
-    def create_worker(kv_caches):
-        nonlocal create_calls
-        create_calls += 1
-        return worker
-
-    monkeypatch.setattr(spec, "create_worker", create_worker)
-    kv_caches = object()
-
-    assert spec.get_worker(kv_caches) is worker
-    assert spec.get_worker(kv_caches) is worker
-    assert create_calls == 1
+def test_scheduler_connector_keeps_absent_worker(monkeypatch):
+    monkeypatch.setattr(OffloadingConnector, "__init__", lambda self, *args: setattr(self, "connector_worker", None))
+    connector = AscendOffloadingConnector(object(), KVConnectorRole.SCHEDULER, object())
+    assert connector.connector_worker is None
 
 
 def test_ascend_connector_replaces_worker_with_current_vllm_config(
