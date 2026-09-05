@@ -23,11 +23,68 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
+from vllm.model_executor.models.qwen3_dflash import _resolve_layer_attention
 
 import vllm_ascend.models.qwen3_dspark as qwen3_dspark
+
+
+class TestQwen3DSparkDraftWindow:
+    """Tests for scheduler-visible DSpark draft KV window configuration."""
+
+    @staticmethod
+    def _make_config(window_size, dflash_config=None):
+        draft_hf_config = SimpleNamespace(dflash_config=dflash_config)
+        return SimpleNamespace(
+            additional_config={"draft_window_size": window_size},
+            speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=draft_hf_config)),
+        ), draft_hf_config
+
+    def test_enables_physical_swa_cache_for_draft_layers(self) -> None:
+        vllm_config, draft_hf_config = self._make_config(1024)
+
+        qwen3_dspark._configure_dspark_draft_window(vllm_config)
+
+        assert draft_hf_config.dflash_config == {
+            "use_swa": True,
+            "swa_window_size": 1024,
+        }
+        assert _resolve_layer_attention(draft_hf_config, 0) == (1024, False)
+
+    def test_preserves_other_dflash_options(self) -> None:
+        vllm_config, draft_hf_config = self._make_config(
+            2048,
+            {"causal": False, "use_swa": False, "swa_window_size": 4096},
+        )
+
+        qwen3_dspark._configure_dspark_draft_window(vllm_config)
+
+        assert draft_hf_config.dflash_config == {
+            "causal": False,
+            "use_swa": True,
+            "swa_window_size": 2048,
+        }
+
+    def test_absent_window_keeps_draft_cache_spec_unchanged(self) -> None:
+        draft_hf_config = SimpleNamespace(dflash_config={"causal": False})
+        vllm_config = SimpleNamespace(
+            additional_config={},
+            speculative_config=SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=draft_hf_config)),
+        )
+
+        qwen3_dspark._configure_dspark_draft_window(vllm_config)
+
+        assert draft_hf_config.dflash_config == {"causal": False}
+
+    @pytest.mark.parametrize("window_size", [0, -1, 1024.0, True])
+    def test_rejects_invalid_window(self, window_size) -> None:
+        vllm_config, _ = self._make_config(window_size)
+
+        with pytest.raises(ValueError, match="positive integer"):
+            qwen3_dspark._configure_dspark_draft_window(vllm_config)
 
 
 class TestQwen3DSparkWeightLoading:
