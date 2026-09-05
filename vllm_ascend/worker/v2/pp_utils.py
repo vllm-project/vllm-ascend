@@ -51,7 +51,12 @@ _SPEC_PP_SUPPORT_BY_METHOD: Mapping[str, SpecPPSupport] = MappingProxyType(
             unsupported_feature="EAGLE3 with pipeline parallelism",
         ),
         "dspark": SpecPPSupport(
-            architectures=frozenset({"DeepseekV4ForCausalLM"}),
+            architectures=frozenset(
+                {
+                    "DeepseekV4ForCausalLM",
+                    "GlmMoeDsaForCausalLM",
+                }
+            ),
             needs_aux_hidden_states=True,
             bypass_upstream_pp_guard=True,
         ),
