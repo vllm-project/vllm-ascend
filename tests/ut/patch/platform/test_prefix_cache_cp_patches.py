@@ -7,6 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.single_type_kv_cache_manager import (
+    SlidingWindowManager,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -14,6 +17,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -382,6 +386,55 @@ def test_verify_and_split_propagates_eagle_to_merged_spec_siblings() -> None:
     assert coordinator.single_type_managers[0].use_eagle is False
 
 
+def test_mamba_eagle_lookup_does_not_expand_hybrid_hit() -> None:
+    """Mamba finders do not drop the EAGLE lookahead block.
+
+    The coordinator must therefore keep the Mamba lookup capped at the hit
+    length already established by full attention.
+    """
+    kv_cache_config = _make_hybrid_kv_cache_config()
+    full_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+    mamba_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+
+    class _FullHitManager:
+        @classmethod
+        def find_longest_cache_hit(cls, **kwargs):
+            return ([object(), object()],)
+
+    class _MambaHitManager:
+        lookup_max_lengths: list[int] = []
+
+        @classmethod
+        def find_longest_cache_hit(cls, **kwargs):
+            max_length = kwargs["max_length"]
+            cls.lookup_max_lengths.append(max_length)
+            block_size = kwargs["kv_cache_spec"].block_size
+            return ([object()] * (max_length // block_size),)
+
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+    coordinator.kv_cache_config = kv_cache_config
+    coordinator.attention_groups = [
+        (full_spec, [0], _FullHitManager),
+        (mamba_spec, [1], _MambaHitManager),
+    ]
+    coordinator.eagle_attn_group_indices = {1}
+    coordinator.dcp_world_size = 1
+    coordinator.pcp_world_size = 1
+    coordinator.enable_caching = True
+    coordinator.hash_block_size = 16
+    coordinator.lcm_block_size = 16
+    coordinator.block_pool = MagicMock()
+
+    hit_blocks, hit_length = coordinator.find_longest_cache_hit(
+        block_hashes=[MagicMock(), MagicMock(), MagicMock()],
+        max_cache_hit_length=48,
+    )
+
+    assert _MambaHitManager.lookup_max_lengths == [32]
+    assert [len(blocks) for blocks in hit_blocks] == [2, 2]
+    assert hit_length == 32
+
+
 def test_deepseek_v4_detection_handles_non_mapping_nested_specs() -> None:
     kv_cache_spec = SimpleNamespace(
         kv_cache_specs=[
@@ -421,3 +474,50 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     manager = AscendMambaManager(**manager_kwargs)
 
     assert manager.block_size == mamba_spec.block_size
+
+
+def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
+    """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
+    (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
+    must produce a sparse mask rather than returning ``None``.
+
+    Before the fix, ``alignment_tokens`` was the LCM of raw block_sizes (e.g. 32),
+    making ``need >= per_segment`` always true for Ascend's SWA configuration and
+    the mask returned ``None`` (cache everything). After the fix the alignment is
+    ``lcm_block_size`` (e.g. 4096), which is large enough that only the tail
+    blocks within each segment need caching.
+    """
+    spec = SlidingWindowMLASpec(
+        block_size=32,  # Ascend SWA block_size (--block-size 32)
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.float32,
+        sliding_window=128,  # DeepSeek V4 window
+        compress_ratio=1,
+    )
+    alignment_tokens = 4096  # lcm_block_size
+
+    mask = SlidingWindowManager.reachable_block_mask(
+        start_block=0,
+        end_block=256,  # 256 × 32 = 8192 tokens (2 × alignment_tokens)
+        alignment_tokens=alignment_tokens,
+        kv_cache_spec=spec,
+        use_eagle=False,
+        retention_interval=None,
+        num_prompt_tokens=None,
+    )
+
+    # Must produce a sparse mask, not None.
+    assert mask is not None, "should produce sparse mask with lcm alignment"
+
+    true_blocks = sum(mask)
+
+    # need = cdiv(window−1, block_size) = cdiv(127, 32) = 4
+    # per_segment = alignment_tokens // block_size = 4096 // 32 = 128
+    # Each 128-block segment caches the last 4 blocks (= 0 % sparse padding).
+    total_blocks = len(mask)
+    expected = 4 * (total_blocks // 128)
+    assert true_blocks == expected, (
+        f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
+    )
+    assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"

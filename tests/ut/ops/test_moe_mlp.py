@@ -5,7 +5,7 @@ from unittest.mock import patch
 import torch
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
-from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp
+from vllm_ascend.ops.fused_moe.moe_mlp import cumsum_group_list, unified_apply_mlp, unquant_apply_mlp
 from vllm_ascend.ops.fused_moe.moe_runtime_args import (
     MoEMlpComputeInput,
     MoEQuantParams,
@@ -64,6 +64,40 @@ class TestW4A8RuntimeFlags(unittest.TestCase):
 
 
 class TestUnifiedApplyMlpRequest(unittest.TestCase):
+    def test_unquant_apply_mlp_wraps_tensor_weights_for_grouped_matmul(self):
+        hidden_states = torch.randn(2, 8)
+        gate_up_out = torch.randn(2, 16)
+        expected = torch.randn(2, 8)
+        w1 = torch.randn(2, 8, 16)
+        w2 = torch.randn(2, 8, 8)
+
+        with (
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_grouped_matmul",
+                side_effect=[[gate_up_out], [expected]],
+                create=True,
+            ) as mock_grouped_matmul,
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_mlp.torch_npu.npu_swiglu",
+                return_value=gate_up_out,
+                create=True,
+            ),
+        ):
+            output, _ = unquant_apply_mlp(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                group_list=torch.tensor([1, 1]),
+                need_trans=True,
+            )
+
+        self.assertTrue(output is expected)
+        first_call, second_call = mock_grouped_matmul.call_args_list
+        self.assertEqual(len(first_call.kwargs["weight"]), 1)
+        self.assertEqual(len(second_call.kwargs["weight"]), 1)
+        self.assertEqual(first_call.kwargs["weight"][0].shape, torch.Size([2, 16, 8]))
+        self.assertEqual(second_call.kwargs["weight"][0].shape, torch.Size([2, 8, 8]))
+
     def test_request_unquant_path(self):
         hidden_states = torch.randn(2, 8)
         expected = torch.randn(2, 8)
