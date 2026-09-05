@@ -29,9 +29,11 @@ from vllm_ascend.ops.triton.qwen4_exp.qsa import (
 )
 
 from .common import qsa_cache
+from .lightning_indexer import qsa_select_paged_tokens_lightning
 from .common.qsa_cache import QSAForwardMetadata
 from .nvidia import indexer_qsa as upstream_indexer
 from .nvidia import qsa as upstream_qsa
+from .nvidia.ops.qsa_indexer_rope import qsa_merge_mrope_cos_sin
 from .ops import (
     qsa_compress_groups_with_ratio,
     qsa_select_paged_tokens as qsa_select_paged_tokens_reference,
@@ -63,11 +65,29 @@ def apply_qsa_rope(
     """Apply RoPE using the QSA head width rather than the main Q/K width."""
     rotary_dim = int(rotary_emb.rotary_dim)
     cache = rotary_emb._match_cos_sin_cache_dtype(tensor)  # noqa: SLF001
-    cos_sin = cache[positions]
-    cos, sin = cos_sin.chunk(2, dim=-1)
+    sections = list(getattr(rotary_emb, "mrope_section", []))
+    use_merged_cache = (
+        envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE
+        and positions.ndim == 2
+        and positions.shape[0] == 3
+        and tensor.dtype == torch.bfloat16
+        and tensor.ndim == 3
+        and tensor.shape[0] >= 16
+        and tensor.shape[-1] == 128
+        and cache.ndim == 2
+        and cache.shape[-1] == 64
+        and rotary_dim == 64
+        and sections == [11, 11, 10]
+        and getattr(rotary_emb, "mrope_interleaved", False)
+        and getattr(rotary_emb, "is_neox_style", False)
+    )
+    if use_merged_cache:
+        cos, sin = qsa_merge_mrope_cos_sin(cache, positions)
+    else:
+        cos_sin = cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
 
-    if positions.ndim == 2:
-        sections = list(rotary_emb.mrope_section)
+    if positions.ndim == 2 and not use_merged_cache:
         if getattr(rotary_emb, "mrope_interleaved", False):
             merged_cos = cos[0].clone()
             merged_sin = sin[0].clone()
@@ -135,11 +155,20 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         first_positions: torch.Tensor,
     ) -> torch.Tensor:
         """Apply the reference K normalization and RoPE to compressed keys."""
-        compressed_keys = upstream_indexer._gemma_rmsnorm(
-            pooled.reshape(-1, self.index_head_dim),
-            self.k_layernorm.weight,
-            self.k_layernorm.variance_epsilon,
-        ).reshape(-1, 1, self.index_head_dim)
+        if (
+            envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE
+            and pooled.dtype == torch.bfloat16
+            and pooled.shape[-1] == 128
+        ):
+            compressed_keys = self.k_layernorm(
+                pooled.reshape(-1, self.index_head_dim)
+            ).reshape(-1, 1, self.index_head_dim)
+        else:
+            compressed_keys = upstream_indexer._gemma_rmsnorm(
+                pooled.reshape(-1, self.index_head_dim),
+                self.k_layernorm.weight,
+                self.k_layernorm.variance_epsilon,
+            ).reshape(-1, 1, self.index_head_dim)
         if getattr(self.rotary_emb, "mrope_section", None):
             first_positions = first_positions.transpose(0, 1)
         else:
@@ -251,18 +280,74 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
                 position_rows,
             )
 
+    def _lightning_indexer_eligible(
+        self,
+        query: torch.Tensor,
+        metadata: QSAForwardMetadata,
+    ) -> bool:
+        cache = self.compressed_key_cache.kv_cache
+        return (
+            query.dtype == torch.bfloat16
+            and query.ndim == 3
+            and query.shape[1] <= 64
+            and query.shape[2] == 128
+            and cache.ndim == 4
+            and cache.shape[1:] == (192, 1, 128)
+            and self.compress_ratio == 4
+            and self.token_topk == 2048
+            and metadata.query_start_loc.ndim == 1
+            and metadata.query_start_loc.shape[0] == metadata.seq_lens.shape[0] + 1
+        )
+
     def _select(
         self,
         query: torch.Tensor,
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        selector = (
-            qsa_select_paged_tokens_reference
-            if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE
-            else qsa_select_paged_tokens_triton
-        )
-        return selector(
+        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE:
+            return qsa_select_paged_tokens_reference(
+                query,
+                self.compressed_key_cache.kv_cache,
+                metadata.block_table,
+                metadata.token_to_req,
+                metadata.logical_positions,
+                metadata.seq_lens,
+                self.token_topk,
+                self.compress_ratio,
+                out,
+            )
+        use_lightning = envs.VLLM_ASCEND_ENABLE_QSA_LIGHTNING_INDEXER
+        use_e3 = envs.VLLM_ASCEND_ENABLE_QSA_E3V
+        if use_lightning or use_e3:
+            if self._lightning_indexer_eligible(query, metadata):
+                if not use_lightning:
+                    return qsa_select_paged_tokens_triton(
+                        query,
+                        self.compressed_key_cache.kv_cache,
+                        metadata.block_table,
+                        metadata.token_to_req,
+                        metadata.logical_positions,
+                        metadata.seq_lens,
+                        self.token_topk,
+                        self.compress_ratio,
+                        out,
+                        use_e3=True,
+                    )
+                return qsa_select_paged_tokens_lightning(
+                    query,
+                    self.compressed_key_cache.kv_cache,
+                    metadata.block_table,
+                    metadata.token_to_req,
+                    metadata.logical_positions,
+                    metadata.seq_lens,
+                    metadata.query_start_loc,
+                    self.token_topk,
+                    self.compress_ratio,
+                    out,
+                    use_e3=use_e3,
+                )
+        return qsa_select_paged_tokens_triton(
             query,
             self.compressed_key_cache.kv_cache,
             metadata.block_table,
@@ -370,6 +455,62 @@ qsa_cache.build_qsa_metadata = qsa_cache._build_qsa_metadata_torch
 
 class AscendQwen4ExpQSAAttention(upstream_qsa.Qwen4ExpQSAAttention):
     """Qwen4Exp QSA owner bound to the Ascend implementation."""
+
+    def _main_fused_norm_rope_eligible(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> bool:
+        section = getattr(self.rotary_emb, "mrope_section", None)
+        return bool(
+            self.attn_output_gate
+            and qkv.dtype == torch.bfloat16
+            and qkv.ndim == 2
+            and qkv.shape[1] == 2 * self.q_size + 2 * self.kv_size
+            and self.num_heads == 3
+            and self.num_kv_heads == 1
+            and self.head_dim == 256
+            and getattr(self.rotary_emb, "rotary_dim", None) == 64
+            and getattr(self.rotary_emb, "is_neox_style", False)
+            and getattr(self.rotary_emb, "mrope_interleaved", False)
+            and section is not None
+            and list(section) == [11, 11, 10]
+            and positions.ndim in (1, 2)
+            and (positions.ndim == 1 or positions.shape[0] == 3)
+        )
+
+    def _project_qkv_gate(
+        self,
+        qkv: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        if not envs.VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE:
+            return super()._project_qkv_gate(qkv, positions)
+        if not self._main_fused_norm_rope_eligible(qkv, positions):
+            return super()._project_qkv_gate(qkv, positions)
+
+        # Index the same rotary cache with the original scheduler positions.
+        # This preserves 1-D text positions, 3-axis interleaved MRoPE, and any
+        # non-zero position offset represented by the incoming position tensor.
+        cos_sin = self.rotary_emb.cos_sin_cache[positions]
+        if cos_sin.device != qkv.device:
+            cos_sin = cos_sin.to(qkv.device)
+        if cos_sin.dtype != qkv.dtype:
+            cos_sin = cos_sin.to(qkv.dtype)
+        return torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
+            qkv=qkv,
+            q_weight=1.0 + self.q_norm.weight,
+            k_weight=1.0 + self.k_norm.weight,
+            cos_sin=cos_sin,
+            num_q_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            eps=self.q_norm.variance_epsilon,
+            mrope_section=list(self.rotary_emb.mrope_section),
+            is_interleaved=self.rotary_emb.mrope_interleaved,
+            rope_dim=self.rotary_emb.rotary_dim,
+            has_gate=True,
+        )
 
     def bind_kv_cache(self, kv_cache: QSAKVCache) -> None:
         self.kv_cache = kv_cache

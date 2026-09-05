@@ -236,6 +236,18 @@ std::tuple<at::Tensor, at::Tensor> npu_lightning_indexer_meta(
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
+at::Tensor& qsa_expand_e3_out_meta(
+    const at::Tensor& groups,
+    const at::Tensor& complete_groups,
+    const at::Tensor& tail_start,
+    const at::Tensor& tail_count,
+    const at::Tensor& sequence_lengths,
+    const at::Tensor& token_to_req,
+    at::Tensor& out)
+{
+    return out;
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_sparse_flash_attention_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, double scale_value,
@@ -2079,6 +2091,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("grouped_matmul_swiglu_quant_v2", &vllm_ascend::meta::grouped_matmul_swiglu_quant_v2_meta);
     // Lightning indexer
     ops.impl("npu_lightning_indexer", &vllm_ascend::meta::npu_lightning_indexer_meta);
+    ops.impl("qsa_expand_e3_out", &vllm_ascend::meta::qsa_expand_e3_out_meta);
     // Sparse flash attention
     ops.impl("npu_sparse_flash_attention", &vllm_ascend::meta::npu_sparse_flash_attention_meta);
     ops.impl("npu_sparse_attention_score", &vllm_ascend::meta::npu_sparse_attention_score_meta);

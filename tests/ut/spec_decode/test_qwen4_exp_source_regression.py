@@ -18,6 +18,20 @@ BASE_PROPOSER = ROOT / "vllm_ascend" / "spec_decode" / "llm_base_proposer.py"
 MODEL_RUNNER = ROOT / "vllm_ascend" / "worker" / "model_runner_v1.py"
 OPS = ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "ops.py"
 TRITON_QSA = ROOT / "vllm_ascend" / "ops" / "triton" / "qwen4_exp" / "qsa.py"
+LIGHTNING_INDEXER = (
+    ROOT / "vllm_ascend" / "models" / "qwen4_exp" / "lightning_indexer.py"
+)
+INDEXER_ROPE = (
+    ROOT
+    / "vllm_ascend"
+    / "models"
+    / "qwen4_exp"
+    / "nvidia"
+    / "ops"
+    / "qsa_indexer_rope.py"
+)
+BUILD_ACLNN = ROOT / "csrc" / "build_aclnn.sh"
+ENVS = ROOT / "vllm_ascend" / "envs.py"
 
 
 def _class(path: Path, name: str) -> ast.ClassDef:
@@ -132,8 +146,10 @@ def test_spec_proposer_normalizes_multiple_of_block_size() -> None:
 def test_qsa_indexer_uses_portable_torch_chain() -> None:
     source = ast.unparse(_method(QSA, "AscendQSAIndexer", "forward"))
     project = source.index("self.project_qk")
-    update = source.index("self._update_and_compress")
-    select = source.index("self._select")
+    # The feature-gated branch has its own explicit unsupported-contract
+    # fallback. Anchor this assertion on the default portable branch.
+    update = source.index("self._update_and_compress", project)
+    select = source.index("self._select", update)
     assert project < update < select
 
 
@@ -146,6 +162,8 @@ def test_qsa_graph_path_has_no_host_sync_or_debug_probes() -> None:
         "sys.getrefcount",
         "data_ptr()",
         "logging.getLogger",
+        "logger.warning_once",
+        "logger.info_once",
     ):
         assert diagnostic not in qsa_source
 
@@ -205,10 +223,13 @@ def test_qsa_triton_selector_defines_padding_logits() -> None:
     assert "mask=columns < num_columns" in source
 
 
-def test_qsa_triton_selector_uses_a3_safe_single_tile_programs() -> None:
+def test_qsa_triton_selector_bounds_page_programs_to_safe_row_batches() -> None:
     source = ast.unparse(_function(TRITON_QSA, "qsa_mqa_paged"))
-    assert "tiles_per_program = 1" in source
-    assert "q.shape[0] <= 32" not in source
+    assert "page_program = 1 < q.shape[0] <= 32" in source
+    assert "if page_program else 1" in source
+    kernel = ast.unparse(_function(TRITON_QSA, "_qsa_mqa_paged_kernel"))
+    assert "tl.static_range(0, SUBTILES_PER_PAGE)" in kernel
+    assert "page_base = k_cache_ptr + safe_physical_page * stride_cache_block" in kernel
 
 
 def test_qsa_triton_selector_bounds_topk_row_workspace() -> None:
@@ -216,6 +237,17 @@ def test_qsa_triton_selector_bounds_topk_row_workspace() -> None:
     assert "max_rows_per_chunk = 128" in source
     assert "rows_per_chunk = min(max_rows_per_chunk" in source
     assert "range(0, rows, rows_per_chunk)" in source
+
+
+def test_qsa_lightning_selector_is_one_li_and_one_expand_per_step() -> None:
+    function = _function(LIGHTNING_INDEXER, "qsa_select_paged_tokens_lightning")
+    source = ast.unparse(function)
+    assert not any(isinstance(node, (ast.For, ast.While)) for node in ast.walk(function))
+    assert source.count("torch.ops.npu.npu_lightning_indexer.default") == 1
+    assert source.count("expand(") == 1
+    assert "query[row_slice]" not in source
+    assert "out[row_slice]" not in source
+    assert "row_block_table = block_table[row_requests]" in source
 
 
 def test_qsa_triton_selector_rejects_only_true_capacity_overflow() -> None:
@@ -232,3 +264,72 @@ def test_qsa_ascend_backend_uses_six_slab_kv_views() -> None:
     assert 'six_region_layout.region("r2")' in source
     assert 'six_region_layout.region("r3")' in source
     assert "kv_caches[layer_name] = (k_cache, v_cache)" in source
+
+
+def test_qsa_expand_e3_is_packaged_for_ascend910_93() -> None:
+    source = BUILD_ACLNN.read_text()
+    a3_start = source.index("matched SOC branch: ascend910_93")
+    a5_start = source.index("matched SOC branch: ascend950", a3_start)
+    assert '"qsa_expand_e3"' in source[a3_start:a5_start]
+
+
+def test_qsa_main_fused_norm_rope_is_gated_and_falls_back() -> None:
+    source = ast.unparse(
+        _method(QSA, "AscendQwen4ExpQSAAttention", "_project_qkv_gate")
+    )
+    assert "envs.VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE" in source
+    assert "torch.ops.vllm.triton_split_qkv_rmsnorm_mrope" in source
+    assert source.count("super()._project_qkv_gate(qkv, positions)") == 2
+    assert "cos_sin_cache[positions]" in source
+
+
+def test_qsa_main_fused_norm_rope_contract_is_exact() -> None:
+    source = ast.unparse(
+        _method(QSA, "AscendQwen4ExpQSAAttention", "_main_fused_norm_rope_eligible")
+    )
+    for contract in (
+        "self.num_heads == 3",
+        "self.num_kv_heads == 1",
+        "self.head_dim == 256",
+        "== 64",
+        "[11, 11, 10]",
+        "mrope_interleaved",
+    ):
+        assert contract in source
+    assert "VLLM_ASCEND_ENABLE_QSA_MAIN_FUSED_NORM_ROPE" in ENVS.read_text()
+
+
+def test_qsa_indexer_split_norm_rope_is_gated_and_falls_back() -> None:
+    source = ast.unparse(_function(QSA, "apply_qsa_rope"))
+    gate = "envs.VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE"
+    assert gate in source
+    assert "qsa_merge_mrope_cos_sin" in source
+    assert "cache[positions]" in source
+    assert "tensor.shape[0] >= 16" in source
+    assert "VLLM_ASCEND_ENABLE_QSA_INDEXER_SPLIT_NORM_ROPE" in ENVS.read_text()
+
+
+def test_qsa_indexer_split_norm_rope_keeps_pooling_before_k_norm() -> None:
+    update = ast.unparse(_method(QSA, "AscendQSAIndexer", "_update_and_compress"))
+    compress = update.index("qsa_compress_groups_with_ratio")
+    normalize = update.index("self.normalize_compressed_keys")
+    assert compress < normalize
+
+    normalize_source = ast.unparse(
+        _method(QSA, "AscendQSAIndexer", "normalize_compressed_keys")
+    )
+    assert "self.k_layernorm" in normalize_source
+    assert "upstream_indexer._gemma_rmsnorm" in normalize_source
+
+
+def test_qsa_indexer_rope_kernel_only_merges_cache_rows() -> None:
+    kernel = ast.unparse(_function(INDEXER_ROPE, "_qsa_merge_mrope_cache_kernel"))
+    assert "selected_position" in kernel
+    assert "pos_t" in kernel and "pos_h" in kernel and "pos_w" in kernel
+    assert "norm" not in kernel.lower()
+    assert "weight" not in kernel.lower()
+
+    wrapper = ast.unparse(_function(INDEXER_ROPE, "qsa_merge_mrope_cos_sin"))
+    assert wrapper.count("_qsa_merge_mrope_cache_kernel") == 1
+    assert "positions.shape[0] != 3" in wrapper
+    assert "cache.shape[1] != 64" in wrapper

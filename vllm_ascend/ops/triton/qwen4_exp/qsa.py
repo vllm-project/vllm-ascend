@@ -48,6 +48,8 @@ def _qsa_mqa_paged_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     TILES_PER_PROG: tl.constexpr,
+    SUBTILES_PER_PAGE: tl.constexpr,
+    PAGE_PROGRAM: tl.constexpr,
     STAGES: tl.constexpr,
     MAX_N: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
@@ -81,38 +83,78 @@ def _qsa_mqa_paged_kernel(
         other=0.0,
     )
     column_offsets = tl.arange(0, BLOCK_N)
-    for tile in tl.range(tile_start, tile_end, num_stages=STAGES):
-        columns = tile * BLOCK_N + column_offsets
-        live = columns < visible
-        logical_page = tl.minimum(columns // PAGE_SIZE, PAGE_TABLE_WIDTH - 1)
-        page_offset = columns % PAGE_SIZE
+    if PAGE_PROGRAM:
+        # A page program reuses one request/page-table lookup and one physical
+        # base address across the three contiguous 64-row subtiles of a 192-row
+        # compressed cache page.  This path is bounded to small row batches by
+        # the Python wrapper; larger batches retain the one-tile M1 fallback.
+        logical_page = tl.program_id(1)
         physical_page = tl.load(
             page_table_ptr + safe_request * stride_table_req + logical_page * stride_table_page,
-            mask=live,
+            mask=(request >= 0)
+            & (request < num_requests)
+            & (logical_page < PAGE_TABLE_WIDTH),
             other=-1,
         )
-        page_valid = live & (physical_page >= 0) & (physical_page < num_pages)
-        # physical_page * block stride can overflow int32 for large caches.
         safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
-        keys = tl.load(
-            k_cache_ptr
-            + safe_physical_page[:, None] * stride_cache_block
-            + page_offset[:, None] * stride_cache_token
-            + dims[None, :] * stride_cache_dim,
-            mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
-            other=0.0,
-            eviction_policy="evict_first",
-        )
-        scores = tl.dot(keys, query, out_dtype=tl.float32)
-        scores = tl.where(heads[None, :] < NUM_HEADS, tl.maximum(scores, 0.0), 0.0)
-        score = tl.sum(scores, axis=1) / score_divisor
-        # topk consumes the full capacity, so invalid columns must contain a
-        # deterministic sentinel instead of retaining uninitialized storage.
-        tl.store(
-            logits_ptr + row * stride_logits_row + columns,
-            tl.where(page_valid, score, -float("inf")),
-            mask=columns < num_columns,
-        )
+        page_base = k_cache_ptr + safe_physical_page * stride_cache_block
+        physical_page_valid = (physical_page >= 0) & (physical_page < num_pages)
+        for subtile in tl.static_range(0, SUBTILES_PER_PAGE):
+            page_offset = subtile * BLOCK_N + column_offsets
+            columns = logical_page * PAGE_SIZE + page_offset
+            live = columns < visible
+            page_valid = live & physical_page_valid
+            keys = tl.load(
+                page_base
+                + page_offset[:, None] * stride_cache_token
+                + dims[None, :] * stride_cache_dim,
+                mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
+                other=0.0,
+                eviction_policy="evict_first",
+            )
+            scores = tl.dot(keys, query, out_dtype=tl.float32)
+            scores = tl.where(heads[None, :] < NUM_HEADS, tl.maximum(scores, 0.0), 0.0)
+            score = tl.sum(scores, axis=1) / score_divisor
+            tl.store(
+                logits_ptr + row * stride_logits_row + columns,
+                tl.where(page_valid, score, -float("inf")),
+                mask=columns < num_columns,
+            )
+    else:
+        for tile in tl.range(tile_start, tile_end, num_stages=STAGES):
+            logical_page = tile // SUBTILES_PER_PAGE
+            page_offset = (tile % SUBTILES_PER_PAGE) * BLOCK_N + column_offsets
+            columns = logical_page * PAGE_SIZE + page_offset
+            live = columns < visible
+            physical_page = tl.load(
+                page_table_ptr + safe_request * stride_table_req + logical_page * stride_table_page,
+                mask=(request >= 0)
+                & (request < num_requests)
+                & (logical_page < PAGE_TABLE_WIDTH),
+                other=-1,
+            )
+            page_valid = live & (physical_page >= 0) & (physical_page < num_pages)
+            # physical_page * block stride can overflow int32 for large caches.
+            safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
+            keys = tl.load(
+                k_cache_ptr
+                + safe_physical_page * stride_cache_block
+                + page_offset[:, None] * stride_cache_token
+                + dims[None, :] * stride_cache_dim,
+                mask=page_valid[:, None] & (dims[None, :] < HEAD_DIM),
+                other=0.0,
+                eviction_policy="evict_first",
+            )
+            scores = tl.dot(keys, query, out_dtype=tl.float32)
+            scores = tl.where(heads[None, :] < NUM_HEADS, tl.maximum(scores, 0.0), 0.0)
+            score = tl.sum(scores, axis=1) / score_divisor
+            # topk consumes the full capacity, so invalid columns must contain
+            # a deterministic sentinel instead of retaining stale storage.
+            tl.store(
+                logits_ptr + row * stride_logits_row + columns,
+                tl.where(page_valid, score, -float("inf")),
+                mask=columns < num_columns,
+            )
 
 
 @triton.jit
@@ -592,12 +634,15 @@ def qsa_mqa_paged(
     if not q.shape[0] or not columns:
         return logits, visible_blocks
     BLOCK_N = 64
+    if k_cache.shape[1] % BLOCK_N:
+        raise ValueError("QSA compressed page size must be divisible by the score tile")
     BLOCK_D = max(16, triton.next_power_of_2(q.shape[2]))
     MAX_N = max(16, triton.next_power_of_2(q.shape[1]))
     # A3 requires the per-program paged tile to retain its naturally aligned
     # 64-row layout.  The GB300 eight-tile reuse profile can lower to an
     # unaligned UB vector access once the row batch exceeds 32.
-    tiles_per_program = 1
+    page_program = 1 < q.shape[0] <= 32
+    tiles_per_program = k_cache.shape[1] // BLOCK_N if page_program else 1
     _qsa_mqa_paged_kernel[(q.shape[0], triton.cdiv(columns, BLOCK_N * tiles_per_program))](
         q,
         k_cache,
@@ -628,6 +673,8 @@ def qsa_mqa_paged(
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         TILES_PER_PROG=tiles_per_program,
+        SUBTILES_PER_PAGE=k_cache.shape[1] // BLOCK_N,
+        PAGE_PROGRAM=page_program,
         STAGES=2,
         MAX_N=MAX_N,
         COMPRESS_RATIO=compress_ratio,
@@ -692,6 +739,48 @@ def expand_qsa_block_indices_npu(
     return out
 
 
+def expand_qsa_block_indices_e3(
+    block_indices: torch.Tensor,
+    query_positions: torch.Tensor,
+    sequence_lengths: torch.Tensor,
+    token_to_req: torch.Tensor,
+    compress_ratio: int,
+    token_topk: int,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    """Expand ratio-4 compressed groups with the graph-safe AscendC E3 op."""
+    if compress_ratio != 4 or token_topk != 2048:
+        raise ValueError("QSA E3 requires ratio=4 and token_topk=2048")
+    if block_indices.shape != (query_positions.numel(), 512):
+        raise ValueError("QSA E3 compressed groups must have shape [rows, 512]")
+    if out.shape != (block_indices.shape[0], 2051):
+        raise ValueError("QSA E3 output must have shape [rows, 2051]")
+    row_requests = token_to_req.to(torch.int64)
+    row_sequence_lengths = sequence_lengths[row_requests]
+    positions = query_positions.to(torch.int32)
+    complete_groups = torch.minimum(
+        torch.minimum(
+            (positions + 1).floor_divide(compress_ratio),
+            row_sequence_lengths.floor_divide(compress_ratio),
+        ),
+        torch.full_like(positions, 512),
+    ).to(torch.int32)
+    tail_start = ((positions + 1).floor_divide(compress_ratio) * compress_ratio).to(torch.int32)
+    tail_count = torch.minimum(
+        positions + 1 - tail_start,
+        torch.full_like(positions, compress_ratio - 1),
+    ).to(torch.int32)
+    return torch.ops._C_ascend.qsa_expand_e3_out(
+        block_indices,
+        complete_groups,
+        tail_start,
+        tail_count,
+        sequence_lengths.to(torch.int32),
+        token_to_req.to(torch.int32),
+        out,
+    )
+
+
 def qsa_select_paged_tokens(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -702,6 +791,8 @@ def qsa_select_paged_tokens(
     token_topk: int,
     compress_ratio: int,
     out: torch.Tensor | None = None,
+    *,
+    use_e3: bool = False,
 ) -> torch.Tensor:
     """Score, select, and expand QSA indices without host synchronization."""
 
@@ -736,7 +827,7 @@ def qsa_select_paged_tokens(
     for row_start in range(0, rows, rows_per_chunk):
         row_end = min(row_start + rows_per_chunk, rows)
         row_slice = slice(row_start, row_end)
-        logits, visible_blocks = qsa_mqa_paged(
+        logits, _ = qsa_mqa_paged(
             q[row_slice],
             k_cache,
             page_table,
@@ -747,12 +838,8 @@ def qsa_select_paged_tokens(
         )
         blocks = blocks_buffer[: row_end - row_start]
         blocks.copy_(torch.topk(logits, block_topk, dim=-1).indices.to(torch.int32))
-        topk_rank = torch.arange(block_topk, device=q.device)
-        blocks.masked_fill_(
-            topk_rank.unsqueeze(0) >= visible_blocks.unsqueeze(1),
-            -1,
-        )
-        expand_qsa_block_indices_npu(
+        expand = expand_qsa_block_indices_e3 if use_e3 else expand_qsa_block_indices_npu
+        expand(
             blocks,
             query_positions[row_slice],
             sequence_lengths,
