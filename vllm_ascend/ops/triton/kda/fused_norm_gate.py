@@ -35,6 +35,7 @@ def layer_norm_gated_fwd_kernel(
     mean,
     rstd,
     eps,
+    num_valid_rows,
     T,
     D: tl.constexpr,
     BT: tl.constexpr,
@@ -45,6 +46,7 @@ def layer_norm_gated_fwd_kernel(
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_NUM_VALID_ROWS: tl.constexpr,
 ):
     i_t = tl.program_id(0)
 
@@ -53,6 +55,15 @@ def layer_norm_gated_fwd_kernel(
 
     p_x = tl.make_block_ptr(x, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
     b_x = tl.load(p_x, boundary_check=(0, 1)).to(tl.float32)
+    # Fold ``_zero_padded_spec_output`` into the input load: rows beyond
+    # ``num_valid_rows`` (graph-padding slots the recurrent kernel left
+    # uninitialized) are zeroed here so RMSNorm drives them to 0 exactly as the
+    # old ``torch.where(arange<n, x, 0)`` pre-pass did. ``num_valid_rows`` is a
+    # pointer to a 0-d int tensor so the value can vary per graph replay.
+    if HAS_NUM_VALID_ROWS:
+        nvr = tl.load(num_valid_rows)
+        valid_row = (i_t * BT + tl.arange(0, BT)) < nvr
+        b_x = tl.where(valid_row[:, None], b_x, 0.0)
     if HAS_RESIDUAL:
         p_res = tl.make_block_ptr(residual, (T, D), (D, 1), (i_t * BT, 0), (BT, BD), (1, 0))
         b_x += tl.load(p_res, boundary_check=(0, 1)).to(tl.float32)
@@ -108,6 +119,7 @@ def layer_norm_gated_fwd_kernel1(
     mean,
     rstd,
     eps,
+    num_valid_rows,
     D: tl.constexpr,
     BD: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -116,6 +128,7 @@ def layer_norm_gated_fwd_kernel1(
     HAS_RESIDUAL: tl.constexpr,
     HAS_WEIGHT: tl.constexpr,
     HAS_BIAS: tl.constexpr,
+    HAS_NUM_VALID_ROWS: tl.constexpr,
 ):
     i_t = tl.program_id(0)
     x += i_t * D
@@ -129,6 +142,12 @@ def layer_norm_gated_fwd_kernel1(
     o_d = tl.arange(0, BD)
     m_d = o_d < D
     b_x = tl.load(x + o_d, mask=m_d, other=0.0).to(tl.float32)
+    # See ``layer_norm_gated_fwd_kernel``: zero graph-padding rows (one row
+    # per program here) so the norm emits 0 for them, replacing the old
+    # ``_zero_padded_spec_output`` pre-pass.
+    if HAS_NUM_VALID_ROWS:
+        nvr = tl.load(num_valid_rows)
+        b_x = tl.where(i_t < nvr, b_x, 0.0)
     if HAS_RESIDUAL:
         b_x += tl.load(residual + o_d, mask=m_d, other=0.0).to(tl.float32)
     if STORE_RESIDUAL_OUT:
@@ -176,6 +195,7 @@ def layer_norm_gated_fwd(
     out_dtype: torch.dtype | None = None,
     residual_dtype: torch.dtype | None = None,
     is_rms_norm: bool = False,
+    num_valid_rows: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor]:
     if residual is not None:
         residual_dtype = residual.dtype
@@ -198,6 +218,10 @@ def layer_norm_gated_fwd(
     BD = min(MAX_FUSED_SIZE, next_power_of_2(D))
     if D > BD:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
+
+    has_num_valid_rows = num_valid_rows is not None
+    # Triton needs a real pointer even when the branch is unused; fall back to x.
+    nvr_ptr = num_valid_rows if has_num_valid_rows else x
 
     if D <= 512:
         BT = 32
@@ -222,6 +246,8 @@ def layer_norm_gated_fwd(
             HAS_RESIDUAL=residual is not None,
             HAS_WEIGHT=weight is not None,
             HAS_BIAS=bias is not None,
+            num_valid_rows=nvr_ptr,
+            HAS_NUM_VALID_ROWS=has_num_valid_rows,
             num_warps=4,
         )
     else:
@@ -244,6 +270,8 @@ def layer_norm_gated_fwd(
             HAS_RESIDUAL=residual is not None,
             HAS_WEIGHT=weight is not None,
             HAS_BIAS=bias is not None,
+            num_valid_rows=nvr_ptr,
+            HAS_NUM_VALID_ROWS=has_num_valid_rows,
             num_warps=4,
         )
     return y, mean, rstd, residual_out if residual_out is not None else x
@@ -254,8 +282,17 @@ def _kda_rms_norm_sigmoid_gate_impl(
     gate: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
+    num_valid_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Adapt the supplied fused kernel to K3's per-head output layout."""
+    """Adapt the supplied fused kernel to K3's per-head output layout.
+
+    ``num_valid_rows`` (optional 0-d int tensor) is the number of *valid token
+    rows* in the spec-decode contiguous path; the kernel folds
+    ``_zero_padded_spec_output`` into the input load by zeroing rows beyond it.
+    It is in token units and is scaled by the head count here, because the
+    kernel iterates rows of the reshaped ``[num_tokens * num_heads, D]`` view
+    (token-major, so valid rows = num_valid_tokens * num_heads).
+    """
     if x.shape[-1] != gate.shape[-1]:
         raise ValueError(f"KDA output and gate head dimensions differ: {x.shape[-1]} != {gate.shape[-1]}")
     if x.numel() != gate.numel():
@@ -263,6 +300,14 @@ def _kda_rms_norm_sigmoid_gate_impl(
 
     output_shape = x.shape
     feature_dim = output_shape[-1]
+    if num_valid_rows is not None:
+        assert x.ndim == 4 and x.shape[0] == 1, (
+            "num_valid_rows expects KDA's [1, T, H, D] output layout")
+        num_tokens = output_shape[1]
+        num_heads = x.numel() // (num_tokens * feature_dim)
+        nvr_rows = num_valid_rows * num_heads
+    else:
+        nvr_rows = None
     output, _, _, _ = layer_norm_gated_fwd(
         x=x.reshape(-1, feature_dim),
         g=gate.reshape(-1, feature_dim),
@@ -272,6 +317,7 @@ def _kda_rms_norm_sigmoid_gate_impl(
         eps=eps,
         out_dtype=x.dtype,
         is_rms_norm=True,
+        num_valid_rows=nvr_rows,
     )
     return output.reshape(output_shape)
 
@@ -281,8 +327,9 @@ def _kda_rms_norm_sigmoid_gate_fake(
     gate: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
+    num_valid_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    del gate, weight, eps
+    del gate, weight, eps, num_valid_rows
     return torch.empty_like(x)
 
 
@@ -300,6 +347,7 @@ def apply_kda_rms_norm_sigmoid_gate(
     gate: torch.Tensor,
     weight: torch.Tensor,
     eps: float,
+    num_valid_rows: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Call K3's opaque fused RMSNorm and sigmoid-gate operator."""
-    return torch.ops.vllm.kda_rms_norm_sigmoid_gate(x, gate, weight, eps)
+    return torch.ops.vllm.kda_rms_norm_sigmoid_gate(x, gate, weight, eps, num_valid_rows)

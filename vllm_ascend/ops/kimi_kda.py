@@ -293,7 +293,11 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             core_attn_out,
             self.prefix,
         )
-        core_attn_out = self._apply_output_norm_gate(core_attn_out, output_gate)
+        core_attn_out = self._apply_output_norm_gate(
+            core_attn_out,
+            output_gate,
+            num_valid_rows=getattr(self, "_kda_norm_num_valid_rows", None),
+        )
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
 
@@ -301,6 +305,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
         self,
         core_attn_out: torch.Tensor,
         output_gate: torch.Tensor,
+        num_valid_rows: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if apply_kda_rms_norm_sigmoid_gate is not None:
             return apply_kda_rms_norm_sigmoid_gate(
@@ -308,6 +313,7 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 output_gate,
                 self.o_norm.weight,
                 self.o_norm.eps,
+                num_valid_rows=num_valid_rows,
             )
         return self.o_norm(core_attn_out, output_gate)
 
@@ -605,12 +611,12 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
             )
-            # Clear only static dummy rows skipped by the kernel. Real query
-            # tokens and their accepted lengths are unchanged.
-            core_spec = _zero_padded_spec_output(
-                core_spec,
-                attn_metadata.spec_query_start_loc,
-            )
+            # Padding rows the recurrent kernel left uninitialized are zeroed
+            # downstream: the contiguous path folds the zeroing into the
+            # gated-norm kernel (via ``self._kda_norm_num_valid_rows``), so the
+            # Range/Less/Fill/SelectV2 pre-pass is skipped; the merge path still
+            # zeroes explicitly because spec tokens are scattered (not a row
+            # range the norm can threshold).
 
         core_non_spec = None
         if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
@@ -699,6 +705,12 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 )
 
         if core_spec is not None and core_non_spec is not None:
+            # Merge path: spec tokens are scattered to ``spec_token_indices``,
+            # so the norm's row-range threshold can't express validity — zero
+            # the dummy spec rows explicitly and leave the threshold unset.
+            core_spec = _zero_padded_spec_output(
+                core_spec, attn_metadata.spec_query_start_loc)
+            self._kda_norm_num_valid_rows = None
             merged = torch.empty(
                 (1, num_actual_tokens, self.local_num_heads, self.head_dim),
                 dtype=core_non_spec.dtype,
@@ -708,6 +720,17 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
             merged.index_copy_(1, non_spec_token_indices, core_non_spec)
             core_attn_out[:, :num_actual_tokens] = merged
         elif core_spec is not None:
+            # Contiguous spec path: defer padding-row zeroing to the gated-norm
+            # kernel via ``num_valid_rows`` (RMSNorm drives padding rows to 0
+            # anyway), so the Range/Less/Fill/SelectV2 pre-pass is skipped.
+            # The non-triton fallback keeps the explicit zeroing.
+            if apply_kda_rms_norm_sigmoid_gate is not None:
+                self._kda_norm_num_valid_rows = attn_metadata.spec_query_start_loc[-1]
+            else:
+                core_spec = _zero_padded_spec_output(
+                    core_spec, attn_metadata.spec_query_start_loc)
+                self._kda_norm_num_valid_rows = None
             core_attn_out[:, :num_actual_tokens] = core_spec
         elif core_non_spec is not None:
+            self._kda_norm_num_valid_rows = None
             core_attn_out[:, :num_actual_tokens] = core_non_spec
