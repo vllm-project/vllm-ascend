@@ -253,12 +253,35 @@ inline std::vector<std::string> get_default_custom_lib_path()
     return default_vendors_list;
 }
 
-const std::vector<std::string> g_custom_lib_path = get_custom_lib_path();
-const std::vector<std::string> g_default_custom_lib_path = get_default_custom_lib_path();
-
 inline const char *GetOpApiLibName(void) { return "libopapi.so"; }
 
 inline const char *GetCustOpApiLibName(void) { return "libcust_opapi.so"; }
+
+static inline std::vector<std::string> get_packaged_custom_lib_path()
+{
+    Dl_info dl_info;
+    static int module_anchor = 0;
+    if (dladdr(&module_anchor, &dl_info) == 0 || dl_info.dli_fname == nullptr) {
+        return std::vector<std::string>();
+    }
+
+    std::string module_path = real_path(dl_info.dli_fname);
+    if (module_path.empty()) {
+        module_path = std::string(dl_info.dli_fname);
+    }
+    auto last_slash = module_path.find_last_of('/');
+    if (last_slash == std::string::npos) {
+        return std::vector<std::string>();
+    }
+
+    std::string packaged_lib_path =
+        module_path.substr(0, last_slash) + "/_cann_ops_custom/vendors/vllm-ascend/op_api/lib/";
+    packaged_lib_path = real_path(packaged_lib_path);
+    if (packaged_lib_path.empty()) {
+        return std::vector<std::string>();
+    }
+    return std::vector<std::string>{packaged_lib_path};
+}
 
 inline void *GetOpApiFuncAddrInLib(void *handler, const char *libName,
                                    const char *apiName) {
@@ -273,8 +296,12 @@ inline void *GetOpApiLibHandler(const char *libName) {
 
 inline void *GetOpApiFuncAddr(const char *apiName)
 {
-    if (!g_custom_lib_path.empty()) {
-        for (auto &it : g_custom_lib_path) {
+    static const std::vector<std::string> custom_lib_path = get_custom_lib_path();
+    static const std::vector<std::string> default_custom_lib_path = get_default_custom_lib_path();
+    static const std::vector<std::string> packaged_custom_lib_path = get_packaged_custom_lib_path();
+
+    if (!custom_lib_path.empty()) {
+        for (auto &it : custom_lib_path) {
             auto cust_opapi_lib = real_path(it + "/" + GetCustOpApiLibName());
             if (cust_opapi_lib.empty()) {
                 continue;
@@ -290,13 +317,30 @@ inline void *GetOpApiFuncAddr(const char *apiName)
         }
     }
 
-    if (!g_default_custom_lib_path.empty()) {
-        for (auto &it : g_default_custom_lib_path) {
+    if (!default_custom_lib_path.empty()) {
+        for (auto &it : default_custom_lib_path) {
             auto default_cust_opapi_lib = real_path(it + "/" + GetCustOpApiLibName());
             if (default_cust_opapi_lib.empty()) {
                 continue;
             }
             auto custOpApiHandler = GetOpApiLibHandler(default_cust_opapi_lib.c_str());
+            if (custOpApiHandler != nullptr) {
+                auto funcAddr =
+                    GetOpApiFuncAddrInLib(custOpApiHandler, GetCustOpApiLibName(), apiName);
+                if (funcAddr != nullptr) {
+                    return funcAddr;
+                }
+            }
+        }
+    }
+
+    if (!packaged_custom_lib_path.empty()) {
+        for (auto &it : packaged_custom_lib_path) {
+            auto packaged_cust_opapi_lib = real_path(it + "/" + GetCustOpApiLibName());
+            if (packaged_cust_opapi_lib.empty()) {
+                continue;
+            }
+            auto custOpApiHandler = GetOpApiLibHandler(packaged_cust_opapi_lib.c_str());
             if (custOpApiHandler != nullptr) {
                 auto funcAddr =
                     GetOpApiFuncAddrInLib(custOpApiHandler, GetCustOpApiLibName(), apiName);
