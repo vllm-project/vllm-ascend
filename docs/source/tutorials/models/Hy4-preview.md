@@ -30,7 +30,7 @@ The features below are the ones enabled by the verified deployment commands in [
 | --- | --- | --- |
 | Tensor Parallel (TP) | Splits the model across all 16 NPUs within a node. | `--tensor-parallel-size 16` |
 | Expert Parallel (EP) | Distributes the MoE experts (256 routed + 1 shared per layer) across NPUs. | `--enable-expert-parallel` |
-| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 96K. | `--data-parallel-size 2` |
+| Data Parallel (DP) | Multi-node DP across 2 nodes, extending the context to 96k. | `--data-parallel-size 2` |
 | W8A8 Quantization | Loads the W8A8 quantized weights (Ascend quantization). | `--quantization ascend` |
 | Automatic Prefix Caching | Reuses the KV cache for shared prompt prefixes. | `--enable-prefix-caching` |
 | Speculative Decoding (MTP) | Uses the native MTP layer for Multi-Token Prediction. | `--speculative-config '{"method": "mtp", "num_speculative_tokens": 3}'` |
@@ -64,7 +64,7 @@ Before getting started, confirm that the firmware/driver is installed correctly.
 npu-smi info
 ```
 
-Because the weights are large, a single A3 node only supports about 1K context. If you need to test long sequences such as 32K, it is recommended to use 2 A3 nodes.
+Because the weights are large, a single A3 node only supports about 1k context. If you need to test long sequences such as 32k, it is recommended to use 2 A3 nodes.
 
 ### 3.3 Verify Multi-node Communication (Optional)
 
@@ -163,7 +163,7 @@ vllm serve /path/to/Hy4-preview-w8a8 \
 
 ### 5.2 Multi-Node Co-Located Deployment
 
-DP=2 cross-machine deployment with TP=16 per node extends the context to 96K. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes share the host network via `--net=host`. Use the same command as the A3 single-node deployment, executed inside the container.
+DP=2 cross-machine deployment with TP=16 per node extends the context to 96k. Node 1 (Node1, demo IP `192.168.1.1`) hosts DP rank 0 and the API, and Node 2 (Node2, demo IP `192.168.1.2`) is a headless worker. Both nodes share the host network via `--net=host`. Use the same command as the A3 single-node deployment, executed inside the container.
 
 Startup order:
 
