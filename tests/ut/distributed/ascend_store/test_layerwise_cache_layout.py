@@ -196,8 +196,13 @@ def test_reuse_config_is_scoped_to_layerwise_protocol_connector():
         kv_connector="AscendStoreConnector",
         kv_connector_extra_config={"backend": "memcache"},
     )
+    mp_config = SimpleNamespace(
+        kv_connector="AscendStoreMPConnector",
+        kv_connector_extra_config=ascend_store_config,
+    )
 
     assert get_layerwise_reuse_config(multi_config) is ascend_store_config
+    assert get_layerwise_reuse_config(mp_config) is ascend_store_config
     assert get_layerwise_reuse_config(unsupported) is None
     assert get_layerwise_reuse_config(not_opted_in) is None
 

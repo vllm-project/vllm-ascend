@@ -71,6 +71,14 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether AscendStore runs its Scheduler and Worker services in the
+    # independent KV cache server process. 0: in-process, 1: multiprocess.
+    # This selects the connector; it does not start the server process.
+    "VLLM_ASCEND_STORE_MULTIPROCESS": lambda: bool(int(os.getenv("VLLM_ASCEND_STORE_MULTIPROCESS", "0"))),
+    # ZMQ URL used by the AscendStore multiprocess connector and, unless
+    # overridden on the command line, by the independent KV cache server.
+    # This value is not sensitive. The default is tcp://127.0.0.1:5555.
+    "VLLM_ASCEND_STORE_SERVER_URL": lambda: os.getenv("VLLM_ASCEND_STORE_SERVER_URL", "tcp://127.0.0.1:5555"),
 }
 
 # end-env-vars-definition

@@ -17,8 +17,19 @@
 
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
+from vllm_ascend import envs
+
 
 def register_connector():
+    # vLLM asks the registered class about HMA and cudagraph support before it
+    # constructs a connector, so process mode must select the real class here.
+    if envs.VLLM_ASCEND_STORE_MULTIPROCESS:
+        ascend_store_module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_mp_connector"
+        ascend_store_class = "AscendStoreMPConnector"
+    else:
+        ascend_store_module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        ascend_store_class = "AscendStoreConnector"
+
     # override multi_connector as ascend_multi_connector
     if "MultiConnector" in KVConnectorFactory._registry:
         KVConnectorFactory._registry.pop("MultiConnector")
@@ -36,16 +47,14 @@ def register_connector():
         "MooncakeConnector",
     )
 
-    KVConnectorFactory.register_connector(
-        "MooncakeConnectorStoreV1",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-        "AscendStoreConnector",
-    )
+    KVConnectorFactory.register_connector("MooncakeConnectorStoreV1", ascend_store_module, ascend_store_class)
+
+    KVConnectorFactory.register_connector("AscendStoreConnector", ascend_store_module, ascend_store_class)
 
     KVConnectorFactory.register_connector(
-        "AscendStoreConnector",
-        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector",
-        "AscendStoreConnector",
+        "AscendStoreMPConnector",
+        "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_mp_connector",
+        "AscendStoreMPConnector",
     )
 
     KVConnectorFactory.register_connector(
