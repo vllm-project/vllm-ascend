@@ -253,7 +253,7 @@ class MemcacheBackend(Backend):
     def batch_alloc(self, keys: list[str], sizes: list[int], lease_ttl_ms: int = 0) -> list[int]:
         self.ensure_initialized()
         assert self.store is not None
-        return self.store.batch_alloc(keys, sizes, lease_ttl_ms)
+        return self.store.batch_alloc(keys, sizes, 1, lease_ttl_ms)
 
     def batch_add_lease(self, keys: list[str], lease_ttl_ms: int = 0) -> list[int]:
         assert self.store is not None
