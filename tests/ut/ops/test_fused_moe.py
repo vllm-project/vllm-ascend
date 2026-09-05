@@ -530,6 +530,71 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     assert situ_call["linear_beta"] == 25.0
 
 
+@pytest.mark.parametrize("clamp_limit", [0.0, 10.0])
+def test_w8a8_shared_swiglu_uses_group_index_only_without_clamp(monkeypatch, clamp_limit):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(3, 4, dtype=torch.bfloat16)
+    gate_up = torch.ones(3, 8, dtype=torch.int32)
+    quantized_input = torch.ones(3, 4, dtype=torch.int8)
+    input_scale = torch.ones(3, dtype=torch.float32)
+    quantized_swiglu = torch.ones(3, 4, dtype=torch.int8)
+    swiglu_scale = torch.ones(3, dtype=torch.float32)
+    down_out = torch.randn(3, 4, dtype=torch.bfloat16)
+    gate_up_proj = MagicMock()
+    gate_up_proj.weight = torch.ones(4, 8, dtype=torch.int8)
+    gate_up_proj.weight_scale = torch.ones(8, dtype=torch.bfloat16)
+    gate_up_proj.weight_scale_fp32 = torch.ones(8, dtype=torch.float32)
+    down_proj = MagicMock()
+    down_proj.weight = torch.ones(4, 4, dtype=torch.int8)
+    down_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=gate_up_proj,
+        down_proj=down_proj,
+        act_fn=nn.Identity(),
+    )
+    runner.quant_type = QuantType.W8A8
+    runner.multistream_overlap_shared_expert = False
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_gmm2=MagicMock(),
+        before_combine=MagicMock(),
+        swiglu_limit=clamp_limit,
+    )
+    fast_dynamic_quant = MagicMock(return_value=(quantized_input, input_scale))
+    fast_quant_matmul = MagicMock(side_effect=[gate_up, down_out])
+    custom_ops = SimpleNamespace(
+        npu_dequant_swiglu_quant=MagicMock(return_value=(quantized_swiglu, swiglu_scale)),
+    )
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(fused_moe_module.torch.npu, "current_stream", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_dynamic_quant", fast_dynamic_quant, raising=False)
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_quant_matmul", fast_quant_matmul)
+    monkeypatch.setattr(fused_moe_module.torch.ops, "_C_ascend", custom_ops)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.ALLGATHER,
+        ),
+    )
+
+    output = runner._forward_shared_experts(hidden_states, events)
+
+    torch.testing.assert_close(output, down_out)
+    swiglu_call = custom_ops.npu_dequant_swiglu_quant.call_args.kwargs
+    assert swiglu_call["clamp_limit"] == clamp_limit
+    if clamp_limit > 0.0:
+        assert swiglu_call["group_index"] is None
+    else:
+        torch.testing.assert_close(swiglu_call["group_index"], torch.tensor([hidden_states.shape[0]]))
+
+
 @pytest.mark.parametrize("quant_type", [QuantType.W4A8MXFP, QuantType.W8A8MXFP])
 def test_mxfp_shared_situ_uses_situ_mx_quant(monkeypatch, quant_type):
     runner = AscendMoERunner.__new__(AscendMoERunner)
