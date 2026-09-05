@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config, replace
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
@@ -123,6 +123,22 @@ def _is_glm_model(model_config) -> bool:
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
+
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Mark the cloned config while constructing a draft model.
+
+        The release vLLM loader relies on ``vllm_config.model_config`` still
+        referring to the target config so that draft attention layers receive
+        distinct prefixes. Carry only the Ascend-specific marker needed by
+        attention constructors instead of replacing the model config.
+        """
+        draft_vllm_config = super()._create_draft_vllm_config()
+        additional_config = dict(draft_vllm_config.additional_config or {})
+        additional_config["_ascend_is_draft_model"] = True
+        return replace(
+            draft_vllm_config,
+            additional_config=additional_config,
+        )
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
