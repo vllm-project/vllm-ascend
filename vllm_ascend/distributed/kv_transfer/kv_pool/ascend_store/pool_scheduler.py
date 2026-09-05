@@ -515,7 +515,12 @@ class KVPoolScheduler:
             # rewrite during MTP draft/verify steps. Partial hits that stop on
             # an interior block boundary carry a valid mamba state snapshot
             # at that boundary and can be loaded as-is.
-            hit_reaches_final_block = num_external_hit_tokens > (request.num_tokens - self.lcm_block_size)
+            # The final granularity block starts at the lcm-aligned boundary
+            # containing the last token; num_tokens - lcm_block_size equals
+            # that boundary only for lcm-aligned prompts and over-trims
+            # unaligned prompts whose hit stops exactly on the boundary.
+            final_block_start = (request.num_tokens - 1) // self.lcm_block_size * self.lcm_block_size
+            hit_reaches_final_block = num_external_hit_tokens > final_block_start
             if hit_reaches_final_block:
                 num_external_hit_tokens = max(
                     num_computed_tokens,

@@ -163,6 +163,33 @@ class TestKVPoolScheduler(unittest.TestCase):
         self.assertTrue(load_spec.can_load)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_layerwise_mtp_hit_on_final_block_boundary_not_trimmed(self, mock_client_cls):
+        scheduler = KVPoolScheduler(
+            self._make_config(block_size=16, extra_config={"backend": "memcache"}),
+            use_layerwise=True,
+        )
+        scheduler.use_eagle = True
+        scheduler.cache_transfer_granularity = 16
+        scheduler._get_layerwise_hit_tokens = MagicMock(return_value=96)
+
+        request = MagicMock()
+        request.prompt_token_ids = list(range(100))
+        request.num_tokens = 101
+        request.request_id = "r1"
+        request.block_hashes = [b"h"] * 7
+
+        need, is_async = scheduler.get_num_new_matched_tokens(request, 0)
+
+        # The hit (96) stops exactly on the final block's start boundary
+        # ((101 - 1) // 16 * 16 = 96) and must be loaded as-is instead of
+        # being trimmed back by one whole lcm block.
+        self.assertEqual(need, 96)
+        self.assertFalse(is_async)
+        load_spec = scheduler.load_specs["r1"]
+        self.assertEqual(load_spec.kvpool_cached_tokens, 96)
+        self.assertEqual(load_spec.kvpool_store_skip_tokens, 96)
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_full_hbm_hit_skips_external_lookup(self, mock_client_cls):
         scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
         request = MagicMock()
