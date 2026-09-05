@@ -93,7 +93,7 @@ If you want to deploy a multi-node service, install the same version of vLLM and
 
 Single-node deployment runs both Prefill and Decode on the same node. It is suitable for functional validation, long-context single-cluster serving, and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
 
-Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64GB x 16).
+Run the following script to execute online 128k inference on 1 Atlas 800 A3 (64GB x 16).
 
 ```shell
 #!/bin/sh
