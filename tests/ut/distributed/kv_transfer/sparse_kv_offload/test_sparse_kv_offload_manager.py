@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import torch
 from vllm.v1.kv_cache_interface import KVCacheSpec
@@ -7,9 +8,21 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
 )
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import sparse_kv_offload_manager
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
     get_host_device_memory_usage_ratio,
 )
+from vllm_ascend.utils import AscendDeviceType
+
+
+class TestSparseKVOffloadInitialization(unittest.TestCase):
+    def test_non_a3_is_rejected(self):
+        with (
+            patch.object(sparse_kv_offload_manager, "_SPARSE_KV_OFFLOAD_MANAGER", None),
+            patch.object(sparse_kv_offload_manager, "get_ascend_device_type", return_value=AscendDeviceType.A2),
+            self.assertRaisesRegex(RuntimeError, "only supported on Atlas A3"),
+        ):
+            sparse_kv_offload_manager.init_sparse_kv_offload_manager(None, None, None)
 
 
 class TestHostDeviceMemoryRatio(unittest.TestCase):
