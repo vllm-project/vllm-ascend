@@ -54,6 +54,16 @@ def _should_skip_indexer_init(
     return isinstance(indexer_type, str) and indexer_type.lower() == "shared"
 
 
+def _is_mtp_layer(config: DeepseekV2Config | DeepseekV3Config, prefix: str) -> bool:
+    layer_id = extract_layer_index(prefix)
+    num_hidden_layers = getattr(config, "num_hidden_layers", None)
+    return num_hidden_layers is not None and layer_id >= num_hidden_layers
+
+
+def _resolve_mtp_indexer_permissions(skip_topk: bool, is_mtp_layer: bool) -> tuple[bool, bool]:
+    return skip_topk and not is_mtp_layer, not is_mtp_layer
+
+
 def _deepseek_v2_mla_attention_init(
     self,
     vllm_config: VllmConfig,
@@ -213,6 +223,7 @@ def _deepseek_v2_mla_attention_init(
     )
 
     layer_id = extract_layer_index(prefix)
+    is_mtp_layer = _is_mtp_layer(config, prefix)
 
     if _index_topk_pattern is None:
         _skip_topk = (
@@ -270,6 +281,9 @@ def _deepseek_v2_mla_attention_init(
         topk_indices_buffer=topk_indices_buffer,
     )
 
+    effective_skip_topk, allow_short_prefill_indexer_scoring_skip = _resolve_mtp_indexer_permissions(
+        _skip_topk, is_mtp_layer
+    )
     self.mla_attn = MultiHeadLatentAttentionWrapper(
         self.hidden_size,
         self.num_local_heads,
@@ -283,7 +297,8 @@ def _deepseek_v2_mla_attention_init(
         cache_config,
         quant_config,
         prefix,
-        skip_topk=_skip_topk,
+        skip_topk=effective_skip_topk,
+        allow_short_prefill_indexer_scoring_skip=allow_short_prefill_indexer_scoring_skip,
     )
 
 

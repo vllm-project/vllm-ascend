@@ -310,6 +310,7 @@ class Glm5NextDecoderLayer(nn.Module):
                 cache_config=cache_config,
                 quant_config=None,  # MLA projections are BF16 in checkpoint
                 prefix=f"{prefix}.self_attn",
+                allow_short_prefill_indexer_scoring_skip=not is_mtp_layer,
                 topk_indices_buffer=topk_indices_buffer,
                 skip_rope=config.mla_nope,
             )

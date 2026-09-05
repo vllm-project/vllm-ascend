@@ -82,7 +82,7 @@ class TestAscendMultiHeadLatentAttention(TestBase):
         mock_mla_attn.impl = MagicMock()
         mock_mla_attn.impl.process_weights_after_loading = MagicMock()
 
-        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn):
+        with patch("vllm_ascend.ops.mla.MLAAttention", return_value=mock_mla_attn) as mock_mla_cls:
             mock_tp_size.return_value = 2
             mock_vllm_config = MagicMock(spec=VllmConfig)
             mock_vllm_config.model_config.hf_text_config = MagicMock(num_hidden_layers=32, first_k_dense_replace=True)
@@ -102,10 +102,12 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 cache_config=self.mock_cache_config,
                 quant_config=self.mock_quant_config,
                 prefix=self.prefix,
+                allow_short_prefill_indexer_scoring_skip=True,
             )
 
             self.assertEqual(attn.tp_size, 2)
             self.assertIsNotNone(attn.mla_attn)
+            self.assertTrue(mock_mla_cls.call_args.kwargs["allow_short_prefill_indexer_scoring_skip"])
 
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
