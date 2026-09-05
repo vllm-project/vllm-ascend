@@ -47,7 +47,7 @@ env:
 
 jobs:
   resolve-source:
-    runs-on: linux-amd64-cpu-4-hk
+    runs-on: linux-amd64-cpu-8-hk
     outputs:
       source_repository: ${{ steps.source.outputs.source_repository }}
       source_ref: ${{ steps.source.outputs.source_ref }}
@@ -126,21 +126,13 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
-  ensure-csrc-cache:
-    needs: resolve-source
-    uses: ./.github/workflows/_ensure_csrc_cache.yaml
-    with:
-      target_ids: '["a2-arm64-ubuntu"]'
-      repository: ${{ needs.resolve-source.outputs.source_repository }}
-      source_ref: ${{ needs.resolve-source.outputs.source_ref }}
-      base_repository: vllm-project/vllm-ascend
-      base_ref: ${{ needs.resolve-source.outputs.base_ref }}
-      base_sha: ${{ needs.resolve-source.outputs.base_sha }}
-
   main2main:
-    needs: [resolve-source, ensure-csrc-cache]
-    runs-on: linux-aarch64-a2b1-8
-    timeout-minutes: 2880
+    needs: resolve-source
+    # All analysis/planning/adapter/QA/pre-CI/final-gate work runs on a pure
+    # CPU runner; E2E runs on the A2/A3/310P NPU runners via the external
+    # main2main-e2e workflows (dispatched by step 0 below).
+    runs-on: linux-amd64-cpu-8-hk
+    timeout-minutes: 1440
     concurrency:
       group: main2main
       cancel-in-progress: false
@@ -168,14 +160,40 @@ jobs:
         shell: bash -el {0}
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
-      MAIN2MAIN_IMAGE_TAG: 9.1.0-910b-ubuntu22.04-py3.12
       TARGET_COMMIT: ${{ github.event_name == 'workflow_dispatch' && inputs.target_commit || '' }}
       PUSH_TO_GITHUB: 'true'
       GITHUB_REPO: vllm-project/vllm-ascend
       HEAD_FORK: vllm-ascend-ci/vllm-ascend
       MAIN2MAIN_KEEP_BRANCH: 'true'
       MAIN2MAIN_WORKSPACE: /tmp/main2main_flow/workspace
-      MAIN2MAIN_CASES_FILE: .github/workflows/scripts/main2main_tests.json
+      # External E2E on the A2/A3/310P resident runners (select_tests.py
+      # ready-all selection, identical to PR CI).  This workflow dispatches
+      # main2main-e2e.yaml ONCE (below); the runners build their env and
+      # then serve every E2E round in place from the flow's signal-branch
+      # commands.  MAIN2MAIN_E2E_PREP_RUN_ID is filled by the "Pre-start
+      # E2E runner envs" step so the flow reuses that run.
+      MAIN2MAIN_E2E_REPO: vllm-ascend-ci/vllm-ascend
+      MAIN2MAIN_E2E_BRANCH: main2main_e2e
+      # Must mirror main2main-e2e.yaml's resident matrix (a3 temporarily
+      # removed) — groups for chips outside it are dropped flow-side,
+      # otherwise every round waits its full timeout for a chip that never
+      # reports.
+      MAIN2MAIN_E2E_CHIPS: 'a2,310p'
+      # Fork carrying the signal branch (the adapted code + test_groups.json)
+      # that the E2E workflow checks out per round — same fork the PR head
+      # lives on, so the pushed history is already known there.
+      MAIN2MAIN_E2E_SIGNAL_REPO: vllm-ascend-ci/vllm-ascend
+      # Identifies this main run in the e2e workflow: the prep dispatch
+      # inputs and the prepare-<chip>-<main_run_id> job names key on it,
+      # and the resident loop probes it to detect main-run completion.
+      MAIN2MAIN_E2E_MAIN_RUN_ID: ${{ github.run_id }}
+      # Pin the flow revision the install step clones.  Kept on
+      # feature/e2e-external while the 3-runner E2E change is under
+      # validation (main2main_flow PR #3); remove once that PR merges.
+      MAIN2MAIN_FLOW_REF: feature/e2e-external
+      # npu-smi exists in the CANN container but there is no device on the
+      # CPU runner — skip the mega_moe JIT warmup entirely.
+      MAIN2MAIN_SKIP_NPU_WARMUP: 'true'
       MAIN2MAIN_LOG_HELPERS: |
         print_group() {
           local title="$1"
@@ -202,22 +220,6 @@ jobs:
 
       - name: Exclude vllm dir from ascend git
         run: echo "vllm-upstream/" >> .git/info/exclude
-
-      - name: Load main2main test cases
-        run: |
-          set -eu
-          if [ ! -f "${MAIN2MAIN_CASES_FILE}" ]; then
-            echo "::error::main2main test cases file not found: ${MAIN2MAIN_CASES_FILE}"
-            exit 1
-          fi
-          CASES=$(jq -r '.cases | join(" ")' "${MAIN2MAIN_CASES_FILE}")
-          if [ -z "${CASES}" ]; then
-            echo "::error::no test cases loaded from ${MAIN2MAIN_CASES_FILE}"
-            exit 1
-          fi
-          echo "Loaded $(jq '.cases | length' "${MAIN2MAIN_CASES_FILE}") test cases:"
-          printf '%s\n' "${CASES}"
-          echo "MAIN2MAIN_TEST_CASES=${CASES}" >> "$GITHUB_ENV"
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v7
@@ -261,13 +263,147 @@ jobs:
           git config user.email "main2main-bot@users.noreply.github.com"
           gh --version
 
-      - name: Check npu and CANN info
-        if: ${{ !cancelled() }}
+      - name: Pre-start E2E runner envs
         run: |
-          npu-smi info || true
-          if [ -d /usr/local/Ascend/ascend-toolkit/latest ]; then
-            cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info || true
+          set -euo pipefail
+          # Dispatch the A2/A3/310P environment prep NOW (in parallel with
+          # the remaining CPU installs), then WAIT until each NPU
+          # runner picks up its prepare job (machine resources
+          # allocated, pod up, runner online) before the main flow
+          # proceeds — fail fast if the machines cannot come up.  The flow
+          # reuses this run id (MAIN2MAIN_E2E_PREP_RUN_ID) instead of
+          # dispatching again.
+          VLLM_COMMIT="${TARGET_COMMIT}"
+          if [ -z "${VLLM_COMMIT}" ]; then
+            VLLM_COMMIT=$(git -C vllm-upstream rev-parse HEAD)
           fi
+          echo "Pre-starting main2main E2E env prep for vllm=${VLLM_COMMIT} (A2/A3/310P)..."
+          # Every main run prepares its own env (run-name
+          # Main2Main-E2E-<main_run_id>): the env belongs to this run's
+          # fixed vllm commit, and each step's E2E rounds then reuse it
+          # without re-installing or re-acquiring the csrc cache.  No
+          # cross-run prep reuse — a stale reused run may have had its
+          # runner workspace reaped, forcing re-install on the next round.
+          gh workflow run main2main-e2e.yaml \
+            --repo "${HEAD_FORK}" \
+            --ref main \
+            -f "vllm=${VLLM_COMMIT}" \
+            -f "base_ref=main" \
+            -f "signal_branch=${MAIN2MAIN_E2E_BRANCH}" \
+            -f "signal_repo=${MAIN2MAIN_E2E_SIGNAL_REPO}" \
+            -f "flow_ref=${MAIN2MAIN_FLOW_REF:-main}" \
+            -f "main_run_id=${GITHUB_RUN_ID}" \
+            -f "main_run_repo=${GITHUB_REPOSITORY}"
+          # Phase 1: find our run id (list API indexing can lag ~1 min).
+          # The run-name is unique to this main run
+          # (Main2Main-E2E-<main_run_id>), so the newest matching run is
+          # the one we just dispatched.
+          RUN_ID=""
+          for i in $(seq 1 30); do
+            RUN_ID=$(gh api "repos/${HEAD_FORK}/actions/runs?event=workflow_dispatch&branch=main&per_page=50" 2>/tmp/prep-poll.err \
+              | python3 -c "
+          import json, sys
+          runs = json.load(sys.stdin).get('workflow_runs', [])
+          main_run = sys.argv[1]
+          want_name = 'Main2Main-E2E-' + main_run
+          cands = [r['id'] for r in runs if r.get('name') == want_name]
+          print(max(cands) if cands else '')
+          " "${GITHUB_RUN_ID}" || true)
+            if [ -n "${RUN_ID:-}" ]; then
+              break
+            fi
+            echo "prep run not found (poll ${i}/30)"
+            sleep 10
+          done
+          if [ -z "${RUN_ID:-}" ]; then
+            echo "::error::prep run id not found after 30 polls — the NPU runners were never dispatched"
+            exit 1
+          fi
+          echo "MAIN2MAIN_E2E_PREP_RUN_ID=${RUN_ID}" >> "$GITHUB_ENV"
+          echo "Prep run ${RUN_ID} started"
+          # Phase 2: wait until each prepare job's "Check NPU availability"
+          # step completed (npu-smi ok) — not merely until the job leaves
+          # queued (which is right after the init container finishes, before
+          # the NPU is confirmed usable).  Jobs are queried by the prep run
+          # id itself, so prefix matching on prepare-<chip>- is unambiguous.
+          # Use the local RUN_ID: MAIN2MAIN_E2E_PREP_RUN_ID was written to
+          # GITHUB_ENV for later steps and is not bound in this shell
+          # (set -u would abort on it).
+          PREP_RUN_ID=${RUN_ID}
+          WAIT_MIN=${MAIN2MAIN_E2E_READY_TIMEOUT_MIN:-120}
+          echo "Waiting for the NPU runners to pass NPU availability check (prepare-a2/310p) — up to ${WAIT_MIN} min..."
+          DEADLINE=$(( $(date +%s) + WAIT_MIN * 60 ))
+          while :; do
+            READY_STATE=$(gh api "repos/${HEAD_FORK}/actions/runs/${PREP_RUN_ID}/jobs" \
+              | python3 -c "
+          import json, sys
+          jobs = json.load(sys.stdin).get('jobs', [])
+          want = [f'prepare-{c}-' for c in ('a2', '310p')]
+          NPU_STEP = 'Check NPU availability'
+          state = {}
+          for j in jobs:
+              name = j.get('name') or ''
+              for w in want:
+                  if name.startswith(w):
+                      step_st = step_con = 'missing'
+                      for st in j.get('steps', []) or []:
+                          if st.get('name') == NPU_STEP:
+                              step_st = st.get('status') or 'missing'
+                              step_con = (st.get('conclusion') or '') or 'missing'
+                      state[w[:-1]] = (step_st, step_con, j.get('status'),
+                                       j.get('conclusion') or 'missing')
+          out = []
+          for w in want:
+              if w[:-1] in state:
+                  step_st, step_con, job_st, job_con = state[w[:-1]]
+                  out.append(f'{w[:-1]}|{step_st}|{step_con}|{job_st}|{job_con}')
+              else:
+                  out.append(f'{w[:-1]}|missing|missing|missing|missing')
+          print(';'.join(out))
+          ") || true
+            if [ -z "${READY_STATE}" ]; then
+              echo "  runners: <gh api failed — retrying>"
+              sleep 30
+              continue
+            fi
+            echo "  runners: ${READY_STATE}"
+            ALL_READY=true
+            for entry in $(echo "${READY_STATE}" | tr ';' '\n'); do
+              IFS='|' read -r jname jstep jconclusion jstatus jjob_conclusion <<< "${entry}"
+              case "${jstatus}" in
+                completed)
+                  # failed/skipped/cancelled/timed_out are CONCLUSION values,
+                  # never job statuses — check the job conclusion once the
+                  # job completed (the resident loop keeps it in_progress
+                  # afterwards, so this only fires on an early death).
+                  case "${jjob_conclusion}" in
+                    failure|cancelled|timed_out|startup_failure|skipped)
+                      echo "::error::${jname} job completed with ${jjob_conclusion} — cannot wait for it"
+                      exit 1
+                      ;;
+                  esac
+                  ;;
+              esac
+              case "${jstep}" in
+                completed)
+                  if [ "${jconclusion}" != "success" ]; then
+                    echo "::error::${jname} 'Check NPU availability' failed (${jconclusion})"
+                    exit 1
+                  fi
+                  ;;
+                *) ALL_READY=false ;;
+              esac
+            done
+            if [ "${ALL_READY}" = "true" ]; then
+              echo "All NPU runners passed the NPU availability check (npu-smi ok)"
+              break
+            fi
+            if [ "$(date +%s)" -gt "${DEADLINE}" ]; then
+              echo "::error::timed out after ${WAIT_MIN} min waiting for the NPU availability check (last state: ${READY_STATE})"
+              exit 1
+            fi
+            sleep 30
+          done
 
       - name: Install opencode + main2main-flow
         env:
@@ -276,7 +412,7 @@ jobs:
           set -euxo pipefail
 
           NODE_INSTALL_DIR="/opt/nodejs"
-          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-arm64.tar.gz"
+          NODE_ARCHIVE_NAME="node-v${NODE_VERSION}-linux-x64.tar.gz"
           NODE_ARCHIVE="/tmp/${NODE_ARCHIVE_NAME}"
           NODE_CHECKSUMS="/tmp/node-v${NODE_VERSION}-SHASUMS256.txt"
           curl -fsSL --retry 3 --retry-delay 5 --retry-all-errors \
@@ -326,10 +462,16 @@ jobs:
           # ensure git push uses gh token
           git config --global credential.helper "!gh auth git-credential"
 
-          # install main2main_flow
+          # install main2main_flow; the pinned ref also re-applies on
+          # self-hosted runners where /tmp persists between runs
           M2M_FLOW_DIR="/tmp/main2main_flow"
+          FLOW_REF="${MAIN2MAIN_FLOW_REF:-main}"
           if [ ! -d "${M2M_FLOW_DIR}/.git" ]; then
-            git clone https://github.com/vllm-ascend/main2main_flow.git "${M2M_FLOW_DIR}"
+            git clone --branch "${FLOW_REF}" \
+              https://github.com/vllm-ascend/main2main_flow.git "${M2M_FLOW_DIR}"
+          else
+            git -C "${M2M_FLOW_DIR}" fetch origin "${FLOW_REF}"
+            git -C "${M2M_FLOW_DIR}" checkout --detach FETCH_HEAD
           fi
           pip install -e "${M2M_FLOW_DIR}"
 
@@ -361,86 +503,53 @@ jobs:
           echo "name=${BRANCH}" >> "$GITHUB_OUTPUT"
           echo "base_sha=${BASE_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Get csrc hash
-        id: get_csrc_hash
-        run: |
-          # Fail closed so a git error cannot silently produce sha256(empty).
-          set -euo pipefail
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-
-          # Match the standalone cache producer's tracked csrc build inputs.
-          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
-          if [ -z "$CSRC_MANIFEST" ]; then
-            echo "::error::No tracked csrc inputs found."
-            exit 1
-          fi
-
-          CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
-          echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
-
-      - name: Get architecture
-        id: get_arch
-        run: |
-          ARCH=$(uname -m)
-          case "$ARCH" in
-            x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
-            aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
-            *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
-          esac
-
-      - name: Restore vllm-ascend csrc cache
-        id: cache-csrc
-        uses: runs-on/cache/restore@v5
-        with:
-          path: |
-            vllm_ascend/_cann_ops_custom
-            vllm_ascend/*.so
-            vllm_ascend/lib
-            vllm_ascend/include
-          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ env.MAIN2MAIN_IMAGE_TAG }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
-          # During the rollout, tolerate misses so main2main can use the existing
-          # NPU build while CPU cache production proves stable.
-          # Restore fail-on-cache-miss to true after the transition period.
-          fail-on-cache-miss: false
-
-      - name: Install Mooncake wheel
-        run: |
-          set -euxo pipefail
-          apt-get install -y --no-install-recommends \
-            libibverbs1 \
-            ibverbs-providers \
-            librdmacm1 \
-            libnuma1 \
-            libcurl4
-          ldconfig
-          MOONCAKE_WHEEL="mooncake_transfer_engine_ascend-0.3.9-cp312-cp312-manylinux_2_35_aarch64.whl"
-          pip install --no-cache-dir --no-deps \
-            "https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/${MOONCAKE_WHEEL}"
-
       - name: Install vllm-project/vllm from source
         working-directory: vllm-upstream
         run: |
           VLLM_TARGET_DEVICE=empty uv pip install .
           pip uninstall -y triton
 
-      - name: Install vllm-ascend
+      # CPU-runner install: requirements-dev.txt plus an editable install of
+      # the package itself with kernel compilation disabled (COMPILE_CUSTOM_
+      # KERNELS=0 — the NPU runners own csrc builds via the main2main-e2e
+      # workflow's prepare job).  Without the editable install the
+      # vllm.platform_plugins entry point is absent and `import vllm` fails
+      # device inference ("Failed to infer device type") — 162 UT failures
+      # in run 32989253968.  The _build_info.py stub is generated first;
+      # setup.py's develop regen overwrites it with identical content.
+      #
+      # uc-manager is excluded: it has no amd64 wheel and its sdist build
+      # fetches vendor deps over git, which fails on this runner (run
+      # 32985956048).  It is a device-side library — no CPU UT imports it.
+      - name: Install vllm-ascend deps only (no csrc compile/install)
         working-directory: ${{ github.workspace }}
         env:
-          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+          SOC_VERSION: ascend910b1
         run: |
-          pip install uc-manager
-          uv pip install -r requirements-dev.txt
-          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
-          # Preserve main2main availability during the transition by compiling
-          # on the NPU only when the CPU-produced cache is unavailable.
-          if [ "$CSRC_CACHE_HIT" = "true" ]; then
-            echo "csrc cache hit: skip kernel compilation"
-            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
-          else
-            echo "csrc cache miss: compile kernels on the NPU runner"
-            uv pip install -e . --no-build-isolation
-          fi
+          # Keep the filtered copy in the repo root so the `-r
+          # requirements-lint.txt` / `-r requirements.txt` includes inside
+          # requirements-dev.txt still resolve relative to the checkout.
+          grep -v '^uc-manager$' requirements-dev.txt > requirements-dev-nouc.txt
+          uv pip install -r requirements-dev-nouc.txt
+          rm -f requirements-dev-nouc.txt
+          python3 - <<'PY'
+          import importlib.util
+          import os
+          from pathlib import Path
+
+          # Reproduce setup.py's gen_build_info without installing the
+          # package (hardware.py is stdlib-only by design for setup.py).
+          spec = importlib.util.spec_from_file_location(
+              "hardware", os.path.join(os.getcwd(), "vllm_ascend", "device", "hardware.py"))
+          hardware = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(hardware)
+          device_type = hardware.device_type_from_soc_version(os.environ["SOC_VERSION"]).name
+          Path("vllm_ascend/_build_info.py").write_text(
+              "# Auto-generated file\n"
+              f"__device_type__ = '{device_type}'\n")
+          PY
+          COMPILE_CUSTOM_KERNELS=0 uv pip install --no-deps \
+            --no-build-isolation -e .
 
       - name: Run main2main flow
         id: run-main2main
@@ -608,6 +717,21 @@ jobs:
             --repo "${UPSTREAM_REPO}" \
             --title "[main2main] main2main manual review required (${SHORT_NEW})" \
             --body-file /tmp/main2main-manual-review.md
+
+      # Cancel the resident-runner run so the NPU runners are released
+      # (pod reclaimed / runner freed for other CI).  The resident loop
+      # also self-releases on main-run completion; cancelling here is the
+      # prompt stop when the flow itself fails.  Placed before "Chain next
+      # run": a chained run's fresh dispatch must not find this run's
+      # residents still holding the runners.  Cancel is idempotent (409 on
+      # an already-completed run is harmless).
+      - name: Release E2E runners
+        if: always()
+        run: |
+          if [ -n "${MAIN2MAIN_E2E_PREP_RUN_ID:-}" ]; then
+            gh api -X POST "repos/${MAIN2MAIN_E2E_REPO}/actions/runs/${MAIN2MAIN_E2E_PREP_RUN_ID}/cancel" || true
+            echo "Released E2E runners: cancelled resident-runner run ${MAIN2MAIN_E2E_PREP_RUN_ID}"
+          fi
 
       - name: Chain next run
         if: steps.final-status.outputs.status == 'completed' && steps.final-status.outputs.steps_completed != '0'
