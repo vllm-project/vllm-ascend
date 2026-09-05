@@ -839,7 +839,7 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 self._shared_experts.down_proj, "weight_scale"
             )
             shared_uses_situ = isinstance(self._shared_experts.act_fn, AscendSituAndMul)
-            if has_quantized_shared and self.quant_type in (QuantType.W8A8, QuantType.W4A8):
+            if has_quantized_shared and self.quant_type == QuantType.W8A8:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
@@ -934,6 +934,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 maybe_wait_event(fused_moe_evts.before_combine)
                 shared_out = self._shared_experts.down_proj((quantized_x, swiglu_out_scale))[0]
             else:
+                # Kimi K3 per-channel W4A8 shared experts also use this
+                # path. Their Linear scheme runs the W4-native weight-only
+                # matmul, avoiding QuantMatmul WeightNZ for INT4Pack weights.
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.before_dispatch)

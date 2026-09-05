@@ -462,7 +462,7 @@ def test_unquantized_shared_situ_uses_split_bf16_path(monkeypatch):
     runner._shared_experts_part2.assert_called_once_with(hidden_states, gate_up)
 
 
-def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
+def test_per_channel_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     runner = AscendMoERunner.__new__(AscendMoERunner)
     nn.Module.__init__(runner)
     hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
@@ -479,12 +479,13 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     down_proj = MagicMock()
     down_proj.weight = torch.ones(2, 4, dtype=torch.int8)
     down_proj.weight_scale = torch.ones(4, dtype=torch.bfloat16)
+    down_proj.weight_scale_fp32 = torch.ones(4, dtype=torch.float32)
     runner._shared_experts = SimpleNamespace(
         gate_up_proj=gate_up_proj,
         down_proj=down_proj,
         act_fn=AscendSituAndMul(beta=4.0, linear_beta=25.0),
     )
-    runner.quant_type = QuantType.W4A8
+    runner.quant_type = QuantType.W8A8
     runner.multistream_overlap_shared_expert = False
     stream = MagicMock()
     events = fused_moe_module.FusedMoEEvents(
@@ -522,12 +523,122 @@ def test_w8a8_shared_situ_uses_dequant_situ_quant(monkeypatch):
     down_proj.assert_not_called()
     fast_dynamic_quant.assert_called_once_with(hidden_states)
     assert fast_quant_matmul.call_count == 2
+    gate_up_call = fast_quant_matmul.call_args_list[0]
+    assert gate_up_call.args == (quantized_input, gate_up_proj.weight, gate_up_proj.weight_scale)
+    assert gate_up_call.kwargs["pertoken_scale"] is None
+    assert gate_up_call.kwargs["output_dtype"] == torch.int32
     situ_call = custom_ops.dequant_situ_quant.call_args.kwargs
     assert situ_call["x"] is gate_up
     assert situ_call["weight_scale"] is gate_up_proj.weight_scale_fp32
     assert situ_call["activation_scale"] is input_scale
     assert situ_call["beta"] == 4.0
     assert situ_call["linear_beta"] == 25.0
+    down_call = fast_quant_matmul.call_args_list[1]
+    assert down_call.args == (quantized_situ, down_proj.weight, down_proj.weight_scale)
+    assert down_call.kwargs["pertoken_scale"] is situ_scale
+    assert down_call.kwargs["output_dtype"] == hidden_states.dtype
+
+
+def test_per_channel_w4a8_shared_experts_use_weight_only_fallback(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up = torch.randn(2, 8, dtype=torch.bfloat16)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(
+            weight_scale=torch.ones(8),
+            weight_scale_fp32=torch.ones(8),
+        ),
+        down_proj=SimpleNamespace(
+            weight_scale=torch.ones(4),
+            weight_scale_fp32=torch.ones(4),
+        ),
+        act_fn=AscendSituAndMul(beta=4.0, linear_beta=25.0),
+    )
+    runner._shared_experts_part1 = MagicMock(return_value=gate_up)
+    runner._shared_experts_part2 = MagicMock(return_value=down_out)
+    runner.quant_type = QuantType.W4A8
+    runner.multistream_overlap_shared_expert = False
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_combine=MagicMock(),
+    )
+    quant_matmul = MagicMock()
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(
+        fused_moe_module.torch.npu,
+        "current_stream",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_quant_matmul", quant_matmul)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.ALLGATHER,
+        ),
+    )
+
+    output = runner._forward_shared_experts(hidden_states, events)
+
+    assert output is down_out
+    runner._shared_experts_part1.assert_called_once_with(hidden_states)
+    runner._shared_experts_part2.assert_called_once_with(hidden_states, gate_up)
+    quant_matmul.assert_not_called()
+
+
+def test_per_group_w4a8_shared_experts_use_quantized_linear_path(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.bfloat16)
+    gate_up = torch.randn(2, 8, dtype=torch.bfloat16)
+    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
+    runner._shared_experts = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+        down_proj=SimpleNamespace(weight_scale=torch.ones(1)),
+        act_fn=nn.Identity(),
+    )
+    runner._shared_experts_part1 = MagicMock(return_value=gate_up)
+    runner._shared_experts_part2 = MagicMock(return_value=down_out)
+    runner.quant_type = QuantType.W4A8
+    runner.multistream_overlap_shared_expert = False
+    events = fused_moe_module.FusedMoEEvents(
+        before_routed_experts=MagicMock(),
+        before_dispatch=MagicMock(),
+        before_combine=MagicMock(),
+    )
+    quant_matmul = MagicMock()
+
+    monkeypatch.setattr(fused_moe_module, "npu_stream_switch", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(fused_moe_module, "shared_expert_dp_enabled", lambda: True)
+    monkeypatch.setattr(fused_moe_module, "shared_experts_calculation_stream", MagicMock())
+    monkeypatch.setattr(
+        fused_moe_module.torch.npu,
+        "current_stream",
+        MagicMock(return_value=MagicMock()),
+    )
+    monkeypatch.setattr(fused_moe_module.torch_npu, "npu_quant_matmul", quant_matmul)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(
+            flash_comm_v1_enabled=False,
+            moe_comm_type=MoECommType.ALLGATHER,
+        ),
+    )
+
+    output = runner._forward_shared_experts(hidden_states, events)
+
+    assert output is down_out
+    runner._shared_experts_part1.assert_called_once_with(hidden_states)
+    runner._shared_experts_part2.assert_called_once_with(hidden_states, gate_up)
+    quant_matmul.assert_not_called()
 
 
 @pytest.mark.parametrize("quant_type", [QuantType.W4A8MXFP, QuantType.W8A8MXFP])

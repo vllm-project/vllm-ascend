@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
 import regex as re
@@ -53,6 +54,104 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         params = self.method.get_pergroup_param(8, 32, torch.bfloat16, layer_type="row")
         self.assertEqual(params["scale_bias"].dtype, torch.float32)
         self.assertEqual(params["scale_bias"].shape, (32, 16))
+
+    def test_per_channel_weight_uses_only_first_level_scale(self):
+        self.method.group_size = 0
+        self.method.is_per_channel_weight = True
+        self.method.new_quant_version = True
+
+        params = self.method.get_pergroup_param(8, 32, torch.bfloat16)
+
+        self.assertEqual(params["weight_scale"].shape, (32, 1))
+        self.assertEqual(params["weight_offset"].shape, (32, 1))
+        self.assertNotIn("weight_scale_second", params)
+        self.assertNotIn("weight_offset_second", params)
+        self.assertEqual(params["scale_bias"].shape, (32, 1))
+
+    @patch("torch_npu.npu_quant_matmul")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_per_channel_weight_uses_per_token_activation_scale(self, mock_dynamic_quant, mock_matmul):
+        self.method.group_size = 0
+        self.method.is_per_channel_weight = True
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.empty(8, 4, dtype=torch.int32), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones(8, dtype=torch.bfloat16), requires_grad=False)
+        x = torch.randn(2, 4, dtype=torch.bfloat16)
+        quantized_x = torch.ones(2, 4, dtype=torch.int8)
+        pertoken_scale = torch.ones(2, dtype=torch.float32)
+        mock_dynamic_quant.return_value = (quantized_x, pertoken_scale)
+        mock_matmul.return_value = torch.empty(2, 8, dtype=torch.bfloat16)
+
+        self.method.apply(layer, x)
+
+        mock_dynamic_quant.assert_called_once_with(x)
+        self.assertEqual(mock_matmul.call_args.args, (quantized_x, layer.weight, layer.weight_scale))
+        self.assertIs(mock_matmul.call_args.kwargs["pertoken_scale"], pertoken_scale)
+        self.assertEqual(mock_matmul.call_args.kwargs["output_dtype"], x.dtype)
+
+    @patch("torch_npu.npu_dynamic_quant")
+    @patch("torch_npu.npu_weight_quant_batchmatmul")
+    def test_apply_kimi_shared_expert_uses_weight_only_fallback(self, mock_weight_only_matmul, mock_dynamic_quant):
+        self.method.enable_per_channel_for_kimi_shared_expert()
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.empty(4, 1, dtype=torch.int32), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones(8, dtype=torch.bfloat16), requires_grad=False)
+        x = torch.randn(2, 4, dtype=torch.bfloat16)
+        expected = torch.empty(2, 8, dtype=torch.bfloat16)
+        mock_weight_only_matmul.return_value = expected
+
+        output = self.method.apply(layer, x)
+
+        self.assertIs(output, expected)
+        mock_dynamic_quant.assert_not_called()
+        mock_weight_only_matmul.assert_called_once()
+        call = mock_weight_only_matmul.call_args
+        self.assertIs(call.args[0], x)
+        self.assertIs(call.args[1], layer.weight)
+        torch.testing.assert_close(call.kwargs["antiquant_scale"], layer.weight_scale)
+        self.assertEqual(call.kwargs["antiquant_group_size"], 0)
+
+    @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size", return_value=1)
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
+    def test_kimi_k3_text_config_marks_only_shared_expert(self, mock_get_current_vllm_config, _mock_get_tp_world_size):
+        """Text-only K3 loading exposes kimi_linear as its immediate config."""
+        mock_get_current_vllm_config.return_value = SimpleNamespace(
+            quant_config=SimpleNamespace(quant_description={"group_size": 256}),
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type="kimi_linear"),
+                hf_text_config=SimpleNamespace(
+                    model_type="kimi_linear",
+                    mla_use_output_gate=True,
+                    routed_expert_hidden_size=3584,
+                ),
+            ),
+        )
+        method = AscendW4A8DynamicLinearMethod()
+        shared_layer = SimpleNamespace(prefix="model.layers.0.block_sparse_moe.shared_experts.gate_up_proj")
+        routed_layer = SimpleNamespace(prefix="model.layers.0.block_sparse_moe.experts")
+
+        self.assertTrue(method._uses_per_channel_shared_expert(shared_layer))
+        self.assertFalse(method._uses_per_channel_shared_expert(routed_layer))
+
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz", side_effect=identity)
+    def test_process_per_channel_weight_without_second_level_scale(self, _mock_maybe_trans_nz):
+        self.method.group_size = 0
+        self.method.is_per_channel_weight = True
+        self.method.new_quant_version = True
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.zeros((16, 8), dtype=torch.int8), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.bfloat16), requires_grad=False)
+        layer.weight_offset = torch.nn.Parameter(torch.empty((32, 1), dtype=torch.float32), requires_grad=False)
+        layer.scale_bias = torch.nn.Parameter(torch.zeros((32, 1), dtype=torch.float32), requires_grad=False)
+
+        self.method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.data.shape, (8, 4))
+        self.assertEqual(layer.weight_scale.data.shape, (32,))
+        self.assertEqual(layer.weight_scale.dtype, torch.bfloat16)
+        self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
+        torch.testing.assert_close(layer.weight_scale_fp32, layer.weight_scale.data.float())
+        self.assertFalse(hasattr(layer, "weight_scale_second"))
 
     @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_convert_weight_to_int4pack")
@@ -127,6 +226,27 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
             self.assertRaisesRegex(AssertionError, re.escape(expected_message)),
         ):
             self.method.process_weights_after_loading(layer)
+
+    @patch("torch_npu.npu_convert_weight_to_int4pack")
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
+    def test_process_per_channel_kimi_shared_expert_weight_keeps_int4pack_nd(self, mock_maybe_trans_nz, mock_int4pack):
+        self.method.enable_per_channel_for_kimi_shared_expert()
+        packed_weight = torch.zeros((8, 4), dtype=torch.int32)
+        mock_int4pack.return_value = packed_weight
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.zeros((32, 8), dtype=torch.int8), requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(torch.ones((32, 1), dtype=torch.bfloat16), requires_grad=False)
+        layer.weight_offset = torch.nn.Parameter(torch.zeros((32, 1), dtype=torch.bfloat16), requires_grad=False)
+
+        self.method.process_weights_after_loading(layer)
+
+        mock_maybe_trans_nz.assert_not_called()
+        mock_int4pack.assert_called_once()
+        self.assertEqual(mock_int4pack.call_args.args[0].shape, torch.Size([8, 32]))
+        self.assertEqual(mock_int4pack.call_args.args[0].dtype, torch.int32)
+        self.assertEqual(layer.weight.data.data_ptr(), packed_weight.data_ptr())
+        self.assertEqual(layer.weight_scale_fp32.dtype, torch.float32)
+        self.assertEqual(layer.weight_scale_fp32.shape, torch.Size([32]))
 
 
 class TestAscendW4A8DynamicLinearMethodWithNpu(TestBase):
