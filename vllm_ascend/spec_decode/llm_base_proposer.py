@@ -110,6 +110,19 @@ def _is_glm_model(model_config) -> bool:
     return "glm" in str(model_type).lower()
 
 
+def _supports_spec_decode_graph(model_config, method: str) -> bool:
+    """Return whether graph-mode drafting is supported for this model/method.
+
+    GLM graph-mode support is currently validated only for the GLM-MoE-DSA
+    MTP and DSpark drafters. Keep other GLM variants and speculative methods
+    on the existing eager path.
+    """
+    if not _is_glm_model(model_config):
+        return True
+    model_type = getattr(getattr(model_config, "hf_text_config", None), "model_type", "")
+    return str(model_type).lower() == "glm_moe_dsa" and method in ("mtp", "dspark")
+
+
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
@@ -216,25 +229,21 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.tp_group_context = nullcontext()
 
         self.use_cuda_graph = self.runner._use_aclgraph() and not self.speculative_config.enforce_eager
-        self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
-
-        # GLM series models: speculative decoding does not yet support running
-        # the draft model in graph mode. Force the draft model to always use
-        # eager mode. This is equivalent to the user adding
-        # `"enforce_eager": true` to the `--speculative-config`, and keeps
-        # the target model's graph-mode setting untouched.
-        # TODO(lilinsiman): Remove this code segment after future versions of the GLM
-        # series models support graph input for speculative inference.
-        if _is_glm_model(self.vllm_config.model_config):
-            if self.use_cuda_graph:
-                logger.warning(
-                    "GLM series models with speculative decoding currently do "
-                    "not support graph mode. The draft model has been "
-                    "automatically switched to eager mode "
-                    "(enforce_eager=true). Graph mode support for GLM "
-                    "speculative decoding will be added in a future release. "
-                )
+        is_glm_model = _is_glm_model(self.vllm_config.model_config)
+        if self.use_cuda_graph and not _supports_spec_decode_graph(self.vllm_config.model_config, self.method):
+            logger.warning(
+                "GLM graph-mode speculative decoding is currently supported "
+                "only for the MTP and DSpark methods. The %s draft model has been "
+                "automatically switched to eager mode.",
+                self.method,
+            )
             self.use_cuda_graph = False
+        elif self.use_cuda_graph and is_glm_model:
+            logger.info(
+                "Enabling ACL graph mode for the GLM-MoE-DSA %s draft model.", self.method
+            )
+
+        self._raise_if_padded_drafter_batch_disabled_and_full_graph_enabled()
 
         # NOTE: _enable_probabilistic_draft_probs is set by the upstream
         # SpecDecodeBaseProposer.__init__.
@@ -295,6 +304,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.use_eagle = self.runner.use_eagle
         self.draft_window_size = None
         self.sliding_window = None
+        self._per_group_sliding_windows: dict[int, SlidingWindowAdapter] = {}
 
     def _raise_if_padded_drafter_batch_disabled_and_full_graph_enabled(self):
         if (
@@ -954,14 +964,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_reqs = common_attn_metadata.query_start_loc.shape[0]
             self.query_start_loc.gpu[:num_reqs].copy_(common_attn_metadata.query_start_loc)
             self.query_start_loc.cpu[:num_reqs].copy_(common_attn_metadata.query_start_loc_cpu)
-            num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
-                self.query_start_loc,
-                num_input_tokens,
-                batch_descriptor.num_reqs if batch_descriptor.num_reqs is not None else common_attn_metadata.num_reqs,
-                common_attn_metadata.num_reqs,
-                aclgraph_runtime_mode,
-                batch_descriptor.num_reqs,
-            )
+            if self.method == "dspark":
+                graph_num_reqs = (
+                    batch_descriptor.num_reqs
+                    if batch_descriptor.num_reqs is not None
+                    else common_attn_metadata.num_reqs
+                )
+                num_reqs_padded = self.pad_query_start_loc_for_graph(
+                    self.query_start_loc,
+                    num_input_tokens,
+                    common_attn_metadata.num_reqs,
+                    graph_num_reqs,
+                )
+            else:
+                num_reqs_padded = self.runner._pad_query_start_loc_for_fia(
+                    self.query_start_loc,
+                    num_input_tokens,
+                    (
+                        batch_descriptor.num_reqs
+                        if batch_descriptor.num_reqs is not None
+                        else common_attn_metadata.num_reqs
+                    ),
+                    common_attn_metadata.num_reqs,
+                    aclgraph_runtime_mode,
+                    batch_descriptor.num_reqs,
+                )
             common_attn_metadata.num_reqs = num_reqs_padded
             common_attn_metadata.query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
             common_attn_metadata.query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
@@ -1058,6 +1085,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         multi_steps_attn_metadata, attn_metadata_i = self.build_draft_attn_metadata(
             common_attn_metadata, num_input_tokens, num_tokens
         )
+        if self.method == "dspark" and self.use_cuda_graph:
+            graph_key = attn_metadata_i.actual_seq_lengths_q[-1]
+            assert graph_key == num_input_tokens, (
+                f"DSpark runtime metadata graph key {graph_key} does not match "
+                f"dispatched query size {num_input_tokens}."
+            )
 
         if self.uses_mrope:
             used_update_positions = self.mrope_positions[:, token_indices_to_sample]
@@ -1134,6 +1167,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         )
         if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
             active_device_metadata_executor = None
+
+        # DSpark context K/V has a step-dependent shape, so it must execute
+        # eagerly outside the captured query-block graph. The persistent
+        # context slot-mapping buffers prepared by set_inputs_first_pass keep
+        # the eager cache write and graph replay connected to the same cache.
+        if self.method == "dspark":
+            self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -1176,6 +1216,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()
+        if self.method == "dspark":
+            assert draft_token_ids.ndim == 2
+            assert draft_token_ids.shape[0] >= batch_size, (
+                f"DSpark graph returned {draft_token_ids.shape[0]} request rows "
+                f"for a real batch of {batch_size}."
+            )
+            assert draft_token_ids.shape[1] == self.num_speculative_tokens
         return draft_token_ids
 
     def _sample_draft_from_logits(
@@ -1258,9 +1305,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_positions = self._get_positions(num_input_tokens)
         model_kwargs = {"input_ids": model_input_ids, "positions": model_positions, "inputs_embeds": inputs_embeds}
 
-        if self.method in ("dflash", "dspark"):
+        if self.method == "dflash":
             self.build_model_inputs_first_pass(num_input_tokens, self._context_slot_mapping_buffers)
-        else:
+        elif self.method != "dspark":
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
                 model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
@@ -2300,6 +2347,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     # update full-graph params for one spec token
     def _update_full_graph_params(self, forward_context, num_tokens, draft_attn_metadatas=None):
         assert len(self.draft_attn_groups) > 0
+        if self.method == "dspark" and draft_attn_metadatas:
+            first_layer = self.draft_attn_groups[0].layer_names[0]
+            graph_key = draft_attn_metadatas[0][first_layer].actual_seq_lengths_q[-1]
+            assert graph_key == num_tokens, (
+                f"DSpark graph update key {graph_key} does not match "
+                f"captured query size {num_tokens}."
+            )
         attn_backend = self.draft_attn_groups[0].backend
         update_full_graph_params(
             attn_backend,
@@ -2425,6 +2479,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             )
             else None
         )
+        base_common_attn_metadata = common_attn_metadata
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
             device_metadata_provider = (
@@ -2436,23 +2491,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             if self.use_compress:
                 extra_attn_metadata_args["block_size"] = attn_group.kv_cache_spec.block_size
             if self.method == "dspark":
-                gid = attn_group.kv_cache_group_id
-                common_attn_metadata = copy.copy(common_attn_metadata)
-                block_table = getattr(self, "_per_group_block_table_buffers", {}).get(gid)
-                if block_table is not None:
-                    common_attn_metadata.block_table_tensor = block_table[: common_attn_metadata.num_reqs]
-                slot_mapping = self._per_group_query_slot_mapping_buffers[gid]
-                if slot_mapping is not None:
-                    common_attn_metadata.slot_mapping = slot_mapping[:num_input_tokens]
-                # Apply the sliding window to the per-group block_table + seq_lens
-                # that DSpark's draft FIA actually reads. This branch overwrites
-                # common_attn_metadata.block_table_tensor with the full per-group
-                # table, so the window applied earlier (line 922) is bypassed; we
-                # skipped it there for dspark and re-apply here on the per-group
-                # table so FIA reads the recent-blocks clone instead of block 0.
-                # (dspark only - self.sliding_window is None for MTP.)
-                if self.sliding_window is not None:
-                    self.sliding_window.apply(common_attn_metadata)
+                common_attn_metadata = self._prepare_dspark_group_metadata(
+                    base_common_attn_metadata,
+                    attn_group,
+                    num_input_tokens,
+                )
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
