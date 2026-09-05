@@ -992,6 +992,17 @@ def test_bundled_ascendc_index_score_registers_a5_fp8_kernel() -> None:
     assert '"msa_index_score"' in a5_build_branch
 
 
+def test_bundled_ascendc_index_score_flushes_wide_a5_block_tables() -> None:
+    repo_root = Path(msa_m3_module.__file__).parents[3]
+    op_root = repo_root / "csrc" / "attention" / "msa_index_score"
+    epilogue = (op_root / "op_kernel" / "arch35" / "msa_seg_row_max_epilogue.h").read_text(encoding="utf-8")
+    example = (op_root / "examples" / "test_aclnn_msa_index_score.cpp").read_text(encoding="utf-8")
+
+    assert "AdvanceStageWindow" in epilogue
+    assert "FlushStageToStrideEnd" in epilogue
+    assert "L0-fp8-wide-table-257" in example
+
+
 def test_ascendc_index_score_uses_dense_mode_without_mask() -> None:
     idx_q = torch.zeros(1, 2, 128)
     index_key_cache = torch.zeros(4, 128, 128)

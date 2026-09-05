@@ -38,8 +38,8 @@ public:
     // S workspace 元素类型：非量化 fp16，int8 fp32。
     using ElementS = std::conditional_t<IS_QUANT, float, half>;
 
-    // score 暂存容量：1 AIC : 2 AIV 下每个 subcore 最多拿到半个 M-tile 的行；
-    // 一次 flush 覆盖 MSA_STAGE_BLOCKS 个 block（= 每行 1KB 连续写回）。
+    // score 暂存容量：1 AIC : 2 AIV 下每个 subcore 最多拿到半个 M-tile 的行。
+    // 单窗 MSA_STAGE_BLOCKS 列（= 每行 1KB）；更宽的 score 末维按窗滑动 flush。
     static constexpr uint32_t MSA_STAGE_ROWS = MSA_ROW_TILE_M / MSA_AIV_PER_AIC;
     static constexpr uint32_t MSA_STAGE_BLOCKS = 256;
     static_assert(MSA_STAGE_BLOCKS % MSA_BLOCKS_PER_STILE == 0, "stage window must hold whole S-tiles");
@@ -161,13 +161,12 @@ public:
         tokenBase0_ = task.cuQStart;
         if constexpr (MSA_A5_USE_C2UB) {
             // 禁止 4B DataCopyPad：MTE3 会按 32B 写出，把后面的 fill 槽写成 0。
-            // 先在 UB 按行攒满 score 末维，再按 stride 一次 DataCopy（16 对齐）。
-            stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS) && (strideOutToken_ <= MSA_STAGE_BLOCKS);
-            stageBlkBase_ = 0;
-            stageBlkEnd_ = stageOn_ ? strideOutToken_ : 0;
+            // UB 一次最多攒 MSA_STAGE_BLOCKS 列；block_table 宽 >256 时 score 末维
+            // RoundUp(width,16) 会超过该容量，必须按窗口 flush，不能关掉 stage
+            // （关掉后 C2UB 没有逐 block 直写，GM 保持 at::empty 垃圾值）。
+            stageOn_ = (mSub_ > 0U) && (mSub_ <= MSA_STAGE_ROWS);
             if (stageOn_) {
-                AscendC::Duplicate(ubStage_, MSA_FILL_VALUE, mSub_ * MSA_STAGE_BLOCKS);
-                AscendC::PipeBarrier<PIPE_V>();
+                OpenStageWindow(0);
             }
         } else if constexpr (!IS_QUANT) {
             // 本任务两级 S16 的 V_MTE2 余额；EndTask 对称 Wait，避免跨任务/跨启动泄漏。
@@ -179,7 +178,7 @@ public:
     /// 任务结束：把暂存窗口里剩余的 score 写回 GM。
     __aicore__ inline void EndTask()
     {
-        FlushStage();
+        FlushStageToStrideEnd();
         if constexpr (!MSA_A5_USE_C2UB && !IS_QUANT) {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID0);
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
@@ -246,9 +245,10 @@ public:
     /// int8 仍为两块 [mSub,64] fp32 panel，64 宽密排 WRM 后 Max。
     __aicore__ inline void ProcessPageUb(uint32_t ping, const MsaTask &task, uint32_t blk)
     {
-        if (mSub_ == 0U || blk >= MSA_STAGE_BLOCKS) {
+        if (mSub_ == 0U) {
             return;
         }
+        AdvanceStageWindow(blk);
         constexpr uint32_t N_PER_ND = 64;
         constexpr uint32_t N_PAGE = MSA_BLOCK_SIZE;
         constexpr uint8_t SRC_REP_128 = N_PAGE / MSA_HALF_PER_BLOCK;  // 8
@@ -400,13 +400,46 @@ private:
         AscendC::PipeBarrier<PIPE_V>();
     }
 
-    /// 把 score 暂存窗口按行写回 GM：每行一次 ≥1KB 的连续 DataCopy。
+    /// 打开以 base 为起点的 score 暂存窗口，整窗先填 -inf。
+    __aicore__ inline void OpenStageWindow(uint32_t base)
+    {
+        stageBlkBase_ = base;
+        stageBlkEnd_ = MsaMinU32(base + MSA_STAGE_BLOCKS, strideOutToken_);
+        AscendC::Duplicate(ubStage_, MSA_FILL_VALUE, mSub_ * MSA_STAGE_BLOCKS);
+        AscendC::PipeBarrier<PIPE_V>();
+    }
+
+    /// blk 越过当前窗时先 flush，再开下一窗（窗宽 MSA_STAGE_BLOCKS）。
+    __aicore__ inline void AdvanceStageWindow(uint32_t blk)
+    {
+        if (!stageOn_) {
+            return;
+        }
+        while (blk >= stageBlkBase_ + MSA_STAGE_BLOCKS) {
+            FlushStage();
+            OpenStageWindow(stageBlkBase_ + MSA_STAGE_BLOCKS);
+        }
+    }
+
+    /// 当前窗 + 一直到 score 末维的后续纯 -inf 窗。
+    __aicore__ inline void FlushStageToStrideEnd()
+    {
+        FlushStage();
+        if constexpr (MSA_A5_USE_C2UB) {
+            while (stageOn_ && stageBlkEnd_ < strideOutToken_) {
+                OpenStageWindow(stageBlkEnd_);
+                FlushStage();
+            }
+        }
+    }
+
+    /// 把 score 暂存窗口按行写回 GM：每行一次 ≥32B 对齐的连续 DataCopy。
     __aicore__ inline void FlushStage()
     {
         if (!stageOn_ || stageBlkEnd_ <= stageBlkBase_) {
             return;
         }
-        const uint32_t count = stageBlkEnd_ - stageBlkBase_;
+        const uint32_t count = MsaMinU32(stageBlkEnd_ - stageBlkBase_, MSA_STAGE_BLOCKS);
         AscendC::PipeBarrier<PIPE_ALL>();
         AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);

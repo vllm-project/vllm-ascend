@@ -10,7 +10,7 @@ bash build.sh --pkg --soc=ascend910b --ops=msa_index_score -j32
 bash ./build_out/cann-ops-transformer-custom_linux-x86_64.run --quiet --install-path=/tmp/msa_opp
 export ASCEND_CUSTOM_OPP_PATH=/tmp/msa_opp/vendors/custom_transformer
 bash build.sh --run_example msa_index_score eager cust --vendor_name=custom --soc=ascend910b
-# 通过：末行 [PASS]: 34/34 cases passed（A2 跳过 3 条 FP8）
+# 通过：末行 [PASS]: 36/36 cases passed（A2 跳过 4 条 FP8）
 
 # Ascend 950：必须 --soc=ascend950；安装后 source vendors/custom_transformer/bin/set_env.bash
 bash build.sh --pkg --soc=ascend950 --ops=msa_index_score -j32
@@ -18,7 +18,7 @@ bash ./build_out/cann-ops-transformer-custom_linux-x86_64.run --quiet --install-
 source /tmp/msa_opp/vendors/custom_transformer/bin/set_env.bash
 export ASCEND_CUSTOM_OPP_PATH=/tmp/msa_opp/vendors/custom_transformer
 bash build.sh --run_example msa_index_score eager cust --vendor_name=custom --soc=ascend950
-# 通过：末行 [PASS]: 37/37 cases passed
+# 通过：末行 [PASS]: 40/40 cases passed
 ```
 
 ## 2. 用例矩阵
@@ -51,8 +51,10 @@ bash build.sh --run_example msa_index_score eager cust --vendor_name=custom --so
 | `L0-stride-bbnd` / `L1-stride-bbnd` | PA BBND dim0 gap=2 | 间隔槽下毒，校验 stride 寻址 |
 | `L1-stride-bnbd` | PA BNBD dim0 gap=2 | 另一 PA 布局 |
 | `L1-stride-int8` | PA int8 dim0 gap=2 | 量化拷页 + stride |
+| `L0-wide-table-257` / `L1-wide-table-257-bf16` | PA `block_table` 宽 257 | 950 C2UB 256 列滑窗 flush |
+| `L0-fp8-wide-table-257` | 同上 + FP8 | score 末维 272，有效列与 fill 位 |
 
-默认跑完整用例矩阵（含 TND / BNBD、mixed-batch pad、整 batch `q_len`/`kv_len=0`、PA key dim0 stride）。950 另含 3 条 FP8，共 37 条；A2/A3 跳过 FP8，期望 34/34。key 布局由 `layout_key`（aclnn：`layoutKeyOptional`）指定，不再从 shape 推断。
+默认跑完整用例矩阵（含 TND / BNBD、mixed-batch pad、整 batch `q_len`/`kv_len=0`、PA key dim0 stride、宽 `block_table`）。950 另含 4 条 FP8，共 40 条；A2/A3 跳过 FP8，期望 36/36。key 布局由 `layout_key`（aclnn：`layoutKeyOptional`）指定，不再从 shape 推断。
 
 ## 3. Python 参考
 

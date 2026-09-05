@@ -166,6 +166,7 @@
     - 为 0 时，代表 defaultMask 模式，`atten_mask` 传入空；
     - 为 3 时，代表 rightDownCausal 模式，`atten_mask` 必须传入，shape 为 $[2048, 2048]$，取值为 1 代表该位不参与计算，为 0 代表该位参与计算。
 - `init_blocks`、`local_blocks` 必须 $\ge 0$ 且不超过逻辑 block 数（PA 为 `block_table` 第二维；TND 为 score 末维对齐宽度）。两者均为 0 时跳过 $local\_mask$。
+- PageAttention `block_table` 第二维可以大于实际 KV 逻辑 block 数；score 末维为 $\mathrm{RoundUp}(width, 16)$。Ascend 950 C2UB 对超过 256 列按 256 列滑窗 flush。
 - A2/A3 与 Ascend 950：`q_len` / `kv_len` 允许为 0（含整 batch）。对应请求跳过 QK；空 KV 的 score 填 `-inf`；整 batch `T1=0` 时 `SetBlockDim(1)`。
 - 本算子输出止于 block score，**不包含** TopK。
 
@@ -213,10 +214,10 @@ export ASCEND_CUSTOM_OPP_PATH=/path/to/msa_opp/vendors/custom_transformer
 
 # aclnn example 必须带 --soc=ascend950（否则默认 910b）
 bash build.sh --run_example msa_index_score eager cust --vendor_name=custom --soc=ascend950
-# 通过：末行 [PASS]: 37/37 cases passed
-# 矩阵：30 条 fp16/bf16/int8（BBND/BNBD/TND，含 mixed-batch pad + 整 batch q_len/kv_len=0）+ 3 条 FP8（D=128）+ 4 条 PA key dim0 stride
+# 通过：末行 [PASS]: 40/40 cases passed
+# 矩阵：36 条 fp16/bf16/int8（BBND/BNBD/TND，含 pad / 空序列 / key dim0 stride / 宽 block_table）+ 4 条 FP8（D=128）
 # 容差：fp16/bf16/int8 1e-3，FP8 2e-2
-# A2/A3：同上矩阵去掉 FP8，期望 [PASS]: 34/34（skipped 3 FP8）
+# A2/A3：同上矩阵去掉 FP8，期望 [PASS]: 36/36（skipped 4 FP8）
 ```
 
 torch_extension 见 [msa_index_score.md](../../torch_extension/cann_ops_transformer/docs/zh/msa_index_score.md)。`cann/set_env.sh` 会把 cann 自带 `site-packages` 插到 `PYTHONPATH` 前面，必须把本仓 `torch_extension` 再插回最前。
@@ -231,5 +232,6 @@ torch_extension 见 [msa_index_score.md](../../torch_extension/cann_ops_transfor
 > - 完整公式：`score = Maxpool[(scale·)Q@Kᵀ + atten_mask] + local_mask`。
 > - **950 当前交付**（`op_kernel/arch35/`）：计算骨架与 A2 相同（Q 驻留 × K pingpong × **8-page S GM** + MODE 0x2 握手）。Cube **原生** FP8（TilingKey 4/5/6，`hifloat8_t` / `fp8_e5m2_t` / `fp8_e4m3fn_t`，无 scale，禁止 Cast→fp16）。L0C→AIV UB（C_to_UB）尚未作为主路径。`arch22/` 冻结。
 > - **PA key dim0 stride**（A2/A3 与 950）：key 为 `IgnoreContiguous`；tiling 用 `GetInputStride` / `GetRequiredInputStride` 读首轴元素 stride，写入已有 `strideKvBlock`。TND 不允许非连续。scale 仍按逻辑 page 紧凑布局。
+> - **950 宽 `block_table`**：C2UB score 暂存单窗 256 列；末维 `RoundUp(width,16)>256` 时按窗 flush 并补写后续 `-inf`，不能关掉 stage。
 > - torch 的 `torch_npu.hifloat8.npu()` 当前会打出非法 device id，脚本跳过；kernel / aclnn 已挂 HIFLOAT8。
 > - 测性能须选 Health=OK 且空闲的卡。
