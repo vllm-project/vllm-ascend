@@ -30,6 +30,7 @@ import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import weak_ref_tensors
 from vllm_ascend.worker.encoder_acl_graph import (
     get_encoder_forward_context,
@@ -71,7 +72,11 @@ class AscendMMEncoderAttention(MMEncoderAttention):
             prefix=prefix,
         )
 
-        self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
+        self.enable_pad = (
+            envs_ascend.VLLM_ASCEND_MM_ENCODER_ENABLE_PAD
+            and self.head_size > MIN_PAD_SIZE
+            and self.head_size < MAX_PAD_SIZE
+        )
 
     def _reshape_qkv_to_3d(
         self,
