@@ -425,6 +425,22 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             actual_seq_lengths_buffer = self.spec_actual_seq_lengths
         spec_num_rows = attn_metadata.spec_query_start_loc.size(0) - 1
 
+        # clamp num_accepted_tokens to not exceed current
+        # spec query length. When a request is near completion (remaining
+        # tokens < num_speculative_tokens + 1), the scheduler reduces the
+        # query length, but num_accepted_tokens from the previous step may
+        # still be spec+1. This mismatch causes CausalConv1d tiling to
+        # fail with "numAcceptedTokens exceeds varlen segment length".
+        spec_query_lens = (
+            attn_metadata.spec_query_start_loc[1 : spec_num_rows + 1]
+            - attn_metadata.spec_query_start_loc[:spec_num_rows]
+        ).to(attn_metadata.num_accepted_tokens.dtype)
+        torch.clamp(
+            attn_metadata.num_accepted_tokens[:spec_num_rows],
+            max=spec_query_lens,
+            out=attn_metadata.num_accepted_tokens[:spec_num_rows],
+        )
+
         attn_metadata.spec_decode_metadata = GDNSpecDecodeMetadata(
             spec_causal_conv1d=GDNSpecCausalConv1dMetadata(
                 query_start_loc=attn_metadata.spec_query_start_loc,
