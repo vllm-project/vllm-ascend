@@ -348,6 +348,13 @@ class NPUModelRunner310V2(NPUModelRunner):
                     num_reqs=num_reqs,
                     num_active_loras=num_active_loras,
                 )
+            if vllm_version_is("0.27.1"):
+                return orig_dispatch(
+                    num_reqs,
+                    num_tokens,
+                    uniform_token_count,
+                    num_active_loras,
+                )
             return orig_dispatch(
                 num_reqs,
                 num_tokens,
