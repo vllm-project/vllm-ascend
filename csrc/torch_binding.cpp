@@ -53,6 +53,8 @@
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
+#include "attention/turboquant_reshape_and_cache_v310/turboquant_reshape_and_cache_v310_torch_adpt.h"
+#include "attention/turboquant_paged_attention_v310/turboquant_paged_attention_v310_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
@@ -1986,6 +1988,47 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                                   Tensor? num_accepted_tokens, "
         "                                   float scale_value=1.0) -> (Tensor output)");
     ops.impl("npu_recurrent_gated_delta_rule_310", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule_310);
+
+    // --- TurboQuant KV cache (arXiv 2504.19874) -----------------------------
+    // bits selects the tiling key (compile-time); variant (MSE | MSE+QJL) and
+    // codebook_mode (uniform | Lloyd-Max) are runtime tiling-data fields, so
+    // all twelve A/B scenarios come from three kernel instantiations.
+    ops.def(
+        // key_norms/value_norms are CALLER-OWNED and PERSISTENT: [num_slots, 16]
+        // halves, one 32B block per slot. They used to be allocated inside the op
+        // and returned, which discarded all history in serving (one write call
+        // per decode step) -- 4 of 256 norm entries survived, cosine 0.139670.
+        "npu_turboquant_reshape_and_cache_v310(Tensor key, "
+        "                                      Tensor value, "
+        "                                      Tensor(a!) key_cache, "
+        "                                      Tensor(b!) value_cache, "
+        "                                      Tensor(c!) key_norms, "
+        "                                      Tensor(d!) value_norms, "
+        "                                      Tensor slot_mapping, "
+        "                                      Tensor signs, "
+        "                                      Tensor centroids, "
+        "                                      int bits=3, "
+        "                                      int variant=0, "
+        "                                      int codebook_mode=0) -> ()");
+    ops.impl("npu_turboquant_reshape_and_cache_v310", torch::kPrivateUse1,
+             &vllm_ascend::npu_turboquant_reshape_and_cache_v310);
+
+    ops.def(
+        "npu_turboquant_paged_attention_v310(Tensor query, "
+        "                                    Tensor key_cache, "
+        "                                    Tensor value_cache, "
+        "                                    Tensor key_norms, "
+        "                                    Tensor value_norms, "
+        "                                    Tensor block_table, "
+        "                                    Tensor seq_lens, "
+        "                                    Tensor signs, "
+        "                                    Tensor centroids, "
+        "                                    int bits=3, "
+        "                                    float scale=0.0625, "
+        "                                    int variant=0, "
+        "                                    int codebook_mode=0) -> (Tensor attn_out)");
+    ops.impl("npu_turboquant_paged_attention_v310", torch::kPrivateUse1,
+             &vllm_ascend::npu_turboquant_paged_attention_v310);
 
     ops.def(
         "chunk_gated_delta_rule_fwd_h(Tensor k, Tensor w, Tensor u, Tensor? g=None, *, Tensor? gk=None, Tensor? initial_state=None, bool? output_final_state=False, int? chunk_size=None, bool? save_new_value=True, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? use_exp2=False, bool? transpose_state_layout=False) -> (Tensor h_out, Tensor v_new_out, Tensor final_state_out)"
