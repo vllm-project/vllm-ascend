@@ -29,6 +29,8 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.worker import T
 
 
 class MemoryBackend:
+    requires_exists_before_put = True
+
     def __init__(self):
         self.values = {}
         self.writes = []
@@ -388,6 +390,11 @@ def test_registration_rollback_retains_only_failed_unregistrations():
     adapter.close()
     assert not adapter._registered
     assert backend.store.unregister_buffer.call_args_list[-1].args == (200, 10)
+
+
+def test_backend_exists_before_put_capability_is_forwarded():
+    backend = MagicMock(requires_exists_before_put=False)
+    assert TransferBackend("yuanrong", backend, 0).requires_exists_before_put is False
 
 
 def test_lazy_memcache_registration_keeps_backend_initialization_semantics():

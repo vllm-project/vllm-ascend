@@ -54,6 +54,10 @@ class TransferBackend:
     def set_device(self) -> None:
         torch.npu.set_device(self.device_index)
 
+    @property
+    def requires_exists_before_put(self) -> bool:
+        return getattr(self.backend, "requires_exists_before_put", True)
+
     def ensure_initialized(self) -> None:
         ensure = getattr(self.backend, "ensure_initialized", None)
         if ensure is not None:
