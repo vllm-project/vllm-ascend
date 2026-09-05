@@ -1520,6 +1520,7 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
             config.model_config.hf_text_config.index_topk = 32
         else:
             config.model_config.hf_text_config = MagicMock(spec=[])  # no index_topk
+            config.model_config.hf_text_config.num_hidden_layers = 36
         config.model_config.get_num_layers.return_value = 36
         config.model_config.get_total_num_kv_heads.return_value = num_kv_heads
         config.model_config.max_model_len = 4096
