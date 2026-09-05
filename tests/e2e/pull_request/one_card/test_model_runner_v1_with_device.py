@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 import vllm_ascend.compilation.acl_graph as acl_graph
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 
@@ -39,17 +40,24 @@ def initialize_kv_cache(runner: NPUModelRunner):
     """
     Only perform necessary steps in NPUModelRunner.initialize_kv_cache()
     """
-    attn_spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
-        head_size=runner.model_config.get_head_size(),
-        dtype=runner.kv_cache_dtype,
+    attn_spec = AscendAttentionBackend.customize_spec(
+        FullAttentionSpec(
+            block_size=BLOCK_SIZE,
+            num_kv_heads=runner.model_config.get_num_kv_heads(runner.parallel_config),
+            head_size=runner.model_config.get_head_size(),
+            dtype=runner.kv_cache_dtype,
+        )
     )
     tensor_size = attn_spec.page_size_bytes * NUM_BLOCKS
     kv_cache_config = KVCacheConfig(
         num_blocks=NUM_BLOCKS,
         kv_cache_tensors=[
-            KVCacheTensor(size=tensor_size, shared_by=["layer.0"]),
+            KVCacheTensor(
+                size=tensor_size,
+                layers=["layer.0"],
+                layer_stride=tensor_size,
+                block_stride=(attn_spec.page_size_bytes // attn_spec.num_heads),
+            ),
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=attn_spec)],
     )
