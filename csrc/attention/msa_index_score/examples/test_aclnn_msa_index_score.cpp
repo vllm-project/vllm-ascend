@@ -113,6 +113,8 @@ struct TestCase {
     int fp8Kind = 0;
     // PA key dim0 间隔：1=紧凑；>1 时 storage 为 key|gap|key|...（A2/A3 与 950）。
     int64_t keyDim0Gap = 1;
+    // PA block_table 第二维；0 表示按 kv_len 取 maxBlocks。>256 覆盖 950 C2UB 滑窗 flush。
+    int64_t tableWidth = 0;
 };
 
 constexpr float kLocalScoreInit = 1.0e30F;
@@ -525,6 +527,9 @@ bool RunCase(const TestCase &tc, aclrtStream stream)
     for (int64_t b = 0; b < batch; ++b) {
         maxBlocks = std::max<int64_t>(maxBlocks, CeilDivI64(tc.kvLen[b], BLOCK_SIZE));
     }
+    if (tc.tableWidth > maxBlocks) {
+        maxBlocks = tc.tableWidth;
+    }
     const int64_t scoreStride = RoundUpI64(maxBlocks, SCORE_STRIDE_ALIGN);
 
     // block_table 故意打乱，验证 paged 间接寻址。
@@ -874,6 +879,36 @@ int main()
          KeyLayout::BBND,
          0,
          2},
+        // block_table 宽 257：score 末维 RoundUp=272 > UB 单窗 256，950 C2UB 滑窗 flush。
+        {"L0-wide-table-257", 2, 16, 2, {2}, {5}, {16}, false, false, kSparseModeRightDown, KeyLayout::BBND, 0, 1, 257},
+        {"L0-fp8-wide-table-257",
+         2,
+         128,
+         2,
+         {2},
+         {5},
+         {16},
+         false,
+         false,
+         kSparseModeRightDown,
+         KeyLayout::BBND,
+         1,
+         1,
+         257},
+        {"L1-wide-table-257-bf16",
+         8,
+         128,
+         8,
+         {32},
+         {256},
+         {1},
+         true,
+         false,
+         kSparseModeRightDown,
+         KeyLayout::BBND,
+         0,
+         1,
+         257},
     };
 
     size_t passed = 0;
