@@ -498,6 +498,64 @@ def test_local_shared_expert_dp_reduces_partial_routed_output(
         all_reduce.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("output_is_reduced", "moe_comm_type", "flash_comm_v1_enabled", "should_call_op"),
+    [
+        # No explicit flag: falls back to _fused_output_is_reduced, which
+        # resolves from the runtime moe_comm_type.
+        (None, MoECommType.ALLGATHER, False, True),
+        (None, MoECommType.MC2, False, False),
+        # Explicit flag must win over the property: an un-reduced output has
+        # to reach the graph-opaque custom op no matter what the context says.
+        (False, MoECommType.MC2, False, True),
+        # Already-reduced output (finalize() reduced it upstream) is skipped
+        # by design.
+        (True, MoECommType.ALLGATHER, False, False),
+    ],
+)
+def test_runner_maybe_reduce_final_output_routes_via_custom_op_when_unreduced(
+    monkeypatch,
+    output_is_reduced,
+    moe_comm_type,
+    flash_comm_v1_enabled,
+    should_call_op,
+):
+    """Regression guard for A00282 / upstream #10557.
+
+    When the combined MoE output is not reduced yet, the final TP reduction
+    must go through the graph-opaque custom op
+    ``maybe_all_reduce_tensor_model_parallel`` instead of a Python-level
+    branch that a captured graph could bake in with a stale value. Before
+    upstream #10557 the decision lived in a Python ``@property`` evaluated
+    during graph capture and baked into the replay graph, so the all-reduce
+    was skipped at runtime and multi-concurrency output was garbled on A2.
+    """
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    monkeypatch.setattr(
+        fused_moe_module,
+        "_EXTRA_CTX",
+        SimpleNamespace(moe_comm_type=moe_comm_type, flash_comm_v1_enabled=flash_comm_v1_enabled),
+    )
+    states = torch.randn(4, 8)
+
+    with patch(
+        "torch.ops.vllm.maybe_all_reduce_tensor_model_parallel",
+        side_effect=lambda x: x,
+    ) as mock_reduce:
+        result = runner._maybe_reduce_final_output(
+            states,
+            5,
+            output_is_reduced,
+        )
+
+    assert result.shape == (4, 5)
+    torch.testing.assert_close(result, states[..., :5])
+    if should_call_op:
+        mock_reduce.assert_called_once_with(states)
+    else:
+        mock_reduce.assert_not_called()
+
+
 def test_routed_experts_select_experts_validates_router_logits(monkeypatch):
     routed_experts = AscendRoutedExperts.__new__(AscendRoutedExperts)
     hidden_states = torch.randn(2, 4)
