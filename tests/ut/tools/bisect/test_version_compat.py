@@ -94,6 +94,7 @@ def test_adapter_switches_mismatched_vllm_and_torch_npu(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ):
+    monkeypatch.delenv("VLLM_VERSION", raising=False)
     commands: list[list[str]] = []
     monkeypatch.setattr("tools.bisect.version_compat.installed_vllm_version", lambda: "0.24.0")
     monkeypatch.setattr("tools.bisect.version_compat.installed_torch_npu_version", lambda: "2.10.0.post1")
