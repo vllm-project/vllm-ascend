@@ -43,6 +43,7 @@ import vllm_ascend.patch.platform.patch_dyntra_lb_core  # noqa
 
 import vllm_ascend.patch.platform.patch_kv_cache_coordinator  # noqa
 import vllm_ascend.patch.platform.patch_speculative_config  # noqa
+import vllm_ascend.patch.platform.patch_stop_token_ids_validation  # noqa
 
 import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
