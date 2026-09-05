@@ -21,6 +21,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import override_forward_context
 from vllm.v1.attention.backend import AttentionCGSupport
 
 from vllm_ascend.attention.context_parallel.dsa_cp import (
@@ -108,6 +109,17 @@ def _mock_dsa_kv_plan(**method_returns) -> MagicMock:
     for name, value in method_returns.items():
         getattr(plan, name).return_value = value
     return plan
+
+
+def _make_forward_context():
+    from vllm.forward_context import ForwardContext
+
+    return ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+        additional_kwargs={},
+    )
 
 
 def _make_vllm_config(num_speculative_tokens: int | None = None) -> SimpleNamespace:
@@ -613,6 +625,7 @@ def test_dsa_cp_legacy_compressor_waits_for_device_local_metadata():
     metadata = SimpleNamespace(
         compressor_metadata=None,
         device_local_metadata_group_id=23,
+        cache_group_key="model.layers.0.self_attn.attn",
         full_compress_cos=torch.ones((1, 1, 1, 2)),
         full_compress_sin=torch.zeros((1, 1, 1, 2)),
         num_compressed_tokens=1,
@@ -629,7 +642,9 @@ def test_dsa_cp_legacy_compressor_waits_for_device_local_metadata():
     with (
         patch("vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata") as wait,
         patch("vllm_ascend.attention.context_parallel.dsa_cp.get_dsa_attn_kv_plan", return_value=plan),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch.object(torch.ops._C_ascend, "compressor_metadata", create=True, return_value=(1, 2, 3)),
+        override_forward_context(_make_forward_context()),
     ):
         assert impl._compute_compressor_metadata(metadata) == (1, 2, 3)
 

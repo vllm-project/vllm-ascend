@@ -1532,6 +1532,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
             )
 
+            if self.use_compress:
+                # The compressor metadata cached for the previous draft substep
+                # is stale now; drop it before running the next one.
+                from vllm_ascend.attention.dsa_v1 import reset_compressor_metadata_cache
+
+                reset_compressor_metadata_cache()
+
             model_kwargs = {
                 "input_ids": model_input_ids,
                 "positions": model_positions,

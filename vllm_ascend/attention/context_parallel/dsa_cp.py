@@ -123,6 +123,9 @@ class AscendDSAReqMetadata:
     full_compress_cos: torch.Tensor = None
     start_pos: torch.Tensor = None
     num_actual_reqs: int | None = None
+    # Every layer of a cache group receives the same builder output, so this
+    # key lets the compressor metadata be computed once per group per substep.
+    cache_group_key: str = ""
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
     compressor_metadata: dsa_v1.CompressorMetadataOutput | None = None
@@ -218,6 +221,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.seq_lens: torch.Tensor = None
         self.seq_lens_cpu: torch.Tensor = None
         self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
+        if not layer_names:
+            raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
+        # vLLM assigns the builder result to every layer in an attention group.
+        self.cache_group_key = layer_names[0]
         hf_config = self.model_config.hf_config
 
         self.hadamard = None
@@ -702,6 +709,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             start_pos=start_pos,
             sas_metadata=sas_metadata,
             qli_metadata=None,
+            cache_group_key=self.cache_group_key,
             cu_cmp_seqlen_list=None,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
@@ -1002,6 +1010,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             start_pos=self.start_pos_prefill[:num_reqs],
             num_compressed_tokens=num_compressed_tokens,
             num_actual_reqs=num_actual_reqs,
+            cache_group_key=self.cache_group_key,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
             device_local_metadata_group_id=device_local_metadata_group_id,
@@ -1438,30 +1447,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
                 metadata.device_local_metadata_group_id,
             )
 
-        assert metadata.full_compress_cos is not None
-        assert metadata.full_compress_sin is not None
-        assert metadata.num_compressed_tokens is not None
-        assert metadata.start_pos is not None
-        assert metadata.num_actual_reqs is not None
-        full_compress_cos = metadata.full_compress_cos.view(
-            metadata.full_compress_cos.shape[0],
-            metadata.full_compress_cos.shape[-1],
-        )
-        full_compress_sin = metadata.full_compress_sin.view(
-            metadata.full_compress_sin.shape[0],
-            metadata.full_compress_sin.shape[-1],
-        )
-        return torch.ops._C_ascend.compressor_metadata(
-            full_compress_cos,
-            full_compress_sin,
-            metadata.query_start_loc,
-            metadata.start_pos,
-            metadata.block_table,
-            metadata.storage_block_size,
-            get_dsa_attn_kv_plan(self.vllm_config).get_dsa_compressor_slot_mapping_format(),
+        return dsa_v1.get_or_compute_compressor_metadata(
+            metadata,
             self.compress_ratio,
-            metadata.num_compressed_tokens,
-            metadata.num_actual_reqs,
+            self.vllm_config,
         )
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
