@@ -75,11 +75,7 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         mock_group.rank_in_group = 0
         with (
             patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=mock_group),
-            patch("vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
-            patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
-                return_value=2,
-            ),
+            patch("vllm_ascend.ops.vocab_parallel_embedding.get_tensor_model_parallel_rank", return_value=0),
             patch("vllm.model_executor.layers.vocab_parallel_embedding.pad_vocab_size", side_effect=lambda x, y: x + y),
             patch("vllm.model_executor.layers.vocab_parallel_embedding.divide", side_effect=lambda x, y: x // y),
         ):
@@ -146,7 +142,6 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
         # Should just pass through without masking
         layer.quant_method.embedding.assert_called_once_with(layer, input_.long())
         self.assertEqual(output.shape, (3, layer.embedding_dim))
-
         mock_reduce_tp1.assert_not_called()
 
     def test_forward_with_tp(self):
@@ -224,6 +219,22 @@ class TestCustomVocabParallelEmbedding(unittest.TestCase):
                     # Call the forward method
                     output = layer.forward(input_)
                 self.assertEqual(output.shape, expected_shape)
+
+    def test_disable_tp(self):
+        layer = AscendVocabParallelEmbedding(
+            num_embeddings=self.num_embeddings,
+            embedding_dim=self.embedding_dim,
+            org_num_embeddings=self.org_num_embeddings,
+            padding_size=self.padding_size,
+            quant_config=None,
+            prefix="",
+            disable_tp=True,
+        )
+
+        self.assertTrue(layer.disable_tp)
+        self.assertIsNone(layer.comm_group)
+        self.assertEqual(layer.tp_size, 1)
+        self.assertEqual(layer.tp_rank, 0)
 
 
 class TestAscendLogitsProcessor(unittest.TestCase):
