@@ -692,6 +692,72 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     assert manager.block_size == mamba_spec.block_size
 
 
+@pytest.mark.parametrize(
+    ("mamba_cache_mode", "enable_caching"),
+    [("none", False), ("align", True)],
+)
+def test_ascend_mamba_manager_does_not_count_external_block_for_running_decode(
+    mamba_cache_mode: str,
+    enable_caching: bool,
+) -> None:
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode=mamba_cache_mode,
+    )
+    block_pool = BlockPool(20, enable_caching, 16)
+    manager = AscendMambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        enable_caching=enable_caching,
+        kv_cache_group_id=0,
+        scheduler_block_size=16,
+    )
+
+    manager.allocate_new_blocks("running", 8, 8)
+    prediction_args = ("running", 9, [], 8, 9, False)
+    upstream_prediction = super(
+        AscendMambaManager, manager
+    ).get_num_blocks_to_allocate(*prediction_args)
+    ascend_prediction = manager.get_num_blocks_to_allocate(*prediction_args)
+    free_before = block_pool.get_num_free_blocks()
+    allocated = manager.allocate_new_blocks("running", 9, 9)
+
+    assert upstream_prediction == 0
+    assert ascend_prediction == upstream_prediction
+    assert allocated == []
+    assert block_pool.get_num_free_blocks() == free_before
+
+
+def test_ascend_mamba_manager_preserves_external_cache_headroom_for_new_request(
+) -> None:
+    mamba_spec = MambaSpec(
+        block_size=16,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    manager = AscendMambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=BlockPool(20, False, 16),
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=16,
+    )
+
+    prediction_args = ("new", 9, [], 8, 9, False)
+    upstream_prediction = super(
+        AscendMambaManager, manager
+    ).get_num_blocks_to_allocate(*prediction_args)
+
+    assert manager.req_to_blocks.get("new") is None
+    assert manager.get_num_blocks_to_allocate(*prediction_args) == (
+        upstream_prediction + 1
+    )
+
+
+
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
     """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
     (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
