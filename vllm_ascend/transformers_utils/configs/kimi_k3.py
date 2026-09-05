@@ -72,9 +72,14 @@ class K3DSparkConfig(PretrainedConfig):
     # the concrete config class preserves direct attribute access when older
     # checkpoints omit the corresponding serialized field.
     max_position_embeddings: int = K3_DSPARK_MAX_POSITION_EMBEDDINGS
+    # The original K3 DSpark checkpoint is bidirectional and omits this field;
+    # causal checkpoints override it in config.json.
+    full_attention_causal: bool = False
 
     hidden_size: int
     intermediate_size: int
+    block_size: int
+    dflash_config: dict[str, Any]
     kv_lora_rank: int
     markov_rank: int
     num_attention_heads: int
@@ -85,7 +90,9 @@ class K3DSparkConfig(PretrainedConfig):
     qk_rope_head_dim: int
     rms_norm_eps: float
     rope_parameters: dict[str, Any]
+    sample_from_anchor: bool
     target_hidden_size: int
+    target_layer_ids: list[int]
     v_head_dim: int
     vocab_size: int
 
