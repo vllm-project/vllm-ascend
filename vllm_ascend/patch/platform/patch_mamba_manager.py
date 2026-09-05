@@ -8,44 +8,18 @@ from collections.abc import Sequence
 
 import vllm.v1.core.single_type_kv_cache_manager as single_type_kv_cache_manager
 from vllm.v1.core.single_type_kv_cache_manager import (
-    BlockHashList,
-    BlockPool,
     KVCacheBlock,
-    KVCacheSpec,
     MambaManager,
-    MambaSpec,
 )
 
 
 class AscendMambaManager(MambaManager):
-    def __init__(self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs) -> None:
-        super().__init__(kv_cache_spec, block_pool, **kwargs)
-        self.block_size = kv_cache_spec.block_size
+    """Temporary compatibility for synchronous external Mamba cache loads.
 
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-        drop_eagle_block: bool = False,
-    ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
-        return super().find_longest_cache_hit(
-            block_hashes=block_hashes,
-            max_length=max_length,
-            kv_cache_group_ids=kv_cache_group_ids,
-            block_pool=block_pool,
-            kv_cache_spec=kv_cache_spec,
-            alignment_tokens=alignment_tokens,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
-            drop_eagle_block=drop_eagle_block,
-        )
+    Upstream already owns Mamba block sizing and prefix-cache lookup. Keep only
+    the allocation fix from vLLM PR #46892 until that change is merged and the
+    pinned vLLM revision contains it.
+    """
 
     def get_num_blocks_to_allocate(
         self,
@@ -79,8 +53,7 @@ class AscendMambaManager(MambaManager):
         # num_tokens_main_model exceeds total_computed_tokens.)
         has_external_tokens = total_computed_tokens > local_hit_tokens
         has_new_scheduled_tokens = num_tokens_main_model > total_computed_tokens
-        if has_external_tokens and has_new_scheduled_tokens:
-            # one more block for external computed tokens
+        if self.mamba_cache_mode == "align" and has_external_tokens and has_new_scheduled_tokens:
             num_new_blocks += 1
         return num_new_blocks
 

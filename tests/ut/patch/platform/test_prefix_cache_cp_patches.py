@@ -692,6 +692,132 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     assert manager.block_size == mamba_spec.block_size
 
 
+@pytest.mark.parametrize(
+    ("total_computed_tokens", "num_tokens_main_model", "expected_blocks"),
+    [
+        pytest.param(0, 16, 1, id="new-tokens-only"),
+        pytest.param(32, 32, 1, id="external-cache-only"),
+        pytest.param(32, 48, 2, id="external-cache-with-new-tokens"),
+    ],
+)
+def test_ascend_mamba_manager_external_cache_block_count(
+    total_computed_tokens: int,
+    num_tokens_main_model: int,
+    expected_blocks: int,
+) -> None:
+    """Account for the external state block during synchronous loading."""
+    block_size = 16
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    block_pool = BlockPool(
+        10,
+        True,
+        block_size,
+        False,
+        MagicMock(),
+    )
+    manager = AscendMambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=1,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        scheduler_block_size=block_size,
+    )
+
+    num_blocks = manager.get_num_blocks_to_allocate(
+        request_id="request",
+        num_tokens=num_tokens_main_model,
+        new_computed_blocks=(),
+        total_computed_tokens=total_computed_tokens,
+        num_local_computed_tokens=0,
+        num_tokens_main_model=num_tokens_main_model,
+    )
+
+    assert num_blocks == expected_blocks
+
+
+def test_ascend_mamba_manager_does_not_overcount_non_align_cache() -> None:
+    block_size = 16
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+    )
+    block_pool = BlockPool(
+        10,
+        True,
+        block_size,
+        False,
+        MagicMock(),
+    )
+    manager = AscendMambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=1,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        scheduler_block_size=block_size,
+    )
+
+    num_blocks = manager.get_num_blocks_to_allocate(
+        request_id="request",
+        num_tokens=48,
+        new_computed_blocks=(),
+        total_computed_tokens=32,
+        num_local_computed_tokens=0,
+        num_tokens_main_model=48,
+    )
+
+    # Preserve the upstream non-align result: the extra synchronous-load
+    # state block is specific to ``mamba_cache_mode="align"``.
+    assert num_blocks == 2
+
+
+def test_ascend_mamba_manager_preserves_optional_main_model_tokens() -> None:
+    """Keep compatibility with callers using the historical method shape."""
+    block_size = 16
+    mamba_spec = MambaSpec(
+        block_size=block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    block_pool = BlockPool(
+        10,
+        True,
+        block_size,
+        False,
+        MagicMock(),
+    )
+    manager = AscendMambaManager(
+        kv_cache_spec=mamba_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=1,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        scheduler_block_size=block_size,
+    )
+
+    num_blocks = manager.get_num_blocks_to_allocate(
+        request_id="request",
+        num_tokens=block_size,
+        new_computed_blocks=(),
+        total_computed_tokens=0,
+        num_local_computed_tokens=block_size,
+    )
+
+    assert num_blocks == 1
+
+
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
     """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
     (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``
