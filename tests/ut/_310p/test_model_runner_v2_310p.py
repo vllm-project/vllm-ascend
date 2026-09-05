@@ -290,11 +290,39 @@ def test_config_rejects_out_of_scope_features(field, value, message) -> None:
         NPUModelRunner310V2._validate_config(_make_vllm_config(**{field: value}))
 
 
-def test_sampler_rejects_random_sampling_parameters() -> None:
+def test_sampler_accepts_supported_greedy_sampling_parameters() -> None:
     sampler = Ascend310PSampler()
     sampler.add_request(0, 4, SamplingParams(temperature=0))
+
+
+@pytest.mark.parametrize(
+    ("sampling_kwargs", "message"),
+    [
+        ({"top_p": 0.9}, "top_p"),
+        ({"top_k": 10}, "top_k"),
+        ({"min_p": 0.1}, "min_p"),
+        ({"repetition_penalty": 1.1}, "repetition_penalty"),
+        ({"presence_penalty": 0.1}, "presence/frequency penalty"),
+        ({"frequency_penalty": 0.1}, "presence/frequency penalty"),
+        (
+            {"presence_penalty": 0.1, "frequency_penalty": 0.1},
+            "presence/frequency penalty",
+        ),
+        ({"logprobs": 1}, "logprobs"),
+        ({"prompt_logprobs": 1}, "logprobs"),
+        ({"logit_bias": {1: 0.1}}, "logits processors"),
+    ],
+)
+def test_sampler_rejects_unsupported_sampling_parameters(sampling_kwargs, message) -> None:
+    sampler = Ascend310PSampler()
+    with pytest.raises(NotImplementedError, match=message):
+        sampler.add_request(0, 4, SamplingParams(temperature=0, **sampling_kwargs))
+
+
+def test_sampler_rejects_random_sampling_parameters() -> None:
+    sampler = Ascend310PSampler()
     with pytest.raises(NotImplementedError, match="Unsupported sampling parameters"):
-        sampler.add_request(1, 4, SamplingParams(temperature=1))
+        sampler.add_request(0, 4, SamplingParams(temperature=1))
 
 
 def test_block_tables_use_cpu_metadata_for_gather_and_slot_mapping() -> None:
