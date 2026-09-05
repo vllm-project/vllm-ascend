@@ -27,6 +27,10 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     backend_map,
     get_layerwise_protocol,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
+    AscendStoreCoordinator,
+    ExternalCachedBlockPool,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     build_layerwise_cache_layout,
     build_layerwise_reuse_layout,
@@ -41,6 +45,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     PoolKey,
     ReqMeta,
     RequestTracker,
+    block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -131,6 +136,7 @@ class KVPoolScheduler:
         self.cache_transfer_granularity = infer_cache_transfer_granularity(
             self.grouped_block_size, self.lcm_block_size, self.kv_cache_group_ids
         )
+        self.cache_coordinator = self._build_cache_coordinator()
         # request_id -> full_token_ids
         self._request_trackers: dict[str, RequestTracker] = {}
         self._preempted_req_ids: set[str] = set()
@@ -309,6 +315,20 @@ class KVPoolScheduler:
         num_hit_blocks = query_start_block + num_queried_hit_blocks
         return num_hit_blocks * self._block_size
 
+    def _build_cache_coordinator(self) -> AscendStoreCoordinator | None:
+        """Build the hybrid cache-hit/mask coordinator (mirrors the worker)."""
+        if self.kv_cache_config is None or not self.use_hybrid:
+            return None
+        return AscendStoreCoordinator(
+            self.kv_cache_config.kv_cache_groups,
+            scheduler_block_size=self.cache_transfer_granularity,
+            hash_block_size=self.hash_block_size,
+            group_block_sizes=self.grouped_block_size,
+            group_cache_families=self.kv_cache_group_families,
+            use_eagle=self.use_eagle,
+            retention_interval=self.retention_interval,
+        )
+
     def _make_layerwise_hit_check_keys(self, group_id: int, block_hash_hex: str) -> list[str]:
         """All-rank keys for scheduler-side hit check, built by the
         backend's protocol module.
@@ -332,12 +352,99 @@ class KVPoolScheduler:
         token_len: int,
         num_computed_tokens: int,
     ) -> int:
+        self._get_or_create_request_tracker(request.request_id)
+        if self.cache_coordinator is not None:
+            return self._lookup_layerwise_with_coordinator(request, token_len)
+        return self._lookup_layerwise_contiguous(request, token_len, num_computed_tokens)
+
+    def _lookup_layerwise_with_coordinator(
+        self,
+        request: "Request",
+        token_len: int,
+    ) -> int:
+        """Reachability-aware hit check for hybrid models.
+
+        Mirrors the non-layerwise coordinator lookup: only the blocks the KV
+        cache managers consider reachable (sliding-window / compressor-state
+        tails) are queried for reachability-limited groups — those groups are
+        stored sparsely by the layerwise save path — and the final hit length
+        is derived by find_longest_cache_hit so it matches the store-side
+        reachable mask semantics.
+        """
+        coordinator = self.cache_coordinator
+        assert coordinator is not None
+        aligned_len = (
+            (token_len + coordinator.lcm_block_size - 1) // coordinator.lcm_block_size * coordinator.lcm_block_size
+        )
+        lookup_masks = coordinator.lookup_mask(aligned_len)
+        num_hash_blocks = token_len // self.hash_block_size
+        block_hashes_to_check = request.block_hashes[:num_hash_blocks]
+        exists: set[tuple[int, bytes]] = set()
+
+        for group_id in range(len(self.grouped_block_size)):
+            effective_block_size = get_group_block_size(self.grouped_block_size, group_id)
+            group_block_hashes = get_block_hashes(block_hashes_to_check, effective_block_size, self.hash_block_size)
+            lookup_mask = lookup_masks[group_id] if lookup_masks is not None and group_id < len(lookup_masks) else None
+            keys_by_block: list[list[str]] = []
+            allowed_hashes: list[BlockHash] = []
+            for block_idx, block_hash in enumerate(group_block_hashes):
+                if lookup_mask is not None and not (block_idx < len(lookup_mask) and lookup_mask[block_idx]):
+                    continue
+                keys_by_block.append(self._make_layerwise_hit_check_keys(group_id, block_hash_to_str(block_hash)))
+                allowed_hashes.append(block_hash)
+            all_keys = [key for block_keys in keys_by_block for key in block_keys]
+            if not all_keys:
+                continue
+
+            key_infos = self.store_scheduler.batch_get_key_info(all_keys)
+            if len(key_infos) != len(all_keys):
+                logger.error(
+                    "KV pool batch_get_key_info returned unexpected number of results: expected=%d, actual=%d",
+                    len(all_keys),
+                    len(key_infos),
+                )
+                continue
+
+            # A block is hit only when ALL ranks' keys return valid GVA
+            offset = 0
+            for block_hash, block_keys in zip(allowed_hashes, keys_by_block):
+                block_infos = key_infos[offset : offset + len(block_keys)]
+                offset += len(block_keys)
+                if all(ki.size() and ki.size() > 0 for ki in block_infos):
+                    exists.add((group_id, block_hash_to_bytes(block_hash)))
+
+        if not exists:
+            logger.debug(
+                "hit_check: req=%s token_len=%d no pooled blocks found",
+                request.request_id,
+                token_len,
+            )
+            return 0
+        _, hit_length = coordinator.find_longest_cache_hit(
+            request.block_hashes,
+            token_len,
+            ExternalCachedBlockPool(self.hash_block_size, exists),
+            apply_eagle=False,
+        )
+        logger.debug(
+            "hit_check: req=%s token_len=%d reachable_lookup hit_tokens=%d",
+            request.request_id,
+            token_len,
+            hit_length,
+        )
+        return hit_length
+
+    def _lookup_layerwise_contiguous(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
         # In layerwise mode, always query from block 0 because the remote
         # pool stores per-layer data that may not match local prefix cache.
         num_hash_blocks = token_len // self.hash_block_size
         block_hashes_to_check = request.block_hashes[:num_hash_blocks]
         hits_per_group: list[int] = []
-        self._get_or_create_request_tracker(request.request_id)
 
         for group_id in range(len(self.grouped_block_size)):
             effective_block_size = get_group_block_size(self.grouped_block_size, group_id)

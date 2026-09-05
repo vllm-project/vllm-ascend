@@ -1736,5 +1736,169 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
                 send_thread.dec_stored_request.assert_called_once_with("r1")
 
 
+class TestKVPoolWorkerReachableMasks(unittest.TestCase):
+    """Layerwise reachable-mask filtering on the save/load paths."""
+
+    def _make_worker(self):
+        worker = make_worker(self, extra_config={"backend": "memcache"}, use_layerwise=True)
+        worker.layerwise_offload = True
+        worker.num_kv_cache_groups = 1
+        worker.grouped_block_size = [16]
+        worker.kv_cache_group_families = ["default"]
+        worker.group_block_len = {0: [64]}
+        worker.group_num_layers = {0: 1}
+        worker.hash_block_size = 16
+        worker.page_size_bytes = 64
+        worker.head_or_tp_rank = 0
+        worker._allocated_gvas = {}
+        worker.m_store = MagicMock()
+        return worker
+
+    @staticmethod
+    def _make_request(**overrides):
+        block_ids = overrides.pop("block_ids", [10, 11, 12, 13])
+        store_masks = overrides.pop("store_masks", None)
+        load_masks = overrides.pop("load_masks", None)
+        params = dict(
+            req_id="r1",
+            token_len_chunk=64,
+            save_start_token=0,
+            save_end_token=64,
+            target_token_len=64,
+            block_hashes=["h0", "h1", "h2", "h3"],
+            can_save=True,
+            block_ids_np=np.asarray(block_ids, dtype=np.int64),
+            block_ids_by_group_np=[np.asarray(block_ids, dtype=np.int64)],
+        )
+        params.update(overrides)
+        request = ReqMeta(**params)
+        if store_masks is not None:
+            request.store_masks = store_masks
+        if load_masks is not None:
+            request.load_masks = load_masks
+        return request
+
+    def test_compute_reachable_store_masks_fallbacks(self):
+        worker = self._make_worker()
+        request = self._make_request()
+        self.assertIsNone(worker._compute_reachable_store_masks(request))
+
+        worker.cache_coordinator = object()
+        self.assertIsNone(worker._compute_reachable_store_masks(self._make_request(save_end_token=60)))
+
+        worker.token_database.store_mask = MagicMock(side_effect=AssertionError("unaligned"))
+        self.assertIsNone(worker._compute_reachable_store_masks(request))
+
+        expected = ([False, True],)
+        worker.token_database.store_mask = MagicMock(return_value=expected)
+        self.assertEqual(worker._compute_reachable_store_masks(request), expected)
+
+    def test_alloc_gvas_for_save_respects_store_mask(self):
+        worker = self._make_worker()
+        worker.m_store.batch_alloc.return_value = [101, 103]
+        request = self._make_request(store_masks=([False, True, False, True],))
+
+        worker._alloc_gvas_for_save([request])
+
+        keys = worker.m_store.batch_alloc.call_args.args[0]
+        self.assertEqual(keys, ["llama-7b@h1@0", "llama-7b@h3@0"])
+        self.assertEqual(request.save_keys, ["llama-7b@h1@0", "llama-7b@h3@0"])
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [0, 101, 0, 103])
+
+    def test_alloc_gvas_for_save_without_mask_allocates_all(self):
+        worker = self._make_worker()
+        worker.m_store.batch_alloc.return_value = [101, 102, 103, 104]
+        request = self._make_request()
+
+        worker._alloc_gvas_for_save([request])
+
+        keys = worker.m_store.batch_alloc.call_args.args[0]
+        self.assertEqual(len(keys), 4)
+        self.assertEqual(request.block_gvas_by_group_np[0].tolist(), [101, 102, 103, 104])
+
+    def test_process_save_for_layer_batch_splits_masked_runs(self):
+        worker = self._make_worker()
+        request = self._make_request(store_masks=([False, True, False, True],))
+
+        worker._process_save_for_layer_batch([request], 0)
+
+        ranges = worker.layer_save_tasks[0][0].block_ranges
+        self.assertEqual(
+            [(r.start_block, r.end_block, r.partial_block_index) for r in ranges],
+            [(1, 2, None), (3, 4, None)],
+        )
+
+    def test_process_save_for_layer_batch_mask_and_partial_ride_last_run(self):
+        worker = self._make_worker()
+        request = self._make_request(
+            save_end_token=64,
+            target_token_len=66,
+            block_ids=[10, 11, 12, 13, 14],
+            store_masks=([False, True, False, True],),
+        )
+
+        worker._process_save_for_layer_batch([request], 0)
+
+        ranges = worker.layer_save_tasks[0][0].block_ranges
+        self.assertEqual(
+            [(r.start_block, r.end_block, r.partial_block_index) for r in ranges],
+            [(1, 2, None), (3, 4, 4)],
+        )
+
+    def test_process_save_for_layer_batch_fully_masked_skips_request(self):
+        worker = self._make_worker()
+        request = self._make_request(store_masks=([False, False, False, False],))
+
+        worker._process_save_for_layer_batch([request], 0)
+
+        self.assertEqual(worker.layer_save_tasks[0], [])
+
+    def test_prepare_load_gvas_queries_only_masked_blocks(self):
+        worker = self._make_worker()
+        worker.cache_coordinator = object()
+        worker.token_database.load_mask = MagicMock(return_value=([False, True, False, True],))
+        key_info = MagicMock()
+        key_info.size.return_value = 64
+        key_info.gva_list.return_value = [201]
+        worker.m_store.batch_get_key_info.return_value = [key_info, key_info]
+        worker.m_store.batch_add_lease.return_value = [0, 0]
+        request = self._make_request(
+            can_save=None,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=64,
+                can_load=True,
+            ),
+        )
+
+        worker._prepare_load_gvas([request])
+
+        queried_keys = worker.m_store.batch_get_key_info.call_args.args[0]
+        self.assertEqual(queried_keys, ["llama-7b@h1@0", "llama-7b@h3@0"])
+        self.assertEqual(request.load_masks, ([False, True, False, True],))
+        self.assertEqual(request.load_block_gvas_by_group_np[0].tolist(), [0, 201, 0, 201])
+
+    def test_process_load_for_layer_batch_respects_load_mask(self):
+        worker = self._make_worker()
+        request = self._make_request(
+            can_save=None,
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=64,
+                can_load=True,
+            ),
+            load_masks=([False, True, False, True],),
+            partial_load_gva_per_group=[0],
+        )
+
+        worker._process_load_for_layer_batch([request], 0)
+
+        ranges = worker.layer_load_tasks[0][0].block_ranges
+        self.assertEqual(
+            [(r.start_block, r.end_block, r.partial_block_index) for r in ranges],
+            [(1, 2, None), (3, 4, None)],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

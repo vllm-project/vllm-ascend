@@ -19,8 +19,11 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
     RequestTracker,
@@ -915,6 +918,209 @@ class TestKVPoolSchedulerUpdateStateAfterAllocBranches(unittest.TestCase):
         scheduler.load_specs["r1"] = LoadSpec(0, 32, can_load=False)
         scheduler.update_state_after_alloc(MagicMock(request_id="r1"), MagicMock(), 0)
         self.assertTrue(scheduler.load_specs["r1"].can_load)
+
+
+class _PrefixHitManager:
+    """FA manager whose find_longest_cache_hit returns (blocks, hit_length)."""
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        **kwargs,
+    ):
+        computed: tuple[list, ...] = tuple([] for _ in kv_cache_group_ids)
+        max_blocks = max_length // kv_cache_spec.block_size
+        for block_hash in list(block_hashes)[:max_blocks]:
+            cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
+            if not cached:
+                break
+            for blocks, block in zip(computed, cached):
+                blocks.append(block)
+        return computed, len(computed[0]) * kv_cache_spec.block_size
+
+
+class _SparseSWAHitManager(_PrefixHitManager):
+    """SWA manager: only segment-tail blocks are reachable/hit."""
+
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block,
+        end_block,
+        alignment_tokens,
+        kv_cache_spec,
+        use_eagle,
+        retention_interval=None,
+        **kwargs,
+    ):
+        if alignment_tokens is None:
+            return None
+        per_segment = max(alignment_tokens // kv_cache_spec.block_size, 1)
+        return [(idx + 1) % per_segment == 0 for idx in range(start_block, end_block)]
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        **kwargs,
+    ):
+        # Right-to-left search for a cached run ending on an aligned boundary.
+        block_size = kv_cache_spec.block_size
+        max_num_blocks = max_length // block_size
+        computed: tuple[list, ...] = tuple([None] * max_num_blocks for _ in kv_cache_group_ids)
+        for i in range(max_num_blocks - 1, -1, -1):
+            cached = block_pool.get_cached_block(block_hashes[i], kv_cache_group_ids)
+            if not cached:
+                continue
+            if (i + 1) * block_size % alignment_tokens != 0:
+                continue
+            for blocks, block in zip(computed, cached):
+                blocks[i] = block
+            return computed, (i + 1) * block_size
+        return computed, 0
+
+
+class TestKVPoolSchedulerLayerwiseReachableLookup(unittest.TestCase):
+    """_get_layerwise_hit_tokens with the reachability coordinator.
+
+    Mirrors the DSV4 layout: a full-attention group plus a sliding-window
+    group whose pooled blocks are stored sparsely (segment tails only).
+    """
+
+    def setUp(self):
+        patcher = patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            side_effect=self._manager_for_spec,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    @staticmethod
+    def _manager_for_spec(spec):
+        if getattr(spec, "sliding_window", None) is not None:
+            return _SparseSWAHitManager
+        return _PrefixHitManager
+
+    def _make_coordinator(self):
+        return AscendStoreCoordinator(
+            [
+                KVCacheGroupSpec(
+                    ["layer.0"],
+                    FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                ),
+                KVCacheGroupSpec(
+                    ["layer.1"],
+                    SlidingWindowSpec(
+                        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=16
+                    ),
+                ),
+            ],
+            scheduler_block_size=32,
+            hash_block_size=16,
+            group_block_sizes=[16, 16],
+            group_cache_families=["default", "c1"],
+        )
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def _make_scheduler(self, mock_client_cls):
+        scheduler = KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=True)
+        scheduler.cache_coordinator = self._make_coordinator()
+        scheduler.grouped_block_size = [16, 16]
+        scheduler.kv_cache_group_ids = [0, 1]
+        return scheduler
+
+    @staticmethod
+    def _key_info(hit: bool):
+        info = MagicMock()
+        info.size.return_value = 64 if hit else 0
+        info.gva_list.return_value = [0x1000] if hit else []
+        return info
+
+    def _stub_pool(self, scheduler, num_blocks: int, pool_layout: dict[int, list[int]]):
+        """Mock batch_get_key_info so a block exists iff it is in pool_layout.
+
+        Layerwise hit-check keys use the multi-group format model@group@hash@rank,
+        so the stub decodes the group and block index from each key.
+        """
+        hash_hex_by_idx = {f"{idx:02x}" * 32: idx for idx in range(num_blocks)}
+
+        def get_key_info(keys):
+            infos = []
+            for key in keys:
+                parts = key.split("@")
+                group_id = int(parts[1])
+                block_idx = hash_hex_by_idx[parts[2]]
+                infos.append(self._key_info(block_idx in pool_layout.get(group_id, [])))
+            return infos
+
+        scheduler.store_scheduler.batch_get_key_info.side_effect = get_key_info
+
+    @staticmethod
+    def _request(num_blocks: int):
+        request = MagicMock()
+        request.request_id = "r1"
+        request.block_hashes = [bytes([idx]) * 32 for idx in range(num_blocks)]
+        return request
+
+    def test_sparse_swa_storage_still_yields_full_hit(self):
+        scheduler = self._make_scheduler()
+        # 64 tokens = 4 blocks per group. The SWA group only stores the tail
+        # of each 32-token segment (block 1 and block 3); the full-attention
+        # group stores everything.
+        self._stub_pool(scheduler, 4, {0: [0, 1, 2, 3], 1: [1, 3]})
+
+        hit = scheduler._get_layerwise_hit_tokens(self._request(4), 64, 0)
+
+        self.assertEqual(hit, 64)
+        queried_keys = scheduler.store_scheduler.batch_get_key_info.call_args_list
+        # Only the 4 FA keys + 2 sparsely-stored SWA keys are queried.
+        self.assertEqual(sum(len(call.args[0]) for call in queried_keys), 6)
+
+    def test_hit_stops_where_stored_tail_is_missing(self):
+        scheduler = self._make_scheduler()
+        # SWA group stored block 1 (tail of the first segment) but block 3
+        # (tail of the second segment) is missing -> hit cannot extend past
+        # the first 32 tokens.
+        self._stub_pool(scheduler, 4, {0: [0, 1, 2, 3], 1: [1]})
+
+        hit = scheduler._get_layerwise_hit_tokens(self._request(4), 64, 0)
+
+        self.assertEqual(hit, 32)
+
+    def test_no_pooled_blocks_returns_zero(self):
+        scheduler = self._make_scheduler()
+        self._stub_pool(scheduler, 2, {})
+
+        hit = scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0)
+
+        self.assertEqual(hit, 0)
+
+    def test_without_coordinator_falls_back_to_contiguous(self):
+        scheduler = self._make_scheduler()
+        scheduler.cache_coordinator = None
+        infos = [self._key_info(True), self._key_info(False)]
+
+        def get_key_info(keys):
+            return infos[: len(keys)]
+
+        scheduler.store_scheduler.batch_get_key_info.side_effect = get_key_info
+
+        hit = scheduler._get_layerwise_hit_tokens(self._request(2), 32, 0)
+
+        self.assertEqual(hit, 16)
 
 
 if __name__ == "__main__":

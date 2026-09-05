@@ -4,7 +4,7 @@ import importlib
 import math
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from typing import Any
 
 import numpy as np
@@ -76,6 +76,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    masked_block_runs,
     uses_hybrid_kv_cache,
 )
 from vllm_ascend.distributed.utils import (
@@ -1036,16 +1037,35 @@ class KVPoolWorker:
                 save_start_block = max(save_start_block, hit_full_blocks)
             if partial_block_index is None:
                 partial_block_index = request.partial_block_index
-            if save_start_block >= save_end_block and partial_block_index is None:
-                continue
-            request_block_ranges.append(
-                LayerBlockRange(
-                    request=request,
-                    start_block=save_start_block,
-                    end_block=save_end_block,
-                    partial_block_index=partial_block_index,
-                )
+            group_store_mask = (
+                request.store_masks[group_id]
+                if request.store_masks is not None and group_id < len(request.store_masks)
+                else None
             )
+            block_runs = masked_block_runs(group_store_mask, save_start_block, save_end_block)
+            if not block_runs and partial_block_index is None:
+                continue
+            for run_idx, (run_start_block, run_end_block) in enumerate(block_runs):
+                # The trailing partial block rides on the last run (or on its
+                # own zero-length range) so it is transferred exactly once.
+                is_last_run = run_idx == len(block_runs) - 1
+                request_block_ranges.append(
+                    LayerBlockRange(
+                        request=request,
+                        start_block=run_start_block,
+                        end_block=run_end_block,
+                        partial_block_index=partial_block_index if is_last_run else None,
+                    )
+                )
+            if not block_runs and partial_block_index is not None:
+                request_block_ranges.append(
+                    LayerBlockRange(
+                        request=request,
+                        start_block=partial_block_index,
+                        end_block=partial_block_index,
+                        partial_block_index=partial_block_index,
+                    )
+                )
         if request_block_ranges:
             self.layer_save_tasks[layer_id].append(
                 LayerTransferTask(
@@ -1110,16 +1130,35 @@ class KVPoolWorker:
                 partial_block_index = None
             if partial_block_index is not None and partial_block_index < load_start_block:
                 partial_block_index = None
-            if load_start_block >= full_blocks and partial_block_index is None:
-                continue
-            request_block_ranges.append(
-                LayerBlockRange(
-                    request=request,
-                    start_block=load_start_block,
-                    end_block=full_blocks,
-                    partial_block_index=partial_block_index,
-                )
+            group_load_mask = (
+                request.load_masks[group_id]
+                if request.load_masks is not None and group_id < len(request.load_masks)
+                else None
             )
+            block_runs = masked_block_runs(group_load_mask, load_start_block, full_blocks)
+            if not block_runs and partial_block_index is None:
+                continue
+            for run_idx, (run_start_block, run_end_block) in enumerate(block_runs):
+                # The trailing partial block rides on the last run (or on its
+                # own zero-length range) so it is transferred exactly once.
+                is_last_run = run_idx == len(block_runs) - 1
+                request_block_ranges.append(
+                    LayerBlockRange(
+                        request=request,
+                        start_block=run_start_block,
+                        end_block=run_end_block,
+                        partial_block_index=partial_block_index if is_last_run else None,
+                    )
+                )
+            if not block_runs and partial_block_index is not None:
+                request_block_ranges.append(
+                    LayerBlockRange(
+                        request=request,
+                        start_block=partial_block_index,
+                        end_block=partial_block_index,
+                        partial_block_index=partial_block_index,
+                    )
+                )
         if request_block_ranges:
             self.layer_load_tasks[layer_id].append(
                 LayerTransferTask(
@@ -1227,31 +1266,41 @@ class KVPoolWorker:
                     )
                     hit_full_blocks = pool_hit_tokens // effective_block_size
                     save_start_block = max(save_start_block, hit_full_blocks)
+                group_store_mask = (
+                    request.store_masks[group_id]
+                    if request.store_masks is not None and group_id < len(request.store_masks)
+                    else None
+                )
+                end_limit = min(save_end_block, len(group_block_hashes))
+                candidate_blocks = [
+                    block_idx
+                    for block_idx in range(save_start_block, end_limit)
+                    if group_store_mask is None or block_idx >= len(group_store_mask) or group_store_mask[block_idx]
+                ]
                 candidate_keys = [
                     self._make_layerwise_full_key(
                         group_id,
                         block_hash_to_str(group_block_hashes[block_idx]),
                     )
-                    for block_idx in range(
-                        save_start_block,
-                        min(save_end_block, len(group_block_hashes)),
-                    )
+                    for block_idx in candidate_blocks
                 ]
                 self._refresh_allocated_gvas(candidate_keys)
                 # Skip blocks that are still present and readable in MemCache.
-                while save_start_block < save_end_block and save_start_block < len(group_block_hashes):
-                    key = self._make_layerwise_full_key(
-                        group_id, block_hash_to_str(group_block_hashes[save_start_block])
-                    )
+                # Only a leading run of already-allocated blocks is skipped so
+                # the readable-blob write failure semantics stay unchanged.
+                allocated_prefix = 0
+                for block_idx in candidate_blocks:
+                    key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
                     if key in self._allocated_gvas:
-                        save_start_block += 1
+                        allocated_prefix += 1
                     else:
                         break
+                transfer_blocks = candidate_blocks[allocated_prefix:]
 
                 block_gvas: list[int] = []
                 new_keys: list[str] = []
                 new_positions: list[int] = []
-                for blk_idx in range(save_start_block, min(save_end_block, len(group_block_hashes))):
+                for blk_idx in transfer_blocks:
                     key = self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[blk_idx]))
                     cached = self._allocated_gvas.get(key)
                     if cached is not None:
@@ -1319,7 +1368,7 @@ class KVPoolWorker:
 
                 logger.debug(
                     "alloc_gvas: req=%s group=%d eff_bs=%d save_blocks=[%d,%d) "
-                    "new_keys=%d cached_keys=%d alloc_size=%d",
+                    "new_keys=%d cached_keys=%d masked=%s alloc_size=%d",
                     request.req_id,
                     group_id,
                     effective_block_size,
@@ -1327,14 +1376,15 @@ class KVPoolWorker:
                     save_end_block,
                     len(new_keys),
                     len(block_gvas) - len(new_keys),
+                    group_store_mask is not None,
                     alloc_size,
                 )
 
-                # Pad block_gvas to match block_ids length (fill 0 for blocks before save_start)
+                # Pad block_gvas to match block_ids length (fill 0 for non-transferred blocks)
                 full_gvas = [0] * len(block_ids_by_group)
-                for i, gva in enumerate(block_gvas):
-                    if save_start_block + i < len(full_gvas):
-                        full_gvas[save_start_block + i] = gva
+                for blk_idx, gva in zip(transfer_blocks, block_gvas):
+                    if blk_idx < len(full_gvas):
+                        full_gvas[blk_idx] = gva
 
                 all_group_gvas.append(np.asarray(full_gvas, dtype=np.int64))
                 all_group_block_ids.append(np.asarray(block_ids_by_group, dtype=np.int64))
@@ -1375,6 +1425,7 @@ class KVPoolWorker:
                     request.req_id,
                 )
             block_hashes = request.block_hashes
+            request.load_masks = self._compute_reachable_load_masks(request, cached_tokens)
 
             all_group_load_gvas: list[np.ndarray] = []
             all_group_load_keys: list[str] = []
@@ -1415,11 +1466,21 @@ class KVPoolWorker:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
 
-                keys = [
-                    self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[i]))
-                    for i in range(load_start_block, full_blocks)
+                group_load_mask = (
+                    request.load_masks[group_id]
+                    if request.load_masks is not None and group_id < len(request.load_masks)
+                    else None
+                )
+                block_indices = [
+                    block_idx
+                    for block_idx in range(load_start_block, full_blocks)
+                    if group_load_mask is None or block_idx >= len(group_load_mask) or group_load_mask[block_idx]
                 ]
-                block_indices = list(range(load_start_block, full_blocks))
+                keys = [
+                    self._make_layerwise_full_key(group_id, block_hash_to_str(group_block_hashes[block_idx]))
+                    for block_idx in block_indices
+                ]
+                has_partial_key = False
                 if partial_block_index is not None:
                     keys.append(
                         self._make_layerwise_partial_key(
@@ -1430,6 +1491,7 @@ class KVPoolWorker:
                         )
                     )
                     block_indices.append(partial_block_index)
+                    has_partial_key = True
                 if not keys:
                     all_group_load_gvas.append(np.zeros(full_len, dtype=np.int64))
                     continue
@@ -1542,15 +1604,18 @@ class KVPoolWorker:
                     sum(1 for r in lease_results if r != 0),
                 )
 
-                # Pad to match block_ids_by_group length, with 0s before load_start_block
+                # Pad to match block_ids_by_group length, filling only the
+                # positions whose keys were actually queried (the trailing
+                # partial key is excluded from the per-position fill).
                 full_gvas = [0] * full_len
-                normal_gva_count = full_blocks - load_start_block
-                for i, gva in enumerate(gvas[:normal_gva_count]):
-                    if load_start_block + i < len(full_gvas):
-                        full_gvas[load_start_block + i] = gva
+                full_key_count = len(block_indices) - (1 if has_partial_key else 0)
+                for gva_index in range(full_key_count):
+                    block_idx = block_indices[gva_index]
+                    if block_idx < len(full_gvas):
+                        full_gvas[block_idx] = gvas[gva_index]
                 all_group_load_gvas.append(np.asarray(full_gvas, dtype=np.int64))
-                if partial_block_index is not None and len(gvas) > normal_gva_count:
-                    request.partial_load_gva_per_group[group_id] = gvas[normal_gva_count]
+                if has_partial_key and gvas:
+                    request.partial_load_gva_per_group[group_id] = gvas[-1]
 
             if all_group_load_gvas:
                 request.load_keys = all_group_load_keys
@@ -1638,6 +1703,48 @@ class KVPoolWorker:
                         if task.group_id == group_id:
                             task.shared_block_data = shared
 
+    def _compute_reachable_store_masks(
+        self,
+        request: ReqMeta,
+    ) -> tuple[Sequence[bool] | None, ...] | None:
+        """Per-group reachable-store masks for the layerwise save path.
+
+        Mirrors the non-layerwise store path (KVCacheStoreSendingThread):
+        for reachability-limited groups (sliding window / compressor state)
+        only the blocks the KV cache managers consider reachable are
+        persisted, instead of the full sequence. Falls back to None (store
+        everything) when the coordinator is unavailable or the save extent
+        is not aligned.
+        """
+        if self.cache_coordinator is None:
+            return None
+        if request.save_end_token <= 0:
+            return None
+        if request.save_end_token % self.cache_transfer_granularity != 0:
+            return None
+        try:
+            return self.token_database.store_mask(request.save_end_token, request.num_prompt_tokens)
+        except AssertionError:
+            return None
+
+    def _compute_reachable_load_masks(
+        self,
+        request: ReqMeta,
+        cached_tokens: int,
+    ) -> tuple[Sequence[bool] | None, ...] | None:
+        """Per-group load masks for the layerwise load path.
+
+        Mirrors the non-layerwise load path: only the blocks the KV cache
+        managers need for a hit of ``cached_tokens`` are fetched, which is a
+        subset of the blocks persisted by the reachable store masks.
+        """
+        if self.cache_coordinator is None or cached_tokens <= 0:
+            return None
+        try:
+            return self.token_database.load_mask(request.block_hashes, cached_tokens)
+        except AssertionError:
+            return None
+
     def process_layer_data(self, requests: list[ReqMeta]) -> None:
         if not requests:
             return
@@ -1645,6 +1752,8 @@ class KVPoolWorker:
         # Worker threads may still own the lists from the preceding step.
         self.layer_save_tasks = [[] for _ in range(self.num_layers)]
         self.layer_load_tasks = [[] for _ in range(self.num_layers)]
+        for request in requests:
+            request.store_masks = self._compute_reachable_store_masks(request)
         for physical_layer in range(self.num_layers):
             group_layers = self.physical_layer_to_group_layers.get(physical_layer, [(0, physical_layer)])
             for group_id, layer_idx_in_group in group_layers:
