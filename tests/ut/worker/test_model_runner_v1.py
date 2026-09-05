@@ -42,13 +42,13 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         runner.use_compress = True
         runner._has_gdn = False
 
-        runner._determine_batch_execution_and_padding = MagicMock(
+        runner._determine_batch_execution_and_padding = MagicMock(  # type: ignore[method-assign]
             return_value=(CUDAGraphMode.NONE, SimpleNamespace(num_tokens=1, num_reqs=1), None, None, None)
         )
-        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=True)  # type: ignore[method-assign]
         runner.synchronize_input_prep = MagicMock(return_value=nullcontext())
         runner._get_cumsum_and_arange = MagicMock(return_value=np.array([1], dtype=np.int32))
-        runner._pad_query_start_loc_for_fia = MagicMock(return_value=1)
+        runner._pad_query_start_loc_for_fia = MagicMock(return_value=1)  # type: ignore[method-assign]
 
         runner.optimistic_seq_lens_cpu = torch.zeros(8, dtype=torch.int32)
         runner.seq_lens = MagicMock()
@@ -62,7 +62,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
         block_tables.__getitem__.side_effect = lambda index: SimpleNamespace(
             slot_mapping=SimpleNamespace(gpu=slot_mappings[index])
         )
-        runner.input_batch = SimpleNamespace(block_table=block_tables)
+        runner.input_batch = SimpleNamespace(block_table=block_tables)  # type: ignore[assignment]
         runner.kv_cache_config = SimpleNamespace(kv_cache_groups=[object(), object()])
 
         def check_slots_before_build(**_kwargs):
@@ -70,7 +70,7 @@ class TestDummyRunSlotInvalidation(unittest.TestCase):
                 torch.testing.assert_close(slot_mapping, torch.full_like(slot_mapping, -1))
             raise RuntimeError("metadata checked")
 
-        runner._build_attention_metadata = check_slots_before_build
+        runner._build_attention_metadata = check_slots_before_build  # type: ignore[method-assign,assignment]
 
         with self.assertRaisesRegex(RuntimeError, "metadata checked"):
             runner._dummy_run(1)
@@ -90,7 +90,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
                     submission_in_flight=True,
                     uses_external_events=uses_external_events,
                 )
-                runner.device_metadata_executor = executor
+                runner.device_metadata_executor = executor  # type: ignore[assignment]
 
                 if should_raise:
                     with self.assertRaisesRegex(RuntimeError, "requires external events"):
@@ -116,7 +116,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner.scheduler_config = SimpleNamespace(max_num_batched_tokens=4, max_num_seqs=4)
         runner.dynamic_eplb = False
         runner.dcp_size = 1
-        runner._determine_batch_execution_and_padding = MagicMock(
+        runner._determine_batch_execution_and_padding = MagicMock(  # type: ignore[method-assign]
             return_value=(
                 CUDAGraphMode.FULL,
                 SimpleNamespace(num_tokens=4, num_reqs=4),
@@ -126,7 +126,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
             )
         )
         runner.synchronize_input_prep = nullcontext
-        runner._should_build_dummy_attn_metadata = MagicMock(return_value=False)
+        runner._should_build_dummy_attn_metadata = MagicMock(return_value=False)  # type: ignore[method-assign]
         runner.maybe_dummy_run_with_lora = MagicMock(return_value=nullcontext())
         runner.lora_config = None
         runner.max_num_tokens = 4
@@ -144,13 +144,13 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         runner._has_sinks = False
         runner.use_aux_hidden_state_outputs = False
         runner.use_compress = False
-        runner._finalize_dump_data = MagicMock()
+        runner._finalize_dump_data = MagicMock()  # type: ignore[method-assign]
 
         def model_forward(*args):
             events.append("forward")
             return torch.zeros((4, 1))
 
-        runner._model_forward = MagicMock(side_effect=model_forward)
+        runner._model_forward = MagicMock(side_effect=model_forward)  # type: ignore[method-assign]
         executor = MagicMock(submission_in_flight=True)
         executor.uses_external_events = True
         executor.release.side_effect = lambda: events.append("release")
@@ -229,7 +229,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.num_accepted_tokens = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         runner.prev_positions = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         batch_counts = torch.ones(12, dtype=torch.int32)
-        runner.input_batch = SimpleNamespace(
+        runner.input_batch = SimpleNamespace(  # type: ignore[assignment]
             num_accepted_tokens_cpu=batch_counts.numpy(),
             num_accepted_tokens_cpu_tensor=batch_counts,
         )
@@ -1126,7 +1126,7 @@ class TestNPUModelRunnerEncoderCacheReset(unittest.TestCase):
         runner.cached = {}
         runner._pending_encoder_cache_copies = deque()
         runner.late_interaction_runner = MagicMock()
-        runner._sync_device = MagicMock()
+        runner._sync_device = MagicMock()  # type: ignore[method-assign]
         return runner
 
     def test_reset_clears_score_encoder_cache_state(self):
@@ -1389,10 +1389,13 @@ class TestNPUModelRunnerOutputTokenIds(unittest.TestCase):
             scheduled_spec_decode_tokens={"req0": [-1, -1, -1]},
         )
 
-        spec_decode_metadata = runner._calc_spec_decode_metadata(
-            num_draft_tokens=np.array([3], dtype=np.int32),
-            cu_num_scheduled_tokens=np.array([4], dtype=np.int32),
-        )
+        # pin_memory() requires the NPU PrivateUse1 hooks, which a CPU-only
+        # UT process does not register; identity-patch it for this test.
+        with patch.object(torch.Tensor, "pin_memory", lambda self: self):
+            spec_decode_metadata = runner._calc_spec_decode_metadata(
+                num_draft_tokens=np.array([3], dtype=np.int32),
+                cu_num_scheduled_tokens=np.array([4], dtype=np.int32),
+            )
         runner._sanitize_placeholder_input_ids_for_forward(
             scheduler_output,
             num_forward_tokens=4,

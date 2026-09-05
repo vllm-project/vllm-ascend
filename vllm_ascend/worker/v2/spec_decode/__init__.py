@@ -36,6 +36,15 @@ def init_speculator(
 
         return AscendDSparkSpeculator(vllm_config, device)
     if speculative_config.use_dflash():
+        # The DFlash2 candidate selector exists only in a DFlash2 speculator;
+        # routing the checkpoint through DFlash1 would degrade silently.
+        draft_archs = getattr(speculative_config.draft_model_config, "architectures", None) or []
+        if "DFlash2DraftModel" in draft_archs:
+            from vllm_ascend.worker.v2.spec_decode.dflash2.speculator import (
+                AscendDFlash2Speculator,
+            )
+
+            return AscendDFlash2Speculator(vllm_config, device)
         from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
             AscendDFlashSpeculator,
         )
