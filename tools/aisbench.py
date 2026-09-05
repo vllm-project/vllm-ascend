@@ -55,9 +55,6 @@ class AisbenchRunner:
             ]
         if self.num_prompts:
             aisbench_cmd.extend(["--num-prompts", str(self.num_prompts)])
-        if self.work_dir:
-            os.makedirs(self.work_dir, exist_ok=True)
-            aisbench_cmd.extend(["--work-dir", self.work_dir])
         self.stdout_file = f"output_{self.task_type}.txt"
         aisbench_cmd = " ".join(aisbench_cmd) + f" --debug > {self.stdout_file} 2>&1 &"
         print(f"running aisbench cmd: {aisbench_cmd}")
@@ -93,21 +90,14 @@ class AisbenchRunner:
         self.repetition_penalty = aisbench_config.get("repetition_penalty")
         self.no_pred = aisbench_config.get("no_pred")
         self.thinking = aisbench_config.get("thinking")
-        work_dir = aisbench_config.get("work_dir")
-        self.work_dir = os.path.expandvars(work_dir) if work_dir else None
         self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
         self.tpot_threshold = aisbench_config.get("tpot_threshold")
         self.exp_folder = None
         self.result_line = None
-        self.result = None
         self._init_dataset_conf()
         self._init_request_conf()
         self._run_aisbench_task()
         self._wait_for_task()
-        if self.task_type == "accuracy":
-            self._get_result_accuracy()
-        if self.task_type == "performance":
-            self._get_result_performance()
         if verify:
             self.baseline = aisbench_config.get("baseline", 1)
             if self.task_type == "accuracy":
@@ -242,6 +232,7 @@ class AisbenchRunner:
         self.result = float(df.iloc[0, -1])
 
     def _performance_verify(self):
+        self._get_result_performance()
         output_throughput = self.result_json["Output Token Throughput"]["total"].replace("token/s", "")
         assert float(output_throughput) >= self.threshold * self.baseline, (
             "Performance verification failed. "
@@ -262,6 +253,7 @@ class AisbenchRunner:
             )
 
     def _accuracy_verify(self):
+        self._get_result_accuracy()
         acc_value = self.result
         assert self.baseline - self.threshold <= acc_value <= self.baseline + self.threshold, (
             "Accuracy verification failed. "
@@ -285,13 +277,7 @@ def run_aisbench_cases(model, port, aisbench_cases, server_args="", host_ip="loc
         logging.info("[%d/%d] Starting benchmark: %s (type=%s)", idx, total, case_name, case_type)
         logging.info("=" * 60)
         try:
-            with AisbenchRunner(
-                model=model,
-                port=port,
-                host_ip=host_ip,
-                aisbench_config=aisbench_case,
-                verify=aisbench_case.get("verify", True),
-            ) as aisbench:
+            with AisbenchRunner(model=model, port=port, host_ip=host_ip, aisbench_config=aisbench_case) as aisbench:
                 aisbench_results.append(aisbench.result)
             logging.info("[%d/%d] Finished benchmark: %s", idx, total, case_name)
         except Exception as e:
