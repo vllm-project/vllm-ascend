@@ -328,13 +328,14 @@ class K3DSparkModel(nn.Module):
         # _maybe_share_embeddings (has_own_embed_tokens=False).
         self.embed_tokens: nn.Module | None = None
 
-        self.context_proj = ReplicatedLinear(
+        self.context_proj = ColumnParallelLinear(
             self.config.target_hidden_size * self.config.num_target_layers,
             self.config.hidden_size,
             bias=False,
             return_bias=False,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "context_proj"),
+            gather_output=True,
         )
         self.context_norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
