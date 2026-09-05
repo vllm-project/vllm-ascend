@@ -588,6 +588,29 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.assertIs(returned[2], value)
         self.assertIs(returned[3], output)
 
+    @patch("vllm_ascend.attention.attention_v1.notify_kv_cache_written")
+    @patch("torch_npu.npu_scatter_pa_kv_cache", create=True)
+    def test_c8_nz_cache_write_uses_physical_block_size(self, mock_scatter_pa_kv_cache, _mock_notify):
+        query = torch.randn(2, 8, 64)
+        key = torch.randn(2, 8, 64)
+        value = torch.randn(2, 8, 64)
+        kv_cache = (
+            torch.empty(24, 128, 8, 64, dtype=torch.int8),
+            torch.empty(24, 128, 8, 64, dtype=torch.int8),
+        )
+        output = torch.empty_like(query)
+        metadata = MagicMock()
+        metadata.slot_mapping = torch.arange(2)
+        metadata.num_actual_tokens = 2
+        self.mock_vllm_config.cache_config.block_size = 1536
+        self.impl_c8_kv_share.kv_sharing_target_layer_name = None
+
+        self.impl_c8_kv_share._reshape_and_cache(query, key, value, kv_cache, metadata, output)
+
+        cache_args = mock_scatter_pa_kv_cache.call_args.kwargs
+        self.assertEqual(cache_args["key_cache"].shape, (24, 8, 2, 128, 32))
+        self.assertEqual(cache_args["value_cache"].shape, (24, 8, 2, 128, 32))
+
     def test_forward_no_attn_metadata(self):
         """Test forward pass when attn_metadata is None"""
         query = torch.randn(10, 8 * 64)

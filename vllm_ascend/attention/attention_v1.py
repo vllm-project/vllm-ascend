@@ -2239,7 +2239,10 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
             encoder_decoder = self.attn_type == AttentionType.ENCODER_DECODER
 
             # NZ write path: 5D view + npu_scatter_pa_kv_cache
-            block_size = self.vllm_config.cache_config.block_size
+            # Hybrid models can use a scheduler block size that differs from
+            # the physical attention cache block size. PA_NZ packing must use
+            # the physical cache dimension so the write layout matches FIA.
+            block_size = self.key_cache.shape[1]
             k_cache_layer = self._nz_5d_view(self.key_cache, block_size)
             v_cache_layer = self._nz_5d_view(self.value_cache, block_size)
 
