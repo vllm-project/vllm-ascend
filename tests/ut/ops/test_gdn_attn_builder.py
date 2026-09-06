@@ -316,6 +316,28 @@ def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
 
 
+def test_dspark_reorder_threshold_includes_target_token():
+    vllm_config = _make_vllm_config(num_speculative_tokens=7)
+    vllm_config.speculative_config.method = "dspark"
+    vllm_config.parallel_config.decode_context_parallel_size = 16
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((1,), (1,)),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+        num_speculative_blocks=0,
+    )
+
+    builder = AscendGDNAttentionMetadataBuilder(
+        spec,
+        ["layer0"],
+        vllm_config,
+        torch.device("cpu"),
+    )
+
+    assert builder.reorder_batch_threshold == 8
+
+
 def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
     builder = _make_builder(
         device=torch.device("cpu"),
