@@ -37,10 +37,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         super().__init__(vllm_config, device, runner=runner)
         assert vllm_config.speculative_config is not None
         self.sample_from_anchor = getattr(self.draft_model_config.hf_config, "sample_from_anchor", True)
-        if self.sample_from_anchor:
-            self.num_query_per_req = self.num_speculative_tokens
-        else:
-            self.num_query_per_req = 1 + self.num_speculative_tokens
+        # Keep this at the configured maximum. Per-batch dynamic K and
+        # confidence-based per-request verification lengths only trim the
+        # drafts consumed after this parallel query has written its KV slots.
+        self.num_query_per_req = (
+            vllm_config.speculative_config.num_drafter_query_tokens  # type: ignore[attr-defined]
+        )
 
         blk = 1 + self.num_speculative_tokens
         self._dspark_draft_buffer = torch.zeros((self.max_batch_size, blk), dtype=torch.int64, device=device)
@@ -293,7 +295,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dflash_hidden_states[: self._dflash_num_context] = target_hidden_states[: self._dflash_num_context]
 
         effective_seq_lens = cad.seq_lens
-        if has_num_rejected:
+        if num_rejected_tokens_gpu is not None:
             effective_seq_lens = effective_seq_lens - num_rejected_tokens_gpu
 
         max_model_len = self.vllm_config.model_config.max_model_len
@@ -301,7 +303,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         request_window_ok = self._request_window_ok[:batch_size]
         request_window_ok.copy_((effective_seq_lens[:batch_size] >= 0) & (window_end <= max_model_len))
         ctx_end = cad.query_start_loc[1 : batch_size + 1]
-        if has_num_rejected:
+        if num_rejected_tokens_gpu is not None:
             request_window_ok.logical_and_(ctx_end > num_rejected_tokens_gpu[:batch_size])
         else:
             request_window_ok.logical_and_(ctx_end > 0)

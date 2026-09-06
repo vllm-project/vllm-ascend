@@ -3455,6 +3455,7 @@ class NPUModelRunner(GPUModelRunner):
                 if num_reqs_padded > num_reqs:
                     num_blocks_per_row[num_reqs:].zero_()
                     num_blocks_per_row_cpu[num_reqs:].zero_()
+                    block_table_cpu[num_reqs:].zero_()
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid,
                     cm.block_table_tensor,
