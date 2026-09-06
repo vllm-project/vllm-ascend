@@ -589,9 +589,9 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_text_config
+        parallel_config = vllm_config.parallel_config
         self.config = config
         self.vocab_size = config.vocab_size
-        parallel_config = vllm_config.parallel_config
         # vLLM's generic MoE SP switch currently requires DP > 1. K3 also
         # needs the same rank-local token layout for the TP/EP, DP=1 topology
         # that FlashComm used before the standard SP operators were available.
@@ -832,6 +832,9 @@ class AscendKimiLinearForCausalLM(UpstreamKimiLinearForCausalLM):
     ) -> None:
         self.model.configure_dspark_aux_hidden_state_contract(contract)
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model._set_aux_hidden_state_layers(layers)
+
 
 class AscendKimiK3MultiModalProjector(KimiK25MultiModalProjector):
     """Kimi projector with the optional ModelSlim output rotation."""
@@ -936,3 +939,6 @@ class AscendKimiK3ForConditionalGeneration(UpstreamKimiK3ForConditionalGeneratio
         contract: DSparkAuxHiddenContract,
     ) -> None:
         self.language_model.configure_dspark_aux_hidden_state_contract(contract)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.language_model.set_aux_hidden_state_layers(layers)
