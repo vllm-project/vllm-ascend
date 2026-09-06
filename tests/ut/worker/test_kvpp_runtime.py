@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+from threading import Event, get_ident
 from types import SimpleNamespace
 
 import pytest
@@ -94,6 +96,165 @@ def test_kvpp_08_prefetch_starts_when_scheduled_and_advances_on_wait():
     assert scheduler._active_pages is None
 
 
+@pytest.fixture
+def parallel_scheduler(monkeypatch):
+    calls = []
+    recorded_events = []
+    schedulers = []
+
+    class FakeEvent:
+        def record(self, stream):
+            recorded_events.append(self)
+
+    class FakeStream:
+        def wait_event(self, event):
+            calls.append(("wait", event))
+
+    monkeypatch.setattr(
+        torch,
+        "npu",
+        SimpleNamespace(
+            Event=FakeEvent,
+            Stream=FakeStream,
+            current_device=lambda: 0,
+            current_stream=lambda: "compute",
+            set_device=lambda _device: None,
+            stream=lambda _stream: nullcontext(),
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(kvpp_module.dist, "send", lambda _token, dst, group, tag: calls.append(("send", dst, tag)))
+    monkeypatch.setattr(kvpp_module.dist, "recv", lambda _token, src, group, tag: calls.append(("recv", src, tag)))
+
+    def copy(direction):
+        def enqueue(bundle, pages, stream):
+            calls.append((direction, bundle, pages))
+            return SimpleNamespace(synchronize=lambda: calls.append(("complete", direction)))
+
+        return enqueue
+
+    def make(rank):
+        owners = {_layer(38): 0, _layer(39): 1, _layer(40): 0}
+        scheduler = KVPPScheduler(
+            kvpp_group=SimpleNamespace(rank_in_group=rank, world_size=3, ranks=[16, 17, 18], cpu_group="pp1"),
+            layer_owner_ranks=owners,
+            kv_caches={name: object() for name in owners},
+            num_physical_blocks=10,
+            tokens_per_block=4,
+            max_active_pages=10,
+            transport=SimpleNamespace(
+                initialize_transport=lambda *_args: None,
+                copy_active_pages_to_staging=copy("push"),
+                copy_active_pages_from_staging=copy("pull"),
+            ),
+        )
+        schedulers.append(scheduler)
+        return scheduler, calls, recorded_events
+
+    yield make
+    for scheduler in schedulers:
+        scheduler._prefetch_executor.shutdown(wait=True)
+
+
+@pytest.mark.parametrize(("rank", "layer_index", "peers"), [(0, 38, [17, 18]), (1, 39, [16, 18])])
+def test_owner_sends_after_forward_ready_without_waiting_for_scratch(parallel_scheduler, rank, layer_index, peers):
+    scheduler, calls, _events = parallel_scheduler(rank)
+    pages, forward_ready, scratch_ready = object(), object(), object()
+    layer = _layer(layer_index)
+
+    scheduler.run_layer_prefetch(layer, pages, forward_ready, scratch_ready)
+
+    assert calls == (
+        [("recv", peer, kvpp_module._KVPP_READY_TAG) for peer in peers]
+        + [("wait", forward_ready), ("push", (layer,), pages), ("complete", "push")]
+        + [("send", peer, kvpp_module._KVPP_DONE_TAG) for peer in peers]
+    )
+
+
+@pytest.mark.parametrize(("rank", "layer_index", "owner"), [(1, 38, 16), (0, 39, 17)])
+def test_receiver_requires_send_completion_and_destination_ready(parallel_scheduler, rank, layer_index, owner):
+    scheduler, calls, _events = parallel_scheduler(rank)
+    pages, forward_ready, scratch_ready = object(), object(), object()
+    layer = _layer(layer_index)
+
+    scheduler.run_layer_prefetch(layer, pages, forward_ready, scratch_ready)
+
+    assert calls == [
+        ("send", owner, kvpp_module._KVPP_READY_TAG),
+        ("recv", owner, kvpp_module._KVPP_DONE_TAG),
+        ("wait", forward_ready),
+        ("wait", scratch_ready),
+        ("pull", (layer,), pages),
+        ("complete", "pull"),
+    ]
+
+
+def test_background_receiver_publishes_staging_ready_before_waiting_for_done(parallel_scheduler, monkeypatch):
+    scheduler, calls, events = parallel_scheduler(1)
+    waiting_for_done, send_done = Event(), Event()
+    caller_thread = get_ident()
+    worker_threads = []
+
+    def wait_for_sender(_token, src, group, tag):
+        worker_threads.append(get_ident())
+        assert calls == [("send", src, kvpp_module._KVPP_READY_TAG)]
+        waiting_for_done.set()
+        assert send_done.wait(timeout=5), "Test did not release the sender completion."
+        calls.append(("recv", src, tag))
+
+    monkeypatch.setattr(kvpp_module.dist, "recv", wait_for_sender)
+    _begin(scheduler)
+    try:
+        assert waiting_for_done.wait(timeout=5)
+        assert len(worker_threads) == 1
+        assert worker_threads[0] != caller_thread
+        assert not scheduler._prefetch_future.done()
+        assert not any(call[0] in ("wait", "pull") for call in calls)
+    finally:
+        send_done.set()
+    scheduler._prefetch_future.result(timeout=5)
+    assert ("wait", events[0]) in calls
+    assert ("wait", events[1]) in calls
+    assert calls[-1] == ("complete", "pull")
+
+
+def test_forward_event_is_reused_without_background_advancing_layers(parallel_scheduler):
+    scheduler, calls, events = parallel_scheduler(0)
+    _begin(scheduler)
+    forward_ready = scheduler._forward_ready
+    scheduler._prefetch_future.result(timeout=5)
+    assert scheduler._next_attention_layer_index == 0
+    assert len(events) == 2  # One forward event and the first scratch safe point.
+    assert [call[0] for call in calls].count("push") == 1
+
+    for layer in (38, 39, 40):
+        scheduler.wait_for_layer(_layer(layer))
+        assert scheduler._forward_ready is forward_ready
+    assert len(events) == 4
+    scheduler.complete_forward()
+    assert scheduler._forward_ready is None
+    _begin(scheduler)
+    assert scheduler._forward_ready is not forward_ready
+    scheduler._prefetch_future.result(timeout=5)
+
+
+def test_explicit_scratch_event_is_passed_to_worker_without_an_extra_safe_point(parallel_scheduler):
+    scheduler, calls, events = parallel_scheduler(1)
+    scheduler._active_pages = pages = object()
+    scheduler._forward_ready = forward_ready = object()
+    scratch_ready = object()
+
+    scheduler.start_layer_prefetch(_layer(38), scratch_ready=scratch_ready)
+    scheduler._prefetch_future.result(timeout=5)
+
+    assert events == []
+    assert ("wait", forward_ready) in calls
+    assert ("wait", scratch_ready) in calls
+    assert ("pull", (_layer(38),), pages) in calls
+    with pytest.raises(RuntimeError, match="previous prefetch must be consumed"):
+        scheduler.start_layer_prefetch(_layer(39), scratch_ready=scratch_ready)
+
+
 def test_kvpp_runtime_disabled_preparation_is_noop():
     runtime = KVPPRuntime()
     runtime.prepare_forward((torch.zeros(1, 1, dtype=torch.int32),), [1])
@@ -173,6 +334,6 @@ def test_kvpp_10_rejects_managed_layers_from_multiple_cache_groups(monkeypatch):
                     SimpleNamespace(layer_names=(indexer,)),
                 ]
             ),
-            block_tables=object(),
+            block_tables=SimpleNamespace(blocks_per_kv_block=(1, 1), kernel_block_sizes=(128, 128)),
             static_forward_context={},
         )

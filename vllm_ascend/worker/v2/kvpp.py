@@ -272,6 +272,7 @@ class KVPPScheduler:
         self.attention_layer_names = tuple(self.layer_cache_bundles)
         self._next_attention_layer_index = 0
         self._active_pages: KVPPActivePages | None = None
+        self._forward_ready: Any | None = None
         self._kv_transfer_stream: Any | None = None
         self._prefetch_executor: ThreadPoolExecutor | None = None
         self._prefetch_future: Future[None] | None = None
@@ -301,6 +302,11 @@ class KVPPScheduler:
             self.tokens_per_block,
             self.num_physical_blocks,
         )
+        if self.kvpp_group.world_size > 1:
+            # Covers this forward's metadata and earlier persistent KV writes
+            # on the compute stream, independently of per-layer scratch reuse.
+            self._forward_ready = torch.npu.Event()
+            self._forward_ready.record(torch.npu.current_stream())
         self._next_attention_layer_index = 0
         self.start_layer_prefetch(self.attention_layer_names[0])
 
@@ -308,6 +314,7 @@ class KVPPScheduler:
         if self._active_pages is None:
             return
         self._active_pages = None
+        self._forward_ready = None
         self._next_attention_layer_index = 0
 
     def wait_for_layer(self, layer_name: str) -> None:
@@ -330,25 +337,32 @@ class KVPPScheduler:
         if self._next_attention_layer_index < len(self.attention_layer_names):
             self.start_layer_prefetch(self.attention_layer_names[self._next_attention_layer_index])
 
-    def start_layer_prefetch(self, layer_name: str) -> None:
-        self._prefetch_future = None
+    def start_layer_prefetch(self, layer_name: str, scratch_ready: Any | None = None) -> None:
+        """Launch at the caller's chosen point, without advancing in the worker.
+
+        A supplied scratch event must already be recorded after the target
+        buffer's last use. Otherwise use the current compute-stream safe point.
+        """
         if self.kvpp_group.world_size <= 1:
             return
+        if self._prefetch_future is not None:
+            raise RuntimeError("KVPP previous prefetch must be consumed before starting another layer.")
         if self._prefetch_executor is None or self._kv_transfer_stream is None:
             raise RuntimeError("KVPP prefetch resources were not initialized.")
-        # All ranks publish a local safe point. Alternating layers use distinct
-        # buffers. When a buffer cycles back after two layers, this event is
-        # ordered after all earlier attention work on the compute stream, so
-        # the owner cannot overwrite a buffer that is still being read.
-        scratch_ready = torch.npu.Event()
-        scratch_ready.record(torch.npu.current_stream())
+        forward_ready = self._forward_ready
+        if forward_ready is None:
+            raise RuntimeError("KVPP forward readiness was not prepared before prefetch.")
         pages = self._active_pages
         if pages is None:
             raise RuntimeError("KVPP active pages were not prepared before prefetch.")
+        if scratch_ready is None:
+            scratch_ready = torch.npu.Event()
+            scratch_ready.record(torch.npu.current_stream())
         self._prefetch_future = self._prefetch_executor.submit(
             self.run_layer_prefetch,
             layer_name,
             pages,
+            forward_ready,
             scratch_ready,
         )
 
@@ -356,81 +370,71 @@ class KVPPScheduler:
         self,
         layer_name: str,
         active_pages: KVPPActivePages,
+        forward_ready: Any,
         scratch_ready: Any,
     ) -> None:
-        """Run safe-point and completion notification off the compute thread."""
+        """Run both phases in order on the existing communication worker."""
         if self._kv_transfer_stream is None:
             raise RuntimeError("KVPP communication stream was not initialized.")
         if self._npu_device_id is not None:
             torch.npu.set_device(self._npu_device_id)
 
-        owner_kvpp_rank = self.layer_owner_ranks[layer_name]
-        local_kvpp_rank = self.kvpp_group.rank_in_group
-        owner_global_rank = self.kvpp_group.ranks[owner_kvpp_rank]
         layer_index = extract_layer_index(layer_name)
-        token = torch.ones(1, dtype=torch.uint8, device="cpu")
-
         with torch.profiler.record_function(f"kvpp.comm_total.layer_{layer_index}"):
-            if local_kvpp_rank != owner_kvpp_rank:
-                # The previous prefetch future completed before this task was
-                # submitted, so this rank's staging region can be overwritten.
-                # Scratch reuse is a separate device-stream dependency below.
-                dist.send(
-                    token,
-                    dst=owner_global_rank,
-                    group=self.kvpp_group.cpu_group,
-                    tag=_KVPP_READY_TAG,
-                )
-                dist.recv(
-                    token,
-                    src=owner_global_rank,
-                    group=self.kvpp_group.cpu_group,
-                    tag=_KVPP_DONE_TAG,
-                )
-                with torch.profiler.record_function(f"kvpp.transport_receive.layer_{layer_index}"):
-                    with torch.npu.stream(self._kv_transfer_stream):
-                        self._kv_transfer_stream.wait_event(scratch_ready)
-                        receive_completion = self.transport.copy_active_pages_from_staging(
-                            self.layer_cache_bundles[layer_name],
-                            active_pages,
-                            self._kv_transfer_stream,
-                        )
-                    receive_completion.synchronize()
-                return
+            self.run_layer_send(layer_name, active_pages, forward_ready)
+            self.run_layer_receive(layer_name, active_pages, forward_ready, scratch_ready)
 
-            for peer_kvpp_rank, peer_global_rank in enumerate(self.kvpp_group.ranks):
-                if peer_kvpp_rank == owner_kvpp_rank:
-                    continue
-                dist.recv(
-                    token,
-                    src=peer_global_rank,
-                    group=self.kvpp_group.cpu_group,
-                    tag=_KVPP_READY_TAG,
-                )
+    def run_layer_send(self, layer_name: str, active_pages: KVPPActivePages, forward_ready: Any) -> None:
+        """Publish free staging, or push as its owner; never wait for scratch.
 
-            with torch.profiler.record_function(f"kvpp.transport_push.layer_{layer_index}"):
-                with torch.npu.stream(self._kv_transfer_stream):
-                    # ``active_pages`` is materialized on the compute stream in
-                    # schedule_forward().  The owner reads those tensors from
-                    # the transfer stream as MTE descriptors, so it needs the
-                    # same cross-stream dependency as the consumer path above.
-                    self._kv_transfer_stream.wait_event(scratch_ready)
-                    completion = self.transport.copy_active_pages_to_staging(
-                        self.layer_cache_bundles[layer_name],
-                        active_pages,
-                        self._kv_transfer_stream,
-                    )
-                # Only the communication worker waits on the host. The compute
-                # thread continues until this layer first writes/reads its
-                # paged KV cache.
-                completion.synchronize()
+        Called on the communication worker after the previous prefetch has
+        completed, so no preceding unpack still reads the local staging slot.
+        """
+        owner_kvpp_rank = self.layer_owner_ranks[layer_name]
+        owner_global_rank = self.kvpp_group.ranks[owner_kvpp_rank]
+        token = torch.ones(1, dtype=torch.uint8, device="cpu")
+        if self.kvpp_group.rank_in_group != owner_kvpp_rank:
+            dist.send(token, dst=owner_global_rank, group=self.kvpp_group.cpu_group, tag=_KVPP_READY_TAG)
+            return
 
-            for peer_kvpp_rank, peer_global_rank in enumerate(self.kvpp_group.ranks):
-                if peer_kvpp_rank == owner_kvpp_rank:
-                    continue
-                dist.send(
-                    token,
-                    dst=peer_global_rank,
-                    group=self.kvpp_group.cpu_group,
-                    tag=_KVPP_DONE_TAG,
+        for peer_kvpp_rank, peer_global_rank in enumerate(self.kvpp_group.ranks):
+            if peer_kvpp_rank != owner_kvpp_rank:
+                dist.recv(token, src=peer_global_rank, group=self.kvpp_group.cpu_group, tag=_KVPP_READY_TAG)
+
+        layer_index = extract_layer_index(layer_name)
+        with torch.profiler.record_function(f"kvpp.transport_push.layer_{layer_index}"):
+            with torch.npu.stream(self._kv_transfer_stream):
+                self._kv_transfer_stream.wait_event(forward_ready)
+                completion = self.transport.copy_active_pages_to_staging(
+                    self.layer_cache_bundles[layer_name], active_pages, self._kv_transfer_stream
                 )
+            completion.synchronize()
+
+        for peer_kvpp_rank, peer_global_rank in enumerate(self.kvpp_group.ranks):
+            if peer_kvpp_rank != owner_kvpp_rank:
+                dist.send(token, dst=peer_global_rank, group=self.kvpp_group.cpu_group, tag=_KVPP_DONE_TAG)
+
+    def run_layer_receive(
+        self,
+        layer_name: str,
+        active_pages: KVPPActivePages,
+        forward_ready: Any,
+        scratch_ready: Any,
+    ) -> None:
+        """Unpack on the communication worker after DONE and scratch readiness."""
+        owner_kvpp_rank = self.layer_owner_ranks[layer_name]
+        if self.kvpp_group.rank_in_group == owner_kvpp_rank:
+            return
+
+        owner_global_rank = self.kvpp_group.ranks[owner_kvpp_rank]
+        token = torch.ones(1, dtype=torch.uint8, device="cpu")
+        dist.recv(token, src=owner_global_rank, group=self.kvpp_group.cpu_group, tag=_KVPP_DONE_TAG)
+        layer_index = extract_layer_index(layer_name)
+        with torch.profiler.record_function(f"kvpp.transport_receive.layer_{layer_index}"):
+            with torch.npu.stream(self._kv_transfer_stream):
+                self._kv_transfer_stream.wait_event(forward_ready)
+                self._kv_transfer_stream.wait_event(scratch_ready)
+                completion = self.transport.copy_active_pages_from_staging(
+                    self.layer_cache_bundles[layer_name], active_pages, self._kv_transfer_stream
+                )
+            completion.synchronize()
