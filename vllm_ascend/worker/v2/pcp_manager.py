@@ -407,9 +407,18 @@ class AscendPCPManager(PCPManager):
         # Only duck-typed attributes are consumed downstream, so callers may
         # pass batch stand-ins (e.g. UT SimpleNamespace or the capture dummy).
         hidden_restore_idx = self._hidden_restore_idx
+        if hidden_restore_idx is None:
+            # Graph capture (vLLM #53515/#53869) never partitions a batch, so
+            # _build_batch_layout did not fill _hidden_restore_idx. Runtime
+            # prepare_attn rebuilds this metadata every step, so an identity
+            # placeholder is sufficient for the capture-only context.
+            hidden_restore_idx = torch.arange(
+                global_batch.num_tokens_after_padding,
+                dtype=torch.int64,
+                device=self.device,
+            )
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
-        assert hidden_restore_idx is not None
         return AscendPCPAttentionContext(
             global_batch=global_batch,
             global_block_tables=self._block_tables.gather_block_tables(
