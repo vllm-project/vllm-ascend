@@ -72,7 +72,11 @@ def _prepare_pcp_inputs_to_capture(
         # The Ascend dummy carries the seq_lens_np/attn_state views consumed
         # by Ascend metadata builders and doubles as the capture-time PCP
         # global batch (is_dummy=True).
-        input_batch = AscendInputBatch.make_dummy(num_reqs, num_tokens, input_buffers, max_query_len=max_query_len)
+        # mypy binds the conditional AscendInputBatch.make_dummy definitions to
+        # the first (0.27.1) signature; the main lane adds max_query_len.
+        input_batch = AscendInputBatch.make_dummy(  # type: ignore[call-arg]
+            num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+        )
         input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
         slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
