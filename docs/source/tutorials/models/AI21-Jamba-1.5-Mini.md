@@ -12,7 +12,7 @@ This document provides a practical deployment and validation reference for `AI21
 
 You can use the official docker image to run `AI21-Jamba-1.5-Mini` directly.
 
-Refer to [using docker](../../installation.md#set-up-using-docker) for the container setup steps.
+Refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image) for the container setup steps.
 
 ## Deployment
 
