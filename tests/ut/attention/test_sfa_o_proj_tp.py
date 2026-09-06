@@ -105,7 +105,18 @@ class TestAscendSFAOProjTPParams(TestBase):
         impl.enable_dsa_cp_with_o_proj_tp = True
         gathered_output = torch.cat((torch.ones(2, 3), torch.full((2, 3), 2.0)))
         tp_group = SimpleNamespace(all_gather=MagicMock(return_value=gathered_output))
-        with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=tp_group):
+        # _finalize_o_proj gathers via common_cp.write_cp_output, which binds
+        # its own get_tp_group reference: patch both namespaces.
+        with (
+            patch(
+                "vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group",
+                return_value=tp_group,
+            ),
+            patch(
+                "vllm_ascend.attention.context_parallel.common_cp.get_tp_group",
+                return_value=tp_group,
+            ),
+        ):
             output = impl._finalize_o_proj(
                 attn_output=torch.randn(2, 8),
                 output=torch.empty(3, 3),
