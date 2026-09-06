@@ -379,6 +379,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=[],
+            eplb_heat_collection_status=(
+                self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
+            ),
         ):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)

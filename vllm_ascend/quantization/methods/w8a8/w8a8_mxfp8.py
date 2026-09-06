@@ -279,9 +279,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         if topk_weights is None or topk_ids is None:
             raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
 
-        if x.dtype not in [torch.float8_e4m3fn]:
-            topk_weights = topk_weights.to(x.dtype)
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(

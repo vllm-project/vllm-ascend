@@ -96,7 +96,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
-        "scatter_nd_update_v2"
+        "scatter_nd_update_sk"
         "moe_grouped_matmul"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
@@ -105,6 +105,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
+        "rms_norm_cast"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"
@@ -148,7 +149,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     setup_catlass_dependency
 
     CUSTOM_OPS_ARRAY=(
-        "scatter_nd_update_v2"
+        "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
         "lightning_indexer"
         "sparse_flash_attention"
@@ -159,6 +160,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "moe_gating_top_k"
         "moe_gating_top_k_hash"
         "add_rms_norm_bias"
+        "rms_norm_cast"
         "transpose_kv_cache_by_block"
         "copy_and_expand_eagle_inputs"
         "causal_conv1d"

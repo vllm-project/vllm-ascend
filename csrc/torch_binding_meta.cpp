@@ -488,6 +488,17 @@ std::tuple<at::Tensor,at::Tensor, at::Tensor> npu_add_rms_norm_bias_meta(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, rstd, x);
 }
 
+std::tuple<at::Tensor, at::Tensor> npu_rms_norm_cast_meta(
+    const at::Tensor& x,
+    const at::Tensor& gamma,
+    double epsilon)
+{
+    at::Tensor y = at::empty_symint(x.sym_sizes(), x.options());
+    at::Tensor y_fp32 = at::empty_symint(
+        x.sym_sizes(), x.options().dtype(at::kFloat));
+    return {y, y_fp32};
+}
+
 at::Tensor npu_sign_bits_pack_meta(const at::Tensor& input,
                                    const int64_t size) {
     auto ySize = ceil_div(input.sym_size(0), 8);
@@ -1453,7 +1464,6 @@ at::Tensor npu_lightning_indexer_quant_meta(
     return lightning_indexer_quant_output;
 }
 
-
 std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_k2q_csr_meta(
     const at::Tensor &q2k,
     const at::Tensor &cu_seqlens,
@@ -1515,7 +1525,7 @@ at::Tensor npu_sparse_attention_score_prefill_meta(
     return at::empty_symint(query.sym_sizes(), query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
-void npu_scatter_nd_update_v2_meta(
+void npu_scatter_nd_update_sk_meta(
     at::Tensor& var,
     const at::Tensor& indices,
     const at::Tensor& update)
@@ -2079,6 +2089,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("moe_gating_top_k", &vllm_ascend::meta::moe_gating_top_k_meta);
     // Add_Rms_Norm_Bias
     ops.impl("npu_add_rms_norm_bias", &vllm_ascend::meta::npu_add_rms_norm_bias_meta);
+    ops.impl("npu_rms_norm_cast", &vllm_ascend::meta::npu_rms_norm_cast_meta);
     // transpose_kv_cache_by_block
     ops.impl("transpose_kv_cache_by_block", &vllm_ascend::meta::transpose_kv_cache_by_block_meta);
     // npu_sign_bits_pack
@@ -2109,7 +2120,7 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_swiglu_group_quant", &vllm_ascend::meta::npu_swiglu_group_quant_meta);
     ops.impl("indexer_compress_epilog_v2", &vllm_ascend::meta::indexer_compress_epilog_v2_meta);
     ops.impl("npu_dequant_swiglu_quant", &vllm_ascend::meta::npu_dequant_swiglu_quant_meta);
-    ops.impl("npu_scatter_nd_update_v2", &vllm_ascend::meta::npu_scatter_nd_update_v2_meta);
+    ops.impl("npu_scatter_nd_update_sk", &vllm_ascend::meta::npu_scatter_nd_update_sk_meta);
     // Lightning indexer quant
     ops.impl("npu_lightning_indexer_quant", &vllm_ascend::meta::npu_lightning_indexer_quant_meta);
     // MLA prolog (MlaPrologV3), Ascend950-only; name aligned with torch_npu

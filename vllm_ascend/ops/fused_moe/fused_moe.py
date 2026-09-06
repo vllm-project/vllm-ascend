@@ -225,6 +225,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             with self._sequence_parallel_context():
                 shared_hidden_states = shared_experts_input if shared_experts_input is not None else hidden_states
                 if self.ascend_shared_experts is None:
+                    if self.is_internal_router:
+                        gate = self.gate
+                        assert gate is not None
+                        hidden_states_fp32 = (
+                            router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+                        )
+                        router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
                     return self.routed_experts.forward_impl(
                         hidden_states=hidden_states,
                         router_logits=router_logits,
@@ -236,11 +243,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if self.is_internal_router:
                     gate = self.gate
                     assert gate is not None
-                    # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
-                    # increase with extra hidden states. We also assume that all gate
-                    # linear is unquantized so that we the weight is pre-casted in
-                    # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                    hidden_states_fp32 = shared_hidden_states.float()
+                    # Reuse the fused RMSNorm FP32 output when supplied. Otherwise,
+                    # retain the standalone cast for other model call sites.
+                    hidden_states_fp32 = (
+                        router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
+                    )
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # v0.27.1: weight_fp32 is guaranteed by is_internal_router.
                     router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
@@ -283,7 +290,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     if self.is_internal_router:
                         gate = self.gate
                         assert gate is not None
-                        hidden_states_fp32 = hidden_states.float()
+                        hidden_states_fp32 = (
+                            router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
+                        )
                         router_logits = F.linear(
                             hidden_states_fp32,
                             gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
@@ -299,11 +308,11 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 if self.is_internal_router:
                     gate = self.gate
                     assert gate is not None
-                    # NOTE(Angazenn): To make this cast explicitly, the hbm usage might
-                    # increase with extra hidden states. We also assume that all gate
-                    # linear is unquantized so that we the weight is pre-casted in
-                    # process_weights_after_loading of AscendUnquantizedLinearMethod.
-                    hidden_states_fp32 = shared_hidden_states.float()
+                    # Reuse the fused RMSNorm FP32 output when supplied. Otherwise,
+                    # retain the standalone cast for other model call sites.
+                    hidden_states_fp32 = (
+                        router_logits if router_logits.dtype == torch.float32 else shared_hidden_states.float()
+                    )
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # main (cdc4824a21): is_internal_router only checks self.gate,
                     # weight_fp32 may be absent, fall back to gate.weight.

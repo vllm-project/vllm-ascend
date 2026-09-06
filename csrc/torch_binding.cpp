@@ -30,6 +30,7 @@
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
@@ -1901,14 +1902,14 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
     return std::make_tuple(y, scale);
 }
 
-void npu_scatter_nd_update_v2(
+void npu_scatter_nd_update_sk(
     at::Tensor& var,
     const at::Tensor& indices,
     const at::Tensor& update)
 {
     // construct the output tensor
     at::IntArrayRef var_stride = var.strides();
-    EXEC_NPU_CMD(aclnnScatterNdUpdateV2, var, indices, update, var_stride);
+    EXEC_NPU_CMD(aclnnScatterNdUpdateSk, var, indices, update, var_stride);
     return;
 }
 
@@ -2404,6 +2405,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         );
     ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
 
+    ops.def(
+        "npu_rms_norm_cast(Tensor x, Tensor gamma, float epsilon=1e-6)"
+        " -> (Tensor y, Tensor y_fp32)"
+    );
+    ops.impl("npu_rms_norm_cast", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_cast);
+
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
 
@@ -2801,11 +2808,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_dequant_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::npu_dequant_swiglu_quant);
 
     ops.def(
-        "npu_scatter_nd_update_v2("
+        "npu_scatter_nd_update_sk("
                 "Tensor(a!) var, Tensor indices, Tensor update"
             ") -> ()"
     );
-    ops.impl("npu_scatter_nd_update_v2", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_v2);
+    ops.impl("npu_scatter_nd_update_sk", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_sk);
 
     // This operator is planned to be integrated into PTA in the near future.
     // Once that happens, the implementation in csrc will be removed.

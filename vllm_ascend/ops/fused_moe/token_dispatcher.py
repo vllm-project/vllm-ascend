@@ -425,7 +425,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=combine_metadata.expanded_row_idx,
-            probs=combine_metadata.topk_weights,
+            probs=combine_metadata.topk_weights.to(hidden_states.dtype),
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
@@ -710,7 +710,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,
             sorted_indices=combine_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
-            probs=combine_metadata.topk_weights,
+            probs=combine_metadata.topk_weights.to(permutated_local_input_tokens.dtype),
             restore_shape=combine_metadata.hidden_shape_before_permute,
         )
         output = output.view(combine_metadata.hidden_shape)

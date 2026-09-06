@@ -161,9 +161,6 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        if x.dtype not in [torch.float8_e4m3fn]:
-            topk_weights = topk_weights.to(x.dtype)
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(

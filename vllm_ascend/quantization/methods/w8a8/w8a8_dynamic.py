@@ -194,7 +194,6 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
         lora_context = getattr(layer, "_ascend_moe_lora_context", None)
         assert topk_ids is not None
         assert topk_weights is not None
-        topk_weights = topk_weights.to(self.in_dtype)
 
         activation = getattr(layer, "activation", "silu")
         moe_comm_method = _EXTRA_CTX.moe_comm_method
