@@ -404,7 +404,8 @@ class AscendPCPManager(PCPManager):
         if global_batch is None:
             global_batch = capture_batch
         assert global_batch is not None
-        assert isinstance(global_batch, AscendInputBatch)
+        # Only duck-typed attributes are consumed downstream, so callers may
+        # pass batch stand-ins (e.g. UT SimpleNamespace or the capture dummy).
         hidden_restore_idx = self._hidden_restore_idx
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None

@@ -748,7 +748,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     if pcp_context is not None:
         assert [call["pcp_cache_group_idx"] for call in calls] == [0, 1]
         assert pcp_manager is not None
-        pcp_manager.build_attention_context.assert_called_once_with()
+        pcp_manager.build_attention_context.assert_called_once_with(input_batch)
     else:
         assert all(call["pcp_cache_group_idx"] is None for call in calls)
 
