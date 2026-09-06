@@ -58,9 +58,12 @@ DONE_RECVING_MSG = b"done_recving_msg"
 
 
 @pytest.fixture(autouse=True)
-def _parallel_groups():
+def _parallel_groups(monkeypatch):
     """Scope fake distributed topology to each case; never patch at collection."""
     module = sys.modules[KVCacheTaskTracker.__module__]
+    # Worker construction writes this environment variable. Track its original
+    # state even in legacy constructor tests, not only in the wire fixture.
+    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", os.environ.get("ASCEND_TRANSFER_TIMEOUT", "30"))
     with (
         patch.object(module, "get_pp_group", return_value=types.SimpleNamespace(rank_in_group=0, world_size=1)),
         patch.object(module, "get_tp_group", return_value=types.SimpleNamespace(rank_in_group=0, world_size=4)),
@@ -3138,6 +3141,81 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(len(worker.kv_caches), 1)
         self.assertIsNotNone(worker.kv_send_thread)
         self.assertIsNone(worker.kv_recv_thread)
+
+    def test_missing_parallel_fields_reject_before_backend_creation(self):
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        for role, field in (
+            ("prefill", "tp_size"),
+            ("prefill", "dp_size"),
+            ("decode", "tp_size"),
+            ("decode", "dp_size"),
+        ):
+            with self.subTest(role=role, field=field):
+                parallel = {"prefill": {"tp_size": 2, "dp_size": 1}, "decode": {"tp_size": 2, "dp_size": 1}}
+                del parallel[role][field]
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+                with (
+                    patch.object(module.global_te, "get_transfer_engine") as backend,
+                    self.assertRaises(AssertionError),
+                ):
+                    MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                backend.assert_not_called()
+
+    def test_unsupported_parallel_combinations_reject_before_backend_creation(self):
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        # Existing V1 constraints, not new compatibility rules invented by UT.
+        cases = (
+            (2, 4, 1, 1, 1, ValueError, "prefill_tp_size"),
+            (2, 2, 2, 1, 1, AssertionError, "decode pp size must be 1"),
+            (2, 2, 1, 2, 2, AssertionError, "pp and pcp cannot open in same time"),
+        )
+        for prefill_tp, decode_tp, decode_pp, local_pp, local_pcp, error, message in cases:
+            with self.subTest(
+                prefill_tp=prefill_tp, decode_tp=decode_tp, decode_pp=decode_pp, pp=local_pp, pcp=local_pcp
+            ):
+                parallel = {
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "decode": {"tp_size": decode_tp, "dp_size": 1, "pp_size": decode_pp},
+                }
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+                self.vllm_config.parallel_config.pipeline_parallel_size = local_pp
+                with (
+                    patch.object(module.global_te, "get_transfer_engine") as backend,
+                    patch.object(
+                        module,
+                        "get_pcp_group",
+                        return_value=types.SimpleNamespace(rank_in_group=0, world_size=local_pcp),
+                    ),
+                    self.assertRaisesRegex(error, message),
+                ):
+                    MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                backend.assert_not_called()
+
+    def test_supported_parallel_neighbors_create_backend(self):
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        for prefill_tp, decode_tp, local_pp, local_pcp in ((2, 2, 1, 1), (4, 2, 2, 1), (4, 2, 1, 2)):
+            with self.subTest(prefill_tp=prefill_tp, decode_tp=decode_tp, pp=local_pp, pcp=local_pcp):
+                parallel = {
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "decode": {"tp_size": decode_tp, "dp_size": 1},
+                }
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+                self.vllm_config.parallel_config.pipeline_parallel_size = local_pp
+                with (
+                    patch.object(
+                        module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
+                    ) as backend,
+                    patch.object(
+                        module,
+                        "get_pcp_group",
+                        return_value=types.SimpleNamespace(rank_in_group=0, world_size=local_pcp),
+                    ),
+                    patch.object(module.torch.npu, "current_device", return_value=5),
+                ):
+                    worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                backend.assert_called_once_with("127.0.0.1", device_name="5" if local_pp > 1 else None)
+                self.assertEqual((worker._prefill_tp_size, worker._decode_tp_size), (prefill_tp, decode_tp))
+                self.assertEqual(worker.handshake_port, 5000)
 
     def test_register_kv_caches_consumer(self):
         self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
