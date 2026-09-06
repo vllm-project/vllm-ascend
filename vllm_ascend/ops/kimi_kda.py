@@ -150,30 +150,24 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
         param_shard.copy_(fused_weight)
 
 
-def _live_token_counts(attn_metadata: GDNAttentionMetadata) -> tuple[int, int]:
-    """Return CPU-side live spec / non-spec token counts for this step.
+def _zero_padded_output(
+    output: torch.Tensor,
+    num_live_tokens: torch.Tensor,
+) -> torch.Tensor:
+    """Clear graph-padding rows using a device-side live-token count.
 
-    FULL-graph dummy sequences have length 0, so these counts stay equal to the
-    packed query tokens and do not include graph-padded rows. ``_forward`` is
-    eager-broken during capture, so slicing with these Python ints is valid.
+    FULL ACLGraph capture inlines ``_forward`` (the eager-break decorator is a
+    no-op in FULL mode), so Python slices such as ``output[:, :live_tokens]``
+    bake the capture-time length. ``query_start_loc[-1]`` stays a static buffer
+    that replay updates, matching 310P GDN's device-side mask.
     """
-    spec_live = attn_metadata.num_spec_decode_tokens if attn_metadata.spec_sequence_masks is not None else 0
-    non_spec_live = attn_metadata.num_decode_tokens + attn_metadata.num_prefill_tokens
-    return spec_live, non_spec_live
-
-
-def _take_live_tokens(output: torch.Tensor, live_tokens: int) -> torch.Tensor:
-    """Drop kernel output rows past the packed live prefix.
-
-    Conv / recurrent skip zero-length graph sequences and leave those rows
-    untouched. Keep the same input shape as GDN (``[:num_actual_tokens]``) and
-    discard the skipped tail here instead of an elementwise mask.
-    """
-    if live_tokens <= 0:
-        return output[:, :0]
-    if output.shape[1] > live_tokens:
-        return output[:, :live_tokens]
-    return output
+    token_indices = torch.arange(
+        output.shape[1],
+        dtype=num_live_tokens.dtype,
+        device=output.device,
+    )
+    valid_tokens = token_indices < num_live_tokens
+    return torch.where(valid_tokens.view(1, -1, 1, 1), output, 0.0)
 
 
 def _prepare_beta(
@@ -562,7 +556,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         spec_masks = attn_metadata.spec_sequence_masks
         spec_token_indices = attn_metadata.spec_token_indx
         non_spec_token_indices = attn_metadata.non_spec_token_indx
-        spec_live, non_spec_live = _live_token_counts(attn_metadata)
 
         if spec_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -617,7 +610,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
             )
-            core_spec = _take_live_tokens(core_spec, spec_live)
 
         core_non_spec = None
         if mixed_non_spec is not None and mixed_non_spec.shape[0] > 0:
@@ -709,44 +701,40 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
                     attn_metadata.non_spec_state_indices_tensor,
                 )
 
-            if core_non_spec is not None:
-                core_non_spec = _take_live_tokens(core_non_spec, non_spec_live)
-
         if core_spec is None and core_non_spec is None:
             # Idle DP dummy runs carry graph-shaped metadata with no live work.
             # Do not feed a previous replay's output through the norm gate.
             core_attn_out.zero_()
             return
 
-        live_tokens = 0
+        num_live_tokens = None
         if core_spec is not None:
-            live_tokens += spec_live
+            assert attn_metadata.spec_query_start_loc is not None
+            num_live_tokens = attn_metadata.spec_query_start_loc[-1]
         if core_non_spec is not None:
-            live_tokens += non_spec_live
+            assert attn_metadata.non_spec_query_start_loc is not None
+            num_non_spec_tokens = attn_metadata.non_spec_query_start_loc[-1]
+            num_live_tokens = num_non_spec_tokens if num_live_tokens is None else num_live_tokens + num_non_spec_tokens
+        assert num_live_tokens is not None
 
-        # Dummy sequences contribute 0 tokens, so live rows are a packed prefix.
-        # Zero the scheduler window first so skipped kernel tails cannot leak,
-        # then scatter/copy only that prefix (GDN copies the full kernel tensor).
+        # GDN copies the full kernel tensor into a zeros buffer. Do the same:
+        # do not Python-slice to a live count (FULL graphs bake that length).
+        # Kernel-skipped tails may still be copied; the device mask after
+        # o_norm clears them without a capture-time Python length.
         core_attn_out[:, :num_actual_tokens].zero_()
         if core_spec is not None and core_non_spec is not None:
             assert spec_token_indices is not None
             assert non_spec_token_indices is not None
-            spec_token_indices = spec_token_indices[:spec_live]
-            non_spec_token_indices = non_spec_token_indices[:non_spec_live]
-            assert spec_token_indices.numel() == core_spec.shape[1]
-            assert non_spec_token_indices.numel() == core_non_spec.shape[1]
+            assert spec_token_indices.numel() + non_spec_token_indices.numel() <= num_actual_tokens
             core_attn_out[:, :num_actual_tokens].index_copy_(1, spec_token_indices, core_spec)
             core_attn_out[:, :num_actual_tokens].index_copy_(1, non_spec_token_indices, core_non_spec)
         elif core_spec is not None:
-            core_attn_out[:, :spec_live] = core_spec
+            core_attn_out[:, :num_actual_tokens] = core_spec
         elif core_non_spec is not None:
-            core_attn_out[:, :non_spec_live] = core_non_spec
+            core_attn_out[:, :num_actual_tokens] = core_non_spec
 
-        # Restrict FusedRMSNormGated to the packed live prefix. GDN norms the
-        # full tensor after zeros(); KDA cannot, because captured g2 padding
-        # can be NaN and 0 * sigmoid(NaN) is NaN.
-        if live_tokens > 0:
-            core_attn_out[:, :live_tokens].copy_(
-                self.o_norm(core_attn_out[:, :live_tokens], g2[:live_tokens]),
-            )
+        # KDA's sigmoid gate turns padding NaN into NaN even when x is 0, so
+        # mask with the device live count after the fused norm.
+        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
+        core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
         core_attn_out[:, num_actual_tokens:].zero_()

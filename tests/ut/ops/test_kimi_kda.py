@@ -13,9 +13,8 @@ from vllm_ascend.ops.kimi_kda import (
     _PACKED_CONV_WEIGHT_NAME,
     AscendKimiK3DeltaAttention,
     _KDAFusedBFGLinear,
-    _live_token_counts,
     _prepare_beta,
-    _take_live_tokens,
+    _zero_padded_output,
 )
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -70,42 +69,55 @@ class _RecordingStreamSwitch:
         self.trace.append(f"exit:{self.stream.name}")
 
 
-def test_live_token_counts_ignore_graph_padded_sequences():
-    spec_meta = SimpleNamespace(
-        spec_sequence_masks=torch.tensor([True, True, False, False]),
-        num_spec_decode_tokens=8,
-        num_decode_tokens=0,
-        num_prefill_tokens=0,
-    )
-    decode_meta = SimpleNamespace(
-        spec_sequence_masks=None,
-        num_spec_decode_tokens=4,
-        num_decode_tokens=2,
-        num_prefill_tokens=0,
-    )
+def test_zero_padded_output_uses_device_live_token_count():
+    output = torch.full((1, 8, 1, 1), torch.nan)
+    output[:, :6] = torch.arange(6).view(1, 6, 1, 1)
 
-    mixed_meta = SimpleNamespace(
-        spec_sequence_masks=torch.tensor([True, False, False]),
-        num_spec_decode_tokens=2,
-        num_decode_tokens=0,
-        num_prefill_tokens=1,
-    )
+    actual = _zero_padded_output(output, torch.tensor(6, dtype=torch.int32))
 
-    assert _live_token_counts(spec_meta) == (8, 0)
-    assert _live_token_counts(decode_meta) == (0, 2)
-    assert _live_token_counts(mixed_meta) == (2, 1)
+    torch.testing.assert_close(actual[:, :6], output[:, :6])
+    assert torch.equal(actual[:, 6:], torch.zeros_like(actual[:, 6:]))
 
 
-def test_take_live_tokens_discards_unwritten_kernel_tail():
-    output = torch.randn(1, 8, 2, 3)
-    expected = output[:, :5].clone()
-    output[:, 5:] = torch.nan
+def test_python_live_slice_index_copy_hits_graph_padded_garbage_indices():
+    """Capture-time Python slices read the static index buffer's dirty tail.
 
-    actual = _take_live_tokens(output, 5)
+    FULL ACLGraph inlines ``_forward``, so ``spec_token_indices[:spec_live]``
+    keeps the capture length. Replay still uses that length; DSpark's seven
+    speculative slots can hold uninitialized values such as float32 1.0
+    (``0x3F800001``) interpreted as int64, which is the CANN IndexCheck
+    ``1065369473..1065369479`` crash.
+    """
+    capture_tokens = 8
+    dest = torch.zeros(1, capture_tokens, 2, 3)
+    source = torch.ones(1, capture_tokens, 2, 3)
+    spec_token_indices = torch.empty(capture_tokens, dtype=torch.long)
+    spec_token_indices[0] = 0
+    spec_token_indices[1:] = torch.arange(1065369473, 1065369480)
 
-    torch.testing.assert_close(actual, expected)
-    assert _take_live_tokens(output, 8) is output
-    assert _take_live_tokens(output, 0).shape[1] == 0
+    with pytest.raises((IndexError, RuntimeError)):
+        dest.index_copy_(1, spec_token_indices[:capture_tokens], source)
+
+    dest.zero_()
+    dest[:, :capture_tokens].index_copy_(1, spec_token_indices[:1], source[:, :1])
+    torch.testing.assert_close(dest[:, :1], torch.ones(1, 1, 2, 3))
+    assert torch.equal(dest[:, 1:], torch.zeros(1, 7, 2, 3))
+
+
+def test_python_live_slice_cannot_replace_device_query_start_loc_mask():
+    """Python ``num_actual_tokens`` is the captured window, not live tokens."""
+    output = torch.full((1, 8, 2, 3), torch.nan)
+    output[:, :2] = 1.0
+    capture_live = 8
+    query_start_loc = torch.tensor([0, 1, 2, 2, 2, 2, 2, 2, 2], dtype=torch.int32)
+
+    sliced = output[:, :capture_live]
+    assert torch.isnan(sliced[:, 2:]).all()
+
+    masked = _zero_padded_output(output[:, :capture_live], query_start_loc[-1])
+    torch.testing.assert_close(masked[:, :2], torch.ones(1, 2, 2, 3))
+    assert torch.equal(masked[:, 2:], torch.zeros(1, 6, 2, 3))
+    assert torch.isfinite(masked).all()
 
 
 def test_kda_output_norm_uses_checkpoint_epsilon():
@@ -654,8 +666,8 @@ def test_kda_forward_norms_only_live_decode_tokens():
 
     assert captured["conv_tokens"] == 4
     assert captured["recurrent_tokens"] == 4
-    assert captured["tokens"] == 2
-    assert captured["gate_nan"] is False
+    assert captured["tokens"] == 4
+    assert captured["gate_nan"] is True
     torch.testing.assert_close(core_attn_out[:, :2], torch.ones(1, 2, 2, 3))
     assert torch.equal(core_attn_out[:, 2:], torch.zeros(1, 4, 2, 3))
     assert torch.isfinite(core_attn_out).all()
@@ -704,8 +716,8 @@ def test_kda_forward_norms_only_live_spec_tokens():
 
     assert captured["conv_tokens"] == 4
     assert captured["recurrent_tokens"] == 4
-    assert captured["tokens"] == 2
-    assert captured["gate_nan"] is False
+    assert captured["tokens"] == 4
+    assert captured["gate_nan"] is True
     torch.testing.assert_close(core_attn_out[:, :2], torch.ones(1, 2, 2, 3))
     assert torch.equal(core_attn_out[:, 2:], torch.zeros(1, 4, 2, 3))
     assert torch.isfinite(core_attn_out).all()
@@ -766,14 +778,16 @@ def test_kda_forward_scatters_mixed_tokens_before_live_norm():
     assert captured["conv_tokens"] == [2, 1]
     assert captured["recurrent_tokens"] == 2
     assert captured["prefill_tokens"] == 1
-    assert captured["tokens"] == 3
-    assert captured["gate_nan"] is False
+    assert captured["tokens"] == 4
+    assert captured["gate_nan"] is True
     torch.testing.assert_close(captured["core"][0, 0], torch.ones(2, 3))
     torch.testing.assert_close(captured["core"][0, 1], torch.full((2, 3), 2.0))
     torch.testing.assert_close(captured["core"][0, 2], torch.ones(2, 3))
+    assert torch.equal(captured["core"][0, 3], torch.zeros(2, 3))
     torch.testing.assert_close(captured["gate"][0], torch.full((2, 3), 10.0))
     torch.testing.assert_close(captured["gate"][1], torch.full((2, 3), 20.0))
     torch.testing.assert_close(captured["gate"][2], torch.full((2, 3), 30.0))
+    assert torch.isnan(captured["gate"][3]).all()
     torch.testing.assert_close(core_attn_out[:, 0], torch.ones(1, 2, 3))
     torch.testing.assert_close(core_attn_out[:, 1], torch.full((1, 2, 3), 2.0))
     torch.testing.assert_close(core_attn_out[:, 2], torch.ones(1, 2, 3))
