@@ -674,13 +674,16 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         )
         # QLI v2 PA_BBND reads the compressed K length plus the residual from
         # the original length. Persistent buffers keep their addresses stable
-        # during graph replay.
-        self.qli_seqused_k: torch.Tensor = torch.zeros(
-            scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
-        )
-        self.qli_cmp_residual_k: torch.Tensor = torch.zeros(
-            scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
-        )
+        # during graph replay. Full-decode graphs pad the request count beyond
+        # max_num_seqs (cudagraph capture sizes plus the FIA dummy request), so
+        # size the per-request buffers for the graph-mode maximum.
+        max_qli_reqs = scheduler_config.max_num_seqs
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and compilation_config.cudagraph_capture_sizes:
+            max_qli_reqs = max(max_qli_reqs, compilation_config.max_cudagraph_capture_size)
+        # +1 holds the FIA dummy request inserted by mixed-batch padding.
+        self.qli_seqused_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
+        self.qli_cmp_residual_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
