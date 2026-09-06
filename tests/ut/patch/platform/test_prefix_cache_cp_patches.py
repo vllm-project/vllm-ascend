@@ -9,7 +9,10 @@ import pytest
 import torch
 import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
 from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
+from vllm.v1.core.kv_cache_utils import (
+    BlockHashListWithBlockSize,
+    generate_scheduler_kv_cache_config,
+)
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     SlidingWindowManager,
@@ -182,17 +185,20 @@ def _make_vllm_config(
     *,
     enable_prefix_caching: bool,
     dcp: int,
+    pcp: int = 1,
     block_size: int = 16,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         cache_config=SimpleNamespace(
             block_size=block_size,
             enable_prefix_caching=enable_prefix_caching,
+            hash_block_size=None,
             mamba_cache_mode="align",
             prefix_match_unit=None,
         ),
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
+            prefill_context_parallel_size=pcp,
         ),
         kv_transfer_config=None,
     )
@@ -280,6 +286,116 @@ def test_resolve_kv_cache_block_sizes_with_cp_hybrid_groups(
     expected_scheduler_block_size = math.lcm(16, 32) * 2
     assert scheduler_block_size == expected_scheduler_block_size
     assert hash_block_size == expected_hash_block_size
+
+
+@pytest.mark.parametrize("full_block_size", [128, 384])
+def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
+    full_block_size: int,
+) -> None:
+    main_spec = MLAAttentionSpec(
+        block_size=full_block_size,
+        num_kv_heads=1,
+        head_size=512,
+        dtype=torch.bfloat16,
+        model_version="glm5_next",
+    )
+    indexer_spec = MLAAttentionSpec(
+        block_size=full_block_size,
+        num_kv_heads=1,
+        head_size=128,
+        dtype=torch.bfloat16,
+        compress_ratio=16,
+        model_version="glm5_next",
+    )
+    state_spec = SlidingWindowMLASpec(
+        block_size=16,
+        sliding_window=16,
+        num_kv_heads=1,
+        head_size=256,
+        dtype=torch.float32,
+        model_version="glm5_next",
+    )
+    full_group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {"layer.main": main_spec, "layer.indexer": indexer_spec}
+    )
+    state_group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {"layer.state": state_spec}
+    )
+    mamba_spec = MambaSpec(
+        block_size=full_block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    mamba_group_spec = UniformTypeKVCacheSpecs.from_specs(
+        {"layer.mamba": mamba_spec}
+    )
+    assert full_group_spec is not None
+    assert state_group_spec is not None
+    assert mamba_group_spec is not None
+
+    worker_config = KVCacheConfig(
+        num_blocks=10,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["layer.main", "layer.indexer"],
+                kv_cache_spec=full_group_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["layer.state"],
+                kv_cache_spec=state_group_spec,
+            ),
+            KVCacheGroupSpec(
+                layer_names=["layer.mamba"],
+                kv_cache_spec=mamba_group_spec,
+            ),
+        ],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+    scheduler_full_spec = scheduler_config.kv_cache_groups[0].kv_cache_spec
+    assert isinstance(scheduler_full_spec, MLAAttentionSpec)
+    assert scheduler_full_spec.head_size == main_spec.head_size
+    assert scheduler_full_spec.compress_ratio == 1
+
+    vllm_config = _make_vllm_config(
+        enable_prefix_caching=True,
+        dcp=1,
+        pcp=1,
+        block_size=full_block_size,
+    )
+    # Match EngineCore: the global block size becomes the smallest unwrapped
+    # scheduler group size, which is the indexer-state granularity here.
+    vllm_config.cache_config.block_size = min(
+        group.kv_cache_spec.block_size
+        for group in scheduler_config.kv_cache_groups
+    )
+    assert vllm_config.cache_config.block_size == 16
+    scheduler_block_size, hash_block_size = (
+        _ascend_resolve_kv_cache_block_sizes(
+            scheduler_config,
+            vllm_config,
+        )
+    )
+    assert (scheduler_block_size, hash_block_size) == (
+        full_block_size,
+        16,
+    )
+
+    hashes_per_full_block = full_block_size // hash_block_size
+    base_hashes = [
+        index.to_bytes(2, "little")
+        for index in range(2 * hashes_per_full_block)
+    ]
+    full_group_hashes = BlockHashListWithBlockSize(
+        base_hashes,
+        hash_block_size,
+        scheduler_full_spec.block_size,
+    )
+    assert len(full_group_hashes) == 2
+    assert full_group_hashes[0] == b"".join(
+        base_hashes[:hashes_per_full_block]
+    )
 
 
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:

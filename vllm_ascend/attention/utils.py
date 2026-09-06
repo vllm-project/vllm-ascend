@@ -22,15 +22,16 @@ from vllm_ascend.utils import (
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
-_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset({"Glm5NextIndexerCache", "Glm5NextTailCache"})
+_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset(
+    {"Glm5NextIndexerCache", "Glm5NextStateCache"}
+)
 
 
 def is_glm5_next_kpool_cache(attn_module: Any) -> bool:
-    """Return True for GLM-5.3-Flash kpool indexer / tail cache layers.
+    """Return True for the dedicated GLM-Next indexer cache layers.
 
-    Those classes subclass DeepseekV32IndexerCache but keep their own
-    ``compress_ratio`` / ``KpoolTailSpec`` layouts. The DeepSeek V3.2 SFA
-    rewrite must not replace them with ``AscendSFAIndexerCacheSpec``.
+    Their pooled and recurrent-state layouts must not be rewritten as a
+    DeepSeek V3.2 ``AscendSFAIndexerCacheSpec``.
     """
     return type(attn_module).__name__ in _GLM5_NEXT_KPOOL_CACHE_TYPES
 

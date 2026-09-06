@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -438,6 +439,35 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mla_spec_preserves_block_stride_layout_contract(
+        self,
+        mock_get_layers,
+    ):
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+
+        layer_name = "model.layers.1.self_attn.attn"
+        source_spec = MLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+        attn_module.model_version = "glm5_next"
+        attn_module.indexes_kv_by_block_stride = True
+        attn_module.get_kv_cache_spec = MagicMock(return_value=source_spec)
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        spec = runner.get_kv_cache_spec()[layer_name]
+
+        self.assertIsInstance(spec, AscendMLAAttentionSpec)
+        self.assertEqual(spec.model_version, attn_module.model_version)
+        self.assertTrue(spec.indexes_kv_by_block_stride)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):

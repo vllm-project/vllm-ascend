@@ -24,7 +24,7 @@ from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
 from vllm_ascend.utils import vllm_version_is
 
 
-def _scheduler(*, is_kv_consumer: bool | None):
+def _scheduler(*, is_kv_consumer: bool | None, is_glm5_next: bool = False):
     kv_transfer_config = None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer)
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
     # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split; v0.28.0
@@ -32,9 +32,17 @@ def _scheduler(*, is_kv_consumer: bool | None):
     scheduler_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         scheduler_kwargs["mamba_has_prefill_checkpoint_blocks"] = False
+    model_type = "glm5_next" if is_glm5_next else "other"
     return SimpleNamespace(
-        vllm_config=SimpleNamespace(kv_transfer_config=kv_transfer_config),
+        vllm_config=SimpleNamespace(
+            kv_transfer_config=kv_transfer_config,
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(model_type=model_type),
+                hf_text_config=SimpleNamespace(model_type=model_type),
+            ),
+        ),
         cache_config=SimpleNamespace(block_size=384),
+        block_size=128,
         use_eagle=True,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
@@ -120,6 +128,49 @@ def test_producer_decode_fast_path_remains_unsplit():
     assert result == 8
 
 
+def test_glm5_next_prefill_uses_resolved_common_block_size():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False, is_glm5_next=True),
+        _request(
+            num_computed_tokens=128,
+            num_prompt_tokens=500,
+            num_tokens=500,
+        ),
+        num_new_tokens=200,
+    )
+
+    assert result == 128
+
+
+def test_glm5_next_stops_at_last_cacheable_boundary():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=False, is_glm5_next=True),
+        _request(
+            num_computed_tokens=220,
+            num_prompt_tokens=500,
+            num_tokens=500,
+        ),
+        num_new_tokens=100,
+    )
+
+    assert result == 36
+
+
+def test_glm5_next_pd_consumer_still_preserves_verifier_window():
+    result = _mamba_block_aligned_split(
+        _scheduler(is_kv_consumer=True, is_glm5_next=True),
+        _request(),
+        num_new_tokens=8,
+    )
+
+    assert result == 8
+
+
 def test_patch_is_registered_with_upstream_signature():
-    assert scheduler_module.Scheduler._mamba_block_aligned_split is _mamba_block_aligned_split
-    assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(_original_mamba_block_aligned_split)
+    assert (
+        scheduler_module.Scheduler._mamba_block_aligned_split
+        is _mamba_block_aligned_split
+    )
+    assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(
+        _original_mamba_block_aligned_split
+    )

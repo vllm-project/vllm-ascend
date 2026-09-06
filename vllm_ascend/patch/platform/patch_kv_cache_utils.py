@@ -23,11 +23,20 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.models.glm5next.cache_config import (
+    _get_glm5_cache_layout,
+    get_glm5_kv_cache_config,
+    get_glm5_kv_cache_groups,
+    get_glm5_max_memory_usage,
+    get_glm5_pool_bytes_per_block,
+)
+from vllm_ascend.models.glm5next.kv_cache import is_glm5_cache_spec
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
 _orig_get_kv_cache_config_from_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_config_from_groups
 _orig_max_memory_usage_bytes_from_groups = vllm.v1.core.kv_cache_utils._max_memory_usage_bytes_from_groups
 _orig_pool_bytes_per_block = vllm.v1.core.kv_cache_utils._pool_bytes_per_block
@@ -75,22 +84,72 @@ def _ascend_resolve_kv_cache_block_sizes(
     context parallelism for MLA and SWA-MLA layers independently.
 
     For multiple KV cache groups with CP, compute scheduler_block_size as
-    lcm(group_block_sizes) * dcp to maintain alignment.
+    lcm(group_block_sizes) * dcp * pcp to maintain alignment.
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
+    pcp = getattr(
+        vllm_config.parallel_config,
+        "prefill_context_parallel_size",
+        1,
+    )
     groups = kv_cache_config.kv_cache_groups
 
     if len(groups) <= 1:
-        bs = cache_config.block_size * dcp
+        bs = cache_config.block_size * dcp * pcp
         return bs, bs
 
-    if dcp != 1:
+    group_block_sizes = [group.kv_cache_spec.block_size for group in groups]
+    has_glm5_group = any(
+        is_glm5_cache_spec(nested_spec)
+        for group in groups
+        for nested_spec in (
+            group.kv_cache_spec.kv_cache_specs.values()
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+            else (group.kv_cache_spec,)
+        )
+    )
+    if has_glm5_group:
+        # EngineCore rewrites cache_config.block_size to the smallest group
+        # block size. For GLM-Next this is the compressor-state granularity,
+        # while full-attention and Mamba groups retain a larger aligned block.
+        # Resolve from the actual groups so prefix hashes remain splittable by
+        # the state cache after that rewrite.
+        scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
+        connector_enabled = (
+            getattr(vllm_config, "kv_transfer_config", None) is not None
+        )
+        if not (
+            cache_config.enable_prefix_caching or connector_enabled
+        ):
+            return scheduler_block_size, scheduler_block_size
+
+        requested_hash_block_size = getattr(
+            cache_config,
+            "hash_block_size",
+            None,
+        )
+        hash_block_size = (
+            requested_hash_block_size
+            if requested_hash_block_size is not None
+            else math.gcd(*group_block_sizes)
+        )
+        if any(
+            block_size % hash_block_size
+            for block_size in group_block_sizes
+        ):
+            raise ValueError(
+                f"Invalid hash_block_size={hash_block_size}; all GLM-Next "
+                "KV cache group block sizes must be divisible by it. "
+                f"Got group block sizes={group_block_sizes}."
+            )
+        return scheduler_block_size, hash_block_size
+
+    if dcp != 1 or pcp != 1:
         # Ascend supports CP with multiple KV cache groups; compute
         # scheduler_block_size using the LCM of all group block sizes
         # multiplied by the CP factors for proper alignment.
-        group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
-        scheduler_block_size = math.lcm(*group_block_sizes) * dcp
+        scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
         if not cache_config.enable_prefix_caching:
             return scheduler_block_size, scheduler_block_size
         hash_block_size = math.gcd(*group_block_sizes)
@@ -491,6 +550,8 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    if _get_glm5_cache_layout(kv_cache_groups) is not None:
+        return get_glm5_pool_bytes_per_block(kv_cache_groups)
     if not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_pool_bytes_per_block(kv_cache_groups)
 
@@ -503,6 +564,8 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    if _get_glm5_cache_layout(kv_cache_groups) is not None:
+        return get_glm5_max_memory_usage(vllm_config, kv_cache_groups)
     if vllm_version_is("0.28.0") or not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
 
@@ -522,12 +585,23 @@ def _ascend_max_memory_usage_bytes_from_groups(
     )
 
 
+def _get_glm5_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec]:
+    if any(is_glm5_cache_spec(spec) for spec in kv_cache_spec.values()):
+        return get_glm5_kv_cache_groups(vllm_config, kv_cache_spec)
+    return _orig_get_kv_cache_groups(vllm_config, kv_cache_spec)
+
+
 def _ascend_get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
     """Restore Ascend's DSV4 shared-tuple planner removed by vLLM #51718."""
+    if _get_glm5_cache_layout(kv_cache_groups) is not None:
+        return get_glm5_kv_cache_config(vllm_config, kv_cache_groups, available_memory)
     if vllm_version_is("0.28.0") or not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
 
@@ -542,8 +616,6 @@ def _ascend_get_kv_cache_config_from_groups(
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
-
-
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
@@ -553,6 +625,7 @@ vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size = _get_kv_cac
 # main uses _ascend_get_kv_cache_config_from_groups and the stride-aware planner.
 if vllm_version_is("0.28.0"):
     vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
+vllm.v1.core.kv_cache_utils.get_kv_cache_groups = _get_glm5_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )

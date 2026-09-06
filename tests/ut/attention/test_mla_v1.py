@@ -2376,6 +2376,48 @@ class TestAscendMLAImpl(TestBase):
         mock_rope.assert_not_called()
         mock_rope_cache.assert_not_called()
 
+    def test_zero_rope_dim_uses_glm_nope_cache_path(self):
+        self.impl.use_mla_rope = False
+        self.impl.num_kv_heads = 1
+        self.impl.kv_lora_rank = 4
+        self.impl.qk_rope_head_dim = 0
+        self.impl.kv_a_layernorm = MagicMock()
+        self.impl._exec_kv_mla_nope = MagicMock(
+            return_value=(MagicMock(), MagicMock())
+        )
+        self.impl._exec_kv_no_rope = MagicMock()
+
+        kv_no_split = torch.randn(2, 1, 4)
+        kv_cache = (MagicMock(), MagicMock())
+        slots = MagicMock()
+
+        self.impl.exec_kv_decode(
+            kv_no_split,
+            None,
+            None,
+            kv_cache,
+            slots,
+        )
+        self.impl._exec_kv_mla_nope.assert_called_once()
+        self.assertFalse(
+            self.impl._exec_kv_mla_nope.call_args.kwargs["is_prefill"]
+        )
+        self.impl._exec_kv_no_rope.assert_not_called()
+
+        self.impl._exec_kv_mla_nope.reset_mock()
+        self.impl.exec_kv_prefill(
+            kv_no_split,
+            None,
+            None,
+            kv_cache,
+            slots,
+        )
+        self.impl._exec_kv_mla_nope.assert_called_once()
+        self.assertTrue(
+            self.impl._exec_kv_mla_nope.call_args.kwargs["is_prefill"]
+        )
+        self.impl._exec_kv_no_rope.assert_not_called()
+
     @patch("vllm_ascend.attention.mla_v1.torch_npu.npu_kv_rmsnorm_rope_cache", create=True)
     def test_exec_kv_prefill(self, mock_kv_rmsnorm_rope_cache):
         B = 2

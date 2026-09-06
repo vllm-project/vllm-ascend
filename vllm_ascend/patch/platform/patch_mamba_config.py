@@ -9,6 +9,21 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
 
+def _is_glm5_next_model(model_config) -> bool:
+    text_config = getattr(model_config, "hf_text_config", None)
+    model_types = {
+        getattr(getattr(model_config, "hf_config", None), "model_type", None),
+        getattr(text_config, "model_type", None),
+    }
+    return bool(model_types & {"glm5_next", "glm5_next_text"})
+
+
+def _is_sparse_glm5_next(model_config) -> bool:
+    return _is_glm5_next_model(model_config) and getattr(
+        getattr(model_config, "hf_text_config", None), "index_topk", None
+    ) is not None
+
+
 def _using_kv_store(vllm_config) -> bool:
     """
     Check whether AscendStoreConnector is used.
@@ -68,6 +83,7 @@ def verify_and_update_config(cls, vllm_config) -> None:
     for shape, dtype in zip(mamba_shapes, mamba_dtypes):
         mamba_sizes.append(math.prod(shape) * get_dtype_size(dtype))
     ssm_block_page_size, conv_block_page_size = max(mamba_sizes), min(mamba_sizes)
+    mamba_raw_page_size = sum(mamba_sizes)
 
     # Pure linear attention models (e.g. bailing 2.5) have only SSM state,
     # no conv block. Detected by a single 3-D mamba shape (ssm only, no conv).
@@ -91,31 +107,73 @@ def verify_and_update_config(cls, vllm_config) -> None:
         attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_token_page_size = 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
 
-    attn_block_size = kernel_block_size * cdiv(ssm_block_page_size, kernel_block_size * attn_single_token_k_page_size)
-    assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
-        "Cannot align ssm_page_size and attn_page_size."
-    )
-
-    # override attention block size if either (a) the
-    # user has not set it or (b) the user has set it
-    # too small.
-    if cache_config.block_size is None or cache_config.block_size < attn_block_size:
-        cache_config.block_size = attn_block_size
-        logger.info(
-            "Setting attention block size to %d tokens to ensure that attention page size is >= mamba page size.",
-            attn_block_size,
+    is_sparse_glm5 = _is_sparse_glm5_next(model_config)
+    if is_sparse_glm5:
+        # The compressed indexer storage block is consumed by a CANN kernel
+        # whose block size must be a multiple of 16. Keep the scheduler block
+        # C128-aligned while making block_size / index_kpool C16-aligned too.
+        index_kpool = model_config.hf_text_config.index_kpool
+        if not isinstance(index_kpool, int) or index_kpool <= 1:
+            raise ValueError(
+                "Sparse GLM-Next requires index_kpool to be an integer greater than 1."
+            )
+        alignment_tokens = math.lcm(kernel_block_size, index_kpool * 16)
+        min_block_size = cdiv(mamba_raw_page_size, attn_token_page_size)
+        requested_block_size = cache_config.block_size or kernel_block_size
+        attn_block_size = alignment_tokens * cdiv(
+            max(requested_block_size, min_block_size), alignment_tokens
         )
+        if cache_config.block_size != attn_block_size:
+            cache_config.block_size = attn_block_size
+            logger.info(
+                "Setting GLM-Next attention block size to %d tokens to align "
+                "MLA, KDA, and compressed indexer cache pages.",
+                attn_block_size,
+            )
+    else:
+        attn_block_size = kernel_block_size * cdiv(
+            ssm_block_page_size,
+            kernel_block_size * attn_single_token_k_page_size,
+        )
+        assert (
+            attn_single_token_k_page_size * attn_block_size
+            == ssm_block_page_size
+        ), "Cannot align ssm_page_size and attn_page_size."
+
+        # Override attention block size if it is unset or too small.
+        if (
+            cache_config.block_size is None
+            or cache_config.block_size < attn_block_size
+        ):
+            cache_config.block_size = attn_block_size
+            logger.info(
+                "Setting attention block size to %d tokens to ensure that "
+                "attention page size is >= mamba page size.",
+                attn_block_size,
+            )
 
     # compute new attention page size
     attn_page_size = cache_config.block_size * attn_token_page_size
 
-    # pad mamba page size for conv_blocks
+    # GLM-Next packs the complete recurrent state into the same large-page
+    # class as MLA. Preserve the generic Ascend SSM+conv layout for all other
+    # hybrid models.
+    target_mamba_page_size = (
+        max(attn_page_size, mamba_raw_page_size)
+        if is_sparse_glm5
+        else attn_page_size + conv_block_page_size
+    )
     if (
         cache_config.mamba_page_size_padded is None
-        or cache_config.mamba_page_size_padded != attn_page_size + conv_block_page_size
+        or cache_config.mamba_page_size_padded != target_mamba_page_size
     ):
-        cache_config.mamba_page_size_padded = attn_page_size + conv_block_page_size
-        mamba_padding_pct = 100 * conv_block_page_size / cache_config.mamba_page_size_padded
+        cache_config.mamba_page_size_padded = target_mamba_page_size
+        padding_bytes = (
+            target_mamba_page_size - mamba_raw_page_size
+            if is_sparse_glm5
+            else conv_block_page_size
+        )
+        mamba_padding_pct = 100 * padding_bytes / target_mamba_page_size
         logger.info(
             "Padding mamba page size by %.2f%% to ensure "
             "that mamba page size and attention page size are "
