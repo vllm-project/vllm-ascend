@@ -37,12 +37,11 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsEagle3
 from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, process_eagle_weight
 
+from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
 from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2MixtureOfExperts,
     DeepseekV4DecoderLayer,
     DeepseekV4MoE,
-    sequence_parallel_chunk,
-    sp_padding_mask,
 )
 from vllm_ascend.ops.rope_dsv4 import get_cos_and_sin_dsa
 from vllm_ascend.utils import enable_dsa_cp
@@ -264,25 +263,33 @@ class DeepseekV4DSparkModel(nn.Module):
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids).unsqueeze(-2).repeat(1, self.hc_mult, 1)
         full_num_tokens = positions.shape[0]
-        if self.use_sequence_parallel_moe:
+        use_sp = self.use_sequence_parallel_moe
+        orig_is_padding = None
+        forward_context = None
+        if use_sp:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
-                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
-            hidden_states = sequence_parallel_chunk(hidden_states)
-            input_ids = sequence_parallel_chunk(input_ids)
+                orig_is_padding = forward_context.is_padding
+                forward_context.is_padding = sp_padding_mask(orig_is_padding, hidden_states)
+            hidden_states = sp_shard(hidden_states)
+            input_ids = sp_shard(input_ids)
 
-        residual = None
-        for layer in self.layers.values():
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                llama_4_scaling=None,
-                input_ids=input_ids,
-            )
-        if self.use_sequence_parallel_moe:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[:full_num_tokens]
+        try:
+            residual = None
+            for layer in self.layers.values():
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                    llama_4_scaling=None,
+                    input_ids=input_ids,
+                )
+            if use_sp:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
+        finally:
+            if forward_context is not None:
+                forward_context.is_padding = orig_is_padding
         head_hidden = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         return head_hidden
 
