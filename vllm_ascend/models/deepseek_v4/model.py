@@ -698,9 +698,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
         self.norm_eps = config.rms_norm_eps
-        self.use_sequence_parallel_moe = (
-            parallel_config.use_sequence_parallel_moe and parallel_config.pipeline_parallel_size == 1
-        )
+        self.use_sequence_parallel_moe = parallel_config.use_sequence_parallel_moe
         self.enable_dsa_cp = enable_dsa_cp()  # TODO: delete this when enable_dsa_cp is sunset.
 
         attn_cls = DeepseekV4Attention
