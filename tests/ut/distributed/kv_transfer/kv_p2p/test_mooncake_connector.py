@@ -2203,6 +2203,34 @@ def test_tracker_publishes_completed_requests_once(request_ids):
     assert tracker.get_and_clear_finished_requests() == set()
 
 
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_worker_role_drains_only_its_completion_and_error_channel(role):
+    """UT-F: route completion/errors by role, without draining the other side.
+
+    This isolates the worker polling contract, not thread startup or transport.
+    """
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_role = role
+    worker.tp_rank = 0
+    sender = MagicMock(spec=KVCacheSendingThread)
+    receiver = MagicMock(spec=KVCacheRecvingThread)
+    worker.kv_send_thread = sender
+    worker.kv_recv_thread = receiver
+    sender.get_and_clear_finished_requests.side_effect = [{"sent"}, set()]
+    receiver.get_and_clear_finished_requests.side_effect = [{"received"}, set()]
+    receiver.get_and_clear_invalid_block_ids.side_effect = [{7}, set()]
+
+    assert worker.get_finished() == (({"sent"}, set()) if role == "kv_producer" else (set(), {"received"}))
+    assert worker.get_finished() == (set(), set())
+    assert worker.get_block_ids_with_load_errors() == (set() if role == "kv_producer" else {7})
+    assert worker.get_block_ids_with_load_errors() == set()
+    if role == "kv_producer":
+        receiver.get_and_clear_finished_requests.assert_not_called()
+        receiver.get_and_clear_invalid_block_ids.assert_not_called()
+    else:
+        sender.get_and_clear_finished_requests.assert_not_called()
+
+
 def test_tracker_completion_is_consumed_by_only_one_reader():
     """Keep the lock's concurrency contract without asserting its implementation."""
     from concurrent.futures import ThreadPoolExecutor
