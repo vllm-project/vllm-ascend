@@ -4225,6 +4225,7 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_config,
                 self.sparse_kv_offload_config,
             )
+            assert self.sparse_kv_offload_manager is not None
             self.sparse_kv_offload_manager.prepare_host_kv_allocation(
                 device_id=torch.npu.current_device(),
                 dp_rank=int(self.dp_rank),
@@ -4845,6 +4846,7 @@ class NPUModelRunner(GPUModelRunner):
                         k_tensor_size = int(kv_cache_tensor_size // k_tensor_split_factor)
                         v_tensor_size = int(kv_cache_tensor_size // v_tensor_split_factor)
                     if self.sparse_kv_offload_enabled:
+                        assert self.sparse_kv_offload_manager is not None
                         assert self.use_sparse, "Sparse KV offload only support sparse attention."
                         assert not current_sparse_sfa_c8, "Sparse KV offload do not support sparse SFA C8."
                         assert v_tensor_size is not None

@@ -331,10 +331,7 @@ def allocate_kv_cache_tensors_for_sparse_kv_offload(
     tp_rank: int,
     keep_device_kv_cache: bool,
     npu_kv_cache_allocate_func: typing.Callable,
-    host_kv_cache_allocate_func: typing.Callable[
-        [list[int], int], list[torch.Tensor | None]
-    ]
-    | None = None,
+    host_kv_cache_allocate_func: typing.Callable[[list[int], int], list[torch.Tensor | None]] | None = None,
 ):
     if host_kv_cache_allocate_func is not None:
         [k_tensor_cpu, v_tensor_cpu] = host_kv_cache_allocate_func(
@@ -585,15 +582,11 @@ class SparseKVOffloadManager:
         config = offload.OffloadConfig()
         config.device_id = device_id
         config.reserve_size = self.host_pool_size_bytes
-        config.alloc_size = (
-            self.host_pool_size_bytes if self.tp_rank == 0 else 0
-        )
+        config.alloc_size = self.host_pool_size_bytes if self.tp_rank == 0 else 0
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
-        assert offload.initialize(config) == 0, (
-            "Sparse KV offload offload.initialize failed."
-        )
+        assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
         self._host_allocation_prepared = True
 
@@ -604,9 +597,7 @@ class SparseKVOffloadManager:
     ) -> list[torch.Tensor | None]:
         """Allocate one layer's Host K/V through the prepared allocator."""
         if not self._host_allocation_prepared:
-            raise RuntimeError(
-                "prepare_host_kv_allocation must run before Host KV allocation"
-            )
+            raise RuntimeError("prepare_host_kv_allocation must run before Host KV allocation")
         if self._host_kv_allocator is not None:
             return self._host_kv_allocator.allocate_tensors(sizes, alignment)
         if self.tp_rank == 0:

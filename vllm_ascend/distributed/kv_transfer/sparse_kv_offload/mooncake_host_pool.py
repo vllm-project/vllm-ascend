@@ -35,15 +35,9 @@ class HostPoolTopology:
         if self.tp_size <= 0:
             raise ValueError(f"tp_size must be positive, got {self.tp_size}")
         if not 0 <= self.tp_rank < self.tp_size:
-            raise ValueError(
-                f"tp_rank out of range: rank={self.tp_rank}, "
-                f"size={self.tp_size}"
-            )
+            raise ValueError(f"tp_rank out of range: rank={self.tp_rank}, size={self.tp_size}")
         if not 0 <= self.owner_rank < self.tp_size:
-            raise ValueError(
-                f"owner_rank out of range: owner={self.owner_rank}, "
-                f"size={self.tp_size}"
-            )
+            raise ValueError(f"owner_rank out of range: owner={self.owner_rank}, size={self.tp_size}")
 
 
 @dataclass
@@ -71,17 +65,14 @@ def _select_shared_segment_mode() -> tuple[bool, bool]:
         from mooncake.shared_segment import shared_segment_supported
     except ImportError as exc:
         raise RuntimeError(
-            "Mooncake shared_segment support is required for sparse KV "
-            "offload with the Mooncake Host backend"
+            "Mooncake shared_segment support is required for sparse KV offload with the Mooncake Host backend"
         ) from exc
 
     if shared_segment_supported(mmap=False):
         return False, False
     if shared_segment_supported(mmap=True, host_register=True):
         return True, True
-    raise RuntimeError(
-        "Mooncake shared_segment cannot expose an NPU-addressable address"
-    )
+    raise RuntimeError("Mooncake shared_segment cannot expose an NPU-addressable address")
 
 
 def allocate_mooncake_host_region(
@@ -96,8 +87,7 @@ def allocate_mooncake_host_region(
         from mooncake.shared_segment import create_shared_segment
     except ImportError as exc:
         raise RuntimeError(
-            "Mooncake shared_segment support is required for sparse KV "
-            "offload with the Mooncake Host backend"
+            "Mooncake shared_segment support is required for sparse KV offload with the Mooncake Host backend"
         ) from exc
 
     if size_bytes <= 0:
@@ -107,8 +97,7 @@ def allocate_mooncake_host_region(
     allocation_size_bytes = int(size_bytes) + int(alignment) - 1
     if topology.tp_size > 1 and topology.tp_group is None:
         raise RuntimeError(
-            "create_shared_segment requires tp_group when tp_size > 1: "
-            f"tp={topology.tp_rank}/{topology.tp_size}"
+            f"create_shared_segment requires tp_group when tp_size > 1: tp={topology.tp_rank}/{topology.tp_size}"
         )
 
     mmap, host_register = _select_shared_segment_mode()
@@ -143,9 +132,7 @@ def allocate_mooncake_host_region(
         mmap=mmap,
         host_register=host_register,
     )
-    if host_register and os.getenv(
-        "VLLM_ASCEND_SKIP_MIGRATEPAGES"
-    ) is None:
+    if host_register and os.getenv("VLLM_ASCEND_SKIP_MIGRATEPAGES") is None:
         os.environ["VLLM_ASCEND_SKIP_MIGRATEPAGES"] = "1"
 
     raw = segment.tensors("pool")[0].reshape(-1)
@@ -173,10 +160,7 @@ class MooncakeHostPool:
         topology: HostPoolTopology,
     ) -> None:
         if region.tensor.dtype != torch.int8:
-            raise TypeError(
-                "Mooncake Host pool must use an int8 byte tensor, got "
-                f"{region.tensor.dtype}"
-            )
+            raise TypeError(f"Mooncake Host pool must use an int8 byte tensor, got {region.tensor.dtype}")
         if not region.tensor.is_contiguous():
             raise ValueError("Mooncake Host pool allocation must be contiguous")
         self.region = region
@@ -231,8 +215,7 @@ class MooncakeHostPool:
             end = start + int(size)
             if end > self.nbytes:
                 raise MemoryError(
-                    "Mooncake Host pool is exhausted: "
-                    f"requested={size}, offset={start}, capacity={self.nbytes}"
+                    f"Mooncake Host pool is exhausted: requested={size}, offset={start}, capacity={self.nbytes}"
                 )
             tensors.append(self.region.tensor.narrow(0, start, int(size)))
             self._offset = end
@@ -282,17 +265,14 @@ class MooncakeHostPool:
             None,
         )
         if unregister_memory is None:
-            raise RuntimeError(
-                "Mooncake engine must unregister the Host pool before release"
-            )
+            raise RuntimeError("Mooncake engine must unregister the Host pool before release")
         try:
             result = unregister_memory(self.data_ptr)
         except TypeError:
             result = unregister_memory(self.data_ptr, self.nbytes)
         if result not in (0, None):
             raise RuntimeError(
-                "Mooncake unregister_memory failed for sparse KV Host pool: "
-                f"result={result}, ptr=0x{self.data_ptr:x}"
+                f"Mooncake unregister_memory failed for sparse KV Host pool: result={result}, ptr=0x{self.data_ptr:x}"
             )
         self._registered_engine = None
 
