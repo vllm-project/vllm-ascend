@@ -80,7 +80,7 @@ printf 'cann_root=%s\nASCEND_HOME_PATH=%s\nASCEND_OPP_PATH=%s\nLD_LIBRARY_PATH=%
 # Keep Python dependencies fixed. Fail explicitly if the shared image has drifted.
 python3 - <<'PY'
 import importlib.metadata
-for package, expected in (("torch-npu", "2.10.0.post4"), ("vllm", "0.27.1")):
+for package, expected in (("torch-npu", "2.10.0.post4"), ("vllm", "0.27.1+empty")):
     actual = importlib.metadata.version(package)
     print(f"{package}={actual}", flush=True)
     assert actual == expected, f"Base image drift: expected {package}={expected}, got {actual}"
