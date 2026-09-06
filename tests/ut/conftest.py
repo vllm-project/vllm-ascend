@@ -304,7 +304,7 @@ def _pd_unit_network_boundary(request, monkeypatch):
         return
     import socket
 
-    import zmq
+    from zmq.sugar.socket import Socket
 
     monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
 
@@ -314,7 +314,7 @@ def _pd_unit_network_boundary(request, monkeypatch):
     for method in ("bind", "connect", "connect_ex", "listen"):
         monkeypatch.setattr(socket.socket, method, reject_network)
     for method in ("bind", "connect"):
-        monkeypatch.setattr(zmq.Socket, method, reject_network)
+        monkeypatch.setattr(Socket, method, reject_network)
     yield
 
 
@@ -331,7 +331,9 @@ def _reset_stream_globals_before_test(request):
 
     moe_utils_mod = None
     if not request.config.getoption("--pd-unit"):
-        import vllm_ascend.ops.fused_moe.moe_utils as moe_utils_mod
+        from vllm_ascend.ops.fused_moe import moe_utils
+
+        moe_utils_mod = moe_utils
 
     utils_mod._CURRENT_STREAM = None
     utils_mod._GLOBAL_STREAM = None

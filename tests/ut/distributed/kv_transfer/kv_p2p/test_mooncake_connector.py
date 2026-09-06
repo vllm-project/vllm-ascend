@@ -1,3 +1,4 @@
+import importlib
 import inspect
 import os
 import queue
@@ -24,6 +25,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
+from zmq.constants import ROUTER
+from zmq.sugar.socket import Socket
 
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
@@ -210,7 +213,7 @@ def test_sender_endpoint_includes_pipeline_and_prefill_context_ranks(pp_rank, pc
         # handler is exercised separately, without starting an unbounded loop.
         with patch.object(sender, "run_busy_loop", side_effect=receive) as receive_loop:
             sender.run()
-        transport.assert_called_once_with(zmq.ROUTER, f"tcp://127.0.0.1:{port}")
+        transport.assert_called_once_with(ROUTER, f"tcp://127.0.0.1:{port}")
         receive_loop.assert_called_once()
         transport.return_value.__exit__.assert_called_once()
         assert not sender.is_alive()
@@ -240,7 +243,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
                 )
                 sender.task_tracker.add_req_to_process("request-a")
                 expected_pulls = {5555: {"num": 2, "host": "127.0.0.1"}}
-                socket = MagicMock(spec=zmq.Socket)
+                socket = MagicMock(spec=Socket)
                 payload = msgspec.msgpack.encode((DONE_RECVING_MSG, "request-a", expected_pulls))
                 for peer, expected_finished in (
                     (peers[0], set()),
@@ -280,7 +283,7 @@ class TestKVCacheSendingThread(unittest.TestCase):
             kv_caches={},
             pcp_rank=0,
         )
-        sock = MagicMock(spec=zmq.Socket)
+        sock = MagicMock(spec=Socket)
         encoder = msgspec.msgpack.Encoder()
         decoder = msgspec.msgpack.Decoder(type=MooncakeAgentMetadata)
         req_id = "request_42"
@@ -410,9 +413,10 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         vllm_config.cache_config.num_gpu_blocks_override = None
         has_placements = "layers" in KVCacheTensor.__dataclass_fields__
         if has_placements:
-            from vllm.v1.kv_cache_layout import KVCacheLayout
-
-            vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = KVCacheLayout.LBHNC
+            # This module exists only with the placement API. Import the real
+            # dependency conditionally; never synthesize a missing layout type.
+            layout_module = importlib.import_module("vllm.v1.kv_cache_layout")
+            vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout_module.KVCacheLayout.LBHNC
         num_blocks = 10
         allocated_config = get_kv_cache_config_from_groups(
             vllm_config,
@@ -959,7 +963,7 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
     def test_submit_request_serializes_same_peer_fifo(self):
         # Control executor scheduling, not the production peer queue/handler.
         # This proves a fixed interleaving without relying on OS scheduling.
-        scheduled = deque()
+        scheduled: deque[tuple[Any, tuple[Any, ...]]] = deque()
         events = []
         concurrent_jobs = []
         self.thread.executor.shutdown(wait=True)
@@ -1840,7 +1844,7 @@ def wire_transfer_contract(monkeypatch, request):
     layer_names = [layer_name]
     local_addrs, remote_addrs = [[0x1000, 0x2000]], [[0x3000, 0x4000]]
     lengths, local_strides, remote_strides, scales = [[64, 64]], [[80, 80]], [[96, 96]], [[1, 1]]
-    caches = {layer_name: (torch.empty(1), torch.empty(1))}
+    caches: dict[str, tuple[torch.Tensor, ...]] = {layer_name: (torch.empty(1), torch.empty(1))}
     if getattr(request, "param", None) == "split-kernels":
         # One manager group, two transfer groups, different kernel scales.
         # This is a fixed mixed-layout schema, not a real-model accuracy test.
@@ -2476,7 +2480,9 @@ class MockForwardContext:
 class TestMooncakeConnector(unittest.TestCase):
     def setUp(self):
         self.config = MockVllmConfig()
-        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1"
+        visible_devices = patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+        visible_devices.start()
+        self.addCleanup(visible_devices.stop)
 
     def test_scheduler_initialization(self):
         with (
@@ -3265,10 +3271,27 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(lengths, [layer_size])
 
     def test_device_id_selection_with_physical_devices(self):
-        # Test with physical devices set
-        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
-        # Default tp_rank is 0, so device_id should be 10
-        self.assertIsNotNone(worker.engine)
+        # V1 delegates non-PP device selection to the backend. With PP it
+        # explicitly passes the current device, not the TP rank or a stale
+        # hard-coded physical index. The backend boundary is the contract.
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        for pp_size, expected_device in ((1, None), (2, "5")):
+            with self.subTest(pp_size=pp_size):
+                self.vllm_config.parallel_config.pipeline_parallel_size = pp_size
+                with (
+                    patch.object(
+                        module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
+                    ) as get_te,
+                    patch.object(module.torch.npu, "current_device", return_value=5) as current_device,
+                ):
+                    worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                get_te.assert_called_once_with("127.0.0.1", device_name=expected_device)
+                if pp_size == 1:
+                    current_device.assert_not_called()
+                else:
+                    current_device.assert_called_once_with()
+                self.assertIs(worker.engine, self.mock_transfer_engine)
+                self.assertEqual(worker.te_rpc_port, 9090)
 
     def test_get_remote_tp_rank(self):
         def get_tp_rank(
