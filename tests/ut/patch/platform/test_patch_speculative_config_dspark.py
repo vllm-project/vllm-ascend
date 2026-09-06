@@ -11,11 +11,6 @@ from vllm_ascend.patch.platform.patch_speculative_config import (
     _normalize_deepseek_v4_dspark_draft,
 )
 
-_UPSTREAM_K3_DSPARK_DCP_ERROR = (
-    patch_speculative_config._UPSTREAM_K3_DSPARK_DCP_ERROR_FRAGMENT
-    + "; set decode_context_parallel_size=1."
-)
-
 
 def test_legacy_qwen3_dspark_config_uses_qwen3_loader():
     config = Qwen3Config(
@@ -103,33 +98,42 @@ def _make_k3_dspark_config(dcp_size: int = 8):
     )
 
 
-def test_k3_dspark_dcp_bypasses_upstream_gpu_guard(monkeypatch):
+def test_k3_dspark_dcp_is_hidden_only_during_upstream_validation(monkeypatch):
     config = _make_k3_dspark_config()
+    observed_dcp_sizes = []
 
-    def raise_upstream_guard(_config):
-        raise ValueError(_UPSTREAM_K3_DSPARK_DCP_ERROR)
+    def validate_without_gpu_guard(candidate):
+        observed_dcp_sizes.append(
+            candidate.target_parallel_config.decode_context_parallel_size
+        )
 
     monkeypatch.setattr(
-        patch_speculative_config, "_orig_post_init", raise_upstream_guard
+        patch_speculative_config, "_orig_post_init", validate_without_gpu_guard
     )
 
     patch_speculative_config._dspark_post_init(config)
 
+    assert observed_dcp_sizes == [1]
+    assert config.target_parallel_config.decode_context_parallel_size == 8
+
 
 @pytest.mark.parametrize(
-    ("config", "message"),
+    ("dcp_size", "message"),
     [
-        (
-            _make_k3_dspark_config(dcp_size=1),
-            _UPSTREAM_K3_DSPARK_DCP_ERROR,
-        ),
-        (_make_k3_dspark_config(), "some other speculative config error"),
+        (1, "upstream speculative config error"),
+        (8, "some other speculative config error"),
     ],
 )
-def test_k3_dspark_dcp_does_not_hide_other_validation_errors(
-    monkeypatch, config, message
+def test_k3_dspark_dcp_restores_config_and_propagates_validation_errors(
+    monkeypatch, dcp_size, message
 ):
-    def raise_validation_error(_config):
+    config = _make_k3_dspark_config(dcp_size=dcp_size)
+    observed_dcp_sizes = []
+
+    def raise_validation_error(candidate):
+        observed_dcp_sizes.append(
+            candidate.target_parallel_config.decode_context_parallel_size
+        )
         raise ValueError(message)
 
     monkeypatch.setattr(
@@ -138,3 +142,6 @@ def test_k3_dspark_dcp_does_not_hide_other_validation_errors(
 
     with pytest.raises(ValueError, match=message):
         patch_speculative_config._dspark_post_init(config)
+
+    assert observed_dcp_sizes == [1]
+    assert config.target_parallel_config.decode_context_parallel_size == dcp_size
