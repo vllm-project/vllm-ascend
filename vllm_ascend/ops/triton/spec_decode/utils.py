@@ -95,6 +95,10 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     HAS_NUM_REJECTED: tl.constexpr = False,
     SAMPLE_FROM_ANCHOR: tl.constexpr = False,
     TILE_SIZE: tl.constexpr = 256,
+    num_blocks_per_row_ptr=0,  # [num_reqs], or null when checking is disabled
+    request_window_ok_ptr=0,  # [num_reqs], or null when checking is disabled
+    padding_slot_id=-1,
+    CHECK_REQUEST_WINDOW: tl.constexpr = False,
 ):
     # Grid-stride kernel: launch grid is capped at the vector-core count by
     # the caller (grid = min(cdiv(total_work, TILE_SIZE), num_vectorcore)),
@@ -140,11 +144,23 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
 
         seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
         effective_seq_len = seq_len - num_rejected
-        last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
+        if CHECK_REQUEST_WINDOW:
+            request_window_ok = tl.load(request_window_ok_ptr + req_idx, mask=mask, other=0).to(tl.int1)
+            valid_ctx = request_window_ok & (valid_ctx_end > 0)
+            safe_last_ctx_idx = tl.where(valid_ctx, valid_ctx_end - 1, 0)
+            last_pos = tl.load(
+                target_positions_ptr + safe_last_ctx_idx,
+                mask=mask & valid_ctx,
+                other=0,
+            )
+        else:
+            last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
 
         # RoPE position id of the query token, derived from the last context
         # token's position. Written to out_query_positions for position embeddings.
         query_pos = last_pos + 1 + q_idx
+        if CHECK_REQUEST_WINDOW:
+            query_pos = tl.where(request_window_ok, query_pos, 0)
         tl.store(out_query_positions_ptr + offs, query_pos, mask=mask)
 
         # Linear KV-cache token index used to look up the physical slot via the
@@ -156,10 +172,36 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         # identical, so this only changes behaviour for multimodal inputs.
         query_kv_slot_pos = effective_seq_len + q_idx
         block_num_q = query_kv_slot_pos // block_size
-        block_id_q = tl.load(block_table_ptr + req_idx * block_table_stride + block_num_q, mask=mask, other=0).to(
-            tl.int64
-        )
-        slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
+        if CHECK_REQUEST_WINDOW:
+            num_blocks_per_row = tl.load(num_blocks_per_row_ptr + req_idx, mask=mask, other=0)
+            block_in_range = (
+                request_window_ok
+                & (query_kv_slot_pos >= 0)
+                & (block_num_q >= 0)
+                & (block_num_q < num_blocks_per_row)
+                & (block_num_q < block_table_stride)
+            )
+            # Select an in-row address before pointer arithmetic. Masking only
+            # the load is insufficient when block_num_q already crosses rows.
+            safe_block_num_q = tl.where(block_in_range, block_num_q, 0)
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + safe_block_num_q,
+                mask=mask & block_in_range,
+                other=0,
+            ).to(tl.int64)
+            slot_valid = block_in_range & (block_id_q != 0)
+            slot_q = tl.where(
+                slot_valid,
+                block_id_q * block_size + (query_kv_slot_pos % block_size),
+                padding_slot_id,
+            )
+        else:
+            block_id_q = tl.load(
+                block_table_ptr + req_idx * block_table_stride + block_num_q,
+                mask=mask,
+                other=0,
+            ).to(tl.int64)
+            slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
         tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)

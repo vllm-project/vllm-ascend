@@ -85,7 +85,10 @@ class BlockTable:
         if self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
-        self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
+        self.num_blocks_per_row_buffer = self._make_buffer(max_num_reqs, dtype=torch.int32)
+        # Keep the existing NumPy interface for the input-batch update path,
+        # while also maintaining a device mirror for DSpark slot validation.
+        self.num_blocks_per_row = self.num_blocks_per_row_buffer.np
         # MTP slot preparation appends up to num_speculative_tokens - 1
         # draft positions for every request beyond the scheduler token limit.
         num_mtp_draft_slots = max(num_speculative_tokens - 1, 0) * self.max_num_reqs
@@ -277,10 +280,13 @@ class BlockTable:
 
     def commit_block_table(self, num_reqs: int) -> None:
         self.block_table.copy_to_gpu(num_reqs)
+        self.num_blocks_per_row_buffer.copy_to_gpu(num_reqs)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table.cpu.fill_(0)
+        self.num_blocks_per_row.fill(0)
+        self.num_blocks_per_row_buffer.gpu.zero_()
 
     def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
         """Convert physical block IDs to logical block IDs."""
@@ -304,6 +310,12 @@ class BlockTable:
         if num_reqs is not None:
             return self.block_table.gpu[:num_reqs]
         return self.block_table.gpu
+
+    def get_num_blocks_per_row_device(self, num_reqs: int | None = None) -> torch.Tensor:
+        """Return the device-side count of valid block-table entries per row."""
+        if num_reqs is not None:
+            return self.num_blocks_per_row_buffer.gpu[:num_reqs]
+        return self.num_blocks_per_row_buffer.gpu
 
     def get_cpu_tensor(self) -> torch.Tensor:
         """Returns the CPU tensor of the block table."""
