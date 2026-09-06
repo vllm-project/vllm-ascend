@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
@@ -15,6 +16,7 @@ from vllm_ascend.models.kimi_k3 import (
 )
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
+    _get_target_rotation_path,
 )
 
 
@@ -62,6 +64,34 @@ def test_k3_dspark_reports_draft_attention_causality():
 
     model.config = SimpleNamespace()
     assert model.get_draft_attn_causal() == [False, False, False]
+
+
+def test_k3_dspark_recovers_target_quarot_rotation_path(tmp_path):
+    rotation_filename = "global_rotation.safetensors"
+    description = {
+        "optional": {
+            "quarot": {
+                "rotation_map": {
+                    "global_rotation": rotation_filename,
+                }
+            }
+        }
+    }
+    (tmp_path / "quant_model_description.json").write_text(
+        json.dumps(description),
+        encoding="utf-8",
+    )
+    vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(model=str(tmp_path)),
+    )
+
+    with patch(
+        "vllm_ascend.models.kimi_k3_dspark.get_rotation_path",
+        return_value=None,
+    ):
+        rotation_path = _get_target_rotation_path(vllm_config)
+
+    assert rotation_path == tmp_path / rotation_filename
 
 
 def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):

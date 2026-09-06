@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 MLA DSpark draft model for Ascend."""
 
+import json
 from collections.abc import Iterable
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -58,6 +60,28 @@ def _uses_causal_draft_attention(config) -> bool:
     if isinstance(dflash_config, dict) and "causal" in dflash_config:
         return bool(dflash_config["causal"])
     return bool(getattr(config, "full_attention_causal", False))
+
+
+def _get_target_rotation_path(vllm_config: VllmConfig) -> Path | None:
+    rotation_path = get_rotation_path(vllm_config)
+    if rotation_path is not None:
+        return rotation_path
+
+    # MRV2 replaces vllm_config.quant_config with the draft model's quant
+    # config before constructing the DSpark model. A non-quantized draft then
+    # loses the target model's QuaRot metadata even though model_config still
+    # points at the target checkpoint. Recover that target-only metadata.
+    target_model_path = Path(vllm_config.model_config.model)
+    description_path = target_model_path / "quant_model_description.json"
+    try:
+        with description_path.open(encoding="utf-8") as description_file:
+            description = json.load(description_file)
+        relative_path = description["optional"]["quarot"]["rotation_map"][
+            "global_rotation"
+        ]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    return target_model_path / relative_path
 
 
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
@@ -264,7 +288,7 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
-        self.rotation_path = get_rotation_path(vllm_config)
+        self.rotation_path = _get_target_rotation_path(vllm_config)
         self.target_model_path = vllm_config.model_config.model
         if self.rotation_path is not None:
             target_config = vllm_config.model_config.hf_text_config
