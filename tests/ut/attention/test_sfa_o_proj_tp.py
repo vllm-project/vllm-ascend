@@ -54,6 +54,8 @@ class TestAscendSFAOProjTPParams(TestBase):
             self.weight = torch.nn.Parameter(torch.randn(4, 3), requires_grad=False)
             self.weight_scale = torch.nn.Parameter(torch.randn(2, 3), requires_grad=False)
             self.quant_method = linear_method
+            # Mirror RowParallelLinear default: full-weight path gathers output.
+            self.reduce_results = True
 
     def setUp(self):
         AscendSFADSACPImpl.o_proj_full_pools.clear()
