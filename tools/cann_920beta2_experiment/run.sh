@@ -4,6 +4,21 @@ set -euo pipefail
 baseline=$(realpath "$1")
 evidence=$(realpath "$2")
 scripts=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+collect_diagnostics() {
+    status=$?
+    trap - EXIT
+    mkdir -p "$evidence/install-logs"
+    if [[ -d /var/log/ascend_seclog ]]; then
+        find /var/log/ascend_seclog -maxdepth 2 -type f -name '*install*.log' \
+            -exec cp --parents {} "$evidence/install-logs/" \;
+        find /var/log/ascend_seclog -maxdepth 2 -type f -name '*install*.log' \
+            -exec tail -n 100 {} \;
+    fi
+    df -h >"$evidence/disk-space.txt"
+    printf 'exit_code=%s\n' "$status" >"$evidence/script-exit.txt"
+    exit "$status"
+}
+trap collect_diagnostics EXIT
 version=9.2.0-beta.2
 base_url=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.2.T3
 [[ $(uname -m) == aarch64 ]]
@@ -11,6 +26,8 @@ base_url=https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%209.2.T3
 
 # This script is only for the disposable CI container, never for a host installation.
 prefix=$(mktemp -d /opt/cann-920beta2-experiment.XXXXXX)
+# install-for-all requires a traversable prefix; mktemp defaults to mode 0700.
+chmod 755 "$prefix"
 downloads=$(mktemp -d /tmp/cann-920beta2-downloads.XXXXXX)
 npu-smi info >"$evidence/npu-before.txt"
 python3 -m pip freeze >"$evidence/python-before.txt"
