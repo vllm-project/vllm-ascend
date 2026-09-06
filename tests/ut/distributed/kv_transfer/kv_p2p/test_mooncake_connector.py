@@ -2023,12 +2023,41 @@ def test_metadata_to_wire_descriptors_and_completion(
     assert worker.get_finished() == (set(), set())
 
 
-def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contract):
-    """UT-IT: backend failure reports invalid blocks, releases P and isolates B."""
-    worker, receiver, engine, socket, peer = wire_transfer_contract
-    socket.recv.side_effect = [msgspec.msgpack.encode(peer), b"ACK", b"ACK"]
+@pytest.mark.parametrize("done_ack", [b"ACK", b"NOT-ACK"], ids=["cleanup-succeeds", "cleanup-also-fails"])
+def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contract, monkeypatch, done_ack):
+    """UT-IT: retain first-failure evidence even if DONE cleanup also fails.
+
+    D completion means local cleanup, not successful transfer or proven P-side
+    release. A failed DONE is not allowed to erase the original transfer error.
+    """
+    worker, receiver, engine, _, peer = wire_transfer_contract
+    module = sys.modules[MooncakeConnectorWorker.__module__]
+    socket = MagicMock(spec=Socket)
+    socket.recv.side_effect = [msgspec.msgpack.encode(peer), done_ack, b"ACK"]
+    socket_pool = receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)]
+    socket_pool.clear()
+    socket_pool.append(socket)
+    used_sockets = [socket]
+    failures: list[tuple[str, str | None, Exception, types.TracebackType | None]] = []
+
+    def record_transfer_error(message, request_id, error):
+        failures.append(("transfer", request_id, error, sys.exc_info()[2]))
+
+    def record_cleanup_error(message, error):
+        failures.append(("cleanup", None, error, sys.exc_info()[2]))
+
+    # Observe logging at its output boundary, not the transfer/cleanup helpers.
+    monkeypatch.setattr(module.logger, "exception", record_transfer_error)
+    monkeypatch.setattr(module.logger, "warning", record_cleanup_error)
     engine.batch_transfer_sync_read.side_effect = [-1, 0]
     for request_id, block_id, expected_errors in [("a", 1, {1}), ("b", 2, set())]:
+        if request_id == "b" and done_ack != b"ACK":
+            socket.close.assert_called_once_with()
+            assert not socket_pool  # The failed connection must not be reused.
+            replacement = MagicMock(spec=Socket)
+            replacement.recv.return_value = b"ACK"
+            socket_pool.append(replacement)
+            used_sockets.append(replacement)
         metadata = MooncakeConnectorMetadata()
         metadata.reqs_in_batch.add(request_id)
         metadata.add_new_req(
@@ -2052,12 +2081,23 @@ def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contra
         assert worker.get_block_ids_with_load_errors() == set()
         assert worker.get_finished() == (set(), {request_id})
         assert worker.get_finished() == (set(), set())
+        assert receiver.request_queue.unfinished_tasks == 0
     assert engine.batch_transfer_sync_read.call_count == 2
-    assert [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list] == [
+    assert [msgspec.msgpack.decode(call.args[0]) for sock in used_sockets for call in sock.send.call_args_list] == [
         [GET_META_MSG, ""],
         [DONE_RECVING_MSG, "prefill-a", {}],
         [DONE_RECVING_MSG, "prefill-b", {}],
     ]
+    assert failures[0][:2] == ("transfer", "prefill-a")
+    assert isinstance(failures[0][2], RuntimeError)
+    assert str(failures[0][2]) == "Mooncake transfer failed, ret: -1"
+    assert failures[0][3] is not None
+    assert [failure[0] for failure in failures] == (["transfer"] if done_ack == b"ACK" else ["transfer", "cleanup"])
+    if done_ack != b"ACK":
+        assert "NOT-ACK" in str(failures[1][2])
+        assert failures[1][3] is not None
+    else:
+        socket.close.assert_not_called()
 
 
 @pytest.mark.parametrize("wire_transfer_contract", ["split-kernels"], indirect=True)
