@@ -277,7 +277,7 @@ def test_kvpp_09_runtime_binds_cache_and_attention_hook(monkeypatch):
     initialized_caches = {}
 
     class FakeTransport:
-        def __init__(self, *_args):
+        def __init__(self, *_args, **_kwargs):
             pass
 
         def initialize_transport(self, caches, _bundles, _max_pages):

@@ -29,6 +29,7 @@ import torch.nn as nn
 import torch_npu
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from torch_npu.profiler import dynamic_profile as dp
+from vllm import envs as vllm_envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.distributed import ensure_model_parallel_initialized, get_pcp_group, init_distributed_environment
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
@@ -62,6 +63,7 @@ from vllm_ascend.batch_invariant import init_batch_invariance
 from vllm_ascend.core.kv_cache_placement import (
     KVPPPhysicalCachePlan,
     create_kvpp_cache_allocation_plan,
+    kvpp_staging_size_bytes,
 )
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
@@ -564,7 +566,9 @@ class NPUWorker(WorkerBase):
                 GiB(self.init_snapshot.free_memory),
                 GiB(kv_cache_memory_bytes),
             )
-            return self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+            return self._apply_kvpp_memory_constraints(
+                self._apply_kv_offload_decode_memory_constraints(kv_cache_memory_bytes)
+            )
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -630,8 +634,34 @@ class NPUWorker(WorkerBase):
         self.available_kv_cache_memory_bytes = self._apply_kv_offload_decode_memory_constraints(
             self.available_kv_cache_memory_bytes
         )
+        self.available_kv_cache_memory_bytes = self._apply_kvpp_memory_constraints(self.available_kv_cache_memory_bytes)
 
         return int(self.available_kv_cache_memory_bytes)
+
+    def _apply_kvpp_memory_constraints(self, available_bytes: int) -> int:
+        plan = self._kvpp_cache_allocation_plan
+        if plan is None:
+            return available_bytes
+        budget = plan.plan_memory(self.vllm_config, available_bytes)
+        # The engine treats an override as authoritative, even above its
+        # memory-derived limit. Reject that escape here, not during allocation.
+        override = self.cache_config.num_gpu_blocks_override
+        if override is not None and not 0 < override <= budget.max_num_blocks:
+            raise ValueError(
+                f"KVPP num_gpu_blocks_override={override} must be between 1 and {budget.max_num_blocks} "
+                "to fit KV cache and staging in the memory budget."
+            )
+        kv_budget_bytes = budget.max_num_blocks * budget.kv_page_size_bytes
+        logger.info(
+            "KVPP memory budget: available_bytes=%d, kv_page_bytes=%d, staging_page_bytes=%d, "
+            "max_num_blocks=%d, kv_budget_bytes=%d (staging included in the original budget)",
+            available_bytes,
+            budget.kv_page_size_bytes,
+            budget.staging_page_size_bytes,
+            budget.max_num_blocks,
+            kv_budget_bytes,
+        )
+        return kv_budget_bytes
 
     def log_memory_stats(self) -> None:
         """Profiles the torch reserved memory, torch allocated memory in execute_model()."""
@@ -994,6 +1024,8 @@ class NPUWorker(WorkerBase):
             )
         kvpp_config = KVPPConfig.from_vllm_config(self.vllm_config)
         if kvpp_config.size > 1:
+            if vllm_envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                raise NotImplementedError("KVPP staging budgeting does not support elastic EP scale-up launches.")
             kvpp_rank = get_tp_group().rank_in_group % kvpp_config.size
             self._kvpp_cache_allocation_plan = create_kvpp_cache_allocation_plan(
                 self.vllm_config,
@@ -1021,9 +1053,20 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
-        if self._kvpp_cache_allocation_plan is not None:
+        kvpp_staging_capacity_bytes = None
+        plan = self._kvpp_cache_allocation_plan
+        if plan is not None:
+            kvpp_staging_capacity_bytes = kvpp_staging_size_bytes(
+                plan.staging_page_size_bytes, kv_cache_config.num_blocks
+            )
+            logger.info(
+                "KVPP final allocation: num_blocks=%d, kv_bytes=%d, staging_bytes=%d",
+                kv_cache_config.num_blocks,
+                sum(tensor.size for tensor in kv_cache_config.kv_cache_tensors),
+                kvpp_staging_capacity_bytes,
+            )
             kv_cache_config = copy.deepcopy(kv_cache_config)
-            self._kvpp_cache_allocation_plan.restore_logical_cache_view(kv_cache_config)
+            plan.restore_logical_cache_view(kv_cache_config)
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
@@ -1033,7 +1076,12 @@ class NPUWorker(WorkerBase):
 
             context = nullcontext()  # type: ignore
         with context:
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            if kvpp_staging_capacity_bytes is None:
+                self.model_runner.initialize_kv_cache(kv_cache_config)
+            else:
+                self.model_runner.initialize_kv_cache(
+                    kv_cache_config, kvpp_staging_capacity_bytes=kvpp_staging_capacity_bytes
+                )
 
         # MRV2's scheduler emits new_block_ids_to_zero whenever this flag is
         # set, so its worker-side consumer must use the same condition. Keep the

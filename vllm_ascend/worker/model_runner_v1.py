@@ -3927,7 +3927,9 @@ class NPUModelRunner(GPUModelRunner):
 
         self.debugger.step(**kwargs)
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, *, kvpp_staging_capacity_bytes: int | None = None
+    ) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
         Args:
@@ -4003,6 +4005,7 @@ class NPUModelRunner(GPUModelRunner):
             static_forward_context=self.compilation_config.static_forward_context,
             kv_caches=kv_caches,
             block_tables=self.input_batch.block_table,
+            staging_capacity_bytes=kvpp_staging_capacity_bytes,
         )
 
     def _align_memory(self, tensor: torch.Tensor, alignment: int) -> torch.Tensor:

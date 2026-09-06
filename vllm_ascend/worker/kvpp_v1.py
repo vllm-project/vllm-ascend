@@ -22,6 +22,7 @@ class KVPPV1Runtime:
         static_forward_context: dict[str, Any],
         kv_caches: dict[str, Any],
         block_tables: Any,
+        staging_capacity_bytes: int | None = None,
     ) -> KVPPV1Runtime:
         if KVPPConfig.from_vllm_config(vllm_config).size <= 1:
             return cls()
@@ -32,6 +33,7 @@ class KVPPV1Runtime:
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
                 static_forward_context=static_forward_context,
+                staging_capacity_bytes=staging_capacity_bytes,
                 cache_layout=KVPPCacheLayout(
                     layer_caches=kv_caches,
                     physical_blocks_per_kv_block=tuple(

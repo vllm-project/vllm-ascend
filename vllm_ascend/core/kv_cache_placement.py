@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+import copy
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 
 from vllm.config import VllmConfig
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, get_kv_cache_groups
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -15,6 +16,37 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.ascend_config import KVPPConfig
 
+# MemFabric device slices must be aligned to HYBM_LARGE_PAGE_SIZE (2 MiB).
+KVPP_STAGING_ALIGNMENT_BYTES = 2 << 20
+
+
+def kvpp_staging_size_bytes(page_size_bytes: int, num_blocks: int) -> int:
+    """Capacity of one complete scratch bundle, aligned for MemFabric."""
+    size = page_size_bytes * num_blocks
+    return (size + KVPP_STAGING_ALIGNMENT_BYTES - 1) // KVPP_STAGING_ALIGNMENT_BYTES * KVPP_STAGING_ALIGNMENT_BYTES
+
+
+@dataclass(frozen=True)
+class KVPPCacheMemoryBudget:
+    """KV and staging share the same post-profile device memory budget."""
+
+    kv_page_size_bytes: int
+    staging_page_size_bytes: int
+    max_num_blocks: int
+
+    @classmethod
+    def create(cls, available_bytes: int, kv_page_size_bytes: int, staging_page_size_bytes: int):
+        if kv_page_size_bytes <= 0 or staging_page_size_bytes <= 0:
+            raise ValueError("KVPP KV and staging page sizes must be positive.")
+        available_bytes = int(available_bytes)
+        num_blocks = max(0, available_bytes // (kv_page_size_bytes + staging_page_size_bytes))
+        while num_blocks > 0:
+            required = num_blocks * kv_page_size_bytes + kvpp_staging_size_bytes(staging_page_size_bytes, num_blocks)
+            if required <= available_bytes:
+                break
+            num_blocks -= 1
+        return cls(kv_page_size_bytes, staging_page_size_bytes, num_blocks)
+
 
 @dataclass(frozen=True)
 class KVPPPhysicalCachePlan:
@@ -23,6 +55,21 @@ class KVPPPhysicalCachePlan:
     logical_cache_spec: dict[str, KVCacheSpec]
     physical_cache_spec: dict[str, KVCacheSpec]
     scratch_layer_aliases: dict[str, list[str]]
+    physical_cache_groups: list[KVCacheGroupSpec]
+    staging_page_size_bytes: int
+
+    def plan_memory(self, vllm_config: VllmConfig, available_bytes: int) -> KVPPCacheMemoryBudget:
+        # Reuse the upstream allocator's actual per-block cost, including
+        # scratch, MTP and group padding; never count logical aliases again.
+        sizing_config = copy.copy(vllm_config)
+        sizing_config.cache_config = copy.copy(vllm_config.cache_config)
+        sizing_config.cache_config.num_gpu_blocks_override = 1
+        one_block = get_kv_cache_config_from_groups(sizing_config, self.physical_cache_groups, 0)
+        return KVPPCacheMemoryBudget.create(
+            available_bytes,
+            sum(tensor.size for tensor in one_block.kv_cache_tensors),
+            self.staging_page_size_bytes,
+        )
 
     def restore_logical_cache_view(self, kv_cache_config: KVCacheConfig) -> None:
         """Restore logical layer bindings on an upstream physical config."""
@@ -224,8 +271,17 @@ def create_kvpp_cache_allocation_plan(
         for layer_name in logical_cache_spec
         if layer_name in physical_layer_names
     }
+    staging_bytes_by_layer: dict[int, int] = defaultdict(int)
+    # Scratch specs remain unchanged. Each managed layer is received by some
+    # non-owner, so the largest logical bundle covers the group's largest
+    # scratch requirement, even when individual ranks have different scratch
+    # layouts. MemFabric requires equal SHM contributions within the group.
+    for layer_name in layer_owner_ranks:
+        staging_bytes_by_layer[extract_layer_index(layer_name)] += logical_cache_spec[layer_name].page_size_bytes
     return KVPPPhysicalCachePlan(
         logical_cache_spec=logical_cache_spec,
         physical_cache_spec=physical_cache_spec,
         scratch_layer_aliases=scratch_layer_aliases,
+        physical_cache_groups=physical_cache_groups,
+        staging_page_size_bytes=max(staging_bytes_by_layer.values()),
     )

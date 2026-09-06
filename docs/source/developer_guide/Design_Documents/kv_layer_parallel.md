@@ -119,11 +119,41 @@ KV-cache group and a non-hybrid MLA model.
 For `L` uniform layers and a KVPP world size `K`, a rank uses approximately:
 
 ```text
-L / K persistent layer caches + 2 scratch layer caches
+L / K persistent layer caches + 2 scratch layer caches + 1 staging layer bundle
 ```
 
 The final block count is reduced to the minimum block count calculated for any
 worker so that all ranks expose the same physical page address space.
+
+Staging is included in the post-profile memory budget, not allocated outside
+`gpu_memory_utilization`. The Ascend worker obtains the physical KV bytes per
+block from the existing allocator (including scratch, MTP and layout padding),
+and reserves one complete largest managed layer bundle per block for staging.
+The bundle includes both MLA KV and indexer caches when applicable. Layers
+reuse the same staging allocation; MTP caches are not transferred.
+Scratch allocation still uses each corresponding layer's original KV spec.
+Different owners may therefore have different scratch layouts or counts.
+The equal-sized MemFabric SHM contribution covers the largest transferable
+bundle in the KVPP group, not the sum of a rank's persistent or scratch caches.
+
+For an available budget `B`, physical KV bytes per block `C`, and staging
+bytes per block `S`, choose the largest integer `N` satisfying
+`N * C + align_up(N * S, 2 MiB) <= B`. Only `N * C` is returned to the upstream
+KV planner. After upstream reduces the block count across workers, the Ascend
+worker derives the aligned staging size from that final count and passes it
+to the transport. No upstream configuration fields or
+scheduler changes are needed. An explicit `kv_cache_memory_bytes` budget also
+includes staging when KVPP is enabled; an oversized block-count override is
+rejected at the worker's budget entry point, before the engine applies it.
+Elastic EP scale-up launches skip this memory-planning entry point and are
+therefore rejected when KVPP is enabled; ordinary EP remains supported.
+
+The transport checks the real cache tensors against this reservation and
+requires identical staging capacities and per-bundle wire layouts within each
+KVPP group before creating shared memory. This is a MemFabric/transfer
+requirement, not a requirement that rank-local scratch allocations match.
+Local tensor addresses and strides may differ. Staging covers all physical pages like one scratch bundle,
+but each transfer still copies only active pages.
 
 ## Metadata invariants
 
@@ -204,8 +234,9 @@ export MEMFABRIC_HYBRID_HOME_PATH=<installed-memfabric-hybrid-path>
 export MF_CONFIG_STORE_URL=<store-url>
 ```
 
-The staging capacity and MTE core count remain configurable through the MTE
-configuration variables. There is no transport-backend selection variable.
+Staging capacity is planned automatically; `ASCEND_KVPP_MTE_STAGING_BYTES`
+has been removed and no longer controls allocation. The MTE core count remains
+configurable. There is no transport-backend selection variable.
 
 ## Execution flow
 

@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
+from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -9,8 +11,11 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_placement import (
+    KVPP_STAGING_ALIGNMENT_BYTES,
+    KVPPCacheMemoryBudget,
     build_cache_allocation_groups,
     create_kvpp_cache_allocation_plan,
+    kvpp_staging_size_bytes,
     map_kvpp_layers_to_owners,
 )
 
@@ -117,3 +122,70 @@ def test_kvpp_05_restores_logical_cache_view():
     logical_tensor_names = {name for tensor in config.kv_cache_tensors for name in tensor.shared_by}
     assert logical_tensor_names == set(names)
     assert set(config.kv_cache_groups[0].layer_names) == set(names)
+
+
+@pytest.mark.parametrize("available_bytes", [0, 1, (2 << 20) - 1, 2 << 20, 17 << 20, (1 << 40) + 17])
+def test_staging_budget_finds_maximum_fitting_block_count(available_bytes):
+    kv_page_bytes, staging_page_bytes = 57344, 12288
+    budget = KVPPCacheMemoryBudget.create(available_bytes, kv_page_bytes, staging_page_bytes)
+    count = budget.max_num_blocks
+    assert count * kv_page_bytes + kvpp_staging_size_bytes(staging_page_bytes, count) <= available_bytes
+    assert (count + 1) * kv_page_bytes + kvpp_staging_size_bytes(staging_page_bytes, count + 1) > available_bytes
+    assert isinstance(count, int)
+
+
+def test_staging_alignment_is_included_in_budget():
+    alignment = KVPP_STAGING_ALIGNMENT_BYTES
+    budget = KVPPCacheMemoryBudget.create(3 * alignment, alignment, alignment + 1)
+    assert budget.max_num_blocks == 1
+    assert kvpp_staging_size_bytes(alignment + 1, 1) == 2 * alignment
+
+
+def test_staging_budget_counts_one_bundle_and_excludes_mtp():
+    config = _config(mtp=True)
+    config.cache_config = SimpleNamespace(num_gpu_blocks_override=None, enable_cross_layers=False)
+    main_spec = _spec()
+    indexer_spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16)
+    worker_spec = {_target(i): main_spec for i in range(5)}
+    worker_spec.update({_indexer(i): indexer_spec for i in range(5)})
+    worker_spec["model.layers.5.mtp_block.self_attn.attn"] = main_spec
+    plan = create_kvpp_cache_allocation_plan(config, worker_spec, kvpp_rank=1)
+    assert plan.staging_page_size_bytes == main_spec.page_size_bytes + indexer_spec.page_size_bytes
+    budget = plan.plan_memory(config, 1 << 30)
+    assert budget.kv_page_size_bytes == sum(spec.page_size_bytes for spec in plan.physical_cache_spec.values())
+    assert config.cache_config.num_gpu_blocks_override is None
+    smaller_budget = plan.plan_memory(config, 1 << 28)
+    assert smaller_budget.max_num_blocks < budget.max_num_blocks
+
+
+def test_final_cross_rank_block_reduction_remains_inside_budget():
+    budget = KVPPCacheMemoryBudget.create(64 << 20, 65536, 16384)
+    for count in (1, budget.max_num_blocks // 2, budget.max_num_blocks):
+        assert count * 65536 + kvpp_staging_size_bytes(16384, count) <= 64 << 20
+
+
+def test_rank_local_scratch_specs_can_differ_without_changing_staging_requirement():
+    config = _config()
+    config.cache_config = SimpleNamespace(num_gpu_blocks_override=9, enable_cross_layers=False)
+    large = _spec()
+    small = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+    worker_spec = {_target(i): large if i < 3 else small for i in range(5)}
+    plans = [create_kvpp_cache_allocation_plan(config, worker_spec, rank) for rank in range(2)]
+    allocations = [get_kv_cache_config_from_groups(config, plan.physical_cache_groups, 1 << 30) for plan in plans]
+    for rank, plan in enumerate(plans):
+        scratch_spec = small if rank == 0 else large
+        assert len(plan.scratch_layer_aliases) == 2
+        for name in plan.scratch_layer_aliases:
+            assert plan.physical_cache_spec[name] == scratch_spec
+            tensor = next(tensor for tensor in allocations[rank].kv_cache_tensors if name in tensor.shared_by)
+            assert tensor.size == 9 * scratch_spec.page_size_bytes
+        assert plan.staging_page_size_bytes == large.page_size_bytes
+    assert sum(tensor.size for tensor in allocations[0].kv_cache_tensors) != sum(
+        tensor.size for tensor in allocations[1].kv_cache_tensors
+    )
+
+
+def test_fractional_profile_budget_produces_integer_block_count():
+    budget = KVPPCacheMemoryBudget.create((17 << 20) + 0.75, 57344, 12288)
+    assert isinstance(budget.max_num_blocks, int)
+    assert budget == KVPPCacheMemoryBudget.create(17 << 20, 57344, 12288)

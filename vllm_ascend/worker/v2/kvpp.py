@@ -85,6 +85,7 @@ class KVPPRuntime:
         kv_cache_config: Any,
         block_tables: Any,
         static_forward_context: dict[str, Any],
+        staging_capacity_bytes: int | None = None,
     ) -> KVPPRuntime:
         if KVPPConfig.from_vllm_config(vllm_config).size <= 1:
             return cls()
@@ -99,6 +100,7 @@ class KVPPRuntime:
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             static_forward_context=static_forward_context,
+            staging_capacity_bytes=staging_capacity_bytes,
             cache_layout=KVPPCacheLayout(
                 layer_caches=layer_caches,
                 physical_blocks_per_kv_block=block_tables.blocks_per_kv_block,
@@ -114,6 +116,7 @@ class KVPPRuntime:
         kv_cache_config: Any,
         static_forward_context: dict[str, Any],
         cache_layout: KVPPCacheLayout,
+        staging_capacity_bytes: int | None = None,
     ) -> KVPPRuntime:
         """Create the runtime after a model runner has normalized its cache layout."""
         layer_names = tuple(
@@ -152,11 +155,6 @@ class KVPPRuntime:
             kv_cache_config.num_blocks * cache_layout.physical_blocks_per_kv_block[managed_cache_group_index]
         )
         tokens_per_block = cache_layout.tokens_per_block[managed_cache_group_index]
-        max_blocks_per_request = (vllm_config.model_config.max_model_len + tokens_per_block - 1) // tokens_per_block
-        max_active_pages = min(
-            num_physical_blocks,
-            vllm_config.scheduler_config.max_num_seqs * max_blocks_per_request,
-        )
         kvpp_group = get_kvpp_group()
         scheduler = KVPPScheduler(
             kvpp_group=kvpp_group,
@@ -164,10 +162,11 @@ class KVPPRuntime:
             kv_caches=managed_kv_caches,
             tokens_per_block=tokens_per_block,
             num_physical_blocks=num_physical_blocks,
-            max_active_pages=max_active_pages,
+            max_active_pages=num_physical_blocks,
             transport=MemFabricMTEKVPPTransport(
                 kvpp_group,
                 num_physical_blocks,
+                staging_capacity_bytes=staging_capacity_bytes,
             ),
             attention_layer_names=tuple(attention_impls),
         )

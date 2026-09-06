@@ -214,7 +214,9 @@ class NPUModelRunner(GPUModelRunner):
             self.pp_handler.broadcast_draft_tokens()
         return output
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_kv_cache(
+        self, kv_cache_config: KVCacheConfig, *, kvpp_staging_capacity_bytes: int | None = None
+    ) -> None:
         with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
@@ -229,6 +231,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config=self.kv_cache_config,
             block_tables=self.block_tables,
             static_forward_context=self.compilation_config.static_forward_context,
+            staging_capacity_bytes=kvpp_staging_capacity_bytes,
         )
         self.model_state.kvpp_runtime = self.kvpp
 

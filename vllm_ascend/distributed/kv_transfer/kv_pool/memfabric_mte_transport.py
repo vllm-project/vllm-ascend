@@ -23,6 +23,7 @@ from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.logger import logger
 
 from vllm_ascend import envs
+from vllm_ascend.core.kv_cache_placement import kvpp_staging_size_bytes
 
 
 def _build_group_store_url(store_url: str, kvpp_group: GroupCoordinator) -> str:
@@ -106,16 +107,17 @@ class MemFabricMTEKVPPTransport:
         *,
         shared_memory_backend: Any | None = None,
         copy_pages_op: Callable[..., None] | None = None,
+        staging_capacity_bytes: int | None = None,
     ) -> None:
         self._kvpp_group = kvpp_group
         self._num_physical_pages = num_physical_pages
         self._shared_memory_backend = shared_memory_backend
         self._copy_pages_op = copy_pages_op
+        self._planned_staging_capacity_bytes = staging_capacity_bytes
         self._staging_memory: Any | None = None
         self._local_staging_region: MTEStagingRegion | None = None
         self._staging_regions_by_rank: list[MTEStagingRegion] = []
         self._transfer_regions_by_cache: dict[str, tuple[_MTETransferRegion, ...]] = {}
-        self._staging_region_offsets_by_cache_bundle: dict[tuple[str, ...], dict[str, tuple[int, ...]]] = {}
         self._device_transfer_plans_by_cache_bundle: dict[tuple[str, ...], _MTEDeviceTransferPlan] = {}
         self._staging_shm_id: int
 
@@ -140,7 +142,16 @@ class MemFabricMTEKVPPTransport:
 
         store_url = os.getenv("MF_CONFIG_STORE_URL") or os.environ["ASCEND_MF_STORE_URL"]
         store_url = _build_group_store_url(store_url, self._kvpp_group)
-        staging_capacity_bytes = envs.ASCEND_KVPP_MTE_STAGING_BYTES
+        self._transfer_regions_by_cache = self._build_transfer_regions(kv_caches_by_name)
+        self._device_transfer_plans_by_cache_bundle, required_bytes = self._build_device_transfer_plans(
+            cache_bundles, max_active_pages
+        )
+        # Standalone transport callers have no worker budget. Production uses
+        # the capacity already included in the worker's memory plan.
+        staging_capacity_bytes = self._planned_staging_capacity_bytes
+        if staging_capacity_bytes is None:
+            staging_capacity_bytes = required_bytes
+        self._check_staging_layout(required_bytes, staging_capacity_bytes, max_active_pages)
         self._staging_shm_id = envs.ASCEND_KVPP_MTE_SHM_ID
         staging_memory = self._create_staging_memory(
             shared_memory_backend,
@@ -148,13 +159,7 @@ class MemFabricMTEKVPPTransport:
             store_url,
             staging_capacity_bytes,
         )
-        self._transfer_regions_by_cache = self._build_transfer_regions(kv_caches_by_name)
         local_staging_region = self._gather_staging_regions(staging_memory, staging_capacity_bytes)
-        self._staging_region_offsets_by_cache_bundle = self._build_staging_region_offsets(
-            cache_bundles,
-            max_active_pages,
-        )
-        self._device_transfer_plans_by_cache_bundle = self._build_device_transfer_plans(cache_bundles)
 
         logger.info(
             "KVPP MemFabric MTE initialized: rank=%d, gva=%#x, staging_capacity_bytes=%d, shm_id=%d, store_url=%s",
@@ -164,6 +169,34 @@ class MemFabricMTEKVPPTransport:
             self._staging_shm_id,
             store_url,
         )
+
+    def _check_staging_layout(self, required_bytes: int, capacity_bytes: int, max_active_pages: int) -> None:
+        """Check the wire layout, not equality of rank-local scratch allocations."""
+        # Equal total sizes alone do not ensure the owner and receiver agree
+        # on segment offsets or data types. Local base addresses and strides
+        # may differ and are deliberately excluded from the wire signature.
+        bundles = tuple(
+            (
+                names,
+                tuple(
+                    (r.page_length_bytes, r.base_tensor.dtype)
+                    for name in names
+                    for r in self._transfer_regions_by_cache[name]
+                ),
+            )
+            for names in sorted(self._device_transfer_plans_by_cache_bundle)
+        )
+        local = (capacity_bytes, required_bytes, self._num_physical_pages, max_active_pages, bundles)
+        layouts = [local] * self._kvpp_group.world_size
+        dist.all_gather_object(layouts, local, group=self._kvpp_group.cpu_group)
+        if any(
+            capacity != capacity_bytes
+            or required > capacity
+            or not 0 < slots <= pages
+            or (pages, slots, peer_bundles) != local[2:]
+            for capacity, required, pages, slots, peer_bundles in layouts
+        ):
+            raise ValueError("KVPP staging capacity or wire layout does not match across ranks; SHM was not allocated.")
 
     def _create_staging_memory(
         self,
@@ -270,53 +303,27 @@ class MemFabricMTEKVPPTransport:
         self._staging_regions_by_rank = peer_staging_regions
         return self._local_staging_region
 
-    def _build_staging_region_offsets(
-        self,
-        cache_bundles: tuple[tuple[str, ...], ...],
-        max_active_pages: int,
-    ) -> dict[tuple[str, ...], dict[str, tuple[int, ...]]]:
-        """Assign every cache bundle disjoint regions in staging."""
-        staging_capacity_bytes = min(staging_region.capacity_bytes for staging_region in self._staging_regions_by_rank)
-        offsets_by_cache_bundle: dict[tuple[str, ...], dict[str, tuple[int, ...]]] = {}
-        for cache_names in cache_bundles:
-            if cache_names in offsets_by_cache_bundle:
-                continue
-
-            offsets_by_cache: dict[str, tuple[int, ...]] = {}
-            next_offset_bytes = 0
-            for cache_name in cache_names:
-                cache_offsets: list[int] = []
-                for transfer_region in self._transfer_regions_by_cache[cache_name]:
-                    cache_offsets.append(next_offset_bytes)
-                    next_offset_bytes += transfer_region.page_length_bytes * max_active_pages
-                offsets_by_cache[cache_name] = tuple(cache_offsets)
-
-            if next_offset_bytes > staging_capacity_bytes:
-                raise RuntimeError(
-                    "KVPP MTE staging capacity is insufficient for the configured batch: "
-                    f"required_bytes={next_offset_bytes}, capacity_bytes={staging_capacity_bytes}, "
-                    f"max_active_pages={max_active_pages}. Increase ASCEND_KVPP_MTE_STAGING_BYTES."
-                )
-            offsets_by_cache_bundle[cache_names] = offsets_by_cache
-        return offsets_by_cache_bundle
-
     def _build_device_transfer_plans(
         self,
         cache_bundles: tuple[tuple[str, ...], ...],
-    ) -> dict[tuple[str, ...], _MTEDeviceTransferPlan]:
-        """Materialize all address/layout data that is invariant across forwards."""
+        max_active_pages: int,
+    ) -> tuple[dict[tuple[str, ...], _MTEDeviceTransferPlan], int]:
+        """Build static descriptors and their staging requirement in one pass."""
         plans: dict[tuple[str, ...], _MTEDeviceTransferPlan] = {}
+        required_page_bytes = 0
         for cache_names in cache_bundles:
             if cache_names in plans:
                 continue
 
             regions: list[_MTETransferRegion] = []
             staging_offsets: list[int] = []
-            offsets_by_cache = self._staging_region_offsets_by_cache_bundle[cache_names]
+            page_offset = 0
             for cache_name in cache_names:
-                cache_regions = self._transfer_regions_by_cache[cache_name]
-                regions.extend(cache_regions)
-                staging_offsets.extend(offsets_by_cache[cache_name])
+                for region in self._transfer_regions_by_cache[cache_name]:
+                    regions.append(region)
+                    staging_offsets.append(page_offset * max_active_pages)
+                    page_offset += region.page_length_bytes
+            required_page_bytes = max(required_page_bytes, page_offset)
             if not regions:
                 raise ValueError("KVPP MTE cache bundle cannot be empty.")
 
@@ -347,7 +354,7 @@ class MemFabricMTEKVPPTransport:
                     device=anchor.device,
                 ),
             )
-        return plans
+        return plans, kvpp_staging_size_bytes(required_page_bytes, self._num_physical_pages)
 
     def _build_active_page_descriptors(
         self,
