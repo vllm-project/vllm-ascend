@@ -24,17 +24,17 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
 from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix, sequence_parallel_chunk
+from vllm.model_executor.models.utils import PPMissingLayer, maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.models.common.ops.sequence_parallel import sp_padding_mask, sp_shard
 from vllm_ascend.models.deepseek_v4.model import (
     DeepseekV2MixtureOfExperts,
     DeepseekV4DecoderLayer,
     DeepseekV4MoE,
     get_spec_layer_idx_from_weight_name,
-    sp_padding_mask,
 )
 from vllm_ascend.utils import enable_dsa_cp
 
@@ -127,25 +127,39 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
         full_num_tokens = positions.shape[0]
-        if self.mtp_block.use_sequence_parallel_moe:
+        use_sp = self.mtp_block.use_sequence_parallel_moe
+        # Shard the mask only for the duration of this forward: the same
+        # forward_context is reused across draft steps with full-length
+        # inputs, so a sharded mask must not leak to the next step.
+        orig_is_padding = None
+        forward_context = None
+        if use_sp:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
-                forward_context.is_padding = sp_padding_mask(forward_context.is_padding, inputs_embeds)
-            inputs_embeds = sequence_parallel_chunk(inputs_embeds)
-            previous_hidden_states = sequence_parallel_chunk(previous_hidden_states)
+                orig_is_padding = forward_context.is_padding
+                forward_context.is_padding = sp_padding_mask(orig_is_padding, inputs_embeds)
+            # sp_shard supports arbitrary leading dims; upstream
+            # sequence_parallel_chunk only pads 2D correctly and would pad
+            # the hc_mult dim of [N, hc_mult, H] instead of the token dim.
+            inputs_embeds = sp_shard(inputs_embeds)
+            previous_hidden_states = sp_shard(previous_hidden_states)
 
-        hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
+        try:
+            hidden_states = self.e_proj(inputs_embeds).unsqueeze(-2) + self.h_proj(previous_hidden_states)
 
-        hidden_states, residual = self.mtp_block(
-            positions=positions,
-            hidden_states=hidden_states,
-            residual=None,
-            input_ids=None,
-        )
+            hidden_states, residual = self.mtp_block(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=None,
+                input_ids=None,
+            )
 
-        if self.mtp_block.use_sequence_parallel_moe:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-            hidden_states = hidden_states[:full_num_tokens]
+            if use_sp:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
+                hidden_states = hidden_states[:full_num_tokens]
+        finally:
+            if forward_context is not None:
+                forward_context.is_padding = orig_is_padding
 
         # hidden_states = self.hc_head(hidden_states, self.hc_head_fn,
         #                              self.hc_head_scale, self.hc_head_base)
