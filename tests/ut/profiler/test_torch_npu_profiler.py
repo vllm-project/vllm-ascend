@@ -67,6 +67,8 @@ class TestTorchNPUProfilerWrapper(TestBase):
             torch_profiler_dir="/path/to/traces",
             torch_profiler_with_stack=True,
             torch_profiler_with_memory=True,
+            torch_profiler_record_shapes=True,
+            torch_profiler_with_flops=True,
         )
 
         mock_export_type.Text = "Text"
@@ -110,8 +112,10 @@ class TestTorchNPUProfilerWrapper(TestBase):
         profile_kwargs = mock_profile.call_args.kwargs
         self.assertEqual(profile_kwargs["activities"], ["CPU", "NPU"])
         self.assertIsNone(profile_kwargs["schedule"])
+        self.assertTrue(profile_kwargs["record_shapes"])
         self.assertTrue(profile_kwargs["profile_memory"])
         self.assertEqual(profile_kwargs["with_modules"], True)
+        self.assertTrue(profile_kwargs["with_flops"])
         self.assertEqual(profile_kwargs["on_trace_ready"], mock_trace_handler_instance)
         self.assertEqual(result, mock_profiler_instance)
 
@@ -287,6 +291,34 @@ class TestTorchNPUProfilerWrapper(TestBase):
         self.assertFalse(wrapper._profiler_step())
         self.assertTrue(wrapper._profiler_step())
         self.assertEqual(mock_profiler.step.call_count, 3)
+
+    def test_max_iterations_counts_only_active_schedule_steps(self):
+        from vllm_ascend.profiler.torch_npu_profiler import TorchNPUProfilerWrapper
+
+        profiler_config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/path/to/traces",
+            wait_iterations=1,
+            warmup_iterations=1,
+            active_iterations=3,
+            max_iterations=1,
+        )
+        mock_profiler = MagicMock()
+        with patch.object(TorchNPUProfilerWrapper, "_create_profiler", return_value=mock_profiler):
+            wrapper = TorchNPUProfilerWrapper(profiler_config, "trace_name")
+
+        wrapper.start()
+        wrapper.step()  # Remaining warmup step.
+        self.assertEqual(wrapper._profiling_for_iters, 0)
+        mock_profiler.stop.assert_not_called()
+
+        wrapper.step()  # First active step.
+        self.assertEqual(wrapper._profiling_for_iters, 1)
+        mock_profiler.stop.assert_not_called()
+
+        wrapper.step()  # Second active step exceeds max_iterations.
+        self.assertEqual(wrapper._profiling_for_iters, 2)
+        mock_profiler.stop.assert_called_once()
 
     @patch("vllm_ascend.profiler.torch_npu_profiler.torch.profiler.record_function")
     def test_annotate_context_manager_uses_torch_record_function(self, mock_record_function):

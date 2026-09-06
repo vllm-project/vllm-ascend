@@ -22,6 +22,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import ProfilerConfig
+from vllm.logger import logger
 from vllm.profiler.wrapper import WorkerProfiler
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -64,6 +65,12 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
                 active=profiler_config.active_iterations,
                 repeat=1,
             )
+            logger.info_once(
+                "NPU profiler schedule configured: wait=%d, warmup=%d, active=%d",
+                profiler_config.wait_iterations,
+                profiler_config.warmup_iterations,
+                profiler_config.active_iterations,
+            )
 
         experimental_config = torch_npu.profiler._ExperimentalConfig(
             export_type=torch_npu.profiler.ExportType.Text,
@@ -83,11 +90,13 @@ class TorchNPUProfilerWrapper(WorkerProfiler):
                 torch_npu.profiler.ProfilerActivity.NPU,
             ],
             schedule=profiler_schedule,
+            record_shapes=profiler_config.torch_profiler_record_shapes,
             with_stack=False,
             profile_memory=profiler_config.torch_profiler_with_memory,
             # NOTE: torch_npu.profiler.with_modules is equivalent to torch.profiler.with_stack.
             # The with_stack option in torch_npu.profiler introduces significant time overhead.
             with_modules=profiler_config.torch_profiler_with_stack,
+            with_flops=profiler_config.torch_profiler_with_flops,
             experimental_config=experimental_config,
             on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                 profiler_config.torch_profiler_dir,

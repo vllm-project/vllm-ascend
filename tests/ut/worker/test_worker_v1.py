@@ -1277,9 +1277,7 @@ class TestNPUWorker(TestBase):
         context = worker.annotate_profile(MagicMock())
 
         worker.profiler.step.assert_called_once()
-        worker.profiler.annotate_context_manager.assert_called_once_with(
-            "execute_context_2(8)_generation_3(3)"
-        )
+        worker.profiler.annotate_context_manager.assert_called_once_with("execute_context_2(8)_generation_3(3)")
         self.assertIs(context, worker.profiler.annotate_context_manager.return_value)
 
     @patch("vllm_ascend.worker.worker.compute_iteration_details")

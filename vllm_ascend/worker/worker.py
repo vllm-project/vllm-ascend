@@ -732,12 +732,9 @@ class NPUWorker(WorkerBase):
             gen_qk_compute = 0
             total_scheduled_tokens = 0
 
-            new_req_ids = {
-                new_req.req_id for new_req in scheduler_output.scheduled_new_reqs
-            }
+            new_req_ids = {new_req.req_id for new_req in scheduler_output.scheduled_new_reqs}
             num_computed_tokens_by_req = {
-                new_req.req_id: new_req.num_computed_tokens
-                for new_req in scheduler_output.scheduled_new_reqs
+                new_req.req_id: new_req.num_computed_tokens for new_req in scheduler_output.scheduled_new_reqs
             }
             for req_id, num_computed_tokens in zip(
                 scheduler_output.scheduled_cached_reqs.req_ids,
@@ -749,10 +746,7 @@ class NPUWorker(WorkerBase):
                 query_len = num_tokens
                 total_scheduled_tokens += query_len
                 seq_len = num_computed_tokens_by_req.get(req_id, 0) + query_len
-                if (
-                    scheduler_output.scheduled_cached_reqs.is_context_phase(req_id)
-                    or req_id in new_req_ids
-                ):
+                if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or req_id in new_req_ids:
                     ctx_seq_len_sum += seq_len
                     ctx_qq_compute += query_len * query_len
                     ctx_qk_compute += query_len * seq_len
