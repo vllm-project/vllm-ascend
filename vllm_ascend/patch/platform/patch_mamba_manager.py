@@ -35,6 +35,10 @@ class AscendMambaManager(MambaManager):
         pcp_world_size: int = 1,
         drop_eagle_block: bool = False,
     ) -> tuple[list[KVCacheBlock], ...] | tuple[tuple[list[KVCacheBlock], ...], int]:
+        # Mamba recurrent state is replicated on every DCP rank, so its
+        # scheduler-side prefix lookup uses the logical (non-DCP-scaled)
+        # block layout. PCP remains unsupported for this path.
+        assert pcp_world_size == 1, "PCP not support mamba now."
         return super().find_longest_cache_hit(
             block_hashes=block_hashes,
             max_length=max_length,
@@ -42,8 +46,8 @@ class AscendMambaManager(MambaManager):
             block_pool=block_pool,
             kv_cache_spec=kv_cache_spec,
             alignment_tokens=alignment_tokens,
-            dcp_world_size=dcp_world_size,
-            pcp_world_size=pcp_world_size,
+            dcp_world_size=1,
+            pcp_world_size=1,
             drop_eagle_block=drop_eagle_block,
         )
 

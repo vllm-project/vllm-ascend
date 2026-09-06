@@ -1552,6 +1552,41 @@ def _validate_draft_decode_context_parallel_config(vllm_config: VllmConfig) -> N
     if draft_model_config is None:
         return
 
+    target_model_config = vllm_config.model_config
+    target_architectures = {
+        *(getattr(target_model_config, "architectures", ()) or ()),
+        *(getattr(target_model_config.hf_config, "architectures", ()) or ()),
+    }
+    target_architecture = getattr(target_model_config, "architecture", None)
+    if target_architecture:
+        target_architectures.add(target_architecture)
+    draft_architectures = {
+        *(getattr(draft_model_config, "architectures", ()) or ()),
+        *(getattr(draft_model_config.hf_config, "architectures", ()) or ()),
+    }
+    uses_kimi_k3_gqa_dspark = (
+        speculative_config.use_dspark()
+        and (
+            getattr(target_model_config.hf_config, "model_type", None) == "kimi_k3"
+            or any("KimiK3" in arch for arch in target_architectures)
+        )
+        and getattr(draft_model_config.hf_config, "model_type", None) == "qwen3"
+        and any(architecture in {"DSparkDraftModel", "Qwen3DSparkModel"} for architecture in draft_architectures)
+    )
+    if uses_kimi_k3_gqa_dspark:
+        draft_parallel_config = speculative_config.draft_parallel_config
+        if draft_parallel_config is not None and (
+            draft_parallel_config.tensor_parallel_size != parallel_config.tensor_parallel_size
+        ):
+            raise ValueError(
+                "Kimi K3 GQA DSpark requires draft tensor parallel size to match the target tensor parallel size."
+            )
+        if parallel_config.tensor_parallel_size % decode_context_parallel_size != 0:
+            raise ValueError(
+                "Target tensor parallel size must be divisible by decode context parallel size for Kimi K3 GQA DSpark."
+            )
+        return
+
     # MLA draft models do not use the GQA/MQA DCP head-sharding rule.
     if draft_model_config.use_mla:
         return

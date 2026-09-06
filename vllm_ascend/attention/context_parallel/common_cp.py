@@ -5,6 +5,7 @@ import torch.distributed as dist
 import torch_npu
 from vllm.distributed import get_dcp_group
 
+import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
 from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 
 
@@ -124,15 +125,13 @@ class DCPImplMixin:
         softmax_lse: torch.Tensor,
         head_size: int,
     ) -> torch.Tensor:
-        return _npu_attention_update(
-            head_size,
-            _process_attn_out_lse(
-                attn_output,
-                softmax_lse,
-                dcp_size=self.dcp_size,
-                dcp_device_group=self.dcp_device_group,
-            ),
-            dcp_size=self.dcp_size,
+        del head_size
+        return torch.ops.vllm.sfa_dcp_a2a_fused(
+            attn_output.to(torch.float32),
+            softmax_lse.to(torch.float32),
+            self.dcp_size,
+            1,
+            self.dcp_group.unique_name,
         )
 
 

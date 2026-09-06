@@ -277,7 +277,7 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
     model.use_sequence_parallel = False
     model.output_attn_res_proj = nn.Identity()
     model.output_attn_res_norm = nn.Identity()
-    model._set_aux_hidden_state_layers((1,))
+    model._set_aux_hidden_state_layers((1, 2))
 
     model.dspark_aux_capture_materialized = True
     _, materialized_aux = model(
@@ -287,7 +287,9 @@ def test_kimi_model_selects_materialized_or_raw_dspark_aux_stream(monkeypatch):
         inputs_embeds=torch.tensor([[1.0]]),
     )
     torch.testing.assert_close(materialized_aux[0], torch.tensor([[111.0]]))
+    torch.testing.assert_close(materialized_aux[1], torch.tensor([[321.0]]))
 
+    model._set_aux_hidden_state_layers((1,))
     model.dspark_aux_capture_materialized = False
     _, raw_aux = model(
         input_ids=None,

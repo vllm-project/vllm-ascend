@@ -76,6 +76,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
+    FullAttentionSpec,
     HiddenStateCacheSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -227,6 +228,7 @@ else:
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendDCPReplicatedDraftAttentionSpec,
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
@@ -707,14 +709,34 @@ class NPUModelRunner(GPUModelRunner):
 
     def _draft_uses_qwen3_gqa_dspark(self) -> bool:
         """Return whether the draft expects Kimi's materialized residual."""
-        if self.speculative_config is None or not self.speculative_config.use_dspark():
+        speculative_config = getattr(self, "speculative_config", None)
+        if speculative_config is None or not speculative_config.use_dspark():
             return False
-        draft_model_config = self.speculative_config.draft_model_config
+        draft_model_config = speculative_config.draft_model_config
         if draft_model_config is None:
             return False
         hf_config = draft_model_config.hf_config
         architectures = getattr(hf_config, "architectures", ()) or ()
-        return getattr(hf_config, "model_type", None) == "qwen3" and "Qwen3DSparkModel" in architectures
+        return getattr(hf_config, "model_type", None) == "qwen3" and any(
+            architecture in {"DSparkDraftModel", "Qwen3DSparkModel"}
+            for architecture in architectures
+        )
+
+    def _uses_dcp_replicated_dspark_draft_kv(self) -> bool:
+        """Whether this runner uses the K3 target and GQA DSpark KV layout."""
+        if not self._draft_uses_qwen3_gqa_dspark():
+            return False
+        hf_config = getattr(self.model_config, "hf_config", None)
+        architectures = {
+            *(getattr(self.model_config, "architectures", ()) or ()),
+            *(getattr(hf_config, "architectures", ()) or ()),
+        }
+        architecture = getattr(self.model_config, "architecture", None)
+        if architecture:
+            architectures.add(architecture)
+        return getattr(hf_config, "model_type", None) == "kimi_k3" or any(
+            "KimiK3" in architecture for architecture in architectures
+        )
 
     def _use_aclgraph(self) -> bool:
         return (
@@ -4861,8 +4883,20 @@ class NPUModelRunner(GPUModelRunner):
                         ]
                         sum_page_size_bytes = raw_k_tensor.numel() + raw_v_tensor.numel()
                     assert raw_k_tensor is not None
-                    assert sum_page_size_bytes % current_kv_cache_spec.page_size_bytes == 0
-                    num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
+                    physical_page_size_bytes = current_kv_cache_spec.page_size_bytes
+                    if isinstance(
+                        current_kv_cache_spec,
+                        AscendDCPReplicatedDraftAttentionSpec,
+                    ):
+                        # The custom spec reports the aggregate bytes backing one
+                        # target-DCP logical block. The draft backend still sees
+                        # the original per-lane page layout, only with D times as
+                        # many physical blocks.
+                        physical_page_size_bytes = (
+                            current_kv_cache_spec.lane_page_size_bytes
+                        )
+                    assert sum_page_size_bytes % physical_page_size_bytes == 0
+                    num_blocks = sum_page_size_bytes // physical_page_size_bytes
 
                     # `num_blocks` is the number of blocks the model runner can use.
                     # `kv_cache_config.num_blocks` is the number of blocks that
@@ -5237,6 +5271,11 @@ class NPUModelRunner(GPUModelRunner):
         # ordering expected by graph parameter update logic in attention backends.
         mamba_layers: dict[str, MambaBase] = {}
         attn_layer_names = set()
+        replicated_draft_layer_names = (
+            set(getattr(self.drafter, "_draft_attn_layer_names", ()))
+            if self._uses_dcp_replicated_dspark_draft_kv()
+            else set()
+        )
         for layer_name, attn_module in attn_layers.items():
             if (isinstance(attn_module, Attention)
                     and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None):
@@ -5371,6 +5410,24 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name in attn_layer_names:
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
+
+        # Apply DCP replication only after hybrid page-size alignment. The
+        # ordinary draft page is first padded to K3's target/Mamba page, then
+        # multiplied by DCP so one scheduler block backs every DCP lane.
+        for layer_name in replicated_draft_layer_names:
+            spec = kv_cache_spec[layer_name]
+            if not isinstance(spec, FullAttentionSpec):
+                raise TypeError(
+                    "Kimi K3's DCP-replicated GQA DSpark cache requires "
+                    f"FullAttentionSpec, got {type(spec).__name__} for "
+                    f"{layer_name}."
+                )
+            kv_cache_spec[layer_name] = (
+                AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(
+                    spec,
+                    self.dcp_size,
+                )
+            )
 
         if self.sparse_kv_offload_enabled:
             self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage
