@@ -1,5 +1,8 @@
+import sys
+import types
 import unittest
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -7,16 +10,19 @@ import torch
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
     mooncake_host_pool as host_pool_module,
 )
-
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.mooncake_host_pool import (
     HostMemoryRegion,
     HostPoolTopology,
     MooncakeHostPool,
 )
 
+_shared_segment_stub: Any = types.ModuleType("mooncake.shared_segment")
+_shared_segment_stub.create_shared_segment = MagicMock()
+_shared_segment_stub.shared_segment_supported = MagicMock(return_value=True)
+sys.modules.setdefault("mooncake.shared_segment", _shared_segment_stub)
+
 
 class TestMooncakeHostPool(unittest.TestCase):
-
     def _allocate_region_for_mode(self, *, host_register: bool) -> HostMemoryRegion:
         raw = MagicMock()
         raw.reshape.return_value = raw
@@ -123,7 +129,6 @@ class TestMooncakeHostPool(unittest.TestCase):
             ],
         )
 
-
     def test_non_owner_cannot_register_region(self):
         pool = MooncakeHostPool(
             HostMemoryRegion(torch.empty(64, dtype=torch.int8)),
@@ -202,6 +207,7 @@ class TestMooncakeHostPool(unittest.TestCase):
             self._allocate_region_for_mode(host_register=False)
 
             self.assertNotIn(key, host_pool_module.os.environ)
+
     def test_failed_construction_releases_region(self):
         release = MagicMock()
         region = HostMemoryRegion(
