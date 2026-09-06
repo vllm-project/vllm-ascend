@@ -1162,7 +1162,13 @@ class NPUWorker(WorkerBase):
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
                 return
-            self.profiler.stop()
+            try:
+                self.profiler.stop()
+            finally:
+                # A stopped torch-npu profiler cannot collect another trace
+                # when start() is called again. Recreate the wrapper on the
+                # next request so its schedule and trace name are reset too.
+                self.profiler = None
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

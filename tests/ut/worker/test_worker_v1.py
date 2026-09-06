@@ -641,8 +641,8 @@ class TestNPUWorker(TestBase):
             self.assertIs(worker.profiler, mock_profiler_wrapper.return_value)
             mock_profiler_wrapper.return_value.start.assert_called_once()
 
-    def test_profile_restart_reuses_existing_profiler(self):
-        """[RFC #6954] Restarting profile reuses existing profiler."""
+    def test_profile_restart_recreates_npu_profiler(self):
+        """Restarting recreates the one-shot torch-npu profiler."""
         from vllm_ascend.worker.worker import NPUWorker
 
         profiler_config = ProfilerConfig(
@@ -668,9 +668,13 @@ class TestNPUWorker(TestBase):
             )
 
             worker.profile(is_start=False)
-            worker.profile(is_start=True)  # Restart without new prefix
-            # Should NOT create new profiler, just restart existing
-            mock_wrapper.assert_called_once()
+            worker.profile(is_start=True, profile_prefix="session2")
+
+            self.assertEqual(mock_wrapper.call_count, 2)
+            mock_wrapper.assert_called_with(
+                profiler_config,
+                "session2_dp0_pp0_tp0_dcp0_ep0_rank0",
+            )
             self.assertEqual(mock_profiler.start.call_count, 2)
             mock_profiler.stop.assert_called_once()
 
