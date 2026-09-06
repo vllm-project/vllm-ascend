@@ -389,11 +389,23 @@ class AscendPCPManager(PCPManager):
             graph_slot_mappings[:, target_start + local_num_tokens : target_start + graph_num_tokens].fill_(-1)
         return graph_slot_mappings
 
-    def build_attention_context(self) -> AscendPCPAttentionContext:
-        """Build the PCP context consumed by attention metadata builders."""
+    def build_attention_context(
+        self,
+        capture_batch: AscendInputBatch | None = None,
+    ) -> AscendPCPAttentionContext:
+        """Build the PCP context consumed by attention metadata builders.
+
+        At runtime the global batch partitioned by ``partition_batch`` is the
+        authoritative view. Graph capture (vLLM #53869) never partitions a
+        batch, so callers pass the capture-only dummy batch laid out on the
+        same persistent input buffers.
+        """
         global_batch = self._global_batch
-        hidden_restore_idx = self._hidden_restore_idx
+        if global_batch is None:
+            global_batch = capture_batch
         assert global_batch is not None
+        assert isinstance(global_batch, AscendInputBatch)
+        hidden_restore_idx = self._hidden_restore_idx
         assert self._block_tables is not None
         assert self._global_batch_slot_mappings is not None
         assert hidden_restore_idx is not None

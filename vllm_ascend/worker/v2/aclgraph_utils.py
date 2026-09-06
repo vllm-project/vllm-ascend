@@ -41,6 +41,7 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -68,7 +69,10 @@ def _prepare_pcp_inputs_to_capture(
         # supplies capture-only PCP metadata instead. The block tables must
         # retain the same PCP-local backing that runtime prepare_attn updates,
         # because the SFA full graph cannot rebind their captured pointer.
-        input_batch = cudagraph_utils.InputBatch.make_dummy(
+        # The Ascend dummy carries the seq_lens_np/attn_state views consumed
+        # by Ascend metadata builders and doubles as the capture-time PCP
+        # global batch (is_dummy=True).
+        input_batch = AscendInputBatch.make_dummy(
             num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
         )
         input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
