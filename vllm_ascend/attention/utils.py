@@ -355,7 +355,8 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
 
 def filter_chunked_req_indices(
     seq_len: torch.Tensor,
-    mask_for_non_zero_chunk: list[bool] | None,
+    mask_for_non_zero_chunk: list[bool] | torch.Tensor | None,
+    total_tokens: int | None = None,
 ) -> torch.Tensor:
     """
     filter the reqs which are doing real chunk_prefill.
@@ -363,19 +364,29 @@ def filter_chunked_req_indices(
     Args:
         seq_len: contains multi-req length: [req0_len, req1_len, ...]
         mask_for_non_zero_chunk: [True, False, True, False, ...]
+        total_tokens: sum of ``seq_len`` when it is already known on the host.
+            Supplying this for accelerator tensors prevents repeat_interleave
+            from synchronizing to infer its dynamic output size.
     Returns:
         filtered_indices: the real chunked req's indices
     """
     assert mask_for_non_zero_chunk is not None and len(seq_len) == len(mask_for_non_zero_chunk)
-    offsets = torch.cumsum(torch.cat([torch.tensor([0]), seq_len[:-1]]), dim=0)
-    filtered_ranges = [
-        torch.arange(offsets[i], offsets[i] + seq_len[i])
-        for i in range(len(mask_for_non_zero_chunk))
-        if mask_for_non_zero_chunk[i]
-    ]
-    if not filtered_ranges:
-        return torch.empty(0, dtype=torch.long, device=seq_len.device)
-    return torch.cat(filtered_ranges)
+    if total_tokens is None:
+        if seq_len.device.type != "cpu":
+            raise ValueError("total_tokens is required for accelerator seq_len")
+        total_tokens = int(seq_len.sum().item())
+
+    request_mask = torch.as_tensor(
+        mask_for_non_zero_chunk,
+        dtype=torch.bool,
+        device=seq_len.device,
+    )
+    token_mask = torch.repeat_interleave(
+        request_mask,
+        seq_len,
+        output_size=total_tokens,
+    )
+    return torch.nonzero(token_mask, as_tuple=False).flatten()
 
 
 def split_decodes_and_prefills(
