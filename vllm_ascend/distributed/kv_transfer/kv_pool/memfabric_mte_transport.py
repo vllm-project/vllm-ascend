@@ -66,6 +66,17 @@ class MTEStagingRegion:
 
 
 @dataclass(frozen=True)
+class _MTECompletion:
+    """Completion event that keeps asynchronous descriptor tensors alive."""
+
+    event: Any
+    retained_resources: tuple[torch.Tensor, ...]
+
+    def synchronize(self) -> None:
+        self.event.synchronize()
+
+
+@dataclass(frozen=True)
 class _MTETransferRegion:
     """One base address and its logical-page layout."""
 
@@ -395,7 +406,7 @@ class MemFabricMTEKVPPTransport:
             )
         completion_event = torch.npu.Event()
         completion_event.record(stream)
-        return completion_event
+        return _MTECompletion(completion_event, (local_offsets, staging_offsets, lengths))
 
     def copy_active_pages_from_staging(
         self,
@@ -423,4 +434,4 @@ class MemFabricMTEKVPPTransport:
         )
         completion_event = torch.npu.Event()
         completion_event.record(stream)
-        return completion_event
+        return _MTECompletion(completion_event, (local_offsets, staging_offsets, lengths))

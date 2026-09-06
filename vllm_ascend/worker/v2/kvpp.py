@@ -410,6 +410,11 @@ class KVPPScheduler:
 
             with torch.profiler.record_function(f"kvpp.transport_push.layer_{layer_index}"):
                 with torch.npu.stream(self._kv_transfer_stream):
+                    # ``active_pages`` is materialized on the compute stream in
+                    # schedule_forward().  The owner reads those tensors from
+                    # the transfer stream as MTE descriptors, so it needs the
+                    # same cross-stream dependency as the consumer path above.
+                    self._kv_transfer_stream.wait_event(scratch_ready)
                     completion = self.transport.copy_active_pages_to_staging(
                         self.layer_cache_bundles[layer_name],
                         active_pages,
