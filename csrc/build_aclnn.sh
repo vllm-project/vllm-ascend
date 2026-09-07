@@ -221,6 +221,21 @@ fi
 
 log_selected_ops
 
+# Determine optimal build parallelism.
+# - Use nproc if available, fall back to /proc/cpuinfo, then default to 1.
+# - Cap at 16 to prevent OOM on memory-constrained environments (e.g. CI buildkitd pods).
+# - build.sh's get_cpu_num() further caps the value via OPS_CPU_NUMBER/MAX_JOBS.
+get_build_jobs() {
+    local cpu_count
+    cpu_count=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+    if [ "${cpu_count}" -gt 16 ]; then
+        cpu_count=16
+    fi
+    echo "${cpu_count}"
+}
+BUILD_JOBS=$(get_build_jobs)
+log "detected build parallelism: -j${BUILD_JOBS}"
+
 
 # # build custom ops
 # cd csrc
@@ -247,9 +262,9 @@ log_selected_ops
   : "${SOC_VERSION:?SOC_VERSION is not set}"
   : "${SOC_ARG:?SOC_ARG is not set}"
 
-  log "build command: bash build.sh --pkg -j$(nproc) --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
+  log "build command: bash build.sh --pkg -j${BUILD_JOBS} --ops=\"${CUSTOM_OPS}\" --soc=\"${SOC_ARG}\""
   log "building custom ops ${CUSTOM_OPS} for ${SOC_VERSION}"
-  bash build.sh --pkg -j$(nproc) --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
+  bash build.sh --pkg -j${BUILD_JOBS} --ops="${CUSTOM_OPS}" --soc="${SOC_ARG}"
   log "build.sh finished"
 
   custom_ops_install_dir="${ROOT_DIR}/vllm_ascend/_cann_ops_custom"
