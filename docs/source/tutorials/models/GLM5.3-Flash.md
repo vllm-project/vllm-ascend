@@ -353,7 +353,7 @@ curl http://<node0_ip>:<port>/v1/completions \
     -d '{
         "model": "glm",
         "prompt": "The future of AI is",
-        "max_completion_tokens": 50,
+        "max_tokens": 50
     }'
 ```
 
