@@ -66,7 +66,7 @@ Please refer to the [Feature Guide](../user_guide/feature_guide/index.md) for fe
 
 **Content Writing Requirements:**
 
-- Describe the hardware resources, software environment, and model files required for deployment.
+- Describe the hardware resources and model files required for deployment.
 - Weight download links from both `HuggingFace` and `ModelScope` must be provided.
 - Path description: After providing the download link, a path description example must be included, clearly reminding users to note the actual storage path and explaining that this path will be used in subsequent deployment commands.
 
@@ -123,6 +123,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 - Provide troubleshooting guidance below the startup commands. If the issue is already covered in the public FAQ, a direct link to it may be used.
 - **Model path specification**: In deployment commands, the model path must use the variable placeholder `<YOUR_MODEL_PATH>`, with a comment reminding users to replace this placeholder with the path recorded in Section 3.1.
 - If the model supports only a single hardware series (e.g., Atlas 300I DUO only), explicitly state this at the beginning of the installation section. If multiple hardware series are supported(e.g., A3/A2 series), use tabbed syntax to present them separately, with newer models listed first. For syntax differences between MkDocs and Sphinx frameworks, refer to [Syntax Supplement](template-supplement.md#3-tabs).
+- The configuration script for the **Commercial Model** shall be strictly aligned with the optimal performance configuration validated for the specific version release scenario. The use of generic default startup scripts that have not undergone performance tuning and verification is prohibited.
 
 ### 5.1 Single-Node Online Deployment
 
@@ -130,7 +131,7 @@ If multi-node deployment is required, please follow the [Verify Multi-node Commu
 
 - Describe the architectural characteristics and applicable scenarios of single-node deployment.
 - Provide startup command templates and key parameter descriptions.
-- Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK),**and provide a complete example of the echo output**.
+- Provide service verification methods (e.g., curl commands) and expected results, specifying success indicators (e.g., 200 OK), and **provide a complete example of the echo output**.
 
 **Example:**
 
@@ -175,8 +176,8 @@ Expected Result: Omitted (fill in according to actual output).
 
 **Content Writing Requirements:**
 
-- Guide users on how to test the basic functionality of the model through simple interface calls after the service is started.
-- Provide expected results, specifying success indicators (e.g., HTTP 200, JSON response containing a choices field),**and provide a complete example of the echo output**.
+- Guide users on how to verify whether the model functions properly and whether the inference results are correct by sending inference requests after the service has started.
+- Describe the expected output characteristics (e.g., the response contains a choices field with reasonable content) and **provide a complete example of the echo output**.
 
 **Example:**
 
@@ -254,26 +255,15 @@ Provide recommended configurations for three typical scenarios (long context, lo
 
 **Documentation Requirements:**
 
-If the model has specific optimizations, summarize the key optimization techniques and tuning experience for this model.
+For model-specific optimizations, the key optimization techniques and hyperparameter tuning experiences should be summarized, unless the critical parameters have already been clearly specified in Chapter 5, in which case this section may be omitted.
 
 **Example:**
-
-**Optimizations Enabled by Default**
-
-The following optimizations are enabled by default and require no additional configuration:
-
-| Optimization Technique | Technical Principle | Performance Benefit |
-| ---------------------- | ------------------- | ------------------- |
-| Rope Optimization | The cos_sin_cache and indexing operations of positional encoding are executed only in the first layer, and subsequent layers reuse them directly | Reduces redundant computation during the decoding phase, accelerating inference |
-| AddRMSNormQuant Fusion | Merges address-wise multi-scale normalization and quantization operations into a single operator | Optimizes memory access patterns, improving computational efficiency |
-| Zero-like Elimination | Removes unnecessary zero-tensor operations in Attention forward pass | Reduces memory footprint, improves matrix operation efficiency |
-| FullGraph Optimization | Captures and replays the entire decoding graph at once using `compilation_config={"cudagraph_mode":"FULL_DECODE_ONLY"}` | Significantly reduces scheduling latency, stabilizes multi-device performance |
-
 **Optimizations That Require Explicit Enabling**
 
-| Optimization Technique | Applicable Scenarios | Enablement Method | Technical Principle | Precautions |
-| ---------------------- | -------------------- | ----------------- | ------------------- | ----------- |
-| Matmul-ReduceScatter Fusion | Large-scale distributed environments | Automatically enabled after enabling sequence parallelism | Fuses matrix multiplication and Reduce-Scatter operations to achieve pipelined parallel processing | Same as sequence parallelism, has threshold protection |
+| Optimization Technique | Applicable Scenarios | Enablement Method | Precautions |
+| ---------------------- | -------------------- | ----------------- | ----------- |
+| FlashComm_v1           | A3 prefill nodes / co-located nodes  | `export VLLM_ASCEND_ENABLE_FLASHCOMM1=1` | Not available when `layer_sharding` includes `o_proj`  |
+| MLAPO                  | A3 co-located high-throughput / PD decode nodes | `export VLLM_ASCEND_ENABLE_MLAPO=1` | Consumes more NPU memory; in PD scenarios enable on decode nodes only |
 
 #### 9.2.2 General Tuning Reference
 
