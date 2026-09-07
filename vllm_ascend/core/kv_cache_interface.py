@@ -7,6 +7,7 @@ from dataclasses import dataclass, fields, replace
 from typing import Any
 
 import torch
+import vllm.v1.kv_cache_interface as kv_mod
 from typing_extensions import Self
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
@@ -348,3 +349,13 @@ def register_ascend_kv_cache_specs() -> None:
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
+    # cpu-ut's verified vLLM pin has no KpoolTailSpec. The compat shim publishes
+    # one onto vllm.v1.kv_cache_interface; register it only after built-ins so
+    # we do not short-circuit KVCacheSpecRegistry._ensure_registered.
+    kpool_tail_spec = getattr(kv_mod, "KpoolTailSpec", None)
+    if getattr(kpool_tail_spec, "__name__", "") == "_FallbackKpoolTailSpec":
+        KVCacheSpecRegistry.register(
+            kvcache_spec_cls=kpool_tail_spec,
+            manager_class=FullAttentionManager,
+            uniform_type_base_spec=kpool_tail_spec,
+        )
