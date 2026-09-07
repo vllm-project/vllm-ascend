@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -872,3 +872,81 @@ def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
         f"expected {expected} cached blocks ({4}/{128} per segment), got {true_blocks}/{total_blocks}"
     )
     assert true_blocks > 0 and true_blocks < total_blocks, f"mask should be sparse, got {true_blocks}/{total_blocks}"
+
+
+TARGET_PAGE_BYTES = 940032
+DRAFT_PAGE_BYTES = TARGET_PAGE_BYTES * 8
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ReplicatedDraftCapacitySpec(FullAttentionSpec):
+    dcp_replication_size: int = 8
+
+
+def _make_replicated_draft_capacity_groups():
+    target = FullAttentionSpec(
+        block_size=768, num_kv_heads=1, head_size=32, dtype=torch.bfloat16, page_size_padded=TARGET_PAGE_BYTES
+    )
+    draft = _ReplicatedDraftCapacitySpec(
+        block_size=768, num_kv_heads=1, head_size=32, dtype=torch.bfloat16, page_size_padded=DRAFT_PAGE_BYTES
+    )
+    state = MambaSpec(
+        block_size=768,
+        shapes=((1,),),
+        dtypes=(torch.bfloat16,),
+        page_size_padded=TARGET_PAGE_BYTES,
+        mamba_cache_mode="align",
+        num_speculative_blocks=3,
+    )
+    layers = {f"target.{i}": target for i in range(24)}
+    layers.update({f"draft.{i}": draft for i in range(5)})
+    groups = [KVCacheGroupSpec(list(layers), UniformTypeKVCacheSpecs(block_size=768, kv_cache_specs=layers))]
+    for group_id in range(3):
+        layers = {f"state.{group_id}.{i}": state for i in range(23)}
+        groups.append(KVCacheGroupSpec(list(layers), UniformTypeKVCacheSpecs(block_size=768, kv_cache_specs=layers)))
+    return groups
+
+
+def test_pool_bytes_match_allocated_target_and_independent_draft_tensors():
+    groups = _make_replicated_draft_capacity_groups()
+    # Measured physical allocation: 24 target tensors and five 8-lane drafts.
+    assert kv_cache_utils_patch._replicated_draft_pool_bytes_per_block(groups) == 60162048
+    assert kv_cache_utils_patch._replicated_draft_pool_bytes_per_block(groups) * 295 == 17747804160
+
+
+@pytest.mark.parametrize("length,blocks", [(65536, 26), (200000, 48), (1048576, 186)])
+def test_admission_uses_shared_pool_slot_bytes(length, blocks):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=length),
+        parallel_config=SimpleNamespace(decode_context_parallel_size=8),
+        cache_config=SimpleNamespace(mamba_cache_mode="align"),
+    )
+    assert (
+        kv_cache_utils_patch._replicated_draft_max_memory_usage_bytes(config, _make_replicated_draft_capacity_groups())
+        == blocks * 60162048
+    )
+
+
+def test_non_replicated_layout_uses_existing_planner():
+    groups = _make_replicated_draft_capacity_groups()
+    specs = groups[0].kv_cache_spec.kv_cache_specs
+    for name, spec in list(specs.items()):
+        if isinstance(spec, _ReplicatedDraftCapacitySpec):
+            specs[name] = replace(spec, dcp_replication_size=1)
+    assert kv_cache_utils_patch._replicated_draft_pool_bytes_per_block(groups) is None
+
+
+def test_incompatible_shared_state_page_uses_existing_planner():
+    groups = _make_replicated_draft_capacity_groups()
+    specs = groups[1].kv_cache_spec.kv_cache_specs
+    name = groups[1].layer_names[0]
+    specs[name] = replace(specs[name], page_size_padded=2 * TARGET_PAGE_BYTES)
+    assert kv_cache_utils_patch._replicated_draft_pool_bytes_per_block(groups) is None
+
+
+def test_empty_or_single_group_uses_existing_planner():
+    assert kv_cache_utils_patch._replicated_draft_pool_bytes_per_block([]) is None
+    assert (
+        kv_cache_utils_patch._replicated_draft_pool_bytes_per_block(_make_replicated_draft_capacity_groups()[:1])
+        is None
+    )
