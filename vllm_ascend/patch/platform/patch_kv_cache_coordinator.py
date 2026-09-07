@@ -21,6 +21,7 @@ from vllm.v1.core.kv_cache_utils import (
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
+    MambaManager,
     SlidingWindowManager,
     get_manager_for_kv_cache_spec,
 )
@@ -151,6 +152,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+        # vLLM #53614 aligns exported Mamba checkpoints with EAGLE replay.
+        if use_eagle:
+            for manager in self.single_type_managers:
+                if isinstance(manager, MambaManager):
+                    manager.drop_eagle_checkpoint_block = True
 
         # hash_block_size: the block size used to compute block hashes.
         # The actual block size usually equals hash_block_size, but in cases where

@@ -93,6 +93,41 @@ def _make_hybrid_kv_cache_config(
     )
 
 
+@pytest.mark.parametrize("use_eagle, expected_checkpoint", [(False, 192), (True, 176)])
+def test_hybrid_mamba_checkpoint_matches_eagle_replay_boundary(use_eagle, expected_checkpoint):
+    config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=128)
+    config.kv_cache_groups[1].kv_cache_spec = replace(
+        config.kv_cache_groups[1].kv_cache_spec,
+        mamba_cache_mode="align",
+        num_speculative_blocks=1,
+        num_prefill_checkpoint_blocks=1,
+        prefill_checkpoint_alignment=16,
+    )
+    coordinator = AscendHybridKVCacheCoordinator(
+        config,
+        max_model_len=1024,
+        max_in_flight_tokens=512,
+        use_eagle=use_eagle,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=16,
+        scheduler_block_size=128,
+    )
+    manager = coordinator.single_type_managers[1]
+    assert manager.drop_eagle_checkpoint_block is use_eagle
+    manager.get_num_blocks_to_allocate(
+        request_id="checkpoint",
+        num_tokens=200,
+        new_computed_blocks=[],
+        total_computed_tokens=0,
+        num_local_computed_tokens=0,
+        num_tokens_main_model=200,
+    )
+    assert manager._checkpoint_positions["checkpoint"] == expected_checkpoint
+
+
 def _make_kimi_k3_dspark_kv_cache_specs(
     *,
     block_size: int = 384,

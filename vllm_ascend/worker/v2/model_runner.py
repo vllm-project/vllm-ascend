@@ -155,11 +155,11 @@ class NPUModelRunner(GPUModelRunner):
         )
         if self.use_spec_pp:
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-                install_spec_pp_token_broadcast,
+                install_spec_pp_draft_update,
             )
 
             assert self.pp_handler is not None
-            install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
+            install_spec_pp_draft_update(self.pp_handler)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -233,13 +233,7 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         self._restore_replicated_draft_target_states()
-        output = super().sample_tokens(grammar_output)
-
-        if self.use_spec_pp and self.is_last_pp_rank:
-            assert self.pp_handler is not None
-            # Wait until propose() has populated this step's draft tokens.
-            self.pp_handler.broadcast_draft_tokens()
-        return output
+        return super().sample_tokens(grammar_output)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
