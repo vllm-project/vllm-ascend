@@ -32,9 +32,7 @@ def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:
     """
     assert _original_get_v1_unsupported_features is not None
     unsupported = _original_get_v1_unsupported_features(self)
-    if DFLASH2_UNSUPPORTED_FEATURE in unsupported:
-        unsupported.remove(DFLASH2_UNSUPPORTED_FEATURE)
-    return unsupported
+    return [feature for feature in unsupported if feature != DFLASH2_UNSUPPORTED_FEATURE]
 
 
 # The gate only exists on vLLM versions that ship the v2 model runner split.
