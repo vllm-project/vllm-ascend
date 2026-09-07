@@ -243,7 +243,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
-            core_attn_out = torch.empty(
+            # o_proj consumes the full T_pad window. zeros keep
+            # [num_actual_tokens:] from leaking uninitialized values.
+            core_attn_out = torch.zeros(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
