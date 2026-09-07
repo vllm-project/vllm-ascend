@@ -72,7 +72,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_acc
 
-  - name: "Qwen3vl-8B-pef"
+  - name: "Qwen3vl-8B-perf"
     model: "vllm-ascend/Qwen3-VL-8B-Instruct-w8a8sc-310-vllm-tp1"
     envs:
       <<: *envs

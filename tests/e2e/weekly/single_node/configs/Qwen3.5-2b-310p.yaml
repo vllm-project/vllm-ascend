@@ -66,7 +66,7 @@ test_cases:
     benchmarks:
       <<: *benchmarks_acc
 
-  - name: "Qwen35-2B-acc"
+  - name: "Qwen35-2B-perf"
     model: "Qwen/Qwen3.5-2B"
     envs:
       <<: *envs
