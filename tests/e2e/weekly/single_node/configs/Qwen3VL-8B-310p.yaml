@@ -65,6 +65,7 @@ test_cases:
     model: "vllm-ascend/Qwen3-VL-8B-Instruct-w8a8sc-310-vllm-tp1"
     envs:
       <<: *envs
+    server_cmd: *server_cmd
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[16,32]}'

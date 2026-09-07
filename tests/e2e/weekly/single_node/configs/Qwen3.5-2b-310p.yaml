@@ -59,6 +59,7 @@ test_cases:
     model: "Qwen/Qwen3.5-2B"
     envs:
       <<: *envs
+    server_cmd: *server_cmd
     server_cmd_extra:
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_DECODE_ONLY","cudagraph_capture_sizes":[16,32]}'
