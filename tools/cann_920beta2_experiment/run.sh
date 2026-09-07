@@ -89,6 +89,11 @@ MAX_JOBS=32 python3 -m pip install --no-deps --no-build-isolation -e "$baseline"
 python3 -m pip freeze >"$evidence/python-after.txt"
 
 export HF_HUB_OFFLINE=1 VLLM_USE_MODELSCOPE=True VLLM_WORKER_MULTIPROC_METHOD=spawn
+# Persist only named, non-secret runtime settings for the next workflow step.
+for variable in PATH LD_LIBRARY_PATH PYTHONPATH ASCEND_HOME_PATH ASCEND_OPP_PATH \
+    ASCEND_AICPU_PATH ASCEND_TOOLKIT_HOME HF_HUB_OFFLINE VLLM_USE_MODELSCOPE VLLM_WORKER_MULTIPROC_METHOD; do
+    printf 'export %s=%q\n' "$variable" "${!variable:-}" >>"$evidence/runtime-env.sh"
+done
 cd "$baseline"
-python3 "$scripts/probe.py" --baseline "$baseline" --evidence "$evidence"
+python3 "$scripts/probe.py" --baseline "$baseline" --evidence "$evidence" --minimal-only
 npu-smi info >"$evidence/npu-after.txt"

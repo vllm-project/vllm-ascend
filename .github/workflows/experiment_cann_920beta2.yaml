@@ -38,12 +38,26 @@ jobs:
           submodules: recursive
           persist-credentials: false
           path: baseline
-      - name: Install matched toolkit and A3 ops, then reproduce
+      - name: Install matched toolkit and A3 ops, then run minimal probes
         run: |
           mkdir -p "$GITHUB_WORKSPACE/evidence"
           bash experiment/tools/cann_920beta2_experiment/run.sh \
             "$GITHUB_WORKSPACE/baseline" "$GITHUB_WORKSPACE/evidence" \
             2>&1 | tee "$GITHUB_WORKSPACE/evidence/experiment.log"
+      - name: Upload minimal probe evidence before model loading
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cann-920beta2-minimal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/
+          if-no-files-found: warn
+      - name: Trace model startup with effective Ascend fusion on and off
+        run: |
+          source "$GITHUB_WORKSPACE/evidence/runtime-env.sh"
+          cd "$GITHUB_WORKSPACE/baseline"
+          python3 "$GITHUB_WORKSPACE/experiment/tools/cann_920beta2_experiment/probe.py" \
+            --baseline "$GITHUB_WORKSPACE/baseline" --evidence "$GITHUB_WORKSPACE/evidence" \
+            --startup-only
       - name: Upload experiment evidence
         if: always()
         uses: actions/upload-artifact@v4
