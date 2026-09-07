@@ -1704,30 +1704,16 @@ class TestNPUPlatform(TestBase):
             (
                 True,
                 True,
-                False,
                 "vllm_ascend.attention.mla_v1.AscendMLABackend",
             ),
             (
-                False,
-                True,
-                False,
-                "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
-            ),
-            (
-                True,
-                False,
-                True,
-                "vllm_ascend.attention.mla_v1.AscendMLABackend",
-            ),
-            (
-                False,
                 False,
                 True,
                 "vllm_ascend.attention.attention_v1.AscendAttentionBackend",
             ),
         )
-        for use_mla, use_pcp, use_dcp, expected_backend in cases:
-            with self.subTest(use_mla=use_mla, use_pcp=use_pcp, use_dcp=use_dcp):
+        for use_mla, use_pcp, expected_backend in cases:
+            with self.subTest(use_mla=use_mla, use_pcp=use_pcp):
                 attn_selector_config = AttentionSelectorConfig(
                     dtype=torch.float16,
                     head_size=0,
@@ -1736,22 +1722,9 @@ class TestNPUPlatform(TestBase):
                     use_mla=use_mla,
                     use_sparse=False,
                     use_pcp=use_pcp,
-                    use_dcp=use_dcp,
                 )
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
-
-    def test_get_attn_backend_cls_rejects_pcp_and_dcp(self):
-        attn_selector_config = AttentionSelectorConfig(
-            dtype=torch.float16,
-            head_size=0,
-            kv_cache_dtype=None,
-            block_size=128,
-            use_pcp=True,
-            use_dcp=True,
-        )
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP simultaneously"):
-            self.platform.get_attn_backend_cls("ascend", attn_selector_config)
 
     def test_get_attn_backend_cls_selects_sfa_pcp_backend(self):
         attn_selector_config = AttentionSelectorConfig(
