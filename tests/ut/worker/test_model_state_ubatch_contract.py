@@ -8,13 +8,22 @@ import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 
+from vllm_ascend._310p.worker.v2.model_state import Ascend310PMambaHybridModelState, Ascend310PModelState
 from vllm_ascend.worker.v2.model_states.default import AscendModelState
 from vllm_ascend.worker.v2.model_states.mamba_hybrid import AscendMambaHybridModelState
 
 
-@pytest.mark.parametrize("model_cls", [AscendModelState, AscendMambaHybridModelState])
+@pytest.mark.parametrize(
+    "model_cls, metadata_owner",
+    [
+        (AscendModelState, AscendModelState),
+        (AscendMambaHybridModelState, AscendMambaHybridModelState),
+        (Ascend310PModelState, AscendModelState),
+        (Ascend310PMambaHybridModelState, AscendMambaHybridModelState),
+    ],
+)
 @pytest.mark.parametrize("ubatch_idx", [0, 1])
-def test_prepare_attn_accepts_single_batch_contract(model_cls, ubatch_idx):
+def test_prepare_attn_accepts_single_batch_contract(model_cls, metadata_owner, ubatch_idx):
     state = model_cls.__new__(model_cls)
     state.vllm_config = SimpleNamespace(
         parallel_config=SimpleNamespace(prefill_context_parallel_size=1),
@@ -36,7 +45,7 @@ def test_prepare_attn_accepts_single_batch_contract(model_cls, ubatch_idx):
         attn_state=None,
     )
     metadata = {"layer": object()}
-    with patch(f"{model_cls.__module__}.build_attn_metadata", return_value=metadata) as build:
+    with patch(f"{metadata_owner.__module__}.build_attn_metadata", return_value=metadata) as build:
         args = (batch, CUDAGraphMode.NONE, (), torch.empty(0), [], SimpleNamespace())
         if ubatch_idx:
             with pytest.raises(AssertionError, match="DBO is not supported"):
