@@ -307,6 +307,10 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             self.spec_sas_metadata = [
                 torch.zeros(SAS_METADATA_SIZE, dtype=torch.int32, device=self.device) for _ in range(spec_token_num)
             ]
+            self.spec_start_pos = [
+                torch.zeros(scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device)
+                for _ in range(spec_token_num)
+            ]
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -566,19 +570,25 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
 
         if metadata_cache is not None and "local_query_start_loc" in metadata_cache:
             # Hit: local token metadata computed by a sibling kv-cache group
-            # of the same draft step. Values are identical across groups, so
-            # the cached (cloned) tensors are reused directly.
+            # of the same draft step. Values are identical across groups; copy
+            # them into this builder's stable per-draft buffers so the returned
+            # views keep fixed addresses across aclgraph capture/replay.
             local_start = metadata_cache["local_start"]
             local_end_with_pad = metadata_cache["local_end_with_pad"]
             tokens_per_rank = metadata_cache["tokens_per_rank"]
             num_tokens_pad = metadata_cache["num_tokens_pad"]
-            local_query_start_loc = metadata_cache["local_query_start_loc"]
-            local_seq_lens = metadata_cache["local_seq_lens"]
             max_local_query_len = metadata_cache["max_local_query_len"]
             max_local_seq_lens = metadata_cache["max_local_seq_lens"]
             local_cos = metadata_cache["local_cos"]
             local_sin = metadata_cache["local_sin"]
-            start_pos = metadata_cache["start_pos"]
+            self.spec_local_query_start_loc[draft_index - 1][: num_reqs + 1].copy_(
+                metadata_cache["local_query_start_loc"]
+            )
+            self.spec_local_seq_lens[draft_index - 1][:num_reqs].copy_(metadata_cache["local_seq_lens"])
+            self.spec_start_pos[draft_index - 1][:num_reqs].copy_(metadata_cache["start_pos"])
+            local_query_start_loc = self.spec_local_query_start_loc[draft_index - 1][: num_reqs + 1]
+            local_seq_lens = self.spec_local_seq_lens[draft_index - 1][:num_reqs]
+            start_pos = self.spec_start_pos[draft_index - 1][:num_reqs]
         else:
             (
                 local_start,
@@ -596,8 +606,11 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 local_seq_lens=self.spec_local_seq_lens[draft_index - 1],
                 is_noncausal=is_noncausal,
             )
-            local_query_start_loc = local_query_start_loc.clone()
-            local_seq_lens = local_seq_lens.clone()
+            # NOTE: no .clone() here. ACL graph capture bakes the addresses of
+            # these tensors into the draft graph, so every replay must read the
+            # freshly built values from the same (stable) buffer addresses.
+            # Returning a fresh clone would leave the graph reading stale
+            # capture-time metadata and cause illegal device memory accesses.
             local_cos = cos.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
             local_sin = sin.pad_to(num_tokens_pad)[local_start:local_end_with_pad]
 
@@ -612,21 +625,24 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             max_local_query_len = max(1, int(local_seq_lens_q_cpu.max().item()))
             max_local_seq_lens = max(1, int(local_seq_lens_cpu.max().item()))
 
-            start_pos = self.seq_lens[:num_reqs] - seq_lens_q
+            start_pos = self.spec_start_pos[draft_index - 1][:num_reqs]
+            start_pos.copy_(self.seq_lens[:num_reqs] - seq_lens_q)
 
             if metadata_cache is not None:
+                # Store value snapshots: the persistent buffers are refilled on
+                # every step, so sibling groups must copy the values now.
                 metadata_cache.update(
                     local_start=local_start,
                     local_end_with_pad=local_end_with_pad,
                     tokens_per_rank=tokens_per_rank,
                     num_tokens_pad=num_tokens_pad,
-                    local_query_start_loc=local_query_start_loc,
-                    local_seq_lens=local_seq_lens,
+                    local_query_start_loc=local_query_start_loc.clone(),
+                    local_seq_lens=local_seq_lens.clone(),
                     max_local_query_len=max_local_query_len,
                     max_local_seq_lens=max_local_seq_lens,
                     local_cos=local_cos,
                     local_sin=local_sin,
-                    start_pos=start_pos,
+                    start_pos=start_pos.clone(),
                 )
 
         dspark_swa_indices = None
