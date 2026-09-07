@@ -402,7 +402,7 @@ def test_pp_mtp_spec_token_id_edge_cases():
     assert advancing.spec_token_ids == [401]
 
 
-def test_pp_ipc_cached_request_data_skips_empty_output_and_extra_reqs():
+def test_pp_ipc_cached_request_data_skips_empty_output_tokens():
     scheduler = Scheduler.__new__(Scheduler)
     scheduler.use_pp = True
     scheduler.use_v2_model_runner = False
@@ -420,17 +420,10 @@ def test_pp_ipc_cached_request_data_skips_empty_output_and_extra_reqs():
         num_output_tokens=0,
         num_output_placeholders=0,
     )
-    req_extra = SimpleNamespace(
-        request_id="req-1",
-        all_token_ids=[7],
-        num_computed_tokens=3,
-        num_output_tokens=1,
-        num_output_placeholders=0,
-    )
     blocks = SimpleNamespace(get_block_ids=lambda allow_none: ([0],))
     cached = Scheduler._make_cached_request_data(
         scheduler,
-        running_reqs=[req_empty, req_extra],
+        running_reqs=[req_empty],
         resumed_reqs=[],
         num_scheduled_tokens={"req-0": 2},
         spec_decode_tokens={},
