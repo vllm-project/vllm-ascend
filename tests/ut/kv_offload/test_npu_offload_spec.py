@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
+import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.cpu_npu as cpu_npu_mod
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.npu as npu_mod
 import vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector as connector_mod
 from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_connector import (
@@ -67,6 +68,81 @@ def test_npu_worker_releases_handlers_before_mmap() -> None:
 
     assert calls == ["store", "load", "mmap"]
     assert worker._mmap_region is None
+
+
+@pytest.mark.parametrize("view_method", ["create_next_worker_view", "create_next_view"])
+def test_npu_worker_supports_shared_region_view_apis(
+    monkeypatch: pytest.MonkeyPatch,
+    view_method: str,
+) -> None:
+    created_page_sizes = []
+    captured_cpu_tensors = []
+
+    class FakeRegion:
+        def cleanup(self):
+            pass
+
+    def create_view(self, page_size_bytes):
+        created_page_sizes.append(page_size_bytes)
+        return torch.empty((3, page_size_bytes), dtype=torch.int8)
+
+    monkeypatch.setattr(FakeRegion, view_method, create_view, raising=False)
+
+    class FakeHandler:
+        def __init__(self, **kwargs):
+            captured_cpu_tensors.append(kwargs["cpu_tensors"])
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(
+        cpu_npu_mod,
+        "SingleDirectionNPUOffloadingHandler",
+        FakeHandler,
+    )
+    kv_caches = SimpleNamespace(
+        tensors=[
+            SimpleNamespace(
+                page_size_bytes=4,
+                tensor=torch.empty((6, 4), dtype=torch.int8),
+            )
+        ],
+        group_data_refs=[],
+    )
+
+    worker = cpu_npu_mod.NPUOffloadingWorker(
+        kv_caches=kv_caches,
+        blocks_per_chunk=2,
+        num_cpu_blocks=3,
+        mmap_region=FakeRegion(),
+    )
+
+    assert created_page_sizes == [8]
+    assert len(captured_cpu_tensors) == 2
+    assert captured_cpu_tensors[0][0] is captured_cpu_tensors[1][0]
+    assert captured_cpu_tensors[0][0].shape == (3, 8)
+    worker.shutdown()
+
+
+def test_npu_worker_cleans_shared_region_for_unsupported_view_api() -> None:
+    class FakeRegion:
+        cleaned = False
+
+        def cleanup(self):
+            self.cleaned = True
+
+    region = FakeRegion()
+    kv_caches = SimpleNamespace(tensors=[], group_data_refs=[])
+
+    with pytest.raises(AttributeError, match="create_next_view"):
+        cpu_npu_mod.NPUOffloadingWorker(
+            kv_caches=kv_caches,
+            blocks_per_chunk=2,
+            num_cpu_blocks=3,
+            mmap_region=region,
+        )
+
+    assert region.cleaned
 
 
 def test_cpu_spec_uses_v027_blocks_per_chunk(

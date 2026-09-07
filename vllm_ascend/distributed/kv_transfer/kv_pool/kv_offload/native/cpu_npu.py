@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
@@ -50,6 +51,15 @@ def _new_descriptor_buffers(
         torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin_memory),
         torch.empty(num_copy_ops, dtype=torch.int64, pin_memory=pin_memory),
     )
+
+
+def _get_worker_view_factory(
+    mmap_region: SharedOffloadRegion,
+) -> Callable[[int], torch.Tensor]:
+    create_view = getattr(mmap_region, "create_next_worker_view", None)
+    if create_view is None:
+        create_view = mmap_region.create_next_view  # type: ignore[attr-defined]
+    return create_view
 
 
 class SingleDirectionNPUOffloadingHandler:
@@ -279,6 +289,7 @@ class NPUOffloadingWorker(OffloadingWorker):
         npu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
         try:
+            create_worker_view = _get_worker_view_factory(mmap_region) if mmap_region is not None else None
             for kv_cache_tensor in kv_caches.tensors:
                 npu_page_size_bytes = kv_cache_tensor.page_size_bytes
                 npu_tensor = kv_cache_tensor.tensor
@@ -296,8 +307,8 @@ class NPUOffloadingWorker(OffloadingWorker):
                     )
                 cpu_page_size_bytes = npu_page_size_bytes * blocks_per_chunk
 
-                if mmap_region is not None:
-                    cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
+                if create_worker_view is not None:
+                    cpu_tensor = create_worker_view(cpu_page_size_bytes)
                 else:
                     start_time = time.monotonic()
                     cpu_tensor = torch.zeros(
