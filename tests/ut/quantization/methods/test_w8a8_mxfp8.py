@@ -146,9 +146,38 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config")
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config")
     def setUp(self, mock_ascend, mock_vllm):
-        mock_vllm.return_value = create_mock_vllm_config()
+        vllm_config = create_mock_vllm_config()
+        vllm_config.use_v2_model_runner = False
+        vllm_config.parallel_config.enable_eplb = False
+        mock_vllm.return_value = vllm_config
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+
+    def test_use_eplb_covers_v1_and_v2_configs(self):
+        cases = (
+            (False, False, False, False, False),
+            (False, True, False, True, True),
+            (True, True, False, False, False),
+            (True, False, True, False, True),
+        )
+        for use_v2, dynamic_eplb, enable_eplb, expected_dynamic, expected_use_eplb in cases:
+            vllm_config = create_mock_vllm_config()
+            vllm_config.use_v2_model_runner = use_v2
+            vllm_config.parallel_config.enable_eplb = enable_eplb
+            with (
+                self.subTest(use_v2=use_v2, dynamic_eplb=dynamic_eplb, enable_eplb=enable_eplb),
+                patch(
+                    "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_current_vllm_config",
+                    return_value=vllm_config,
+                ),
+                patch(
+                    "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.get_ascend_config",
+                    return_value=create_mock_ascend_config(dynamic_eplb=dynamic_eplb),
+                ),
+            ):
+                scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+                self.assertEqual(scheme.dynamic_eplb, expected_dynamic)
+                self.assertEqual(scheme.use_eplb, expected_use_eplb)
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
@@ -186,14 +215,50 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
         )
         original_shape = layer.w13_weight.shape
-        self.scheme.process_weights_after_loading(layer)
+        with (
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_format_cast") as format_cast,
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.copy_memory_") as copy_memory,
+        ):
+            self.scheme.process_weights_after_loading(layer)
+
+        format_cast.assert_not_called()
+        copy_memory.assert_not_called()
         self.assertTrue(hasattr(layer, "_mxfp8_original_shapes"))
         self.assertIn("w13_weight", layer._mxfp8_original_shapes)
         self.assertEqual(layer.w13_weight.shape, (original_shape[0], original_shape[2], original_shape[1]))
-        self.assertFalse(layer.w13_weight.data.is_contiguous())
-        self.assertFalse(layer.w2_weight.data.is_contiguous())
-        self.assertFalse(layer.w13_weight_scale.data.is_contiguous())
-        self.assertFalse(layer.w2_weight_scale.data.is_contiguous())
+        self.assertTrue(layer.w13_weight.data.is_contiguous())
+        self.assertTrue(layer.w2_weight.data.is_contiguous())
+        self.assertTrue(layer.w13_weight_scale.data.is_contiguous())
+        self.assertTrue(layer.w2_weight_scale.data.is_contiguous())
+        for param_name, buffer_name in (
+            ("w13_weight", "_mxfp8_w13_weight_buf"),
+            ("w2_weight", "_mxfp8_w2_weight_buf"),
+            ("w13_weight_scale", "_mxfp8_w13_scale_buf"),
+            ("w2_weight_scale", "_mxfp8_w2_scale_buf"),
+        ):
+            self.assertEqual(getattr(layer, param_name).data_ptr(), getattr(layer, buffer_name).data_ptr())
+
+    def test_eplb_process_preserves_transpose_views(self):
+        self.scheme.use_eplb = True
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
+        source_storage_ptrs = {
+            name: getattr(layer, name).untyped_storage().data_ptr()
+            for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+        }
+        with (
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.npu_format_cast") as format_cast,
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu.copy_memory_") as copy_memory,
+        ):
+            self.scheme.process_weights_after_loading(layer)
+
+        format_cast.assert_not_called()
+        copy_memory.assert_not_called()
+        for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"):
+            source = getattr(layer, name)
+            self.assertFalse(source.is_contiguous())
+            self.assertEqual(source.untyped_storage().data_ptr(), source_storage_ptrs[name])
 
         weight_views = self.scheme.get_eplb_weight_views(layer)
         self.assertTrue(self.scheme.supports_eplb)
@@ -205,6 +270,56 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             self.assertTrue(weight_view.is_contiguous())
             self.assertEqual(weight_view.shape[0], self.num_experts)
             self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
+
+    def test_non_eplb_rl_reload_keeps_execution_addresses(self):
+        layer = create_mxfp_moe_layer(
+            num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+        )
+        self.scheme.process_weights_after_loading(layer)
+        buffer_names = {
+            "w13_weight": "_mxfp8_w13_weight_buf",
+            "w2_weight": "_mxfp8_w2_weight_buf",
+            "w13_weight_scale": "_mxfp8_w13_scale_buf",
+            "w2_weight_scale": "_mxfp8_w2_scale_buf",
+        }
+        execution_ptrs = {name: getattr(layer, buffer_name).data_ptr() for name, buffer_name in buffer_names.items()}
+
+        for reload_idx in range(3):
+            self.scheme.restore_weights_for_rl_loading(layer)
+            layer.w13_weight.data.fill_(reload_idx + 1)
+            layer.w2_weight.data.fill_(reload_idx + 4)
+            layer.w13_weight_scale.data.fill_(reload_idx + 7)
+            layer.w2_weight_scale.data.fill_(reload_idx + 10)
+
+            expected = {
+                "w13_weight": layer.w13_weight.data.transpose(1, 2).contiguous().clone(),
+                "w2_weight": layer.w2_weight.data.transpose(1, 2).contiguous().clone(),
+            }
+            for scale_name in ("w13_weight_scale", "w2_weight_scale"):
+                scale = getattr(layer, scale_name).data
+                g_num, n_size, k_size = scale.shape
+                expected[scale_name] = (
+                    scale.reshape(g_num, n_size, k_size // 2, 2).transpose(1, 2).contiguous().clone()
+                )
+
+            self.scheme.process_weights_after_loading(layer)
+            for name, expected_tensor in expected.items():
+                actual = getattr(layer, name)
+                self.assertEqual(getattr(layer, name).data_ptr(), execution_ptrs[name])
+                if actual.dtype == torch.float8_e4m3fn:
+                    actual = actual.view(torch.uint8)
+                    expected_tensor = expected_tensor.view(torch.uint8)
+                self.assertTrue(torch.equal(actual, expected_tensor))
+
+        before_idempotent = {name: getattr(layer, name).clone() for name in buffer_names}
+        self.scheme.process_weights_after_loading(layer)
+        for name, expected_tensor in before_idempotent.items():
+            actual = getattr(layer, name)
+            self.assertEqual(getattr(layer, name).data_ptr(), execution_ptrs[name])
+            if actual.dtype == torch.float8_e4m3fn:
+                actual = actual.view(torch.uint8)
+                expected_tensor = expected_tensor.view(torch.uint8)
+            self.assertTrue(torch.equal(actual, expected_tensor))
 
     def test_restore_weights_for_rl_loading(self):
         layer = create_mxfp_moe_layer(

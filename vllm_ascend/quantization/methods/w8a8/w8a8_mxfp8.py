@@ -236,6 +236,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         self.group_size = quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
         self.dynamic_eplb = False if vllm_config.use_v2_model_runner else ascend_config.eplb_config.dynamic_eplb
+        self.use_eplb = self.dynamic_eplb or (
+            vllm_config.use_v2_model_runner is True and vllm_config.parallel_config.enable_eplb is True
+        )
 
     @staticmethod
     def get_weight(
@@ -313,6 +316,24 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             layer.w2_weight_scale.transpose(1, 2),
         ]
 
+    @staticmethod
+    def _update_transformed_buffer(
+        layer: torch.nn.Module,
+        param_name: str,
+        buffer_name: str,
+        transformed: torch.Tensor,
+        use_npu_memory_copy: bool = False,
+    ) -> None:
+        if not hasattr(layer, buffer_name):
+            setattr(layer, buffer_name, transformed)
+        else:
+            buffer = getattr(layer, buffer_name)
+            if use_npu_memory_copy:
+                torch_npu.copy_memory_(buffer, transformed, non_blocking=False)
+            else:
+                buffer.copy_(transformed)
+        getattr(layer, param_name).data = getattr(layer, buffer_name)
+
     def process_weights_after_loading(self, layer):
         """Process weights after loading for MXFP8 inference.
 
@@ -326,6 +347,9 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         this method stores original shapes and can be called multiple times safely.
         Use restore_weights_for_rl_loading() before weight reload, then call this
         method again after loading.
+
+        When EPLB is disabled, the transformed tensors are cached and refreshed
+        in place so ACL graph replay keeps using the captured addresses.
         """
 
         # Check if already transformed to avoid double transformation
@@ -343,15 +367,51 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             }
 
         g_num, n_size, k_size = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
+        w13_scale = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2).transpose(1, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2).contiguous()
-        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w2_weight.data = torch_npu.npu_format_cast(layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+        w2_scale = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2).transpose(1, 2)
+
+        if self.use_eplb:
+            layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+            layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+            layer.w13_weight_scale.data = w13_scale
+            layer.w2_weight_scale.data = w2_scale
+        else:
+            w13_weight = layer.w13_weight.data.transpose(1, 2).contiguous()
+            w2_weight = layer.w2_weight.data.transpose(1, 2).contiguous()
+            w13_weight_is_npu = w13_weight.device.type == "npu"
+            w2_weight_is_npu = w2_weight.device.type == "npu"
+            if w13_weight_is_npu:
+                w13_weight = torch_npu.npu_format_cast(w13_weight, ACL_FORMAT_FRACTAL_NZ)
+            if w2_weight_is_npu:
+                w2_weight = torch_npu.npu_format_cast(w2_weight, ACL_FORMAT_FRACTAL_NZ)
+
+            self._update_transformed_buffer(
+                layer,
+                "w13_weight",
+                "_mxfp8_w13_weight_buf",
+                w13_weight,
+                use_npu_memory_copy=w13_weight_is_npu,
+            )
+            self._update_transformed_buffer(
+                layer,
+                "w2_weight",
+                "_mxfp8_w2_weight_buf",
+                w2_weight,
+                use_npu_memory_copy=w2_weight_is_npu,
+            )
+            self._update_transformed_buffer(
+                layer,
+                "w13_weight_scale",
+                "_mxfp8_w13_scale_buf",
+                w13_scale.contiguous(),
+            )
+            self._update_transformed_buffer(
+                layer,
+                "w2_weight_scale",
+                "_mxfp8_w2_scale_buf",
+                w2_scale.contiguous(),
+            )
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -392,7 +452,8 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
             """Helper to restore a single MoE weight and its scale using safe memory copies."""
             # --- 1. Restore Weight ---
             weight_tensor = getattr(layer, weight_key)
-            weight_tensor.data = torch_npu.npu_format_cast(weight_tensor.data, ACL_FORMAT_FRACTAL_ND)
+            if not self.use_eplb and weight_tensor.device.type == "npu":
+                weight_tensor.data = torch_npu.npu_format_cast(weight_tensor.data, ACL_FORMAT_FRACTAL_ND)
             target_weight = weight_tensor.data.transpose(1, 2).contiguous()
             weight_tensor.data = weight_tensor.data.transpose(1, 2)
             weight_tensor.data.copy_(target_weight)
