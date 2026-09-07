@@ -127,7 +127,8 @@ class TestNPUPlatform(TestBase):
     def test_minimax_m3_mixed_kv_cache_auto_config_is_strictly_scoped(self):
         test_cases = (
             (AscendDeviceType.A3, "MiniMaxM3SparseForCausalLM", "fp8"),
-            (AscendDeviceType.A5, "OtherForCausalLM", "fp8"),
+            (AscendDeviceType.A5, "MiniMaxM2ForCausalLM", "fp8"),
+            (AscendDeviceType.A5, "LlamaForCausalLM", "fp8"),
             (AscendDeviceType.A5, "MiniMaxM3SparseForCausalLM", "auto"),
             (AscendDeviceType.A5, "MiniMaxM3SparseForCausalLM", "bfloat16"),
         )
