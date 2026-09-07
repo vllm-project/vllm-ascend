@@ -474,42 +474,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         )
         return attn_metadata
 
-    def _fold_spec_sized_prefill_chunks_into_spec(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        spec_sequence_masks_cpu: torch.Tensor,
-        num_accepted_tokens: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Advance stateful spec-width prompt chunks through live spec inputs."""
-        is_prefilling = common_attn_metadata.is_prefilling
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        if is_prefilling is None or seq_lens_cpu is None or num_accepted_tokens is None:
-            return spec_sequence_masks_cpu, num_accepted_tokens
-
-        num_reqs = min(
-            spec_sequence_masks_cpu.numel(),
-            is_prefilling.numel(),
-            seq_lens_cpu.numel(),
-        )
-        is_prefilling = is_prefilling[:num_reqs]
-        seq_lens_cpu = seq_lens_cpu[:num_reqs]
-        query_lens_cpu = torch.diff(common_attn_metadata.query_start_loc_cpu)[:num_reqs]
-        fold = (
-            is_prefilling
-            & ~spec_sequence_masks_cpu
-            & (query_lens_cpu == self.num_spec + 1)
-            & (seq_lens_cpu > query_lens_cpu)
-        )
-        fold_indices = fold.nonzero(as_tuple=True)[0]
-        if fold_indices.numel() == 0:
-            return spec_sequence_masks_cpu, num_accepted_tokens
-
-        spec_sequence_masks_cpu = spec_sequence_masks_cpu.clone()
-        spec_sequence_masks_cpu[fold_indices] = True
-        num_accepted_tokens = num_accepted_tokens.clone()
-        num_accepted_tokens[fold_indices.to(num_accepted_tokens.device)] = self.num_spec + 1
-        return spec_sequence_masks_cpu, num_accepted_tokens
-
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -550,14 +514,13 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 )
             else:
                 # Dynamic speculative decoding can be enabled while this batch
-                # carries no draft tokens. Treat it as ordinary decode unless a
-                # stateful spec-width prompt chunk must use the spec branch.
+                # carries no draft tokens. Treat it as ordinary decode or
+                # prefill according to the live request metadata.
                 spec_sequence_masks_cpu.zero_()
-            spec_sequence_masks_cpu, num_accepted_tokens = self._fold_spec_sized_prefill_chunks_into_spec(
-                m,
-                spec_sequence_masks_cpu,
-                num_accepted_tokens,
-            )
+            # A spec-sized prefill tail must remain on the live prefill path.
+            # Folding it into spec metadata would force an all-token-accepted
+            # state commit and corrupt conv/recurrent state in concurrent
+            # batches.
             num_spec_decodes = spec_sequence_masks_cpu.sum().item()
             if num_spec_decodes == 0:
                 spec_sequence_masks = None
