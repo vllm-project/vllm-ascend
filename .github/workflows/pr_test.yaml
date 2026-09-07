@@ -592,10 +592,6 @@ jobs:
       base_ref: ${{ github.base_ref }}
       base_sha: ${{ needs.select-tests.outputs.base_sha }}
       test_groups: ${{ needs.select-tests.outputs.test_groups }}
-      # ready-all runs the full e2e suite; load-balanced partitions on slower
-      # hardware (e.g. a3-4 with only 2 groups) can exceed the 120m default
-      # without an actual test failure. Keep the default for ready-precise.
-      timeout-minutes: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') && 240 || 120 }}
 
   run-selected-tests-upstream:
     needs:
