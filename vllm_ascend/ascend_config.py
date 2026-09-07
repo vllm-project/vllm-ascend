@@ -531,8 +531,7 @@ class AscendConfig:
             pcp_size = vc.parallel_config.prefill_context_parallel_size
             if pcp_size > 1:
                 migration = (
-                    "Prefill context parallelism is already enabled; remove "
-                    "enable_dsa_cp from additional_config."
+                    "Prefill context parallelism is already enabled; remove enable_dsa_cp from additional_config."
                 )
             elif tp_size > 1:
                 migration = (
