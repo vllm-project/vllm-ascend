@@ -251,7 +251,7 @@ class AscendRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: torch.Tensor,
+        key: torch.Tensor | None,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
         out_dtype: torch.dtype | None = None,
@@ -264,6 +264,26 @@ class AscendRotaryEmbedding(RotaryEmbedding):
             tp_group = get_tp_group()
             positions = torch.ops.vllm.all_gather(positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name)
 
+        if key is None:
+            dummy_key = (
+                torch.empty(query.shape[0], 0, self.head_size, dtype=query.dtype, device=query.device)
+                if HAS_TRITON
+                else torch.empty(
+                    (query.shape[0], 1, self.head_size) if query.ndim == 3 else (query.shape[0], self.head_size),
+                    dtype=query.dtype,
+                    device=query.device,
+                )
+            )
+            query, _ = rope_forward_oot(
+                positions,
+                query,
+                dummy_key,
+                self.cos_sin_cache,
+                self.head_size,
+                self.rotary_dim,
+                is_neox_style,
+            )
+            return query, None
         rope_args = (
             positions,
             query,
