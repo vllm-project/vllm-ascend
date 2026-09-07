@@ -31,7 +31,7 @@ def _fa_quant_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
 class AscendFAQuantAttentionMethod:
     def __init__(self):
         vllm_config = get_current_vllm_config()
-        config = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_text_config
         self.kv_lora_rank = getattr(config, "kv_lora_rank", 0)
         self.qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
 

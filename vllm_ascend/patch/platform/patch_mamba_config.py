@@ -8,6 +8,9 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
+from vllm_ascend.quantization.utils import model_uses_fa_quantization
+from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD
+
 
 def _using_kv_store(vllm_config) -> bool:
     """
@@ -25,6 +28,29 @@ def _using_kv_store(vllm_config) -> bool:
         if connectors := kv_connector_extra_config.get("connectors"):
             return any(connector.get("kv_connector") == "AscendStoreConnector" for connector in connectors)
     return False
+
+
+def _uses_mla_fa_quant_cache(vllm_config) -> bool:
+    """Return whether MLA stores its latent KV cache in an 8-bit dtype."""
+    model_config = vllm_config.model_config
+    if not model_config.use_mla:
+        return False
+
+    quant_config = getattr(vllm_config, "quant_config", None)
+    if quant_config is not None:
+        if getattr(quant_config, "enable_fa_quant", False):
+            return True
+        if getattr(quant_config, "quant_description", None):
+            return False
+
+    quantization = getattr(model_config, "quantization", None)
+    if quantization not in (None, ASCEND_QUANTIZATION_METHOD):
+        return False
+
+    return model_uses_fa_quantization(
+        model_config.model,
+        revision=getattr(model_config, "revision", None),
+    )
 
 
 @classmethod
@@ -84,6 +110,20 @@ def verify_and_update_config(cls, vllm_config) -> None:
         qk_rope_head_dim = model_config.hf_text_config.qk_rope_head_dim
         attn_single_token_k_page_size = kv_lora_rank * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_rope_token_page_size = qk_rope_head_dim * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
+        if _uses_mla_fa_quant_cache(vllm_config):
+            # MLA C8 quantizes only latent K; the positional cache stays in
+            # model dtype. Use the actual K bytes so the logical block grows
+            # from 384 to 768 tokens and remains aligned with the Mamba state.
+            kv_dtype_size = get_dtype_size(kv_cache_dtype)
+            assert kv_dtype_size == 2, (
+                f"Hybrid MLA C8 cache currently requires a 2-byte unquantized KV dtype, got {kv_cache_dtype}."
+            )
+            attn_single_token_k_page_size //= kv_dtype_size
+            logger.info(
+                "Using hybrid MLA 8-bit latent-cache layout: K=%d B/token, V=%d B/token.",
+                attn_single_token_k_page_size,
+                attn_rope_token_page_size,
+            )
         attn_token_page_size = attn_single_token_k_page_size + attn_rope_token_page_size
     else:
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
