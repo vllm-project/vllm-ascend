@@ -1275,6 +1275,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         ret_hidden_states = self.model(**model_kwargs)
         last_hidden_states, hidden_states = _split_draft_outputs(ret_hidden_states)
+        del ret_hidden_states
 
         # step 1+ skip indexer
         draft_model = getattr(self.model, "model", None)
@@ -1436,6 +1437,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         logits=logits,
                     )
 
+        # Release sampled logits before the next draft forward.
+        logits = None
+
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             if draft_probs_step0 is not None:
@@ -1467,6 +1471,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             positions = self.positions[token_indices_to_sample]
         hidden_states = hidden_states[token_indices_to_sample]
+        del last_hidden_states
         token_indices_to_sample = self.arange[:batch_size]
 
         input_batch_size = num_input_tokens if (self.method == "mtp" or self.use_cuda_graph) else batch_size
@@ -1508,6 +1513,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             self.input_ids[:batch_size] = input_ids
             self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states.view(batch_size, -1)
+            # Release the previous output storage before the next forward.
+            del hidden_states
             if self.supports_mm_inputs:
                 self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
@@ -1549,6 +1556,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             ret_hidden_states = self.model(**model_kwargs)
             last_hidden_states, hidden_states = _split_draft_outputs(ret_hidden_states)
+            del ret_hidden_states
 
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
                 last_hidden_states, model_positions, hidden_states
@@ -1596,6 +1604,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             # TODO(wenlong): get more than one token for tree attention
             hidden_states = hidden_states[:batch_size]
+            del last_hidden_states
+            logits = None
             draft_token_ids_tensor[draft_index + 1] = draft_token_ids
             if draft_probs_list is not None:
                 if draft_probs_step is not None:
