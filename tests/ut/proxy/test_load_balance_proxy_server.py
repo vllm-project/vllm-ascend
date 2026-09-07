@@ -247,61 +247,63 @@ def proxy_server():
         _kill_port(port)
     time.sleep(1)
 
-    # Start mock backends (each in its own process group for clean teardown)
-    procs.append(
-        subprocess.Popen(
-            [sys.executable, test_file, "--mock-backend", str(MOCK_PREFILL_PORT)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+    try:
+        # Start mock backends (each in its own process group for clean teardown)
+        procs.append(
+            subprocess.Popen(
+                [sys.executable, test_file, "--mock-backend", str(MOCK_PREFILL_PORT)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
         )
-    )
-    procs.append(
-        subprocess.Popen(
-            [sys.executable, test_file, "--mock-backend", str(MOCK_DECODE_PORT)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+        procs.append(
+            subprocess.Popen(
+                [sys.executable, test_file, "--mock-backend", str(MOCK_DECODE_PORT)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
         )
-    )
-    assert _wait_health(f"http://127.0.0.1:{MOCK_PREFILL_PORT}/health"), "mock prefill failed to start"
-    assert _wait_health(f"http://127.0.0.1:{MOCK_DECODE_PORT}/health"), "mock decode failed to start"
+        assert _wait_health(f"http://127.0.0.1:{MOCK_PREFILL_PORT}/health"), "mock prefill failed to start"
+        assert _wait_health(f"http://127.0.0.1:{MOCK_DECODE_PORT}/health"), "mock decode failed to start"
 
-    # Start proxy
-    procs.append(
-        subprocess.Popen(
-            [
-                sys.executable,
-                str(PROXY_SCRIPT),
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(PROXY_PORT),
-                "--prefiller-hosts",
-                "127.0.0.1",
-                "--prefiller-ports",
-                str(MOCK_PREFILL_PORT),
-                "--decoder-hosts",
-                "127.0.0.1",
-                "--decoder-ports",
-                str(MOCK_DECODE_PORT),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
+        # Start proxy
+        procs.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    str(PROXY_SCRIPT),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(PROXY_PORT),
+                    "--prefiller-hosts",
+                    "127.0.0.1",
+                    "--prefiller-ports",
+                    str(MOCK_PREFILL_PORT),
+                    "--decoder-hosts",
+                    "127.0.0.1",
+                    "--decoder-ports",
+                    str(MOCK_DECODE_PORT),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
         )
-    )
-    assert _wait_health(f"http://127.0.0.1:{PROXY_PORT}/healthcheck"), "proxy failed to start"
+        assert _wait_health(f"http://127.0.0.1:{PROXY_PORT}/healthcheck"), "proxy failed to start"
 
-    yield f"http://127.0.0.1:{PROXY_PORT}"
-
-    # Teardown
-    for p in procs:
-        with contextlib.suppress(Exception):
-            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-        with contextlib.suppress(Exception):
-            p.kill()
-    time.sleep(1)
+        yield f"http://127.0.0.1:{PROXY_PORT}"
+    finally:
+        # Teardown — must run even when a startup assertion fails, otherwise
+        # the subprocesses leak and cause port conflicts in later tests.
+        for p in procs:
+            with contextlib.suppress(Exception):
+                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            with contextlib.suppress(Exception):
+                p.kill()
+        time.sleep(1)
 
 
 # --------------------------------------------------------------------------- #
@@ -391,8 +393,10 @@ def test_decode_connection_failure(proxy_server):
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    assert _wait_health(f"http://127.0.0.1:{dead_port}/healthcheck", timeout=15)
     try:
+        # The health wait must also be inside `try` so a failed startup
+        # assertion still reaches the cleanup below.
+        assert _wait_health(f"http://127.0.0.1:{dead_port}/healthcheck", timeout=15)
         with httpx.Client(timeout=15) as c:
             r = c.post(
                 f"http://127.0.0.1:{dead_port}/v1/chat/completions",

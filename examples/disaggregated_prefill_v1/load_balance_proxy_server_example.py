@@ -1014,10 +1014,16 @@ async def _replay_first_chunk(first_chunk: bytes, gen: Any):
     returned with the real HTTP status; this replays that chunk so the client
     still receives the full stream.
     """
-    if first_chunk:
-        yield first_chunk
-    async for chunk in gen:
-        yield chunk
+    try:
+        if first_chunk:
+            yield first_chunk
+        async for chunk in gen:
+            yield chunk
+    finally:
+        # Closing this outer generator does not close ``gen``; close it
+        # explicitly so an early client disconnect releases the decode
+        # connection instead of leaking it.
+        await gen.aclose()
 
 
 async def handle_completions_impl(api: str, request: Request):
@@ -1059,6 +1065,11 @@ async def handle_completions_impl(api: str, request: Request):
         try:
             preopened_first = await preopened_gen.__anext__()
         except asyncio.CancelledError:
+            # The cancellation was injected at the __anext__ await point, so
+            # the generator is left suspended inside its `client.stream`
+            # block; close it explicitly to release the decode connection.
+            if preopened_gen is not None:
+                await preopened_gen.aclose()
             await _finish_instance(runtime, instance_info, release_prefill_kv=True)
             request_released = True
             raise
