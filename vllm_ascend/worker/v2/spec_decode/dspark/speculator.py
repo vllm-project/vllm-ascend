@@ -27,6 +27,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.models.qwen3_dspark import process_weight
 from vllm_ascend.utils import (
     get_rotation_matrix,
@@ -117,6 +118,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 self.input_buffers.positions,
                 num_tokens_padded,
                 torch.from_numpy(self.input_batch.is_prefilling_np),
+                attn_state=AscendAttentionState.SpecDecoding,
             ),
         ):
             attn_metadata = self._build_draft_attn_metadata(
@@ -173,7 +175,10 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
+                self.input_buffers.positions,
+                self.max_num_tokens,
+                torch.from_numpy(self.input_batch.is_prefilling_np),
+                attn_state=AscendAttentionState.SpecDecoding,
             ),
         ):
             return super().propose(

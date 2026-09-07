@@ -7,6 +7,7 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -259,6 +260,14 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         )
         self.rotation_path = get_rotation_path(vllm_config)
         self.target_model_path = vllm_config.model_config.model
+        self._load_pp_embedding = get_pp_group().world_size > 1 and self.rotation_path is None
+        if self._load_pp_embedding:
+            target_config = vllm_config.model_config.hf_text_config
+            self.model.embed_tokens = VocabParallelEmbedding(
+                target_config.vocab_size,
+                target_config.hidden_size,
+                prefix=maybe_prefix(maybe_prefix(prefix, "model"), "embed_tokens"),
+            )
         if self.rotation_path is not None:
             target_config = vllm_config.model_config.hf_text_config
             model_prefix = maybe_prefix(prefix, "model")
@@ -330,6 +339,16 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             )
             self.has_own_embed_tokens = True
             self.has_own_lm_head = True
+        elif self._load_pp_embedding:
+            assert self.model.embed_tokens is not None
+            load_quarot_target_layer(
+                self.model.embed_tokens,
+                self.target_model_path,
+                TARGET_EMBED_WEIGHT_NAMES,
+                None,
+                "draft embed_tokens.weight",
+            )
+            self.has_own_embed_tokens = True
         return loaded_weights
 
     def embed_input_ids(
