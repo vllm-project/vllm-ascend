@@ -28,6 +28,9 @@ case "${SOC_ARG}" in
     ascend910_93)
         BATCH_INVARIANT_DEVICE="A3"
         ;;
+    ascend950*)
+        BATCH_INVARIANT_DEVICE="950"
+        ;;
     *)
         log "Warning: batch_invariant not available for SOC_ARG=${SOC_ARG}; skipping"
         exit 0
@@ -50,8 +53,8 @@ case "${ARCH_INFO}" in
 esac
 
 # download and install run package
-BATCH_INVARIANT_RUN_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-1.0.0-linux.${ARCH_SUFFIX}.run"
-BATCH_INVARIANT_RUN_FILE="cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-1.0.0-linux.${ARCH_SUFFIX}.run"
+BATCH_INVARIANT_RUN_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-2.0.0-linux.${ARCH_SUFFIX}.run"
+BATCH_INVARIANT_RUN_FILE="cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-2.0.0-linux.${ARCH_SUFFIX}.run"
 
 log "Downloading batch_invariant run package..."
 unset ASCEND_CUSTOM_OPP_PATH
@@ -70,8 +73,8 @@ fi
 rm -f "${BATCH_INVARIANT_RUN_FILE}"
 
 # download and install whl package
-BATCH_INVARIANT_WHL_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/batch_invariant-torch_ops_extension-1.0.0.zip"
-BATCH_INVARIANT_WHL_FILE="batch_invariant-torch_ops_extension-1.0.0.zip"
+BATCH_INVARIANT_WHL_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vllm-ascend/batch_invariant-torch_ops_extension-2.0.0.zip"
+BATCH_INVARIANT_WHL_FILE="batch_invariant-torch_ops_extension-2.0.0.zip"
 
 log "Downloading batch_invariant whl package..."
 if curl --max-time 3 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1 && [[ -f "${BATCH_INVARIANT_WHL_FILE}" ]]; then

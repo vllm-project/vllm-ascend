@@ -23,12 +23,11 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance currently requires Ascend Atlas A2 and A3 inference products NPUs.
-We will support Ascend 950 Products and other NPUs in the future.
+Batch invariance supports Ascend Atlas A2, A3, and Ascend 950 (Atlas A5) NPUs.
 
 ## Software Requirements
 
-Batch invariance requires custom operators for Atlas A2 and A3 inference products. Set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend from source to build and install the required operator packages.
+Batch invariance requires custom operators for Atlas A2, A3, and Ascend 950 (Atlas A5) products. Set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend from source to build and install the required operator packages.
 
 The `batch_invariant_ops` build and installation process consists of two stages as in the [build_batch_invariant_ops.sh](https://github.com/vllm-project/vllm-ascend/blob/main/csrc/build_batch_invariant_ops.sh), which must run in order:
 
@@ -75,9 +74,16 @@ cd <vllm-ascend-source-dir>
 bash csrc/build_batch_invariant_ops.sh ascend910_93
 ```
 
+**Ascend 950 (Atlas A5):**
+
+```bash
+cd <vllm-ascend-source-dir>
+bash csrc/build_batch_invariant_ops.sh ascend950
+```
+
 ### Use Docker images
 
-The A2 and A3 Docker images build vllm-ascend from source with `VLLM_BATCH_INVARIANT=1`, so the image build installs both the AscendC operator run package and the `batch_invariant_ops` wheel. This build-time environment variable is not retained as a runtime setting. Set `VLLM_BATCH_INVARIANT=1` when starting the server or running offline inference to enable batch invariance.
+The A2, A3, and A5 (Ascend 950) Docker images for Ubuntu and openEuler build vllm-ascend from source with `VLLM_BATCH_INVARIANT=1`, so the image build installs both the AscendC operator run package and the `batch_invariant_ops` wheel. This build-time environment variable is not retained as a runtime setting. Set `VLLM_BATCH_INVARIANT=1` when starting the server or running offline inference to enable batch invariance.
 
 ### Quick Check
 
@@ -106,8 +112,7 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
-  --compilation-config '{"cudagraph_mode": "PIECEWISE"}'
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B
 ```
 
 Then use the OpenAI-compatible client:
@@ -158,7 +163,6 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
-    compilation_config={"cudagraph_mode": "PIECEWISE"},
 )
 
 # Outputs will be deterministic regardless of batch size
@@ -190,8 +194,9 @@ When batch invariance is enabled, vLLM:
 
 !!! note
 
-    The batch invariance attention operators currently do not support
-    `FULL`,`FULL_DECODE_ONLY` cudagraph mode.
+    With the 2.0.0 operator run package, batch invariance supports graph execution,
+    including `FULL` and `FULL_DECODE_ONLY` cudagraph modes. The examples above
+    use the default graph configuration without overriding `cudagraph_mode`.
 
 !!! note
 
@@ -202,7 +207,6 @@ When batch invariance is enabled, vLLM:
 The batch invariance feature is under active development. Planned improvements include:
 
 - Support for additional NPUs series
-- Support `FULL`,`FULL_DECODE_ONLY` cudagraph mode with batch invariance attention operators
 - Expanded model coverage
 - Performance optimizations
 - Additional testing and validation
