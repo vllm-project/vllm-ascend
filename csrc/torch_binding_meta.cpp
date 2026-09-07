@@ -940,11 +940,10 @@ std::tuple<at::Tensor, at::Tensor> npu_turbo_quant_sparse_attn_sharedkv_meta(
 std::tuple<at::Tensor, at::Tensor, at::Tensor> turboquant_sparse_flash_attention_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
     const at::Tensor &sparse_indices, const c10::optional<at::Tensor> &key_dequant_scale,
-    const c10::optional<at::Tensor> &value_dequant_scale, const c10::optional<at::Tensor> &block_table,
-    const c10::optional<at::Tensor> &actual_seq_lengths_query,
-    const c10::optional<at::Tensor> &actual_seq_lengths_kv, double scale_value, int64_t key_quant_mode,
-    int64_t value_quant_mode, int64_t sparse_block_size, c10::string_view layout_query,
-    c10::string_view layout_kv, int64_t sparse_mode, int64_t pre_tokens, int64_t next_tokens,
+    const c10::optional<at::Tensor> &value_dequant_scale, const at::Tensor &block_table,
+    const at::Tensor &actual_seq_lengths_query, const at::Tensor &actual_seq_lengths_kv,
+    double scale_value, int64_t key_quant_mode, int64_t value_quant_mode, int64_t sparse_block_size,
+    c10::string_view layout_query, c10::string_view layout_kv, int64_t sparse_mode,
     int64_t attention_mode, int64_t quant_scale_repo_mode, int64_t tile_size, int64_t rope_head_dim,
     bool return_softmax_lse)
 {
