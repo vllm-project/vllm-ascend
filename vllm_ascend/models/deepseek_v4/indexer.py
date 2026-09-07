@@ -47,6 +47,7 @@ from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     npu_stream_switch,
+    vllm_version_is,
 )
 from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
@@ -104,7 +105,11 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
         # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
         # AttentionSpec.tokens_per_state on main.
-        ratio_kwargs = {"tokens_per_state": self.compress_ratio}
+        ratio_kwargs = (
+            {"compress_ratio": self.compress_ratio}
+            if vllm_version_is("0.28.0")
+            else {"tokens_per_state": self.compress_ratio}
+        )
         return AscendMLAAttentionSpec(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,

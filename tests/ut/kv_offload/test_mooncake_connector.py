@@ -88,7 +88,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is  # noqa: E402
 
 for _k, _v in _saved_modules.items():
     sys.modules[_k] = _v
@@ -103,8 +103,9 @@ def make_mock_kv_caches() -> dict[str, Any]:
 
 
 def make_mock_kv_cache_tensor(size: int, layer_names: list[str]) -> types.SimpleNamespace:
-    """Build the vLLM main descriptor (vLLM #51718 renamed shared_by to layers)."""
-    return types.SimpleNamespace(size=size, layers=layer_names)
+    """Build a lane-specific descriptor (vLLM #51718 renamed shared_by to layers)."""
+    layer_field = "shared_by" if vllm_version_is("0.28.0") else "layers"
+    return types.SimpleNamespace(size=size, **{layer_field: layer_names})
 
 
 def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:

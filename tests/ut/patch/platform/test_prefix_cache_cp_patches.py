@@ -40,16 +40,19 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     """Build a KVCacheTensor; vLLM #51718 renamed shared_by -> layers on main."""
+    if vllm_version_is("0.28.0"):
+        return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
-    return {"tokens_per_state": ratio}
+    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
 def _make_hybrid_kv_cache_config(
@@ -240,7 +243,10 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     assert merged.block_size == spec.block_size
     assert merged.real_page_size_bytes == (512 // 4) * (128 * 2 + 2)
     assert merged.page_size_bytes == spec.page_size_padded
-    assert merged.tokens_per_state == spec.tokens_per_state
+    if vllm_version_is("0.28.0"):
+        assert merged.compress_ratio == spec.compress_ratio
+    else:
+        assert merged.tokens_per_state == spec.tokens_per_state
     assert merged.model_version == spec.model_version
     assert merged.scale_dim == spec.scale_dim
     assert merged.scale_dtype == spec.scale_dtype
@@ -413,6 +419,7 @@ def test_deepseek_v4_scheduler_lcm_uses_logical_group_sizes() -> None:
     assert hash_block_size == 512
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 only changed the main planner")
 def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     planned_tensor = _make_kv_cache_tensor(4096, ["c4_attn", "c128_attn"])
@@ -456,6 +463,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert needed_memory == expected_memory
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 introduced shared backing on main")
 def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> None:
     kv_cache_config = _make_deepseek_v4_kv_cache_config()
     groups = kv_cache_config.kv_cache_groups
@@ -489,6 +497,7 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
         assert tensor.block_stride == page_size
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="vLLM #51718 only re-plans ranks on main")
 def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
     small_page_spec = MLAAttentionSpec(
         block_size=128,
