@@ -3,7 +3,7 @@
 
 from collections import defaultdict
 from types import MethodType, SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 import torch
@@ -1096,3 +1096,170 @@ def test_update_from_output_removes_stopped_preempted_requests():
 
     assert request not in scheduler.waiting
     assert request not in scheduler.skipped_waiting
+
+
+def _prime_running(scheduler, num_requests=2, num_tokens=32, max_tokens=16):
+    block_size = scheduler.vllm_config.cache_config.block_size
+    for i in range(num_requests):
+        scheduler.add_request(
+            create_request(
+                request_id=i + 1,
+                num_tokens=num_tokens,
+                max_tokens=max_tokens,
+                block_size=block_size,
+            )
+        )
+    scheduler.schedule()
+    for req in scheduler.running:
+        req.num_computed_tokens = 0
+        req.num_output_placeholders = 0
+        req.next_decode_eligible_step = 0
+    return scheduler.vllm_config.cache_config.block_size
+
+
+def test_recompute_schedule_preempt_skips_and_waiting_edges():
+    fcfs = _make_recompute_scheduler()
+    _prime_running(fcfs)
+    fcfs.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    fcfs.schedule()
+
+    prio = _make_recompute_scheduler()
+    _prime_running(prio)
+    prio.policy = SchedulingPolicy.PRIORITY
+    prio.running[0].priority = 10
+    prio.running[-1].priority = 0
+    prio.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    prio.schedule()
+
+    offload = _make_recompute_scheduler()
+    _prime_running(offload)
+    offload.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
+    offload.connector = MagicMock()
+    offload.connector.update_state_before_preempt.return_value = True
+    offload.kv_cache_manager.get_block_ids = MagicMock(return_value=([0],))
+    offload.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    offload.schedule()
+
+    fallback = _make_recompute_scheduler()
+    _prime_running(fallback)
+    fallback.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
+    fallback.connector = MagicMock()
+    fallback.connector.update_state_before_preempt.return_value = False
+    fallback.kv_cache_manager.get_block_ids = MagicMock(return_value=([0],))
+    fallback.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    fallback.schedule()
+
+    skips = _make_recompute_scheduler()
+    _prime_running(skips, num_requests=2)
+    if len(skips.running) >= 2:
+        first, second = skips.running
+        first.num_output_placeholders = 2
+        first.num_computed_tokens = first.num_prompt_tokens + first.max_tokens
+        second.next_decode_eligible_step = skips.current_step + 8
+        skips.schedule()
+        first.num_output_placeholders = 0
+        first.num_computed_tokens = 0
+        try:
+            first.is_prefill_chunk = True
+            second.is_prefill_chunk = False
+        except AttributeError:
+            pass
+        second.next_decode_eligible_step = 0
+        skips.schedule(throttle_prefills=True)
+
+    extras = _make_recompute_scheduler()
+    _prime_running(extras, num_requests=1)
+    extras.scheduler_config.long_prefill_token_threshold = 8
+    extras.need_mamba_block_aligned_split = True
+    extras._mamba_block_aligned_split = MagicMock(side_effect=lambda req, n, *a, **k: n)
+    extras.lora_config = MagicMock(max_loras=1)
+    if extras.running:
+        extras.running[0].lora_request = MagicMock(lora_int_id=1)
+        extras.running[0].spec_token_ids = [9, 8, 7]
+    extras.ec_connector = MagicMock()
+    extras._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1]))
+    extras.encoder_cache_manager.allocate = MagicMock()
+    with patch.object(Request, "has_encoder_inputs", new_callable=PropertyMock, return_value=True):
+        extras.schedule()
+
+
+def test_recompute_waiting_connector_lora_stale_and_output_edges():
+    connector_sched = _make_recompute_scheduler()
+    block_size = connector_sched.vllm_config.cache_config.block_size
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.side_effect = [(None, False), (8, True), (4, False)]
+    connector_sched.connector = connector
+    connector_sched.connector_prefix_cache_stats = MagicMock()
+    connector_sched._get_computed_blocks_for_connector = MagicMock(
+        return_value=(connector_sched.kv_cache_manager.empty_kv_cache_blocks, 5, 0, True)
+    )
+    connector_sched._truncate_computed_blocks_for_connector = MagicMock(
+        return_value=connector_sched.kv_cache_manager.empty_kv_cache_blocks
+    )
+    connector_sched.ec_connector = MagicMock()
+    connector_sched.ec_connector.ensure_cache_available.side_effect = [False, True]
+    connector_sched._build_kv_connector_meta = MagicMock(return_value="meta")
+    connector_sched.needs_kv_cache_zeroing = True
+    connector_sched._skip_zero_block_ids = set()
+    connector_sched.kv_cache_manager.get_zeroing_block_ids_in_range = MagicMock(return_value={1})
+    connector_sched.kv_cache_manager.record_prefix_cache_stats = MagicMock()
+    for i in range(3):
+        connector_sched.add_request(create_request(request_id=50 + i, num_tokens=16, max_tokens=4, block_size=block_size))
+    connector_sched.schedule()
+
+    stale = _make_recompute_scheduler()
+    req = create_request(request_id=60, num_tokens=16, max_tokens=4, block_size=block_size)
+    stale.add_request(req)
+    req.num_stale_output_tokens = 2
+    req.drop_stale_output = False
+    stale.schedule()
+
+    resumed = _make_recompute_scheduler()
+    resumed_req = create_request(request_id=61, num_tokens=16, max_tokens=4, block_size=block_size)
+    resumed.add_request(resumed_req)
+    resumed_req.status = RequestStatus.PREEMPTED
+    resumed_req.num_computed_tokens = 4
+    resumed.schedule()
+
+    lora = _make_recompute_scheduler()
+    lora.lora_config = MagicMock(max_loras=1)
+    r1 = create_request(request_id=70, num_tokens=16, max_tokens=4, block_size=block_size)
+    r2 = create_request(request_id=71, num_tokens=16, max_tokens=4, block_size=block_size)
+    r1.lora_request = MagicMock(lora_int_id=1)
+    r2.lora_request = MagicMock(lora_int_id=2)
+    lora.add_request(r1)
+    lora.add_request(r2)
+    lora.schedule()
+
+    output_sched = _make_recompute_scheduler()
+    output_sched.defer_block_free = True
+    output_sched.processed_step_seq = 0
+    output_sched._drain_deferred_frees = MagicMock()
+    output_sched.use_v2_model_runner = True
+    output_sched.dynamic_sd_lookup = {1: 2}
+    output_sched.perf_metrics = MagicMock()
+    output_sched.perf_metrics.is_enabled.return_value = True
+    output_sched.perf_metrics.get_step_perf_stats_per_gpu.return_value = None
+    output_sched.connector = MagicMock()
+    output_sched.connector.get_kv_connector_stats.return_value = None
+    output_sched.connector.take_events.return_value = ["evt"]
+    output_sched.kv_cache_manager.take_events = MagicMock(return_value=["kv"])
+    output_sched.kv_event_publisher = MagicMock()
+    output_sched._build_kv_connector_meta = MagicMock(return_value="meta")
+    output_sched.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
+    output_sched.kv_cache_manager.take_partial_tail_offloads = MagicMock(return_value=["off"])
+    output_sched.kv_cache_manager.take_kv_cache_block_copies = MagicMock(return_value=(["copy"], ["cow"]))
+    output_sched._free_cow_retained_blocks = MagicMock()
+    output_sched.observability_config = SimpleNamespace(enable_logging_iteration_details=True)
+    output_sched._make_scheduled_encoder_input_stats = MagicMock(return_value="enc-stats")
+    out_req = create_request(request_id=80, num_tokens=16, max_tokens=4, block_size=block_size)
+    output_sched.add_request(out_req)
+    out = output_sched.schedule()
+    output_sched.finished_req_ids_dict = {0: {"gone"}, 1: {"other"}}
+    output_sched.grammar_compile_error_reqs = set()
+    kv_out = SimpleNamespace(invalid_block_ids={"b"}, kv_connector_stats=None)
+    model_out = create_model_runner_output(list(output_sched.running) or [out_req])
+    model_out.kv_connector_output = kv_out
+    output_sched._handle_invalid_blocks = MagicMock(return_value=set())
+    output_sched.update_from_output(out, model_out)
+
