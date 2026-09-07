@@ -1626,7 +1626,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_hc_pre_sinkhorn_npu(
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(y, post, comb_frag);
 }
 
-void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice)
+void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const at::Tensor &r2, c10::string_view rotary_mode, at::IntArrayRef partial_slice, bool negate_sin)
 {
     constexpr int BSND_DIM_NUM = 4;
     static const std::unordered_map<std::string, int> mode_map = {
@@ -1643,7 +1643,8 @@ void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const 
     }
     auto origin_dim_num = x.dim();
     TORCH_CHECK(origin_dim_num == BSND_DIM_NUM, "Input tensor x's dim num should be 4, actual ", origin_dim_num, ".");
-    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, r2, it->second, partial_slice);
+    const at::Tensor &sin = negate_sin ? at::neg(r2) : r2;
+    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, sin, it->second, partial_slice);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
@@ -3087,7 +3088,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
 
     ops.def(
         "inplace_partial_rotary_mul("
-            "Tensor(a!) x, Tensor r1, Tensor r2, str rotary_mode, int[] partial_slice"
+            "Tensor(a!) x, Tensor r1, Tensor r2, str rotary_mode, int[] partial_slice, bool negate_sin=False"
         ") -> ()"
     );
     ops.impl("inplace_partial_rotary_mul", torch::kPrivateUse1, &vllm_ascend::inplace_partial_rotary_mul_npu);
