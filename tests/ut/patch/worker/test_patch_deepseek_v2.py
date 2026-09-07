@@ -104,6 +104,7 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
     assert len(receive_buffers) == 1
     assert receive_buffers[0].shape == (3, 2)
     assert receive_buffers[0].dtype == torch.int32
+    assert receive_buffers[0].data_ptr() == topk_indices_buffer.data_ptr()
 
 
 def test_pp_forward_restores_and_propagates_topk_indices(monkeypatch):

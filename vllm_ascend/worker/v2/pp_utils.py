@@ -229,14 +229,21 @@ def configure_pp_topk_transport(model: _PPTopKModel) -> None:
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
+        if batch_size > topk_indices_buffer.shape[0]:
+            raise ValueError(
+                "PP Top-K receive buffer exceeds the model buffer capacity: "
+                f"requested {batch_size} tokens, capacity "
+                f"{topk_indices_buffer.shape[0]}."
+            )
         intermediate_tensors = tensor_factory(batch_size, dtype, device)
-        return add_pp_transport_buffers(
+        # GPUModelRunner copies every received PP tensor into this persistent
+        # factory buffer before graph replay. Alias it to the model-level Top-K
+        # buffer so FULL_DECODE reads the current payload directly, instead of
+        # relying on an in-graph copy into separately captured storage.
+        return add_pp_transport_tensors(
             intermediate_tensors,
             PPTransportDataType.TOPK_INDICES,
-            count=1,
-            shape=(batch_size, *topk_indices_buffer.shape[1:]),
-            dtype=topk_indices_buffer.dtype,
-            device=device,
+            [topk_indices_buffer[:batch_size]],
         )
 
     model.make_empty_intermediate_tensors = wrapped_tensor_factory
