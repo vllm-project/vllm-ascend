@@ -4,6 +4,7 @@
 from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 from safetensors.torch import save_file
 from torch import nn
@@ -16,6 +17,61 @@ from vllm_ascend.models.kimi_k3 import (
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+from vllm_ascend.ops import mla as ascend_mla
+
+
+@pytest.mark.parametrize("use_rope", [False, True])
+@pytest.mark.parametrize("q_lora_rank", [None, 8])
+def test_kimi_mla_subclass_dispatch_preserves_ascend_initialization(monkeypatch, use_rope, q_lora_rank):
+    modules = SimpleNamespace(
+        indexer=None,
+        indexer_rotary_emb=None,
+        is_sparse=False,
+        topk_indices_buffer=None,
+        rotary_emb=nn.Identity() if use_rope else None,
+        fused_qkv_a_proj=nn.Identity() if q_lora_rank is not None else None,
+        q_b_proj=nn.Identity() if q_lora_rank is not None else None,
+        q_a_layernorm=nn.Identity() if q_lora_rank is not None else None,
+        q_proj=nn.Identity() if q_lora_rank is None else None,
+        kv_a_proj_with_mqa=nn.Identity() if q_lora_rank is None else None,
+        kv_a_layernorm=nn.Identity(),
+        kv_b_proj=nn.Identity(),
+        o_proj=nn.Identity(),
+        g_proj=nn.Identity(),
+    )
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=1)),
+        compilation_config=SimpleNamespace(static_forward_context={}),
+    )
+    attention = MagicMock()
+    factory = MagicMock(return_value=attention)
+    monkeypatch.setattr(ascend_mla, "MLAAttention", factory)
+    monkeypatch.setattr(ascend_mla, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(ascend_mla, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    # Instantiate the exact new upstream class, not the replacement directly.
+    wrapper = kimi_k3.KimiK3MultiHeadLatentAttentionWrapper(
+        16, 2, 0.5, 4, 4, 8, q_lora_rank, 8, modules, prefix="model.layers.0.mla"
+    )
+    assert isinstance(wrapper, kimi_k3.AscendKimiK3MultiHeadLatentAttention)
+    assert wrapper.mla_attn is attention
+    assert wrapper.forward.__func__ is ascend_mla.AscendMultiHeadLatentAttention.forward
+    assert config.compilation_config.static_forward_context["model.layers.0.mla"] is wrapper
+    factory.assert_called_once()
+    forwarded = factory.call_args.kwargs
+    for name in (
+        "rotary_emb",
+        "fused_qkv_a_proj",
+        "q_b_proj",
+        "q_a_layernorm",
+        "q_proj",
+        "kv_a_proj_with_mqa",
+        "kv_a_layernorm",
+        "o_proj",
+        "g_proj",
+    ):
+        assert forwarded[name] is getattr(modules, name)
+    assert forwarded["use_mla_rope"] is use_rope
 
 
 def test_kimi_moe_leaves_routed_input_transform_to_runner():
