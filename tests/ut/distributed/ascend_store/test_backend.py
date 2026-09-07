@@ -293,6 +293,7 @@ class TestMooncakeBackendSetup(unittest.TestCase):
         contribute_memory: bool = True,
     ) -> MooncakeBackend:
         backend = MooncakeBackend.__new__(MooncakeBackend)
+        backend.device_id = 0
         backend.parallel_config = MagicMock()
         backend.config = config
         backend.local_seg = None
@@ -416,6 +417,7 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             patch.object(MooncakeBackend, "__init__", lambda self, pc: None),
         ):
             backend = MooncakeBackend.__new__(MooncakeBackend)
+            backend.device_id = 0
             backend.store = MagicMock()
             backend.config = MagicMock()
             backend.local_seg = "127.0.0.1:1234"
@@ -889,7 +891,7 @@ class TestMemcacheBackendMethods(unittest.TestCase):
         with patch.object(MemcacheBackend, "__init__", lambda self, pc: None):
             backend = MemcacheBackend.__new__(MemcacheBackend)
             backend.store = MagicMock()
-            backend.local_rank = 0
+            backend.device_id = 0
             # Set internal state to avoid lazy init logic during tests
             backend._lazy_init = False
             backend._store_initialized = True

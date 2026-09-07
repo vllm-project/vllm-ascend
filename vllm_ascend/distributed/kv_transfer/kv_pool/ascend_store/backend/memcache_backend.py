@@ -7,13 +7,13 @@ from typing import Any
 
 import torch
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
+    get_scheduler_device_id,
 )
 
 
@@ -141,12 +141,14 @@ class MemcacheBackend(Backend):
     def __init__(
         self,
         parallel_config: ParallelConfig,
-        local_rank: int | None = None,
+        device_id: int | None = None,
         init_bm: bool = True,
         lazy_init: bool = False,
     ):
         _validate_device_ub_qos()
-        self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
+        # Capture the bound visible device on the worker thread. A DP shard's
+        # local rank need not equal its device, and new threads default to NPU 0.
+        self.device_id = torch.npu.current_device() if device_id is None else device_id
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()
 
@@ -167,7 +169,7 @@ class MemcacheBackend(Backend):
             if self._store_initialized:
                 return
 
-            logger.info("Initializing Memcache store. local_rank=%d", self.local_rank)
+            logger.info("Initializing Memcache store. device_id=%d", self.device_id)
             self.store = self._setup_store()
             self._store_initialized = True
             self._register_buffers_if_needed()
@@ -182,10 +184,11 @@ class MemcacheBackend(Backend):
                 "to run vLLM with MemcacheConnector."
             ) from e
 
+        self.set_device()
         store = DistributedObjectStore()
 
         try:
-            res = store.init(self.local_rank, init_bm=self._init_bm)
+            res = store.init(self.device_id, init_bm=self._init_bm)
         except ValueError as e:
             logger.error("Configuration loading failed. error=%s. Check memcache config and environment.", e)
             raise
@@ -199,10 +202,8 @@ class MemcacheBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        # The scheduler is a single metadata client. It is initialized before
-        # the world group exists and must not initialize memcache storage, so
-        # keep the old device_id=0/init_bm=False behavior here.
-        return cls(parallel_config, local_rank=0, init_bm=False)
+        # The scheduler only needs metadata access, without contributing BM.
+        return cls(parallel_config, device_id=get_scheduler_device_id(parallel_config), init_bm=False)
 
     def init_store(self, init_bm: bool = True):
         if self.store is not None:
@@ -213,8 +214,7 @@ class MemcacheBackend(Backend):
         self._register_buffers_if_needed()
 
     def set_device(self):
-        device = torch.device(f"npu:{self.local_rank}")
-        torch.npu.set_device(device)
+        torch.npu.set_device(self.device_id)
 
     def register_buffer(self, ptrs: list[int], sizes: list[int]):
         self._pending_buffers = (list(ptrs), list(sizes))
