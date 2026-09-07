@@ -354,6 +354,9 @@ a3-560t:
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-4-cn12-001
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+      - name: compressor-metadata-cross-stream
+        os: linux-aarch64-a3-2-cn12-001
+        tests: tests/e2e/nightly/single_node/ops/singlecard_ops/test_compressor_metadata.py
       # YAML-driven tests
       - name: Qwen3.5-27B-w8a8-A3
         os: linux-aarch64-a3-2-cn12-001
