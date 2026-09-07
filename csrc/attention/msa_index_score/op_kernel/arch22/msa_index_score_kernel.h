@@ -67,8 +67,7 @@ public:
     static_assert(MSA_K_SCRATCH_STAGES_A2 == 4, "A2 int8 K scratch handshake assumes 4 slots");
     // int8：cast 放 epilogue 尾部。EVENT_ID2 每页成对 MTE2_V / V_MTE3 / MTE3_MTE2。
     // 非量化 TND 仍占用 epilogue S 区（gather 在 WaitS 之前，S 尚未载入）。
-    static constexpr uint32_t UB_OFF_CAST_I8 =
-        IS_QUANT ? MsaSegRowMaxEpilogue<true>::UB_OFF_TAIL : 0;
+    static constexpr uint32_t UB_OFF_CAST_I8 = IS_QUANT ? MsaSegRowMaxEpilogue<true>::UB_OFF_TAIL : 0;
     static constexpr uint32_t UB_SIZE_CAST_I8 = MSA_BLOCK_SIZE * MSA_K_TILE * sizeof(int8_t);
     static constexpr uint32_t UB_OFF_CAST_FP = UB_OFF_CAST_I8 + UB_SIZE_CAST_I8;
     static constexpr uint32_t UB_SIZE_CAST_FP = MSA_BLOCK_SIZE * MSA_K_TILE * sizeof(half);
@@ -169,10 +168,9 @@ private:
         return coreKScratch;
     }
 
-    __aicore__ inline void WaitKScratchReady(Catlass::Arch::CrossCoreFlag &flagK0,
-                                             Catlass::Arch::CrossCoreFlag &flagK1,
-                                             Catlass::Arch::CrossCoreFlag &flagK2,
-                                             Catlass::Arch::CrossCoreFlag &flagK3, uint32_t st)
+    __aicore__ inline void WaitKScratchReady(Catlass::Arch::CrossCoreFlag &flagK0, Catlass::Arch::CrossCoreFlag &flagK1,
+                                             Catlass::Arch::CrossCoreFlag &flagK2, Catlass::Arch::CrossCoreFlag &flagK3,
+                                             uint32_t st)
     {
         if constexpr (IS_QUANT_V) {
             const uint32_t slot = st % MSA_K_SCRATCH_STAGES_A2;
@@ -498,8 +496,8 @@ private:
                     const uint64_t sBase =
                         coreWsBase + static_cast<uint64_t>(tileSeq % MSA_WORKSPACE_STAGES) * MSA_STILE_ELEM_NUM;
                     if (stPref < nSt && StileNeedsKScratch(task, stPref * MSA_BLOCKS_PER_STILE)) {
-                        IssueKGatherAndNotify(resource, task, stPref, coreKScratch, subIdx, subBlockNum, flagK0,
-                                              flagK1, flagK2, flagK3);
+                        IssueKGatherAndNotify(resource, task, stPref, coreKScratch, subIdx, subBlockNum, flagK0, flagK1,
+                                              flagK2, flagK3);
                     }
                     epilogue.ProcessSTile(gWorkspace_[sBase], task, st * MSA_BLOCKS_PER_STILE);
                     ++tileSeq;
