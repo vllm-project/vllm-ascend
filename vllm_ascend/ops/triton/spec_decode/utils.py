@@ -117,10 +117,11 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
     while block_start < total_input_tokens:
         offs = block_start + tl.arange(0, TILE_SIZE)
         mask = offs < total_input_tokens
-        pos = tl.load(target_positions_ptr + offs, mask=mask)
-        tl.store(out_context_positions_ptr + offs, pos, mask=mask)
-        slot = tl.load(context_slot_mapping_ptr + offs, mask=mask)
-        tl.store(out_context_slot_mapping_ptr + offs, slot, mask=mask)
+        safe_offs = tl.where(mask, offs, 0)
+        pos = tl.load(target_positions_ptr + safe_offs, mask=mask)
+        tl.store(out_context_positions_ptr + safe_offs, pos, mask=mask)
+        slot = tl.load(context_slot_mapping_ptr + safe_offs, mask=mask)
+        tl.store(out_context_slot_mapping_ptr + safe_offs, slot, mask=mask)
         block_start += block_start_step
 
     # --- Part 2: query block expand ---
@@ -132,8 +133,12 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
         offs = block_start + tl.arange(0, TILE_SIZE)
         mask = offs < num_query_total
 
-        req_idx = offs // num_query_per_req
-        q_idx = offs % num_query_per_req
+        # Ascend SIMT can still lower masked indirect accesses after pointer
+        # arithmetic. Keep every inactive lane inside row/token zero before
+        # constructing any input or output address.
+        safe_offs = tl.where(mask, offs, 0)
+        req_idx = safe_offs // num_query_per_req
+        q_idx = safe_offs % num_query_per_req
 
         ctx_end = tl.load(query_start_loc_ptr + req_idx + 1, mask=mask, other=0)
         if HAS_NUM_REJECTED:
@@ -144,24 +149,22 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
 
         seq_len = tl.load(seq_lens_ptr + req_idx, mask=mask, other=0)
         effective_seq_len = seq_len - num_rejected
+        valid_ctx = (valid_ctx_end > 0) & (valid_ctx_end <= total_input_tokens)
         if CHECK_REQUEST_WINDOW:
             request_window_ok = tl.load(request_window_ok_ptr + req_idx, mask=mask, other=0).to(tl.int1)
-            valid_ctx = request_window_ok & (valid_ctx_end > 0)
-            safe_last_ctx_idx = tl.where(valid_ctx, valid_ctx_end - 1, 0)
-            last_pos = tl.load(
-                target_positions_ptr + safe_last_ctx_idx,
-                mask=mask & valid_ctx,
-                other=0,
-            )
-        else:
-            last_pos = tl.load(target_positions_ptr + valid_ctx_end - 1, mask=mask, other=0)
+            valid_ctx = valid_ctx & request_window_ok
+        safe_last_ctx_idx = tl.where(valid_ctx, valid_ctx_end - 1, 0)
+        last_pos = tl.load(
+            target_positions_ptr + safe_last_ctx_idx,
+            mask=mask & valid_ctx,
+            other=0,
+        )
 
         # RoPE position id of the query token, derived from the last context
         # token's position. Written to out_query_positions for position embeddings.
         query_pos = last_pos + 1 + q_idx
-        if CHECK_REQUEST_WINDOW:
-            query_pos = tl.where(request_window_ok, query_pos, 0)
-        tl.store(out_query_positions_ptr + offs, query_pos, mask=mask)
+        query_pos = tl.where(valid_ctx, query_pos, 0)
+        tl.store(out_query_positions_ptr + safe_offs, query_pos, mask=mask)
 
         # Linear KV-cache token index used to look up the physical slot via the
         # block_table. This is kept separate from query_pos for multimodal
@@ -202,19 +205,19 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
                 other=0,
             ).to(tl.int64)
             slot_q = block_id_q * block_size + (query_kv_slot_pos % block_size)
-        tl.store(out_query_slot_mapping_ptr + offs, slot_q, mask=mask)
+        tl.store(out_query_slot_mapping_ptr + safe_offs, slot_q, mask=mask)
 
         bonus = tl.load(next_token_ids_ptr + req_idx, mask=mask, other=0)
         in_id = tl.where(q_idx == 0, bonus, parallel_drafting_token_id)
-        tl.store(out_input_ids_ptr + offs, in_id, mask=mask)
+        tl.store(out_input_ids_ptr + safe_offs, in_id, mask=mask)
 
         if SAMPLE_FROM_ANCHOR:
             sample_out_idx = req_idx * num_speculative_tokens + q_idx
-            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=mask)
+            tl.store(out_token_indices_ptr + sample_out_idx, safe_offs, mask=mask)
         else:
             sample_mask = mask & (q_idx > 0)
             sample_out_idx = req_idx * num_speculative_tokens + (q_idx - 1)
-            tl.store(out_token_indices_ptr + sample_out_idx, offs, mask=sample_mask)
+            tl.store(out_token_indices_ptr + sample_out_idx, safe_offs, mask=sample_mask)
 
         block_start += block_start_step
 

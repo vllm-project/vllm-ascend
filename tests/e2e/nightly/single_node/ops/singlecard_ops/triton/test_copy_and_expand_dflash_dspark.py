@@ -97,6 +97,9 @@ def copy_and_expand_dflash_dspark_ref(
 # (batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected)
 CONFIGS = [
     (1, [4], 3, False, False),
+    # Regression for a partial query tile: inactive lanes must not construct
+    # out-of-range request or token pointers before their memory masks apply.
+    (29, [4] * 29, 3, True, False),
     (64, [4] * 64, 3, False, False),
     (256, [4] * 256, 3, False, False),
     (1, [2048], 3, False, False),
