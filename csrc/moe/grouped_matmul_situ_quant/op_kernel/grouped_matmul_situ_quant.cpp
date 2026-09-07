@@ -26,7 +26,7 @@ using GmmSituTilingData = gmm_situ::SituTilingHeader;
 // NOTE: the kernel entry and its metadata macros (KERNEL_TASK_TYPE_DEFAULT /
 // REGISTER_TILING_DEFAULT) must stay OUTSIDE any __NPU_ARCH__ guard — the
 // AscendC feature-precompile pass that extracts the tiling struct does not
-// run with __NPU_ARCH__==3510 and would miss them entirely ("do not registe
+// run with __NPU_ARCH__==3510 and would miss them entirely ("do not register
 // tiling struct" / capacity-8 tiling buffer at runtime).
 extern "C" __global__ __aicore__ void grouped_matmul_situ_quant(
     GM_ADDR x, GM_ADDR xScale, GM_ADDR w, GM_ADDR wScale, GM_ADDR groupList,

@@ -1922,6 +1922,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_meta(
     const std::optional<at::Tensor> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
     const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
     int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
     const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
 {
     auto k = x.sym_size(1);
@@ -1948,6 +1949,7 @@ std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
     const std::optional<std::vector<at::Tensor>> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
     const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
     int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
     const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
 {
     auto k = x.sym_size(1);

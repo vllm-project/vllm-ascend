@@ -70,7 +70,7 @@ private:
             CopyOutNZ2ND<enSequentialWrite, T, IS_INTRA_BLOCK>(dst, co1Local, curRow, curCol, baseHeight, baseWidth,
                                                                baseBlockHeight, baseBlockWidth);
         } else {
-            ASCENDC_ASSERT(false, { KERNEL_LOG(KERNEL_ERROR, "CopyOut: unsupport Matmul format type."); });
+            ASCENDC_ASSERT(false, { KERNEL_LOG(KERNEL_ERROR, "CopyOut: unsupported Matmul format type."); });
         }
     }
 
