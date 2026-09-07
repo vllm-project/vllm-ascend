@@ -38,6 +38,12 @@ All speculative decoding methods are configured through the `speculative_config`
 - **`draft_tensor_parallel_size`** (int, optional): Tensor parallelism size for the draft model. Can only be `1` or the same as the target model's tensor parallel size.
 - **`disable_padded_drafter_batch`** (bool, default: `False`): Disable input padding for speculative decoding. If set to `True`, speculative input batches can contain sequences of different lengths, which may only be supported by certain attention backends. **Note:** Only effective with `eagle`, `eagle3`, `mtp`, `dflash`, `draft_model`, and `extract_hidden_states` methods.
 
+Runtime dummy batches can accompany real requests on other DP ranks. Their
+forward token capacity still follows DP padding, but their simulated sampling
+batch is bounded by `max_num_seqs`, including outside memory profiling. Thus a
+64K/128K token prefill does not create thousands of dummy logits rows merely
+because MTP3 is enabled.
+
 **Offline inference** — pass `speculative_config` as a Python dict to `LLM()`:
 
 ```python
