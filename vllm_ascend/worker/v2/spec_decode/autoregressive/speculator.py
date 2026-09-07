@@ -97,15 +97,18 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
     def _create_draft_vllm_config(self) -> VllmConfig:
         """Build the runtime config used while executing the draft model."""
-        parallel_config = replace(
+        # vllm.config.replace rebuilds VllmConfig via its constructor, which
+        # reruns __init__ and __post_init__. That reapplies Ascend platform
+        # configuration for the draft model and can mutate the target's shared
+        # cache layout, so copy the already validated runtime config instead.
+        draft_config = copy(self.vllm_config)
+        draft_config.model_config = self.draft_model_config
+        draft_config.cache_config = copy(self.vllm_config.cache_config)
+        draft_config.parallel_config = replace(
             self.vllm_config.parallel_config,
             pipeline_parallel_size=1,
         )
-        return replace(
-            self.vllm_config,
-            model_config=self.draft_model_config,
-            parallel_config=parallel_config,
-        )
+        return draft_config
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         super().init_cudagraph_manager(cudagraph_mode)
