@@ -11,13 +11,12 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_ascend_config,
     create_mock_vllm_config,
 )
-from vllm_ascend.quantization.compressed_tensors_config import AscendCompressedTensorsConfig
+from vllm_ascend.quantization.configs.compressed_tensors_config import AscendCompressedTensorsConfig
 from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods import (
     AscendW4A8MXFPDynamicFusedMoEMethod,
     AscendW8A8DynamicLinearMethod,
 )
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 KIMI_K3_MXFP4_CONFIG = {
     "config_groups": {
@@ -99,6 +98,21 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         result = self.config._detect_quant_type(weight, input_q, "int-quantized")
         self.assertEqual(result, "W4A8_DYNAMIC")
 
+    def test_w4a8_detection_preserves_release_group_metadata(self):
+        """Both release layouts keep the metadata required by the W4A8 scheme."""
+        for strategy, group_size in (("channel", None), ("group", 128)):
+            with self.subTest(strategy=strategy):
+                weight = self._make_weight_quant(num_bits=4, strategy=strategy, group_size=group_size)
+                input_q = self._make_input_quant(strategy="token", dynamic=True)
+
+                result = self.config._detect_quant_type(weight, input_q, "int-quantized")
+
+                self.assertEqual(result, "W4A8_DYNAMIC")
+                self.assertEqual(self.config.quant_description["group_size"], group_size or 0)
+                self.assertEqual(self.config.quant_description["weight_strategy"], strategy)
+                self.assertEqual(self.config.quant_description["version"], "0")
+                self.assertNotIn("ascend_quant_method", self.config.quant_description)
+
     def test_detect_w4a16(self):
         from compressed_tensors.quantization import QuantizationType
 
@@ -140,14 +154,13 @@ class TestAscendCompressedTensorsQuanType(TestBase):
         weight.group_size = 32
         with (
             patch(
-                "vllm_ascend.quantization.methods.w4a8_mxfp4.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_current_vllm_config",
                 return_value=create_mock_vllm_config(),
             ),
             patch(
-                "vllm_ascend.quantization.methods.w4a8_mxfp4.get_ascend_config",
+                "vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4.get_ascend_config",
                 return_value=create_mock_ascend_config(),
             ),
-            patch("vllm_ascend.quantization.methods.w4a8_mxfp4.get_ep_group", return_value=MagicMock()),
         ):
             scheme = self.config._create_scheme_for_layer_type(
                 weight_quant=weight,
@@ -216,14 +229,12 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
         mock_method.return_value = None
         layer = MagicMock(spec=RowParallelLinear)
         result = self.config.get_quant_method(layer, "model.layers.0.self_attn.q_proj")
-        self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
         self.assertTrue(isinstance(result, AscendLinearMethod))
         self.assertTrue(isinstance(layer.scheme, AscendW8A8DynamicLinearMethod))
 
     def test_get_linear_unquantized_method(self):
         layer = MagicMock(spec=RowParallelLinear)
         result = self.config.get_quant_method(layer, "lm_head")
-        self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
         self.assertTrue(isinstance(result, UnquantizedLinearMethod))
 
     def test_adds_routed_experts_target_for_linear_scheme(self):
@@ -233,7 +244,7 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
 
         self.assertIs(self.config.target_scheme_map["RoutedExperts"], linear_scheme)
 
-    @patch("vllm_ascend.quantization.compressed_tensors_config.find_matched_target", return_value=None)
+    @patch("vllm_ascend.quantization.configs.compressed_tensors_config.find_matched_target", return_value=None)
     def test_get_scheme_dict_returns_none_for_unmatched_target(self, _mock_find_target):
         layer = MagicMock(spec=Attention)
 
@@ -242,7 +253,7 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
         self.assertIsNone(result)
 
     @patch(
-        "vllm_ascend.quantization.compressed_tensors_config.find_matched_target",
+        "vllm_ascend.quantization.configs.compressed_tensors_config.find_matched_target",
         return_value="Linear",
     )
     def test_get_scheme_dict_returns_none_for_none_scheme(self, _mock_find_target):
@@ -264,7 +275,6 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
             result = self.config.get_quant_method(layer, "model.layers.0.mlp.experts")
 
         self.assertIs(result, mock_method.return_value)
-        self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
         self.assertIs(layer.scheme, moe_scheme)
         mock_method.assert_called_once_with(moe_scheme, layer.moe_config, None)
 

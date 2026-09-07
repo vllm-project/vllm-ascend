@@ -28,8 +28,8 @@ from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from .base import AscendMoEScheme, QuantType, get_moe_num_logical_experts
-from .registry import register_scheme
+from ..base import AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from ..registry import register_scheme
 
 
 def unpack_from_int32(

@@ -3,19 +3,14 @@ from typing import Any, Optional, cast
 import torch
 from compressed_tensors.quantization import QuantizationArgs
 from vllm.logger import logger
-from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS, register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig, QuantizeMethodBase
 
 from vllm_ascend.utils import FP8_METHOD
 
-from .methods import get_scheme_class
-
-
-def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:
-    return isinstance(layer, (MoERunner, RoutedExperts))
-
+from ..methods import get_scheme_class
+from ..utils import is_fused_moe_layer
 
 QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
@@ -107,19 +102,16 @@ class AscendFp8Config(QuantizationConfig):
         prefix: str,
         tid2eid=None,
     ) -> Optional["QuantizeMethodBase"]:
-        from .method_adapters import (
+        from ..method_adapters import (
             AscendFusedMoEMethod,
             AscendLinearMethod,
         )
 
         if isinstance(layer, LinearBase):
-            layer.ascend_quant_method = FP8_METHOD
-
             scheme = create_scheme_for_layer(self.quant_description, prefix, "ds_linear", self.packed_modules_mapping)
             quant_method = AscendLinearMethod(scheme)
             return quant_method
-        if _is_fused_moe_layer(layer):
-            layer.ascend_quant_method = FP8_METHOD
+        if is_fused_moe_layer(layer):
             scheme = create_scheme_for_layer(self.quant_description, prefix, "w4a8_moe", self.packed_modules_mapping)
             quant_method = AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)
             return quant_method

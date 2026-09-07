@@ -4,7 +4,7 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_linear_layer, identity
-from vllm_ascend.quantization.methods.w8a16 import AscendW8A16LinearMethod
+from vllm_ascend.quantization.methods.wna16.w8a16 import AscendW8A16LinearMethod
 
 
 class TestAscendW8A16LinearMethod(TestBase):

@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_linear_layer
-from vllm_ascend.quantization.methods.w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
+from vllm_ascend.quantization.methods.w4a4.w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 
 
 class TestAscendW4A4LaosDynamicLinearMethod(TestBase):

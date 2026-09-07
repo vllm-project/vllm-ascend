@@ -18,6 +18,7 @@
 import json
 from pathlib import Path
 
+import torch
 from vllm import envs
 from vllm.logger import logger
 
@@ -28,6 +29,12 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     get_ascend_device_type,
 )
+
+
+def is_fused_moe_layer(layer: torch.nn.Module) -> bool:
+    from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
+
+    return isinstance(layer, (MoERunner, RoutedExperts))
 
 
 def get_model_file(
@@ -109,7 +116,7 @@ def detect_quantization_method(model: str, revision: str | None = None) -> str |
         ``"compressed-tensors"`` for LLM-Compressor models,
         or ``None`` if no quantization signature is found.
     """
-    from vllm_ascend.quantization.modelslim_config import MODELSLIM_CONFIG_FILENAME
+    from vllm_ascend.quantization.configs.modelslim_config import MODELSLIM_CONFIG_FILENAME
 
     # Case 1: ModelSlim — look for quant_model_description.json
     modelslim_path = get_model_file(model, MODELSLIM_CONFIG_FILENAME, revision=revision)
