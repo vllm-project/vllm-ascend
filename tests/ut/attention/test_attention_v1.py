@@ -55,14 +55,14 @@ class TestAttentionGraphHelpers(TestBase):
         vllm_config = MagicMock()
         vllm_config.speculative_config = None
         for device_type in (AscendDeviceType.A2, AscendDeviceType.A3, AscendDeviceType._310P):
-            with self.subTest(device_type=device_type):
-                with patch(
+            with (
+                self.subTest(device_type=device_type),
+                patch(
                     "vllm_ascend.attention.utils.get_current_hardware_profile",
                     return_value=get_hardware_profile(device_type),
-                ):
-                    self.assertTrue(
-                        using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE)
-                    )
+                ),
+            ):
+                self.assertTrue(using_paged_attention(1, vllm_config, head_size=FIA_TND_LARGE_HEAD_FALLBACK_HEAD_SIZE))
 
 
 class TestAscendAttentionBackend(TestBase):
