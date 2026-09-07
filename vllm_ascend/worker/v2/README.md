@@ -42,7 +42,7 @@ to get specific plans.
 
     Why: Upstream vLLM added Model Runner V2 support for
     `extract_hidden_states`. Ascend reuses upstream
-    `ExtractHiddenStatesSpeculator` via `init_speculator` dispatch and keeps
+    `ExtractHiddenStatesSpeculator` unchanged via `init_speculator` and keeps
     `HiddenStateCacheSpec` on a private single-tensor allocate/reshape path.
     `use_aux_hidden_state_outputs` is enabled by upstream
     `GPUModelRunner.__init__` and pinned again on `NPUModelRunner` so Ascend

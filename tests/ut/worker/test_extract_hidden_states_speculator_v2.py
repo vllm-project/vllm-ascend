@@ -48,7 +48,7 @@ def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
         return config, target_device
 
     monkeypatch.setattr(
-        "vllm_ascend.worker.v2.spec_decode.extract_hidden_states.AscendExtractHiddenStatesSpeculator",
+        "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator",
         fake_speculator,
     )
 
@@ -131,35 +131,6 @@ def test_propose_requires_aux_hidden_states():
             slot_mappings={},
             last_hidden_states=torch.empty(0),
             aux_hidden_states=None,
-            num_sampled=torch.empty(0),
-            num_rejected=torch.empty(0),
-            last_sampled=torch.tensor([[10]]),
-            next_prefill_tokens=torch.empty(0),
-            temperature=torch.empty(0),
-            seeds=torch.empty(0),
-        )
-
-
-def test_ascend_propose_reports_configured_layer_ids():
-    from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
-        AscendExtractHiddenStatesSpeculator,
-    )
-
-    speculator = object.__new__(AscendExtractHiddenStatesSpeculator)
-    speculator.num_hidden_states = 3
-    speculator.draft_model_config = SimpleNamespace(
-        hf_config=SimpleNamespace(eagle_aux_hidden_state_layer_ids=[2, 18, 34])
-    )
-    input_batch = cast(Any, SimpleNamespace(idx_mapping=torch.tensor([0], dtype=torch.int32)))
-
-    with pytest.raises(ValueError, match=r"eagle_aux_hidden_state_layer_ids=\[2, 18, 34\]"):
-        AscendExtractHiddenStatesSpeculator.propose(
-            speculator,
-            input_batch=input_batch,
-            attn_metadata={},
-            slot_mappings={},
-            last_hidden_states=torch.empty(0),
-            aux_hidden_states=[torch.zeros(1, 4), torch.zeros(1, 4)],
             num_sampled=torch.empty(0),
             num_rejected=torch.empty(0),
             last_sampled=torch.tensor([[10]]),
