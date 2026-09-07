@@ -81,6 +81,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -109,7 +111,12 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     maybe_create_ubatch_slices,
 )
-from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    allocate_kv_cache,
+    prepare_kernel_block_sizes,
+    select_common_block_size,
+)
 
 # yapf: enable
 from vllm_ascend.ascend_config import get_ascend_config
@@ -187,7 +194,6 @@ from vllm_ascend.utils import (
     is_score_encoder_cache_manager,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
-    model_uses_kpool_indexer,
     oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
@@ -238,6 +244,16 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+@dataclass
+class _LegacyKVCacheTensor:
+    """Compatibility descriptor consumed by the pre-layout-refactor path."""
+
+    size: int
+    shared_by: list[str]
+    offset: int = 0
+    block_stride: int = 0
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
@@ -302,8 +318,8 @@ class ExecuteModelState(NamedTuple):
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        # Must be set before super().__init__() because parent init may call
-        # _allocate_kv_cache_tensors which accesses self.use_compress.
+        # Must be set before super().__init__() because parent initialization
+        # may inspect compressed-cache behavior.
         model_config = getattr(vllm_config, "model_config", None)
         hf_config = getattr(model_config, "hf_config", None) if model_config else None
         self.use_compress = (
@@ -4184,26 +4200,49 @@ class NPUModelRunner(GPUModelRunner):
         return tensor[int(offset) :]
 
     def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
-        """
-        Initialize the memory buffer for KV cache.
+        """Allocate and bind KV cache without migrating special cache types.
 
-        Args:
-            kv_cache_config: The KV cache config
-        Returns:
-            Dict[str, torch.Tensor]: A map between layer names to their
-            corresponding memory buffer for KV cache.
+        Standard GQA/MHA cache uses vLLM's public allocator and strided layout
+        contract. Ascend-specific MLA/SFA, Mamba and cache-only specs retain
+        the existing allocate/reshape/bind path until their layouts and layer
+        bind contracts are migrated independently.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        use_standard_allocator = self._uses_standard_kv_cache_allocator(
+            kv_cache_config
+        )
+        bind_config = kv_cache_config
+        if use_standard_allocator:
+            kernel_block_sizes = prepare_kernel_block_sizes(
+                kv_cache_config, self.attn_groups
+            )
+            kv_caches = allocate_kv_cache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+                kernel_block_sizes,
+            )
+        else:
+            bind_config = self._as_legacy_kv_cache_config(kv_cache_config)
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(bind_config)
+            kv_caches = self._reshape_kv_cache_tensors(
+                bind_config, kv_cache_raw_tensors
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
-        if self.model_config.hf_text_config.model_type == "deepseek_v4":
+        model_type = self.model_config.hf_text_config.model_type
+        num_attn_module = (
+            2
+            if model_type in ("longcat_flash", "longcat_flash_ngram")
+            else 1
+        )
+        if (
+            not use_standard_allocator
+            and model_type == "deepseek_v4"
+        ):
             from vllm_ascend.utils import extract_dsv4_layer_index
 
             assert len(self.kv_caches) == 0
@@ -4215,19 +4254,148 @@ class NPUModelRunner(GPUModelRunner):
             for layer_name, kv_cache in kv_caches.items():
                 self.compilation_config.static_forward_context[
                     layer_name].kv_cache = [kv_cache]
-        else:
+        elif use_standard_allocator:
             from vllm.v1.worker.utils import bind_kv_cache
 
-            model_type = self.model_config.hf_text_config.model_type
-            num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
             bind_kv_cache(
                 kv_caches,
                 self.compilation_config.static_forward_context,
                 self.kv_caches,
                 num_attn_module,
             )
+        else:
+            self._bind_legacy_kv_cache(kv_caches, num_attn_module)
 
         return kv_caches
+
+    def _uses_standard_kv_cache_allocator(
+        self, kv_cache_config: KVCacheConfig
+    ) -> bool:
+        """Return whether every allocated layer is standard GQA/MHA."""
+        if any(
+            not hasattr(kv_cache_tensor, "layers")
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors
+        ):
+            return False
+        if self.use_compress:
+            return False
+
+        special_attention_specs = (
+            MLAAttentionSpec,
+            SlidingWindowMLASpec,
+            EncoderOnlyAttentionSpec,
+            AscendMLAAttentionSpec,
+            AscendSlidingWindowMLASpec,
+            AscendSFAIndexerCacheSpec,
+            HiddenStateCacheSpec,
+        )
+        for group in kv_cache_config.kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            specs = (
+                group_spec.kv_cache_specs.values()
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
+            )
+            if any(
+                not isinstance(spec, AttentionSpec)
+                or isinstance(spec, special_attention_specs)
+                for spec in specs
+            ):
+                return False
+        return True
+
+    def _as_legacy_kv_cache_config(
+        self, kv_cache_config: KVCacheConfig
+    ) -> KVCacheConfig:
+        """Translate the new planner output for the compatibility allocator.
+
+        New ``KVCacheTensor.size`` is the size of one global backing buffer,
+        so it must not be passed to the old per-pool allocator. Reconstruct
+        the former pool grouping from cache groups and compute each pool from
+        the participating specs' page sizes.
+        """
+        if not kv_cache_config.kv_cache_tensors or all(
+            hasattr(tensor, "shared_by")
+            for tensor in kv_cache_config.kv_cache_tensors
+        ):
+            return kv_cache_config
+
+        layer_specs = self._get_layer_kv_cache_specs(kv_cache_config)
+        active_group_layers = [
+            [
+                layer_name
+                for layer_name in group.layer_names
+                if layer_name not in self.runner_only_attn_layers
+            ]
+            for group in kv_cache_config.kv_cache_groups
+        ]
+
+        legacy_tensors: list[_LegacyKVCacheTensor] = []
+        if (
+            len(kv_cache_config.kv_cache_groups) == 1
+            and isinstance(
+                kv_cache_config.kv_cache_groups[0].kv_cache_spec,
+                UniformTypeKVCacheSpecs,
+            )
+        ):
+            for layer_name in active_group_layers[0]:
+                legacy_tensors.append(
+                    _LegacyKVCacheTensor(
+                        size=(
+                            layer_specs[layer_name].page_size_bytes
+                            * kv_cache_config.num_blocks
+                        ),
+                        shared_by=[layer_name],
+                    )
+                )
+        else:
+            group_size = max(
+                (len(layer_names) for layer_names in active_group_layers),
+                default=0,
+            )
+            for layer_idx in range(group_size):
+                shared_by = [
+                    layer_names[layer_idx]
+                    for layer_names in active_group_layers
+                    if layer_idx < len(layer_names)
+                ]
+                page_size = max(
+                    layer_specs[layer_name].page_size_bytes
+                    for layer_name in shared_by
+                )
+                legacy_tensors.append(
+                    _LegacyKVCacheTensor(
+                        size=page_size * kv_cache_config.num_blocks,
+                        shared_by=shared_by,
+                    )
+                )
+
+        legacy_config = copy(kv_cache_config)
+        legacy_config.kv_cache_tensors = legacy_tensors  # type: ignore[assignment]
+        return legacy_config
+
+    def _bind_legacy_kv_cache(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        num_attn_module: int,
+    ) -> None:
+        """Preserve the old direct assignment contract for special caches."""
+        from vllm.v1.worker.utils import extract_layer_index
+
+        assert len(self.kv_caches) == 0
+        index_to_names: defaultdict[int, list[str]] = defaultdict(list)
+        for layer_name in kv_caches:
+            index_to_names[
+                extract_layer_index(layer_name, num_attn_module)
+            ].append(layer_name)
+        for layer_index in sorted(index_to_names):
+            for layer_name in index_to_names[layer_index]:
+                self.kv_caches.append(kv_caches[layer_name])
+
+        for layer_name, kv_cache in kv_caches.items():
+            self.compilation_config.static_forward_context[
+                layer_name
+            ].kv_cache = kv_cache
 
     def _get_layer_kv_cache_specs(self, kv_cache_config: KVCacheConfig) -> dict[str, KVCacheSpec]:
         compilation_config = getattr(self, "compilation_config", None)
@@ -5255,7 +5423,9 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_spec[layer_name] = spec
             elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                    kv_cache_spec[layer_name] = spec
+                    kv_cache_spec[layer_name] = (
+                        attn_module.get_attn_backend().customize_spec(spec)
+                    )
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
@@ -5298,11 +5468,6 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
                         non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
-                        # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
-                        # evenly divide. Ascend binds KV as block-first views
-                        # and indexes padded pages by runtime block stride, so
-                        # unify_kv_cache_spec_page_size may pad them.
-                        indexes_kv_by_block_stride=model_uses_kpool_indexer(self.model_config),
                     )
                     attn_layer_names.add(layer_name)
 
@@ -5311,10 +5476,6 @@ class NPUModelRunner(GPUModelRunner):
                 # V3.2 indexer cache but keep compress_ratio / KpoolTailSpec.
                 if is_glm5_next_kpool_cache(attn_module):
                     if spec := attn_module.get_kv_cache_spec(self.vllm_config):
-                        # Indexer/tail pages do not evenly divide the MLA page.
-                        # Ascend indexes KV by block stride, so opt in to padding.
-                        if isinstance(spec, AttentionSpec):
-                            spec = replace(spec, indexes_kv_by_block_stride=True)
                         kv_cache_spec[layer_name] = spec
                     continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for

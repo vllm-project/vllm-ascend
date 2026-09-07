@@ -428,10 +428,9 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
     def _compute_prefill_context(
         self,
         query: torch.Tensor,
-        kv_cache: tuple[torch.Tensor],
+        kv_cache: torch.Tensor | tuple[torch.Tensor, ...],
         attn_metadata: AscendAttentionDCPMetadata,
     ):
-        assert len(kv_cache) > 1
         assert attn_metadata is not None
         assert attn_metadata.prefill is not None
         assert attn_metadata.prefill.chunked_context is not None
@@ -477,10 +476,9 @@ class AscendAttentionDCPImpl(DCPImplMixin, AscendAttentionBackendImpl):
         return prefix_chunk_output, prefix_chunk_lse
 
     def _load_kv_for_chunk(self, attn_metadata, kv_cache, local_chunked_kv_lens_rank, query, total_toks):
-        cache_key = kv_cache[0]
-        cache_value = kv_cache[1]
+        cache_key, cache_value = self._unpack_kv_cache(kv_cache)
         num_heads = cache_key.size(2)
-        head_size = kv_cache[0].size(-1)
+        head_size = cache_key.size(-1)
 
         key = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
         value = torch.empty(total_toks, num_heads, head_size, dtype=query.dtype, device=query.device)
