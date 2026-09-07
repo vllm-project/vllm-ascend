@@ -1117,6 +1117,15 @@ def _prime_running(scheduler, num_requests=2, num_tokens=32, max_tokens=16):
     return scheduler.vllm_config.cache_config.block_size
 
 
+def _mock_kv_connector(*, matched=(0, False), offload=False):
+    connector = MagicMock()
+    connector.get_num_new_matched_tokens.return_value = matched
+    connector.update_state_before_preempt.return_value = offload
+    connector.ensure_cache_available.return_value = True
+    connector.build_connector_meta.return_value = "meta"
+    return connector
+
+
 def test_recompute_schedule_preempt_skips_and_waiting_edges():
     fcfs = _make_recompute_scheduler()
     _prime_running(fcfs)
@@ -1126,16 +1135,16 @@ def test_recompute_schedule_preempt_skips_and_waiting_edges():
     prio = _make_recompute_scheduler()
     _prime_running(prio)
     prio.policy = SchedulingPolicy.PRIORITY
-    prio.running[0].priority = 10
-    prio.running[-1].priority = 0
+    if len(prio.running) >= 2:
+        prio.running[0].priority = 10
+        prio.running[-1].priority = 0
     prio.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
     prio.schedule()
 
     offload = _make_recompute_scheduler()
     _prime_running(offload)
     offload.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
-    offload.connector = MagicMock()
-    offload.connector.update_state_before_preempt.return_value = True
+    offload.connector = _mock_kv_connector(offload=True)
     offload.kv_cache_manager.get_block_ids = MagicMock(return_value=([0],))
     offload.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
     offload.schedule()
@@ -1143,8 +1152,7 @@ def test_recompute_schedule_preempt_skips_and_waiting_edges():
     fallback = _make_recompute_scheduler()
     _prime_running(fallback)
     fallback.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
-    fallback.connector = MagicMock()
-    fallback.connector.update_state_before_preempt.return_value = False
+    fallback.connector = _mock_kv_connector(offload=False)
     fallback.kv_cache_manager.get_block_ids = MagicMock(return_value=([0],))
     fallback.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
     fallback.schedule()
@@ -1152,7 +1160,7 @@ def test_recompute_schedule_preempt_skips_and_waiting_edges():
     skips = _make_recompute_scheduler()
     _prime_running(skips, num_requests=2)
     if len(skips.running) >= 2:
-        first, second = skips.running
+        first, second = skips.running[0], skips.running[1]
         first.num_output_placeholders = 2
         first.num_computed_tokens = first.num_prompt_tokens + first.max_tokens
         second.next_decode_eligible_step = skips.current_step + 8
@@ -1165,7 +1173,7 @@ def test_recompute_schedule_preempt_skips_and_waiting_edges():
         except AttributeError:
             pass
         second.next_decode_eligible_step = 0
-        skips.schedule(throttle_prefills=True)
+    skips.schedule(throttle_prefills=True)
 
     extras = _make_recompute_scheduler()
     _prime_running(extras, num_requests=1)
@@ -1173,12 +1181,13 @@ def test_recompute_schedule_preempt_skips_and_waiting_edges():
     extras.need_mamba_block_aligned_split = True
     extras._mamba_block_aligned_split = MagicMock(side_effect=lambda req, n, *a, **k: n)
     extras.lora_config = MagicMock(max_loras=1)
+    extras.ec_connector = MagicMock()
+    extras.ec_connector.ensure_cache_available.return_value = True
+    extras._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1]))
+    extras.encoder_cache_manager.allocate = MagicMock()
     if extras.running:
         extras.running[0].lora_request = MagicMock(lora_int_id=1)
         extras.running[0].spec_token_ids = [9, 8, 7]
-    extras.ec_connector = MagicMock()
-    extras._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1]))
-    extras.encoder_cache_manager.allocate = MagicMock()
     with patch.object(Request, "has_encoder_inputs", new_callable=PropertyMock, return_value=True):
         extras.schedule()
 
@@ -1187,7 +1196,12 @@ def test_recompute_waiting_connector_lora_stale_and_output_edges():
     connector_sched = _make_recompute_scheduler()
     block_size = connector_sched.vllm_config.cache_config.block_size
     connector = MagicMock()
-    connector.get_num_new_matched_tokens.side_effect = [(None, False), (8, True), (4, False)]
+    matched = [(None, False), (8, True), (4, False)]
+
+    def _matched(*_a, **_k):
+        return matched.pop(0) if matched else (0, False)
+
+    connector.get_num_new_matched_tokens.side_effect = _matched
     connector_sched.connector = connector
     connector_sched.connector_prefix_cache_stats = MagicMock()
     connector_sched._get_computed_blocks_for_connector = MagicMock(
@@ -1197,7 +1211,13 @@ def test_recompute_waiting_connector_lora_stale_and_output_edges():
         return_value=connector_sched.kv_cache_manager.empty_kv_cache_blocks
     )
     connector_sched.ec_connector = MagicMock()
-    connector_sched.ec_connector.ensure_cache_available.side_effect = [False, True]
+    _ec_calls = {"n": 0}
+
+    def _ensure(*_a, **_k):
+        _ec_calls["n"] += 1
+        return _ec_calls["n"] > 1
+
+    connector_sched.ec_connector.ensure_cache_available.side_effect = _ensure
     connector_sched._build_kv_connector_meta = MagicMock(return_value="meta")
     connector_sched.needs_kv_cache_zeroing = True
     connector_sched._skip_zero_block_ids = set()
@@ -1240,7 +1260,7 @@ def test_recompute_waiting_connector_lora_stale_and_output_edges():
     output_sched.perf_metrics = MagicMock()
     output_sched.perf_metrics.is_enabled.return_value = True
     output_sched.perf_metrics.get_step_perf_stats_per_gpu.return_value = None
-    output_sched.connector = MagicMock()
+    output_sched.connector = _mock_kv_connector()
     output_sched.connector.get_kv_connector_stats.return_value = None
     output_sched.connector.take_events.return_value = ["evt"]
     output_sched.kv_cache_manager.take_events = MagicMock(return_value=["kv"])
