@@ -81,6 +81,33 @@ def test_no_reuse_skips_topology_validation():
     assert kv_cache_config.kv_cache_tensors == original_tensors
 
 
+def test_mamba_spec_with_layer_reuse_is_rejected():
+    spec = MambaSpec(
+        block_size=2,
+        shapes=((1,),),
+        dtypes=(torch.int8,),
+    )
+    layer_names = [f"model.layers.{layer}.self_attn" for layer in range(3)]
+    original_tensors = [KVCacheTensor(size=16, shared_by=[layer_name]) for layer_name in layer_names]
+    kv_cache_config = SimpleNamespace(
+        kv_cache_tensors=original_tensors,
+        kv_cache_groups=[
+            SimpleNamespace(
+                layer_names=layer_names,
+                kv_cache_spec=UniformTypeKVCacheSpecs(
+                    block_size=2,
+                    kv_cache_specs=dict.fromkeys(layer_names, spec),
+                ),
+            )
+        ],
+    )
+
+    # num_shared_buffers=1 with 3 layers engages layer reuse, which cannot
+    # share MambaSpec state buffers across layers.
+    with pytest.raises(ValueError, match="MambaSpec"):
+        apply_layerwise_kv_cache_plan(kv_cache_config, _make_vllm_config(3, 1))
+
+
 def test_base_layers_are_merged_into_shared_slots():
     original_tensors = [KVCacheTensor(size=16, shared_by=[f"model.layers.{layer}.self_attn"]) for layer in range(6)]
     layer_names = [tensor.shared_by[0] for tensor in original_tensors]

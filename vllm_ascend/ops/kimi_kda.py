@@ -27,6 +27,13 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    record_attention_compute_start,
+)
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -541,6 +548,12 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         attn_metadata = attn_metadata_raw[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        # Layerwise KV pool: block until this layer's KV/state blocks finish
+        # loading before any kernel touches conv_state / recurrent_state.
+        # The layer name also routes the per-layer mamba state D2D copy.
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
+
         num_actual_tokens = attn_metadata.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
@@ -716,6 +729,9 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # Idle DP dummy runs carry graph-shaped metadata with no live work.
             # Do not feed a previous replay's output through the norm gate.
             core_attn_out.zero_()
+            # Pair with the wait hook above so the worker's layer counter
+            # stays in sync even for idle runs.
+            maybe_save_kv_layer_to_connector("", [])
             return
 
         num_live_tokens = None
@@ -750,3 +766,8 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # static padding rows whose captured gate values are not live.
         core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
         core_attn_out[:, num_actual_tokens:].zero_()
+        # Layerwise KV pool: this layer's states are written (kernels are
+        # enqueued on the current stream). Record the save event and advance
+        # the worker's layer counter. The layer name is empty because the
+        # worker advances via its current_layer counter (same as GDN path).
+        maybe_save_kv_layer_to_connector("", [])

@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -218,6 +219,19 @@ def build_layerwise_reuse_layout(
 
     physical_layers = sorted(named_specs_by_layer)
     base_layout = build_layerwise_cache_layout(len(physical_layers), extra_config)
+    if base_layout.has_layer_reuse:
+        has_mamba_spec = any(
+            isinstance(named_spec.spec, MambaSpec)
+            for named_specs in named_specs_by_layer.values()
+            for named_spec in named_specs
+        )
+        if has_mamba_spec:
+            raise ValueError(
+                "Layerwise layer reuse (layerwise_num_shared_buffers smaller than "
+                "the number of layers) is not supported for hybrid models with "
+                "MambaSpec layers (e.g. Kimi K3 KDA). Leave "
+                "layerwise_num_shared_buffers unset."
+            )
     independent_layers = [physical_layers[index] for index in base_layout.independent_layers]
     independent_layer_set = set(independent_layers)
 
