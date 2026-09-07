@@ -159,14 +159,26 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             # can be a multiple of hash_block_size.
             self.hash_block_size = hash_block_size
             if enable_caching:
-                # The GLM kpool tail spec uses block_size=index_kpool and opts
-                # out of prefix caching, so it is not bound by the MLA hash
-                # block size.
-                assert all(
-                    self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
+                # Align with upstream vLLM semantics (vllm/v1/core/kv_cache_coordinator.py):
+                # the hash granularity and every participating group's effective block
+                # size must be aligned in either direction — a hash block covers an
+                # integer number of group blocks (fine-grained groups, e.g. 128-token
+                # attention blocks alongside 768-token GDN/mamba state blocks), or one
+                # group block covers an integer number of hash blocks (coarse groups on
+                # the partial-hit path). Groups that opt out of prefix caching (e.g. the
+                # GLM kpool tail spec) are not bound by the hash granularity. This also
+                # no longer trusts the caller-provided scheduler_block_size, which may
+                # be None or a non-LCM value depending on the caller.
+                eff_sizes = [
+                    self._get_effective_block_size(g.kv_cache_spec)
                     for g in kv_cache_config.kv_cache_groups
                     if getattr(g.kv_cache_spec, "participates_in_prefix_caching", True)
-                ), "block_size must be divisible by hash_block_size"
+                ]
+                assert all(hash_block_size % size == 0 or size % hash_block_size == 0 for size in eff_sizes), (
+                    f"hash_block_size={hash_block_size} must be aligned with every "
+                    f"participating group's effective block size in either direction, "
+                    f"effective={eff_sizes}"
+                )
             self.enable_partial_hash_hits = dcp_world_size == 1 and any(
                 isinstance(g.kv_cache_spec, MambaSpec)
                 and g.kv_cache_spec.mamba_cache_mode == "align"
@@ -272,14 +284,26 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             # can be a multiple of hash_block_size.
             self.hash_block_size = hash_block_size
             if enable_caching:
-                # The GLM kpool tail spec uses block_size=index_kpool and opts
-                # out of prefix caching, so it is not bound by the MLA hash
-                # block size.
-                assert all(
-                    self._get_effective_block_size(g.kv_cache_spec) % hash_block_size == 0
+                # Align with upstream vLLM semantics (vllm/v1/core/kv_cache_coordinator.py):
+                # the hash granularity and every participating group's effective block
+                # size must be aligned in either direction — a hash block covers an
+                # integer number of group blocks (fine-grained groups, e.g. 128-token
+                # attention blocks alongside 768-token GDN/mamba state blocks), or one
+                # group block covers an integer number of hash blocks (coarse groups on
+                # the partial-hit path). Groups that opt out of prefix caching (e.g. the
+                # GLM kpool tail spec) are not bound by the hash granularity. This also
+                # no longer trusts the caller-provided scheduler_block_size, which may
+                # be None or a non-LCM value depending on the caller.
+                eff_sizes = [
+                    self._get_effective_block_size(g.kv_cache_spec)
                     for g in kv_cache_config.kv_cache_groups
                     if getattr(g.kv_cache_spec, "participates_in_prefix_caching", True)
-                ), "block_size must be divisible by hash_block_size"
+                ]
+                assert all(hash_block_size % size == 0 or size % hash_block_size == 0 for size in eff_sizes), (
+                    f"hash_block_size={hash_block_size} must be aligned with every "
+                    f"participating group's effective block size in either direction, "
+                    f"effective={eff_sizes}"
+                )
             self.enable_partial_hash_hits = dcp_world_size == 1 and any(
                 isinstance(g.kv_cache_spec, MambaSpec)
                 and g.kv_cache_spec.mamba_cache_mode == "align"
