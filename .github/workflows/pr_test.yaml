@@ -104,7 +104,6 @@ jobs:
           # Short form is for display only (job names); main_commit keeps the
           # full hash for checkout refs and artifact names.
           echo "main_commit_short=${main_commit:0:7}" >> "$GITHUB_OUTPUT"
-
           release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
             echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
@@ -645,8 +644,10 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
         vllm_version_short:
           - ${{ needs.pre-commit.outputs.main_commit_short }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests_upstream.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -672,8 +673,10 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
         vllm_version_short:
           - ${{ needs.pre-commit.outputs.main_commit_short }}
+          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}

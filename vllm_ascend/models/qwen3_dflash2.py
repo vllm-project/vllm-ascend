@@ -225,8 +225,8 @@ class CandidateSelector(nn.Module):
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
     # vLLM #52816 switched the parent constructor from its module global to
-    # this class factory. Declare the main-lane factory so DFlash2 decoder
-    # layers are built.
+    # this class factory. Declare the factory so DFlash2 decoder layers are
+    # built on both v0.28.0 and current main.
     decoder_layer_cls = DFlash2Qwen3DecoderLayer
 
     def __init__(

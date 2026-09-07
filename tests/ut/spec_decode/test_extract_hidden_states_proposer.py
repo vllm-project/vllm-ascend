@@ -36,9 +36,9 @@ from vllm_ascend.spec_decode.extract_hidden_states_proposer import (
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    # CpuGpuBuffer defaults pin_memory=PIN_MEMORY (True), which requires NPU
-    # registration. Strip pin_memory from torch.zeros since the test runs on
-    # CPU without NPU.
+    # CpuGpuBuffer defaults pin_memory=PIN_MEMORY (True),
+    # which requires NPU registration. Strip pin_memory from torch.zeros
+    # since the test runs on CPU without NPU.
     original_zeros = torch.zeros
 
     def _zeros(*args, pin_memory=False, **kwargs):
