@@ -44,16 +44,10 @@ def _make_model_config(**kwargs) -> SimpleNamespace:
 def _make_vllm_config(
     model_config=None,
     speculative_config=None,
-    additional_config=None,
-    lora_config=None,
-    offload_config=None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=model_config,
         speculative_config=speculative_config,
-        additional_config=additional_config,
-        lora_config=lora_config,
-        offload_config=offload_config,
     )
 
 
@@ -94,74 +88,6 @@ class TestIsDefaultV2ModelRunnerModel:
 class TestIsSupportedV2ModelRunnerFeature:
     def test_without_speculative_config(self):
         config = _make_vllm_config(speculative_config=None)
-
-        assert is_supported_v2_model_runner_feature(config) is True
-
-    def test_dynamic_spec_config_forces_v1(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        config = _make_vllm_config(
-            additional_config={"dynamic_spec_config": {"method": "dspark", "method_params": {}}},
-        )
-
-        assert is_supported_v2_model_runner_feature(config) is False
-
-    def test_dynamic_spec_config_with_none_method(self):
-        config = _make_vllm_config(
-            additional_config={"dynamic_spec_config": {"method": None, "method_params": {}}},
-        )
-
-        assert is_supported_v2_model_runner_feature(config) is True
-
-    def test_num_speculative_tokens_per_batch_size_forces_v1(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        config = _make_vllm_config(
-            speculative_config=SimpleNamespace(method="eagle3", num_speculative_tokens_per_batch_size=4),
-        )
-
-        assert is_supported_v2_model_runner_feature(config) is False
-
-    def test_lora_forces_v1(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        config = _make_vllm_config(lora_config=SimpleNamespace(max_lora_rank=16))
-
-        assert is_supported_v2_model_runner_feature(config) is False
-
-    def test_prefetch_offload_forces_v1(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        offload_config = SimpleNamespace(
-            offload_backend="prefetch",
-            uva=SimpleNamespace(cpu_offload_gb=0),
-            prefetch=SimpleNamespace(offload_group_size=4),
-        )
-        config = _make_vllm_config(offload_config=offload_config)
-
-        assert is_supported_v2_model_runner_feature(config) is False
-
-    def test_uva_offload_forces_v1(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        offload_config = SimpleNamespace(
-            offload_backend="auto",
-            uva=SimpleNamespace(cpu_offload_gb=8),
-            prefetch=SimpleNamespace(offload_group_size=0),
-        )
-        config = _make_vllm_config(offload_config=offload_config)
-
-        assert is_supported_v2_model_runner_feature(config) is False
-
-    def test_inactive_offload_config_keeps_v2(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        offload_config = SimpleNamespace(
-            offload_backend="auto",
-            uva=SimpleNamespace(cpu_offload_gb=0),
-            prefetch=SimpleNamespace(offload_group_size=0),
-        )
-        config = _make_vllm_config(offload_config=offload_config)
-
-        assert is_supported_v2_model_runner_feature(config) is True
-
-    def test_missing_offload_config_keeps_v2(self, monkeypatch):
-        monkeypatch.setattr(mrv2_utils.logger, "info_once", lambda *args: None)
-        config = _make_vllm_config()
 
         assert is_supported_v2_model_runner_feature(config) is True
 
@@ -210,13 +136,14 @@ class TestV2ModelRunnerEnvironmentReady:
 
         assert _v2_model_runner_environment_ready(config) is True
 
-    def test_without_triton_on_310p(self, monkeypatch):
-        # 310P does not require Triton for the V2 model runner.
+    @pytest.mark.parametrize("has_triton", [True, False])
+    def test_310p_excluded_regardless_of_triton(self, monkeypatch, has_triton):
+        # 310P does not support the V2 model runner.
         monkeypatch.setattr(mrv2_utils, "is_310p", lambda: True)
-        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", False)
+        monkeypatch.setattr("vllm.triton_utils.HAS_TRITON", has_triton)
         config = _make_vllm_config(speculative_config=None)
 
-        assert _v2_model_runner_environment_ready(config) is True
+        assert _v2_model_runner_environment_ready(config) is False
 
 
 class TestUseV2ModelRunner:

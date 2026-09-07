@@ -445,8 +445,8 @@ class NPUPlatform(Platform):
         # customize the default V2 model runner decision; the whitelist
         # logic itself lives in vllm_ascend.mrv2_utils.
         # The upstream V2 validation is also neutralized, since Ascend fully
-        # owns the V2 enablement decision (e.g. it runs on 310P without
-        # Triton, which the upstream validation would reject).
+        # owns the V2 enablement decision (the platform / Triton gates in
+        # mrv2_utils differ from the upstream validation).
         # TODO(wxsIcey): Remove this once upstream vLLM allows platforms to
         # override the default, and contribute the whitelist upstream.
         apply_v2_model_runner_config_patch()

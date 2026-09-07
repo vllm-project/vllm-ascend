@@ -43,10 +43,10 @@ def _validate_v2_model_runner(vllm_config: VllmConfig) -> None:
     Ascend fully owns the V2 model runner enablement decision through the model
     / feature whitelists in :func:`use_v2_model_runner`, so the upstream checks
     -- Triton availability plus the list of features the *upstream* GPU V2
-    runner does not yet support -- are intentionally decoupled. Otherwise
-    enabling V2 on 310P (which runs the V2 runner without Triton) would fail at
-    config construction with the upstream "Model Runner V2 requires Triton."
-    error.
+    runner does not yet support -- are intentionally decoupled. Otherwise a V2
+    enablement decision made here (e.g. via an explicit
+    ``VLLM_USE_V2_MODEL_RUNNER=1``) could fail at config construction with
+    upstream checks that do not apply to the Ascend runner.
     """
 
 
@@ -92,59 +92,8 @@ def is_default_v2_model_runner_model(vllm_config: VllmConfig) -> bool:
     return any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
 
 
-def _dynamic_spec_config_enabled(vllm_config: VllmConfig) -> bool:
-    """Whether the user opted into the dynamic speculative-length path.
-
-    Reads the raw ``additional_config`` dict instead of the parsed
-    ``AscendConfig`` because this module can be consulted (through the
-    ``use_v2_model_runner`` property) before ``init_ascend_config`` has run.
-    """
-    additional_config = getattr(vllm_config, "additional_config", None) or {}
-    dynamic_spec_config = additional_config.get("dynamic_spec_config") or {}
-    return dynamic_spec_config.get("method") is not None
-
-
-def _cpu_weight_offload_enabled(vllm_config: VllmConfig) -> bool:
-    """Whether any CPU weight offloading is requested.
-
-    Covers both the prefetch backend (``offload_backend='prefetch'`` or
-    ``offload_group_size > 0``) and the UVA backend (``offload_backend='uva'``
-    or ``cpu_offload_gb > 0``). With the default ``offload_backend='auto'``
-    and all-default sub-configs, offloading is inactive.
-    """
-    offload_config = getattr(vllm_config, "offload_config", None)
-    if offload_config is None:
-        return False
-    return (
-        offload_config.offload_backend != "auto"
-        or offload_config.uva.cpu_offload_gb > 0
-        or offload_config.prefetch.offload_group_size > 0
-    )
-
-
 def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
     """Feature whitelist: only whitelisted features may be enabled with a whitelisted model."""
-    # Dynamic speculative length (dynamic_spec_config in additional_config or
-    # num_speculative_tokens_per_batch_size in speculative_config) is only
-    # implemented for the V1 model runner.
-    if _dynamic_spec_config_enabled(vllm_config) or (
-        vllm_config.speculative_config is not None
-        and getattr(vllm_config.speculative_config, "num_speculative_tokens_per_batch_size", None)
-    ):
-        logger.info_once(
-            "Dynamic speculative length is not supported by Model Runner V2; using the V1 model runner instead."
-        )
-        return False
-    # LoRA adapters are only supported by the V1 model runner.
-    if getattr(vllm_config, "lora_config", None) is not None:
-        logger.info_once("LoRA is not supported by Model Runner V2; using the V1 model runner instead.")
-        return False
-    # CPU weight offloading is only supported by the V1 model runner.
-    if _cpu_weight_offload_enabled(vllm_config):
-        logger.info_once(
-            "CPU weight offloading is not supported by Model Runner V2; using the V1 model runner instead."
-        )
-        return False
     speculative_config = vllm_config.speculative_config
     if speculative_config is None:
         return True
@@ -158,13 +107,17 @@ def is_supported_v2_model_runner_feature(vllm_config: VllmConfig) -> bool:
 
 
 def _v2_model_runner_environment_ready(vllm_config: VllmConfig) -> bool:
-    """Check the remaining V2 gates (feature whitelist + Triton availability)."""
+    """Check the remaining V2 gates (feature whitelist + platform + Triton)."""
     if not is_supported_v2_model_runner_feature(vllm_config):
+        return False
+
+    if is_310p():
+        logger.warning_once("Model Runner V2 is not supported on 310P; using the V1 model runner instead.")
         return False
 
     from vllm.triton_utils import HAS_TRITON
 
-    if not is_310p() and not HAS_TRITON:
+    if not HAS_TRITON:
         logger.warning_once("Model Runner V2 requires Triton; using the V1 model runner instead.")
         return False
 
@@ -178,11 +131,8 @@ def use_v2_model_runner(vllm_config: VllmConfig) -> bool:
     runner is enabled by default only when all of the following hold:
 
     * the model is on the default-V2 model whitelist,
-    * the enabled features are on the V2 feature whitelist (dynamic
-      speculative length -- ``dynamic_spec_config`` or
-      ``num_speculative_tokens_per_batch_size`` -- LoRA, and CPU weight
-      offloading force V1),
-    * the runtime provides Triton.
+    * the enabled features are on the V2 feature whitelist,
+    * the platform is not 310P and the runtime provides Triton.
     """
     use_v2_model_runner = envs_vllm.VLLM_USE_V2_MODEL_RUNNER
     if use_v2_model_runner is not None:
