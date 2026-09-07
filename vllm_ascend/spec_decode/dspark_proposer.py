@@ -95,7 +95,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         # references here because K3 draft layers can span multiple cache
         # groups with different logical block sizes.
         self._per_group_block_tables: dict[int, torch.Tensor] = {}
-        self._per_group_block_tables_cpu: dict[int, torch.Tensor] = {}
         self._per_group_slot_mappings: dict[int, torch.Tensor] = {}
         self._per_group_num_blocks_per_row: dict[int, torch.Tensor] = {}
         self._per_group_num_blocks_per_row_cpu: dict[int, torch.Tensor] = {}
@@ -110,8 +109,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._per_group_context_slot_mapping_buffers: dict[int, torch.Tensor] = {}
         self._context_slot_mapping_buffers: list[torch.Tensor | None] | None = None
         self._request_window_ok = torch.zeros(self.max_batch_size, dtype=torch.bool, device=device)
-        self._row_indices = torch.arange(self.max_batch_size, dtype=torch.int64, device=device)
-        self._row_indices_cpu = torch.arange(self.max_batch_size, dtype=torch.int64)
         self._last_valid_draft_counts_cpu: list[int] | None = None
 
     def _compute_confidence(
@@ -225,7 +222,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         slot_mapping: torch.Tensor,
         num_blocks_per_row: torch.Tensor | None = None,
         num_blocks_per_row_cpu: torch.Tensor | None = None,
-        block_table_cpu: torch.Tensor | None = None,
     ) -> None:
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
@@ -242,14 +238,8 @@ class AscendDSparkProposer(AscendDflashProposer):
                 block_table.shape[1],
                 dtype=torch.int32,
             )
-        if block_table_cpu is None:
-            block_table_cpu = torch.ones(
-                block_table.shape,
-                dtype=torch.int32,
-            )
         self._per_group_num_blocks_per_row[gid] = num_blocks_per_row
         self._per_group_num_blocks_per_row_cpu[gid] = num_blocks_per_row_cpu
-        self._per_group_block_tables_cpu[gid] = block_table_cpu
 
     def mask_invalid_draft_output(self, draft_token_ids: torch.Tensor) -> torch.Tensor:
         """Turn drafts from unsafe request windows into scheduler placeholders."""
@@ -318,23 +308,10 @@ class AscendDSparkProposer(AscendDflashProposer):
                 block_size,
                 rounding_mode="floor",
             )
-            first_block = torch.div(
-                effective_seq_lens[:batch_size],
-                block_size,
-                rounding_mode="floor",
-            )
-            last_block = required_blocks - 1
-            safe_first_block = first_block.clamp(min=0, max=block_table.shape[1] - 1)
-            safe_last_block = last_block.clamp(min=0, max=block_table.shape[1] - 1)
-            row_indices = self._row_indices[:batch_size]
-            first_block_ids = block_table[row_indices, safe_first_block.to(torch.int64)]
-            last_block_ids = block_table[row_indices, safe_last_block.to(torch.int64)]
             if self.num_query_per_req > block_size:
                 request_window_ok.zero_()
             request_window_ok.logical_and_(required_blocks <= valid_blocks)
             request_window_ok.logical_and_(valid_blocks <= block_table.stride(0))
-            request_window_ok.logical_and_(first_block_ids != 0)
-            request_window_ok.logical_and_(last_block_ids != 0)
 
         host_seq_lens = cad._seq_lens_cpu
         if host_seq_lens is None:
@@ -349,30 +326,16 @@ class AscendDSparkProposer(AscendDflashProposer):
                 gid = attn_group.kv_cache_group_id
                 block_size = self._per_group_kernel_block_sizes[gid]
                 block_table = self._per_group_block_table_buffers[gid]
-                block_table_cpu = self._per_group_block_tables_cpu[gid]
                 valid_blocks_cpu = self._per_group_num_blocks_per_row_cpu[gid][:batch_size]
                 required_blocks_cpu = torch.div(
                     host_window_end + block_size - 1,
                     block_size,
                     rounding_mode="floor",
                 )
-                first_block_cpu = torch.div(
-                    host_seq_lens[:batch_size],
-                    block_size,
-                    rounding_mode="floor",
-                )
-                last_block_cpu = required_blocks_cpu - 1
-                safe_first_block_cpu = first_block_cpu.clamp(min=0, max=block_table_cpu.shape[1] - 1)
-                safe_last_block_cpu = last_block_cpu.clamp(min=0, max=block_table_cpu.shape[1] - 1)
-                row_indices_cpu = self._row_indices_cpu[:batch_size]
-                first_block_ids_cpu = block_table_cpu[row_indices_cpu, safe_first_block_cpu.to(torch.int64)]
-                last_block_ids_cpu = block_table_cpu[row_indices_cpu, safe_last_block_cpu.to(torch.int64)]
                 if self.num_query_per_req > block_size:
                     host_window_ok.zero_()
                 host_window_ok.logical_and_(required_blocks_cpu <= valid_blocks_cpu)
                 host_window_ok.logical_and_(valid_blocks_cpu <= block_table.stride(0))
-                host_window_ok.logical_and_(first_block_ids_cpu != 0)
-                host_window_ok.logical_and_(last_block_ids_cpu != 0)
             self._last_valid_draft_counts_cpu = torch.where(
                 host_window_ok,
                 self.num_speculative_tokens,

@@ -94,25 +94,37 @@ def copy_and_expand_dflash_dspark_ref(
     }
 
 
-# (batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected)
+# (batch_size, ctx_lens, num_spec, sample_from_anchor,
+#  has_num_rejected, check_request_window)
 CONFIGS = [
-    (1, [4], 3, False, False),
+    (1, [4], 3, False, False, False),
     # Regression for a partial query tile: inactive lanes must not construct
-    # out-of-range request or token pointers before their memory masks apply.
-    (29, [4] * 29, 3, True, False),
-    (64, [4] * 64, 3, False, False),
-    (256, [4] * 256, 3, False, False),
-    (1, [2048], 3, False, False),
-    (4, [1024] * 4, 3, False, False),
-    (8, [512] * 8, 3, False, False),
-    (64, [4] * 64, 3, True, False),
-    (64, [4] * 64, 3, False, True),
-    (8, [512] * 8, 3, True, True),
+    # out-of-range pointers. Block ID zero is a valid allocation and must pass
+    # the request-window guard rather than being treated as a padding sentinel.
+    (29, [4] * 29, 3, True, False, True),
+    (64, [4] * 64, 3, False, False, False),
+    (256, [4] * 256, 3, False, False, False),
+    (1, [2048], 3, False, False, False),
+    (4, [1024] * 4, 3, False, False, False),
+    (8, [512] * 8, 3, False, False, False),
+    (64, [4] * 64, 3, True, False, False),
+    (64, [4] * 64, 3, False, True, False),
+    (8, [512] * 8, 3, True, True, False),
 ]
 
 
-@pytest.mark.parametrize("batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected", CONFIGS)
-def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_from_anchor, has_num_rejected):
+@pytest.mark.parametrize(
+    "batch_size,ctx_lens,num_spec,sample_from_anchor,has_num_rejected,check_request_window",
+    CONFIGS,
+)
+def test_copy_and_expand_dflash_dspark(
+    batch_size,
+    ctx_lens,
+    num_spec,
+    sample_from_anchor,
+    has_num_rejected,
+    check_request_window,
+):
     init_device_properties_triton()
     device = "npu"
     torch.manual_seed(0)
@@ -127,6 +139,8 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
     total_ctx = int(query_start_loc[-1].item())
 
     history = torch.randint(0, 100, (batch_size,), dtype=torch.int32, device=device)
+    if check_request_window:
+        history[0] = 0
     seq_lens = ctx + history
     target_positions = torch.cat(
         [
@@ -141,6 +155,10 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
     )
     max_blocks = int((seq_lens.max() + num_query_per_req + KV_BLOCK_SIZE) // KV_BLOCK_SIZE) + 2
     block_table = torch.randint(1, 10000, (batch_size, max_blocks), dtype=torch.int32, device=device)
+    if check_request_window:
+        block_table[0, 0] = 0
+    num_blocks_per_row = torch.full((batch_size,), max_blocks, dtype=torch.int32, device=device)
+    request_window_ok = torch.ones(batch_size, dtype=torch.bool, device=device)
 
     if has_num_rejected:
         num_rejected_tokens = torch.minimum(
@@ -201,6 +219,10 @@ def test_copy_and_expand_dflash_dspark(batch_size, ctx_lens, num_spec, sample_fr
         HAS_NUM_REJECTED=has_num_rejected,
         SAMPLE_FROM_ANCHOR=sample_from_anchor,
         TILE_SIZE=_COPY_EXPAND_TILE_SIZE,
+        num_blocks_per_row_ptr=num_blocks_per_row,
+        request_window_ok_ptr=request_window_ok,
+        padding_slot_id=-1,
+        CHECK_REQUEST_WINDOW=check_request_window,
     )
 
     torch.testing.assert_close(out_input_ids, ref["out_input_ids"])

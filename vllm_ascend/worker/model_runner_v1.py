@@ -3451,18 +3451,15 @@ class NPUModelRunner(GPUModelRunner):
                 num_blocks_per_row_cpu = blk_table.num_blocks_per_row_buffer.cpu[
                     :num_reqs_padded
                 ]
-                block_table_cpu = blk_table.get_cpu_tensor()[:num_reqs_padded]
                 if num_reqs_padded > num_reqs:
                     num_blocks_per_row[num_reqs:].zero_()
                     num_blocks_per_row_cpu[num_reqs:].zero_()
-                    block_table_cpu[num_reqs:].zero_()
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid,
                     cm.block_table_tensor,
                     cm.slot_mapping,
                     num_blocks_per_row,
                     num_blocks_per_row_cpu,
-                    block_table_cpu,
                 )
             elif self.speculative_config and isinstance(
                 self.drafter, AscendStep3p5MTPProposer

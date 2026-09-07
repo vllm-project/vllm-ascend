@@ -192,9 +192,8 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
                 mask=mask & block_in_range,
                 other=0,
             ).to(tl.int64)
-            slot_valid = block_in_range & (block_id_q != 0)
             slot_q = tl.where(
-                slot_valid,
+                block_in_range,
                 block_id_q * block_size + (query_kv_slot_pos % block_size),
                 padding_slot_id,
             )
