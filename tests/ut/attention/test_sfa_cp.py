@@ -188,7 +188,7 @@ def test_sfa_builder_cache_slot_layout(pcp_enabled: bool, c8_reshape_optim_enabl
     torch.testing.assert_close(common.slot_mapping, slots)
     assert metadata.num_input_tokens == 2
     if c8_reshape_optim_enabled:
-        torch.testing.assert_close(store_metadata.call_args.args[0], slots[:2])
+        torch.testing.assert_close(store_metadata.call_args.args[0], expected_slots)
     else:
         store_metadata.assert_not_called()
     impl_cls = AscendSFAPCPImpl if pcp_enabled else AscendSFAImpl

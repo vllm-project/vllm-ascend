@@ -363,7 +363,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
 
         if get_ascend_config().c8_reshape_optim_enabled:
             torch.ops._C_ascend.store_kv_block_metadata(
-                slot_mapping[:num_input_tokens] if self.pcp_enabled else slot_mapping,
+                slot_mapping,
                 common_attn_metadata.group_len,
                 common_attn_metadata.group_key_idx,
                 common_attn_metadata.group_key_cache_idx,
