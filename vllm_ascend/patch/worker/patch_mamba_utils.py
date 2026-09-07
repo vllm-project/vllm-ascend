@@ -1,6 +1,7 @@
 # mypy: ignore-errors
 
 import itertools
+import os
 from typing import Any
 
 import torch
@@ -18,9 +19,9 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.utils import is_310p
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -32,7 +33,7 @@ mamba_utils._TEMPORAL_TILES = 1
 
 
 def _can_launch_triton_batch_memcpy() -> bool:
-    return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
+    return not is_310p()
 
 
 def _get_mamba_groups(
@@ -82,10 +83,29 @@ def _stage_mamba_copy_metadata(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
 
 
 def _do_mamba_copy_block_npu(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
-    """Copy state after KV load using metadata staged during preprocessing."""
+    """Copy state after KV load using metadata staged during preprocessing.
+
+    Uses the tensor-pair copy path (dst.copy_(src.clone())) by default: the
+    Ascend triton batch_memcpy port dropped upstream's is_left_overlap guard,
+    and align-mode state moves copy between slots of ONE pool where src/dst
+    ranges can overlap. The clone materialises the source first, giving
+    memmove semantics exactly like upstream's guarded kernel. GLM53_BATCH_MEMCPY=1
+    restores the raw pointer kernel for A/B.
+    """
     n = copy_bufs.offset
     if n == 0:
         return
+    if os.environ.get("GLM53_BATCH_MEMCPY") != "1":
+        pairs = getattr(copy_bufs, "_tensor_copy_pairs", None)
+        if pairs is not None and len(pairs) == n:
+            for src_state, dst_state in pairs:
+                dst_state.copy_(src_state.clone())
+            copy_bufs._tensor_copy_pairs = []
+            return
+        if pairs is not None and len(pairs) == 0:
+            # No pairs collected (should not happen - the torch collector is
+            # bound below) - fall through to the pointer kernel.
+            pass
     _batch_memcpy_triton(
         copy_bufs.src_ptrs.gpu[:n],
         copy_bufs.dst_ptrs.gpu[:n],
@@ -207,10 +227,11 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
     # block. Preserve that default so the next preprocess keeps the right
     # accept_token_bias when multiple draft tokens were accepted.
     num_accepted_tokens_cpu_tensor[:num_reqs].copy_(num_accepted_tokens_gpu[:num_reqs])
-    # InputBatch rows may be condensed/reused by async scheduling before this
-    # fallback consumes the snapshot. Keep this step's accepted counts
-    # independent from those mutable request rows.
-    num_accepted_tokens = num_accepted_tokens_cpu_tensor
+    # Consume the per-step snapshot staged above rather than
+    # input_batch.num_accepted_tokens_cpu: async scheduling can condense/reuse
+    # input_batch rows before this fallback runs, so the live field is not
+    # guaranteed to hold this step's values (review feedback).
+    num_accepted_tokens = num_accepted_tokens_cpu_tensor.tolist()
     for i in range(num_reqs):
         num_tokens_running_state = num_computed_tokens[i] + num_scheduled_tokens[i] - num_draft_tokens[i]
         new_num_computed_tokens = num_tokens_running_state + num_accepted_tokens[i] - 1
@@ -383,6 +404,9 @@ def finish_mamba_copy_by_layer(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
 if _can_launch_triton_batch_memcpy():
     mamba_utils.batch_memcpy_kernel = batch_memcpy_kernel
     mamba_utils.batch_memcpy = _batch_memcpy_triton
+    # Collect tensor pairs alongside the pointer buffers so the copy can use
+    # the overlap-safe torch path (see _do_mamba_copy_block_npu).
+    mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_npu
     mamba_utils.postprocess_mamba_fused_kernel = postprocess_mamba_fused_kernel
     # Layerwise KV pool: collect copy metadata grouped per layer so each
