@@ -22,7 +22,6 @@ from vllm_ascend.models.glm5next.kv_cache import (
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-
 MAIN = "model.layers.1.attn"
 INDEXER = "model.layers.1.indexer.k_cache"
 STATE = "model.layers.1.indexer.state_cache"
