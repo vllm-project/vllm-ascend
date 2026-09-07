@@ -22,7 +22,7 @@ def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
             {
                 "n_predict": hf_config.dspark_block_size,
                 "ptd_token_id": getattr(hf_config, "dspark_noise_token_id", None),
-                "architectures": ["DeepSeekV4DSparkMTPModel"],
+                "architectures": ["DSparkDraftModel"],
             }
         )
         return hf_config

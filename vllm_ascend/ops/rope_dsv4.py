@@ -7,6 +7,48 @@ import torch_npu
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 
+from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+
+
+def inplace_partial_rotary_mul(
+    x: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    rotary_mode: str = "interleave",
+    partial_slice: list[int] | None = None,
+) -> None:
+    """Wrapper for inplace_partial_rotary_mul with A3 fallback.
+
+    On A5 (Ascend950), uses the fused CANN custom op
+    ``torch.ops._C_ascend.inplace_partial_rotary_mul`` which applies RoPE
+    in-place to a slice of the last dim.
+
+    On A3 (Ascend910B3), the custom op lacks a matching tiling kernel.
+    Fall back to: split the tensor into nope and rope parts, apply
+    ``torch_npu.npu_rotary_mul`` to the rope part only, then write back
+    in-place.
+    """
+    if get_ascend_device_type() not in {AscendDeviceType.A3}:
+        torch.ops._C_ascend.inplace_partial_rotary_mul(
+            x, cos, sin, rotary_mode=rotary_mode, partial_slice=partial_slice,
+        )
+        return
+
+    assert partial_slice is not None
+    nope_dim, full_dim = partial_slice
+    rope_dim = full_dim - nope_dim
+
+    x_view = x  # already unsqueezed by caller (shape: [T, 1, H, full_dim])
+
+    nope_part = x_view[..., :nope_dim]
+    rope_part = x_view[..., nope_dim:full_dim:full_dim]
+
+    rope_part = torch_npu.npu_rotary_mul(
+        rope_part, cos, sin, rotary_mode=rotary_mode,
+    )
+
+    x_view[..., :nope_dim].copy_(nope_part)
+    x_view[..., nope_dim:full_dim].copy_(rope_part)
 
 class RopeGlobalState:
     def __init__(self):
