@@ -631,19 +631,32 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
         return KVPoolScheduler(make_config(), use_layerwise=False)
 
     def test_update_finished(self):
-        cases = [
-            ("sending", {"r1", "r2", "r3"}, {"r1", "r2"}, {"r3"}),
-            ("sending", {"r1"}, None, {"r1"}),
-            ("recving", {"r1", "r2"}, {"r1"}, {"r2"}),
-            ("recving", {"r1"}, None, {"r1"}),
+        sending_cases = [
+            ({"r1": 2, "r2": 3, "r3": 4}, {"r1", "r2"}, {"r3": 4}),
+            ({"r1": 2}, None, {"r1": 2}),
         ]
-        for direction, initial, finished, expected in cases:
-            with self.subTest(direction=direction, finished=finished):
+        for sending_initial, finished, sending_expected in sending_cases:
+            with self.subTest(direction="sending", finished=finished):
                 scheduler = self._make_scheduler()
-                attribute = "_delayed_free_req_ids" if direction == "sending" else "_loading_req_ids"
-                setattr(scheduler, attribute, initial)
-                getattr(scheduler, f"update_finished_{direction}")(finished)
-                self.assertEqual(getattr(scheduler, attribute), expected)
+                for req_id, num_blocks in sending_initial.items():
+                    scheduler._set_delayed_free(req_id, num_blocks)
+                scheduler.update_finished_sending(finished)
+                self.assertEqual(scheduler._delayed_free_blocks_by_req, sending_expected)
+                self.assertEqual(
+                    scheduler._num_delayed_free_blocks,
+                    sum(sending_expected.values()),
+                )
+
+        recving_cases = [
+            ({"r1", "r2"}, {"r1"}, {"r2"}),
+            ({"r1"}, None, {"r1"}),
+        ]
+        for recving_initial, finished, recving_expected in recving_cases:
+            with self.subTest(direction="recving", finished=finished):
+                scheduler = self._make_scheduler()
+                scheduler._loading_req_ids = recving_initial
+                scheduler.update_finished_recving(finished)
+                self.assertEqual(scheduler._loading_req_ids, recving_expected)
 
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
@@ -701,6 +714,19 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.update_connector_output(output)
         scheduler._block_pool.free_blocks.assert_not_called()
 
+    def test_finished_send_updates_delayed_release_metrics(self):
+        scheduler = self._make_scheduler()
+        scheduler._set_delayed_free("r1", 3)
+
+        entered = scheduler.get_stats()
+        self.assertEqual(entered.data["delayed_release_requests"], 1)
+        self.assertEqual(entered.data["delayed_release_blocks"], 3)
+
+        scheduler.update_finished_sending({"r1"})
+        released = scheduler.get_stats()
+        self.assertEqual(released.data["delayed_release_requests"], 0)
+        self.assertEqual(released.data["delayed_release_blocks"], 0)
+
 
 class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
     """Test request_finished_all_groups."""
@@ -749,7 +775,7 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request.request_id = "r1"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
         self.assertTrue(delay)
-        self.assertIn("r1", scheduler._delayed_free_req_ids)
+        self.assertEqual(scheduler._delayed_free_blocks_by_req["r1"], 2)
 
     def test_no_delay_empty_blocks(self):
         scheduler = self._make_scheduler()

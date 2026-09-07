@@ -78,6 +78,9 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_tp_mismatch_info,
     uses_hybrid_kv_cache,
 )
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
+)
 from vllm_ascend.distributed.utils import (
     get_decode_context_model_parallel_rank,
     get_decode_context_model_parallel_world_size,
@@ -126,6 +129,8 @@ class KVPoolWorker:
         self._init_kv_events(vllm_config)
         self._init_state_vars()
         self._init_layerwise_config()
+        self._kv_stats = AscendStoreKVConnectorStats()
+        self._kv_stats_lock = threading.Lock()
 
     def _init_parallelism_info(self, model_config, parallel_config) -> None:
         self.local_rank = envs.LOCAL_RANK
@@ -597,6 +602,7 @@ class KVPoolWorker:
                     ready_event,
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
+                    record_load_get=self._record_load_get,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -946,7 +952,11 @@ class KVPoolWorker:
                 len(key_list_c),
                 key_list_c[:3],
             )
-            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            load_get_start = time.perf_counter()
+            try:
+                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            finally:
+                self._record_load_get(load_get_start, len(key_list_c))
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
@@ -984,6 +994,19 @@ class KVPoolWorker:
                 load_group_ids,
                 len(key_list_c),
             )
+
+    def _record_load_get(self, start_time: float, num_keys: int) -> None:
+        duration = time.perf_counter() - start_time
+        with self._kv_stats_lock:
+            self._kv_stats.record_load_get(duration, num_keys)
+
+    def get_stats(self) -> AscendStoreKVConnectorStats | None:
+        with self._kv_stats_lock:
+            if self._kv_stats.is_empty():
+                return None
+            stats = self._kv_stats
+            self._kv_stats = AscendStoreKVConnectorStats()
+            return stats
 
     def _process_save_for_layer_batch(
         self,
@@ -1979,7 +2002,11 @@ class KVPoolWorker:
             len(keys_c),
             keys_c[:3],
         )
-        ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        load_get_start = time.perf_counter()
+        try:
+            ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        finally:
+            self._record_load_get(load_get_start, len(keys_c))
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
             with self._invalid_block_ids_lock:
