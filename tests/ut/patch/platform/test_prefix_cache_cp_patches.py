@@ -393,9 +393,9 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
         scheduler_full_spec.block_size,
     )
     assert len(full_group_hashes) == 2
-    assert full_group_hashes[0] == b"".join(
-        base_hashes[:hashes_per_full_block]
-    )
+    # vLLM hashes are chained across prefix blocks, so the last state-sized
+    # hash in a full block is already that full block's hash.
+    assert full_group_hashes[0] == base_hashes[hashes_per_full_block - 1]
 
 
 def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> None:

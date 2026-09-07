@@ -4265,7 +4265,12 @@ class NPUModelRunner(GPUModelRunner):
             logger.debug("%s reuses KV cache of %s", layer_name, target_layer_name)
             kv_caches[layer_name] = kv_caches[target_layer_name]
 
-        if self.model_config.hf_text_config.model_type == "deepseek_v4":
+        model_type = getattr(
+            getattr(self.model_config, "hf_text_config", None),
+            "model_type",
+            None,
+        )
+        if model_type == "deepseek_v4":
             from vllm_ascend.utils import extract_dsv4_layer_index
 
             assert len(self.kv_caches) == 0
@@ -4280,7 +4285,6 @@ class NPUModelRunner(GPUModelRunner):
         else:
             from vllm.v1.worker.utils import bind_kv_cache
 
-            model_type = self.model_config.hf_text_config.model_type
             num_attn_module = 2 if model_type in ("longcat_flash", "longcat_flash_ngram") else 1
             bind_kv_cache(
                 kv_caches,
