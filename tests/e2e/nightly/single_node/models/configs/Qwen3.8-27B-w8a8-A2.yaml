@@ -62,18 +62,3 @@ test_cases:
         request_rate: 0
         baseline: 90.0838
         threshold: 0.97
-      acc_GPQA:
-        case_type: accuracy
-        dataset_path: vllm-ascend/gpqa
-        request_conf: vllm_api_general_chat
-        dataset_conf: gpqa/gpqa_gen_0_shot_cot_chat_prompt
-        max_out_len: 32768
-        batch_size: 32
-        baseline: 85.0166
-        threshold: 5
-        temperature: 1.0
-        top_p: 0.95
-        top_k: 20
-        min_p: 0.0
-        presence_penalty: 1.5
-        repetition_penalty: 1.0

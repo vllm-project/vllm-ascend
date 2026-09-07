@@ -28,7 +28,7 @@ It is recommended to download the model weight to a local directory, such as `/d
 
 You can use our official docker image to run `Mixtral-8x7B-Instruct-v0.1` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
 # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
@@ -76,13 +76,12 @@ export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=10
 export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=200
-export VLLM_ASCEND_ENABLE_MLAPO=1
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 ```
 
 ``` bash
 
-vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" \
+vllm serve "mistralai/Mixtral-8x7B-Instruct-v0.1" --additional-config '{"enable_mlapo":true}' \
   --tensor-parallel-size 4 \
   --max-model-len 4096 \
   --dtype bfloat16 \
@@ -113,7 +112,7 @@ curl http://localhost:8000/v1/chat/completions \
     -d '{
         "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
         "messages": [
-            {"role": "user", "content": "你好，介绍一下你自己"}
+            {"role": "user", "content": "Hello, please introduce yourself."}
         ],
         "max_tokens": 100,
         "temperature": 0.7
@@ -143,7 +142,7 @@ curl http://localhost:8000/v1/chat/completions \
     -d '{
         "model": "mistralai/Mixtral-8x7B-Instruct-v0.1",
         "messages": [
-            {"role": "user", "content": "简单解释一下为什么 Mixtral 模型被称为\"混合专家模型\"(MoE)？"}
+            {"role": "user", "content": "Briefly explain why Mixtral is called a \"mixture-of-experts\" (MoE) model."}
         ],
         "max_tokens": 100,
         "temperature": 0.7

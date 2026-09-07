@@ -24,7 +24,7 @@ from vllm.model_executor.models.kimi_k25_vit import (
     get_rope_shape_decorate,
 )
 
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 
 @get_rope_shape_decorate
@@ -82,7 +82,7 @@ Learnable2DInterpPosEmbDivided_fixed.forward = AscendLearnable2DInterpPosEmbDivi
 # the `dtype=model_config.dtype` (e.g. bf16) would overwrite the fp8 parameters
 # created by the Ascend quantization scheme, causing a dtype mismatch later
 # in weight_loader when the checkpoint's fp8 weights are loaded.
-if get_ascend_device_type() == AscendDeviceType.A5:
+if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION):
     _original_moonvit_to = MoonViT3dPretrainedModel.to
 
     def _patched_moonvit_to(self, *args, **kwargs):

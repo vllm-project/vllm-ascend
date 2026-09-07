@@ -55,14 +55,14 @@ multiple nodes, such as `/root/.cache/`.
 
 If you want to deploy the model in a multi-node environment, verify the
 communication environment according to
-[verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+[verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
 Select an image based on your machine type and start the docker image on your
-node. Refer to [using docker](../../installation.md#set-up-using-docker).
+node. Refer to [using a prebuilt image](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A3 series"
 
@@ -153,7 +153,7 @@ node. Refer to [using docker](../../installation.md#set-up-using-docker).
 ### 4.2 Source Code Installation
 
 You can also build and install `vllm-ascend` from source. Refer to
-[set up using Python](../../installation.md#set-up-using-python).
+[set up using Python](../../getting_started/installation.md#installation-existing-cann-install).
 
 If you want to deploy a multi-node service, install the same version of vLLM
 and vLLM-Ascend on each node.
@@ -196,9 +196,9 @@ Before starting the service:
         export DP_SIZE=4
         export TP_SIZE=16
 
+        export HCCL_BUFFSIZE_EP=2048
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export HCCL_BUFFSIZE=1024
-        export HCCL_BUFFSIZE_EP=2048
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_INTRA_ROCE_ENABLE=0
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -250,9 +250,9 @@ Before starting the service:
         export DP_START_RANK=<1_OR_2_OR_3>
         export TP_SIZE=16
 
+        export HCCL_BUFFSIZE_EP=2048
         export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
         export HCCL_BUFFSIZE=1024
-        export HCCL_BUFFSIZE_EP=2048
         export HCCL_IF_IP=$LOCAL_IP
         export HCCL_INTRA_ROCE_ENABLE=0
         export HCCL_OP_EXPANSION_MODE="AIV"

@@ -100,7 +100,6 @@ The following is a simple example of how to use sleep mode.
 
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-    os.environ["VLLM_ASCEND_ENABLE_NZ"] = "0"
 
     if __name__ == "__main__":
         prompt = "How are you?"
@@ -109,7 +108,11 @@ The following is a simple example of how to use sleep mode.
         print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
         # record npu memory use baseline in case other process is running
         used_bytes_baseline = total - free
-        llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
+        llm = LLM(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            enable_sleep_mode=True,
+            additional_config={"weight_nz_mode": 0},
+        )
         sampling_params = SamplingParams(temperature=0, max_tokens=10)
         output = llm.generate(prompt, sampling_params)
 
@@ -137,9 +140,10 @@ The following is a simple example of how to use sleep mode.
     export VLLM_SERVER_DEV_MODE="1"
     export VLLM_WORKER_MULTIPROC_METHOD="spawn"
     export VLLM_USE_MODELSCOPE="True"
-    export VLLM_ASCEND_ENABLE_NZ="0"
 
-    vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
+    vllm serve Qwen/Qwen2.5-0.5B-Instruct \
+        --enable-sleep-mode \
+        --additional-config='{"weight_nz_mode": 0}'
 
     # after serving is up, post to these endpoints.
     # /sleep reads level from the query string (JSON body is ignored).

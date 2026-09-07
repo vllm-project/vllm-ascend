@@ -68,7 +68,7 @@ You can use our official docker image to run Hy3-preview directly. For Atlas A3 
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 ## Deployment
 

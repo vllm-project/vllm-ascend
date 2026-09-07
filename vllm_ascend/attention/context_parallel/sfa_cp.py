@@ -3,14 +3,16 @@ from dataclasses import dataclass
 from typing import Any, NamedTuple, TypeVar
 
 import torch
-import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_pcp_group, get_tp_group
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
     DCPImplMixin,
@@ -26,24 +28,125 @@ from vllm_ascend.attention.sfa_v1 import (
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, split_decodes_and_prefills
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import all_gather_async
-from vllm_ascend.quantization.tp_weight_switch import TPWeightSwitchMixin
 from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
-    enable_dsa_cp_with_o_proj_tp,
+    enable_dsa_cp_full_o_proj,
+    enable_pcp_o_proj_weight_sharding,
     enable_sfa_dcp_replicated_indexer,
-    vllm_version_is,
 )
-
-if vllm_version_is("0.27.1"):
-    from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
-else:
-    from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
+from vllm_ascend.weight_switch import (
+    WeightLoadPartition,
+    WeightSwitchConfig,
+    WeightSwitchMixin,
+)
+from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-class AscendSFAPCPImpl(AscendSFAImpl):
+class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
+    """SFA PCP implementation with PCP-sharded O-proj weights.
+
+    Weight switching is performed only in the PCP domain. When TP is enabled,
+    the checkpoint's ordinary TP-local O-proj layout remains unchanged; PCP
+    slices that TP-local weight, and the original TP output reduction remains
+    part of the row-parallel layer semantics.
+    """
+
+    o_proj_full_pools: dict[Any, torch.Tensor] = {}
+    o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.enable_pcp_o_proj_weight_sharding = enable_pcp_o_proj_weight_sharding()
+        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_pcp_group(), shard_axis="input"))
+        if not self.enable_pcp_o_proj_weight_sharding:
+            return
+        self.o_proj_weight_load_partition = WeightLoadPartition.from_nested_groups(
+            get_tp_group(),
+            get_pcp_group(),
+        )
+        linear_method = self._get_o_proj_weight_switch_method()
+        self.o_proj_weight_load_state = linear_method.prepare_layer_for_parallel_weight_load(
+            self.o_proj,
+            self.o_proj_weight_switch_config,
+            self.o_proj_weight_load_partition,
+        )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        result = super().process_weights_after_loading(act_dtype)
+        if self.enable_pcp_o_proj_weight_sharding:
+            self._enable_o_proj_full_weight_switch()
+        return result
+
+    def _get_parallel_forward_context(
+        self,
+        attn_metadata: M,
+        num_input_tokens: int,
+        hidden_states: torch.Tensor,
+    ) -> SFAForwardContext:
+        context = super()._get_parallel_forward_context(
+            attn_metadata,
+            num_input_tokens,
+            hidden_states,
+        )
+        context.gather_full_o_proj = self._o_proj_weight_switch_enabled and attn_metadata.attn_state not in {
+            AscendAttentionState.DecodeOnly,
+            AscendAttentionState.SpecDecoding,
+        }
+        if context.gather_full_o_proj:
+            self._all_gather_o_proj_full_weight()
+        return context
+
+    def _finalize_o_proj(
+        self,
+        attn_output: torch.Tensor,
+        output: torch.Tensor,
+        gather_full_o_proj: bool,
+    ) -> torch.Tensor:
+        if not self._o_proj_weight_switch_enabled:
+            return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
+        if gather_full_o_proj:
+            with self._use_full_o_proj_weights():
+                return super()._finalize_o_proj(attn_output, output, gather_full_o_proj)
+
+        # Decode tokens are replicated on PCP ranks. Each rank projects only
+        # its PCP input slice; PCP all-reduce reconstructs the pre-existing
+        # TP-local result, then the normal row-parallel TP reduction completes
+        # the output when TP is enabled.
+        linear_method = self._get_o_proj_weight_switch_method()
+        weight_part = self._get_o_proj_weight_switch_state().gather_parts.get("weight")
+        if weight_part is None:
+            raise RuntimeError("SFA PCP O-proj requires a gather spec for the weight attribute.")
+        # This is the logical TP-local O-proj input width. It remains valid
+        # even when a quantization method stores the weight in a packed layout
+        # whose gathered storage dimension differs from the activation dimension.
+        full_input_size = self.o_proj_weight_load_state.input_size_per_partition_before
+        if attn_output.shape[-1] != full_input_size:
+            raise RuntimeError(
+                "SFA PCP O-proj input does not match the reconstructed TP-local weight: "
+                f"input_shape={tuple(attn_output.shape)}, expected_last_dim={full_input_size}."
+            )
+        local_input = WeightSwitchMixin.split_tensor_for_parallel(
+            attn_output,
+            self.o_proj_weight_switch_config.world_size,
+            self.o_proj_weight_switch_config.rank,
+            dim=-1,
+        )
+        partial_output = linear_method.apply(self.o_proj, local_input, bias=None)
+        partial_output = self.o_proj_weight_switch_config.group.all_reduce(partial_output)
+
+        if self.o_proj.reduce_results and get_tp_group().world_size > 1:
+            if not self.o_proj.skip_bias_add and get_tp_group().rank_in_group == 0 and self.o_proj.bias is not None:
+                partial_output = partial_output + self.o_proj.bias
+            partial_output = get_tp_group().all_reduce(partial_output)
+        elif not self.o_proj.skip_bias_add and self.o_proj.bias is not None:
+            partial_output = partial_output + self.o_proj.bias
+
+        output.copy_(partial_output)
+        return output
+
     def _get_sfa_kv_slot_mapping(
         self,
         attn_metadata: M,
@@ -288,21 +391,22 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
         dsa_cp_context.slot_mapping_cp = local_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
 
 
-class AscendSFADSACPImpl(AscendSFAImpl):
+class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     """SFA implementation for DSA-CP token sharding in the TP group."""
 
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
+    o_proj_weight_switch_pool_key = "sfa_o_proj"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.local_num_heads = self.num_heads * self.tp_size
-        self.enable_dsa_cp_with_o_proj_tp = enable_dsa_cp_with_o_proj_tp()
+        self.enable_dsa_cp_full_o_proj = enable_dsa_cp_full_o_proj()
+        self._initialize_o_proj_weight_switch(WeightSwitchConfig.from_group(get_tp_group()))
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         result = super().process_weights_after_loading(act_dtype)
-        self._o_proj_tp_weight_switch_enabled = False
-        if self.enable_dsa_cp_with_o_proj_tp:
-            self._enable_o_proj_tp_full_weight_switch()
+        if self.enable_dsa_cp_full_o_proj:
+            self._enable_o_proj_full_weight_switch()
         return result
 
     def _get_fused_type_unsupported_reasons(self, pp_type):
@@ -340,7 +444,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
         assert context is not None, "DSA-CP requires attn_metadata.dsa_cp_context."
         gather_full_o_proj = (
             self.tp_size > 1
-            and self.enable_dsa_cp_with_o_proj_tp
+            and self.enable_dsa_cp_full_o_proj
             and attn_metadata.attn_state
             not in {
                 AscendAttentionState.DecodeOnly,
@@ -439,14 +543,7 @@ class AscendSFADSACPImpl(AscendSFAImpl):
         for handle in kv_ag_handles:
             handle.wait()
         if full_gather_o_proj_enabled:
-            self._enable_o_proj_tp_full_weight_switch()
-            linear_method = self._get_o_proj_linear_method()
-            assert isinstance(linear_method, TPWeightSwitchMixin)
-            assert self.o_proj_tp_weight_state is not None
-            linear_method.all_gather_tp_weight(
-                self.o_proj_tp_weight_state,
-                get_tp_group(),
-            )
+            self._all_gather_o_proj_full_weight()
 
         if kv_cache is not None:
             assert fused_kv_no_split is not None
@@ -478,30 +575,8 @@ class AscendSFADSACPImpl(AscendSFAImpl):
                 )
         return k_pe, k_nope, k_li
 
-    def _enable_o_proj_tp_full_weight_switch(self) -> None:
-        if self._o_proj_tp_weight_switch_enabled:
-            return
-
-        linear_method = self._get_o_proj_linear_method()
-        if not isinstance(linear_method, TPWeightSwitchMixin) or not linear_method.supports_tp_weight_switch:
-            raise RuntimeError(
-                "SFA DSA-CP o_proj full-weight switching requires a TP weight-switch capable method, "
-                f"got {type(linear_method).__name__}."
-            )
-        self.o_proj_tp_weight_state = linear_method.enable_tp_weight_switch(
-            self.o_proj,
-            self.tp_size,
-            pool=AscendSFADSACPImpl.o_proj_full_pools,
-            pool_key_prefix=(type(linear_method).__qualname__, "sfa_o_proj"),
-        )
-        self._o_proj_tp_weight_switch_enabled = True
-
-    def _get_o_proj_linear_method(self):
-        quant_method = self.o_proj.quant_method
-        return getattr(quant_method, "quant_method", quant_method)
-
     def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
-        return self._get_o_proj_linear_method().apply(self.o_proj, attn_output)
+        return self._get_o_proj_weight_switch_method().apply(self.o_proj, attn_output)
 
     def _finalize_o_proj(
         self,
@@ -509,23 +584,14 @@ class AscendSFADSACPImpl(AscendSFAImpl):
         output,
         gather_full_o_proj,
     ):
-        if not self.enable_dsa_cp_with_o_proj_tp:
+        if not self.enable_dsa_cp_full_o_proj:
             return super()._finalize_o_proj(
                 attn_output,
                 output,
                 gather_full_o_proj,
             )
         if gather_full_o_proj:
-            linear_method = self._get_o_proj_linear_method()
-            assert isinstance(linear_method, TPWeightSwitchMixin)
-            assert self.o_proj_tp_weight_state is not None
-            linear_method.wait_tp_weight_all_gather(self.o_proj_tp_weight_state)
-            linear_method.switch_tp_weight(
-                self.o_proj,
-                self.o_proj_tp_weight_state,
-                use_full_weight=True,
-            )
-            try:
+            with self._use_full_o_proj_weights():
                 local_output = self._apply_o_proj_full_weight(attn_output)
                 full_output = get_tp_group().all_gather(local_output.contiguous(), dim=0)
                 if full_output.shape[0] < output.shape[0] or full_output.shape[1:] != output.shape[1:]:
@@ -535,12 +601,6 @@ class AscendSFADSACPImpl(AscendSFAImpl):
                         f"{tuple(output.shape)}."
                     )
                 output[...] = full_output[: output.shape[0]]
-            finally:
-                linear_method.switch_tp_weight(
-                    self.o_proj,
-                    self.o_proj_tp_weight_state,
-                    use_full_weight=False,
-                )
             return output
 
         send = (
@@ -858,6 +918,9 @@ class AscendSFADCPMetadataBuilder(
 
 
 class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
+    can_return_lse_for_decode: bool = True
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -1000,9 +1063,22 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             raise RuntimeError(
                 f"topk_indices last dimension ({topk_count}) exceeds configured index_topk ({self._dcp_index_topk})."
             )
+        if topk_indices.numel() == 0:
+            return topk_indices
 
-        # Remap the topk indices from the replicated view to the DCP-local KV cache view.
-        # We use float32 for better performance on Ascend.
+        if HAS_TRITON and topk_indices.is_npu:
+            from vllm_ascend.ops.triton.sparse_index_remap import remap_sparse_indices_triton
+
+            return remap_sparse_indices_triton(
+                topk_indices,
+                self.dcp_size,
+                self.dcp_rank,
+                self._dcp_interleave_size,
+            )
+
+        # Fallback for environments without Triton: remap the topk indices from
+        # the replicated view to the DCP-local KV cache view. We use float32 for
+        # better performance on Ascend.
         topk_indices_fp32 = topk_indices.to(torch.float32)
         interleave_size = self._dcp_interleave_size
         local_block_indices = torch.floor(topk_indices_fp32 / interleave_size)
@@ -1027,47 +1103,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         _, pack_order = torch.sort(pack_keys, dim=-1)
         return torch.gather(remapped_indices, dim=-1, index=pack_order.to(torch.int32))
 
-    def _all_to_all_dcp_tensor(
-        self,
-        tensor: torch.Tensor,
-        scatter_dim: int,
-    ) -> torch.Tensor:
-        assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
-        scatter_size = tensor.shape[scatter_dim]
-        if scatter_size % self.dcp_size != 0:
-            raise RuntimeError(
-                "DCP output All2All requires the scatter dimension to be divisible "
-                f"by dcp_size, got shape={tuple(tensor.shape)}, scatter_dim={scatter_dim}, "
-                f"and dcp_size={self.dcp_size}."
-            )
-
-        local_scatter_size = scatter_size // self.dcp_size
-        send = tensor.movedim(scatter_dim, 0).contiguous()
-        recv = torch.empty_like(send)
-        dist.all_to_all_single(recv, send, group=self.dcp_group.device_group)
-        recv = recv.view(self.dcp_size, local_scatter_size, *send.shape[1:])
-        return recv
-
-    @staticmethod
-    def _merge_dcp_outputs_with_torch(
-        output_recv: torch.Tensor,
-        lse_recv: torch.Tensor,
-        token_dim: int,
-    ) -> torch.Tensor:
-        if output_recv.ndim != 4 or lse_recv.ndim != 3 or output_recv.shape[:3] != lse_recv.shape:
-            raise RuntimeError(
-                "DCP output merge expects matching rank/token/head dimensions, "
-                f"got {tuple(output_recv.shape)} and {tuple(lse_recv.shape)}."
-            )
-        if token_dim not in (1, 2):
-            raise RuntimeError(f"DCP output merge token_dim must be 1 or 2, got {token_dim}.")
-        lse_recv = lse_recv.masked_fill(~torch.isfinite(lse_recv), float("-inf"))
-        weights = torch.softmax(lse_recv, dim=0)
-        weights = torch.nan_to_num(weights, nan=0.0)
-
-        output = (output_recv.to(lse_recv.dtype) * weights.unsqueeze(-1)).sum(dim=0)
-        return output.movedim(token_dim - 1, 0).contiguous()
-
     def _merge_dcp_outputs(
         self,
         sfa_output: torch.Tensor,
@@ -1075,7 +1110,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         dsa_cp_context: DSACPContext | None = None,
     ) -> torch.Tensor:
         scatter_dim = 1
-        token_dim = 2
         if dsa_cp_context is not None:
             # DSA-CP keeps heads replicated and shards tokens. The All2All
             # destination must match the token range assigned to this rank.
@@ -1100,11 +1134,15 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                     f"[{dsa_cp_context.local_start}, {dsa_cp_context.local_end_with_pad})."
                 )
             scatter_dim = 0
-            token_dim = 1
 
-        output_recv = self._all_to_all_dcp_tensor(sfa_output, scatter_dim)
-        lse_recv = self._all_to_all_dcp_tensor(softmax_lse, scatter_dim).squeeze(-1)
-        return self._merge_dcp_outputs_with_torch(output_recv, lse_recv, token_dim)
+        assert self.dcp_group is not None, "DCP output All2All requires dcp_group when dcp_size > 1."
+        return torch.ops.vllm.sfa_dcp_a2a_fused(
+            sfa_output,
+            softmax_lse,
+            self.dcp_size,
+            scatter_dim,
+            self.dcp_group.unique_name,
+        )
 
     def _start_dcp_query_gather(
         self,

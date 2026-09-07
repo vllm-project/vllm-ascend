@@ -8,7 +8,7 @@ from tests.ut.quantization.conftest_quantization import (
     create_mock_vllm_config,
 )
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.quantization.methods.w8a8fp8_dynamic import (
+from vllm_ascend.quantization.methods.w8a8.w8a8fp8_dynamic import (
     AscendW8A8FP8DynamicFusedMoEMethod,
     AscendW8A8FP8DynamicLinearMethod,
 )
@@ -44,10 +44,10 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
     intermediate_size = 128
 
     @patch("torch.distributed.get_rank")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_mc2_group")
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_mc2_group")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config")
     def setUp(self, mock_ascend, mock_mc2, mock_rank):
-        with patch("vllm_ascend.quantization.methods.w8a8_dynamic.get_current_vllm_config") as mock_vllm:
+        with patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_current_vllm_config") as mock_vllm:
             mock_vllm.return_value = create_mock_vllm_config()
             mock_ascend.return_value = create_mock_ascend_config()
             mock_mc2.return_value = MagicMock(
@@ -83,7 +83,7 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
             self.assertEqual(param_dict["w13_weight"].shape[0], num_experts)
             self.assertEqual(param_dict["w2_weight"].shape[0], num_experts)
 
-    @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX")
     def test_apply_uses_explicit_dispatch_and_mlp_args(self, mock_extra_ctx):
         tokens = 4
         hidden_size = self.hidden_size

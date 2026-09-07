@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
     MooncakeConnectorScheduler,
+    MooncakeConnectorWorker,
 )
 
 
@@ -55,12 +56,16 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         return thread
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
-        expected_device = torch.device("npu:5")
-        kv_cache = MagicMock(device=expected_device)
+        expected_device_index = 5
+        kv_cache = MagicMock(device=expected_device_index)
         model_config = types.SimpleNamespace(
             is_deepseek_mla=False,
             hf_config=types.SimpleNamespace(compress_ratios=[1]),
-            hf_text_config=types.SimpleNamespace(num_hidden_layers=1),
+            hf_text_config=types.SimpleNamespace(
+                num_hidden_layers=1,
+                head_dim=64,
+                num_key_value_heads=8,
+            ),
         )
         vllm_config = types.SimpleNamespace(
             model_config=model_config,
@@ -78,7 +83,10 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 worker_events[threading.get_ident()].append(("set_device", device_index))
 
         with (
-            patch("torch.npu.set_device", side_effect=record_set_device),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.torch.npu.set_device",
+                side_effect=record_set_device,
+            ),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.is_vl_model",
                 return_value=False,
@@ -135,7 +143,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         handled_worker_events = [events for events in worker_events.values() if any(e == "handle" for e, _ in events)]
         self.assertEqual(len(handled_worker_events), 2)
         for events in handled_worker_events:
-            self.assertEqual(events[0], ("set_device", expected_device.index))
+            self.assertEqual(events[0], ("set_device", expected_device_index))
             self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
@@ -232,6 +240,63 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         )
         self.assertIn(peer_key, thread.active_peer_request_handlers)
         thread.executor.submit.assert_called_once_with(thread._handle_peer_requests, peer_key)
+
+
+class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_hybrid_registration_uses_actual_merged_tensor_ranges(self):
+        alignment = 2 * 1024 * 1024
+        backing_size = 4 * alignment
+        layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.1.self_attn",
+        ]
+        raw_tensor = torch.empty(backing_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
+        kv_caches = {
+            layer_names[0]: backing[: 2 * alignment],
+            layer_names[1]: backing[alignment : 3 * alignment],
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=False,
+                hf_text_config=types.SimpleNamespace(),
+            )
+        )
+        worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=1,
+            kv_cache_groups=[types.SimpleNamespace(layer_names=layer_names)],
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    size=backing_size,
+                    layers=[layer_name],
+                    shared_by=[layer_name],
+                )
+                for layer_name in layer_names
+            ],
+        )
+        worker.use_hybrid = True
+        worker.use_mamba = False
+        worker.use_compress = True
+
+        class RegistrationCaptured(Exception):
+            pass
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ) as register_buffer,
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches(kv_caches)
+
+        register_buffer.assert_called_once_with(
+            [backing.data_ptr()],
+            [3 * alignment],
+        )
 
 
 class TestMooncakeHybridConnectorScheduler(unittest.TestCase):

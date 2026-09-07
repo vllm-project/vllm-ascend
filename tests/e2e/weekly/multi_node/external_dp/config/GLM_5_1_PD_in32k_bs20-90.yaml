@@ -190,7 +190,6 @@ templates:
   - node_index: 2
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
       TASK_QUEUE_ENABLE: "1"
     server_cmd_template:
       - --host
@@ -219,7 +218,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true,"enable_fused_mc2":1}'
+      - '{"recompute_scheduler_enable": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"
@@ -253,7 +252,6 @@ templates:
   - node_index: 3
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_MLAPO: "1"
       TASK_QUEUE_ENABLE: "1"
     server_cmd_template:
       - --host
@@ -282,7 +280,7 @@ templates:
       - --compilation-config
       - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true,"enable_fused_mc2":1}'
+      - '{"recompute_scheduler_enable": true,"enable_fused_mc2":1,"enable_mlapo":true}'
       - --trust-remote-code
       - --max-num-seqs
       - "32"

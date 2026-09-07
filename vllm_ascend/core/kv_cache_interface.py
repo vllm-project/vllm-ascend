@@ -50,7 +50,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     @property
     def storage_block_size(self) -> int:
         """Return the physical block size consumed by Ascend kernels."""
-        return self.block_size // self.compress_ratio
+        return self.block_size // self.tokens_per_state
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -76,6 +76,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
                 spec.alignment,
+                spec.tokens_per_state,
             )
             for spec in specs
         }
@@ -239,4 +240,13 @@ def register_ascend_kv_cache_specs() -> None:
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+
+    # Imported lazily so this module stays independent of any single model.
+    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager, KpoolTailSpec
+
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=KpoolTailSpec,
+        manager_class=KpoolTailManager,
+        uniform_type_base_spec=KpoolTailSpec,
     )

@@ -98,7 +98,7 @@ multi-node-tests:
   uses: ./.github/workflows/_e2e_nightly_multi_node.yaml
   with:
     soc_version: a3
-    runner: linux-aarch64-a3-0
+    runner: linux-aarch64-a3-800t-0
     image: 'swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:nightly-a3'
     replicas: 1
     size: {% raw %}${{ matrix.test_config.size }}{% endraw %}
