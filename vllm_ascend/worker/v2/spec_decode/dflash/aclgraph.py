@@ -16,6 +16,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params,
     set_draft_graph_params,
     update_full_graph_params,
 )
@@ -82,10 +83,25 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         """Override run_fullgraph to update full graph params in run_fullgraph."""
         num_tokens = desc.num_tokens
 
+        if self.speculator is None:
+            raise RuntimeError("Draft ACL graph manager has no bound speculator.")
+        if self.update_stream is None:
+            raise RuntimeError("Draft ACL graph manager has no bound update stream.")
+        expected_num_tokens = desc.num_reqs * self.speculator.num_query_per_req
+        if num_tokens != expected_num_tokens:
+            raise RuntimeError(
+                "Draft ACL graph descriptor mismatch: "
+                f"num_tokens={num_tokens}, num_reqs={desc.num_reqs}, "
+                f"num_query_per_req={self.speculator.num_query_per_req}."
+            )
+
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
+        graph_params = get_draft_graph_params()
+        self._validate_graph_param_cardinality(graph_params, num_tokens)
+        draft_backend = self.speculator.get_draft_graph_backend()
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
@@ -93,6 +109,11 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # calculate num_tokens_across_dp.
         num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens, device=self.device)
 
+        # ``sample_tokens`` invokes the proposer after the target forward
+        # context has already exited.  _EXTRA_CTX is a proxy to that context,
+        # so it must never be read before installing the draft context here.
+        # The new context owns these flags and is discarded on exit; restoring
+        # values through the proxy after exit would fail for the same reason.
         with set_forward_context(
             self.speculator.model_state.attn_metadata,
             self.vllm_config,
@@ -102,16 +123,13 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             batch_descriptor=None,  # Full graph model don't need batch_descriptor
             slot_mapping=None,
         ):
-            # decide to update draft graph params
+            # Keep the existing ExternalEvent/task-update submission protocol;
+            # only make the draft context explicit and scoped.
             _EXTRA_CTX.is_draft_model = True
-
             _EXTRA_CTX.is_draft_model_prefill = False
-
             forward_context = get_forward_context()
-
             update_full_graph_params(
-                # FIXME(Ronald1995): support hybrid attn backend
-                list(self.speculator.attn_backends.values())[0],
+                draft_backend,
                 self.update_stream,
                 forward_context,
                 num_tokens,
@@ -120,3 +138,29 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret
+
+    @staticmethod
+    def _validate_graph_param_cardinality(graph_params: Any, num_tokens: int) -> int:
+        """Prevent ``zip`` in backend updaters from silently dropping tasks."""
+        if graph_params is None:
+            raise RuntimeError("Draft ACL graph parameters have not been initialized.")
+
+        captured_params = graph_params.attn_params.get(num_tokens)
+        handles = graph_params.handles.get(num_tokens)
+        events = graph_params.events.get(num_tokens)
+        if captured_params is None or handles is None or events is None:
+            raise RuntimeError(
+                f"Draft ACL graph has no captured parameter bucket for {num_tokens} tokens."
+            )
+        counts = (len(captured_params), len(handles), len(events))
+        if counts[0] == 0:
+            raise RuntimeError(
+                f"Draft ACL graph captured no attention update tasks for {num_tokens} tokens."
+            )
+        if len(set(counts)) != 1:
+            raise RuntimeError(
+                "Draft ACL graph update cardinality mismatch for "
+                f"{num_tokens} tokens: params={counts[0]}, handles={counts[1]}, "
+                f"events={counts[2]}."
+            )
+        return counts[0]
