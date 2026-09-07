@@ -46,7 +46,7 @@ def test_prepare_attn_accepts_single_batch_contract(model_cls, metadata_owner, u
     )
     metadata = {"layer": object()}
     with patch(f"{metadata_owner.__module__}.build_attn_metadata", return_value=metadata) as build:
-        args = (batch, CUDAGraphMode.NONE, (), torch.empty(0), [], SimpleNamespace())
+        args: tuple[object, ...] = (batch, CUDAGraphMode.NONE, (), torch.empty(0), [], SimpleNamespace())
         if ubatch_idx:
             with pytest.raises(AssertionError, match="DBO is not supported"):
                 state.prepare_attn(*args, ubatch_idx=ubatch_idx)
