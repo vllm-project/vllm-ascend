@@ -230,6 +230,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         """
         self.input_batch = input_batch
         sync_state = dp_sync
+        if self.method == "pard2":
+            if not aux_hidden_states:
+                raise ValueError("PARD-2 target-dependent mode requires auxiliary target hidden states.")
+            last_hidden_states = self.model.combine_hidden_states(torch.cat(aux_hidden_states, dim=-1))
+            # The projection has already been applied. Passing the auxiliary
+            # list to upstream would project it a second time and its MRV2
+            # implementation currently accepts auxiliary states for EAGLE3 only.
+            aux_hidden_states = None
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (

@@ -42,3 +42,7 @@ class AscendEagleSpeculator(AscendAutoRegressiveSpeculator, EagleSpeculator):
                 enable_eplb=False,
             ),
         )
+
+
+class AscendPard2Speculator(AscendEagleSpeculator):
+    """Initial MRV2 PARD-2 support using Ascend's autoregressive draft loop."""
