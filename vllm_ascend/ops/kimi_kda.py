@@ -696,5 +696,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         elif core_non_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_non_spec
 
-        core_attn_out[:, :num_actual_tokens].copy_(self.o_norm(core_attn_out[:, :num_actual_tokens], g2))
+        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
+        core_attn_out[:, :num_actual_tokens].copy_(normalized)
 
