@@ -1133,9 +1133,8 @@ class NPUWorker(WorkerBase):
             and speculative_config.method == "eagle3"
             and speculative_config.num_speculative_tokens > 1
         )
-        needs_mrv2_mamba_zeroing = self.use_v2_model_runner and kv_cache_config.has_mamba_layers
         should_init_kv_zeroer = kv_cache_config.needs_kv_cache_zeroing and (
-            needs_mrv2_mamba_zeroing or needs_mrv1_mamba_eagle_zeroing
+            self.use_v2_model_runner or needs_mrv1_mamba_eagle_zeroing
         )
         # Keep bookkeeping buffers outside the sleep-mode KV-cache pool so they
         # survive sleep/wake cycles.
