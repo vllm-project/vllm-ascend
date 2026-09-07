@@ -924,6 +924,7 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
+        cudagraph_stats=None,
         **state_kwargs,
     )
     grammar_output = object()
