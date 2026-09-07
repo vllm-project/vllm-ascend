@@ -42,15 +42,10 @@ to get specific plans.
 
     Why: Upstream vLLM added Model Runner V2 support for
     `extract_hidden_states`. Ascend reuses upstream
-    `ExtractHiddenStatesSpeculator` unchanged via `init_speculator` and keeps
+    `ExtractHiddenStatesSpeculator` via `init_speculator` dispatch and keeps
     `HiddenStateCacheSpec` on a private single-tensor allocate/reshape path.
     `use_aux_hidden_state_outputs` is enabled by upstream
-    `GPUModelRunner.__init__` and pinned again on `NPUModelRunner` so Ascend
-    re-init cannot drop it.
-
-    After load, MRV2 disables torch.compile on the target backbone so
-    Python-list aux collection survives TP collective graph breaks, and
-    rejects `eagle_aux_hidden_state_layer_ids` outside `0..num_hidden_layers`.
+    `GPUModelRunner.__init__`.
 
     After vLLM #51718 (0828 pin), every KV descriptor is a view into one
     shared backing with `[B, H, N, C]` pages. Hidden-state dumps stay on

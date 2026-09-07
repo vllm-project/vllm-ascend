@@ -526,7 +526,7 @@ Key configuration parameters:
 
 1. **`num_speculative_tokens`**: Must be set to `1`. This method does not perform actual speculation, so the value is fixed.
 
-2. **`eagle_aux_hidden_state_layer_ids`**: List of layer indices from which to extract hidden states. For example, `[2, 18, 34]` extracts from layers 2, 18, and 34 on **36-layer Qwen3-8B**. Valid ids are `0..num_hidden_layers` (id `num_hidden_layers` is the last decoder's output, before the final norm). Shallower models must not copy the Qwen3-8B example: a 24-layer Qwen3.5 or 27-layer DeepSeek-V2-Lite will skip `34` and fail with `Expected 3 auxiliary hidden states, got 2`. Use the EAGLE3 default `(2, num_layers // 2, num_layers - 3)` when unsure.
+2. **`eagle_aux_hidden_state_layer_ids`**: List of layer indices from which to extract hidden states. For example, `[2, 18, 34]` extracts from layers 2, 18, and 34.
 
 3. **`kv_connector`**: Must be set to `"ExampleHiddenStatesConnector"` to enable saving hidden states to disk.
 
