@@ -1,5 +1,5 @@
 test_name: "GLM-5.2-W8A8C8-A3-Memcache-PD"
-model: "Eco-Tech/GLM-5.2-W8A8C8"
+model: "Eco-Tech/GLM-5.2-w8a8c8"
 num_nodes: 4
 npu_per_node: 16
 
@@ -114,7 +114,7 @@ prefill_server_cmd: &prefill_server_cmd
   - "--max-model-len"
   - "133120"
   - "--additional-config"
-  - '{"fuse_muls_add": true, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true, "c8_enable_reshape_optim": true}'
+  - '{"fuse_muls_add": true, "enable_dsa_cp": true, "enable_sparse_sfa_c8": true, "enable_sparse_li_c8": true}'
   - "--max-num-batched-tokens"
   - "8192"
   - "--trust-remote-code"

@@ -19,7 +19,7 @@ msgstr ""
 "Generated-By: detect_po_changes.py\n"
 
 msgid "# Supported Features"
-msgstr "# 支持的功能"
+msgstr "# 支持的特性"
 
 msgid ""
 "The feature support principle of vLLM Ascend is: **aligned with vLLM**. We "

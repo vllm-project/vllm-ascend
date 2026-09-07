@@ -30,7 +30,7 @@ from vllm_ascend.config_utils import config
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
-_MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
+_MEGA_MOE_SUPPORTED = None
 
 
 def is_mega_moe_supported() -> bool:
@@ -41,6 +41,9 @@ def is_mega_moe_supported() -> bool:
     during config init (AscendConfig._validate_user_input_ranges rolls back
     megamoe), and a direct import binds a stale snapshot for the bool.
     """
+    global _MEGA_MOE_SUPPORTED
+    if _MEGA_MOE_SUPPORTED is None:
+        _MEGA_MOE_SUPPORTED = importlib.util.find_spec("cann_ops_transformer") is not None
     return _MEGA_MOE_SUPPORTED
 
 
@@ -254,12 +257,12 @@ class AscendConfig:
             "enable_mc2_hierarchy_comm": false,
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
+            "enable_force_eplb": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
-            "mega_moe_max_tokens": 131072,
+            "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
-            "c8_enable_reshape_optim": false,
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
             "mlapo_keep_prefill_weights": false,
@@ -388,15 +391,22 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    enable_force_eplb: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
-    mega_moe_max_tokens: int = 131072
+    # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
+    # The same value is passed as dispatch_ffn_combine's max_output_size
+    # and CANN MegaMoe buffer's max_recv_token_num.
+    # This is a reference value: if the actual per-rank received token
+    # count exceeds it, tokens may be truncated, causing precision
+    # degradation. Do not set it too large because workspace memory scales
+    # linearly with this value. Default 65536.
+    mega_moe_max_tokens: int = 65536
     ascend_log_path: str = dataclasses.field(
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
-    c8_enable_reshape_optim: bool = False
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
@@ -441,6 +451,7 @@ class AscendConfig:
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+    _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -454,7 +465,7 @@ class AscendConfig:
         # to enable the megamoe for testing capabilities.
         # These codes will be removed after megamoe is ready.
         global _MEGA_MOE_SUPPORTED
-        if self.enable_fused_mc2 == 1:
+        if self.enable_fused_mc2 in (0, 1):
             # When enable_fused_mc2=1, roll back to dispatch_ffn_combine.
             _MEGA_MOE_SUPPORTED = False
         elif self.enable_fused_mc2 == 2:
@@ -469,6 +480,13 @@ class AscendConfig:
     # the max_num_batched_tokens that sequence-parallel writeback corrected).
     def derive_and_validate(self, vllm_config: VllmConfig) -> AscendConfig:
         vc = vllm_config
+        if (
+            self.enable_force_eplb
+            and self.eplb_config.dynamic_eplb
+            and vc.model_config is not None
+            and vc.model_config.is_moe
+        ):
+            raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
 
         # profiling_chunk vs min_chunk clamp
@@ -613,15 +631,22 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        # sparse c8 + reshape optim derivation
+        # Sparse C8 derivation. The StoreKVBlock optimization is internal and
+        # enabled only for SFA + Lightning Indexer C8 on PD prefill nodes.
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
         self.enable_sparse_sfa_c8 = self.enable_sparse_sfa_c8 and use_sparse
         self.enable_sparse_li_c8 = self.enable_sparse_li_c8 and use_sparse
-        # c8_enable_reshape_optim is a user input field now; keep the original
-        # semantics: only meaningful when enable_sparse_li_c8 is true.
-        self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and self.c8_enable_reshape_optim
+        kv_transfer_config = vc.kv_transfer_config
+        is_prefill_node = kv_transfer_config is not None and (
+            getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
+            or (
+                bool(getattr(kv_transfer_config, "is_kv_producer", False))
+                and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
+            )
+        )
+        self._c8_reshape_optim_enabled = self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -750,6 +775,8 @@ class AscendConfig:
 
         moe_intermediate_size = getattr(hf_text_config, "moe_intermediate_size", None)
         if moe_intermediate_size is None:
+            moe_intermediate_size = getattr(hf_text_config, "intermediate_size", None)
+        if moe_intermediate_size is None:
             return False
         if moe_intermediate_size < 1024 or moe_intermediate_size > 3072 or moe_intermediate_size % 512 != 0:
             return False
@@ -848,6 +875,11 @@ class AscendConfig:
 
         layer_ids = {extract_layer_index(normalized_layer_name)}
         return any(layer_id in self._sparse_li_c8_layer_ids for layer_id in layer_ids)
+
+    @property
+    def c8_reshape_optim_enabled(self) -> bool:
+        """Whether SFA should use StoreKVBlock for LI C8 cache writes."""
+        return self._c8_reshape_optim_enabled
 
     @staticmethod
     def _get_compile_ranges(compilation_config):
@@ -1376,10 +1408,10 @@ def init_ascend_config(vllm_config):
         "dump_config",
         "dump_config_path",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
-        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/
-        # c8_enable_reshape_optim are NOT here — they are user-input fields that
-        # derive_and_validate *augments* (self.x = self.x and condition), so the user
-        # must be able to pass them. Only pure-derived fields (no user input) are stripped.
+        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8
+        # are NOT here — they are user-input fields that derive_and_validate
+        # augments (self.x = self.x and condition), so the user must be able to
+        # pass them. Only pure-derived fields (no user input) are stripped.
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",
@@ -1397,6 +1429,17 @@ def init_ascend_config(vllm_config):
         "batch_job_sched_config",
     }
     kwargs = {k: v for k, v in additional_config.items() if k not in _NON_USER_INPUT_KEYS}
+    unknown_keys = sorted(set(kwargs) - AscendConfig.__dataclass_fields__.keys())
+    # vLLM-Omni shares this mapping with the platform plugin. Preserve its
+    # extension keys on VllmConfig while excluding them from Ascend validation.
+    if unknown_keys and importlib.util.find_spec("vllm_omni") is not None:
+        logger.warning(
+            "The following additional_config keys are invalid for vLLM-Ascend: %s. "
+            "They may be used by vLLM-Omni or another project. "
+            "Please remove them if they are not needed for your use case.",
+            unknown_keys,
+        )
+        kwargs = {k: v for k, v in kwargs.items() if k not in unknown_keys}
 
     new_config = AscendConfig(  # type: ignore[call-arg]
         scheduler_config=sched,

@@ -17,25 +17,7 @@
         "image_tag": "9.1.0-310p-ubuntu22.04-py3.12",
         "csrc_cache_target": "310p-arm64-ubuntu"
     },
-    "linux-aarch64-a3-2": {
-        "chip": "a3",
-        "npu_num": 2,
-        "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
-        "csrc_cache_target": "a3-arm64-ubuntu"
-    },
-    "linux-aarch64-a3-4": {
-        "chip": "a3",
-        "npu_num": 4,
-        "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
-        "csrc_cache_target": "a3-arm64-ubuntu"
-    },
-    "linux-aarch64-a3-8": {
-        "chip": "a3",
-        "npu_num": 8,
-        "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",
-        "csrc_cache_target": "a3-arm64-ubuntu"
-    },
-    "linux-aarch64-a3-16": {
+    "linux-aarch64-a3-800t-16": {
         "chip": "a3",
         "npu_num": 16,
         "image_tag": "9.1.0-a3-ubuntu22.04-py3.12",

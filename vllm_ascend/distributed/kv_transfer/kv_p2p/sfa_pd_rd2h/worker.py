@@ -95,6 +95,16 @@ def _resolve_kv_transfer_backend(vllm_config: VllmConfig) -> str:
     return backend
 
 
+def _resolve_memfabric_transfer_protocol(vllm_config: VllmConfig) -> str | None:
+    """Read the optional MemFabric data-path protocol.
+
+    Read from ``kv_connector_extra_config["memfabric_transfer_protocol"]``:
+    ``sdma``/``device_rdma`` for A3 nodes, ``device_urma`` for A5 nodes.
+    """
+    extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
+    return extra.get("memfabric_transfer_protocol")
+
+
 def _validate_tcp_port(port: int, *, description: str) -> None:
     if not MIN_TCP_PORT <= port <= MAX_TCP_PORT:
         raise ValueError(f"{description} must be in [{MIN_TCP_PORT}, {MAX_TCP_PORT}], got {port}")
@@ -158,6 +168,7 @@ class SFAPDRD2HConsumerWorker:
             global_memfabric_te.configure(
                 role=MEMFABRIC_ROLE_DECODE,
                 device_id=torch.npu.current_device(),
+                transfer_protocol=_resolve_memfabric_transfer_protocol(self.vllm_config),
             )
             self.engine = global_memfabric_te.get_transfer_engine(self.side_channel_host)
         return self.engine
@@ -444,6 +455,7 @@ class SFAPDRD2HProducerWorker:
         global_memfabric_te.configure(
             role=MEMFABRIC_ROLE_PREFILL,
             device_id=torch.npu.current_device(),
+            transfer_protocol=_resolve_memfabric_transfer_protocol(vllm_config),
         )
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config

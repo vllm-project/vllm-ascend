@@ -1,4 +1,4 @@
 pandas
 datasets
-modelscope
+modelscope<1.38
 tabulate

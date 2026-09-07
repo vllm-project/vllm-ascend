@@ -22,8 +22,8 @@ from vllm.v1.worker.utils import select_common_block_size
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import MLAPO_MAX_SUPPORTED_TOKENS
 from vllm_ascend.attention.utils import (
+    MLAPO_MAX_SUPPORTED_TOKENS,
     SFA_QSFA_TILE_SIZE,
     AscendCommonAttentionMetadata,
     ascend_chunked_prefill_workspace_size,
@@ -358,7 +358,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             draft_index,
         )
 
-        if get_ascend_config().c8_enable_reshape_optim:
+        if get_ascend_config().c8_reshape_optim_enabled:
             torch.ops._C_ascend.store_kv_block_metadata(
                 slot_mapping,
                 common_attn_metadata.group_len,
@@ -1266,7 +1266,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _use_li_c8_reshape_optim(self) -> bool:
         """Whether this layer can use the LI C8 cache-write operator."""
-        return self.enable_sparse_li_c8 and get_ascend_config().c8_enable_reshape_optim
+        return self.enable_sparse_li_c8 and get_ascend_config().c8_reshape_optim_enabled
 
     def _execute_sparse_flash_attention_process(
         self,

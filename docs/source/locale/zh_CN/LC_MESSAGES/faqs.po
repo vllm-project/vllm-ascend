@@ -346,7 +346,7 @@ msgid ""
 " through E2E test."
 msgstr ""
 "- **功能测试**：我们添加了 CI，包括部分 vllm 原生单元测试和 vllm-ascend 自身的单元测试。在 vllm-ascend "
-"的测试中，我们通过端到端测试来验证基本功能、流行模型的可用性以及[支持的功能](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html)。"
+"的测试中，我们通过端到端测试来验证基本功能、流行模型的可用性以及[支持的特性](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html)。"
 
 msgid ""
 "- **Performance test**: We provide [benchmark](https://github.com/vllm-"

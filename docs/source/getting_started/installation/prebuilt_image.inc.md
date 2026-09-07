@@ -22,8 +22,8 @@
             | `vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler` | Ascend A3 series products | openEuler |
             | `vllm-ascend:{{ vllm_ascend_version }}-310p` | Atlas 300I DUO / Atlas 200I Pro | Ubuntu |
             | `vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler` | Atlas 300I DUO / Atlas 200I Pro | openEuler |
-            | `vllm-ascend:{{ vllm_ascend_version }}-950dt` | Ascend 950DT series products | Ubuntu |
-            | `vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler` | Ascend 950DT series products | openEuler |
+            | `vllm-ascend:{{ vllm_ascend_version }}-a5` | Ascend 950DT series products | Ubuntu |
+            | `vllm-ascend:{{ vllm_ascend_version }}-a5-openeuler` | Ascend 950DT series products | openEuler |
 
 {% filter indent(8, true) %}{% include "getting_started/quick_start/ascend_image/atlas-a2.inc.md" %}{% endfilter %}
 

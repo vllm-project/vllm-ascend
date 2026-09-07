@@ -25,6 +25,7 @@ The following model weights are available:
 - `Qwen3.8-27B` (BF16 version): requires 1 Ascend950DT series (96GB × 8) node or 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Qwen/Qwen3.8-27B)
 - `Qwen3.8-27B-w8a8` (Quantized version): requires 1 Ascend950PR series (128GB × 8) node or 1 Atlas 800 A3 (64GB × 16) node or 1 Atlas 800 A2 (64GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8)
 - `Qwen3.8-27B-w8a8-mxfp8` (Quantized version): requires 1 Ascend950DT series (96GB × 8) or 1 Ascend950PR series (128GB × 8) node. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-mxfp8)
+- `Qwen3.8-27B-w8a8-310p` (Quantized version): requires 1 Atlas 300I DUO. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/Qwen3.8-27B-w8a8-310p)
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`.
 
@@ -149,6 +150,37 @@ Select an image based on your machine type and start the docker image on your no
         -it $IMAGE bash
     ```
 
+=== "Atlas 300I DUO"
+
+    Start the docker image on each node.
+
+    ```bash
+    export IMAGE=quay.io/ascend/vllm-ascend:v0.23.0-310p
+    export NAME=vllm-ascend
+
+    docker run --rm \
+        --name $NAME \
+        --shm-size=1g \
+        --device /dev/davinci0 \
+        --device /dev/davinci1 \
+        --device /dev/davinci2 \
+        --device /dev/davinci3 \
+        --device /dev/davinci4 \
+        --device /dev/davinci5 \
+        --device /dev/davinci6 \
+        --device /dev/davinci7 \
+        --device /dev/davinci_manager \
+        --device /dev/devmm_svm \
+        --device /dev/hisi_hdc \
+        -v /usr/local/dcmi:/usr/local/dcmi \
+        -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+        -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+        -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+        -v /etc/ascend_install.info:/etc/ascend_install.info \
+        -v /root/.cache:/root/.cache \
+        -it $IMAGE bash
+    ```
+
 After entering the container, verify that vLLM and vLLM-Ascend can be imported:
 
 ```shell
@@ -161,11 +193,19 @@ You can also build and install `vllm-ascend` from source. Refer to [set up using
 
 If you want to deploy a multi-node service, install the same version of vLLM and vLLM-Ascend on each node.
 
+!!! note
+
+    On Atlas 300I DUO, you may need to uninstall `triton-ascend` and `triton` to avoid dependency conflicts:
+
+    ```bash
+    pip uninstall -y triton-ascend triton
+    ```
+
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
 ### 5.1 Single-Node Online Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios.
+Single-node deployment completes both Prefill and Decode within the same node, suitable for development, testing, and medium-scale inference scenarios. On Atlas 300I DUO, at least 2 devices are required.
 
 Before starting the service:
 
@@ -178,14 +218,14 @@ Before starting the service:
     ```bash
     #!/bin/sh
     # Load model from ModelScope to speed up download
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
     export VLLM_USE_MODELSCOPE=True
-    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     export HCCL_BUFFSIZE=512
-    # To reduce memory fragmentation and avoid out of memory
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    # To reduce memory fragmentation and avoid out of memory
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8-mxfp8) or a local directory path
-    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8-mxfp8
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \
@@ -281,14 +321,14 @@ Before starting the service:
     ```bash
     #!/bin/sh
     # Load model from ModelScope to speed up download
+    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
     export VLLM_USE_MODELSCOPE=True
-    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
     export HCCL_BUFFSIZE=512
-    # To reduce memory fragmentation and avoid out of memory
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+    # Size of the shared buffer (in MB) used by HCCL for NPU-to-NPU collective communication
+    # To reduce memory fragmentation and avoid out of memory
 
     # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
-    export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
 
     vllm serve $MODEL_PATH \
         --host 0.0.0.0 \
@@ -324,6 +364,53 @@ Before starting the service:
     - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
         - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
         - `"cudagraph_capture_sizes"`: represents different levels of graph modes. The default value is `[1, 2, 4, 8, 16, 24, 32, 40,..., --max-num-seqs]`. In the graph mode, the input for graphs at different levels is fixed, and inputs between levels are automatically padded to the next level. Currently, the default setting is recommended. Only in some scenarios is it necessary to set this separately to achieve optimal performance.
+
+=== "Atlas 300I DUO"
+
+    Currently only the **TP** scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. Replace `MODEL_PATH` with a ModelScope model id or a local directory path. The quantized version needs to start with the `--quantization ascend` parameter.
+
+    === "Qwen3.8-27B-w8a8"
+
+        Startup Command:
+
+        ```bash
+        #!/bin/sh
+        # Load model from ModelScope to speed up download
+        export VLLM_USE_MODELSCOPE=True
+
+        # Model weight path; can be a ModelScope model id (e.g., Eco-Tech/Qwen3.8-27B-w8a8) or a local directory path
+        export MODEL_PATH=Eco-Tech/Qwen3.8-27B-w8a8
+
+        vllm serve $MODEL_PATH \
+            --host 127.0.0.1 \
+            --port 8000 \
+            --tensor-parallel-size 4 \
+            --served-model-name qwen3.8 \
+            --max-num-seqs 128 \
+            --max-model-len 16384 \
+            --trust-remote-code \
+            --gpu-memory-utilization 0.90 \
+            --mamba-ssm-cache-dtype float16 \
+            --dtype float16 \
+            --speculative-config '{"method": "qwen3_5_mtp","num_speculative_tokens":1}' \
+            --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [2,16]}' \
+            --additional-config '{"ascend_compilation_config": {"enable_npugraph_ex": false}}'
+        ```
+
+    Key Parameter Descriptions:
+
+    - `--tensor-parallel-size` sets the tensor parallel size. Choose **TP=2** or **TP=4** according to the available devices.
+    - `--max-model-len` represents the context length, which is the maximum value of the input plus output for a single request. Configure it based on the actual workload and available memory; `Qwen3.8-27B` supports up to 262144.
+    - `--max-num-seqs` indicates the maximum number of concurrent requests. Configure it as needed—setting it too high may cause OOM.
+    - `--gpu-memory-utilization` represents the proportion of HBM that vLLM will use for actual inference. Configure this value according to the actual device memory; setting it too high may cause OOM. The default value is `0.9`.
+    - `--mamba-ssm-cache-dtype` sets the data type of the Mamba SSM cache. On Atlas 300I DUO, only `float16` is supported.
+    - `--dtype float16` must be set on Atlas 300I DUO. These devices only support the FP16 data type.
+    - `--speculative-config` uses `qwen3_5_mtp` for `Qwen3.8-27B` because it shares the same MTP head design as `Qwen3.5-27B`. On Atlas 300I DUO, it is recommended to set `num_speculative_tokens` to `1`.
+    - `--compilation-config` contains configurations related to the aclgraph graph mode. The most significant configurations are `"cudagraph_mode"` and `"cudagraph_capture_sizes"`, which have the following meanings:
+        - `"cudagraph_mode"`: represents the specific graph mode. Currently, `"PIECEWISE"` and `"FULL_DECODE_ONLY"` are supported. The graph mode is mainly used to reduce the cost of operator dispatch. Currently, `"FULL_DECODE_ONLY"` is recommended.
+        - `"cudagraph_capture_sizes"`: represents different levels of graph modes. When tensor parallelism (TP) is enabled, hardware event-id constraints allow at most two capture sizes (for example, `[1, 8]`).
+        With MTP enabled, calculate each capture size as `n * (num_speculative_tokens + 1)`, where `n` is a capture size for the deployment without MTP. For example, when `num_speculative_tokens` is `1`, the non-MTP sizes `[1,2,4,8]` become `[2,4,8,16]`.
+    - `--additional-config` with `"ascend_compilation_config": {"enable_npugraph_ex": false}` is required on Atlas 300I DUO because `enable_npugraph_ex` is not supported on this platform.
 
 ## 6 Functional Verification
 
@@ -437,6 +524,8 @@ After about several minutes, you can get the performance evaluation result.
 ### 9.1 Recommended Configurations
 
 > **Note**: The current documentation focuses on the rapid adaptation and validation of the Qwen3.8-27B model on Ascend NPUs. Performance tuning results have not yet been fully verified. Recommended configurations for typical scenarios (e.g., long context, low latency, and high throughput) will be supplemented and updated here once the corresponding validation is completed. In the meantime, please refer to [Section 9.2](#92-tuning-guidelines) for general tuning guidance.
+>
+> **Atlas 300I DUO**: Currently only the TP scenario is supported. Choose **TP=2** or **TP=4** according to the available devices. With **TP=4**, `--max-model-len` can support **128k** and **256k** long-sequence scenarios; configure `--max-num-seqs` as needed—setting it too high may cause OOM.
 
 ### 9.2 Tuning Guidelines
 

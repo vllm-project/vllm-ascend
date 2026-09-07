@@ -36,18 +36,18 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiMLAAttention,
 )
-from vllm_ascend.models.llama_eagle3 import (
-    get_rotation_matrix,
-    get_rotation_path,
-    load_quarot_target_layer,
-)
+from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.models.qwen3_dspark import (
     TARGET_EMBED_WEIGHT_NAMES,
     TARGET_LM_HEAD_WEIGHT_NAMES,
     process_weight,
 )
 from vllm_ascend.ops.rotary_embedding import get_cos_and_sin_mla
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import (
+    get_rotation_matrix,
+    get_rotation_path,
+    vllm_version_is,
+)
 
 
 def _uses_causal_draft_attention(config) -> bool:

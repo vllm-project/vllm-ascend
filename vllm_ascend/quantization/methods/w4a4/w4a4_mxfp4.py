@@ -26,7 +26,10 @@ from vllm.utils.math_utils import cdiv
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
+from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
+from vllm_ascend.ops.fused_moe.moe_utils import cumsum_group_list, maybe_normalize_mxfp_scale_layout
 from vllm_ascend.ops.fused_moe.routed_experts import AscendRoutedExperts  # noqa: F401
+from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD, dispose_tensor
 
 from ..base import (
     AscendLinearScheme,
@@ -35,6 +38,32 @@ from ..base import (
     TPWeightGatherSpec,
 )
 from ..registry import register_scheme
+
+
+# Select checkpoint parameter names for packed compressed-tensors weights.
+def _use_compressed_tensors_mxfp4_weight_names() -> bool:
+    quant_config = get_current_vllm_config().quant_config
+    if quant_config is None:
+        return False
+
+    get_name = getattr(quant_config, "get_name", None)
+    return callable(get_name) and get_name() == COMPRESSED_TENSORS_METHOD
+
+
+def _rename_packed_weight_parameter(layer: torch.nn.Module, weight_name: str) -> None:
+    packed_weight_name = f"{weight_name}_packed"
+    if not hasattr(layer, packed_weight_name):
+        return
+
+    setattr(
+        layer,
+        weight_name,
+        torch.nn.Parameter(
+            getattr(layer, packed_weight_name).data,
+            requires_grad=False,
+        ),
+    )
+    delattr(layer, packed_weight_name)
 
 
 @register_scheme("W4A4_MXFP4", "linear")
@@ -62,7 +91,8 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
 
     def get_weight(self, input_size: int, output_size: int, params_dtype: torch.dtype) -> dict[str, Any]:
-        params_dict = {"weight": torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
+        weight_name = "weight_packed" if _use_compressed_tensors_mxfp4_weight_names() else "weight"
+        params_dict = {weight_name: torch.empty(output_size, input_size // 2, dtype=torch.uint8)}
         return params_dict
 
     def get_pergroup_param(
@@ -118,6 +148,8 @@ class AscendW4A4MXFP4DynamicLinearMethod(AscendLinearScheme):
         - weight_scale: (n_dim, k_dim) -> (k_dim//2, n_dim, 2)
         """
 
+        _rename_packed_weight_parameter(layer, "weight")
+
         n_dim, k_dim = layer.weight_scale.data.shape
         # Shape should be padded if it cannot be divided by 2
         if k_dim % 2 != 0:
@@ -135,6 +167,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
 
     model_dtype = None
     quant_type: QuantType = QuantType.W4A4MXFP
+    act_quant_type: torch.dtype = torch_npu.float4_e2m1fn_x2
+    fused_activations = frozenset({"silu"})
     supports_eplb = True
 
     def __init__(self):
@@ -148,10 +182,11 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
     ) -> dict[str, Any]:
         param_dict = {}
-        param_dict["w13_weight"] = torch.empty(
+        suffix = "_packed" if _use_compressed_tensors_mxfp4_weight_names() else ""
+        param_dict[f"w13_weight{suffix}"] = torch.empty(
             num_experts, 2 * intermediate_size_per_partition, hidden_sizes // 2, dtype=torch.uint8
         )
-        param_dict["w2_weight"] = torch.empty(
+        param_dict[f"w2_weight{suffix}"] = torch.empty(
             num_experts, hidden_sizes, intermediate_size_per_partition // 2, dtype=torch.uint8
         )
         return param_dict
@@ -178,17 +213,13 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         shared_experts: Any | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        if x.dtype not in [torch.uint8]:
-            topk_weights = topk_weights.to(x.dtype)
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
                 hidden_states=x,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
+                layer=layer,
                 quant_type=self.quant_type,
                 dynamic_eplb=self.dynamic_eplb,
                 expert_map=layer.ascend_expert_map,
@@ -202,9 +233,8 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
                 mxfp_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_per_token_scale_dtype=torch_npu.float8_e8m0fnu,
                 mxfp_use_bf16=(x.dtype in [torch.bfloat16, torch.uint8]),
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-            )
+            ),
+            quant_method=self,
         )
 
     @staticmethod
@@ -217,6 +247,9 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         ]
 
     def process_weights_after_loading(self, layer):
+        _rename_packed_weight_parameter(layer, "w13_weight")
+        _rename_packed_weight_parameter(layer, "w2_weight")
+
         g_num, n_size, k_size = layer.w13_weight_scale.shape
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
@@ -227,3 +260,80 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2)
+
+    def apply_gmm1_act_quant(self, mlp_compute_input: MoEMlpComputeInput):
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            x=hidden_states,
+            weight=[layer.w13_weight],
+            group_list=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 0),
+            weight_scale=[layer.w13_weight_scale],
+            x_scale=pertoken_scale,
+            dequant_mode=2,
+            quant_mode=2,
+            dequant_dtype=torch.float32,
+            quant_dtype=torch_npu.float4_e2m1fn_x2,
+            x_dtype=torch_npu.float4_e2m1fn_x2,
+            weight_dtype=torch_npu.float4_e2m1fn_x2,
+            weight_scale_dtype=torch_npu.float8_e8m0fnu,
+            x_scale_dtype=torch_npu.float8_e8m0fnu,
+        )
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return out, maybe_normalize_mxfp_scale_layout(out_scale)
+
+    def apply_gmm1(self, mlp_compute_input: MoEMlpComputeInput):
+        hidden_states = mlp_compute_input.hidden_states
+        hidden_states, pertoken_scale = self._quant_hidden_states(hidden_states, mlp_compute_input.dynamic_scale)
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w13_weight],
+            scale=[layer.w13_weight_scale],
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            group_list_type=mlp_compute_input.group_list_type,
+            output_dtype=torch.bfloat16,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+        )[0]
+        dispose_tensor(mlp_compute_input.hidden_states)
+        return hidden_states
+
+    def apply_act_quant(self, mlp_compute_input: MoEMlpComputeInput, hidden_states: torch.Tensor):
+        hidden_states, dynamic_scale = torch_npu.npu_dynamic_mx_quant(
+            hidden_states, dst_type=torch_npu.float4_e2m1fn_x2
+        )
+        return hidden_states, maybe_normalize_mxfp_scale_layout(dynamic_scale)
+
+    def apply_gmm2(self, mlp_compute_input: MoEMlpComputeInput, hidden_states, act_out_scale):
+        layer = mlp_compute_input.layer
+        assert layer is not None
+        input_dtype = mlp_compute_input.hidden_states.dtype
+        use_bf16 = input_dtype in [torch.bfloat16, torch.uint8, torch.float4_e2m1fn_x2]
+        output_dtype = (
+            input_dtype
+            if input_dtype in [torch.bfloat16, torch.float16]
+            else (torch.bfloat16 if use_bf16 else torch.float16)
+        )
+        return torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[layer.w2_weight],
+            scale=[layer.w2_weight_scale],
+            bias=None,
+            per_token_scale=[act_out_scale],
+            split_item=2,
+            group_list_type=mlp_compute_input.group_list_type,
+            group_type=0,
+            group_list=mlp_compute_input.group_list,
+            output_dtype=output_dtype,
+            scale_dtype=torch_npu.float8_e8m0fnu,
+            per_token_scale_dtype=torch_npu.float8_e8m0fnu,
+            x_dtype=torch_npu.float4_e2m1fn_x2,
+            weight_dtype=torch_npu.float4_e2m1fn_x2,
+        )[0]
