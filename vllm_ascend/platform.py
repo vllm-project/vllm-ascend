@@ -229,13 +229,16 @@ class NPUPlatform(Platform):
         use_dcp = getattr(attn_selector_config, "use_dcp", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
-        # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
+        # index_kpool GLM is not DeepSeek SFA; it has its own sparse MLA
+        # backend, and falls back to the dense one when its indexer is off.
         try:
             from vllm.config import get_current_vllm_config
-            from vllm_ascend.utils import enable_sfa
+            from vllm_ascend.utils import enable_sfa, kpool_indexer_is_active
 
             if use_sparse and not enable_sfa(get_current_vllm_config()):
                 use_sparse = False
+                if use_mla and kpool_indexer_is_active(get_current_vllm_config().model_config):
+                    return "vllm_ascend.attention.kpool_mla_v1.AscendKpoolMLABackend"
         except Exception:
             pass
         key = (use_mla, use_sparse)

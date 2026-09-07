@@ -2,28 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sparse attention indexer layer for the GLM-5.3-Flash kpool indexer.
 
-GLM-5.3-Flash enables its sparse indexer only when the checkpoint sets
-``index_topk``; with ``index_topk`` unset the model runs as dense NoPE MLA plus
-KDA, which is the configuration vLLM Ascend currently supports.
+Upstream calls this op from the model's ``Indexer.forward``, where it scores and
+selects on CUDA through a set of fused kernels: block-FP8 MQA logits via
+DeepGEMM, paged MQA logits, and radix top-k over a device workspace.
 
-This module keeps the layer so the sparse configuration still builds its index-K
-and tail caches (the KV cache specs are wired up and PD transfer works), but the
-scoring path is not implemented on Ascend. The upstream implementation is a set
-of fused CUDA kernels -- block-FP8 MQA logits through DeepGEMM, paged MQA logits,
-and radix top-k over a device workspace -- with no NPU equivalent yet. Rather
-than carry that unreachable code, ``forward_oot`` reports the gap so a sparse
-checkpoint fails at load with an actionable message instead of dispatching into
-a CUDA-only kernel.
+Ascend does it a layer lower instead. ``AscendKpoolMLAImpl`` writes the pooled
+keys, scores them with ``npu_lightning_indexer`` and attends over the winners
+all inside the attention layer, which is what lets the selection see the keys
+this very step just wrote. So on Ascend this op is never dispatched; the class
+stays because the layer still owns the index-K and tail caches, whose KV cache
+specs and PD transfer are wired through it.
 """
 
 import torch
-from vllm.logger import logger
 from vllm.model_executor.custom_op import CustomOp
 
 _UNSUPPORTED_MESSAGE = (
-    "GLM-5.3-Flash sparse (kpool) attention indexing is not implemented on "
-    "Ascend NPU. The dense NoPE MLA path is supported: serve a checkpoint whose "
-    "config leaves `index_topk` unset."
+    "This layer is not the Ascend kpool indexer. The scoring and selection live in "
+    "AscendKpoolMLAImpl, which runs them inside the attention layer so the pooled "
+    "keys it just wrote are the ones it scores. Reaching this op means the model was "
+    "routed to a backend that does not do that."
 )
 
 
@@ -62,7 +60,6 @@ class SparseAttnIndexerKpool(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         self.skip_k_cache_insert = skip_k_cache_insert
         self.use_fp4_cache = use_fp4_cache
-        logger.warning_once(_UNSUPPORTED_MESSAGE)
 
     def forward_oot(
         self,

@@ -57,7 +57,12 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+    serialized_spec_compress_ratio,
+    spec_compress_ratio,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     RegisterRegions,
@@ -464,8 +469,11 @@ class KVCacheRecvingThread(threading.Thread):
             kv_cache_spec = group_spec.get("kv_cache_spec")
             if isinstance(kv_cache_spec, dict):
                 for spec in kv_cache_spec.values():
-                    if isinstance(spec, dict) and isinstance(spec.get("compress_ratio"), int):
-                        compress_ratio = max(1, spec["compress_ratio"])
+                    if not isinstance(spec, dict):
+                        continue
+                    spec_ratio = serialized_spec_compress_ratio(spec)
+                    if spec_ratio is not None:
+                        compress_ratio = spec_ratio
                         break
             self.group_compress_ratios[group_id] = compress_ratio
         self.remote_te_port: dict[str, dict[int, int]] = SizedDict()
@@ -1785,8 +1793,10 @@ class MooncakeConnectorScheduler:
         for spec in specs:
             if isinstance(spec, SlidingWindowSpec):
                 sliding_window = spec.sliding_window
-            elif hasattr(spec, "compress_ratio"):
-                compress_ratio = spec.compress_ratio
+                continue
+            spec_ratio = spec_compress_ratio(spec)
+            if spec_ratio > 1:
+                compress_ratio = spec_ratio
 
         return GroupTransferInfo(
             tokens_per_block=block_size * max(1, int(compress_ratio)),
@@ -2808,8 +2818,11 @@ class MooncakeConnectorWorker:
         kv_cache_spec = group_spec.get("kv_cache_spec")
         if isinstance(kv_cache_spec, dict):
             for spec in kv_cache_spec.values():
-                if isinstance(spec, dict) and isinstance(spec.get("compress_ratio"), int):
-                    compress_ratio = max(1, spec["compress_ratio"])
+                if not isinstance(spec, dict):
+                    continue
+                spec_ratio = serialized_spec_compress_ratio(spec)
+                if spec_ratio is not None:
+                    compress_ratio = spec_ratio
                     break
         return compress_ratio
 

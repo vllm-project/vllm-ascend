@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass, replace
+from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass, fields, replace
+from typing import Any
 
 import torch
 from typing_extensions import Self
@@ -11,6 +14,7 @@ from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, SlidingWindowManager
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
@@ -18,16 +22,128 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+_MLA_SPEC_FIELDS = {field.name for field in fields(MLAAttentionSpec)}
+# vLLM reworked how MLA specs describe cache compression: ``compress_ratio``
+# became ``tokens_per_state``, ``storage_block_size`` turned from a derived row
+# count into an optional token width, and the ``indexes_kv_by_block_stride``
+# opt-in was dropped once padded pages started indexing by block stride
+# unconditionally. Detect the layout from the dataclass rather than from the
+# version string, which containers routinely patch out of sync with the code.
+SPEC_USES_TOKENS_PER_STATE = "tokens_per_state" in _MLA_SPEC_FIELDS
+SPEC_HAS_BLOCK_STRIDE_INDEXING = "indexes_kv_by_block_stride" in _MLA_SPEC_FIELDS
+
+_COMPRESSION_FIELD = "tokens_per_state" if SPEC_USES_TOKENS_PER_STATE else "compress_ratio"
+
+
+def spec_compress_ratio(kv_cache_spec: KVCacheSpec) -> int:
+    """Return how many tokens one physical KV row of ``kv_cache_spec`` holds."""
+    return getattr(kv_cache_spec, _COMPRESSION_FIELD, 1)
+
+
+def optional_spec_compress_ratio(kv_cache_spec: KVCacheSpec) -> int | None:
+    """Return the compression ratio, or ``None`` if the spec declares none.
+
+    Only MLA specs carry cache compression. Callers treat ``None`` as "ask the
+    model config instead", which a plain ratio of 1 must not be confused with.
+    """
+    if not isinstance(kv_cache_spec, (MLAAttentionSpec, SlidingWindowMLASpec)):
+        return None
+    return spec_compress_ratio(kv_cache_spec)
+
+
+def compression_kwargs(compress_ratio: int) -> dict[str, Any]:
+    """Spec kwargs declaring ``compress_ratio`` tokens per physical KV row."""
+    return {_COMPRESSION_FIELD: compress_ratio}
+
+
+def serialized_spec_compress_ratio(serialized_spec: Mapping[str, Any]) -> int | None:
+    """Return the compression ratio of a spec serialized for a peer.
+
+    A PD peer may run either spec layout, so both field names are accepted.
+    Returns ``None`` when the spec declares no compression at all.
+    """
+    for field_name in ("tokens_per_state", "compress_ratio"):
+        value = serialized_spec.get(field_name)
+        if isinstance(value, int):
+            return max(1, value)
+    return None
+
+
+def block_stride_indexing_kwargs(enabled: bool) -> dict[str, bool]:
+    """Spec kwargs opting padded pages into block-stride KV indexing."""
+    return {"indexes_kv_by_block_stride": enabled} if SPEC_HAS_BLOCK_STRIDE_INDEXING else {}
+
+
+def _spec_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
+    """Return the physical KV rows one scheduler block addresses."""
+    token_width = getattr(kv_cache_spec, "storage_block_size", None)
+    if not SPEC_USES_TOKENS_PER_STATE:
+        # Here ``storage_block_size`` is already a row count, exposed by vLLM
+        # for every spec kind.
+        return token_width if token_width is not None else kv_cache_spec.block_size
+    if token_width is None:
+        # ``None`` means the storage is viewed in whole kernel blocks.
+        token_width = kv_cache_spec.block_size
+    compress_ratio = spec_compress_ratio(kv_cache_spec)
+    # Some models tag "uncompressed" with a non-positive ratio, matching the
+    # guard in vLLM's own ``get_num_kernel_states``.
+    return token_width // compress_ratio if compress_ratio > 0 else token_width
+
+
+@dataclass(frozen=True)
+class AliasedKVCacheTensor:
+    """One allocation together with every layer that shares its bytes."""
+
+    size: int
+    shared_by: list[str]
+
+
+def aliased_kv_cache_tensors(
+    kv_cache_config: KVCacheConfig,
+) -> list[AliasedKVCacheTensor]:
+    """Describe the KV cache allocation as sets of layers that share bytes.
+
+    vLLM used to say this directly: a ``KVCacheTensor`` was one allocation of
+    ``size`` bytes plus the ``shared_by`` layers that alias it. It now describes
+    placements into a common backing allocation instead -- layer ``l`` of an
+    entry starts at ``offset + l * layer_stride``, and aliasing is expressed by
+    two placements landing on the same address rather than by a shared list.
+
+    Recover the old view, which is what the allocator below still wants: expand
+    each entry to one placement per layer, then group the placements by address.
+    Layers at the same address are exactly the old ``shared_by`` set -- for
+    GLM-5.3-Flash that is each MLA layer overlaid with its Mamba partner, and
+    each indexer layer overlaid with its kpool tail.
+    """
+    tensors = kv_cache_config.kv_cache_tensors
+    if not tensors or hasattr(tensors[0], "shared_by"):
+        return tensors
+
+    num_blocks = kv_cache_config.num_blocks
+    layers_at: dict[int, list[str]] = defaultdict(list)
+    bytes_at: dict[int, int] = {}
+    for tensor in tensors:
+        layer_bytes = num_blocks * tensor.block_stride
+        assert len(tensor.layers) == 1 or tensor.layer_stride == layer_bytes, (
+            "Ascend's KV cache allocator only handles layer-outermost layouts, "
+            f"got layer_stride={tensor.layer_stride} for {len(tensor.layers)} "
+            f"layers of {layer_bytes} bytes each."
+        )
+        for index, layer_name in enumerate(tensor.layers):
+            offset = tensor.offset + index * tensor.layer_stride
+            layers_at[offset].append(layer_name)
+            bytes_at[offset] = max(bytes_at.get(offset, 0), layer_bytes)
+
+    return [AliasedKVCacheTensor(size=bytes_at[offset], shared_by=layers) for offset, layers in layers_at.items()]
+
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {
-            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
-        }
+        storage_block_sizes = {_spec_storage_block_size(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
-    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+    return _spec_storage_block_size(kv_cache_spec)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -48,14 +164,9 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     store_on_host: bool = False
 
     @property
-    def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels."""
-        return self.block_size // self.tokens_per_state
-
-    @property
     def real_page_size_bytes(self) -> int:
         return (
-            self.storage_block_size
+            get_storage_block_size(self)
             * self.num_kv_heads
             * (self.head_size * get_dtype_size(self.dtype) + self.scale_dim * get_dtype_size(self.scale_dtype))
         )
@@ -76,7 +187,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
                 spec.cache_sparse_sfa_c8,
                 spec.store_on_host,
                 spec.alignment,
-                spec.tokens_per_state,
+                spec_compress_ratio(spec),
             )
             for spec in specs
         }
@@ -96,6 +207,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             alignment=first_spec.alignment,
             cache_sparse_sfa_c8=first_spec.cache_sparse_sfa_c8,
             store_on_host=first_spec.store_on_host,
+            **block_stride_indexing_kwargs(getattr(first_spec, "indexes_kv_by_block_stride", False)),
         )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -179,19 +291,14 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     cache_dtype_str: str | None = None
     # DeepseekV4-only: see MLAAttentionSpec.model_version.
     alignment: int | None = None  # Default to None for no padding.
-    compress_ratio: int = 1
     model_version: str | None = None
 
     def __post_init__(self):
         pass
 
     @property
-    def storage_block_size(self) -> int:
-        return self.block_size // self.compress_ratio
-
-    @property
     def real_page_size_bytes(self) -> int:
-        return self.storage_block_size * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
+        return get_storage_block_size(self) * self.num_kv_heads * self.head_size * get_dtype_size(self.dtype)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -199,7 +306,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             "All attention layers in the same KV cache group must be AscendSlidingWindowMLASpec."
         )
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
-        compress_ratio_set = set(spec.compress_ratio for spec in specs)
+        compress_ratio_set = set(spec_compress_ratio(spec) for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
         assert (
@@ -220,8 +327,8 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=sliding_window_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
-            compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
+            **compression_kwargs(compress_ratio_set.pop()),
         )
 
 
@@ -240,13 +347,4 @@ def register_ascend_kv_cache_specs() -> None:
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
-    )
-
-    # Imported lazily so this module stays independent of any single model.
-    from vllm_ascend.models.glm5next.kv_cache import KpoolTailManager, KpoolTailSpec
-
-    KVCacheSpecRegistry.register(
-        kvcache_spec_cls=KpoolTailSpec,
-        manager_class=KpoolTailManager,
-        uniform_type_base_spec=KpoolTailSpec,
     )

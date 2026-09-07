@@ -77,6 +77,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
     HiddenStateCacheSpec,
+    KpoolTailSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -150,7 +151,6 @@ from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoa
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.model_executor.offloader import create_offloader
-from vllm_ascend.models.glm5next.kv_cache import KpoolTailSpec
 from vllm_ascend.ops.fused_moe.force_eplb import build_force_eplb_topk
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.ops.triton.spec_decode.ngram import triton_ngram_spec_decode
@@ -186,6 +186,7 @@ from vllm_ascend.utils import (
     global_stream,
     is_hidden_state_cache_spec,
     is_score_encoder_cache_manager,
+    kpool_indexer_is_active,
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     oproj_tp_enable,
@@ -229,6 +230,9 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
+    aliased_kv_cache_tensors,
+    block_stride_indexing_kwargs,
+    get_storage_block_size,
 )
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
@@ -670,6 +674,13 @@ class NPUModelRunner(GPUModelRunner):
                     self.use_aux_hidden_state_outputs = True
                 elif self.speculative_config.use_dspark():
                     assert isinstance(self.drafter, AscendDSparkProposer)
+                    self.use_aux_hidden_state_outputs = True
+                elif self.speculative_config.use_dflash():
+                    # DFlash/DFlash2 draft from the target's intermediate layers
+                    # (dflash_config.target_layer_ids), concatenated into the
+                    # drafter's `fc`. Must be checked after use_dspark(), whose
+                    # proposer derives from the DFlash one.
+                    assert isinstance(self.drafter, AscendDflashProposer)
                     self.use_aux_hidden_state_outputs = True
                 self.rejection_sampler = AscendRejectionSampler(
                     self.sampler, self.speculative_config, self.device
@@ -4250,6 +4261,30 @@ class NPUModelRunner(GPUModelRunner):
             return True
         return isinstance(spec, KpoolTailSpec)
 
+    def _kpool_indexer_cache_shape(
+        self,
+        attn_backend,
+        kv_cache_spec: AttentionSpec,
+        num_blocks: int,
+        states_per_block: int,
+    ) -> tuple[int, ...]:
+        """Ask the indexer backend for its cache shape, dtype hint optional."""
+        try:
+            return attn_backend.get_kv_cache_shape(
+                num_blocks,
+                states_per_block,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=getattr(kv_cache_spec, "cache_dtype_str", "auto") or "auto",
+            )
+        except TypeError:
+            return attn_backend.get_kv_cache_shape(
+                num_blocks,
+                states_per_block,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+            )
+
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
@@ -4497,6 +4532,28 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
 
+        # GLM-5.3-Flash overlays the kpool indexer and tail on one backing.
+        # vLLM #51718 descriptors no longer list those layers together, so
+        # recover the shared placement and allocate once before the per-layer
+        # loop below skips the already-bound names.
+        for kv_cache_tensor in aliased_kv_cache_tensors(kv_cache_config):
+            shared = kv_cache_tensor.shared_by
+            if not any(
+                self._is_glm5_next_kpool_layer(name, layer_kv_cache_spec.get(name))
+                for name in shared
+            ):
+                continue
+            if all(name in kv_cache_raw_tensors for name in shared):
+                continue
+            if self.vllm_config.kv_transfer_config is None:
+                tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
+            else:
+                cache_size_aligned = kv_cache_tensor.size + alignment
+                tensor = torch.zeros(cache_size_aligned, dtype=torch.int8, device=self.device)
+                tensor = self._align_memory(tensor, alignment)[: kv_cache_tensor.size]
+            for layer_name_inner in shared:
+                kv_cache_raw_tensors[layer_name_inner] = tensor
+
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
             use_mamba = False
@@ -4738,8 +4795,9 @@ class NPUModelRunner(GPUModelRunner):
                     assert num_blocks == kv_cache_config.num_blocks, \
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
+                    storage_block_size = get_storage_block_size(current_kv_cache_spec)
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-                        num_blocks, current_kv_cache_spec.storage_block_size,
+                        num_blocks, storage_block_size,
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size)
                     kv_cache_shape_list = [kv_cache_shape]
@@ -4749,13 +4807,13 @@ class NPUModelRunner(GPUModelRunner):
                     if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
                         indexer_k_shape = kv_cache_shape
                         indexer_scale_shape = self.attn_backend.get_kv_cache_shape(
-                                                num_blocks, current_kv_cache_spec.storage_block_size,
+                                                num_blocks, storage_block_size,
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim
                                                 )
                         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
                             indexer_full_shape = self.attn_backend.get_kv_cache_shape(
-                                num_blocks, current_kv_cache_spec.storage_block_size,
+                                num_blocks, storage_block_size,
                                 current_kv_cache_spec.num_kv_heads,
                                 current_kv_cache_spec.head_size
                                 + current_kv_cache_spec.scale_dim
@@ -4836,23 +4894,29 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     num_blocks = raw_tensor.numel() // page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    storage_block_size = getattr(
-                        current_kv_cache_spec, "storage_block_size", current_kv_cache_spec.block_size
-                    )
-                    try:
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    if isinstance(current_kv_cache_spec, KpoolTailSpec):
+                        # KpoolTailBackend publishes no shape of its own: the
+                        # ring's layout is the generic
+                        # [block, head, state, content] view its spec already
+                        # describes, the two heads being raw K and the gate
+                        # score.
+                        kv_cache_shape = (
                             num_blocks,
-                            storage_block_size,
                             current_kv_cache_spec.num_kv_heads,
+                            current_kv_cache_spec.block_size,
                             current_kv_cache_spec.head_size,
-                            cache_dtype_str=getattr(current_kv_cache_spec, "cache_dtype_str", "auto") or "auto",
                         )
-                    except TypeError:
-                        kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    else:
+                        # The indexer page holds one cell per pool, i.e.
+                        # block_size // index_kpool of them, which is exactly
+                        # what page_size_bytes above was derived from. Viewing
+                        # it by anything else leaves a cache the operators
+                        # cannot address.
+                        kv_cache_shape = self._kpool_indexer_cache_shape(
+                            attn_backend,
+                            current_kv_cache_spec,
                             num_blocks,
-                            storage_block_size,
-                            current_kv_cache_spec.num_kv_heads,
-                            current_kv_cache_spec.head_size,
+                            current_kv_cache_spec.num_states,
                         )
                     raw_typed = raw_tensor.view(current_kv_cache_spec.dtype)
                     page_size_padded = getattr(current_kv_cache_spec, "page_size_padded", None)
@@ -5436,6 +5500,11 @@ class NPUModelRunner(GPUModelRunner):
                         dtype=dtype,
                         cache_dtype_str=cache_dtype_str,
                         non_causal_multi_token_decode=spec.non_causal_multi_token_decode,
+                        # GLM-5.3-Flash pages (MLA + KDA/Mamba + kpool) do not
+                        # evenly divide. Ascend binds KV as block-first views
+                        # and indexes padded pages by runtime block stride, so
+                        # unify_kv_cache_spec_page_size may pad them.
+                        **block_stride_indexing_kwargs(kpool_indexer_is_active(self.model_config)),
                     )
                     attn_layer_names.add(layer_name)
 
@@ -5444,6 +5513,10 @@ class NPUModelRunner(GPUModelRunner):
                 # V3.2 indexer cache but keep compress_ratio / KpoolTailSpec.
                 if is_glm5_next_kpool_cache(attn_module):
                     if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                        # Indexer/tail pages do not evenly divide the MLA page.
+                        # Ascend indexes KV by block stride, so opt in to padding.
+                        if isinstance(spec, AttentionSpec):
+                            spec = replace(spec, **block_stride_indexing_kwargs(True))
                         kv_cache_spec[layer_name] = spec
                     continue
                 # TODO: This mirrors upstream's separated KV/indexer specs for
@@ -5496,10 +5569,16 @@ class NPUModelRunner(GPUModelRunner):
                 if spec := mamba_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
                     mamba_page_size_padded = spec.page_size_bytes
-            # align attn_page_size to mamba_page_size_padded
-            for layer_name in attn_layer_names:
-                if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
-                    object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
+            # align attn_page_size to mamba_page_size_padded. An active kpool
+            # indexer is excluded: vLLM lays those groups out itself and
+            # requires the attention specs to reach it unpadded, so padding
+            # here would trip its assertion instead of helping. A kpool-shaped
+            # checkpoint served dense (``index_topk`` unset) registers no
+            # indexer layers, never reaches that layout, and still needs this.
+            if not kpool_indexer_is_active(self.model_config):
+                for layer_name in attn_layer_names:
+                    if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
+                        object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
         if self.sparse_kv_offload_enabled:
             self.kv_cache_spec = kv_cache_spec # reserve for Sparse KV offload usage

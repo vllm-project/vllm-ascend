@@ -55,6 +55,17 @@ class IndexerWrapper(nn.Module):
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
         self.k_cache = getattr(vllm_indexer, "k_cache", None)
+
+        # GLM-5.3-Flash scores pools rather than tokens, so its indexer carries
+        # three things DeepSeek's does not: the learned per-slot bias and the
+        # gate projection that together compress a pool, and the ring holding
+        # the pool still being filled. They are optional so this wrapper stays
+        # the single indexer holder for both model families.
+        self.index_kpool: int | None = getattr(vllm_indexer, "index_kpool", None)
+        self.index_kpool_compress_ape = getattr(vllm_indexer, "index_kpool_compress_ape", None)
+        self.index_kpool_compress_gate = getattr(vllm_indexer, "index_kpool_compress_gate", None)
+        self.tail_cache = getattr(vllm_indexer, "tail_cache", None)
+
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
 
     def forward(self):

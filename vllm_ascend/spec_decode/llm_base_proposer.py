@@ -100,14 +100,29 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
 # TODO(lilinsiman): Remove this code segment after future versions of the GLM
 # series models support graph input for speculative inference.
 def _is_glm_model(model_config) -> bool:
-    """Return True if the target model belongs to the GLM series.
+    """Return True if the given model config belongs to the GLM series.
 
     Detection is based on the model_type string (covers glm, chatglm, glm4,
-    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc).
+    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc). Accepts a
+    draft ``ModelConfig`` as well, and tolerates ``None``.
     """
     hf_text_config = getattr(model_config, "hf_text_config", None)
     model_type = getattr(hf_text_config, "model_type", "") or ""
     return "glm" in str(model_type).lower()
+
+
+# TODO(lilinsiman): Remove this code segment after future versions of the GLM
+# series models support graph input for speculative inference.
+def _glm_draft_requires_eager(model_config, draft_model_config) -> bool:
+    """Return True if the draft model has to fall back to eager mode.
+
+    The restriction lives in the GLM decoder layer itself (KDA state and the mHC
+    hyper-connection ops), so it only applies when the draft reuses those layers
+    -- an MTP head derived from the target. A draft carrying its own non-GLM
+    architecture (e.g. the Qwen3-shaped DFlash2 head published for
+    GLM-5.3-Flash) runs in graph mode like any other drafter.
+    """
+    return _is_glm_model(model_config) and _is_glm_model(draft_model_config)
 
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
@@ -225,7 +240,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the target model's graph-mode setting untouched.
         # TODO(lilinsiman): Remove this code segment after future versions of the GLM
         # series models support graph input for speculative inference.
-        if _is_glm_model(self.vllm_config.model_config):
+        if _glm_draft_requires_eager(self.vllm_config.model_config, self.speculative_config.draft_model_config):
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "

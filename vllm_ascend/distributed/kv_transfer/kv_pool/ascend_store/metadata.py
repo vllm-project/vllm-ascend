@@ -13,6 +13,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashList
 from vllm.v1.kv_cache_interface import FullAttentionSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.core.kv_cache_interface import optional_spec_compress_ratio
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import AttentionComputeStartGate
 
 
@@ -202,8 +203,8 @@ def _get_group_spec_ratios(group: object) -> set[int | None]:
         return set()
     kv_cache_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
     if kv_cache_specs is not None:
-        return {getattr(spec, "compress_ratio", None) for spec in kv_cache_specs.values()}
-    return {getattr(kv_cache_spec, "compress_ratio", None)}
+        return {optional_spec_compress_ratio(spec) for spec in kv_cache_specs.values()}
+    return {optional_spec_compress_ratio(kv_cache_spec)}
 
 
 def infer_group_cache_families(

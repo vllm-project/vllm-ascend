@@ -8,6 +8,8 @@ from vllm.model_executor.models.config import MambaModelConfig
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 
+from vllm_ascend.utils import kpool_indexer_is_active
+
 
 def _using_kv_store(vllm_config) -> bool:
     """
@@ -109,13 +111,30 @@ def verify_and_update_config(cls, vllm_config) -> None:
     # compute new attention page size
     attn_page_size = cache_config.block_size * attn_token_page_size
 
+    # How large a mamba page has to be. Normally the conv state rides on top of
+    # an attention-sized page, but GLM-5.3-Flash's grouping aliases mamba blocks
+    # onto MLA blocks -- see _get_kv_cache_groups_glm5_next, which pads mamba to
+    # exactly the MLA page so the two are interchangeable in one tensor. There
+    # the whole state, conv included, has to fit inside one attention page.
+    if kpool_indexer_is_active(model_config):
+        mamba_page_size_target = attn_page_size
+        whole_mamba_state = ssm_block_page_size + conv_block_page_size
+        if attn_page_size < whole_mamba_state:
+            raise ValueError(
+                f"the mamba state ({whole_mamba_state} bytes: {ssm_block_page_size} ssm "
+                f"+ {conv_block_page_size} conv) does not fit one attention page "
+                f"({attn_page_size} bytes), and this model needs the two to be equal. "
+                f"Raise --block-size to at least {cdiv(whole_mamba_state, attn_token_page_size)}."
+            )
+    else:
+        mamba_page_size_target = attn_page_size + conv_block_page_size
+
     # pad mamba page size for conv_blocks
-    if (
-        cache_config.mamba_page_size_padded is None
-        or cache_config.mamba_page_size_padded != attn_page_size + conv_block_page_size
-    ):
-        cache_config.mamba_page_size_padded = attn_page_size + conv_block_page_size
-        mamba_padding_pct = 100 * conv_block_page_size / cache_config.mamba_page_size_padded
+    if cache_config.mamba_page_size_padded is None or cache_config.mamba_page_size_padded != mamba_page_size_target:
+        cache_config.mamba_page_size_padded = mamba_page_size_target
+        mamba_padding_pct = 100 * (
+            1 - (ssm_block_page_size + conv_block_page_size) / cache_config.mamba_page_size_padded
+        )
         logger.info(
             "Padding mamba page size by %.2f%% to ensure "
             "that mamba page size and attention page size are "

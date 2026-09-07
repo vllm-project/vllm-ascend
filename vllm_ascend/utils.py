@@ -127,6 +127,23 @@ def model_uses_kpool_indexer(model_config: Any | None) -> bool:
     return any(hasattr(getattr(model_config, attr, None), "index_kpool") for attr in ("hf_text_config", "hf_config"))
 
 
+def kpool_indexer_is_active(model_config: Any | None) -> bool:
+    """Return True when the kpool indexer contributes KV cache specs.
+
+    ``model_uses_kpool_indexer`` only says the checkpoint is kpool-shaped: the
+    config carries ``index_kpool`` either way. The indexer itself is built --
+    and its k_cache / tail_cache layers registered -- only when ``index_topk``
+    is set. Leaving it unset runs the model as dense NoPE MLA, and then the
+    cache layout must follow the ordinary hybrid MLA + Mamba path.
+    """
+    if not model_uses_kpool_indexer(model_config):
+        return False
+    return any(
+        getattr(getattr(model_config, attr, None), "index_topk", None) is not None
+        for attr in ("hf_text_config", "hf_config")
+    )
+
+
 def model_uses_sfa_sparse(model_config: Any | None) -> bool:
     hf_text_config = getattr(model_config, "hf_text_config", None)
     hf_config = getattr(model_config, "hf_config", None)
@@ -1498,13 +1515,15 @@ def get_compressed_pos_and_indices(
 
     from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
+    from vllm_ascend.core.kv_cache_interface import spec_compress_ratio
+
     for kv_cache_group_id, kv_cache_group_spec in enumerate(kv_cache_groups):
         # Calculate compressed length of historical & total tokens
         if isinstance(kv_cache_group_spec.kv_cache_spec, UniformTypeKVCacheSpecs):
             kv_cache_spec = next(iter(kv_cache_group_spec.kv_cache_spec.kv_cache_specs.values()))
         else:
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-        compress_ratio = getattr(kv_cache_spec, "compress_ratio", 1)
+        compress_ratio = spec_compress_ratio(kv_cache_spec)
 
         # Note(qcs): some models use compress_ratio=0 as non-compression tag.
         if compress_ratio > 1:

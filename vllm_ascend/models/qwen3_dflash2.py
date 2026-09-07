@@ -224,9 +224,7 @@ class CandidateSelector(nn.Module):
 
 
 class DFlash2Qwen3Model(DFlashQwen3Model):
-    # vLLM #52816 switched the parent constructor from its module global to
-    # this class factory. Declare the main-lane factory so DFlash2 decoder
-    # layers are built.
+    # vLLM main builds the layers through this hook (upstream PR 52816).
     decoder_layer_cls = DFlash2Qwen3DecoderLayer
 
     def __init__(
@@ -236,11 +234,21 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
         start_layer_id: int = 0,
         prefix: str = "",
     ) -> None:
-        super().__init__(
-            vllm_config=vllm_config,
-            start_layer_id=start_layer_id,
-            prefix=prefix,
-        )
+        import vllm.model_executor.models.qwen3_dflash as dflash_mod
+
+        # 0.27.1 predates decoder_layer_cls and reads the module global instead,
+        # so swap it for the duration of the parent ctor. A no-op on main, where
+        # the class attribute above wins.
+        original_layer = dflash_mod.DFlashQwen3DecoderLayer
+        dflash_mod.DFlashQwen3DecoderLayer = DFlash2Qwen3DecoderLayer
+        try:
+            super().__init__(
+                vllm_config=vllm_config,
+                start_layer_id=start_layer_id,
+                prefix=prefix,
+            )
+        finally:
+            dflash_mod.DFlashQwen3DecoderLayer = original_layer
 
         draft_config = self.config.dflash_config
         self.input_embedding_scale = float(draft_config.get("input_embedding_scale", 1.0))
@@ -269,7 +277,15 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     has_own_lm_head = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        import vllm.model_executor.models.qwen3_dflash as dflash_mod
+
+        # Same 0.27.1 fallback as DFlash2Qwen3Model.decoder_layer_cls.
+        original_model = dflash_mod.DFlashQwen3Model
+        dflash_mod.DFlashQwen3Model = DFlash2Qwen3Model
+        try:
+            super().__init__(vllm_config=vllm_config, prefix=prefix)
+        finally:
+            dflash_mod.DFlashQwen3Model = original_model
 
         draft_config = self.config.dflash_config
         self.output_multiplier = float(draft_config.get("output_multiplier", 1.0))

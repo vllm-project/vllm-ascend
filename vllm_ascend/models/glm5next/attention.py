@@ -28,16 +28,18 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import MLAAttentionSpec
+from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
 
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
-from vllm_ascend.models.glm5next.kv_cache import KpoolTailSpec
 from vllm_ascend.models.glm5next.ops.kpool_compress import fwht128_quant_fp8
+from vllm_ascend.models.glm5next.ops.kpool_indexer import (
+    LIGHTNING_INDEXER_MAX_POOLS,
+    LIGHTNING_INDEXER_POOLS_ALIGNMENT,
+)
 from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import SparseAttnIndexerKpool
 
 # Paged MQA page sizes the kpool tail cache aligns against. Upstream reads this
 # from `vllm.utils.deep_gemm`, which is a CUDA-only module on Ascend.
-PAGED_MQA_PAGE_SIZES = (32, 64)
 
 # Shared torch.compile config for the indexer's small-kernel leaves. The MLA
 # indexer runs under breakable-CG (CompilationMode.NONE), which blocks FX-graph
@@ -85,17 +87,21 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
     kpool compress kernel inside the indexer op — the cache only provides the
     addressing, which is identical for both schemes.
 
+    Entries are plain bf16, not the FP8-plus-scale layout of DeepSeek's
+    indexer cache, because ``npu_lightning_indexer`` -- the operator that reads
+    this cache on Ascend -- accepts only bf16 or fp16 keys. Dropping the
+    quantization loses no accuracy: its Hadamard rotation is orthonormal, so
+    rotating neither the query nor the key leaves every score unchanged, and
+    skipping the FP8 round-trip only removes error. The extra bytes per entry
+    are already paid for by the kpool compression, which stores one entry per
+    ``index_kpool`` tokens instead of one per token.
+
     The indexer shares one block with the co-located MLA (a single
     ``MLAAttentionSpec`` / block_table), so ``block_size`` is the model-wide
-    ``cache_config.block_size``. DeepGEMM's paged-MQA kernel
-    (``csrc/apis/attention.hpp``) requires ``block_kv`` to be exactly 32 or
-    64, so the storage block is virtually split into pool pages of the
-    largest such size that tiles it (``storage_kernel_block_size``); this
-    needs ``block_size`` to be a multiple of ``index_kpool * 32`` (512 for
-    ``index_kpool = 16``). A smaller block (e.g. the default 64) silently
-    collapses ``storage_block_size`` (64 // 16 = 4) and only fails later at
-    the opaque C++ assert; ``get_kv_cache_spec`` guards this up front
-    instead.
+    ``cache_config.block_size``. ``npu_lightning_indexer`` reads the key cache
+    as pool-major pages and requires that page to hold a multiple of 16 pools,
+    at most 1024, which ``get_kv_cache_spec`` checks up front -- otherwise the
+    only symptom is the operator rejecting a shape mid-decode.
     """
 
     def __init__(
@@ -116,39 +122,54 @@ class Glm5NextIndexerCache(DeepseekV32IndexerCache):
             f"({index_kpool}) so chunked-prefill boundaries stay pool-aligned."
         )
         self._index_kpool = index_kpool
+        # What one scheduler block holds. The allocated page can be wider --
+        # unifying page sizes across cache groups pads this one out to the far
+        # larger MLA page -- so the read path needs the logical count rather
+        # than whatever the allocation's width happens to imply.
+        self.pools_per_block = cache_config.block_size // index_kpool
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig):
         from dataclasses import replace
 
         spec = super().get_kv_cache_spec(vllm_config)
         # ``tokens_per_state`` is the KV-spec representation of kpool
-        # compression in the current cache-layout API.
+        # compression. Do not set ``storage_block_size``: in this vLLM that
+        # field is a token width, not a pool count, and ``num_states`` is
+        # already ``block_size // tokens_per_state``. Pin dtype and head_size
+        # so a packed 132-wide FP8-plus-scale cell cannot sneak back in -- that
+        # page viewed as 128-wide bf16 becomes 165 pools, which
+        # npu_lightning_indexer rejects (block_size must be a multiple of 16).
         assert isinstance(spec, MLAAttentionSpec)
-        spec = replace(spec, tokens_per_state=self._index_kpool)
-
-        # DeepGEMM paged-MQA takes block_kv in {32, 64}; the storage block
-        # (= block_size // index_kpool) is virtually split into pool pages of
-        # the largest such size that tiles it, so it must be a multiple of 32.
-        storage_block_size = spec.block_size // self._index_kpool
-        assert spec.block_size % self._index_kpool == 0 and storage_block_size % 32 == 0, (
-            "Glm5NextIndexerCache: kpool indexer requires cache block_size to "
-            f"be a multiple of index_kpool * 32 ({self._index_kpool * 32}) so "
-            "that DeepGEMM paged-MQA pool pages (32 or 64 entries) tile the "
-            f"storage block, got block_size={spec.block_size} -> "
-            f"storage_block_size={storage_block_size}."
-        )
-        max_page_size = max(PAGED_MQA_PAGE_SIZES)
-        min_page_size = min(PAGED_MQA_PAGE_SIZES)
-        if storage_block_size <= max_page_size:
-            page_size = storage_block_size
-        elif storage_block_size % max_page_size == 0:
-            page_size = max_page_size
-        else:
-            page_size = min_page_size
-        return replace(
+        spec = replace(
             spec,
-            storage_block_size=page_size * self._index_kpool,
+            tokens_per_state=self._index_kpool,
+            dtype=self.dtype,
+            head_size=self.head_dim,
+            state_content_bytes=None,
         )
+
+        pools_per_block = spec.num_states
+        assert (
+            pools_per_block % LIGHTNING_INDEXER_POOLS_ALIGNMENT == 0
+            and 0 < pools_per_block <= LIGHTNING_INDEXER_MAX_POOLS
+        ), (
+            "Glm5NextIndexerCache: npu_lightning_indexer reads the key cache "
+            f"as pages of {pools_per_block} pools, but only accepts a multiple "
+            f"of {LIGHTNING_INDEXER_POOLS_ALIGNMENT} up to "
+            f"{LIGHTNING_INDEXER_MAX_POOLS}. Set --block-size to a multiple of "
+            f"{self._index_kpool * LIGHTNING_INDEXER_POOLS_ALIGNMENT} (got "
+            f"{spec.block_size})."
+        )
+        return spec
+
+    def get_attn_backend(self):
+        # Not the inherited DeepSeek V3.2 indexer backend: its builder is
+        # written around DeepGEMM's paged-MQA scheduling, which has no bearing
+        # on the Ascend operators. This group only needs its pool-granular slot
+        # mapping published.
+        from vllm_ascend.attention.indexer import AscendKpoolIndexerBackend
+
+        return AscendKpoolIndexerBackend
 
 
 class Glm5NextTailCache(DeepseekV32IndexerCache):
@@ -264,16 +285,21 @@ class Indexer(nn.Module):
         self.topk_indices_buffer = topk_indices_buffer
         self._wp_fp32: torch.Tensor | None = None
 
-        # NOTE: (zyongye) we use fp8 naive cache,
-        #       where we store value in fp8 and scale in fp32
-        #       per self.quant_block_size element
+        # Upstream stores each entry as FP8 plus an FP32 scale per
+        # quant_block_size elements, declared as uint8 over a head_dim widened
+        # by the scale bytes (128 + 4 = 132). Ascend keeps plain bf16 of the
+        # logical head_dim instead: npu_lightning_indexer only accepts bf16 or
+        # fp16 keys, and a 132-wide cell viewed as 128-wide bf16 becomes 165
+        # pools -- not a multiple of 16 -- which the operator rejects. See
+        # Glm5NextIndexerCache for why dropping the quant costs no accuracy.
         self.k_cache = Glm5NextIndexerCache(
-            head_dim=self.head_dim + self.head_dim // self.quant_block_size * 4,
-            dtype=torch.uint8,
+            head_dim=self.head_dim,
+            dtype=torch.bfloat16,
             prefix=f"{prefix}.k_cache",
             cache_config=cache_config,
             index_kpool=self.index_kpool,
         )
+        assert self.k_cache.head_dim == self.head_dim
         # Paged tail cache (in-progress pool's raw K + gate score). Written by
         # prefill (seeds the boundary pool) and decode (per-step stash); read by
         # the decode kernel to compress the boundary pool. Transferred across PD

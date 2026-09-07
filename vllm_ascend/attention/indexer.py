@@ -91,3 +91,93 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
         fast_build: bool = False,
     ) -> None:
         return None
+
+
+class AscendKpoolIndexerBackend(AttentionBackend):
+    """Backend for the GLM-5.3-Flash kpool indexer's pooled key cache.
+
+    The cache holds one compressed entry per pool of ``index_kpool`` tokens,
+    which its spec expresses as ``tokens_per_state``, so vLLM emits a
+    pool-granular slot mapping for this group: a slot appears only where a pool
+    completes. The attention impl needs that mapping and the group's sequence
+    lengths, which is all this backend's builder produces.
+
+    Upstream's ``DeepseekV32IndexerBackend`` would otherwise be picked up by
+    inheritance. Its builder is written around DeepGEMM -- paged-MQA scheduling
+    metadata, capability probes for varlen logits -- none of which applies to
+    the Ascend operators, so this replaces it rather than adapting it.
+    """
+
+    accept_output_buffer: bool = False
+
+    @staticmethod
+    def get_name() -> str:
+        return "ASCEND_KPOOL_INDEXER"
+
+    @staticmethod
+    def get_impl_cls():
+        return None
+
+    @staticmethod
+    def get_builder_cls():
+        return AscendKpoolIndexerMetadataBuilder
+
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_type: str = "",
+    ) -> tuple[int, ...]:
+        return (num_blocks, block_size, num_kv_heads, head_size)
+
+
+class AscendKpoolIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
+    """Publish the kpool key cache group's slot mapping and sequence lengths."""
+
+    reorder_batch_threshold = None
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        # The mapping is a plain gather with no host reads, so it replays; the
+        # sparse attention that consumes it is what currently opts out.
+        return AttentionCGSupport.UNIFORM_BATCH
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Any:
+        from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+
+        from vllm_ascend.attention.utils import split_decodes_and_prefills
+
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = split_decodes_and_prefills(
+            common_attn_metadata
+        )
+        # The same dataclass the tail group's upstream builder returns, so both
+        # kpool cache groups hand the impl the same shape of metadata.
+        return DeepseekV32IndexerMetadata(
+            seq_lens=common_attn_metadata.seq_lens,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
+        )

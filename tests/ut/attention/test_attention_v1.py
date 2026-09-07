@@ -6,6 +6,7 @@ import torch
 import vllm_ascend.attention.attention_v1 as attn_module
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import (
+    SWA_INT_MAX,
     AscendAttentionBackend,
     AscendAttentionBackendImpl,
     AscendAttentionMetadataBuilder,
@@ -781,6 +782,34 @@ class TestAscendAttentionBackendImpl(TestBase):
         mock_reshape_and_cache.assert_called_once()
 
         assert output.shape == (10, 8, 64)
+
+    def test_a_bidirectional_batch_is_not_banded_by_the_window(self):
+        """A DFlash draft block is non-causal, and band mode needs a mask.
+
+        The mask builder withholds a mask from a bidirectional batch, so asking
+        for the window's band mode there had FIA refuse the batch outright:
+
+            when sparse_mode is 4 (not 0), atten_mask cannot be empty
+        """
+        sparse_mode, pre_tokens, next_tokens = self.impl_swa._fia_mask_mode(causal=False)
+
+        assert sparse_mode == 0, "a maskless batch has to be defaultMask, not band"
+        # Left open in both directions: the block attends across its own width.
+        assert (pre_tokens, next_tokens) == (SWA_INT_MAX, SWA_INT_MAX)
+
+    def test_a_causal_batch_still_gets_the_window(self):
+        sparse_mode, pre_tokens, next_tokens = self.impl_swa._fia_mask_mode(causal=True)
+
+        assert (sparse_mode, pre_tokens, next_tokens) == (4, self.impl_swa.sliding_window, 0)
+
+    def test_a_causal_batch_without_a_window_is_cropped_right_down(self):
+        sparse_mode, pre_tokens, next_tokens = self.impl._fia_mask_mode(causal=True)
+
+        assert sparse_mode == 3
+        assert (pre_tokens, next_tokens) == (SWA_INT_MAX, SWA_INT_MAX)
+
+    def test_a_windowless_bidirectional_batch_agrees_with_the_windowed_one(self):
+        assert self.impl._fia_mask_mode(causal=False) == self.impl_swa._fia_mask_mode(causal=False)
 
     @patch("vllm_ascend.attention.attention_v1.torch.npu.stream")
     @patch("vllm_ascend.attention.attention_v1.torch.npu.graph_task_update_begin")
