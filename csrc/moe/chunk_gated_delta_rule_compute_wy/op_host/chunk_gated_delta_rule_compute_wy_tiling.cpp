@@ -15,7 +15,6 @@ static constexpr size_t DIM_H = 2;
 static constexpr size_t DIM_D = 3;
 
 static constexpr int64_t FIXED_CHUNK = 64;
-static constexpr int64_t MIN_HEAD_DIM = 64;
 // 310P dav_m200 UB is 192KB. K=V=128 fits since the kernel solves W and U in two
 // passes with a single fp32 RHS resident (~178KB peak); see compute_wy_kernel.h.
 static constexpr int64_t MAX_HEAD_DIM = 128;
@@ -87,8 +86,10 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     if ((t % chunkSize) != 0 || (hv % hk) != 0) {
         return ge::GRAPH_FAILED;
     }
-    if ((kdim != MIN_HEAD_DIM && kdim != MAX_HEAD_DIM) ||
-        (vdim != MIN_HEAD_DIM && vdim != MAX_HEAD_DIM)) {
+    if ((kdim % 16) != 0 || (vdim % 16) != 0) {
+        return ge::GRAPH_FAILED;
+    }
+    if (kdim > MAX_HEAD_DIM || vdim > MAX_HEAD_DIM) {
         return ge::GRAPH_FAILED;
     }
     if (b > 32 || hv > 64) {
@@ -111,8 +112,8 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     // wedge MatmulImpl::Init on the device (bisected: Init alone hangs at K=128),
     // so every tiling is generated for the 64^3 tile.
     // mmAttn: kBeta[64,<=64] @ K[64,<=64]^T -> [64,64], K-slices accumulated in UB.
-    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/true, tiling.mmAttn) !=
-        ge::GRAPH_SUCCESS) {
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/true, tiling.mmAttn,
+                       /*abFromUb=*/true) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     // mmSquare: P[64,64] @ P[64,64] -> [64,64]
