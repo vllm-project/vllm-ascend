@@ -1682,7 +1682,6 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_prefill.call_args.kwargs["max_kv_blocks"] == 1
 
 
-@pytest.mark.parametrize("pad_invalid_slots", [True, False])
 @patch.object(
     torch.ops._C_ascend,
     "npu_sparse_attention_score_prefill",
@@ -1692,7 +1691,6 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
 def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     mock_k2q_csr: MagicMock,
     mock_sparse_attention_score_prefill: MagicMock,
-    pad_invalid_slots: bool,
 ) -> None:
     q = torch.zeros(3, 4, 4, dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 8, 128, 2, 4, dtype=torch.bfloat16)
@@ -1726,7 +1724,6 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
         block_size=128,
         total_kv_blocks=5,
         max_kv_blocks=3,
-        pad_invalid_topk_slots=pad_invalid_slots,
         supports_fp8=False,
     )
 
@@ -1737,8 +1734,7 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     assert k2q_kwargs["max_kv"] == 3
     assert k2q_kwargs["use_simt"] == 0
     assert k2q_kwargs["q_global_offset"] is True
-    expected_topk_idx = topk_idx.clamp_min(0) if pad_invalid_slots else topk_idx
-    assert torch.equal(mock_k2q_csr.call_args.args[0], expected_topk_idx)
+    assert mock_k2q_csr.call_args.args[0] is topk_idx
 
     mock_sparse_attention_score_prefill.assert_called_once()
     args = mock_sparse_attention_score_prefill.call_args.args
@@ -1895,7 +1891,6 @@ def test_sparse_attn_prefill_a5_uses_fp8_inputs(
         block_size=128,
         total_kv_blocks=1,
         max_kv_blocks=1,
-        pad_invalid_topk_slots=False,
         supports_fp8=True,
     )
     args = mock_sparse_attention_score_prefill.call_args.args
@@ -1957,7 +1952,6 @@ def test_sparse_attn_prefill_dispatches_by_hardware_capability(
         mock_legacy.assert_not_called()
         assert mock_kv_gather_q.call_args.args[-2:] == (5, 3)
         assert mock_kv_gather_q.call_args.kwargs == {
-            "pad_invalid_topk_slots": device_type == AscendDeviceType.A3,
             "supports_fp8": device_type == AscendDeviceType.A5,
         }
     else:

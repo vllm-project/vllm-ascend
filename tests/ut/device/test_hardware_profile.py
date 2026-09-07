@@ -46,7 +46,6 @@ _EXPECTED_CAPABILITIES = {
     | {
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
-        HardwareCapability.MINIMAX_M3_PREFILL_TOPK_PADDING,
     },
     AscendDeviceType._310P: frozenset(
         {
