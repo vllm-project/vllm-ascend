@@ -138,10 +138,12 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
                 self.assertEqual(cls.check_all_layers_exists(None, exists, num_layers), expected)
 
     def test_uses_mamba_kv_cache_inside_uniform_group(self):
+        import torch
         from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
         cls = self._make_worker_class()
-        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(np.dtype("float32"),))
+        # vLLM #53896 now compares page sizes while forming uniform groups.
+        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(torch.float32,))
         uniform_spec = UniformTypeKVCacheSpecs.from_specs({"mamba.layer": mamba_spec})
         self.assertIsNotNone(uniform_spec)
         kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=uniform_spec)])
