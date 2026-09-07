@@ -214,6 +214,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_minimax_m3.py: 300
   tests/e2e/pull_request/four_card/test_kimi_k3.py: 360
   tests/e2e/pull_request/one_card/test_attention_v1_precision.py: 540
+  tests/e2e/pull_request/one_card/test_deepseek_v4_vision_precision.py: 180
   tests/e2e/pull_request/one_card/test_mla_precision.py: 190
   tests/e2e/pull_request/one_card/test_sfa_v1_precision.py: 120
   tests/e2e/pull_request/one_card/test_eplb_map_to_physical_npu.py: 30
