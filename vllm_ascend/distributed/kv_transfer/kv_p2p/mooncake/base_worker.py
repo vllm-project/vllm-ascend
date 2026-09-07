@@ -21,7 +21,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
-from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
@@ -41,6 +46,7 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
 )
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_transfer_timeout_value,
+    tensor_storage_key,
     validate_register_region_count,
 )
 from vllm_ascend.distributed.utils import (
@@ -147,6 +153,54 @@ class MooncakeBaseConnectorWorker:
                 self.layer_name_to_group_index[layer_name] = group_index
                 self.layer_name_to_spec_index[layer_name] = spec_index
 
+    def _get_shared_page_metadata(
+        self,
+        caches: tuple[torch.Tensor, ...],
+    ) -> tuple[int, int, tuple[int, ...], int] | None:
+        """Describe views packed into one physical page allocation.
+
+        Sharing a storage alone is insufficient: conventional planar K/V
+        views can share one allocation while their first blocks are many pages
+        apart. A packed layout must place every view's first block inside one
+        common page stride and use the same physical block count and stride.
+        """
+        if not caches or len({tensor_storage_key(cache) for cache in caches}) != 1:
+            return None
+
+        tensor_num_blocks = {cache.shape[0] for cache in caches}
+        page_strides = {cache.stride(0) * cache.element_size() for cache in caches}
+        if len(tensor_num_blocks) != 1 or len(page_strides) != 1:
+            return None
+
+        num_tensor_blocks = next(iter(tensor_num_blocks))
+        page_stride = next(iter(page_strides))
+        if num_tensor_blocks <= 0 or page_stride <= 0 or num_tensor_blocks % self.num_blocks:
+            return None
+
+        page_base_addr = min(cache.data_ptr() for cache in caches)
+        block_lens = [math.prod(cache.shape[1:]) * cache.element_size() for cache in caches]
+        if any(
+            cache.data_ptr() - page_base_addr + block_len > page_stride for cache, block_len in zip(caches, block_lens)
+        ):
+            return None
+
+        storage = caches[0].untyped_storage()
+        storage_base_addr = storage.data_ptr()
+        storage_end_addr = storage_base_addr + storage.nbytes()
+        if page_base_addr < storage_base_addr or page_base_addr + num_tensor_blocks * page_stride > storage_end_addr:
+            return None
+
+        selected_cache = max(
+            zip(caches, block_lens),
+            key=lambda cache_and_len: cache_and_len[1],
+        )[0]
+        return (
+            page_base_addr,
+            page_stride,
+            tuple(selected_cache.shape[1:]),
+            num_tensor_blocks // self.num_blocks,
+        )
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
@@ -183,20 +237,34 @@ class MooncakeBaseConnectorWorker:
                 block_shapes: list[tuple[int, ...]] = []
                 block_size_scales: list[int] = []
 
-                for cache in as_kv_cache_tensors(cache_or_caches):
-                    tensor_num_blocks = cache.shape[0]
-                    element_size = cache.element_size()
-                    block_shape = tuple(cache.shape[1:])
-                    base_addrs.append(cache.data_ptr())
-                    block_strides.append(cache.stride(0) * element_size)
-                    block_lens.append(math.prod(block_shape) * element_size)
+                spec_index = self.layer_name_to_spec_index[layer_name]
+                spec = self.kv_cache_specs[spec_index]
+                caches = as_kv_cache_tensors(cache_or_caches)
+                shared_page_metadata = (
+                    self._get_shared_page_metadata(caches)
+                    if isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+                    else None
+                )
+                if shared_page_metadata is not None:
+                    page_base_addr, page_stride, block_shape, block_size_scale = shared_page_metadata
+                    base_addrs.append(page_base_addr)
+                    block_strides.append(page_stride)
+                    block_lens.append(page_stride)
                     block_shapes.append(block_shape)
-                    block_size_scales.append(tensor_num_blocks // self.num_blocks)
+                    block_size_scales.append(block_size_scale)
+                else:
+                    for cache in caches:
+                        tensor_num_blocks = cache.shape[0]
+                        element_size = cache.element_size()
+                        block_shape = tuple(cache.shape[1:])
+                        base_addrs.append(cache.data_ptr())
+                        block_strides.append(cache.stride(0) * element_size)
+                        block_lens.append(math.prod(block_shape) * element_size)
+                        block_shapes.append(block_shape)
+                        block_size_scales.append(tensor_num_blocks // self.num_blocks)
 
                 configured_layer_names.add(layer_name)
                 layer_names.append(layer_name)
-                spec_index = self.layer_name_to_spec_index[layer_name]
-                spec = self.kv_cache_specs[spec_index]
                 layer_block_size = spec.block_size
                 if isinstance(spec, AscendSFAIndexerCacheSpec):
                     # The cache manager treats one SFA indexer block as a DCP

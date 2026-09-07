@@ -5,7 +5,7 @@ import threading
 from concurrent.futures import Future
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import msgspec
 import pytest
@@ -22,7 +22,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker import (
     MooncakePullConnectorWorker,
     MooncakePullRecvingThread,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import SizedDict
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
+    SizedDict,
+    group_concurrent_contiguous,
+)
 
 from .helpers import (
     make_full_spec,
@@ -822,6 +825,53 @@ def test_whole_block_mla_address_generation_uses_independent_stride() -> None:
     assert src == [1256, 1512]
     assert dst == [6536, 7048]
     assert lengths == [128, 128]
+
+
+def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers() -> None:
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16)
+    thread = make_thread(
+        layer_names=["layer.0", "layer.1"],
+        kv_cache_specs=[spec],
+        kv_caches_base_addr=[[1000], [2000]],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+    )
+    remote = make_pp_metadata(
+        layer_names=["layer.0", "layer.1"],
+        block_strides=[[128], [128]],
+        block_lens=[[128], [128]],
+        tp_base_addrs={0: [[5000], [6000]]},
+    )
+    transfer_entries = [
+        ("request-a", [1, 2], [3, 4]),
+        ("request-b", [3, 5], [5, 8]),
+    ]
+    src: list[int] = []
+    dst: list[int] = []
+    lengths: list[int] = []
+
+    with patch(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.group_concurrent_contiguous",
+        wraps=group_concurrent_contiguous,
+    ) as mock_group:
+        thread._append_spec_transfer_addresses(
+            0,
+            0,
+            1,
+            1,
+            {(0, 0): transfer_entries, (1, 1): transfer_entries},
+            remote,
+            src,
+            dst,
+            lengths,
+        )
+
+    assert mock_group.call_count == 2
+    mock_group.assert_any_call([1, 2], [3, 4])
+    mock_group.assert_any_call([3, 5], [5, 8])
+    assert src == [1128, 1384, 1640, 2128, 2384, 2640]
+    assert dst == [5384, 5640, 6024, 6384, 6640, 7024]
+    assert lengths == [256, 128, 128, 256, 128, 128]
 
 
 def test_mamba_unequal_tp_slices_conv_projections_and_state() -> None:

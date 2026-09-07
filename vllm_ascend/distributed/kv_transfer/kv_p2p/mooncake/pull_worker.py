@@ -39,6 +39,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     ensure_zmq_recv,
     ensure_zmq_send,
+    group_concurrent_contiguous,
     zmq_ctx,
 )
 
@@ -977,6 +978,27 @@ class MooncakePullRecvingThread(threading.Thread):
                             dst_list.append(remote_block_addr + remote_inner_offset)
                             length_list.append(transfer_len)
 
+    @staticmethod
+    def _append_block_transfer_addresses(
+        local_block_groups: list[list[int]],
+        remote_block_groups: list[list[int]],
+        local_base_addr: int,
+        remote_base_addr: int,
+        local_block_stride: int,
+        remote_block_stride: int,
+        transfer_len: int,
+        src_list: list[int],
+        dst_list: list[int],
+        length_list: list[int],
+        local_inner_offset: int = 0,
+        remote_inner_offset: int = 0,
+    ) -> None:
+        """Append addresses from block groups prepared for one request."""
+        for local_block_group, remote_block_group in zip(local_block_groups, remote_block_groups):
+            src_list.append(local_base_addr + local_block_group[0] * local_block_stride + local_inner_offset)
+            dst_list.append(remote_base_addr + remote_block_group[0] * remote_block_stride + remote_inner_offset)
+            length_list.append(transfer_len * len(local_block_group))
+
     def _append_spec_transfer_addresses(
         self,
         spec_index: int,
@@ -990,21 +1012,6 @@ class MooncakePullRecvingThread(threading.Thread):
         length_list: list[int],
     ) -> None:
         """Append all layers and requests belonging to one local spec."""
-        for (local_layer_index, _), transfer_entries in transfer_entries_by_layer.items():
-            for request_id, local_block_ids, remote_block_ids in transfer_entries:
-                if len(local_block_ids) != len(remote_block_ids):
-                    raise ValueError(
-                        f"Mooncake block ID count mismatch for request {request_id!r}, "
-                        f"layer {self.layer_names[local_layer_index]!r}: "
-                        f"local={len(local_block_ids)}, remote={len(remote_block_ids)}"
-                    )
-        if not any(
-            local_block_ids
-            for transfer_entries in transfer_entries_by_layer.values()
-            for _, local_block_ids, _ in transfer_entries
-        ):
-            return
-
         spec = self.kv_cache_specs[spec_index]
         if isinstance(spec, MambaSpec):
             self._append_mamba_transfer_addresses(
@@ -1018,6 +1025,37 @@ class MooncakePullRecvingThread(threading.Thread):
                 length_list,
             )
             return
+
+        block_ids_by_request: dict[str, tuple[list[int], list[int]]] = {}
+        for (local_layer_index, _), transfer_entries in transfer_entries_by_layer.items():
+            for request_id, local_block_ids, remote_block_ids in transfer_entries:
+                if len(local_block_ids) != len(remote_block_ids):
+                    raise ValueError(
+                        f"Mooncake block ID count mismatch for request {request_id!r}, "
+                        f"layer {self.layer_names[local_layer_index]!r}: "
+                        f"local={len(local_block_ids)}, remote={len(remote_block_ids)}"
+                    )
+                block_ids = (local_block_ids, remote_block_ids)
+                previous_block_ids = block_ids_by_request.setdefault(request_id, block_ids)
+                if previous_block_ids != block_ids:
+                    raise ValueError(
+                        f"Mooncake block IDs differ within spec {spec_index} for request {request_id!r}"
+                    )
+
+        if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
+            return
+
+        single_block_ids_by_request = {
+            request_id: (
+                [[block_id] for block_id in local_block_ids],
+                [[block_id] for block_id in remote_block_ids],
+            )
+            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
+        }
+        contiguous_block_ids_by_request = {
+            request_id: group_concurrent_contiguous(local_block_ids, remote_block_ids)
+            for request_id, (local_block_ids, remote_block_ids) in block_ids_by_request.items()
+        }
         remote_tp_metadata = remote_metadata.metadata_by_tp_rank[remote_tp_rank]
         transfer_whole_block = isinstance(
             spec,
@@ -1045,11 +1083,25 @@ class MooncakePullRecvingThread(threading.Thread):
                             f"{self.layer_names[local_layer_index]!r}, cache {cache_index}: "
                             f"local={local_block_len}, remote={remote_block_len}"
                         )
-                    for _, local_block_ids, remote_block_ids in transfer_entries:
-                        for local_block_id, remote_block_id in zip(local_block_ids, remote_block_ids):
-                            src_list.append(local_base_addr + local_block_id * local_block_stride)
-                            dst_list.append(remote_base_addr + remote_block_id * remote_block_stride)
-                            length_list.append(local_block_len)
+                    block_ids_to_transfer = (
+                        contiguous_block_ids_by_request
+                        if local_block_stride == remote_block_stride == local_block_len
+                        else single_block_ids_by_request
+                    )
+                    for request_id, _, _ in transfer_entries:
+                        local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
+                        self._append_block_transfer_addresses(
+                            local_block_groups=local_block_groups,
+                            remote_block_groups=remote_block_groups,
+                            local_base_addr=local_base_addr,
+                            remote_base_addr=remote_base_addr,
+                            local_block_stride=local_block_stride,
+                            remote_block_stride=remote_block_stride,
+                            transfer_len=local_block_len,
+                            src_list=src_list,
+                            dst_list=dst_list,
+                            length_list=length_list,
+                        )
             return
 
         if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
@@ -1145,11 +1197,28 @@ class MooncakePullRecvingThread(threading.Thread):
                 transfer_len = num_transfer_heads * local_head_len
                 local_inner_offset = local_head_offset * local_head_len
                 remote_inner_offset = remote_head_offset * remote_head_len
-                for _, local_block_ids, remote_block_ids in transfer_entries:
-                    for local_block_id, remote_block_id in zip(local_block_ids, remote_block_ids):
-                        src_list.append(local_base_addr + local_block_id * local_block_stride + local_inner_offset)
-                        dst_list.append(remote_base_addr + remote_block_id * remote_block_stride + remote_inner_offset)
-                        length_list.append(transfer_len)
+                block_ids_to_transfer = (
+                    contiguous_block_ids_by_request
+                    if local_block_stride == local_block_len == transfer_len
+                    and remote_block_stride == remote_block_len == transfer_len
+                    else single_block_ids_by_request
+                )
+                for request_id, _, _ in transfer_entries:
+                    local_block_groups, remote_block_groups = block_ids_to_transfer[request_id]
+                    self._append_block_transfer_addresses(
+                        local_block_groups=local_block_groups,
+                        remote_block_groups=remote_block_groups,
+                        local_base_addr=local_base_addr,
+                        remote_base_addr=remote_base_addr,
+                        local_block_stride=local_block_stride,
+                        remote_block_stride=remote_block_stride,
+                        transfer_len=transfer_len,
+                        local_inner_offset=local_inner_offset,
+                        remote_inner_offset=remote_inner_offset,
+                        src_list=src_list,
+                        dst_list=dst_list,
+                        length_list=length_list,
+                    )
 
     def _execute_tp_transfer_bucket(
         self,

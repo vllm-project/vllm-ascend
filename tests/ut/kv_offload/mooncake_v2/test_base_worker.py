@@ -9,6 +9,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheTensor,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -81,6 +82,54 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     assert metadata.block_size_scales == [[2, 2]]
     assert metadata.block_strides == [[k_cache.stride(0) * 2, v_cache.stride(0) * 2]]
     transfer_engine.register_buffer.assert_called_once()
+
+
+def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> None:
+    spec = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=32, dtype=torch.float16)
+    raw_cache = torch.empty(4 * 64, dtype=torch.float16)
+    k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(64, 1), storage_offset=0)
+    scale_cache = torch.as_strided(raw_cache, size=(4, 8), stride=(64, 1), storage_offset=32)
+    config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[KVCacheTensor(size=raw_cache.nbytes, shared_by=["layer.0"])],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
+    )
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.kv_cache_config = config
+    worker.engine_id = "engine-d"
+    worker.te_rpc_port = 9000
+    worker.block_size = 16
+    worker.side_channel_host = "10.0.0.1"
+    worker.handshake_port = 5000
+    transfer_engine = MagicMock()
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.global_te",
+        transfer_engine,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.validate_register_region_count",
+        MagicMock(),
+    )
+
+    worker.register_kv_caches({"layer.0": [k_cache, scale_cache]})
+
+    metadata = worker.xfer_handshake_metadata
+    assert metadata is not None
+    assert metadata.kv_caches_base_addr == [[raw_cache.data_ptr()]]
+    assert metadata.block_strides == [[128]]
+    assert metadata.block_lens == [[128]]
+    assert metadata.block_shapes == [[(32,)]]
+    assert metadata.block_size_scales == [[1]]
+
+
+def test_shared_storage_is_not_enough_to_identify_a_packed_page() -> None:
+    raw_cache = torch.empty(4 * 64, dtype=torch.float16)
+    k_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(32, 1), storage_offset=0)
+    v_cache = torch.as_strided(raw_cache, size=(4, 32), stride=(32, 1), storage_offset=128)
+    worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
+    worker.num_blocks = 4
+
+    assert worker._get_shared_page_metadata((k_cache, v_cache)) is None
 
 
 def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch) -> None:
