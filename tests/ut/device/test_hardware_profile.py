@@ -51,7 +51,6 @@ _EXPECTED_CAPABILITIES = {
         HardwareCapability.CANN_MEGAMOE,
         HardwareCapability.MC2_FULLMESH_V2_COMM,
         HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q,
-        HardwareCapability.MINIMAX_M3_PREFILL_TOPK_PADDING,
         HardwareCapability.MOE_DISPATCH_EXTRA_ARGS,
         HardwareCapability.NPU_TOP_K_TOP_P,
     },

@@ -152,16 +152,6 @@ def _build_cu_block_lens(
     return cu_block_lens
 
 
-def _pad_invalid_prefill_topk_slots(topk_idx: torch.Tensor) -> torch.Tensor:
-    """Replace unavailable causal/padding slots with logical KV block zero.
-
-    The fixed-slot A3 combine path cannot consume unwritten statistics for
-    unavailable slots. Early causal queries can contain ``-1`` even when the
-    final request length exceeds top-k.
-    """
-    return topk_idx.clamp_min(0)
-
-
 @torch.no_grad()
 def _minimax_m3_index_score(
     idx_q: torch.Tensor,
@@ -555,12 +545,9 @@ def _minimax_m3_sparse_attn_kv_gather_q(
     total_kv_blocks: int,
     max_kv_blocks: int,
     *,
-    pad_invalid_topk_slots: bool,
     supports_fp8: bool,
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
-    if pad_invalid_topk_slots:
-        topk_idx = _pad_invalid_prefill_topk_slots(topk_idx)
 
     inner_precise = _PREFILL_KV_GATHER_Q_INNER_PRECISE
     if key.dtype == torch.float8_e4m3fn:
@@ -572,6 +559,8 @@ def _minimax_m3_sparse_attn_kv_gather_q(
         inner_precise = _SPARSE_ATTN_INNER_PRECISE
 
     cu_block_lens = _build_cu_block_lens(seq_lens, block_size)
+    # Keep the -1 sentinel: K2Q drops invalid entries, while replacing them
+    # with zero would add duplicate attention edges for logical KV block 0.
     k2q_row_ptr, k2q_q_indices, k2q_slot_indices = _npu_k2q_csr(
         topk_idx,
         cu_seqlens_q,
@@ -648,14 +637,14 @@ def minimax_m3_sparse_attn(
     )
     hardware_profile = get_current_hardware_profile()
     supports_kv_gather_q = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_KV_GATHER_Q)
-    pad_invalid_topk_slots = hardware_profile.supports(HardwareCapability.MINIMAX_M3_PREFILL_TOPK_PADDING)
+    supports_fp8 = hardware_profile.supports(HardwareCapability.FP8_ATTENTION)
     if not supports_kv_gather_q:
         _minimax_m3_sparse_attn_a3(*common_args)
         return
 
     # The A3 CI image can predate the vendor Split-KV ACLNN package. A5
     # already requires that package and cannot use the BF16-only A3 fallback.
-    if pad_invalid_topk_slots and not _is_minimax_sparse_attention_split_kv_available():
+    if not supports_fp8 and not _is_minimax_sparse_attention_split_kv_available():
         _minimax_m3_sparse_attn_a3(*common_args)
         return
 
@@ -663,8 +652,7 @@ def minimax_m3_sparse_attn(
         *common_args,
         total_kv_blocks,
         max_kv_blocks,
-        pad_invalid_topk_slots=pad_invalid_topk_slots,
-        supports_fp8=hardware_profile.supports(HardwareCapability.FP8_ATTENTION),
+        supports_fp8=supports_fp8,
     )
 
 
