@@ -23,19 +23,54 @@ _FP8_E4M3_MAX = 448.0
 
 # --- RoPE tile sizing constants ---
 # All Triton RoPE arithmetic promotes to float32 (4 bytes) per element.
+# Applies to cos_row, sin_row, q_tile_*, new_q_tile_* throughout the kernel.
 _ROPE_FLOAT32_BYTES = 4
 # Fraction of total UB that may be used for RoPE tiles. The remainder
 # absorbs compiler scratch, register spill, and double-buffering overhead.
+# Conservative at 0.5 - safe but possibly suboptimal. If future profiling
+# shows compiler overhead is lower, this can be raised. Never set >= 1.0
+# as that leaves no room for non-RoPE UB usage.
 _ROPE_UB_SAFETY_FACTOR = 0.5
-# Default tile sizes when UB headroom is sufficient (common head_dim <= 128).
+# Default (max) tile sizes when UB headroom is sufficient. Acts as a cap:
+#   block_size = min(max_block_from_ub, default_max)
+# Beyond this size, launch overhead and cache effects start to dominate.
+# Typical "performance knee" for vector-core NPU is 64 (NeoX) / 32 (Non-NeoX).
+# Not hardware-UB-dependent - change only if kernel launch characteristics
+# change (e.g., different vector core count).
 _ROPE_DEFAULT_BLOCK_SIZE_NEOX = 64
 _ROPE_DEFAULT_BLOCK_SIZE_NON_NEOX = 32
 # Minimum tile size (Triton requires power-of-2 constexpr >= 1).
 _ROPE_MIN_BLOCK_SIZE = 1
-# Live tensors in the hottest loop iteration (all float32):
-#   NeoX:     q_tile_1, q_tile_2, new_q_tile_1, new_q_tile_2  -> 4
-#   Non-NeoX: q_tile(x2), new_q_tile_1, new_q_tile_2, q_tile_out(x2) -> 6
-# Each "x2" accounts for the extra dimension in the 3-D pair layout.
+# Number of live float32 tensors in the hottest loop iteration of the kernel.
+# Used to compute UB footprint: bytes = num_live_tensors * half_dim * 4 * BLOCK
+# These values are tightly coupled to the kernel implementation.
+#
+# NeoX path (4 tensors) - see _triton_rope lines 207-218:
+#   line 207: q_tile_1 = tl.load(...)       # input half 1
+#   line 212: q_tile_2 = tl.load(...)       # input half 2
+#   line 215: new_q_tile_1 = q_tile_1 * cos - q_tile_2 * sin  # output half 1
+#   line 218: new_q_tile_2 stored
+#   -> At line 216 (storing new_q_tile_1): q_tile_1, q_tile_2,
+#      new_q_tile_1 are live. new_q_tile_2 is computed at line 217.
+#   -> Peak live count = 4 (both inputs + both outputs) right before
+#      the final store at line 218.
+#
+# Non-NeoX path (6 tensors, due to 3-D pair layout) - see lines 228-233:
+#   line 228: q_tile = tl.load(...)         # 3D (BLOCK, half, 2), counts as 2
+#   line 229: q_tile_1, q_tile_2 = tl.split(q_tile)
+#   line 230: new_q_tile_1 = ...            # output half 1
+#   line 231: new_q_tile_2 = ...            # output half 2
+#   line 232: q_tile_out = tl.join(...)     # 3D (BLOCK, half, 2), counts as 2
+#   line 233: tl.store(q_tile_out, ...)
+#   -> At line 233 (storing q_tile_out): q_tile_1, q_tile_2,
+#      new_q_tile_1, new_q_tile_2, q_tile_out (x2) all live.
+#   -> Peak live count = 6 (q_tile x2 + new_q_tile_1 + new_q_tile_2 +
+#      q_tile_out x2).
+#
+# MAINTENANCE NOTE: If the kernel's hot loop is modified (e.g., adding
+# intermediate buffers, changing load/store order, or introducing streaming
+# writes), update these counts to reflect the new peak live-tensor count.
+# Overestimating is safe (just smaller tiles); underestimating risks UB overflow.
 _ROPE_NUM_LIVE_TENSORS_NEOX = 4
 _ROPE_NUM_LIVE_TENSORS_NON_NEOX = 6
 
