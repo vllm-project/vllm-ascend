@@ -637,22 +637,17 @@ def _configure_minimax_m3_a5_mixed_kv_cache(vllm_config: VllmConfig) -> None:
     sparse_freq = sparse_config.get("sparse_attention_freq") or []
     sparse_layer_ids = {layer_idx for layer_idx, freq in enumerate(sparse_freq) if freq != 0}
     gqa_layer_ids = [
-        str(layer_idx)
-        for layer_idx in range(text_config.num_hidden_layers)
-        if layer_idx not in sparse_layer_ids
+        str(layer_idx) for layer_idx in range(text_config.num_hidden_layers) if layer_idx not in sparse_layer_ids
     ]
     if not gqa_layer_ids:
         return
 
-    skip_layers = list(
-        dict.fromkeys(str(layer) for layer in (cache_config.kv_cache_dtype_skip_layers or []))
-    )
+    skip_layers = list(dict.fromkeys(str(layer) for layer in (cache_config.kv_cache_dtype_skip_layers or [])))
     known_skip_layers = set(skip_layers)
     skip_layers.extend(layer for layer in gqa_layer_ids if layer not in known_skip_layers)
     cache_config.kv_cache_dtype_skip_layers = skip_layers
     logger.info_once(
-        "Using BF16 KV cache for MiniMax-M3 GQA layers %s on Ascend A5; "
-        "other layers retain the configured %s policy.",
+        "Using BF16 KV cache for MiniMax-M3 GQA layers %s on Ascend A5; other layers retain the configured %s policy.",
         ", ".join(gqa_layer_ids),
         cache_config.cache_dtype,
     )
