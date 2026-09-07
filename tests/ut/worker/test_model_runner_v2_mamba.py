@@ -107,7 +107,18 @@ def test_prepare_inputs_propagates_padded_request_count():
         for target in node.targets
         if isinstance(target, ast.Name)
     }
-    assert ast.unparse(assignments["query_start_loc"]) == ("self.input_buffers.query_start_loc[:num_reqs_padded + 1]")
+    query_start_loc_values = [
+        ast.unparse(node.value)
+        for node in ast.walk(prepare_inputs)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "query_start_loc" for target in node.targets)
+    ]
+    # prepare_inputs copies the rank-local padded request count from the
+    # persistent input-buffer query_start_loc, then trims it in place.
+    assert query_start_loc_values == [
+        "self.input_buffers.query_start_loc",
+        "query_start_loc[:num_reqs_padded + 1]",
+    ]
     assert ast.unparse(assignments["seq_lens"]) == "self.input_buffers.seq_lens[:num_reqs_padded]"
 
     input_batch = next(
