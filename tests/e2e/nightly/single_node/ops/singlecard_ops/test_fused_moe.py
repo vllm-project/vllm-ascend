@@ -21,7 +21,6 @@ Run `pytest tests/ops/test_fused_moe.py`.
 """
 
 import gc
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -33,9 +32,8 @@ from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import build_mlp_compute_input
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEQuantParams
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import MoETokenDispatchInput
-from vllm_ascend.ops.fused_moe.moe_mlp import apply_moe_mlp
+from vllm_ascend.ops.fused_moe.moe_mlp import unified_apply_mlp
 from vllm_ascend.ops.fused_moe.token_dispatcher import TokenDispatcherWithAllGather
-from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
 from vllm_ascend.quantization.quant_type import QuantType
 
 NUM_EXPERTS = [8, 64]
@@ -237,29 +235,23 @@ def test_token_dispatcher_with_all_gather_quant(
 
     combine_metadata = token_dispatch_output.combine_metadata
 
-    layer = SimpleNamespace(
-        w13_weight=w1,
-        w13_weight_scale_fp32=w1_scale,
-        w2_weight=w2,
-        w2_weight_scale=w2_scale,
-        activation="silu",
-    )
     mlp_compute_input = build_mlp_compute_input(
         fused_experts_input=build_fused_experts_input(
             hidden_states=a,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            layer=layer,
+            w1=w1,
+            w2=w2,
             quant_type=QuantType.W8A8,
             dynamic_eplb=False,
             expert_map=expert_map,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
         ),
         token_dispatch_output=token_dispatch_output,
         use_fusion_ops=False,
     )
-    quant_method = AscendW8A8DynamicFusedMoEMethod.__new__(AscendW8A8DynamicFusedMoEMethod)
-    quant_method.use_expert_weight_list = False
-    expert_output, _ = apply_moe_mlp(mlp_compute_input, quant_method)
+    expert_output = unified_apply_mlp(mlp_compute_input=mlp_compute_input)
     combined_output = dispatcher.token_combine(
         hidden_states=expert_output, combine_metadata=combine_metadata, bias=None
     )

@@ -130,51 +130,6 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
     )
 
 
-def test_dynamic_int8_lora_reads_weights_from_layer_via_quant_method() -> None:
-    mlp_input = _make_input(layer=SimpleNamespace())
-    quant_method = Mock()
-    quant_method.get_mlp_weights.return_value = MoEWeights(
-        w1=[torch.ones(1, 4, 6, dtype=torch.int8)],
-        w2=[torch.ones(1, 3, 4, dtype=torch.int8)],
-        w1_scale=[torch.ones(1, 6)],
-        w2_scale=[torch.ones(1, 4, dtype=torch.bfloat16)],
-    )
-    quantized_input = torch.ones(2, 4, dtype=torch.int8)
-    input_scale = torch.ones(2)
-    gate_up_out = torch.randn(2, 6, dtype=torch.bfloat16)
-    activated = torch.randn(2, 3, dtype=torch.bfloat16)
-    quantized_activated = torch.ones(2, 3, dtype=torch.int8)
-    activated_scale = torch.ones(2)
-    down_out = torch.randn(2, 4, dtype=torch.bfloat16)
-    routing = (torch.tensor([0, 1]), torch.tensor([0, 1]))
-    event = object()
-    stream = Mock(record_event=Mock(return_value=event))
-
-    with (
-        patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
-        patch(
-            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
-            side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
-        ),
-        patch(f"{QUANT_MOE}.torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
-        patch(f"{QUANT_MOE}._apply_moe_activation", return_value=activated),
-        patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=down_out),
-        patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
-        patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
-        patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
-        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
-    ):
-        extra_ctx.moe_comm_type = MoECommType.ALLGATHER
-        output, output_event = quant_apply_mlp_with_moe_lora(
-            mlp_compute_input=mlp_input,
-            quant_method=quant_method,
-        )
-
-    assert output is down_out
-    assert output_event is event
-    quant_method.get_mlp_weights.assert_called_once_with(mlp_input.layer)
-
-
 @pytest.mark.parametrize(
     ("comm_type", "mlp_input", "message"),
     [
@@ -325,7 +280,7 @@ def test_dynamic_int8_lora_applies_topk_scales_before_down_proj() -> None:
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_allgather", return_value=routing),
         patch(f"{QUANT_MOE}.moe_lora_apply_w13"),
         patch(f"{QUANT_MOE}.moe_lora_apply_w2"),
-        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
+        patch("torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = MoECommType.ALLGATHER
         quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)
