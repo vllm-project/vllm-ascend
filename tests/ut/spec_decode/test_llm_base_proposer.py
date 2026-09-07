@@ -195,7 +195,7 @@ def test_load_model_reads_validated_draft_window_size():
             "vllm_ascend.spec_decode.llm_base_proposer.get_layers_from_vllm_config",
             side_effect=[{}, {"draft": draft_layer}, {}, {"draft": draft_layer}],
         ),
-        patch("vllm_ascend.ascend_config.get_ascend_config") as mock_get_ascend_config,
+        patch("vllm_ascend.spec_decode.llm_base_proposer.get_ascend_config") as mock_get_ascend_config,
         patch("vllm_ascend.spec_decode.llm_base_proposer.SlidingWindowAdapter") as mock_adapter,
         patch("vllm_ascend.spec_decode.llm_base_proposer.supports_multimodal", return_value=False),
     ):
