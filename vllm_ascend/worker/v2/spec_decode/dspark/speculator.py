@@ -24,10 +24,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
 from vllm_ascend.models.dspark_aux import DSparkAuxHiddenContract
 from vllm_ascend.utils import (
@@ -108,16 +108,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         if rotation_path is not None and self._is_qwen3_gqa_draft(draft_hf_config):
             target_language_model = (
-                target_model.get_language_model()
-                if hasattr(target_model, "get_language_model")
-                else target_model
+                target_model.get_language_model() if hasattr(target_model, "get_language_model") else target_model
             )
             target_inner = target_language_model.model
             target_lm_head = get_target_lm_head(target_model, target_language_model)
             draft_inner = model.model
-            embed_shared = getattr(draft_inner, "embed_tokens", None) is getattr(
-                target_inner, "embed_tokens", None
-            )
+            embed_shared = getattr(draft_inner, "embed_tokens", None) is getattr(target_inner, "embed_tokens", None)
             lm_head_shared = getattr(model, "lm_head", None) is target_lm_head
             logger.warning(
                 "[dspark/quarot-check] rotation_path=%s embed_shared=%s "
@@ -161,8 +157,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             return False
         architectures = getattr(config, "architectures", ()) or ()
         return getattr(config, "model_type", None) == "qwen3" or any(
-            architecture in ("Qwen3DSparkModel", "DSparkDraftModel")
-            for architecture in architectures
+            architecture in ("Qwen3DSparkModel", "DSparkDraftModel") for architecture in architectures
         )
 
     @staticmethod
@@ -179,10 +174,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         if aux_hidden_format is None:
             architectures = getattr(format_provider, "architectures", ()) or ()
             model_type = getattr(format_provider, "model_type", None)
-            if model_type == "qwen3" or (
-                "Qwen3DSparkModel" in architectures
-                or "DSparkDraftModel" in architectures
-            ):
+            if model_type == "qwen3" or ("Qwen3DSparkModel" in architectures or "DSparkDraftModel" in architectures):
                 aux_hidden_format = DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
         if aux_hidden_format is None:
             return None
@@ -270,8 +262,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             missing_layers = active_layer_names.difference(attn_backends)
             if missing_layers:
                 raise RuntimeError(
-                    "DSpark attention layers were not mapped to KV-cache "
-                    f"groups: {sorted(missing_layers)}."
+                    f"DSpark attention layers were not mapped to KV-cache groups: {sorted(missing_layers)}."
                 )
 
     def get_draft_graph_backend(self) -> type[AttentionBackend]:
@@ -294,10 +285,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 f"{getattr(backend, '__name__', repr(backend))}={sorted(layer_names)}"
                 for backend, layer_names in backend_layers.items()
             )
-            raise NotImplementedError(
-                "DSpark ACL graph currently supports one GQA attention backend; "
-                f"got {details}."
-            )
+            raise NotImplementedError(f"DSpark ACL graph currently supports one GQA attention backend; got {details}.")
         return next(iter(backend_layers))
 
     def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
@@ -351,9 +339,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         if not attn_metadata:
             raise RuntimeError("DSpark ACL graph produced no draft attention metadata.")
 
-        expected_query_lens = [
-            (i + 1) * self.num_query_per_req for i in range(num_reqs_padded)
-        ]
+        expected_query_lens = [(i + 1) * self.num_query_per_req for i in range(num_reqs_padded)]
         expected_num_tokens = num_reqs_padded * self.num_query_per_req
         for layer_name, metadata in attn_metadata.items():
             actual_query_lens = list(getattr(metadata, "actual_seq_lengths_q", ()))

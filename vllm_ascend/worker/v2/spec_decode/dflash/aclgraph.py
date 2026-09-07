@@ -101,7 +101,13 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         )
         graph_params = get_draft_graph_params()
         self._validate_graph_param_cardinality(graph_params, num_tokens)
-        draft_backend = self.speculator.get_draft_graph_backend()
+        if hasattr(self.speculator, "get_draft_graph_backend"):
+            draft_backend = self.speculator.get_draft_graph_backend()
+        else:
+            backends = set(self.speculator.attn_backends.values())
+            if len(backends) != 1:
+                raise NotImplementedError("Draft ACL graph requires one attention backend.")
+            draft_backend = next(iter(backends))
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
@@ -149,14 +155,10 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         handles = graph_params.handles.get(num_tokens)
         events = graph_params.events.get(num_tokens)
         if captured_params is None or handles is None or events is None:
-            raise RuntimeError(
-                f"Draft ACL graph has no captured parameter bucket for {num_tokens} tokens."
-            )
+            raise RuntimeError(f"Draft ACL graph has no captured parameter bucket for {num_tokens} tokens.")
         counts = (len(captured_params), len(handles), len(events))
         if counts[0] == 0:
-            raise RuntimeError(
-                f"Draft ACL graph captured no attention update tasks for {num_tokens} tokens."
-            )
+            raise RuntimeError(f"Draft ACL graph captured no attention update tasks for {num_tokens} tokens.")
         if len(set(counts)) != 1:
             raise RuntimeError(
                 "Draft ACL graph update cardinality mismatch for "

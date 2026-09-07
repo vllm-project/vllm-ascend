@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Validate v0.27.1 DFlash semantics and the pinned-main signature shim."""
+"""Validate rejected-context and null-block semantics on the main DFlash API."""
 
 import torch
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import (
     _prepare_dflash_inputs_kernel_ascend,
 )
@@ -83,23 +82,15 @@ def _run_prepare(*, positions: list[int], block_table_values: list[int]):
         max_num_tokens,
         128,
     )
-    if vllm_version_is("0.27.1"):
-        _prepare_dflash_inputs_kernel_ascend[(1, 1)](
-            *args,
-            SAMPLE_FROM_ANCHOR=True,
-            PAD_SLOT_ID=PAD_SLOT_ID,
-            BLOCK_SIZE=16,
-        )
-    else:
-        _prepare_dflash_inputs_kernel_ascend[(1, 1)](
-            *args,
-            0,
-            SAMPLE_FROM_ANCHOR=True,
-            PAD_SLOT_ID=PAD_SLOT_ID,
-            CP_SIZE=1,
-            CP_INTERLEAVE=1,
-            BLOCK_SIZE=16,
-        )
+    _prepare_dflash_inputs_kernel_ascend[(1, 1)](
+        *args,
+        0,
+        SAMPLE_FROM_ANCHOR=True,
+        PAD_SLOT_ID=PAD_SLOT_ID,
+        CP_SIZE=1,
+        CP_INTERLEAVE=1,
+        BLOCK_SIZE=16,
+    )
     torch.npu.synchronize()
 
     return {

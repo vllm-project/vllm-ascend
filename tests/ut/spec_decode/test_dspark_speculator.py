@@ -31,8 +31,7 @@ from vllm_ascend.models.dspark_aux import (
     DSparkAuxHiddenContract,
     DSparkAuxHiddenFormat,
 )
-from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM
-from vllm_ascend.models.qwen3_dspark import _get_draft_rotation_path
+from vllm_ascend.models.qwen3_dspark import AscendQwen3DSparkForCausalLM, _get_draft_rotation_path
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
     DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED,
     DSPARK_AUX_HIDDEN_FORMAT_RAW,
@@ -41,6 +40,8 @@ from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
 
 _HIDDEN = 8
 _FC_IN = 5 * _HIDDEN  # concatenated aux hidden states
+
+
 def _spec(vllm_config: SimpleNamespace) -> AscendDSparkSpeculator:
     """Bypass the heavy ``__init__``; ``load_draft_model`` only reads
     ``self.vllm_config`` and the patched parent call."""
@@ -135,9 +136,7 @@ class TestLoadDraftModel:
     def test_configures_capture_before_loading_draft(self, monkeypatch):
         events = []
         target = SimpleNamespace(
-            set_dspark_aux_capture_materialized=lambda enabled: events.append(
-                ("capture", enabled)
-            )
+            set_dspark_aux_capture_materialized=lambda enabled: events.append(("capture", enabled))
         )
 
         def _load(self, target_model, target_attn_layer_names):
@@ -147,9 +146,7 @@ class TestLoadDraftModel:
         monkeypatch.setattr(DSparkSpeculator, "load_draft_model", _load)
         spec = _spec(_bf16_config())
         spec.draft_model_config = SimpleNamespace(
-            hf_config=SimpleNamespace(
-                dspark_aux_hidden_state_format=DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
-            )
+            hf_config=SimpleNamespace(dspark_aux_hidden_state_format=DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED)
         )
 
         spec.load_draft_model(target, set())
@@ -238,9 +235,7 @@ def test_process_weight_orthogonal_basis_equivalence():
     from vllm_ascend.models.qwen3_dspark import process_weight
 
     generator = torch.Generator().manual_seed(7)
-    q, _ = torch.linalg.qr(
-        torch.randn(_HIDDEN, _HIDDEN, dtype=torch.float64, generator=generator)
-    )
+    q, _ = torch.linalg.qr(torch.randn(_HIDDEN, _HIDDEN, dtype=torch.float64, generator=generator))
     x = torch.randn(3, 5, _HIDDEN, dtype=torch.float64, generator=generator)
     weight = torch.randn(_HIDDEN, _FC_IN, dtype=torch.float64, generator=generator)
     x_rotated = x @ q
@@ -256,10 +251,7 @@ def test_process_weight_orthogonal_basis_equivalence():
 
 class TestAuxHiddenStateFormatContract:
     def test_qwen3_gqa_draft_declares_materialized_format(self):
-        assert (
-            AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format
-            == DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
-        )
+        assert AscendQwen3DSparkForCausalLM.dspark_aux_hidden_state_format == DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED
 
     @pytest.mark.parametrize(
         ("aux_hidden_format", "expected_materialized"),

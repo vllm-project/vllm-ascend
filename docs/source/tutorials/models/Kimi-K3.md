@@ -126,14 +126,11 @@ release versions in the generic examples.
 
 ### 4.3 Model Runner V2 Target-Only Validation
 
-The Model Runner V2 gates below target vLLM `v0.27.1` at commit
-`6e448d0ea9bf3d88d898b65449ca6dc2aec170ac`. Verify the source checkout before
-building the runtime image:
-
-```shell
-test "$(git -C /vllm-workspace/vllm rev-parse HEAD)" = \
-  "6e448d0ea9bf3d88d898b65449ca6dc2aec170ac"
-```
+Use the vLLM main revision paired with this vLLM Ascend main checkout.
+Earlier dependency validation used vLLM `v0.27.1` at `6e448d0`; those
+results are historical and do not qualify this main-based integration.
+The integration uses main's `layers`, `layer_stride`, and `block_stride`
+cache descriptors and retains main's MRV2 DP synchronization interfaces.
 
 Set the following environment variable before starting a target-only MRV2
 functional test:
@@ -209,10 +206,34 @@ acceptance patterns, or model accuracy. Before accepting the MLA eager gate,
 repeat it with the full target and MLA draft checkpoints and retain evidence
 for zero, partial, and full acceptance, block crossing, abort/request reuse,
 and deterministic parity with target-only eager. Prefix-cache state reuse while
-DSpARK is enabled also remains a separate follow-up gate. GQA DSpARK and draft
-ACL Graph remain separate follow-up scopes. Multimodal draft inputs are also
-deferred for this bring-up because vLLM 0.27.1 keeps DFlash multimodal capability
-disabled.
+DSpARK is enabled also remains a separate follow-up gate.
+
+### 4.5 Model Runner V2 GQA DSpARK ACL Graph Integration
+
+GQA drafts consume materialized target auxiliary hidden states. For QuaRot
+targets, pass rotation metadata to the BF16 draft loader before weight sharing
+is decided, so FC, embedding, and LM head use the correct representation.
+The loader rejects unintended sharing of rotated target embedding/LM-head
+weights. MLA drafts retain their raw-prefix-sum contract.
+
+Use `VLLM_USE_V2_MODEL_RUNNER=1`, target compilation mode
+`{"cudagraph_mode":"FULL_DECODE_ONLY"}`, and `enforce_eager=false` in the
+DSpark speculative configuration. Set the target and draft context limits to
+the intended workload (for example, both to `135000` for long-context tests).
+The GQA graph updater validates backend selection, padded query lengths, and
+captured parameter/handle/event counts before submitting replay updates.
+
+This integration keeps the full target layers and routed experts. It includes
+no runtime expert reduction or reduced-layer checkpoint remapping. Synthetic
+small-model tests are not full-checkpoint accuracy results.
+
+Run `tests/ut/spec_decode/test_dspark_graph_contract.py` in addition to the
+contract and cache tests above. Hardware qualification of this main-based
+integration is pending. The preceding four-node full-expert integration
+completed target/draft graph capture but stalled on the first inference;
+it produced no valid acceptance result. Capture success does not establish
+successful runtime replay, and this integration does not claim to fix that
+distributed hang.
 
 ## 5 Online Service Deployment
 

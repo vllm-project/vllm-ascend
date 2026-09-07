@@ -6,10 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 
 import vllm_ascend.worker.v2.spec_decode.dflash.aclgraph as aclgraph_module
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
-from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm_ascend.worker.v2.spec_decode.dspark.speculator import AscendDSparkSpeculator
 
 

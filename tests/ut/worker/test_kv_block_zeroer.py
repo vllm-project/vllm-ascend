@@ -134,7 +134,7 @@ def test_strided_views_keep_payload_separate_from_scheduler_stride(ratio):
 
 
 def test_compressed_cache_uses_physical_block_size():
-    spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, compress_ratio=4)
+    spec = AscendMLAAttentionSpec(block_size=128, num_kv_heads=1, head_size=8, dtype=torch.bfloat16, tokens_per_state=4)
     cache = torch.empty(2, 32, 1, 8, dtype=torch.bfloat16)
     zeroer = _init_zeroer([_group(spec, ["attn"])], {"attn": (cache,)}, [[128]])
     assert zeroer._meta[1].tolist() == [32 * 8 // 2]

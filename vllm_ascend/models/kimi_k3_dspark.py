@@ -76,9 +76,7 @@ def _get_target_rotation_path(vllm_config: VllmConfig) -> Path | None:
     try:
         with description_path.open(encoding="utf-8") as description_file:
             description = json.load(description_file)
-        relative_path = description["optional"]["quarot"]["rotation_map"][
-            "global_rotation"
-        ]
+        relative_path = description["optional"]["quarot"]["rotation_map"]["global_rotation"]
     except (OSError, KeyError, TypeError, json.JSONDecodeError):
         return None
     return target_model_path / relative_path

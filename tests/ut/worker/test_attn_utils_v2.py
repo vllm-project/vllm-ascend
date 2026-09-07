@@ -228,6 +228,8 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     assert tensor_raw_caches[mtp_name].storage_offset() == (
         base_offset + tuple_stride + small_spec.page_size_bytes * num_blocks
     )
+
+
 def test_build_draft_attn_metadata_forwards_ascend_context(monkeypatch):
     captured_kwargs = {}
 

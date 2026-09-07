@@ -1,6 +1,5 @@
 import ast
 from contextlib import nullcontext
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -89,75 +88,39 @@ def _group(spec: MambaSpec):
     )
 
 
-def test_validate_dense_and_packed_kv_cache_tensor_layouts():
-    attention_spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
-    mamba_spec = MambaSpec(block_size=4, shapes=((4,),), dtypes=(torch.float32,))
-    assert attention_spec.page_size_bytes == mamba_spec.page_size_bytes == 16
-
-    dense = KVCacheConfig(
-        num_blocks=3,
-        kv_cache_tensors=[KVCacheTensor(size=48, shared_by=["attn", "mamba"])],
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attention_spec),
-            KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
-        ],
+def _layout_config(tensors, *, same_group=False):
+    spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
+    groups = (
+        [KVCacheGroupSpec(layer_names=["attn", "other"], kv_cache_spec=spec)]
+        if same_group
+        else [KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec) for name in ("attn", "other")]
     )
-    validate_kv_cache_tensor_layouts(dense)
+    return KVCacheConfig(num_blocks=3, kv_cache_tensors=tensors, kv_cache_groups=groups)
 
-    packed = replace(
-        dense,
-        kv_cache_tensors=[
-            KVCacheTensor(size=96, shared_by=["attn"], offset=0, block_stride=32),
-            KVCacheTensor(size=96, shared_by=["mamba"], offset=16, block_stride=32),
-        ],
-    )
-    validate_kv_cache_tensor_layouts(packed)
+
+def test_validate_main_layer_views_and_cross_group_aliases():
+    # Main permits hybrid groups to overlay the same backing.
+    aliases = [_make_kv_cache_tensor(48, [name], 16, layer_stride=48) for name in ("attn", "other")]
+    validate_kv_cache_tensor_layouts(_layout_config(aliases))
+    # Layers in one group use separate contiguous regions in the backing.
+    packed = [_make_kv_cache_tensor(96, ["attn", "other"], 16, layer_stride=48)]
+    validate_kv_cache_tensor_layouts(_layout_config(packed, same_group=True))
 
 
 @pytest.mark.parametrize(
     ("tensors", "error"),
     [
-        ([KVCacheTensor(size=47, shared_by=["attn"])], "dense layout size"),
-        ([KVCacheTensor(size=48, shared_by=["attn"], offset=1)], "offset without a packed"),
-        ([KVCacheTensor(size=48, shared_by=["missing"])], "unknown layer"),
-        (
-            [
-                KVCacheTensor(size=48, shared_by=["attn"]),
-                KVCacheTensor(size=48, shared_by=["attn"]),
-            ],
-            "multiple storage owners",
-        ),
-        ([KVCacheTensor(size=64, shared_by=["attn"], block_stride=16)], "packed layout size"),
-        ([KVCacheTensor(size=96, shared_by=["attn"], offset=20, block_stride=32)], "page range"),
-        (
-            [
-                KVCacheTensor(size=96, shared_by=["attn"], offset=0, block_stride=32),
-                KVCacheTensor(size=96, shared_by=["mamba"], offset=8, block_stride=32),
-            ],
-            "overlaps",
-        ),
-        (
-            [
-                KVCacheTensor(size=96, shared_by=["attn"], block_stride=32),
-                KVCacheTensor(size=144, shared_by=["mamba"], block_stride=48),
-            ],
-            "packed backing",
-        ),
+        ([_make_kv_cache_tensor(47, ["attn"], 16)], "exceeds the backing"),
+        ([_make_kv_cache_tensor(48, ["attn"], 16, offset=-1)], "nonnegative"),
+        ([_make_kv_cache_tensor(48, ["missing"], 16)], "unknown layer"),
+        ([_make_kv_cache_tensor(48, ["attn", "attn"], 16)], "multiple storage owners"),
+        ([_make_kv_cache_tensor(48, ["attn"], 8)], "block stride"),
+        ([_make_kv_cache_tensor(48, ["attn", "other"], 16, layer_stride=0)], "overlaps"),
     ],
 )
 def test_validate_kv_cache_tensor_layouts_rejects_invalid_descriptions(tensors, error):
-    attention_spec = FullAttentionSpec(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float16)
-    mamba_spec = MambaSpec(block_size=4, shapes=((4,),), dtypes=(torch.float32,))
-    config = KVCacheConfig(
-        num_blocks=3,
-        kv_cache_tensors=tensors,
-        kv_cache_groups=[
-            KVCacheGroupSpec(layer_names=["attn"], kv_cache_spec=attention_spec),
-            KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
-        ],
-    )
     with pytest.raises(ValueError, match=error):
-        validate_kv_cache_tensor_layouts(config)
+        validate_kv_cache_tensor_layouts(_layout_config(tensors, same_group=True))
 
 
 def test_mamba_model_state_inherits_upstream_state_management():
