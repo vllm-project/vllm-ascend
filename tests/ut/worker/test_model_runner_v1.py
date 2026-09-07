@@ -11,7 +11,13 @@ from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.utils import reorder_batch_to_split_decodes_and_prefills
-from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -278,6 +284,122 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         )
         runner.attn_backend = backend
         return runner
+
+    def test_standard_attention_uses_public_allocator(self):
+        runner = self._build_runner()
+        runner.attn_groups = [[MagicMock()]]
+        runner.cache_config = MagicMock()
+        runner.cache_config.get_resolved_kv_cache_layout.return_value = "LHBNC"
+        runner.shared_kv_cache_layers = {}
+        runner.kv_caches = []
+        runner.model_config.hf_text_config.model_type = "qwen3"
+        runner.compilation_config = SimpleNamespace(
+            static_forward_context={"model.layers.0.self_attn.attn": MagicMock()}
+        )
+        layer_name = "model.layers.0.self_attn.attn"
+        spec = FullAttentionSpec(
+            block_size=16,
+            num_kv_heads=8,
+            head_size=128,
+            dtype=torch.bfloat16,
+        )
+        tensor_size = spec.page_size_bytes * 2
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=tensor_size,
+                    layers=[layer_name],
+                    layer_stride=tensor_size,
+                    block_stride=spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        )
+        allocated = {layer_name: torch.empty(1)}
+
+        with (
+            patch(
+                "vllm_ascend.worker.model_runner_v1.prepare_kernel_block_sizes",
+                return_value=[16],
+            ) as prepare,
+            patch(
+                "vllm_ascend.worker.model_runner_v1.allocate_kv_cache",
+                return_value=allocated,
+            ) as allocate,
+            patch("vllm.v1.worker.utils.bind_kv_cache") as bind,
+            patch.object(runner, "_allocate_kv_cache_tensors") as legacy_allocate,
+        ):
+            result = runner.initialize_kv_cache_tensors(kv_cache_config)
+
+        self.assertIs(result, allocated)
+        prepare.assert_called_once_with(kv_cache_config, runner.attn_groups)
+        allocate.assert_called_once_with(
+            kv_cache_config,
+            runner.device,
+            "LHBNC",
+            [16],
+        )
+        bind.assert_called_once()
+        legacy_allocate.assert_not_called()
+
+    def test_ascend_mla_keeps_compatibility_allocator(self):
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+        runner.kv_caches = []
+        runner.model_config.hf_text_config.model_type = "deepseek_v3"
+        layer_name = "model.layers.0.self_attn.attn"
+        cache_layer = SimpleNamespace(kv_cache=None)
+        runner.compilation_config = SimpleNamespace(static_forward_context={layer_name: cache_layer})
+        spec = AscendMLAAttentionSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        layer_size = spec.page_size_bytes * 2
+        kv_cache_config = KVCacheConfig(
+            num_blocks=2,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=layer_size * 4,
+                    layers=[layer_name],
+                    layer_stride=layer_size,
+                    block_stride=spec.page_size_bytes,
+                )
+            ],
+            kv_cache_groups=[KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=spec)],
+        )
+        backend = MagicMock()
+        backend.get_kv_cache_shape.side_effect = lambda num_blocks, block_size, num_kv_heads, head_size: (
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+        )
+        runner._kv_cache_spec_attn_group_iterator = lambda: [
+            SimpleNamespace(
+                backend=backend,
+                kv_cache_spec=spec,
+                layer_names=[layer_name],
+            )
+        ]
+        runner._get_attention_kv_cache_dims = lambda _name, _spec: (
+            512,
+            64,
+        )
+
+        with (
+            patch("vllm_ascend.worker.model_runner_v1.allocate_kv_cache") as public_allocate,
+        ):
+            result = runner.initialize_kv_cache_tensors(kv_cache_config)
+
+        public_allocate.assert_not_called()
+        key_cache, value_cache = result[layer_name]
+        self.assertEqual(key_cache.shape, (2, 16, 1, 512))
+        self.assertEqual(value_cache.shape, (2, 16, 1, 64))
+        self.assertIs(cache_layer.kv_cache, result[layer_name])
+        self.assertIs(runner.kv_caches[0], result[layer_name])
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):
