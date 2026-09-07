@@ -64,6 +64,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
         data_parallel_rank=1,
     )
     target_config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=128),
         parallel_config=target_parallel_config,
         speculative_config=SimpleNamespace(
             draft_parallel_config=draft_parallel_config,
