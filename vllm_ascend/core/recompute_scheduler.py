@@ -21,7 +21,7 @@ from __future__ import annotations
 import time
 from collections import defaultdict
 from dataclasses import dataclass, fields
-from typing import cast
+from typing import Any, cast
 
 from vllm.config import SchedulerConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
@@ -271,6 +271,8 @@ class RecomputeScheduler(Scheduler):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -877,6 +879,9 @@ class RecomputeScheduler(Scheduler):
                     continue
 
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -974,13 +979,45 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Producer block-state hand-off for external KV connectors. vLLM main
+        # (SchedulerOutput.kv_connector_block_state) drains exact Mamba "align"
+        # boundary states every step and snapshots the scheduled block tables;
+        # older vLLM handed off only producer partial-tail offloads.
         pending_partial_tail_offloads = None
-        if (
-            self.connector is not None
-            and self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_producer
-        ):
-            pending_partial_tail_offloads = self.kv_cache_manager.take_partial_tail_offloads() or None
+        kv_connector_block_state: Any = None
+        if "partial_tail_offloads" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            if (
+                self.connector is not None
+                and self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.is_kv_producer
+            ):
+                take_partial_tail_offloads = getattr(
+                    self.kv_cache_manager,
+                    "take_partial_tail_offloads",
+                    None,
+                )
+                if callable(take_partial_tail_offloads):
+                    pending_partial_tail_offloads = take_partial_tail_offloads() or None
+        elif "kv_connector_block_state" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            from vllm.v1.core.sched.output import KVConnectorBlockState
+
+            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+            if self.connector is not None:
+                snapshot_req_ids = {req.req_id for req in new_reqs_data}
+                snapshot_req_ids.update(
+                    req_id
+                    for req_id, block_ids in zip(
+                        cached_reqs_data.req_ids,
+                        cached_reqs_data.new_block_ids,
+                        strict=True,
+                    )
+                    if block_ids
+                )
+                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                kv_connector_block_state = KVConnectorBlockState(
+                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    boundary_state_offloads=boundary_state_offloads,
+                )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:
@@ -1014,12 +1051,19 @@ class RecomputeScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
-            partial_tail_offloads=pending_partial_tail_offloads,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
+
+        if has_sync_kv_loads and "has_sync_kv_loads" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            scheduler_output.has_sync_kv_loads = True
+
+        if "partial_tail_offloads" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            scheduler_output.partial_tail_offloads = pending_partial_tail_offloads  # type: ignore[attr-defined]
+        elif "kv_connector_block_state" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            scheduler_output.kv_connector_block_state = kv_connector_block_state
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1033,6 +1077,10 @@ class RecomputeScheduler(Scheduler):
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
+
+        if "kv_connector_block_state" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            # Connector-only block state must not be dispatched to workers.
+            scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps that will later be
         # processed by update_from_output.

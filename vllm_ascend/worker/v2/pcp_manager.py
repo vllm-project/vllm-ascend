@@ -23,8 +23,8 @@ import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -259,9 +259,21 @@ class AscendPCPManager(PCPManager):
             # FULL-graph query layout is also the authoritative rank-local
             # layout, including any FIA dummy request.
             graph_query_start_loc_np = global_batch.query_start_loc_np[: graph_num_reqs + 1]
-            async_copy_to_gpu(
-                graph_query_start_loc_np,
-                out=input_buffers.query_start_loc[: graph_num_reqs + 1],
+            # async_copy_to_gpu() always calls pin_memory() on the host source,
+            # which raises when pin memory is unavailable (CPU / CPU-only UT
+            # processes). Replicate its copy inline and only pin + use a
+            # non-blocking H2D when the destination is a real accelerator with
+            # pin memory support.
+            query_start_loc_out = input_buffers.query_start_loc[: graph_num_reqs + 1]
+            query_start_loc_src = graph_query_start_loc_np
+            if isinstance(query_start_loc_src, np.ndarray):
+                query_start_loc_src = torch.from_numpy(query_start_loc_src)
+            use_pinned_copy = PIN_MEMORY and query_start_loc_out.device.type != "cpu"
+            if use_pinned_copy:
+                query_start_loc_src = query_start_loc_src.pin_memory()
+            query_start_loc_out.copy_(
+                query_start_loc_src,
+                non_blocking=use_pinned_copy,
             )
 
             # Graph padding has no RankSegment, so _build_batch_layout does

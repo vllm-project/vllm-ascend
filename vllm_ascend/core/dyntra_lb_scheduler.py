@@ -454,6 +454,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
         # Whether the running batch contains any prefill requests.
         prefill_scheduled = False
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -1005,6 +1007,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
                     continue
 
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -1102,26 +1107,45 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        # Producer partial-tail hand-off for external KV connectors. Drained
-        # before the CoW retentions are released below, so the pin lands while
-        # the cow block still holds a retention ref. Without a producer-side
-        # connector nothing consumes the hand-off, so skip the drain (and its
-        # pin); the manager drops stale entries when the request's blocks are
-        # popped for free.
+        # Producer block-state hand-off for external KV connectors. vLLM main
+        # (SchedulerOutput.kv_connector_block_state) drains exact Mamba "align"
+        # boundary states every step and snapshots the scheduled block tables;
+        # older vLLM handed off only producer partial-tail offloads.
         pending_partial_tail_offloads = None
-        if (
-            self._scheduler_output_supports("partial_tail_offloads")
-            and self.connector is not None
-            and self.vllm_config.kv_transfer_config is not None
-            and self.vllm_config.kv_transfer_config.is_kv_producer
-        ):
-            take_partial_tail_offloads = getattr(
-                self.kv_cache_manager,
-                "take_partial_tail_offloads",
-                None,
-            )
-            if callable(take_partial_tail_offloads):
-                pending_partial_tail_offloads = take_partial_tail_offloads() or None
+        kv_connector_block_state: Any = None
+        if self._scheduler_output_supports("partial_tail_offloads"):
+            if (
+                self.connector is not None
+                and self.vllm_config.kv_transfer_config is not None
+                and self.vllm_config.kv_transfer_config.is_kv_producer
+            ):
+                take_partial_tail_offloads = getattr(
+                    self.kv_cache_manager,
+                    "take_partial_tail_offloads",
+                    None,
+                )
+                if callable(take_partial_tail_offloads):
+                    pending_partial_tail_offloads = take_partial_tail_offloads() or None
+        elif self._scheduler_output_supports("kv_connector_block_state"):
+            from vllm.v1.core.sched.output import KVConnectorBlockState
+
+            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+            if self.connector is not None:
+                snapshot_req_ids = {req.req_id for req in new_reqs_data}
+                snapshot_req_ids.update(
+                    req_id
+                    for req_id, block_ids in zip(
+                        cached_reqs_data.req_ids,
+                        cached_reqs_data.new_block_ids,
+                        strict=True,
+                    )
+                    if block_ids
+                )
+                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                kv_connector_block_state = KVConnectorBlockState(
+                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    boundary_state_offloads=boundary_state_offloads,
+                )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:
@@ -1163,6 +1187,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         )
         if self._scheduler_output_supports("partial_tail_offloads"):
             scheduler_output_kwargs["partial_tail_offloads"] = pending_partial_tail_offloads
+        if self._scheduler_output_supports("kv_connector_block_state"):
+            scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
         if self._scheduler_output_supports("ec_manager_metadata"):
             get_manager_metadata = getattr(
                 self.encoder_cache_manager,
@@ -1172,6 +1198,9 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             if callable(get_manager_metadata):
                 scheduler_output_kwargs["ec_manager_metadata"] = get_manager_metadata()
         scheduler_output = SchedulerOutput(**scheduler_output_kwargs)
+
+        if has_sync_kv_loads and self._scheduler_output_supports("has_sync_kv_loads"):
+            scheduler_output.has_sync_kv_loads = True
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1185,6 +1214,10 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
+
+        if self._scheduler_output_supports("kv_connector_block_state"):
+            # Connector-only block state must not be dispatched to workers.
+            scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).

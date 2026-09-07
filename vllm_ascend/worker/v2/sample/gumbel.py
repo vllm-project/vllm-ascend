@@ -103,6 +103,7 @@ def _gumbel_sample_kernel(
     vocab_size,
     num_blocks,
     BLOCK_SIZE: tl.constexpr,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
 ):
@@ -146,6 +147,10 @@ def _gumbel_sample_kernel(
             # NOTE(Ronald1995): change pos's dtype to tl.int32, because triton-ascend's
             # compiler doesn't support uint64 of pos arg.
             pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+            if IS_DRAFTING:
+                # Offset salt keeping the draft's Gumbel noise disjoint from the
+                # target's (mirrors upstream vLLM #54282).
+                pos = pos + (1 << 30)
             gumbel_seed = tl.randint(seed, pos)
 
             # NOTE(Ronald1995): r is tl.float64 in vllm, change it to tl.float32,
@@ -171,8 +176,9 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    output_processed_logits: torch.Tensor | None = None,
-    output_processed_logits_col: torch.Tensor | None = None,
+    is_drafting: bool,
+    logits_cache: torch.Tensor | None = None,
+    logits_cache_col: torch.Tensor | None = None,
     use_fp64: bool = False,
 ) -> torch.Tensor:
     if use_fp64:
@@ -192,15 +198,15 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
-    per_token_col = output_processed_logits_col is not None and output_processed_logits_col.dim() > 0
+    per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
     _gumbel_sample_kernel[(num_tokens,)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
+        logits_cache,
+        logits_cache.stride(0) if logits_cache is not None else 0,
+        logits_cache_col,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -210,6 +216,7 @@ def gumbel_sample(
         vocab_size,
         num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
+        IS_DRAFTING=is_drafting,
         APPLY_TEMPERATURE=apply_temperature,
         PER_TOKEN_COL=per_token_col,
     )

@@ -193,6 +193,8 @@ class BalanceScheduler(Scheduler):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -686,6 +688,9 @@ class BalanceScheduler(Scheduler):
                     continue
 
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -808,6 +813,9 @@ class BalanceScheduler(Scheduler):
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
+
+        if has_sync_kv_loads and "has_sync_kv_loads" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            scheduler_output.has_sync_kv_loads = True
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store

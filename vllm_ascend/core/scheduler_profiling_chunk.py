@@ -259,6 +259,8 @@ class ProfilingChunkScheduler(Scheduler):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether any scheduled request has a synchronous connector KV load.
+        has_sync_kv_loads = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -645,6 +647,9 @@ class ProfilingChunkScheduler(Scheduler):
                     continue
 
                 self.running.append(request)
+                if num_external_computed_tokens > 0:
+                    # load_kv_async is False here
+                    has_sync_kv_loads = True
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED, scheduled_timestamp)
                 if request.status == RequestStatus.WAITING:
@@ -746,6 +751,9 @@ class ProfilingChunkScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
         )
+
+        if has_sync_kv_loads and "has_sync_kv_loads" in getattr(SchedulerOutput, "__dataclass_fields__", {}):
+            scheduler_output.has_sync_kv_loads = True
 
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)

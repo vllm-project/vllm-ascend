@@ -453,10 +453,14 @@ class NPUModelRunner310(NPUModelRunner):
             )
         elif self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
+            # xdrope_positions is a strided view of the pinned buffer; the
+            # single-slice copy_() hits the same pageable-fallback silent sync
+            # described in PR #51841. Split into per-row copies instead.
+            for row in range(self.xdrope_positions.gpu.shape[0]):
+                self.xdrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
+                    self.xdrope_positions.cpu[row, :total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
 
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)

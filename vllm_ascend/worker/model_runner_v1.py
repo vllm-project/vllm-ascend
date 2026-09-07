@@ -1336,11 +1336,17 @@ class NPUModelRunner(GPUModelRunner):
             )
         elif self.uses_xdrope_dim > 0:
             self._calc_xdrope_positions(scheduler_output)
-            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL)
-            self.xdrope_positions.gpu[:, :total_num_scheduled_tokens].copy_(
-                self.xdrope_positions.cpu[:, :total_num_scheduled_tokens],
-                non_blocking=True,
-            )
+            # Only relevant for models using XD-RoPE (e.g, HunYuan-VL).
+            # xdrope_positions is allocated as [uses_xdrope_dim, max_num_tokens
+            # + 1]; cpu[:, :N] is a strided view of the pinned buffer, and the
+            # single-slice copy_() hits the same pageable-fallback silent sync
+            # described in PR #51841. Split into per-row copies for the same
+            # reason.
+            for row in range(self.xdrope_positions.gpu.shape[0]):
+                self.xdrope_positions.gpu[row, :total_num_scheduled_tokens].copy_(
+                    self.xdrope_positions.cpu[row, :total_num_scheduled_tokens],
+                    non_blocking=True,
+                )
 
         # Record the index of requests that should not be sampled,
         # so that we could clear the sampled tokens before returning
@@ -1668,8 +1674,14 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
+        # Pin the host metadata so the non-blocking H2D copy in
+        # _copy_spec_decode_metadata_to_device stays asynchronous. Pin memory
+        # is only meaningful for a real device transfer (and unavailable on
+        # CPU/CPU-UT processes), so only pin on a non-CPU device that reports
+        # pin memory support.
+        pin_metadata = self.device.type != "cpu" and getattr(self, "pin_memory", PIN_MEMORY)
         cpu_metadata = tuple(
-            torch.from_numpy(value).pin_memory()
+            torch.from_numpy(value).pin_memory() if pin_metadata else torch.from_numpy(value)
             for value in (
                 cu_num_draft_tokens,
                 cu_num_sampled_tokens,

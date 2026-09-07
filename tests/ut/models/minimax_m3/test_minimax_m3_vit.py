@@ -85,12 +85,17 @@ class TestMiniMaxM3VitProcessor(unittest.TestCase):
 
     def test_shared_vision_tower_pruning_follows_image_video_limits(self) -> None:
         def make_vllm_config(limit_mm_per_prompt: dict[str, int]):
+            model_config = SimpleNamespace(
+                hf_config=SimpleNamespace(vision_config=SimpleNamespace()),
+                hf_text_config=SimpleNamespace(hidden_size=1),
+                multimodal_config=_DummyMiniMaxM3MultimodalConfig(limit_mm_per_prompt),
+            )
+            # vLLM main interfaces._mark_language_model reads the mm config via
+            # ModelConfig.get_multimodal_config(); mirror that method so the
+            # model __init__ path works with this lightweight config stub.
+            model_config.get_multimodal_config = lambda: model_config.multimodal_config
             return SimpleNamespace(
-                model_config=SimpleNamespace(
-                    hf_config=SimpleNamespace(vision_config=SimpleNamespace()),
-                    hf_text_config=SimpleNamespace(hidden_size=1),
-                    multimodal_config=_DummyMiniMaxM3MultimodalConfig(limit_mm_per_prompt),
-                ),
+                model_config=model_config,
                 quant_config=None,
             )
 
