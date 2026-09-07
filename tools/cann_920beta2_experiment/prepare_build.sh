@@ -4,8 +4,10 @@ set -euo pipefail
 install_build_dependencies() {
     local evidence=$1
     local dependency resolved
+    local required=(git cmake g++ make pigz dos2unix unzip curl)
     local missing=()
-    for dependency in pigz dos2unix; do
+    # These commands have matching Ubuntu package names. Use one list for installation and verification.
+    for dependency in "${required[@]}"; do
         if ! command -v "$dependency" >/dev/null 2>&1; then
             missing+=("$dependency")
         fi
@@ -17,7 +19,7 @@ install_build_dependencies() {
         DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends "${missing[@]}"
     fi
     : > "$evidence/build-tools.txt"
-    for dependency in git cmake g++ make pigz dos2unix unzip curl; do
+    for dependency in "${required[@]}"; do
         resolved=$(command -v "$dependency") || { echo "Missing build tool: $dependency" >&2; return 1; }
         printf '%s=%s\n' "$dependency" "$resolved" | tee -a "$evidence/build-tools.txt"
     done
