@@ -41,7 +41,8 @@ struct SASTilingOptionalParaInfo {
 enum class SASLayout : uint32_t {
     BSND = 0,
     TND = 1,
-    PA_ND = 2
+    PA_BSND = 2,
+    PA_BNSD = 3
 };
 
 enum class SASAxis : uint32_t {
@@ -277,7 +278,7 @@ public:
     SASLayout qLayout = SASLayout::TND;
     SASLayout cmpSparseIndicesLayout = SASLayout::TND;
     SASLayout oriSparseIndicesLayout = SASLayout::TND;
-    SASLayout kvLayout = SASLayout::PA_ND;
+    SASLayout kvLayout = SASLayout::PA_BSND;
     SASLayout outLayout = SASLayout::BSND;
 
     // template mode
@@ -388,7 +389,7 @@ private:
     SASLayout cmpSparseIndicesLayout_ = SASLayout::TND;
     SASLayout oriSparseIndicesLayout_ = SASLayout::TND;
     SASLayout outLayout_ = SASLayout::TND;
-    SASLayout kvLayout_ = SASLayout::PA_ND;
+    SASLayout kvLayout_ = SASLayout::PA_BSND;
 
     uint32_t oriMaxBlockNumPerBatch_ = 0;
     uint32_t cmpMaxBlockNumPerBatch_ = 0;
@@ -503,7 +504,7 @@ public:
     SASLayout cmpSparseIndicesLayout_ = SASLayout::TND;
     SASLayout oriSparseIndicesLayout_ = SASLayout::TND;
     SASLayout outLayout_ = SASLayout::BSND;
-    SASLayout kvLayout_ = SASLayout::PA_ND;
+    SASLayout kvLayout_ = SASLayout::PA_BSND;
     // PageAttention
     uint32_t oriMaxBlockNumPerBatch_ = 0;
     uint32_t cmpMaxBlockNumPerBatch_ = 0;

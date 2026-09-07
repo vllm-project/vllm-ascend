@@ -368,7 +368,7 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaBlockCube<SAST>::ComputeM
             bL1Tensor = l1KVTensor[kb * L1_BLOCK_OFFSET];
             uint32_t curSeqIdx = info.s2BatchOffset + nL1 * N_SPLIT_SIZE;
             if (info.isOriOnly) {
-                if constexpr (KV_LAYOUT_T == SAS_LAYOUT::PA_ND) {
+                if constexpr (KV_LAYOUT_T == SAS_LAYOUT::PA_BSND || KV_LAYOUT_T == SAS_LAYOUT::PA_BNSD) {
                     uint32_t curS2Offset = info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint;
                     uint32_t copyFinishRowCnt = 0;
                     LocalTensor<KV_T> kTensor;
@@ -397,7 +397,7 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaBlockCube<SAST>::ComputeM
                         startPos.s2Idx = curS2Offset;
                         startPos.dIdx =
                             kL1 * D_SPLIT_SIZE; // mm1 右矩阵 bn2s2d, d为k轴不切; mm2 右矩阵, s2为k轴, d轴切分
-                        DataCopyPA<KV_T>(kTensor, oriKvGm, oriBlockTableGm, shape, startPos);
+                        DataCopyPA<KV_T, KV_LAYOUT_T>(kTensor, oriKvGm, oriBlockTableGm, shape, startPos);
 
                         // 更新循环变量
                         copyFinishRowCnt += copyRowCnt;
@@ -637,7 +637,7 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaBlockCube<SAST>::ComputeM
 
                 uint32_t curSeqIdx = info.s2BatchOffset + (kL1 - kOffset) * 128 + k1 * 256;
                 if (info.isOriOnly) {
-                    if constexpr (KV_LAYOUT_T == SAS_LAYOUT::PA_ND) {
+                    if constexpr (KV_LAYOUT_T == SAS_LAYOUT::PA_BSND || KV_LAYOUT_T == SAS_LAYOUT::PA_BNSD) {
                         uint32_t copyFinishRowCnt = 0;
                         uint32_t curS2Offset = info.s2Idx * constInfo.s2BaseSize + info.s2StartPoint;
                         while (copyFinishRowCnt < kL0Size) {
@@ -662,7 +662,7 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaBlockCube<SAST>::ComputeM
                             shape.copyRowNumAlign = kL0SizeAlign;
                             subvTensor = bL1Tensor[(kL1 - kOffset) * 128 * N_SPLIT_SIZE + copyFinishRowCnt * 16];
 
-                            DataCopyPA<KV_T>(subvTensor, oriKvGm, oriBlockTableGm, shape, startPos);
+                            DataCopyPA<KV_T, KV_LAYOUT_T>(subvTensor, oriKvGm, oriBlockTableGm, shape, startPos);
 
                             // 更新循环变量
                             copyFinishRowCnt += copyRowCnt;

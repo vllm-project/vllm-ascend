@@ -108,7 +108,7 @@ public:
         this->Attr("ori_win_left").AttrType(OPTIONAL).Int(127); // ori_win_left默认值127
         this->Attr("ori_win_right").AttrType(OPTIONAL).Int(0);
         this->Attr("layout_q").AttrType(OPTIONAL).String("TND");
-        this->Attr("layout_kv").AttrType(OPTIONAL).String("PA_ND");
+        this->Attr("layout_kv").AttrType(OPTIONAL).String("PA_BSND");
         this->Attr("return_softmax_lse").AttrType(OPTIONAL).Bool(false);
         this->Attr("kv_quant_mode").AttrType(OPTIONAL).Int(3);
 

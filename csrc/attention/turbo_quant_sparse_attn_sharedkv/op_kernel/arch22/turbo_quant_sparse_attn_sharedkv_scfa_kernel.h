@@ -281,15 +281,15 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaKernel<SAST>::InitAllZero
             return;
         }
         uint32_t tBase = actualSeqLengthsQGm.GetValue(bIdx);
-        uint32_t s1Count = tempLoopInfo.actS1Size;
+        uint32_t s1Count = tempLoopInfo.s1EndIdx - s1Idx + 1;
 
         uint64_t attenOutOffset = (tBase + s1Idx) * kvHeadNum * constInfo.gSize * headDim + // T轴、s1轴偏移
                                   n2Idx * constInfo.gSize * headDim;                        // N2轴偏移
         uint64_t lseOffset = (tBase + s1Idx) * constInfo.gSize +                            // T轴、s1轴偏移
                              n2Idx * constInfo.qSeqSize * constInfo.gSize;                  // N2轴偏移
-        matmul::InitOutput<OUT_T>(attentionOutGm[attenOutOffset], constInfo.gSize * headDim, 0);
+        matmul::InitOutput<OUT_T>(attentionOutGm[attenOutOffset], s1Count * constInfo.gSize * headDim, 0);
         if (constInfo.returnSoftmaxLse) {
-            matmul::InitOutput<T>(softmaxLseGm[lseOffset], constInfo.gSize, 0);
+            matmul::InitOutput<T>(softmaxLseGm[lseOffset], s1Count * constInfo.gSize, 0);
         }
     } else if (constInfo.outputLayout == SAS_LAYOUT::BSND) {
         uint64_t attenOutOffset = bIdx * constInfo.qSeqSize * kvHeadNum * constInfo.gSize * headDim +
@@ -298,9 +298,10 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaKernel<SAST>::InitAllZero
         uint64_t lseOffset = bIdx * constInfo.qSeqSize * constInfo.kvHeadNum * constInfo.gSize + // B轴偏移
                              n2Idx * constInfo.qSeqSize * constInfo.gSize +                      // N2轴偏移
                              s1Idx * constInfo.gSize;                                            // S1轴偏移
-        matmul::InitOutput<OUT_T>(attentionOutGm[attenOutOffset], constInfo.gSize * headDim, 0);
+        uint32_t s1Count = tempLoopInfo.s1EndIdx - s1Idx + 1;
+        matmul::InitOutput<OUT_T>(attentionOutGm[attenOutOffset], s1Count * constInfo.gSize * headDim, 0);
         if (constInfo.returnSoftmaxLse) {
-            matmul::InitOutput<T>(softmaxLseGm[lseOffset], constInfo.gSize, 0);
+            matmul::InitOutput<T>(softmaxLseGm[lseOffset], s1Count * constInfo.gSize, 0);
         }
     }
 }
@@ -342,7 +343,7 @@ __aicore__ inline int32_t TurboQuantSparseAttnSharedkvScfaKernel<SAST>::GetActua
 template <typename SAST>
 __aicore__ inline int32_t TurboQuantSparseAttnSharedkvScfaKernel<SAST>::GetActualSeqLenKV(uint32_t bIdx)
 {
-    if constexpr (KV_LAYOUT_T == SAS_LAYOUT::PA_ND) {
+    if constexpr (PAGE_ATTENTION) {
         tempLoopInfo.actualSeqKVPrefixSum = static_cast<uint64_t>(bIdx * constInfo.kvSeqSize);
         if (constInfo.actualLenDimsKV == 0) {
             return static_cast<int32_t>(constInfo.kvSeqSize);
@@ -411,9 +412,9 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaKernel<SAST>::Init(
         InitActualSeqLen(cuSeqlensQ, cuSeqlensKV, cuSeqlensCmpKV);
     } else if (KV_LAYOUT_T == SAS_LAYOUT::TND) {
         InitActualSeqLen(seqUsedQ, cuSeqlensKV, cuSeqlensCmpKV);
-    } else if ((KV_LAYOUT_T == SAS_LAYOUT::PA_ND || KV_LAYOUT_T == SAS_LAYOUT::BSND) && LAYOUT_T == SAS_LAYOUT::TND) {
+    } else if ((PAGE_ATTENTION || KV_LAYOUT_T == SAS_LAYOUT::BSND) && LAYOUT_T == SAS_LAYOUT::TND) {
         InitActualSeqLen(cuSeqlensQ, seqUsedKV);
-    } else if ((KV_LAYOUT_T == SAS_LAYOUT::PA_ND || KV_LAYOUT_T == SAS_LAYOUT::BSND)) {
+    } else if ((PAGE_ATTENTION || KV_LAYOUT_T == SAS_LAYOUT::BSND)) {
         InitActualSeqLen(seqUsedQ, seqUsedKV);
     }
 
@@ -530,6 +531,7 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaKernel<SAST>::CalcParams(
     info.tndCoreStartKVSplitPos = tempLoopInfo.tndCoreStartKVSplitPos;
     info.isBmm2Output = false;
     info.actS1Size = tempLoopInfo.actS1Size;
+    info.actOriS2Size = tempLoopInfo.actOriS2Size;
 
     // M方向的尾块
     info.actMBaseSize = tempLoopInfo.mBasicSizeTail;
@@ -704,6 +706,20 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaKernel<SAST>::ProcessBala
                                                                       (bN2LoopIdx + 1 == constInfo.bN2End));
         uint32_t gS1SplitNum = CeilDiv(tempLoopInfo.actS1Size * constInfo.gSize, constInfo.mBaseSize);
 
+        if (tempLoopInfo.actS1Size <= 0) {
+            if (!isS1ZeroAndLastBatch) {
+                continue;
+            }
+            // Flush the two-stage preload pipeline without forming a fake query
+            // tile. In particular, avoid `actS1Size - 1` and 0/0 below.
+            tempLoopInfo.s2LoopTimes = 0;
+            for (uint32_t flush = 0; flush < PRELOAD_NUM; ++flush) {
+                PreloadPipeline(gloop, cmpLoop, 0, flush, extraInfo);
+                ++gloop;
+            }
+            continue;
+        }
+
         // 当处于最后一个BN2时, 且gS1End为0时, 说明当前BN2里的所有数据都在当前核处理
         gS1LoopEnd = (bN2LoopIdx + 1 == constInfo.bN2End && constInfo.gS1End != 0) ? constInfo.gS1End : gS1SplitNum;
         // 当处于最后一个BN2且当前S1为0时，需要进入循环计算preload导致的未完成的部分
@@ -720,13 +736,13 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaKernel<SAST>::ProcessBala
             tempLoopInfo.oriMaskRight = tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
                                         static_cast<int32_t>(tempLoopInfo.s1EndIdx) + constInfo.oriWinRight;
             tempLoopInfo.oriMaskLeft = Max(tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size +
-                                               static_cast<int32_t>(tempLoopInfo.s1EndIdx) - constInfo.oriWinLeft,
+                                               static_cast<int32_t>(tempLoopInfo.s1StartIdx) - constInfo.oriWinLeft,
                                            0);
             tempLoopInfo.cmpMaskRight = tempLoopInfo.actOriS2Size - tempLoopInfo.actS1Size;
             GetSparseActualSeqLen();
             UpdateInnerLoopCond();
 
-            uint32_t oriS2Size = tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1;
+            uint32_t oriS2Size = 0;
             uint32_t oriSplitNum = 0;
             uint32_t cmpSplitNum = 0;
             uint32_t cmpS2Size = 0;
@@ -739,6 +755,7 @@ __aicore__ inline void TurboQuantSparseAttnSharedkvScfaKernel<SAST>::ProcessBala
                     continue;
                 }
             } else {
+                oriS2Size = static_cast<uint32_t>(tempLoopInfo.oriMaskRight - tempLoopInfo.oriMaskLeft + 1);
                 oriSplitNum = CeilDiv(oriS2Size, constInfo.s2BaseSize);
                 cmpS2Size = tempLoopInfo.actCmpS2Size;
                 cmpSplitNum = CeilDiv(cmpS2Size, constInfo.s2BaseSize);

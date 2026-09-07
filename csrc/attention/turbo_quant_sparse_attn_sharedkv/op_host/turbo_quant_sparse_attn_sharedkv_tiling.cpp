@@ -47,8 +47,8 @@ const std::map<std::string, std::vector<ge::DataType>> DTYPE_SUPPORT_MAP = {
 
 const std::map<std::string, std::vector<SASLayout>> LAYOUT_SUPPORT_MAP = {
     {QUERY_NAME, {SASLayout::BSND, SASLayout::TND}},
-    {ORI_KV_NAME, {SASLayout::PA_ND, SASLayout::BSND, SASLayout::TND}},
-    {CMP_KV_NAME, {SASLayout::PA_ND, SASLayout::BSND, SASLayout::TND}},
+    {ORI_KV_NAME, {SASLayout::PA_BSND, SASLayout::PA_BNSD}},
+    {CMP_KV_NAME, {SASLayout::PA_BSND, SASLayout::PA_BNSD}},
     {ATTEN_OUT_NAME, {SASLayout::BSND, SASLayout::TND}},
     {ORI_SPARSE_INDICES, {SASLayout::BSND, SASLayout::TND}},
     {CMP_SPARSE_INDICES, {SASLayout::BSND, SASLayout::TND}},
@@ -97,8 +97,10 @@ std::string TQSASLayoutToSerialString(SASLayout layout)
             return "BSND";
         case SASLayout::TND:
             return "TND";
-        case SASLayout::PA_ND:
-            return "PA_ND";
+        case SASLayout::PA_BSND:
+            return "PA_BSND";
+        case SASLayout::PA_BNSD:
+            return "PA_BNSD";
         default:
             return "UNKNOWN";
     }
@@ -111,13 +113,15 @@ struct SASCompileInfo {
 static const std::map<SASLayout, std::vector<SASAxis>> SAS_LAYOUT_AXIS_MAP = {
     {SASLayout::BSND, {SASAxis::B, SASAxis::S, SASAxis::N, SASAxis::D}},
     {SASLayout::TND, {SASAxis::T, SASAxis::N, SASAxis::D}},
-    {SASLayout::PA_ND, {SASAxis::Bn, SASAxis::Bs, SASAxis::N, SASAxis::D}},
+    {SASLayout::PA_BSND, {SASAxis::Bn, SASAxis::Bs, SASAxis::N, SASAxis::D}},
+    {SASLayout::PA_BNSD, {SASAxis::Bn, SASAxis::N, SASAxis::Bs, SASAxis::D}},
 };
 
 static const std::map<SASLayout, size_t> SAS_LAYOUT_DIM_MAP = {
     {SASLayout::BSND, DIM_NUM_FOUR},
     {SASLayout::TND, DIM_NUM_THREE},
-    {SASLayout::PA_ND, DIM_NUM_FOUR},
+    {SASLayout::PA_BSND, DIM_NUM_FOUR},
+    {SASLayout::PA_BNSD, DIM_NUM_FOUR},
 };
 
 static std::string SASDataTypeToSerialString(ge::DataType type)
@@ -138,7 +142,7 @@ ge::graphStatus TQSASInfoParser::CheckRequiredInOutExistence() const
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(opParamInfo_.q.desc == nullptr, OP_LOGE(opName_, "Desc of tensor q is nullptr"),
                 return ge::GRAPH_FAILED);
-    // This operator is intentionally restricted to the SCFA/PA_ND contract.
+    // This operator is intentionally restricted to the SCFA/paged-KV contract.
     // Validate all ABI-required tensors before any shape or dtype helper can
     // dereference their descriptors.  Several of these inputs remain
     // OPTIONAL in the generic OpDef for compatibility with the upstream
@@ -310,7 +314,7 @@ ge::graphStatus TQSASInfoParser::GetAttrParaInfo()
     static const int64_t kDefaultOriWinRight = 0;
     static const bool kDefaultReturnSoftmaxLse = false;
     static const char kDefaultLayoutQ[] = "TND";
-    static const char kDefaultLayoutKv[] = "PA_ND";
+    static const char kDefaultLayoutKv[] = "PA_BSND";
     if (opParamInfo_.oriWinLeft == nullptr) {
         opParamInfo_.oriWinLeft = &kDefaultOriWinLeft;
     }
@@ -415,9 +419,9 @@ ge::graphStatus TQSASInfoParser::GetQueryAndOutLayout()
 ge::graphStatus TQSASInfoParser::GetKvLayout()
 {
     const map<string, SASLayout> layoutKVMap = {
-        {"PA_ND", SASLayout::PA_ND},
-        {"BSND", SASLayout::BSND},
-        {"TND", SASLayout::TND},
+        {"PA_ND", SASLayout::PA_BSND}, // backward-compatible alias
+        {"PA_BSND", SASLayout::PA_BSND},
+        {"PA_BNSD", SASLayout::PA_BNSD},
     };
     std::string layout(opParamInfo_.layoutKv);
     auto it = layoutKVMap.find(layout);
@@ -680,7 +684,7 @@ ge::graphStatus TQSASInfoParser::GetS2Size()
         }
         return ge::GRAPH_FAILED;
     }
-    return (kvLayout_ == SASLayout::PA_ND) ? GetS2SizeForPageAttention() : GetS2SizeForTND();
+    return GetS2SizeForPageAttention();
 }
 
 ge::graphStatus TQSASInfoParser::GetQHeadDim()
@@ -739,11 +743,11 @@ ge::graphStatus TQSASInfoParser::GetActualseqInfo()
             actualLenDimsQ_ = opParamInfo_.seqUsedQ.tensor->GetShapeSize();
         }
     }
-    if (kvLayout_ != SASLayout::PA_ND && kvLayout_ != SASLayout::BSND && kvLayout_ != SASLayout::TND) {
-        OP_LOGE(opName_, "ori_kv and cmp_kv only support PA_ND, BSND and TND layout.");
+    if (kvLayout_ != SASLayout::PA_BSND && kvLayout_ != SASLayout::PA_BNSD) {
+        OP_LOGE(opName_, "ori_kv and cmp_kv only support PA_BSND and PA_BNSD layout.");
         return ge::GRAPH_FAILED;
     }
-    if (kvLayout_ == SASLayout::PA_ND) {
+    if (kvLayout_ == SASLayout::PA_BSND || kvLayout_ == SASLayout::PA_BNSD) {
         if (opParamInfo_.sequsedKv.tensor != nullptr) {
             if (qLayout_ == SASLayout::BSND) {
                 if (opParamInfo_.sequsedKv.tensor->GetShapeSize() != bSize_) {
@@ -764,7 +768,7 @@ ge::graphStatus TQSASInfoParser::GetActualseqInfo()
             OP_CHECK_IF(actualLenDimsKV_ == 0, OP_LOGE(opName_, "seqused_kv cannot be empty tensor."),
                         return ge::GRAPH_FAILED);
         } else {
-            OP_LOGE(opName_, "When kv layout is PA_ND, input sequsedKv must be provided");
+            OP_LOGE(opName_, "When KV uses a paged layout, input sequsedKv must be provided");
             return ge::GRAPH_FAILED;
         }
     } else if (kvLayout_ == SASLayout::TND) {
@@ -822,7 +826,7 @@ void TQSASInfoParser::GenerateInfo(SASTilingInfo &sasInfo)
     sasInfo.outputType = outputType_;
     sasInfo.perfMode = perfMode_;
 
-    if (kvLayout_ == SASLayout::PA_ND) {
+    if (kvLayout_ == SASLayout::PA_BSND || kvLayout_ == SASLayout::PA_BNSD) {
         sasInfo.totalBlockNum =
             (opParamInfo_.oriKv.tensor != nullptr) ? opParamInfo_.oriKv.tensor->GetStorageShape().GetDim(0) : 0;
     }
@@ -1033,8 +1037,6 @@ ge::graphStatus TQSASTilingCheck::CheckDimNumInLayoutSupport(const SASLayout &la
 
 ge::graphStatus TQSASTilingCheck::CheckSingleParaQuery() const
 {
-    OP_CHECK_IF(opParamInfo_.q.shape->GetStorageShape().GetShapeSize() == 0,
-                OP_LOGE(opName_, "q cannot be empty tensor."), return ge::GRAPH_FAILED);
     if (opParamInfo_.q.desc == nullptr) {
         OP_LOGE(opName_, "%s must be provided!", QUERY_NAME.c_str());
         return ge::GRAPH_FAILED;
@@ -1092,9 +1094,8 @@ ge::graphStatus TQSASTilingCheck::CheckSingleParaKvHeadNums() const
 ge::graphStatus TQSASTilingCheck::CheckSingleParaCmpSparseIndices() const
 {
     if (sasInfo_.perfMode == optiling::SASTemplateMode::SCFA_TEMPLATE_MODE) {
-        OP_CHECK_IF(opParamInfo_.cmpSparseIndices.tensor->GetStorageShape().GetShapeSize() == 0,
-                    OP_LOGE(opName_,
-                            "when cmp_sparse_indices is not nullptr(SCFA), cmp_sparse_indices cannot be empty tensor."),
+        OP_CHECK_IF(opParamInfo_.cmpSparseIndices.tensor->GetStorageShape().GetShapeSize() == 0 && qTSize_ != 0,
+                    OP_LOGE(opName_, "cmp_sparse_indices can only be empty when query T is zero."),
                     return ge::GRAPH_FAILED);
         const std::vector<size_t> cmpSparseIndicesDimNumList = {DIM_NUM_THREE, DIM_NUM_FOUR};
         if (ge::GRAPH_SUCCESS != CheckDtypeSupport(opParamInfo_.cmpSparseIndices.desc, CMP_SPARSE_INDICES) ||
@@ -1303,7 +1304,7 @@ ge::graphStatus TQSASTilingCheck::CheckExistenceByMap(std::map<std::string, cons
 
 ge::graphStatus TQSASTilingCheck::CheckParaExistence() const
 {
-    if (kvLayout_ != SASLayout::PA_ND) {
+    if (kvLayout_ != SASLayout::PA_BSND && kvLayout_ != SASLayout::PA_BNSD) {
         return ge::GRAPH_SUCCESS;
     }
     std::map<std::string, const void *> ParamExistMap = {
@@ -1320,10 +1321,6 @@ ge::graphStatus TQSASTilingCheck::CheckParaExistence() const
 ge::graphStatus TQSASTilingCheck::CheckFeatureShape() const
 {
     OP_CHECK_IF(bSize_ <= 0, OP_LOGE(opName_, "batch_size should be greater than 0, but got %u", bSize_),
-                return ge::GRAPH_FAILED);
-
-    OP_CHECK_IF(qTSize_ <= 0 && (qLayout_ == SASLayout::TND),
-                OP_LOGE(opName_, "T_size of query should be greater than 0, but got %u", qTSize_),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(n1Size_ % 4 != 0, OP_LOGE(opName_, "q_head_num should be multiple of 4, but got %u", n1Size_),
@@ -1361,14 +1358,21 @@ ge::graphStatus TQSASTilingCheck::CheckFeatureShape() const
     OP_CHECK_IF(qLayout_ != SASLayout::TND,
                 OP_LOGE(opName_, "TurboQuantSparseAttnSharedkv only supports TND query layout."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(kvLayout_ != SASLayout::PA_ND,
-                OP_LOGE(opName_, "TurboQuantSparseAttnSharedkv only supports PA_ND KV layout."),
+    OP_CHECK_IF(kvLayout_ != SASLayout::PA_BSND && kvLayout_ != SASLayout::PA_BNSD,
+                OP_LOGE(opName_, "TurboQuantSparseAttnSharedkv only supports PA_BSND/PA_BNSD KV layout."),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(sasInfo_.perfMode != SASTemplateMode::SCFA_TEMPLATE_MODE,
                 OP_LOGE(opName_, "TurboQuantSparseAttnSharedkv only supports the sparse compressor template."),
                 return ge::GRAPH_FAILED);
-    OP_CHECK_IF(sasInfo_.cmpKvStride0 == 0 || sasInfo_.cmpKvStride0 % TQ4_SLOT_SIZE != 0,
-                OP_LOGE(opName_, "cmp_kv stride must be a positive multiple of the 258-byte TQ slot size."),
+    uint64_t minOriKvStride = static_cast<uint64_t>(oriBlockSize_) * n2Size_ * oriKvHeadDim_;
+    uint64_t minCmpKvStride = static_cast<uint64_t>(cmpBlockSize_) * n2Size_ * TQ4_SLOT_SIZE;
+    OP_CHECK_IF(sasInfo_.oriKvStride0 < minOriKvStride,
+                OP_LOGE(opName_, "ori_kv stride must cover one physical cache block (at least %lu elements).",
+                        minOriKvStride),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(sasInfo_.cmpKvStride0 < minCmpKvStride,
+                OP_LOGE(opName_, "cmp_kv stride must cover one physical cache block (at least %lu bytes).",
+                        minCmpKvStride),
                 return ge::GRAPH_FAILED);
     OP_CHECK_IF(cmpKvType_ != ge::DT_UINT8, OP_LOGE(opName_, "cmp_kv must be DT_UINT8."), return ge::GRAPH_FAILED);
 
@@ -1460,8 +1464,8 @@ ge::graphStatus TQSASTilingCheck::CheckOriAndCmpKv() const
 ge::graphStatus TQSASTilingCheck::CheckAttenOut() const
 {
     if (opParamInfo_.attnOut.desc != nullptr && opParamInfo_.attnOut.shape != nullptr) {
-        OP_CHECK_IF(opParamInfo_.attnOut.shape->GetStorageShape().GetShapeSize() == 0,
-                    OP_LOGE(opName_, "attn_out cannot be empty tensor."), return ge::GRAPH_FAILED);
+        OP_CHECK_IF(opParamInfo_.attnOut.shape->GetStorageShape() != opParamInfo_.q.shape->GetStorageShape(),
+                    OP_LOGE(opName_, "attn_out shape must be equal to q shape."), return ge::GRAPH_FAILED);
     } else {
         OP_LOGE(opName_, "attn_out cannot be nullptr.");
     }

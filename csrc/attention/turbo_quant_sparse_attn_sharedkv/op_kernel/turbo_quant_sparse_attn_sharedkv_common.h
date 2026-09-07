@@ -34,11 +34,12 @@ enum class SAS_RUN_MODE {
 enum class SAS_LAYOUT {
     BSND = 0,
     TND = 1,
-    PA_ND = 2
+    PA_BSND = 2,
+    PA_BNSD = 3
 };
 
 template <typename Q_T, typename KV_T, typename OUT_T, const bool FLASH_DECODE = false,
-          SAS_LAYOUT LAYOUT_T = SAS_LAYOUT::BSND, SAS_LAYOUT KV_LAYOUT_T = SAS_LAYOUT::PA_ND, int TEMPLATE_MODE = 0,
+          SAS_LAYOUT LAYOUT_T = SAS_LAYOUT::BSND, SAS_LAYOUT KV_LAYOUT_T = SAS_LAYOUT::PA_BSND, int TEMPLATE_MODE = 0,
           typename... Args>
 struct SASType {
     using queryType = Q_T;
@@ -47,7 +48,8 @@ struct SASType {
     static constexpr bool flashDecode = FLASH_DECODE;
     static constexpr SAS_LAYOUT layout = LAYOUT_T;
     static constexpr SAS_LAYOUT kvLayout = KV_LAYOUT_T;
-    static constexpr bool pageAttention = (KV_LAYOUT_T == SAS_LAYOUT::PA_ND);
+    static constexpr bool pageAttention =
+        (KV_LAYOUT_T == SAS_LAYOUT::PA_BSND || KV_LAYOUT_T == SAS_LAYOUT::PA_BNSD);
     static constexpr int templateMode = TEMPLATE_MODE;
 };
 
@@ -133,7 +135,7 @@ __aicore__ inline void DataCopyGmNDToL1(LocalTensor<T> &l1Tensor, GlobalTensor<T
     BSH\BSND\TND 为BBH
     shape.copyRowNumAlign 需要16字节对齐，如拷贝k矩阵，一次拷贝128*512，遇到尾块 10*512 需对齐到16*512
 */
-template <typename T, SAS_LAYOUT SRC_LAYOUT = SAS_LAYOUT::PA_ND>
+template <typename T, SAS_LAYOUT SRC_LAYOUT = SAS_LAYOUT::PA_BSND>
 __aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  // l1
                                   GlobalTensor<T> &srcTensor, // gm
                                   GlobalTensor<int32_t> &blockTableGm,
@@ -156,7 +158,8 @@ __aicore__ inline void DataCopyPA(LocalTensor<T> &dstTensor,  // l1
         // uint64_t offset = idInBlockTable * shape.blockSize * shape.headNum * shape.headDim; // PA的偏移
         uint64_t offset = idInBlockTable * shape.kvStride; // PA的偏移
         uint64_t dStride = shape.headDim;
-        if constexpr (SRC_LAYOUT == SAS_LAYOUT::BSND || SRC_LAYOUT == SAS_LAYOUT::TND) {
+        if constexpr (SRC_LAYOUT == SAS_LAYOUT::BSND || SRC_LAYOUT == SAS_LAYOUT::TND ||
+                      SRC_LAYOUT == SAS_LAYOUT::PA_BSND) {
             offset += (uint64_t)(startPos.n2Idx * shape.headDim) + reaminRowCnt * shape.headDim * shape.headNum +
                       startPos.dIdx;
             dStride = shape.headDim * shape.headNum;
