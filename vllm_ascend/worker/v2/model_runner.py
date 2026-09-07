@@ -58,13 +58,17 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
-from vllm_ascend.worker.utils import disable_compilation
+from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
 
 if not vllm_version_is("0.27.1"):
     from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
-from vllm_ascend.worker.v2.attn_utils import build_attn_state
+from vllm_ascend.worker.v2.attn_utils import (
+    build_attn_state,
+    normalize_mamba_kv_cache_config,
+    validate_kv_cache_tensor_layouts,
+)
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -263,6 +267,10 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
+        # Upstream sizes speculative Mamba block tables using the bare spec.
+        # K3 DSpark worker configs retain uniform per-layer group wrappers.
+        kv_cache_config = normalize_mamba_kv_cache_config(kv_cache_config)
+        validate_kv_cache_tensor_layouts(kv_cache_config)
         with graph_manager_wrapper(self), _use_ascend_pcp_manager_for_vllm_0271():
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
@@ -273,6 +281,18 @@ class NPUModelRunner(GPUModelRunner):
                     self.speculator.pcp_manager = self.pcp_manager
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def _init_kv_zero_meta(self) -> None:
+        # The upstream zeroer only handles a single tensor per layer. Ascend
+        # binds separate K/V views, including unequal MLA cache components.
+        self.kv_block_zeroer = AscendKVBlockZeroer(self.device, pin_memory=True)
+        self.kv_block_zeroer.init_meta(
+            attn_groups_iter=(group for groups in self.attn_groups for group in groups),
+            kernel_block_sizes=[[block_size] for block_size in self.kernel_block_sizes],
+            cache_dtype=self.cache_config.cache_dtype,
+            runner_only_attn_layers=set(),
+            static_forward_context=self.compilation_config.static_forward_context,
+        )
 
     @torch.inference_mode()
     def execute_model(

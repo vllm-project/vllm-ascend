@@ -67,6 +67,104 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
+def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose identical Mamba specs to upstream MRV2 sizing and state handling."""
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_specs = list(spec.kv_cache_specs.values())
+            if (
+                inner_specs
+                and isinstance(inner_specs[0], MambaSpec)
+                and all(inner == inner_specs[0] for inner in inner_specs)
+            ):
+                group = replace(group, kv_cache_spec=inner_specs[0])
+        groups.append(group)
+    # Preserve per-layer attention layouts and the caller's worker config.
+    return replace(kv_cache_config, kv_cache_groups=groups)
+
+
+def validate_kv_cache_tensor_layouts(kv_cache_config: KVCacheConfig) -> None:
+    """Validate the byte layout consumed by upstream MRV2 allocation.
+
+    ``KVCacheTensor`` describes raw byte storage, while attention backends bind
+    typed and possibly strided views later.  Reject inconsistent descriptions
+    before allocation so an invalid offset or stride cannot surface as a cache
+    alias or an out-of-bounds graph replay.
+    """
+    if kv_cache_config.num_blocks <= 0:
+        raise ValueError("KV cache num_blocks must be positive")
+
+    specs_by_layer: dict[str, KVCacheSpec] = {}
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        if isinstance(group_spec, UniformTypeKVCacheSpecs):
+            for layer_name in group.layer_names:
+                specs_by_layer[layer_name] = group_spec.kv_cache_specs[layer_name]
+        else:
+            specs_by_layer.update(dict.fromkeys(group.layer_names, group_spec))
+
+    owners: set[str] = set()
+    packed_backing: tuple[int, int] | None = None
+    packed_ranges: list[tuple[int, int, str]] = []
+    for tensor_idx, kv_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+        label = f"KV cache tensor {tensor_idx}"
+        if kv_tensor.size <= 0:
+            raise ValueError(f"{label} size must be positive")
+        if not kv_tensor.shared_by:
+            raise ValueError(f"{label} must own at least one layer")
+
+        duplicate_owners = owners.intersection(kv_tensor.shared_by)
+        if duplicate_owners:
+            raise ValueError(f"KV cache layers have multiple storage owners: {sorted(duplicate_owners)}")
+        owners.update(kv_tensor.shared_by)
+
+        try:
+            page_sizes = {specs_by_layer[layer_name].page_size_bytes for layer_name in kv_tensor.shared_by}
+        except KeyError as exc:
+            raise ValueError(f"{label} references unknown layer {exc.args[0]!r}") from exc
+        if len(page_sizes) != 1:
+            raise ValueError(f"{label} shares layers with different page sizes: {sorted(page_sizes)}")
+        page_size = page_sizes.pop()
+
+        if kv_tensor.block_stride == 0:
+            if kv_tensor.offset != 0:
+                raise ValueError(f"{label} has an offset without a packed block stride")
+            expected_size = kv_cache_config.num_blocks * page_size
+            if kv_tensor.size != expected_size:
+                raise ValueError(f"{label} size {kv_tensor.size} does not match dense layout size {expected_size}")
+            continue
+
+        if kv_tensor.block_stride < page_size:
+            raise ValueError(f"{label} block stride {kv_tensor.block_stride} is smaller than page size {page_size}")
+        if kv_tensor.offset < 0 or kv_tensor.offset + page_size > kv_tensor.block_stride:
+            raise ValueError(
+                f"{label} page range [{kv_tensor.offset}, {kv_tensor.offset + page_size}) "
+                f"exceeds packed block stride {kv_tensor.block_stride}"
+            )
+        expected_size = kv_cache_config.num_blocks * kv_tensor.block_stride
+        if kv_tensor.size != expected_size:
+            raise ValueError(f"{label} size {kv_tensor.size} does not match packed layout size {expected_size}")
+
+        backing = (kv_tensor.size, kv_tensor.block_stride)
+        if packed_backing is None:
+            packed_backing = backing
+        elif backing != packed_backing:
+            raise ValueError(
+                f"{label} packed backing {backing} does not match the first packed backing {packed_backing}"
+            )
+
+        page_end = kv_tensor.offset + page_size
+        for other_start, other_end, other_label in packed_ranges:
+            if kv_tensor.offset < other_end and other_start < page_end:
+                raise ValueError(
+                    f"{label} page range [{kv_tensor.offset}, {page_end}) overlaps "
+                    f"{other_label} page range [{other_start}, {other_end}) in the packed backing"
+                )
+        packed_ranges.append((kv_tensor.offset, page_end, label))
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -927,11 +1025,13 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+    """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Must run inside
+    speculator path does not forward them or the Ascend attention state. The
+    latter must be ``SpecDecoding`` so MLA uses the token-major speculative
+    path instead of treating draft tokens as independent requests. Must run inside
     ``build_attn_metadata_wrapper()``.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
@@ -939,6 +1039,7 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        kwargs["attn_state"] = AscendAttentionState.SpecDecoding
         return raw(*args, **kwargs)
 
     try:
