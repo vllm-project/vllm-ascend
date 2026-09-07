@@ -53,6 +53,10 @@ if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     sys.modules["torch"] = _torch
     sys.modules["torch.distributed"] = _torch.distributed  # type: ignore[attr-defined]
 
+_torch_module = sys.modules.get("torch") or importlib.import_module("torch")
+if not hasattr(_torch_module, "npu"):
+    _torch_module.npu = MagicMock()  # type: ignore[attr-defined]
+
 if "torch_npu" not in sys.modules:
     sys.modules["torch_npu"] = MagicMock()
     sys.modules["torch_npu._inductor"] = MagicMock()
@@ -429,6 +433,7 @@ _kv_utils_pkg = _make_pkg(
     os.path.join(_kv_transfer_real_path, "utils"),
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
+sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
 
 _kv_pool_pkg = _make_pkg(
     "vllm_ascend.distributed.kv_transfer.kv_pool",

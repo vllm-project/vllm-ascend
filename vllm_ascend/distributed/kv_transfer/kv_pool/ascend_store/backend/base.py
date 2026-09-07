@@ -5,7 +5,6 @@ from typing import Any
 
 import torch
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_world_group
 from vllm.platforms import current_platform
 from vllm.platforms.interface import set_assigned_physical_gpu_ids
 
@@ -15,32 +14,14 @@ QOS_VALUE_MIN = 0
 QOS_VALUE_MAX = 4
 
 
-def get_scheduler_device_id(parallel_config: ParallelConfig) -> int:
-    """Use the colocated worker's device, or the first device in this DP shard."""
-    try:
-        get_world_group()
-    except AssertionError:
-        # With a separate executor, the scheduler has no world group and may
-        # not have initialized NPU yet. Resolve the mapping before querying
-        # current_device(), which would otherwise initialize the default NPU.
-        assigned_ids = parallel_config.assigned_physical_gpu_ids
-        local_rank = 0
-        if assigned_ids is not None:
-            set_assigned_physical_gpu_ids(assigned_ids)
-        elif (
-            parallel_config.distributed_executor_backend not in ("ray", "external_launcher")
-            and parallel_config.data_parallel_backend != "ray"
-            and parallel_config.nnodes_within_dp == 1
-        ):
-            # Match NPUWorker's device selection when no explicit mapping is
-            # supplied. Multi-node and Ray executors manage their own ranks.
-            dp_local_rank = parallel_config.data_parallel_rank_local
-            if dp_local_rank is None:
-                dp_local_rank = parallel_config.data_parallel_index
-            local_rank = dp_local_rank * parallel_config.tensor_parallel_size * parallel_config.pipeline_parallel_size
-        return current_platform.logical_device_id_to_visible_device_id(local_rank)
-
-    return torch.npu.current_device()
+def set_scheduler_device(parallel_config: ParallelConfig) -> None:
+    assigned_ids = parallel_config.assigned_physical_gpu_ids
+    if assigned_ids is not None:
+        set_assigned_physical_gpu_ids(assigned_ids)
+        device_id = current_platform.logical_device_id_to_visible_device_id(0)
+    else:
+        device_id = torch.npu.current_device()
+    torch.npu.set_device(device_id)
 
 
 class Backend(ABC):

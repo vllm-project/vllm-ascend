@@ -19,7 +19,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
-    get_scheduler_device_id,
+    set_scheduler_device,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -102,20 +102,13 @@ def _validate_store_qos() -> None:
 
 
 class MooncakeBackend(Backend):
-    def __init__(
-        self,
-        parallel_config: ParallelConfig,
-        lazy_init: bool = False,
-        contribute_memory: bool = True,
-        device_id: int | None = None,
-    ):
+    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
         _validate_store_qos()
-        # Keep the worker's bound visible device for setup and transfer threads.
-        self.device_id = torch.npu.current_device() if device_id is None else device_id
+        self.device_id = torch.npu.current_device()
 
         self.store: Any | None = None
         self.local_seg: str | None = None
@@ -223,7 +216,8 @@ class MooncakeBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        return cls(parallel_config, contribute_memory=False, device_id=get_scheduler_device_id(parallel_config))
+        set_scheduler_device(parallel_config)
+        return cls(parallel_config, contribute_memory=False)
 
     def set_device(self):
         torch.npu.set_device(self.device_id)

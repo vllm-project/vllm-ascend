@@ -13,7 +13,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
-    get_scheduler_device_id,
+    set_scheduler_device,
 )
 
 
@@ -141,14 +141,11 @@ class MemcacheBackend(Backend):
     def __init__(
         self,
         parallel_config: ParallelConfig,
-        device_id: int | None = None,
         init_bm: bool = True,
         lazy_init: bool = False,
     ):
         _validate_device_ub_qos()
-        # Capture the bound visible device on the worker thread. A DP shard's
-        # local rank need not equal its device, and new threads default to NPU 0.
-        self.device_id = torch.npu.current_device() if device_id is None else device_id
+        self.device_id = torch.npu.current_device()
         self._init_bm = init_bm
         self._lazy_init = lazy_init and _is_device_sdma()
 
@@ -202,8 +199,8 @@ class MemcacheBackend(Backend):
 
     @classmethod
     def create_scheduler_client(cls, parallel_config: ParallelConfig):
-        # The scheduler only needs metadata access, without contributing BM.
-        return cls(parallel_config, device_id=get_scheduler_device_id(parallel_config), init_bm=False)
+        set_scheduler_device(parallel_config)
+        return cls(parallel_config, init_bm=False)
 
     def init_store(self, init_bm: bool = True):
         if self.store is not None:
