@@ -252,7 +252,8 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         hidden_states, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
             hidden_states,
             topk_weight=None,
-            # The `group_index` input for the `npu_swiglu_group_quant` operator currently only supports the `count` type.
+            # The `group_index` input for the `npu_swiglu_group_quant` operator 
+            # currently only supports the `count` type.
             group_index=cumsum_group_list(mlp_compute_input.group_list, mlp_compute_input.group_list_type, 1),
             dst_type=torch.float8_e4m3fn,
             quant_mode=2,
