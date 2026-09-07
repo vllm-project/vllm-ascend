@@ -48,7 +48,7 @@ def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
         return config, target_device
 
     monkeypatch.setattr(
-        "vllm.v1.worker.gpu.spec_decode.extract_hidden_states.ExtractHiddenStatesSpeculator",
+        "vllm_ascend.worker.v2.spec_decode.extract_hidden_states.AscendExtractHiddenStatesSpeculator",
         fake_speculator,
     )
 
@@ -138,3 +138,68 @@ def test_propose_requires_aux_hidden_states():
             temperature=torch.empty(0),
             seeds=torch.empty(0),
         )
+
+
+def test_ascend_propose_reports_configured_layer_ids():
+    from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+        AscendExtractHiddenStatesSpeculator,
+    )
+
+    speculator = object.__new__(AscendExtractHiddenStatesSpeculator)
+    speculator.num_hidden_states = 3
+    speculator.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(eagle_aux_hidden_state_layer_ids=[2, 18, 34])
+    )
+    input_batch = cast(Any, SimpleNamespace(idx_mapping=torch.tensor([0], dtype=torch.int32)))
+
+    with pytest.raises(ValueError, match=r"eagle_aux_hidden_state_layer_ids=\[2, 18, 34\]"):
+        AscendExtractHiddenStatesSpeculator.propose(
+            speculator,
+            input_batch=input_batch,
+            attn_metadata={},
+            slot_mappings={},
+            last_hidden_states=torch.empty(0),
+            aux_hidden_states=[torch.zeros(1, 4), torch.zeros(1, 4)],
+            num_sampled=torch.empty(0),
+            num_rejected=torch.empty(0),
+            last_sampled=torch.tensor([[10]]),
+            next_prefill_tokens=torch.empty(0),
+            temperature=torch.empty(0),
+            seeds=torch.empty(0),
+        )
+
+
+class _AuxHolder(torch.nn.Module):
+    def __init__(self, num_layers: int, aux_layers: tuple[int, ...]):
+        super().__init__()
+        self.do_not_compile = False
+        self.aux_hidden_state_layers = aux_layers
+        self.layers = torch.nn.ModuleList([torch.nn.Identity() for _ in range(num_layers)])
+
+
+class _WrappedTarget(torch.nn.Module):
+    def __init__(self, holder: _AuxHolder):
+        super().__init__()
+        self.model = holder
+
+
+def test_configure_extract_hidden_states_disables_compile_and_accepts_in_range_ids():
+    from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+        configure_extract_hidden_states_target,
+    )
+
+    holder = _AuxHolder(num_layers=36, aux_layers=(2, 18, 34))
+    speculator = SimpleNamespace(num_hidden_states=3)
+    configure_extract_hidden_states_target(_WrappedTarget(holder), speculator)
+    assert holder.do_not_compile is True
+
+
+def test_configure_extract_hidden_states_rejects_oob_layer_ids():
+    from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+        configure_extract_hidden_states_target,
+    )
+
+    holder = _AuxHolder(num_layers=27, aux_layers=(2, 18, 34))
+    speculator = SimpleNamespace(num_hidden_states=3)
+    with pytest.raises(ValueError, match="out-of-range ids \\[34\\]"):
+        configure_extract_hidden_states_target(_WrappedTarget(holder), speculator)

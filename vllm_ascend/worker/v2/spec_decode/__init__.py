@@ -30,13 +30,13 @@ def init_speculator(
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
     if speculative_config.method == "extract_hidden_states":
-        # No Ascend-specific behavior beyond update_stream assignment in
-        # NPUModelRunner; reuse upstream ExtractHiddenStatesSpeculator as-is.
-        from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
-            ExtractHiddenStatesSpeculator,
+        # Reuse upstream ExtractHiddenStatesSpeculator with Ascend diagnostics
+        # and NPU aux-collection pinning (see extract_hidden_states.py).
+        from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+            AscendExtractHiddenStatesSpeculator,
         )
 
-        return ExtractHiddenStatesSpeculator(vllm_config, device)
+        return AscendExtractHiddenStatesSpeculator(vllm_config, device)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,

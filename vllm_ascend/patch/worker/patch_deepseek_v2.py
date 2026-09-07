@@ -327,7 +327,7 @@ def _patched_forward(
         start=self.start_layer,
     ):
         if idx in self.aux_hidden_state_layers:
-            aux_hidden_state = hidden_states + residual
+            aux_hidden_state = hidden_states if residual is None else hidden_states + residual
             if aux_hidden_state.shape[0] != positions.shape[0]:
                 aux_hidden_state = tensor_model_parallel_all_gather(aux_hidden_state, 0)
                 aux_hidden_state = aux_hidden_state[: positions.shape[0]]
@@ -346,7 +346,7 @@ def _patched_forward(
         residual = residual.contiguous()
 
     if self.end_layer in self.aux_hidden_state_layers:
-        aux_hidden_states.append(hidden_states + residual)
+        aux_hidden_states.append(hidden_states if residual is None else hidden_states + residual)
 
     hidden_states, _ = self.norm(hidden_states, residual)
     if len(aux_hidden_states) > 0:

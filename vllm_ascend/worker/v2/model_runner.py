@@ -102,8 +102,13 @@ class NPUModelRunner(GPUModelRunner):
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
         self.use_spec_pp = spec_pp_support is not None
-        # These draft heads consume target aux states collected across PP ranks.
-        if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
+        # Eagle3/DSpark spec-PP and extract_hidden_states both consume target
+        # auxiliary hidden states. Upstream GPUModelRunner already enables the
+        # flag for extract_hidden_states; keep it pinned after Ascend re-init.
+        if self.speculative_config is not None and (
+            (spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states)
+            or self.speculative_config.uses_extract_hidden_states()
+        ):
             self.use_aux_hidden_state_outputs = True
 
         self.use_aclgraph = (
@@ -238,6 +243,16 @@ class NPUModelRunner(GPUModelRunner):
             # Wait until propose() has populated this step's draft tokens.
             self.pp_handler.broadcast_draft_tokens()
         return output
+
+    def load_model(self, load_dummy_weights: bool = False, *args, **kwargs) -> None:
+        super().load_model(load_dummy_weights, *args, **kwargs)
+        if self.speculative_config is not None and self.speculative_config.uses_extract_hidden_states():
+            self.use_aux_hidden_state_outputs = True
+            from vllm_ascend.worker.v2.spec_decode.extract_hidden_states import (
+                configure_extract_hidden_states_target,
+            )
+
+            configure_extract_hidden_states_target(self.model, self.speculator)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
