@@ -119,8 +119,8 @@ class DsaAttnKvPlan:
             # convention. Do not clamp PAD_SLOT_ID (-1) to 0: that overwrites
             # a live physical slot. The scatter kernel skips negative indices.
             flat_cache = cache.view((-1,) + tuple(cache.shape[2:]))
-            indices = slot_mapping.to(torch.int64).view(-1, 1).contiguous()
-            updates = x.reshape((slot_mapping.shape[0],) + tuple(flat_cache.shape[1:])).contiguous()
+            indices = slot_mapping.view(-1, 1)
+            updates = x.reshape((slot_mapping.shape[0],) + tuple(flat_cache.shape[1:]))
             torch_npu.npu_scatter_nd_update_(flat_cache, indices, updates)
             return
         if not self.uses_kv_compress_epilog:
