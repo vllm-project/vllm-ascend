@@ -54,7 +54,7 @@ from vllm.v1.worker.sentinel.eplb_redistribute import (
 )
 
 from vllm_ascend.ops.fused_moe.routed_experts import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.quantization.methods.w8a8_dynamic import (
+from vllm_ascend.quantization.methods.w8a8.w8a8_dynamic import (
     AscendW8A8DynamicFusedMoEMethod,
     scale_from_float_to_int64,
 )
