@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 import scipy  # type: ignore
 import torch
-import torch.nn.functional as F
 import torch_npu
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -914,12 +913,15 @@ class AscendSFAImpl(MLAAttentionImpl):
             and self.kv_lora_rank < TRANSPOSE_BMM_MAX_SUPPORTED_DIM
         ):
             return
-        if self.W_UK_T_padded is None:
-            # Pad dim 1 (qk_nope_head_dim -> qk_head_dim) with zeros; the rope
-            # part of q multiplies these zero rows and is dropped by the matmul.
-            self.W_UK_T_padded = F.pad(self.W_UK_T, (0, 0, self.qk_rope_head_dim, 0))
-        else:
-            self.W_UK_T_padded[:, : self.qk_nope_head_dim, :].copy_(self.W_UK_T)
+        # Zero-pad dim 1 (qk_nope_head_dim -> qk_head_dim); the rope part of q
+        # multiplies these zero rows and is dropped by the matmul. Build via
+        # zeros + copy_ instead of F.pad: on CPU tensors the npu backend
+        # autoload can misroute F.pad in test environments.
+        padded = self.W_UK_T_padded
+        if padded is None:
+            padded = self.W_UK_T.new_zeros(self.W_UK_T.shape[0], self.qk_head_dim, self.W_UK_T.shape[2])
+            self.W_UK_T_padded = padded
+        padded[:, : self.qk_nope_head_dim, :].copy_(self.W_UK_T)
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
