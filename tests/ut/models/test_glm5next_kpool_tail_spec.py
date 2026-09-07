@@ -12,7 +12,10 @@ import ast
 from pathlib import Path
 
 import pytest
-from vllm.v1.kv_cache_interface import KpoolTailSpec
+
+from vllm_ascend.core.kv_cache_interface import (
+    KpoolTailSpec,
+)
 
 VLLM_ASCEND_ROOT = Path(__file__).resolve().parents[3] / "vllm_ascend"
 DUPLICATED_NAMES = ("KpoolTailSpec", "KpoolTailManager")

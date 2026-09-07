@@ -28,8 +28,11 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import KpoolTailSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.core.kv_cache_interface import (
+    KpoolTailSpec,
+)
 from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.ops.kpool_compress import fwht128_quant_fp8
 from vllm_ascend.models.glm5next.ops.kpool_indexer import (

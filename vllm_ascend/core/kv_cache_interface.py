@@ -23,6 +23,10 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+import vllm_ascend.core.kpool_tail_compat  # noqa: F401
+
+KpoolTailSpec = kv_mod.KpoolTailSpec
+
 _MLA_SPEC_FIELDS = {field.name for field in fields(MLAAttentionSpec)}
 # vLLM reworked how MLA specs describe cache compression: ``compress_ratio``
 # became ``tokens_per_state``, ``storage_block_size`` turned from a derived row
@@ -37,8 +41,19 @@ _COMPRESSION_FIELD = "tokens_per_state" if SPEC_USES_TOKENS_PER_STATE else "comp
 
 
 def spec_compress_ratio(kv_cache_spec: KVCacheSpec) -> int:
-    """Return how many tokens one physical KV row of ``kv_cache_spec`` holds."""
-    return getattr(kv_cache_spec, _COMPRESSION_FIELD, 1)
+    """Return how many tokens one physical KV row of ``kv_cache_spec`` holds.
+
+    Only an ``int`` counts. Test doubles (``MagicMock``, ``SimpleNamespace``)
+    auto-create missing attributes, so ``getattr(spec, "tokens_per_state", 1)``
+    is not a safe default -- a mock would then fail ``ratio > 1``. The same
+    helper has to read whichever of the two field names the spec actually
+    carries, because cpu-ut and vLLM main do not agree on the name.
+    """
+    for field_name in dict.fromkeys((_COMPRESSION_FIELD, "tokens_per_state", "compress_ratio")):
+        value = getattr(kv_cache_spec, field_name, None)
+        if isinstance(value, int):
+            return max(1, value)
+    return 1
 
 
 def optional_spec_compress_ratio(kv_cache_spec: KVCacheSpec) -> int | None:
@@ -75,16 +90,31 @@ def block_stride_indexing_kwargs(enabled: bool) -> dict[str, bool]:
     return {"indexes_kv_by_block_stride": enabled} if SPEC_HAS_BLOCK_STRIDE_INDEXING else {}
 
 
+def _raw_storage_token_width(kv_cache_spec: KVCacheSpec) -> int | None:
+    """Read the dataclass ``storage_block_size`` field, not a subclass property.
+
+    Ascend specs re-export the computed row count under that name so existing
+    tests keep working. ``getattr`` would hit the property and recurse.
+    """
+    raw = getattr(kv_cache_spec, "__dict__", {}).get("storage_block_size")
+    return raw if isinstance(raw, int) else None
+
+
+def _spec_block_size(kv_cache_spec: KVCacheSpec) -> int:
+    block_size = getattr(kv_cache_spec, "block_size", None)
+    return block_size if isinstance(block_size, int) else 1
+
+
 def _spec_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical KV rows one scheduler block addresses."""
-    token_width = getattr(kv_cache_spec, "storage_block_size", None)
+    token_width = _raw_storage_token_width(kv_cache_spec)
     if not SPEC_USES_TOKENS_PER_STATE:
         # Here ``storage_block_size`` is already a row count, exposed by vLLM
         # for every spec kind.
-        return token_width if token_width is not None else kv_cache_spec.block_size
+        return token_width if token_width is not None else _spec_block_size(kv_cache_spec)
     if token_width is None:
         # ``None`` means the storage is viewed in whole kernel blocks.
-        token_width = kv_cache_spec.block_size
+        token_width = _spec_block_size(kv_cache_spec)
     compress_ratio = spec_compress_ratio(kv_cache_spec)
     # Some models tag "uncompressed" with a non-positive ratio, matching the
     # guard in vLLM's own ``get_num_kernel_states``.
@@ -163,6 +193,11 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     # indexer spec.
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
+
+    @property
+    def storage_block_size(self) -> int:
+        """Physical KV rows one scheduler block addresses."""
+        return get_storage_block_size(self)
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -296,6 +331,11 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
 
     def __post_init__(self):
         pass
+
+    @property
+    def storage_block_size(self) -> int:
+        """Physical KV rows one scheduler block addresses."""
+        return get_storage_block_size(self)
 
     @property
     def real_page_size_bytes(self) -> int:

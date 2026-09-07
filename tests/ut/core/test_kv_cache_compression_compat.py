@@ -24,6 +24,8 @@ restating which layout was detected.
 """
 
 from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec
@@ -62,12 +64,23 @@ class TestCompressionKwargs(TestBase):
     def test_uncompressed_spec_reports_ratio_one(self):
         self.assertEqual(spec_compress_ratio(_mla_spec(1)), 1)
 
+    def test_reads_either_field_name_from_a_plain_namespace(self):
+        self.assertEqual(spec_compress_ratio(SimpleNamespace(compress_ratio=COMPRESS_RATIO)), COMPRESS_RATIO)
+        self.assertEqual(spec_compress_ratio(SimpleNamespace(tokens_per_state=COMPRESS_RATIO)), COMPRESS_RATIO)
+
+    def test_ignores_auto_created_mock_attributes(self):
+        # Mooncake unit tests pass MagicMock specs; getattr would otherwise
+        # return another MagicMock and `ratio > 1` would TypeError.
+        self.assertEqual(spec_compress_ratio(MagicMock()), 1)
+
 
 class TestStorageBlockSize(TestBase):
     def test_compression_folds_out_of_the_scheduler_block(self):
         # Ascend kernels index physical rows, so one scheduler block covers
         # block_size // compress_ratio of them regardless of spec layout.
-        self.assertEqual(get_storage_block_size(_mla_spec(COMPRESS_RATIO)), BLOCK_SIZE // COMPRESS_RATIO)
+        spec = _mla_spec(COMPRESS_RATIO)
+        self.assertEqual(get_storage_block_size(spec), BLOCK_SIZE // COMPRESS_RATIO)
+        self.assertEqual(spec.storage_block_size, BLOCK_SIZE // COMPRESS_RATIO)
 
     def test_uncompressed_spec_keeps_the_whole_block(self):
         self.assertEqual(get_storage_block_size(_mla_spec(1)), BLOCK_SIZE)
