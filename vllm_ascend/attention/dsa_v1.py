@@ -335,6 +335,14 @@ class AscendDSAReqMetadata:
     slot_mapping: torch.Tensor | None
     storage_block_size: int
     query_start_loc: torch.Tensor
+    positions: torch.Tensor | None = None
+    raw_slot_mapping: torch.Tensor | None = None
+    # Static launch bounds selected by build_attn_metadata.  Fused drafting
+    # updates the device sequence tensors in-place, but these Python values do
+    # not change between draft substeps (and must never be recovered from an
+    # NPU tensor while an ACLGraph is being captured).
+    max_seqlen_q: int | None = None
+    max_seqlen_kv: int | None = None
 
     num_compressed_tokens: int | None = None
     sin: torch.Tensor = None
@@ -598,6 +606,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
+        self.supports_draft_decode_metadata_update = True
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = kv_cache_spec.storage_block_size
         scheduler_config = vllm_config.scheduler_config
@@ -777,6 +786,98 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # TODO(lucas): this is a bit of a hack, we should probably have a
         # better way of doing this
         return modified_batch
+
+    def update_draft_decode_metadata(self, metadata: AscendDSAMetadata) -> None:
+        """Refresh step-dependent DSA tensors from live draft input buffers."""
+        req_metadata = _require_req_metadata(metadata)
+        positions = req_metadata.positions
+        raw_slot_mapping = req_metadata.raw_slot_mapping
+        assert positions is not None
+        assert raw_slot_mapping is not None
+
+        # update_draft_inputs() has already advanced positions, seq_lens and
+        # BlockTables.slot_mappings. Re-run only device work that derives DSA
+        # operator inputs from those live tensors; do not rebuild metadata on
+        # the host.
+        get_cos_and_sin_dsa(positions, use_cache=True)
+
+        if self.compressor_ratio <= 1:
+            assert req_metadata.slot_mapping is not None
+            formatted_slot_mapping = get_dsa_attn_kv_plan(
+                self.vllm_config
+            ).format_dsa_slot_mapping(
+                raw_slot_mapping,
+                self.storage_block_size,
+            )
+            req_metadata.slot_mapping.copy_(formatted_slot_mapping)
+
+        query_lens = (
+            req_metadata.query_start_loc[1:]
+            - req_metadata.query_start_loc[:-1]
+        )
+        if req_metadata.start_pos is not None:
+            torch.sub(
+                req_metadata.seq_lens,
+                query_lens,
+                out=req_metadata.start_pos,
+            )
+
+        if req_metadata.dspark_swa_indices is not None:
+            assert self.speculative_config is not None
+            build_dspark_swa_indices(
+                req_metadata.block_table,
+                self.speculative_config.num_speculative_tokens,
+                self.model_config.hf_config.sliding_window,
+                self.storage_block_size,
+                req_metadata.query_start_loc,
+                req_metadata.seq_lens,
+                metadata.num_actual_tokens,
+                indices_output=req_metadata.dspark_swa_indices,
+            )
+
+        num_reqs = req_metadata.seq_lens.shape[0]
+        assert req_metadata.max_seqlen_q is not None
+        assert req_metadata.max_seqlen_kv is not None
+        cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+            None,
+            "fused_draft_cu_seqlens_ori_kv",
+            req_metadata.seq_lens,
+            num_reqs,
+            self._zero_i32,
+            self.cu_seqlens_ori_kv,
+        )
+        cu_seqlens_cmp_kv = DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(
+            self.cu_seqlens_cmp_kv
+        )
+        # An empty cache forces the metadata kernels to be emitted at every
+        # fused draft substep. Their results are copied into the same buffers
+        # referenced by the captured attention nodes.
+        step_metadata_cache: dict[Any, Any] = {}
+        self._build_sas_metadata(
+            metadata_cache=step_metadata_cache,
+            layer_name=f"c{self.compressor_ratio}",
+            query_start_loc=req_metadata.query_start_loc,
+            seq_lens=req_metadata.seq_lens,
+            max_seqlen_q=req_metadata.max_seqlen_q,
+            max_seqlen_kv=req_metadata.max_seqlen_kv,
+            cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+            cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+        )
+        if self.compressor_ratio == 4:
+            self._build_qli_metadata(
+                metadata_cache=step_metadata_cache,
+                query_start_loc=req_metadata.query_start_loc,
+                seq_lens=req_metadata.seq_lens,
+                max_seqlen_q=req_metadata.max_seqlen_q,
+                max_seqlen_kv=req_metadata.max_seqlen_kv,
+            )
+        if req_metadata.compressor_metadata is not None:
+            build_compressor_metadata_out(
+                req_metadata,
+                self.compressor_ratio,
+                req_metadata.compressor_metadata,
+                self.vllm_config,
+            )
 
     def set_num_actual_tokens(
         self,
@@ -1200,6 +1301,22 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             slot_mapping=slot_mapping,
             storage_block_size=self.storage_block_size,
             query_start_loc=query_start_loc,
+            positions=(
+                common_attn_metadata.positions[: self.num_actual_tokens]
+                if getattr(common_attn_metadata, "positions", None) is not None
+                else None
+            ),
+            raw_slot_mapping=(
+                common_attn_metadata.slot_mapping[: self.num_actual_tokens]
+                if getattr(common_attn_metadata, "slot_mapping", None) is not None
+                else None
+            ),
+            max_seqlen_q=getattr(
+                common_attn_metadata, "max_query_len", max_seqlen_q
+            ),
+            max_seqlen_kv=getattr(
+                common_attn_metadata, "max_seq_len", max_seqlen_kv
+            ),
             num_compressed_tokens=num_compressed_tokens,
             sin=sin,
             cos=cos,
@@ -1424,6 +1541,22 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             slot_mapping=slot_mapping,
             storage_block_size=self.storage_block_size,
             query_start_loc=query_start_loc,
+            positions=(
+                common_attn_metadata.positions[: self.num_actual_tokens]
+                if getattr(common_attn_metadata, "positions", None) is not None
+                else None
+            ),
+            raw_slot_mapping=(
+                common_attn_metadata.slot_mapping[: self.num_actual_tokens]
+                if getattr(common_attn_metadata, "slot_mapping", None) is not None
+                else None
+            ),
+            max_seqlen_q=getattr(
+                common_attn_metadata, "max_query_len", max_seqlen_q
+            ),
+            max_seqlen_kv=getattr(
+                common_attn_metadata, "max_seq_len", max_seqlen_kv
+            ),
             num_compressed_tokens=self.num_actual_tokens,
             sin=sin,
             cos=cos,

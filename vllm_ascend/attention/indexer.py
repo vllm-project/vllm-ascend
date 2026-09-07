@@ -66,6 +66,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
     """Cache-only metadata builder for split SFA indexer cache layers."""
 
     reorder_batch_threshold = None
+    supports_draft_decode_metadata_update = True
 
     def __init__(
         self,
@@ -91,3 +92,6 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[Any]):
         fast_build: bool = False,
     ) -> None:
         return None
+
+    def update_draft_decode_metadata(self, metadata: None) -> None:
+        pass

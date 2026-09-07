@@ -163,6 +163,8 @@ class AscendSFAMetadata:
     block_table: torch.Tensor
     sin: torch.Tensor
     cos: torch.Tensor
+    positions: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
@@ -228,6 +230,7 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFABackend])
 
         self.speculative_config = vllm_config.speculative_config
+        self.supports_draft_decode_metadata_update = True
         self.decode_threshold = 1
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
@@ -262,6 +265,37 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         """Update optional parallel metadata after an outer layout wrapper."""
         return
 
+    def _update_parallel_draft_metadata(
+        self,
+        metadata: AscendSFAMetadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> None:
+        """Refresh fixed-address tensors introduced by a parallel layout."""
+        if metadata.cos.data_ptr() != cos.data_ptr():
+            metadata.cos.copy_(cos[: metadata.cos.shape[0]])
+            metadata.sin.copy_(sin[: metadata.sin.shape[0]])
+
+        raw_slot_mapping = metadata.pcp_slot_mapping
+        if (
+            raw_slot_mapping is not None
+            and metadata.slot_mapping.data_ptr() != raw_slot_mapping.data_ptr()
+        ):
+            metadata.slot_mapping.fill_(-1)
+            num_tokens = min(
+                metadata.slot_mapping.shape[0],
+                raw_slot_mapping.shape[0],
+            )
+            metadata.slot_mapping[:num_tokens].copy_(
+                raw_slot_mapping[:num_tokens]
+            )
+        if raw_slot_mapping is not None:
+            self._update_parallel_slot_mapping(
+                metadata,
+                raw_slot_mapping,
+                metadata.num_input_tokens,
+            )
+
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
         return ascend_chunked_prefill_workspace_size(vllm_config)
@@ -279,6 +313,28 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
     def reorder_batch(self, input_batch: "NPUInputBatch", scheduler_output: "SchedulerOutput") -> bool:
         # No need to reorder for Ascend SFA
         return False
+
+    def update_draft_decode_metadata(self, metadata: AscendSFAMetadata) -> None:
+        """Refresh SFA tensors derived from live draft positions in place."""
+        assert metadata.positions is not None
+        # seq_lens and slot_mapping already alias the buffers updated by
+        # update_draft_inputs() and BlockTables.compute_slot_mappings(). RoPE
+        # is the only base-SFA input materialized into a separate persistent
+        # buffer, so emit its gather/copy for every fused substep.
+        cos, sin = get_cos_and_sin_mla(
+            metadata.positions[: metadata.num_input_tokens].long(),
+            use_cache=True,
+        )
+        self._update_parallel_draft_metadata(metadata, cos, sin)
+
+        if get_ascend_config().c8_reshape_optim_enabled:
+            torch.ops._C_ascend.store_kv_block_metadata(
+                metadata.slot_mapping,
+                metadata.group_len,
+                metadata.group_key_idx,
+                metadata.group_key_cache_idx,
+                metadata.block_size,
+            )
 
     def build(
         self,
@@ -381,6 +437,10 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             block_table=block_table,
             sin=sin[:num_input_tokens],
             cos=cos[:num_input_tokens],
+            positions=common_attn_metadata.positions[:num_input_tokens],
+            query_start_loc=common_attn_metadata.query_start_loc[
+                : num_reqs + 1
+            ],
             block_size=block_size,
             group_len=common_attn_metadata.group_len,
             group_key_idx=common_attn_metadata.group_key_idx,

@@ -388,7 +388,50 @@ class AscendSFADSACPMetadataBuilder(AscendSFAMetadataBuilder):
             )
         else:
             local_mapping = local_mapping[: dsa_cp_context.num_tokens_pad]
-        dsa_cp_context.slot_mapping_cp = local_mapping[dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad]
+        local_mapping = local_mapping[
+            dsa_cp_context.local_start : dsa_cp_context.local_end_with_pad
+        ]
+        if dsa_cp_context.slot_mapping_cp is None:
+            dsa_cp_context.slot_mapping_cp = local_mapping
+        else:
+            dsa_cp_context.slot_mapping_cp.copy_(local_mapping)
+
+    def _update_parallel_draft_metadata(
+        self,
+        metadata: AscendSFAMetadata,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> None:
+        dsa_cp_context = getattr(metadata, "dsa_cp_context", None)
+        assert dsa_cp_context is not None
+
+        metadata.cos.zero_()
+        metadata.sin.zero_()
+        src_start = min(dsa_cp_context.local_start, cos.shape[0])
+        src_end = min(dsa_cp_context.local_end_with_pad, cos.shape[0])
+        if src_end > src_start:
+            dst_end = src_end - src_start
+            metadata.cos[:dst_end].copy_(cos[src_start:src_end])
+            metadata.sin[:dst_end].copy_(sin[src_start:src_end])
+
+        super()._update_parallel_draft_metadata(metadata, cos, sin)
+
+        assert metadata.query_start_loc is not None
+        num_segs = metadata.cum_query_lens.shape[0]
+        global_start = metadata.query_start_loc[:num_segs]
+        global_end = metadata.cum_query_lens
+        req_local_start = global_start.clamp(min=dsa_cp_context.local_start)
+        req_local_end = global_end.clamp(
+            max=dsa_cp_context.local_end_with_pad
+        )
+        num_local_tokens = req_local_end - req_local_start
+        offset = global_end - req_local_end
+        local_key_lens = torch.where(
+            num_local_tokens > 0,
+            torch.clamp_min(metadata.seq_lens - offset, 0),
+            0,
+        )
+        dsa_cp_context.actual_seq_lengths_key.copy_(local_key_lens)
 
 
 class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
@@ -821,6 +864,56 @@ class AscendSFADCPMetadataBuilder(
         )
         return slot_mapping_replicated_view
 
+    def _refresh_draft_slot_mapping_replicated_view(
+        self,
+        metadata: AscendSFADCPMetadata,
+        block_table_replicated_view: torch.Tensor,
+    ) -> torch.Tensor:
+        """Refresh the replicated indexer view from live fused-draft tensors."""
+        assert metadata.positions is not None
+        assert metadata.query_start_loc is not None
+        num_reqs = metadata.seq_lens.shape[0]
+        num_input_tokens = metadata.num_input_tokens
+        num_actual_tokens = min(metadata.num_actual_tokens, num_input_tokens)
+        local_block_table_cols = (
+            block_table_replicated_view.shape[1] // self.dcp_size
+        )
+        _, _, slot_mapping = self._ensure_replicated_view_buffers(
+            num_reqs,
+            num_input_tokens,
+            local_block_table_cols,
+        )
+        slot_mapping.fill_(-1)
+        if num_actual_tokens == 0:
+            return slot_mapping
+
+        query_lens = (
+            metadata.query_start_loc[1 : num_reqs + 1]
+            - metadata.query_start_loc[:num_reqs]
+        )
+        req_indices = torch.repeat_interleave(
+            torch.arange(num_reqs, dtype=torch.int32, device=self.device),
+            query_lens.to(device=self.device),
+            output_size=num_input_tokens,
+        )[:num_actual_tokens]
+        positions = metadata.positions[:num_actual_tokens].to(
+            device=self.device,
+            dtype=torch.int32,
+        )
+        logical_block_idx = positions // self.replicated_view_block_size
+        block_offsets = positions % self.replicated_view_block_size
+        block_table_indices = (
+            req_indices * block_table_replicated_view.shape[1]
+            + logical_block_idx
+        )
+        block_numbers = block_table_replicated_view.flatten()[
+            block_table_indices
+        ]
+        slot_mapping[:num_actual_tokens] = (
+            block_numbers * self.replicated_view_block_size + block_offsets
+        )
+        return slot_mapping
+
     def _build_compact_kv_gather_metadata(
         self,
         dcp_block_table: torch.Tensor,
@@ -895,6 +988,34 @@ class AscendSFADCPMetadataBuilder(
         metadata.num_prefills = num_prefills
         self._update_parallel_slot_mapping(metadata, dcp_slot_mapping, num_input_tokens)
         return metadata
+
+    def update_draft_decode_metadata(
+        self,
+        metadata: AscendSFAMetadata,
+    ) -> None:
+        assert isinstance(metadata, AscendSFADCPMetadata)
+        dcp_context = metadata.dcp_context
+        assert dcp_context is not None
+
+        block_table = self._build_block_table_replicated_view(
+            dcp_context.block_table,
+            metadata.seq_lens,
+        )
+        slot_mapping = self._refresh_draft_slot_mapping_replicated_view(
+            metadata,
+            block_table,
+        )
+        if metadata.block_table.data_ptr() != block_table.data_ptr():
+            metadata.block_table.copy_(block_table)
+        if (
+            metadata.pcp_slot_mapping is not None
+            and metadata.pcp_slot_mapping.data_ptr() != slot_mapping.data_ptr()
+        ):
+            metadata.pcp_slot_mapping.copy_(slot_mapping)
+
+        local_seq_lens = self._get_dcp_local_seq_lens(metadata.seq_lens)
+        dcp_context.seq_lens.copy_(local_seq_lens)
+        super().update_draft_decode_metadata(metadata)
 
     def build_for_graph_capture(
         self,

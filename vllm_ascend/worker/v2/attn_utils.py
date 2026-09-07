@@ -215,8 +215,16 @@ def build_attn_metadata(
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
     # an error.
     if seq_lens_np is None:
-        seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
-    seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
+        if seq_lens_cpu_upper_bound is not None:
+            seq_lens_cpu = seq_lens_cpu_upper_bound[:num_reqs]
+        else:
+            seq_lens_cpu = torch.full(
+                (num_reqs,),
+                max_seq_len,
+                dtype=torch.int32,
+            )
+    else:
+        seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
         seq_lens_cpu_upper_bound = seq_lens_cpu
 
@@ -275,7 +283,6 @@ def build_attn_metadata(
             dcp_local_seq_lens=dcp_local_seq_lens,
             **common_attn_metadata_extra_kwargs,
         )
-
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             is_dsa_builder = isinstance(attn_metadata_builder, AscendDSAMetadataBuilder)

@@ -234,6 +234,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         self.vllm_config = vllm_config
         self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
         self.pcp_enabled = self.pcp_size > 1
+        self.supports_draft_decode_metadata_update = True
         self.model_config = vllm_config.model_config
         self.compilation_config = vllm_config.compilation_config
         self.device = device
@@ -270,6 +271,12 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
     def reorder_batch(self, input_batch, scheduler_output: "SchedulerOutput") -> bool:
         return False
+
+    def update_draft_decode_metadata(self, metadata: AscendMetadata) -> None:
+        seq_lens_cpu = metadata.seq_lens_cpu
+        seq_lens_cpu.add_(seq_lens_cpu.ne(0).to(seq_lens_cpu.dtype))
+        seq_lens_cpu.clamp_(max=self.model_config.max_model_len)
+        metadata.seq_lens_list = seq_lens_cpu.tolist()
 
     def _split_decodes_and_prefills(
         self,
