@@ -42,7 +42,7 @@ def eager_probe(evidence: Path) -> None:
     )
 
 
-def probe_startup(case: dict, evidence: Path, fusion: bool) -> dict:
+def probe_startup(case: dict, evidence: Path, fusion: bool, request_smoke: bool = False) -> dict:
     label = "fusion-on" if fusion else "fusion-off"
     cache = Path(tempfile.mkdtemp(prefix=f"cann920-{label}-", dir="/tmp"))
     with socket.socket() as sock:
@@ -65,11 +65,18 @@ def probe_startup(case: dict, evidence: Path, fusion: bool) -> dict:
     command = [sys.executable, str(Path(__file__).with_name("server.py")), "serve", case["model"], *args]
     result = {"fusion": fusion, "cache": str(cache), "command": command, "status": "timeout"}
     (evidence / f"{label}-command.json").write_text(json.dumps(result, indent=2) + "\n")
-    with (evidence / f"{label}-server.log").open("w") as log:
+    log_path = evidence / f"{label}-server.log"
+    with log_path.open("w") as log, log_path.open() as monitor:
         process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+            recent_log = ""
             while time.monotonic() < deadline:
+                recent_log += monitor.read()
+                if "Segfault encountered" in recent_log or "Fatal Python error: Segmentation fault" in recent_log:
+                    result["status"] = "native_crash"
+                    break
+                recent_log = recent_log[-128:]
                 if process.poll() is not None:
                     result.update(status="process_exited", returncode=process.returncode)
                     break
@@ -81,6 +88,22 @@ def probe_startup(case: dict, evidence: Path, fusion: bool) -> dict:
                 except (urllib.error.URLError, TimeoutError):
                     pass
                 time.sleep(POLL_SECONDS)
+            if result["status"] == "ready" and request_smoke:
+                payload = {"model": case["model"], "prompt": "Hello", "max_tokens": 8, "temperature": 0}
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/v1/completions",
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(request, timeout=180) as response:
+                        completion = json.load(response)
+                    (evidence / "completion-smoke.json").write_text(json.dumps(completion, indent=2) + "\n")
+                    assert completion.get("choices") and completion.get("usage", {}).get("completion_tokens", 0) > 0
+                    result["completion_smoke"] = "passed"
+                except (urllib.error.URLError, TimeoutError, ValueError, AssertionError) as error:
+                    result.update(status="request_failed", completion_error=str(error))
         finally:
             # All children belong to this one experiment server's process group.
             with contextlib.suppress(ProcessLookupError):
@@ -93,6 +116,26 @@ def probe_startup(case: dict, evidence: Path, fusion: bool) -> dict:
     diagnostics = cache / "diagnostics"
     if diagnostics.exists():
         shutil.copytree(diagnostics, evidence / f"{label}-diagnostics", dirs_exist_ok=True)
+    if result["status"] == "ready" and env.get("ARDQ_EXPECTED_VENDOR"):
+        expected_workers = int(args[args.index("--tensor-parallel-size") + 1]) * int(
+            args[args.index("--data-parallel-size") + 1]
+        )
+        configs = [json.loads(p.read_text()) for p in diagnostics.glob("fusion-config-*.json")]
+        successes = [json.loads(p.read_text()) for p in diagnostics.glob("first-success-*.json")]
+        beta_successes = [
+            r
+            for r in successes
+            if r["kwargs"].get("beta") is not None or (len(r["args"]) > 5 and r["args"][5] is not None)
+        ]
+        result["fixed_workers"] = len(beta_successes)
+        verified = (
+            len(configs) >= expected_workers
+            and len(beta_successes) >= expected_workers
+            and all(r["actual_fuse_norm_quant"] and "AddRMSNormQuantFusionPass" in r["passes"] for r in configs)
+            and all(r.get("fixed_libraries") for r in beta_successes)
+        )
+        if not verified:
+            result["status"] = "fixed_library_or_fusion_evidence_missing"
     return result
 
 
@@ -101,6 +144,8 @@ def main() -> None:
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--evidence", required=True, type=Path)
     parser.add_argument("--eager", action="store_true")
+    parser.add_argument("--fusion-on-only", action="store_true")
+    parser.add_argument("--request-smoke", action="store_true")
     phases = parser.add_mutually_exclusive_group()
     phases.add_argument("--minimal-only", action="store_true")
     phases.add_argument("--startup-only", action="store_true")
@@ -111,9 +156,10 @@ def main() -> None:
     config_path = args.baseline / "tests/e2e/nightly/single_node/models/configs/DeepSeek-V3.2-W8A8.yaml"
     case = yaml.safe_load(config_path.read_text())["test_cases"][0]
     if args.startup_only:
-        results = json.loads((args.evidence / "result.json").read_text())
-        for fusion in (True, False):
-            results["startup"].append(probe_startup(case, args.evidence, fusion))
+        result_path = args.evidence / "result.json"
+        results = json.loads(result_path.read_text()) if result_path.exists() else {"startup": []}
+        for fusion in (True,) if args.fusion_on_only else (True, False):
+            results["startup"].append(probe_startup(case, args.evidence, fusion, args.request_smoke))
             (args.evidence / "result.json").write_text(json.dumps(results, indent=2) + "\n")
         print(json.dumps(results, indent=2), flush=True)
         if any(item["status"] != "ready" for item in results["startup"]):

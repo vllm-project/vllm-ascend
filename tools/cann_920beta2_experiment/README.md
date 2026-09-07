@@ -1,17 +1,28 @@
-# CANN 9.2.0.beta2 A3 实验
+# CANN 9.2 beta2 A3 修复验证实验
 
-本目录仅用于实验 PR，验证两次 Nightly 在 `aclnnAddRmsNormDynamicQuantV2GetWorkspaceSize` 中崩溃的问题。
+本目录用于实验 PR #15849，复现并验证 `aclnnAddRmsNormDynamicQuantV2GetWorkspaceSize` 的 tiling SIGSEGV 修复。
 
-工作流使用独立 A3 job，在临时容器的随机 `/opt/cann-920beta2-experiment.*` 目录内同时安装 toolkit 与 A3 ops 9.2.0-beta.2。安装包来自此前升级 ops 的 PR #15643 使用的 CANN 9.2.T3 目录，输出下载包 SHA256、安装元数据和实际加载的库路径。
+工作流复用 `linux-aarch64-nightly-a3-16` runner，在临时容器内安装匹配的 toolkit/A3 ops 9.2.0-beta.2。公共镜像和正式 Nightly 配置不变。CANN 包来自已有 ops 升级实验使用的 9.2.T3 目录，并记录下载包哈希、安装元数据及生效路径。
 
-模型代码固定为第二次失败 job 的 vllm-ascend 提交 `60162f1046750d35c325d0449fcbbcd4af28d488`。继承镜像中的 Python 依赖，但强制检查 torch_npu 为 2.10.0.post4、vLLM 为 0.27.1+empty；若镜像漂移，实验会明确失败。公共基础镜像仍为可变标签，不能把本实验当作历史镜像的完全复刻。
+模型代码固定为 `60162f1046750d35c325d0449fcbbcd4af28d488`，检查 torch_npu=2.10.0.post4、vLLM=0.27.1+empty。基础镜像标签可变，版本漂移会显式失败。
 
-先运行 BF16 `[1/48/4096,7168]` 单路量化 eager 调用，再使用原 DeepSeek-V3.2-W8A8 TP8/DP2 配置，分别开启和关闭 `fuse_norm_quant` 检查服务是否启动到 `/health`。两组均使用各自全新的缓存目录，测试后停止本组服务。该门禁只验证启动阶段，不声明模型精度或性能通过。
+## 本轮步骤
 
-开关必须设置在 `--additional-config` 的 `ascend_compilation_config.fuse_norm_quant`。vLLM 通用 `--compilation-config.pass_config` 中的同名开关不控制本基线的 Ascend pass。此前实验提交 bb8587b 已证明全新缓存会崩溃，但其关闭组未实际关闭 Ascend 融合，不能作为融合关闭对照。
+1. 在原包下执行 BF16 `[1,4]`、带 beta、无 smooth 的调用，要求复现 SIGSEGV。
+2. 拉取 ops-nn 9.2 beta2 固定基线 `30ef7dd56`，应用可选输入描述信息修复及回归用例。校验完整源码树为 `c41d331cdab95233834dbca87e0ada238251a5f0`，与已在 A2 验证的修复提交 `9f85253fa` 一致。
+3. 按 A3 型号 `ascend910_93` 编译自定义包，在本 job 独立目录安装。记录源码树、依赖提交、安装包与动态库哈希。
+4. 验证修复包的带 beta eager/npugraph_ex 调用，rows=4096/48/1、hidden=7168；要求成功且有效输出有限，并核验新库实际加载。
+5. 提前上传修复包和单算子证据，再使用原 DeepSeek-V3.2-W8A8 TP8/DP2 配置，保持 Ascend norm-quant 融合开启，从全新缓存启动模型。
+6. `/health` 成功后发送一个 8-token completion 请求。核验至少 16 个 worker 的融合配置、带 beta 的成功调用与新库哈希。
 
-诊断阶段先独立运行推理模式 eager、npugraph_ex 最小编译图（有/无 smooth）及 `ACL_OP_INIT_MODE=0` 对照，并提前上传 minimal artifact。完整启动记录实际融合配置和 pass 列表、融合后 FX 图、V2 最后调用参数（shape/stride/dtype/offset/可选输入）、Python 栈和进程加载库。诊断钩子不采集张量值；会影响执行时序，需结合无钩子的既有崩溃证据判断。
+本轮验证模型启动及一次真实推理，不运行 AIME/GSM8K 完整精度、性能基准。A2 编译的 `ascend910b` 包不直接用于本轮 A3 验证。
 
-该 PR 新增的 `pull_request` 工作流需经过仓库正常的 fork 工作流审批。现有 `/nightly` 命令使用主分支工作流并传入 `skip_build_image=true`，不会自动构建本 PR 的实验环境。
+## 诊断与历史更正
 
-查看 `cann-920beta2-a3-*` artifact 中的 `experiment.log`、`cann-install-info.txt`、`active-cann-paths.txt`、`eager-loaded-libraries.txt`、`fusion-on-server.log`、`fusion-off-server.log` 和 `result.json`。cold-cache 成功只说明该受控组合未复现；认定缓存兼容问题仍需在相同环境对旧缓存做 A/B。
+Ascend 开关必须设置在 `additional_config.ascend_compilation_config.fuse_norm_quant`。旧 bb8587b 实验误设 upstream pass_config，不能作为关闭 Ascend 融合的对照；修正后的 81bd622 已验证关闭融合可启动。
+
+诊断只记录每个进程首次真实 V2 调用及首次成功结果，避免对已修复的大模型每次调用反复写堆栈。保留原生错误日志、实际融合配置、加载库及返回后的哈希核验。检测到原生段错误时及时结束本实验进程组。
+
+该 fork PR 的工作流仍遵守上游正常审批和排队规则。现有 `/nightly` 使用主分支工作流，不会自动应用这里的修复包。
+
+查看 `cann-920beta2-minimal-*` 和 `cann-920beta2-a3-*` artifact：包版本、fix-build.log、fix-build-metadata.json、fix-packages、stock/fixed-beta-result.json、fusion-on-server.log、fusion-on-diagnostics、completion-smoke.json、result.json。

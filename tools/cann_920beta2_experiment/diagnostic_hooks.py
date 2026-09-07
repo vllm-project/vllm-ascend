@@ -2,12 +2,30 @@
 
 import faulthandler
 import functools
+import hashlib
 import json
 import os
 import threading
 import time
 import traceback
 from pathlib import Path
+
+
+def check_fixed_libraries() -> dict:
+    vendor = os.environ.get("ARDQ_EXPECTED_VENDOR")
+    if not vendor:
+        return {}
+    expected = json.loads(Path(os.environ["ARDQ_EXPECTED_LIBRARIES"]).read_text())
+    loaded = {line.split()[-1] for line in Path("/proc/self/maps").read_text().splitlines() if ".so" in line}
+    checked = {}
+    for name in ("libcust_opapi.so", "libcust_opmaster_rt2.0.so"):
+        candidates = [str(Path(p).resolve()) for p in loaded if p.startswith(vendor + "/") and p.endswith(name)]
+        assert candidates, f"修复库未加载：{name}，预期目录 {vendor}"
+        for path in candidates:
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            assert expected[path] == digest, f"修复库哈希不匹配：{path}"
+            checked[path] = digest
+    return checked
 
 
 def install_trace(directory: Path) -> None:
@@ -17,6 +35,7 @@ def install_trace(directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     pid = os.getpid()
     fault_log = (directory / f"python-fault-{pid}.log").open("w")
+    recorded = False
 
     def describe(value):
         if isinstance(value, torch.Tensor):
@@ -38,6 +57,9 @@ def install_trace(directory: Path) -> None:
     def wrap(original):
         @functools.wraps(original)
         def traced(operator, *args, **kwargs):
+            nonlocal recorded
+            if recorded:
+                return original(operator, *args, **kwargs)
             if not str(operator).startswith("npu.npu_add_rms_norm_dynamic_quant"):
                 return original(operator, *args, **kwargs)
             if any(isinstance(arg, FakeTensor) for arg in args):
@@ -54,13 +76,15 @@ def install_trace(directory: Path) -> None:
                 "inference_mode": torch.is_inference_mode_enabled(),
                 "stack": traceback.format_stack(limit=40),
             }
-            (directory / f"last-call-{pid}.json").write_text(json.dumps(record, indent=2, default=str) + "\n")
+            (directory / f"first-call-{pid}.json").write_text(json.dumps(record, indent=2, default=str) + "\n")
             maps = Path("/proc/self/maps").read_text()
             (directory / f"loaded-libraries-{pid}.txt").write_text(
                 "\n".join(line for line in maps.splitlines() if ".so" in line) + "\n"
             )
             result = original(operator, *args, **kwargs)
-            (directory / f"last-success-{pid}.json").write_text(json.dumps(record, indent=2, default=str) + "\n")
+            record["fixed_libraries"] = check_fixed_libraries()
+            (directory / f"first-success-{pid}.json").write_text(json.dumps(record, indent=2, default=str) + "\n")
+            recorded = True
             return result
 
         return traced

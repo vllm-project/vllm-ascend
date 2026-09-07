@@ -95,5 +95,7 @@ for variable in PATH LD_LIBRARY_PATH PYTHONPATH ASCEND_HOME_PATH ASCEND_OPP_PATH
     printf 'export %s=%q\n' "$variable" "${!variable:-}" >>"$evidence/runtime-env.sh"
 done
 cd "$baseline"
-python3 "$scripts/probe.py" --baseline "$baseline" --evidence "$evidence" --minimal-only
+if [[ ${3:-} != --install-only ]]; then
+    python3 "$scripts/probe.py" --baseline "$baseline" --evidence "$evidence" --minimal-only
+fi
 npu-smi info >"$evidence/npu-after.txt"

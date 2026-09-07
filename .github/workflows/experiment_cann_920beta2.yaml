@@ -38,26 +38,43 @@ jobs:
           submodules: recursive
           persist-credentials: false
           path: baseline
-      - name: Install matched toolkit and A3 ops, then run minimal probes
+      - name: Install matched toolkit and A3 ops
         run: |
           mkdir -p "$GITHUB_WORKSPACE/evidence"
           bash experiment/tools/cann_920beta2_experiment/run.sh \
-            "$GITHUB_WORKSPACE/baseline" "$GITHUB_WORKSPACE/evidence" \
+            "$GITHUB_WORKSPACE/baseline" "$GITHUB_WORKSPACE/evidence" --install-only \
             2>&1 | tee "$GITHUB_WORKSPACE/evidence/experiment.log"
-      - name: Upload minimal probe evidence before model loading
+      - name: Reproduce beta-only crash with the original A3 package
+        run: |
+          source "$GITHUB_WORKSPACE/evidence/runtime-env.sh"
+          python3 experiment/tools/cann_920beta2_experiment/fixed_probe.py \
+            --variant stock --evidence "$GITHUB_WORKSPACE/evidence"
+      - name: Build and install the verified source fix for Ascend 910_93
+        run: |
+          source "$GITHUB_WORKSPACE/evidence/runtime-env.sh"
+          bash experiment/tools/cann_920beta2_experiment/build_fixed.sh \
+            "$GITHUB_WORKSPACE/evidence" 2>&1 | tee "$GITHUB_WORKSPACE/evidence/fix-setup.log"
+      - name: Verify fixed beta-only eager and compiled calls
+        run: |
+          source "$GITHUB_WORKSPACE/evidence/runtime-env.sh"
+          source "$GITHUB_WORKSPACE/evidence/fix-runtime-env.sh"
+          python3 experiment/tools/cann_920beta2_experiment/fixed_probe.py \
+            --variant fixed --evidence "$GITHUB_WORKSPACE/evidence"
+      - name: Upload fixed package and probe evidence before model loading
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: cann-920beta2-minimal-${{ github.run_id }}-${{ github.run_attempt }}
           path: evidence/
           if-no-files-found: warn
-      - name: Trace model startup with effective Ascend fusion on and off
+      - name: Verify fixed DeepSeek startup and completion with Ascend fusion enabled
         run: |
           source "$GITHUB_WORKSPACE/evidence/runtime-env.sh"
+          source "$GITHUB_WORKSPACE/evidence/fix-runtime-env.sh"
           cd "$GITHUB_WORKSPACE/baseline"
           python3 "$GITHUB_WORKSPACE/experiment/tools/cann_920beta2_experiment/probe.py" \
             --baseline "$GITHUB_WORKSPACE/baseline" --evidence "$GITHUB_WORKSPACE/evidence" \
-            --startup-only
+            --startup-only --fusion-on-only --request-smoke
       - name: Upload experiment evidence
         if: always()
         uses: actions/upload-artifact@v4
