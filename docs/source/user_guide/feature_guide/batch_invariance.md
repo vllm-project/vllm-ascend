@@ -194,12 +194,6 @@ When batch invariance is enabled, vLLM:
 
 !!! note
 
-    With the 2.0.0 operator run package, batch invariance supports graph execution,
-    including `FULL` and `FULL_DECODE_ONLY` cudagraph modes. The examples above
-    use the default graph configuration without overriding `cudagraph_mode`.
-
-!!! note
-
     Enabling batch invariance may impact performance compared to the default non-deterministic mode. This trade-off is intentional to guarantee reproducibility.
 
 ## Future Improvements
