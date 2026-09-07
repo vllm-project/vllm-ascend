@@ -16,7 +16,6 @@ from vllm_ascend.worker.v2.pp_utils import (
     PPTransportDataType,
     add_pp_transport_tensors,
     get_pp_transport_tensors,
-    restore_pp_topk_indices,
 )
 
 
@@ -49,20 +48,6 @@ def test_mtp_layer_keeps_indexer():
         "model.layers.80.self_attn",
         skip_topk=True,
     )
-
-
-def test_restore_pp_topk_indices_rejects_incompatible_shape():
-    intermediate_tensors = add_pp_transport_tensors(
-        IntermediateTensors({}),
-        PPTransportDataType.TOPK_INDICES,
-        [torch.zeros((2, 3), dtype=torch.int32)],
-    )
-
-    with pytest.raises(ValueError, match="unexpected shape"):
-        restore_pp_topk_indices(
-            intermediate_tensors,
-            torch.zeros((4, 2), dtype=torch.int32),
-        )
 
 
 def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
@@ -107,15 +92,16 @@ def test_model_init_adds_pp_topk_receive_buffer(monkeypatch):
     assert receive_buffers[0].data_ptr() == topk_indices_buffer.data_ptr()
 
 
-def test_pp_forward_restores_and_propagates_topk_indices(monkeypatch):
+def test_pp_forward_propagates_aliased_topk_indices(monkeypatch):
     pp_group = SimpleNamespace(is_first_rank=False, is_last_rank=False)
     monkeypatch.setattr(patch_deepseek_v2, "get_pp_group", lambda: pp_group)
-
-    received_topk_indices = torch.tensor([[1, 2], [3, 4]], dtype=torch.int32)
+    topk_indices_buffer = torch.zeros((4, 2), dtype=torch.int32)
+    received_topk_indices = topk_indices_buffer[:2]
+    received_topk_indices.copy_(torch.tensor([[1, 2], [3, 4]], dtype=torch.int32))
     model = SimpleNamespace(
         receive_pp_topk_indices=True,
         send_pp_topk_indices=True,
-        topk_indices_buffer=torch.zeros((4, 2), dtype=torch.int32),
+        topk_indices_buffer=topk_indices_buffer,
         config=SimpleNamespace(llama_4_scaling=None),
         layers=[lambda positions, hidden_states, residual, scaling: (hidden_states, residual)],
         start_layer=0,

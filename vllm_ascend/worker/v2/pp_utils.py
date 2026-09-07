@@ -262,34 +262,6 @@ def pp_stage_requires_topk_indices(config: object, start_layer: int) -> bool:
     return bool(getattr(config, "use_index_cache", False)) and should_reuse_topk(config, start_layer)
 
 
-def restore_pp_topk_indices(
-    intermediate_tensors: IntermediateTensors,
-    topk_indices_buffer: torch.Tensor,
-) -> None:
-    """Restore Top-K indices received from the preceding PP stage."""
-    received_tensors = get_pp_transport_tensors(
-        intermediate_tensors,
-        PPTransportDataType.TOPK_INDICES,
-    )
-    if len(received_tensors) != 1:
-        raise ValueError(f"Expected one PP Top-K indices tensor, got {len(received_tensors)}.")
-
-    received_topk_indices = received_tensors[0]
-    if received_topk_indices.shape[1:] != topk_indices_buffer.shape[1:]:
-        raise ValueError(
-            "Received PP Top-K indices have an unexpected shape: "
-            f"received {tuple(received_topk_indices.shape)}, "
-            f"buffer {tuple(topk_indices_buffer.shape)}."
-        )
-    num_tokens = received_topk_indices.shape[0]
-    if num_tokens > topk_indices_buffer.shape[0]:
-        raise ValueError(
-            "Received PP Top-K indices exceed the local buffer capacity: "
-            f"received {num_tokens} tokens, capacity {topk_indices_buffer.shape[0]}."
-        )
-    topk_indices_buffer[:num_tokens].copy_(received_topk_indices)
-
-
 def add_pp_topk_indices(
     intermediate_tensors: IntermediateTensors,
     topk_indices_buffer: torch.Tensor,

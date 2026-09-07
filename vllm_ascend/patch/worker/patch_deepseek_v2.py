@@ -36,7 +36,6 @@ from vllm_ascend.utils import should_reuse_topk
 from vllm_ascend.worker.v2.pp_utils import (
     add_pp_topk_indices,
     configure_pp_topk_transport,
-    restore_pp_topk_indices,
 )
 
 
@@ -329,12 +328,6 @@ def _patched_forward(
         assert intermediate_tensors is not None
         hidden_states = intermediate_tensors["hidden_states"]
         residual = intermediate_tensors["residual"]
-        if self.receive_pp_topk_indices:
-            assert self.topk_indices_buffer is not None
-            restore_pp_topk_indices(
-                intermediate_tensors,
-                self.topk_indices_buffer,
-            )
 
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
     llama_4_scaling: torch.Tensor | None
