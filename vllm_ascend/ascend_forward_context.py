@@ -30,6 +30,7 @@ class MoECommType(Enum):
 _MRV2_IN_PROFILE_RUN: ContextVar[bool] = ContextVar("_MRV2_IN_PROFILE_RUN", default=False)
 
 
+_CANN_MEGAMOE_SUPPORTED_EP_SIZES = frozenset({2, 4, 8, 16, 32, 64, 128})
 _MEGA_MOE_TOKENS_PER_RANK_LIMIT = 4096
 _DISPATCH_FFN_COMBINE_TOKENS_PER_RANK_LIMIT = 512
 _MC2_TOKENS_PER_RANK_LIMIT = 512
@@ -82,14 +83,14 @@ def get_mrv2_in_profile_run() -> bool:
 
 
 def use_cann_megamoe(vllm_config: VllmConfig) -> bool:
-    # TODO: drop the EP-size guard when MegaMoe supports larger EP sizes.
+    # CANN A2/A3 MegaMoe currently supports a discrete EP-size set.
     return (
         is_mega_moe_supported()
         and get_ascend_device_type() == AscendDeviceType.A3
         and get_ascend_config().enable_fused_mc2 == 1
         and is_moe_model(vllm_config)
         and vllm_config.parallel_config.enable_expert_parallel
-        and 1 < get_ep_group().world_size <= 64
+        and get_ep_group().world_size in _CANN_MEGAMOE_SUPPORTED_EP_SIZES
         and getattr(vllm_config, "lora_config", None) is None
     )
 
