@@ -18,12 +18,12 @@ def test_patch_rebinds_early_model_import_and_preserves_custom_factory(monkeypat
     """Repair cached upstream factories without overwriting custom factories."""
     original = fused_moe_layer.FusedMoE
     stale = ModuleType(f"vllm.model_executor.models.{model_name}")
-    stale.FusedMoE = original
+    stale.__dict__["FusedMoE"] = original
     custom = ModuleType("vllm.model_executor.models.custom_test")
     custom_factory = object()
-    custom.FusedMoE = custom_factory
+    custom.__dict__["FusedMoE"] = custom_factory
     unrelated = ModuleType("unrelated_test")
-    unrelated.FusedMoE = original
+    unrelated.__dict__["FusedMoE"] = original
     monkeypatch.setitem(sys.modules, stale.__name__, stale)
     monkeypatch.setitem(sys.modules, custom.__name__, custom)
     monkeypatch.setitem(sys.modules, unrelated.__name__, unrelated)
