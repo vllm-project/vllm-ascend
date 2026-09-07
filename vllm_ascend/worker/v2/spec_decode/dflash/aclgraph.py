@@ -93,7 +93,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
         # calculate num_tokens_across_dp.
         # DPMetadata validates these counts on the host. An NPU tensor would
         # synchronize graph replay before the parameter-update events are recorded.
-        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens, device="cpu")
+        num_tokens_across_dp = torch.full([self.speculator.dp_size], num_tokens)
 
         with set_forward_context(
             self.speculator.model_state.attn_metadata,
