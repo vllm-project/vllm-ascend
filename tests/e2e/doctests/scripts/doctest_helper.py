@@ -22,11 +22,11 @@ Usage from the repository root (these commands do not execute the blocks):
   python3 tests/e2e/doctests/scripts/doctest_helper.py extract MARKER
   python3 tests/e2e/doctests/scripts/doctest_helper.py extract --ref REF MARKER
   python3 tests/e2e/doctests/scripts/doctest_helper.py extract --expand-macros MARKER
-  python3 tests/e2e/doctests/scripts/doctest_helper.py plan --quickstart a2 --installation source
-  python3 tests/e2e/doctests/scripts/doctest_helper.py plan --base BASE_REF --head HEAD_REF
+  python3 tests/e2e/doctests/scripts/doctest_helper.py plan [selection] [image repositories]
 Raw extraction preserves macros; expansion and planning require PyYAML.
 Diff planning compares Git refs but uses working-tree MkDocs values for image tags.
 Manual selections default to none; non-none choices cannot be combined with diff selection.
+Use plan --check-resources for PR planning; explicit manual runs remain strict.
 Run the actual tests with scripts/run_doctests.sh under tests/e2e/doctests/.
 """
 
@@ -36,6 +36,9 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 MKDOCS_PATH = "mkdocs.yml"
@@ -54,6 +57,15 @@ INSTALLATION_OS_IMAGE_TAGS = {
     "ubuntu": "ubuntu22.04",
     "openeuler": "openeuler24.03",
 }
+VLLM_ASCEND_REPOSITORY_URL = "https://github.com/vllm-project/vllm-ascend.git"
+REGISTRY_MANIFEST_ACCEPT = ", ".join(
+    (
+        "application/vnd.oci.image.index.v1+json",
+        "application/vnd.oci.image.manifest.v1+json",
+        "application/vnd.docker.distribution.manifest.list.v2+json",
+        "application/vnd.docker.distribution.manifest.v2+json",
+    )
+)
 
 # Fixed marker locations; adding a marker does not automatically add a runtime step.
 DOCTEST_MARKERS_BY_FILE = {
@@ -231,7 +243,6 @@ def extract_release_values(mkdocs_extra: dict[str, str]) -> dict[str, str]:
 def release_config_changed(base_text: str, head_text: str) -> bool:
     """Compare release-stack configuration between two MkDocs documents."""
     return extract_release_values(parse_mkdocs_extra(base_text)) != extract_release_values(
-        # Parse scalar MkDocs extra values without reading files or resolving custom YAML tags.
         parse_mkdocs_extra(head_text)
     )
 
@@ -308,9 +319,7 @@ def any_doctest_blocks_changed(
         path = DOCTEST_FILE_BY_MARKER[marker]
         if path not in content_cache:
             content_cache[path] = (
-                # Read a repository file from the working tree or a Git ref.
                 read_repo_text(path, base, allow_missing=True),
-                # Read a repository file from the working tree or a Git ref.
                 read_repo_text(path, head, allow_missing=True),
             )
         base_text, head_text = content_cache[path]
@@ -339,16 +348,16 @@ def select_doctests(base: str, head: str) -> dict[str, list[str]]:
     run_pip = installation_script_changed or pip_changed
     run_uv = installation_script_changed or uv_changed
     run_source = installation_script_changed or source_changed
-    # Common-only changes exercise source; method-specific changes already cover common setup.
+    # Common-only changes exercise pip; method-specific changes already cover common setup.
     if installation_common_changed and not (pip_changed or uv_changed or source_changed):
-        run_source = True
+        run_pip = True
 
     base_text = read_repo_text(MKDOCS_PATH, base)
     head_text = read_repo_text(MKDOCS_PATH, head)
     assert base_text is not None and head_text is not None
-    # Shared tooling or release changes add both devices and source, retaining other selections.
+    # Shared tooling or release changes add both devices and pip, retaining other selections.
     if release_config_changed(base_text, head_text) or bool(changed_paths & SHARED_DOCTEST_PATHS):
-        run_a2 = run_310p = run_source = True
+        run_a2 = run_310p = run_pip = True
 
     quickstart_devices = []
     if run_a2:
@@ -356,12 +365,12 @@ def select_doctests(base: str, head: str) -> dict[str, list[str]]:
     if run_310p:
         quickstart_devices.append("310p")
     installation_methods = []
-    if run_pip:
-        installation_methods.append("pip")
-    if run_uv:
-        installation_methods.append("uv")
     if run_source:
         installation_methods.append("source")
+    if run_uv:
+        installation_methods.append("uv")
+    if run_pip:
+        installation_methods.append("pip")
     return {"quickstart": quickstart_devices, "installation": installation_methods}
 
 
@@ -387,58 +396,180 @@ def require_mkdocs_extra_value(mkdocs_extra: dict[str, str], key: str) -> str:
         raise DoctestError(f"No simple scalar named '{key}' under mkdocs.yml extra.") from error
 
 
-def build_quickstart_matrix_entries(devices: list[str], vllm_ascend_version: str) -> list[dict[str, str]]:
-    """Expand selected devices across operating systems and construct vLLM Ascend image tags."""
+def load_mkdocs_extra(ref: str | None = None) -> dict[str, str]:
+    """Load scalar MkDocs extra values from the working tree or a Git ref."""
+    text = read_repo_text(MKDOCS_PATH, ref)
+    assert text is not None
+    return parse_mkdocs_extra(text)
+
+
+def build_quickstart_matrix_entries(
+    devices: list[str], vllm_ascend_version: str, image_repository: str
+) -> list[dict[str, str]]:
+    """Expand each operating system across selected devices and construct vLLM Ascend images."""
     entries = []
-    for device in devices:
-        for os_name in DOCTEST_OSES:
+    image_repository = image_repository.rstrip("/")
+    for os_name in DOCTEST_OSES:
+        for device in devices:
             image_tag = vllm_ascend_version
             if device == "310p":
                 image_tag += "-310p"
             if os_name == "openeuler":
                 image_tag += "-openeuler"
-            entries.append({"device": device, "os": os_name, "image_tag": image_tag})
-    return entries
-
-
-def build_installation_matrix_entries(
-    methods: list[str], cann_version: str, python_version: str
-) -> list[dict[str, str]]:
-    """Expand selected methods across operating systems and construct CANN image tags."""
-    entries = []
-    for method in methods:
-        for os_name, os_image_tag in INSTALLATION_OS_IMAGE_TAGS.items():
             entries.append(
                 {
-                    "method": method,
+                    "device": device,
                     "os": os_name,
-                    "image_tag": f"{cann_version}-910b-{os_image_tag}-py{python_version}",
+                    "image": f"{image_repository}:{image_tag}",
                 }
             )
     return entries
 
 
-def build_doctest_plan(quickstart_devices: list[str], installation_methods: list[str]) -> dict[str, object]:
+def build_installation_matrix_entries(
+    methods: list[str], cann_version: str, python_version: str, image_repository: str
+) -> list[dict[str, str]]:
+    """Expand each operating system across selected methods and construct CANN images."""
+    entries = []
+    image_repository = image_repository.rstrip("/")
+    for os_name, os_image_tag in INSTALLATION_OS_IMAGE_TAGS.items():
+        for method in methods:
+            image_tag = f"{cann_version}-910b-{os_image_tag}-py{python_version}"
+            entries.append(
+                {
+                    "method": method,
+                    "os": os_name,
+                    "image": f"{image_repository}:{image_tag}",
+                }
+            )
+    return entries
+
+
+def build_doctest_plan(
+    quickstart_devices: list[str],
+    installation_methods: list[str],
+    quickstart_image_repository: str,
+    installation_image_repository: str,
+) -> dict[str, object]:
     """Build CI matrices and run flags using the working tree's release versions."""
-    text = read_repo_text(MKDOCS_PATH)
-    assert text is not None
-    mkdocs_extra = parse_mkdocs_extra(text)
+    mkdocs_extra = load_mkdocs_extra()
     quickstart_entries = build_quickstart_matrix_entries(
-        quickstart_devices, require_mkdocs_extra_value(mkdocs_extra, "vllm_ascend_version")
+        quickstart_devices,
+        require_mkdocs_extra_value(mkdocs_extra, "vllm_ascend_version"),
+        quickstart_image_repository,
     )
     installation_entries = build_installation_matrix_entries(
         installation_methods,
-        # Require a named scalar value from the parsed MkDocs configuration.
         require_mkdocs_extra_value(mkdocs_extra, "release_cann_version"),
-        # Require a named scalar value from the parsed MkDocs configuration.
         require_mkdocs_extra_value(mkdocs_extra, "release_image_python_version"),
+        installation_image_repository,
     )
     return {
         "quickstart": {"include": quickstart_entries},
         "installation": {"include": installation_entries},
         "run_quickstart": bool(quickstart_entries),
         "run_installation": bool(installation_entries),
+        "skipped": [],
     }
+
+
+def registry_image_exists(image: str) -> bool:
+    """Return whether an SWR image manifest exists, treating only HTTP 404 as missing."""
+    repository, tag = image.rsplit(":", 1)
+    registry, separator, repository_path = repository.partition("/")
+    if not separator:
+        raise DoctestError(f"Invalid container image reference: {image}")
+
+    token_query = urlencode(
+        {
+            "service": "dockyard",
+            "scope": f"repository:{repository_path}:pull",
+        }
+    )
+    token_url = f"https://{registry}/swr/auth/v2/registry/auth/?{token_query}"
+    with urlopen(token_url, timeout=30) as response:
+        token = json.load(response).get("token")
+    if not token:
+        raise DoctestError(f"SWR did not return an anonymous pull token for {repository}.")
+
+    manifest_url = f"https://{registry}/v2/{quote(repository_path, safe='/')}/manifests/{quote(tag, safe='')}"
+    request = Request(
+        manifest_url,
+        method="HEAD",
+        headers={
+            "Accept": REGISTRY_MANIFEST_ACCEPT,
+            "Authorization": f"Bearer {token}",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30):
+            return True
+    except HTTPError as error:
+        if error.code == 404:
+            return False
+        raise
+
+
+def source_ref_exists(ref: str) -> bool:
+    """Return whether the documented vLLM Ascend clone ref exists as a branch or tag."""
+    result = subprocess.run(
+        [
+            "git",
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "--tags",
+            VLLM_ASCEND_REPOSITORY_URL,
+            f"refs/heads/{ref}",
+            f"refs/tags/{ref}",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 2:
+        return False
+    raise DoctestError(result.stderr.strip() or f"Cannot check vLLM Ascend source ref '{ref}'.")
+
+
+def filter_missing_images(entries: list[dict[str, str]], name: str, skipped: list[str]) -> list[dict[str, str]]:
+    """Remove entries whose image is explicitly absent from the registry."""
+    images = list(dict.fromkeys(entry["image"] for entry in entries))
+    missing = {image for image in images if not registry_image_exists(image)}
+    skipped.extend(f"{name} skipped: image not found: {image}" for image in images if image in missing)
+    return [entry for entry in entries if entry["image"] not in missing]
+
+
+def check_plan_resources(plan: dict[str, object]) -> dict[str, object]:
+    """Filter entries whose required image or source ref is not available yet."""
+    skipped = plan["skipped"]
+    assert isinstance(skipped, list)
+
+    quickstart = plan["quickstart"]
+    assert isinstance(quickstart, dict)
+    quickstart_entries = quickstart["include"]
+    assert isinstance(quickstart_entries, list)
+    quickstart["include"] = filter_missing_images(quickstart_entries, "Quick Start", skipped)
+
+    installation = plan["installation"]
+    assert isinstance(installation, dict)
+    installation_entries = installation["include"]
+    assert isinstance(installation_entries, list)
+    installation_entries = filter_missing_images(installation_entries, "Installation", skipped)
+    source_selected = any(entry["method"] == "source" for entry in installation_entries)
+    if source_selected:
+        source_ref = require_mkdocs_extra_value(load_mkdocs_extra(), "vllm_ascend_version")
+        if not source_ref_exists(source_ref):
+            installation_entries = [entry for entry in installation_entries if entry["method"] != "source"]
+            skipped.append(f"Installation source skipped: source ref not found: {source_ref}")
+    installation["include"] = installation_entries
+
+    plan["run_quickstart"] = bool(quickstart["include"])
+    plan["run_installation"] = bool(installation["include"])
+    return plan
 
 
 def parse_args() -> argparse.Namespace:
@@ -458,6 +589,9 @@ def parse_args() -> argparse.Namespace:
     plan_parser.add_argument("--head")
     plan_parser.add_argument("--quickstart", choices=("none", "a2", "310p"), default="none")
     plan_parser.add_argument("--installation", choices=("none", "pip", "uv", "source"), default="none")
+    plan_parser.add_argument("--quickstart-image-repository", required=True)
+    plan_parser.add_argument("--installation-image-repository", required=True)
+    plan_parser.add_argument("--check-resources", action="store_true")
     args = parser.parse_args()
     if args.command == "plan" and (args.base is not None or args.head is not None):
         if args.base is None or args.head is None:
@@ -473,20 +607,29 @@ def main() -> int:
     if args.command == "extract":
         content = require_doctest_block(args.marker, args.ref)
         if args.expand_macros:
-            mkdocs_text = read_repo_text(MKDOCS_PATH, args.ref)
-            assert mkdocs_text is not None
-            mkdocs_extra = parse_mkdocs_extra(mkdocs_text)
-            content = expand_mkdocs_macros(content, mkdocs_extra, args.marker)
+            content = expand_mkdocs_macros(content, load_mkdocs_extra(args.ref), args.marker)
         sys.stdout.write(content)
         return 0
     if args.command == "plan":
         if args.base is not None:
             selection = select_doctests(args.base, args.head)
-            plan = build_doctest_plan(selection["quickstart"], selection["installation"])
+            plan = build_doctest_plan(
+                selection["quickstart"],
+                selection["installation"],
+                args.quickstart_image_repository,
+                args.installation_image_repository,
+            )
         else:
             quickstart_devices = [] if args.quickstart == "none" else [args.quickstart]
             installation_methods = [] if args.installation == "none" else [args.installation]
-            plan = build_doctest_plan(quickstart_devices, installation_methods)
+            plan = build_doctest_plan(
+                quickstart_devices,
+                installation_methods,
+                args.quickstart_image_repository,
+                args.installation_image_repository,
+            )
+        if args.check_resources:
+            plan = check_plan_resources(plan)
         json.dump(plan, sys.stdout)
         return 0
     raise AssertionError(f"Unhandled command: {args.command}")

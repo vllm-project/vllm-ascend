@@ -323,7 +323,7 @@ Run one of these commands from the repository root in a prepared NPU environment
 
 The entrypoint does not create a container. Use a matching vLLM Ascend image for Quick Start or a disposable CANN container for Installation, which changes system and Python packages. Prepare the examples' model cache in advance; the workers enable Hugging Face offline mode.
 
-In CI, `.github/workflows/schedule_doctest.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. You can also run it manually with `quickstart_device` and/or `installation_method`; `none` skips that case. Each selected case runs on both operating systems, and the matrices appear in the workflow summary. There is no scheduled trigger.
+In CI, `.github/workflows/schedule_doctest.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. You can also run it manually with `quickstart_device` and/or `installation_method`; `none` skips that case. Each selected case runs on both operating systems. There is no scheduled trigger.
 
 For block extraction, plan preview, and selection rules, see the usage notes and function comments in `tests/e2e/doctests/scripts/doctest_helper.py` on the corresponding branch.
 

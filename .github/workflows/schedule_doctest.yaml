@@ -58,6 +58,10 @@ on:
 permissions:
   contents: read
 
+env:
+  QUICKSTART_IMAGE_REPOSITORY: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend
+  INSTALLATION_IMAGE_REPOSITORY: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann
+
 defaults:
   run:
     shell: bash -el {0}
@@ -88,10 +92,9 @@ jobs:
 
       - name: Install doctest tooling
         run: |
-          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install PyYAML
+          pip install PyYAML
 
-      - name: Select tests and build matrices
-        id: plan
+      - name: Build doctest plan
         env:
           DOCTEST_EVENT_NAME: ${{ github.event_name }}
           DOCTEST_BASE_REF: ${{ github.event.pull_request.base.sha }}
@@ -99,35 +102,55 @@ jobs:
           DOCTEST_QUICKSTART_DEVICE: ${{ inputs.quickstart_device }}
           DOCTEST_INSTALLATION_METHOD: ${{ inputs.installation_method }}
         run: |
+          # Trust the checkout in the shell environment used by the planner.
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          args=(
+            plan
+            --quickstart-image-repository "${QUICKSTART_IMAGE_REPOSITORY}"
+            --installation-image-repository "${INSTALLATION_IMAGE_REPOSITORY}"
+          )
           # PRs use diff selection; manual runs use the selected input values.
           if [[ "${DOCTEST_EVENT_NAME}" == "pull_request" ]]; then
-            plan="$(
-              python3 tests/e2e/doctests/scripts/doctest_helper.py \
-                plan --base "${DOCTEST_BASE_REF}" --head "${DOCTEST_HEAD_REF}"
-            )"
+            args+=(
+              --base "${DOCTEST_BASE_REF}"
+              --head "${DOCTEST_HEAD_REF}"
+              --check-resources
+            )
           else
-            plan="$(
-              python3 tests/e2e/doctests/scripts/doctest_helper.py \
-                plan --quickstart "${DOCTEST_QUICKSTART_DEVICE}" \
-                --installation "${DOCTEST_INSTALLATION_METHOD}"
-            )"
+            args+=(
+              --quickstart "${DOCTEST_QUICKSTART_DEVICE}"
+              --installation "${DOCTEST_INSTALLATION_METHOD}"
+            )
           fi
+          python3 tests/e2e/doctests/scripts/doctest_helper.py \
+            "${args[@]}" >"${RUNNER_TEMP}/doctest-plan.json"
 
-          # Forward the helper's matrices and booleans without rebuilding them in Bash.
-          {
-            echo "quickstart=$(jq -c '.quickstart' <<<"${plan}")"
-            echo "installation=$(jq -c '.installation' <<<"${plan}")"
-            echo "run_quickstart=$(jq -r '.run_quickstart' <<<"${plan}")"
-            echo "run_installation=$(jq -r '.run_installation' <<<"${plan}")"
-          } >>"${GITHUB_OUTPUT}"
+      - name: Publish doctest plan
+        id: plan
+        run: |
+          plan_file="${RUNNER_TEMP}/doctest-plan.json"
 
-          {
-            echo '## Doctest matrices'
-            echo
-            echo '```json'
-            jq '{quickstart, installation}' <<<"${plan}"
-            echo '```'
-          } >>"${GITHUB_STEP_SUMMARY}"
+          jq -r '
+            "quickstart=\(.quickstart | tojson)",
+            "installation=\(.installation | tojson)",
+            "run_quickstart=\(.run_quickstart)",
+            "run_installation=\(.run_installation)"
+          ' "${plan_file}" >>"${GITHUB_OUTPUT}"
+
+          echo '============ Doctest matrices ============'
+          jq '{quickstart, installation}' "${plan_file}"
+
+          jq -r \
+            '.skipped[]? | "::notice title=Doctest resource unavailable::\(.)"' \
+            "${plan_file}"
+
+          if jq -e '.skipped | length > 0' "${plan_file}" >/dev/null; then
+            {
+              echo '## Skipped doctest resources'
+              echo
+              jq -r '.skipped[] | "- \(.)"' "${plan_file}"
+            } >>"${GITHUB_STEP_SUMMARY}"
+          fi
 
   quickstart:
     name: Quick Start (${{ matrix.device }}, ${{ matrix.os }})
@@ -136,10 +159,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.quickstart) }}
-    # Runner routing belongs here; the helper supplies device, OS, and image tag.
+    # Runner routing belongs here; the helper supplies device, OS, and image.
     runs-on: ${{ matrix.device == 'a2' && 'linux-aarch64-a2b3-1' || 'linux-aarch64-310p-1' }}
+    timeout-minutes: 40
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.image_tag }}
+      image: ${{ matrix.image }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -150,7 +174,7 @@ jobs:
         run: |
           echo "Device: ${{ matrix.device }}"
           echo "OS: ${{ matrix.os }}"
-          echo "Image tag: ${{ matrix.image_tag }}"
+          echo "Image: ${{ matrix.image }}"
           npu-smi info
 
       - name: Run Quick Start doctest
@@ -166,11 +190,13 @@ jobs:
     if: needs.plan.outputs.run_installation == 'true'
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.plan.outputs.installation) }}
     # All installation methods and operating systems are currently tested on A2.
     runs-on: linux-aarch64-a2b3-1
+    timeout-minutes: 75
     container:
-      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+      image: ${{ matrix.image }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -181,7 +207,7 @@ jobs:
         run: |
           echo "Method: ${{ matrix.method }}"
           echo "OS: ${{ matrix.os }}"
-          echo "Image tag: ${{ matrix.image_tag }}"
+          echo "Image: ${{ matrix.image }}"
           npu-smi info
 
       - name: Run Installation doctest

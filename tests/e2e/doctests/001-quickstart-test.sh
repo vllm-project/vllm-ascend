@@ -22,6 +22,7 @@ set -Eeuo pipefail
 
 DOCTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCTEST_HELPER_PATH="${DOCTEST_DIR}/scripts/doctest_helper.py"
+source "${DOCTEST_DIR}/scripts/common.sh"
 
 VLLM_PID=""
 RUNTIME_DIR=""
@@ -76,19 +77,14 @@ function cleanup_quickstart() {
 function run_quickstart() {
   local device="$1"
   local marker_prefix
-  source "${DOCTEST_DIR}/scripts/common.sh"
   export MODELSCOPE_HUB_FILE_LOCK=false
   export HF_HUB_OFFLINE=1
   trap cleanup_quickstart EXIT
   RUNTIME_DIR="$(mktemp -d)"
 
   case "${device}" in
-    a2)
-      marker_prefix=quickstart-standard
-      ;;
-    310p)
-      marker_prefix=quickstart-300i-duo
-      ;;
+    a2) marker_prefix=quickstart-standard ;;
+    310p) marker_prefix=quickstart-300i-duo ;;
   esac
 
   run_shell_block quickstart-modelscope
@@ -97,6 +93,6 @@ function run_quickstart() {
   run_online "${marker_prefix}"
 }
 
-[[ $# -eq 1 ]] || { echo "Usage: $0 {a2|310p}" >&2; exit 1; }
+[[ $# -eq 1 && "${1:-}" =~ ^(a2|310p)$ ]] || die "Usage: $0 {a2|310p}"
 
 run_quickstart "$1"

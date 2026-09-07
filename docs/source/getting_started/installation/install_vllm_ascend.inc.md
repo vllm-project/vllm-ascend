@@ -1,4 +1,4 @@
-First, install the system dependencies and configure the pip mirror for the container operating system.
+First, install the system dependencies for the container operating system and configure the pip mirror.
 
 For Ubuntu:
 
@@ -6,24 +6,17 @@ For Ubuntu:
 ```bash
 sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
 apt-get update -y && apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq
-# Config pip mirror, only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
-pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+pip config set global.index-url "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ```
 
 For openEuler:
 
 <!-- doctest: installation-common-prerequisites-openeuler -->
 ```bash
-yum update -y && yum install -y gcc g++ cmake ninja-build numactl-devel wget git curl jq
-# Config pip mirror, only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
-pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-```
+yum update -y && yum install -y gcc g++ cmake ninja-build numactl-devel wget git curl jq patch
 
-Optional: If you are working on an x86 machine or using a TorchNPU development version, configure pip's `extra-index`:
-
-```bash
-# For TorchNPU dev version or x86 machine
-pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/"
+pip config set global.index-url "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ```
 
 Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch and TorchNPU are installed automatically as dependencies during this step using the compatible versions for the selected release.
@@ -42,8 +35,12 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     <!-- doctest: installation-pip-install -->
     ```bash
-    pip install "vllm=={{ release_vllm_version }}"
     pip install \
+        --extra-index-url https://download.pytorch.org/whl/cpu/ \
+        "vllm=={{ release_vllm_version }}"
+
+    pip install \
+        --extra-index-url https://download.pytorch.org/whl/cpu/ \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
         "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
@@ -82,14 +79,14 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     <!-- doctest: installation-uv-install -->
     ```bash
     # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
-    pip install vllm=={{ release_vllm_version }}
+    pip install "vllm=={{ release_vllm_version }}"
 
     # Install vllm-project/vllm-ascend from wheelnext index.
     uv pip install --system \
         --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi/variant \
         --index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple \
         --find-links https://mirrors.huaweicloud.com/ascend/repos/pypi/triton-ascend/ \
-        vllm-ascend=={{ release_vllm_ascend_version }}
+        "vllm-ascend=={{ release_vllm_ascend_version }}"
     ```
 
     ??? tip "Clear the cache if uv installation fails"
@@ -121,15 +118,17 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
     # Install vLLM.
     git clone --depth 1 --branch {{ vllm_version }} https://github.com/vllm-project/vllm
     cd vllm
-    VLLM_TARGET_DEVICE=empty pip install -e .
+    VLLM_TARGET_DEVICE=empty pip install -e . \
+        --extra-index-url https://download.pytorch.org/whl/cpu/
     cd ..
 
     # Install vLLM Ascend.
     git clone --depth 1 --branch {{ vllm_ascend_version }} https://github.com/vllm-project/vllm-ascend.git
     cd vllm-ascend
     # git submodule update --init --recursive
-    export ASCEND_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
-    pip install -e . --extra-index-url "${ASCEND_INDEX_URL}"
+    pip install -e . \
+        --extra-index-url https://download.pytorch.org/whl/cpu/ \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
     cd ..
     ```
 
@@ -143,8 +142,9 @@ Finally, handle `triton` and `triton-ascend` according to the hardware:
     ```bash
     pip uninstall -y triton triton-ascend
 
-    pip install triton-ascend=={{ release_triton_ascend_version }} \
-        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+    pip install \
+        --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
+        "triton-ascend=={{ release_triton_ascend_version }}"
     ```
 
     ??? note "Can community Triton and Triton Ascend coexist?"

@@ -28,25 +28,19 @@ function usage() {
   echo "  $0 installation {pip|uv|source}"
 }
 
-case "${1:-}" in
-  quickstart)
-    [[ $# -eq 2 ]] || { usage; exit 1; }
-    case "$2" in
-      a2|310p) ;;
-      *) usage; exit 1 ;;
-    esac
-    exec bash "${DOCTEST_DIR}/001-quickstart-test.sh" "$2"
+[[ $# -eq 2 ]] || { usage; exit 1; }
+
+case "$1:$2" in
+  quickstart:a2|quickstart:310p)
+    worker=001-quickstart-test.sh
     ;;
-  installation)
-    [[ $# -eq 2 ]] || { usage; exit 1; }
-    case "$2" in
-      pip|uv|source) ;;
-      *) usage; exit 1 ;;
-    esac
-    exec bash "${DOCTEST_DIR}/002-installation-test.sh" "$2"
+  installation:pip|installation:uv|installation:source)
+    worker=002-installation-test.sh
     ;;
   *)
     usage
     exit 1
     ;;
 esac
+
+exec bash "${DOCTEST_DIR}/${worker}" "$2"
