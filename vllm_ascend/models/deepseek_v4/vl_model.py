@@ -225,6 +225,9 @@ class AscendDeepseekV4ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
+    def compute_logits_local(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
+        return self.language_model.compute_logits_local(hidden_states)
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.language_model.get_expert_mapping()
 

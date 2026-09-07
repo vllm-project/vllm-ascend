@@ -4117,7 +4117,8 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer._set_positions = lambda n, positions: proposer.positions[:n].copy_(positions)
         proposer.maybe_pad_and_reduce = lambda hidden, positions: (hidden, positions)
         proposer.maybe_all_gather_and_unpad = lambda last, positions, hidden: (last, positions, hidden)
-        proposer.compute_draft_token_ids = lambda hidden, sampling_metadata: (torch.arange(hidden.shape[0]), None)
+        # Set by upstream LLMBaseProposer.__init__; required by _sample_draft_from_logits.
+        proposer._enable_probabilistic_draft_probs = False
 
         buffer = torch.full((8, 4), -1, dtype=torch.int32)
         impl = SimpleNamespace(skip_topk=False, topk_indices_buffer=buffer)
@@ -4158,13 +4159,15 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
 
         proposer.model = MagicMock(side_effect=forward)
         proposer.model.model = predictor
+        # The reduce-sample branch was removed; step 0 now goes through
+        # compute_logits + _sample_draft_from_logits, so compute_logits must
+        # return a real tensor for logits.argmax to produce token ids.
+        proposer.model.compute_logits = lambda hidden: torch.zeros((hidden.shape[0], 4), dtype=torch.float32)
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
             patch.object(llm_base_proposer.ascend_utils, "enable_dsa_cp", return_value=dsa_cp),
             patch.object(llm_base_proposer, "get_tp_group", return_value=group),
-            patch.object(
-                llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace(enable_reduce_sample=True)
-            ),
+            patch.object(llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace()),
             patch("vllm.forward_context._forward_context", SimpleNamespace(moe_layer_index=0)),
         ):
             result = proposer._run_merged_draft(
