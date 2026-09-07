@@ -308,11 +308,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     hidden_states_fp32 = (
                         router_logits if router_logits.dtype == torch.float32 else hidden_states.float()
                     )
-                    if not hasattr(gate, "weight_fp32"):
-                        gate.weight_fp32 = gate.weight.to(torch.float32)
                     router_logits = F.linear(
                         hidden_states_fp32,
-                        gate.weight_fp32,
+                        gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
                     )
                 return self.routed_experts.forward_impl(
                     hidden_states=hidden_states,
@@ -337,13 +335,9 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                 before_routed_experts = torch.npu.current_stream().record_event()
                 # main (cdc4824a21): is_internal_router only checks self.gate,
                 # weight_fp32 may be absent, fall back to gate.weight.
-                # Cache the fp32 gate weight so internal-router forwards
-                # do not recast on every token. Fall back if it is absent.
-                if not hasattr(gate, "weight_fp32"):
-                    gate.weight_fp32 = gate.weight.to(torch.float32)
                 router_logits = F.linear(
                     hidden_states_fp32,
-                    gate.weight_fp32,
+                    gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
                 )
                 after_routed_experts = torch.npu.current_stream().record_event()
             else:
