@@ -221,17 +221,54 @@ fi
 
 log_selected_ops
 
-# Determine optimal build parallelism.
-# - Use nproc if available, fall back to /proc/cpuinfo, then default to 1.
-# - Cap at 16 to prevent OOM on memory-constrained environments (e.g. CI buildkitd pods).
+# Determine optimal build parallelism, cgroup-aware (v1 and v2).
+# - CPU: respect cgroup quota (cpu.max or cpu.cfs_quota_us) and cpuset affinity.
+# - Memory: conservative ~1.5 GiB per opc compiler process, based on the
+#   observed OOM boundary (32 processes × 1.5 GiB ≈ 48 GiB > 24 GiB CI limit).
 # - build.sh's get_cpu_num() further caps the value via OPS_CPU_NUMBER/MAX_JOBS.
 get_build_jobs() {
-    local cpu_count
-    cpu_count=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
-    if [ "${cpu_count}" -gt 16 ]; then
-        cpu_count=16
-    fi
-    echo "${cpu_count}"
+    local cpu_count mem_bytes mem_limit
+
+    # --- cgroup-aware CPU count ---
+    {
+        local quota= period=100000 affinity=
+        if [ -r /sys/fs/cgroup/cpu.max ]; then
+            read -r quota _ < /sys/fs/cgroup/cpu.max
+        elif [ -r /sys/fs/cgroup/cpu/cpu.cfs_quota_us ]; then
+            quota=$(cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us)
+            period=$(cat /sys/fs/cgroup/cpu/cpu.cfs_period_us)
+            [ "$quota" = "-1" ] && quota=max
+        fi
+        affinity=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1)
+        if [ "$quota" = max ] || [ -z "$quota" ]; then
+            cpu_count=$affinity
+        else
+            n=$(( (quota + period - 1) / period ))
+            [ "$n" -lt 1 ] && n=1
+            [ "$n" -lt "$affinity" ] && cpu_count=$n || cpu_count=$affinity
+        fi
+    }
+
+    # --- cgroup-aware memory cap ---
+    {
+        local lim= host=
+        [ -r /sys/fs/cgroup/memory.max ] && lim=$(cat /sys/fs/cgroup/memory.max)
+        [ -z "$lim" ] && [ -r /sys/fs/cgroup/memory/memory.limit_in_bytes ] && \
+            lim=$(cat /sys/fs/cgroup/memory/memory.limit_in_bytes)
+        host=$(awk '/^MemTotal:/ {printf "%d", $2 * 1024}' /proc/meminfo 2>/dev/null || echo 8589934592)
+        if [ -z "$lim" ] || [ "$lim" = max ]; then
+            mem_bytes=$host
+        else
+            [ "$lim" -gt "$host" ] && mem_bytes=$host || mem_bytes=$lim
+        fi
+        # ~1.5 GiB per opc process; cap CPU count to what memory can sustain
+        mem_limit=$(( mem_bytes / 1610612736 ))  # 1.5 GiB in bytes
+        [ "$mem_limit" -lt 1 ] && mem_limit=1
+    }
+
+    # --- final: min of CPU-based and memory-based ---
+    [ "$cpu_count" -gt "$mem_limit" ] && cpu_count=$mem_limit
+    echo "$cpu_count"
 }
 BUILD_JOBS=$(get_build_jobs)
 log "detected build parallelism: -j${BUILD_JOBS}"
