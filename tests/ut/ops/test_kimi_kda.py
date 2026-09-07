@@ -14,7 +14,6 @@ from vllm_ascend.ops.kimi_kda import (
     AscendKimiK3DeltaAttention,
     _KDAFusedBFGLinear,
     _prepare_beta,
-    _zero_padded_output,
 )
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
     AscendW4A8MXFPDynamicLinearMethod,
@@ -69,16 +68,6 @@ class _RecordingStreamSwitch:
         self.trace.append(f"exit:{self.stream.name}")
 
 
-def test_zero_padded_output_uses_device_live_token_count():
-    output = torch.full((1, 8, 1, 1), torch.nan)
-    output[:, :6] = torch.arange(6).view(1, 6, 1, 1)
-
-    actual = _zero_padded_output(output, torch.tensor(6, dtype=torch.int32))
-
-    torch.testing.assert_close(actual[:, :6], output[:, :6])
-    assert torch.equal(actual[:, 6:], torch.zeros_like(actual[:, 6:]))
-
-
 def test_python_live_slice_index_copy_hits_graph_padded_garbage_indices():
     """Capture-time Python slices read the static index buffer's dirty tail.
 
@@ -89,7 +78,7 @@ def test_python_live_slice_index_copy_hits_graph_padded_garbage_indices():
     ``1065369473..1065369479`` crash.
     """
     capture_tokens = 8
-    dest = torch.zeros(1, capture_tokens, 2, 3)
+    dest = torch.empty(1, capture_tokens, 2, 3)
     source = torch.ones(1, capture_tokens, 2, 3)
     spec_token_indices = torch.empty(capture_tokens, dtype=torch.long)
     spec_token_indices[0] = 0
@@ -97,27 +86,6 @@ def test_python_live_slice_index_copy_hits_graph_padded_garbage_indices():
 
     with pytest.raises((IndexError, RuntimeError)):
         dest.index_copy_(1, spec_token_indices[:capture_tokens], source)
-
-    dest.zero_()
-    dest[:, :capture_tokens].index_copy_(1, spec_token_indices[:1], source[:, :1])
-    torch.testing.assert_close(dest[:, :1], torch.ones(1, 1, 2, 3))
-    assert torch.equal(dest[:, 1:], torch.zeros(1, 7, 2, 3))
-
-
-def test_python_live_slice_cannot_replace_device_query_start_loc_mask():
-    """Python ``num_actual_tokens`` is the captured window, not live tokens."""
-    output = torch.full((1, 8, 2, 3), torch.nan)
-    output[:, :2] = 1.0
-    capture_live = 8
-    query_start_loc = torch.tensor([0, 1, 2, 2, 2, 2, 2, 2, 2], dtype=torch.int32)
-
-    sliced = output[:, :capture_live]
-    assert torch.isnan(sliced[:, 2:]).all()
-
-    masked = _zero_padded_output(output[:, :capture_live], query_start_loc[-1])
-    torch.testing.assert_close(masked[:, :2], torch.ones(1, 2, 2, 3))
-    assert torch.equal(masked[:, 2:], torch.zeros(1, 6, 2, 3))
-    assert torch.isfinite(masked).all()
 
 
 def test_kda_output_norm_uses_checkpoint_epsilon():
@@ -476,7 +444,7 @@ def test_prefill_fuses_raw_gate_and_updates_v_first_state():
     torch.testing.assert_close(recurrent_state[state_indices], final_state)
 
 
-def test_kda_empty_forward_context_clears_preallocated_output():
+def test_kda_empty_forward_context_leaves_output_untouched():
     attention = AscendKimiK3DeltaAttention.__new__(AscendKimiK3DeltaAttention)
     core_attn_out = torch.full((1, 4, 2, 3), torch.nan)
 
@@ -492,7 +460,7 @@ def test_kda_empty_forward_context_clears_preallocated_output():
             core_attn_out=core_attn_out,
         )
 
-    assert torch.equal(core_attn_out, torch.zeros_like(core_attn_out))
+    assert torch.isnan(core_attn_out).all()
 
 
 def _decode_graph_metadata(*, num_actual_tokens: int, num_decode_tokens: int, num_decodes: int):
@@ -619,7 +587,7 @@ def _new_kda_attention():
     return attention
 
 
-def test_kda_forward_norms_only_live_decode_tokens():
+def test_kda_forward_overwrites_live_decode_tokens():
     attention = _new_kda_attention()
     captured = {}
 
@@ -669,11 +637,10 @@ def test_kda_forward_norms_only_live_decode_tokens():
     assert captured["tokens"] == 4
     assert captured["gate_nan"] is True
     torch.testing.assert_close(core_attn_out[:, :2], torch.ones(1, 2, 2, 3))
-    assert torch.equal(core_attn_out[:, 2:], torch.zeros(1, 4, 2, 3))
-    assert torch.isfinite(core_attn_out).all()
+    assert torch.isnan(core_attn_out[:, 2:]).all()
 
 
-def test_kda_forward_norms_only_live_spec_tokens():
+def test_kda_forward_overwrites_live_spec_tokens():
     attention = _new_kda_attention()
     captured = {}
 
@@ -719,11 +686,10 @@ def test_kda_forward_norms_only_live_spec_tokens():
     assert captured["tokens"] == 4
     assert captured["gate_nan"] is True
     torch.testing.assert_close(core_attn_out[:, :2], torch.ones(1, 2, 2, 3))
-    assert torch.equal(core_attn_out[:, 2:], torch.zeros(1, 4, 2, 3))
-    assert torch.isfinite(core_attn_out).all()
+    assert torch.isnan(core_attn_out[:, 2:]).all()
 
 
-def test_kda_forward_scatters_mixed_tokens_before_live_norm():
+def test_kda_forward_scatters_mixed_tokens():
     attention = _new_kda_attention()
     captured = {"conv_tokens": []}
 
@@ -783,7 +749,7 @@ def test_kda_forward_scatters_mixed_tokens_before_live_norm():
     torch.testing.assert_close(captured["core"][0, 0], torch.ones(2, 3))
     torch.testing.assert_close(captured["core"][0, 1], torch.full((2, 3), 2.0))
     torch.testing.assert_close(captured["core"][0, 2], torch.ones(2, 3))
-    assert torch.equal(captured["core"][0, 3], torch.zeros(2, 3))
+    assert torch.isnan(captured["core"][0, 3]).all()
     torch.testing.assert_close(captured["gate"][0], torch.full((2, 3), 10.0))
     torch.testing.assert_close(captured["gate"][1], torch.full((2, 3), 20.0))
     torch.testing.assert_close(captured["gate"][2], torch.full((2, 3), 30.0))
@@ -791,8 +757,7 @@ def test_kda_forward_scatters_mixed_tokens_before_live_norm():
     torch.testing.assert_close(core_attn_out[:, 0], torch.ones(1, 2, 3))
     torch.testing.assert_close(core_attn_out[:, 1], torch.full((1, 2, 3), 2.0))
     torch.testing.assert_close(core_attn_out[:, 2], torch.ones(1, 2, 3))
-    assert torch.equal(core_attn_out[:, 3:], torch.zeros(1, 3, 2, 3))
-    assert torch.isfinite(core_attn_out).all()
+    assert torch.isnan(core_attn_out[:, 3:]).all()
 
 
 def test_kda_conv_weight_is_packed_once_in_kernel_layout():

@@ -150,26 +150,6 @@ class _KDAFusedBFGLinear(MergedColumnParallelLinear):
         param_shard.copy_(fused_weight)
 
 
-def _zero_padded_output(
-    output: torch.Tensor,
-    num_live_tokens: torch.Tensor,
-) -> torch.Tensor:
-    """Clear graph-padding rows using a device-side live-token count.
-
-    FULL ACLGraph capture inlines ``_forward`` (the eager-break decorator is a
-    no-op in FULL mode), so Python slices such as ``output[:, :live_tokens]``
-    bake the capture-time length. ``query_start_loc[-1]`` stays a static buffer
-    that replay updates, matching 310P GDN's device-side mask.
-    """
-    token_indices = torch.arange(
-        output.shape[1],
-        dtype=num_live_tokens.dtype,
-        device=output.device,
-    )
-    valid_tokens = token_indices < num_live_tokens
-    return torch.where(valid_tokens.view(1, -1, 1, 1), output, 0.0)
-
-
 def _prepare_beta(
     beta: torch.Tensor,
     num_actual_tokens: int,
@@ -263,9 +243,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         if self.uses_mixed_projection:
             num_tokens = hidden_states.size(0)
             mixed_qkv, beta, g1, g2 = self._run_overlapped_qkv_bfg(hidden_states)
-            # Match GDN: skipped graph-padding rows stay defined zeros instead of
-            # an uninitialized ``empty`` allocation.
-            core_attn_out = torch.zeros(
+            core_attn_out = torch.empty(
                 (1, num_tokens, self.local_num_heads, self.head_dim),
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
@@ -534,7 +512,6 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
         if attn_metadata_raw is None:
-            core_attn_out.zero_()
             return
 
         assert isinstance(attn_metadata_raw, dict)
@@ -703,25 +680,11 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
 
         if core_spec is None and core_non_spec is None:
             # Idle DP dummy runs carry graph-shaped metadata with no live work.
-            # Do not feed a previous replay's output through the norm gate.
-            core_attn_out.zero_()
             return
 
-        num_live_tokens = None
-        if core_spec is not None:
-            assert attn_metadata.spec_query_start_loc is not None
-            num_live_tokens = attn_metadata.spec_query_start_loc[-1]
-        if core_non_spec is not None:
-            assert attn_metadata.non_spec_query_start_loc is not None
-            num_non_spec_tokens = attn_metadata.non_spec_query_start_loc[-1]
-            num_live_tokens = num_non_spec_tokens if num_live_tokens is None else num_live_tokens + num_non_spec_tokens
-        assert num_live_tokens is not None
-
-        # GDN copies the full kernel tensor into a zeros buffer. Do the same:
-        # do not Python-slice to a live count (FULL graphs bake that length).
-        # Kernel-skipped tails may still be copied; the device mask after
-        # o_norm clears them without a capture-time Python length.
-        core_attn_out[:, :num_actual_tokens].zero_()
+        # Copy the full kernel tensor. Do not Python-slice index buffers to a
+        # live count: FULL ACLGraph inlines ``_forward`` and would bake that
+        # length, reading garbage tails of the static index buffer.
         if core_spec is not None and core_non_spec is not None:
             assert spec_token_indices is not None
             assert non_spec_token_indices is not None
@@ -733,8 +696,5 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         elif core_non_spec is not None:
             core_attn_out[:, :num_actual_tokens] = core_non_spec
 
-        # KDA's sigmoid gate turns padding NaN into NaN even when x is 0, so
-        # mask with the device live count after the fused norm.
-        normalized = self.o_norm(core_attn_out[:, :num_actual_tokens], g2)
-        core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
-        core_attn_out[:, num_actual_tokens:].zero_()
+        core_attn_out[:, :num_actual_tokens].copy_(self.o_norm(core_attn_out[:, :num_actual_tokens], g2))
+
