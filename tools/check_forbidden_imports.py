@@ -42,6 +42,12 @@ CHECK_IMPORTS = {
         allowed_files={
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
             "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
+            # MP KV cache server: cloudpickle carries registration payloads
+            # over the trusted local RPC and NPU IPC handle tuples across
+            # processes, same pattern as npu_ipc_engine above.
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/mp/kv_cache/npu_ipc.py",
+            "vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/mp/kv_cache/protocol.py",
+            "tests/ut/distributed/ascend_store/mp/kv_cache/test_registration_recovery.py",
             "tests/ut/distributed/test_hccl_weight_transfer.py",
         },
     ),

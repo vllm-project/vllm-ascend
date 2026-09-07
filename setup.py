@@ -516,6 +516,9 @@ setup(
     cmdclass=cmdclass,
     extras_require={},
     entry_points={
+        "console_scripts": [
+            "vllm-ascend = vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.mp.kv_cache.cli:main"
+        ],
         "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
         "vllm.general_plugins": [
             "ascend_kv_connector = vllm_ascend:register_connector",
