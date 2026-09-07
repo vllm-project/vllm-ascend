@@ -752,7 +752,7 @@ def test_dsa_cp_attention_waits_before_sas_consumer(compress_ratio: int, monkeyp
         "vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group",
         lambda: SimpleNamespace(world_size=1, rank_in_group=0),
     )
-    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.enable_dsa_cp_with_o_proj_tp", lambda: False)
+    monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.enable_dsa_cp_full_o_proj", lambda: False)
     monkeypatch.setattr(
         "vllm_ascend.attention.context_parallel.dsa_cp.get_current_vllm_config",
         _make_vllm_config,
