@@ -447,7 +447,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-start-rank 0 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
-      --served-model-name dsv4-pro \
+      --served-model-name dsv4 \
       --max-model-len 135000 \
       --max-num-batched-tokens 4096 \
       --max-num-seqs 16 \
@@ -510,7 +510,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-start-rank 1 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
-      --served-model-name dsv4-pro \
+      --served-model-name dsv4 \
       --max-model-len 135000 \
       --max-num-batched-tokens 4096 \
       --max-num-seqs 16 \
@@ -749,7 +749,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name auto \
+        --served-model-name dsv4 \
         --max-model-len 131072 \
         --max-num-batched-tokens 4096 \
         --max-num-seqs 16 \
@@ -819,7 +819,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name auto \
+        --served-model-name dsv4 \
         --max-model-len 131072 \
         --max-num-batched-tokens 120 \
         --max-num-seqs 60 \
@@ -918,7 +918,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name dsv4-pro \
+        --served-model-name dsv4 \
         --max-model-len 150000 \
         --max-num-batched-tokens 4096 \
         --max-num-seqs 16 \
@@ -981,7 +981,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name dsv4-pro \
+        --served-model-name dsv4 \
         --max-model-len 150000 \
         --max-num-batched-tokens 96 \
         --max-num-seqs 8 \
