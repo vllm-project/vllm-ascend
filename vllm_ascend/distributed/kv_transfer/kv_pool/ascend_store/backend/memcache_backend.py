@@ -209,7 +209,7 @@ class MemcacheBackend(Backend):
         store = DistributedObjectStore()
 
         try:
-            res = store.init(self.local_rank, init_bm=self._init_bm)
+            res = store.init(torch.npu.current_device(), init_bm=self._init_bm)
         except ValueError as e:
             logger.error("Configuration loading failed. error=%s. Check memcache config and environment.", e)
             raise
