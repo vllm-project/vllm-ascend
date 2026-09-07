@@ -597,7 +597,11 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        return Version(vllm_version) == Version(target_vllm_version)
+        # Compare base versions only, ignoring local segments (e.g. "0.26.0+empty"
+        # must match "0.26.0"). Dev builds carry "+empty" or similar local labels
+        # which cause strict == to return False, leading to wrong code paths
+        # (e.g. patch_fused_moe.py accessing FusedMoEFactory on vllm 0.26.0).
+        return Version(vllm_version).base_version == Version(target_vllm_version).base_version
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
