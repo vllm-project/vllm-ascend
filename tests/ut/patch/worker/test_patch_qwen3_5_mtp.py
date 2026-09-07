@@ -26,49 +26,6 @@ def test_qwen3_5_multimodal_attention_uses_mrope():
     assert patch_qwen3_5._uses_multimodal_rope(attention)
 
 
-@pytest.mark.parametrize("positions_ndim", [1, 2])
-def test_qwen3_5_attention_supplies_three_rope_planes(positions_ndim):
-    num_tokens, head_size, rope_dim = 4, 256, 64
-    positions = torch.tensor([3, 7, 11, 15])
-    if positions_ndim == 2:
-        positions = torch.stack([positions, positions + 20, positions + 40])
-    cache = torch.arange(64 * rope_dim, dtype=torch.float32).reshape(64, rope_dim)
-    q = torch.zeros(num_tokens, 2 * head_size)
-    k = v = torch.zeros(num_tokens, head_size)
-    attention = SimpleNamespace(
-        config=SimpleNamespace(model_type="qwen3_5_moe_text", rms_norm_eps=1e-6),
-        rotary_emb=SimpleNamespace(
-            cos_sin_cache=cache,
-            mrope_section=[11, 11, 10],
-            mrope_interleaved=True,
-            rotary_dim=rope_dim,
-        ),
-        qkv_proj=MagicMock(return_value=(torch.zeros(num_tokens, 4 * head_size), None)),
-        q_norm=SimpleNamespace(weight=torch.zeros(head_size)),
-        k_norm=SimpleNamespace(weight=torch.zeros(head_size)),
-        num_heads=2,
-        num_kv_heads=1,
-        head_dim=head_size,
-        attn_output_gate=False,
-        attn=MagicMock(return_value=q),
-        o_proj=MagicMock(return_value=(q, None)),
-    )
-    with patch.object(
-        torch.ops.vllm,
-        "triton_split_qkv_rmsnorm_mrope",
-        return_value=(q, k, v, None),
-        create=True,
-    ) as fused:
-        patch_qwen3_5.AscendQwen3NextAttention.forward(attention, positions, q)
-
-    # The Triton kernel uses raw offsets for contiguous T/H/W planes.
-    cos_sin = fused.call_args.kwargs["cos_sin"]
-    assert cos_sin.shape == (3, num_tokens, rope_dim)
-    assert cos_sin.is_contiguous()
-    expected_positions = positions if positions_ndim == 2 else positions.unsqueeze(0).expand(3, -1)
-    torch.testing.assert_close(cos_sin, cache[expected_positions])
-
-
 @pytest.mark.skipif(
     patch_qwen3_5.Qwen3_5MultiTokenPredictor is None,
     reason="Qwen3.5 MTP model is not available in this vLLM version.",

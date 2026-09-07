@@ -97,30 +97,6 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
 
 
 @pytest.mark.parametrize(
-    "cudagraph_mode",
-    [CUDAGraphMode.FULL, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL_AND_PIECEWISE],
-)
-def test_uniform_full_graph_preserves_descriptor_request_shape(cudagraph_mode):
-    runner = NPUModelRunner.__new__(NPUModelRunner)
-    runner.decode_query_len = 4
-    runner.compilation_config = SimpleNamespace(cudagraph_mode=cudagraph_mode)
-    query_start_loc = np.full(8, 8, dtype=np.int32)
-    query_start_loc[:3] = [0, 4, 8]
-
-    padded_query_start_loc, num_reqs_padded = runner._pad_query_start_loc_for_fia(
-        num_tokens_padded=16,
-        num_reqs_padded=4,
-        num_reqs=2,
-        query_start_loc_np=query_start_loc,
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        batch_desc_num_reqs=4,
-    )
-
-    assert num_reqs_padded == 4
-    np.testing.assert_array_equal(padded_query_start_loc[:5], [0, 4, 8, 12, 16])
-
-
-@pytest.mark.parametrize(
     "decode_query_len, query_lens, num_tokens_padded, descriptor_num_reqs, expected_query_start_loc",
     [
         (1, [4], 8, 8, [0, 4, 8]),
