@@ -2390,15 +2390,7 @@ class NPUModelRunner(GPUModelRunner):
             cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False  # type: ignore[has-type]
-        # Encoder-decoder models and raw-token multimodal models can only
-        # compile pure decode steps where no encoder inputs are present. The
-        # DeepSeek-V4 vision router needs raw sentinel ids during image
-        # prefill, so keep that pass eager.
-        num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
-        has_encoder_input = num_encoder_reqs > 0 and (
-            self.model_config.is_encoder_decoder
-            or self.model_config.requires_raw_input_tokens
-        )
+        skip_compiled = self._should_skip_compiled_for_mm(scheduler_output)
 
         # Run forward pass
         defer_kv_connector_finalize = self.speculative_config is not None and (
@@ -2417,7 +2409,7 @@ class NPUModelRunner(GPUModelRunner):
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
                 device_metadata_executor=active_device_metadata_executor,
-                skip_compiled=has_encoder_input,
+                skip_compiled=skip_compiled,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
@@ -2954,6 +2946,24 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 self.speculative_config,
             )
+
+    def _should_skip_compiled_for_mm(self, scheduler_output: "SchedulerOutput") -> bool:
+        if self.model_config.is_encoder_decoder and scheduler_output.scheduled_encoder_inputs:
+            return True
+        if not self.model_config.requires_raw_input_tokens:
+            return False
+        # The raw-token dummy run compiles with inputs_embeds=None. Image
+        # prefill must consume the merged embeddings instead, even when the
+        # encoder output is cached and no encoder execution is scheduled.
+        for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
+            state = self.requests[req_id]
+            start = state.num_computed_tokens
+            end = start + num_tokens
+            for feature in state.mm_features:
+                position = feature.mm_position
+                if start < position.offset + position.length and position.offset < end:
+                    return True
+        return False
 
     def _model_forward(
         self,
