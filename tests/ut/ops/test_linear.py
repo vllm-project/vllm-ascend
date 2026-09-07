@@ -59,6 +59,7 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_is_meta = mock.PropertyMock(return_value=False)
         type(self.layer.weight.data).is_meta = mock_is_meta
         self.layer.precast_fp32_weight = False
+        self.layer.skip_weight_nz_conversion = False
 
     @patch("vllm_ascend.utils.get_ascend_config")
     @mock.patch("torch_npu.npu_format_cast")
@@ -86,6 +87,19 @@ class TestAscendUnquantizedLinearMethod(TestBase):
         mock_get_config.return_value = mock_config
         self.method.process_weights_after_loading(self.layer)
         mock_format_cast.assert_called_once()
+
+    @patch("vllm_ascend.utils.get_ascend_config")
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_skips_nz_for_marked_layer(self, mock_format_cast, mock_get_config):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 2
+        mock_get_config.return_value = mock_config
+        self.layer.skip_weight_nz_conversion = True
+        self.layer.precast_fp32_weight = True
+
+        self.method.process_weights_after_loading(self.layer)
+
+        mock_format_cast.assert_not_called()
 
 
 class TestAscendRowParallelLinear(BaseLinearTest):

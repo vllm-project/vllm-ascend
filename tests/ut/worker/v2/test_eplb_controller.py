@@ -108,50 +108,64 @@ class TestAscendEPLBController(unittest.TestCase):
                     log_stats=True,
                 )
 
-    def test_nonmatching_phase_is_forwarded_as_dummy(self):
+    def test_prepare_forward_records_matching_phase(self):
+        controller = self._make_controller(log_balancedness=True)
+        controller.load_collection_phase = "prefill"
+        controller.set_batch_phase(batch_has_prefill=True)
+        state = MagicMock()
+        state.should_record_tensor = torch.zeros((), dtype=torch.bool)
+        state._should_record_current_step.return_value = True
+        state._has_fresh_recorded_load = False
+        controller.state = state
+        model_config = SimpleNamespace()
+        ubatch_slices = [slice(0, 4)]
+
+        controller.prepare_forward(model_config, 4, ubatch_slices)
+
+        state.prepare_forward.assert_called_once_with(
+            model_config,
+            4,
+            ubatch_slices,
+        )
+        state._should_record_current_step.assert_called_once_with(
+            log_stats=True,
+        )
+        self.assertTrue(state.should_record_tensor.item())
+        self.assertTrue(state._has_fresh_recorded_load)
+
+    def test_prepare_forward_disables_nonmatching_phase(self):
         controller = self._make_controller(log_balancedness=True)
         controller.load_collection_phase = "prefill"
         controller.set_batch_phase(batch_has_prefill=False)
         state = MagicMock()
-        controller.state = state
-
-        controller.step()
-
-        state._should_record_current_step.assert_not_called()
-        state.step.assert_called_once_with(True, False, log_stats=True)
-
-    def test_open_window_preserves_recorded_load(self):
-        controller = self._make_controller(log_balancedness=True)
-        expert_load_pass = torch.ones(2, dtype=torch.int32)
-        state = MagicMock()
+        state.should_record_tensor = torch.ones((), dtype=torch.bool)
         state._should_record_current_step.return_value = True
-        state.model_states = {"model": SimpleNamespace(expert_load_pass=expert_load_pass)}
+        state._has_fresh_recorded_load = False
         controller.state = state
 
-        controller.step()
+        controller.prepare_forward(SimpleNamespace(), 4)
 
-        torch.testing.assert_close(
-            expert_load_pass,
-            torch.ones_like(expert_load_pass),
+        state._should_record_current_step.assert_called_once_with(
+            log_stats=True,
         )
-        state.step.assert_called_once_with(False, False, log_stats=True)
+        self.assertFalse(state.should_record_tensor.item())
+        self.assertFalse(state._has_fresh_recorded_load)
 
-    def test_closed_window_clears_every_registered_model(self):
+    def test_prepare_forward_disables_closed_window(self):
         controller = self._make_controller()
-        first_load = torch.ones(2, dtype=torch.int32)
-        second_load = torch.ones(3, dtype=torch.int32)
         state = MagicMock()
+        state.should_record_tensor = torch.ones((), dtype=torch.bool)
         state._should_record_current_step.return_value = False
-        state.model_states = {
-            "first": SimpleNamespace(expert_load_pass=first_load),
-            "second": SimpleNamespace(expert_load_pass=second_load),
-        }
+        state._has_fresh_recorded_load = False
         controller.state = state
 
-        controller.step()
+        controller.prepare_forward(SimpleNamespace(), 4)
 
-        torch.testing.assert_close(first_load, torch.zeros_like(first_load))
-        torch.testing.assert_close(second_load, torch.zeros_like(second_load))
+        state._should_record_current_step.assert_called_once_with(
+            log_stats=False,
+        )
+        self.assertFalse(state.should_record_tensor.item())
+        self.assertFalse(state._has_fresh_recorded_load)
 
     def test_setup_from_mapping_constructs_state_and_registers_model(self):
         controller = self._make_controller()

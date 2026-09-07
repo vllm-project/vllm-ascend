@@ -8,8 +8,11 @@ import numpy as np
 import torch
 import torch_npu
 
-with contextlib.suppress(ImportError):
+with contextlib.suppress(Exception):
     # we should remove this after memfabric.offload is merged to master and available in ci machine.
+    # Importing the package provisions an AICPU kernel on the fly, which raises its own
+    # ProvisioningError rather than ImportError when the CANN build toolchain is incomplete.
+    # Sparse KV offload is opt-in, so nothing here may abort worker startup.
     from memfabric_hybrid import offload  # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed import (

@@ -29,10 +29,7 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.quantization.utils import QUANT_DTYPES, SCALE_DTYPES, get_dynamic_mx_quant_scale_alg
-
-DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
-DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
+from vllm_ascend.quantization.utils import QUANT_DTYPES, get_dynamic_mx_quant_scale_alg
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.rms_norm import triton_q_rms  # noqa: F811
@@ -291,6 +288,21 @@ class BaseDeviceAdaptor:
         )[0]
 
     @staticmethod
+    def clipped_swiglu(
+        hidden_states: torch.Tensor,
+        swiglu_limit: float,
+        swiglu_alpha: float,
+        swiglu_beta: float,
+    ) -> torch.Tensor:
+        return torch_npu.npu_clipped_swiglu(
+            hidden_states,
+            interleaved=False,
+            alpha=swiglu_alpha,
+            limit=swiglu_limit,
+            bias=swiglu_beta,
+        )
+
+    @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_starts, key, value):
         torch_npu.npu_gather_pa_kv_cache(
             cache_kv_c,
@@ -510,39 +522,12 @@ class BaseDeviceAdaptor:
 
         return context_layer
 
-    # ===== Sparse Attention Metadata & Op Selectors =====
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        """Returns the metadata-building operator for sparse attention."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        """Returns kwargs for sparse attention metadata builder."""
-        return {"device": str(device)}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op():
-        """Returns the sparse attention operator."""
-        return torch.ops._C_ascend.npu_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        """Returns base kwargs for sparse attention (extended by caller)."""
-        return {}
-
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
-        """Slot mapping side output format consumed by the DSA scatter op."""
-        return DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET
-
     # ===== SWA / Compressor KV Scatter =====
 
     @staticmethod
     def dsa_kv_compress_scatter(cache, x, slot_mapping):
         """Scatter KV into cache. Non-A5: simple scatter of pre-quantized tensor."""
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(cache, slot_mapping, x)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(cache, slot_mapping, x)
 
     # ===== Indexer Quant + Scatter =====
 
@@ -557,7 +542,7 @@ class BaseDeviceAdaptor:
     @staticmethod
     def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
         """Quantize q and scatter kv into indexer cache.
-        Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
+        Non-A5: int8 quant + 2x scatter_nd_update_sk for k_cache and scale_cache."""
         q, q_scale = torch_npu.npu_dynamic_quant(q, dst_type=torch.int8)
         q_scale = q_scale.to(torch.float16)
 
@@ -568,8 +553,8 @@ class BaseDeviceAdaptor:
             kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
             if kv_scale_out.ndim < 4:
                 kv_scale_out = kv_scale_out.unsqueeze(-1)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
+            torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_k_cache, slot_mapping, kv_out)
+            torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_out)
 
         return q, q_scale, kv_out, kv_scale_out
 
@@ -582,7 +567,7 @@ class BaseDeviceAdaptor:
             return None, None
         kv_out, kv_scale = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
         kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_k_cache, slot_mapping, kv_out)
         return kv_out, kv_scale
 
     @staticmethod
@@ -592,7 +577,7 @@ class BaseDeviceAdaptor:
         kv_scale = kv_scale.to(torch.float16)
         if kv_scale.ndim < 4:
             kv_scale = kv_scale.unsqueeze(-1)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale)
 
     @staticmethod
     def warmup_indexer_quant_scatter(hidden_states, slot_mapping):
@@ -605,8 +590,8 @@ class BaseDeviceAdaptor:
         dummy_shape = (1, 1, 1, kv_dummy.shape[-1])
         indexer_k_cache = torch.zeros(dummy_shape, dtype=kv_dummy.dtype, device=hidden_states.device)
         indexer_scale_cache = torch.zeros(dummy_shape, dtype=torch.float16, device=hidden_states.device)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_dummy)
-        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_dummy)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_k_cache, slot_mapping, kv_dummy)
+        torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
 
@@ -631,6 +616,9 @@ class BaseDeviceAdaptor:
     def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
+        if q_norm_without_weight is not None:
+            return q_norm_without_weight(q)
+
         if triton_q_rms is not None:
             return triton_q_rms(q, eps)
         else:
@@ -674,21 +662,10 @@ class BaseDeviceAdaptor:
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """Format slot_mapping for metadata storage.
-        Non-A5: 2D [block_idx, offset]; A5: 1D pass-through."""
-        return torch.stack([slot_mapping // block_size, slot_mapping % block_size], axis=-1)
-
-    @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
         """Non-A5: return the cached cu_seqlens_cmp_kv tensor.
         A5 override always returns None."""
         return cmp_kv_tensor
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
-        """Non-A5: add extra kwargs for sparse attention. A5: no-op."""
-        extra_kwargs.update(kwargs_to_add)
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(
@@ -1028,85 +1005,31 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         swiglu_limit: float = 0.0,
         mxfp_quant_dtype: QuantType | None = None,
     ):
-        if not use_mxfp_quant:
-            if act_quant_type == torch.float8_e4m3fn:
-                out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=[weight],
-                    weight_scale=[weight_scale],
-                    x_scale=x_scale,
-                    group_list=group_list,
-                    quant_dtype=torch.float8_e4m3fn,
-                    dequant_dtype=torch.float32,
-                )
-                return out, out_scale, None
-            else:
-                return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
-                    x=x,
-                    weight=weight,
-                    group_list=group_list,
-                    weight_scale=weight_scale,
-                    x_scale=x_scale,
-                    bias=bias,
-                    swiglu_limit=swiglu_limit,
-                    use_mxfp_quant=False,
-                )
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP gmm+swiglu+quant kernels are dispatched by each FusedMoEMethod on A5.")
 
-        # W4A8 mxfp
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[x],
-                weight=[weight],
-                scale=None,
-                antiquant_scale=[weight_scale],
-                scale_dtype=None,
-                per_token_scale=[x_scale],
-                per_token_scale_dtype=torch.float8_e8m0fnu,
-                split_item=2,
-                group_type=0,
-                group_list=group_list,
-                x_dtype=torch.float8_e4m3fn,
-                weight_dtype=torch_npu.float4_e2m1fn_x2,
-                output_dtype=torch.bfloat16,
-            )[0]
-            # DSV4 need swiglu_limit input
-            out, out_scale, _ = torch.ops._C_ascend.npu_swiglu_group_quant(
-                hidden_states,
-                topk_weight=None,
-                group_index=None,
-                dst_type=torch.float8_e4m3fn,
-                quant_mode=2,
-                clamp_value=swiglu_limit,
-            )
-        elif mxfp_quant_dtype == QuantType.W4A16MXFP:
-            hidden_states = torch_npu.npu_grouped_matmul(
-                x=[x],
-                weight=[weight],
-                antiquant_scale=[weight_scale],
-                group_list=group_list,
-                split_item=3,
-                group_type=0,
-                output_dtype=x.dtype,
-            )[0]
-            out = torch_npu.npu_swiglu(hidden_states)
-            out_scale = None
-        else:
+        if act_quant_type == torch.float8_e4m3fn:
             out, out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
                 x=x,
                 weight=[weight],
-                group_list=group_list,
                 weight_scale=[weight_scale],
                 x_scale=x_scale,
-                dequant_mode=2,
-                quant_mode=2,
+                group_list=group_list,
+                quant_dtype=torch.float8_e4m3fn,
                 dequant_dtype=torch.float32,
-                quant_dtype=act_quant_type,
-                x_dtype=act_quant_type if act_quant_type in QUANT_DTYPES else None,
-                weight_dtype=weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-                weight_scale_dtype=torch_npu.float8_e8m0fnu,
-                x_scale_dtype=torch_npu.float8_e8m0fnu,
             )
-        return out, A5DeviceAdaptor.maybe_normalize_mxfp_scale_layout(out_scale), None
+            return out, out_scale, None
+
+        return torch_npu.npu_grouped_matmul_swiglu_quant_v2(
+            x=x,
+            weight=weight,
+            group_list=group_list,
+            weight_scale=weight_scale,
+            x_scale=x_scale,
+            bias=bias,
+            swiglu_limit=swiglu_limit,
+            use_mxfp_quant=False,
+        )
 
     @staticmethod
     def get_quant_gmm2_kwargs(
@@ -1119,30 +1042,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         use_bf16: bool = True,
         use_mxfp_quant: bool = False,
     ) -> dict:
-        if not use_mxfp_quant:
-            return BaseDeviceAdaptor.get_quant_gmm2_kwargs(
-                input_dtype=input_dtype,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
-                scale_type=scale_type,
-                per_token_scale_type=per_token_scale_type,
-                use_bf16=use_bf16,
-                use_mxfp_quant=False,
-            )
-
-        output_dtype = (
-            input_dtype
-            if input_dtype in [torch.bfloat16, torch.float16]
-            else (torch.bfloat16 if use_bf16 else torch.float16)
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP gmm2 kernels are dispatched by each FusedMoEMethod on A5.")
+        return BaseDeviceAdaptor.get_quant_gmm2_kwargs(
+            input_dtype=input_dtype,
+            act_quant_type=act_quant_type,
+            weight_quant_type=weight_quant_type,
+            scale_type=scale_type,
+            per_token_scale_type=per_token_scale_type,
+            use_bf16=use_bf16,
+            use_mxfp_quant=False,
         )
-
-        return {
-            "scale_dtype": scale_type if scale_type in SCALE_DTYPES else None,
-            "per_token_scale_dtype": per_token_scale_type if per_token_scale_type in SCALE_DTYPES else None,
-            "x_dtype": act_quant_type if act_quant_type in QUANT_DTYPES else None,
-            "weight_dtype": weight_quant_type if weight_quant_type in QUANT_DTYPES else None,
-            "output_dtype": output_dtype,
-        }
 
     @classmethod
     def npu_grouped_matmul_gmm2(
@@ -1165,75 +1075,42 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         fallback_output_dtype: torch.dtype | None = None,
         mxfp_quant_dtype: QuantType | None = None,
     ) -> torch.Tensor:
-        if not use_mxfp_quant:
-            if act_quant_type == torch.float8_e4m3fn:
-                fallback_output_dtype = torch.bfloat16
-            return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
-                hidden_states=hidden_states,
-                weight=weight,
-                weight_scale=weight_scale,
-                per_token_scale=per_token_scale,
-                group_list=group_list,
-                group_list_type=group_list_type,
-                input_dtype=input_dtype,
-                act_quant_type=act_quant_type,
-                weight_quant_type=weight_quant_type,
-                scale_type=scale_type,
-                per_token_scale_type=per_token_scale_type,
-                use_bf16=use_bf16,
-                use_mxfp_quant=False,
-                bias=bias,
-                fallback_output_dtype=fallback_output_dtype,
-            )
-
-        gmm2_kwargs = cls.get_quant_gmm2_kwargs(
+        if use_mxfp_quant:
+            raise RuntimeError("MXFP gmm2 kernels are dispatched by each FusedMoEMethod on A5.")
+        if act_quant_type == torch.float8_e4m3fn:
+            fallback_output_dtype = torch.bfloat16
+        return BaseDeviceAdaptor.npu_grouped_matmul_gmm2(
+            hidden_states=hidden_states,
+            weight=weight,
+            weight_scale=weight_scale,
+            per_token_scale=per_token_scale,
+            group_list=group_list,
+            group_list_type=group_list_type,
             input_dtype=input_dtype,
             act_quant_type=act_quant_type,
             weight_quant_type=weight_quant_type,
-            scale_type=scale_type if mxfp_quant_dtype != QuantType.W4A8MXFP else None,
+            scale_type=scale_type,
             per_token_scale_type=per_token_scale_type,
             use_bf16=use_bf16,
-            use_mxfp_quant=True,
-        )
-        output_dtype = gmm2_kwargs.pop("output_dtype")
-
-        if isinstance(weight, list) and len(weight) != 1:
-            raise ValueError(f"w2 must have a single tensor in MXFP path, but got {len(weight)}.")
-        if isinstance(weight_scale, list) and len(weight_scale) != 1:
-            raise ValueError(f"w2_scale must have a single tensor in MXFP path, but got {len(weight_scale)}.")
-        gmm2_weight = weight if isinstance(weight, list) else [weight]
-        gmm2_scale = weight_scale if isinstance(weight_scale, list) else [weight_scale]
-
-        if mxfp_quant_dtype == QuantType.W4A16MXFP:
-            return torch_npu.npu_grouped_matmul(
-                x=[hidden_states],
-                weight=gmm2_weight,
-                antiquant_scale=gmm2_scale,
-                bias=bias,
-                split_item=3,
-                group_type=0,
-                group_list_type=group_list_type,
-                group_list=group_list,
-                output_dtype=output_dtype,
-            )[0]
-
-        if mxfp_quant_dtype == QuantType.W4A8MXFP:
-            gmm2_scale = None  # type: ignore[assignment]
-            gmm2_kwargs.update({"antiquant_scale": [weight_scale]})
-
-        return torch_npu.npu_grouped_matmul(
-            x=[hidden_states],
-            weight=gmm2_weight,
-            scale=gmm2_scale,
+            use_mxfp_quant=False,
             bias=bias,
-            per_token_scale=[per_token_scale],
-            split_item=2,
-            group_list_type=group_list_type,
-            group_type=0,
-            group_list=group_list,
-            output_dtype=output_dtype,
-            **gmm2_kwargs,
-        )[0]
+            fallback_output_dtype=fallback_output_dtype,
+        )
+
+    @staticmethod
+    def clipped_swiglu(
+        hidden_states: torch.Tensor,
+        swiglu_limit: float,
+        swiglu_alpha: float,
+        swiglu_beta: float,
+    ) -> torch.Tensor:
+        hidden_size = hidden_states.shape[-1] // 2
+        gate = hidden_states[..., :hidden_size].clamp(max=swiglu_limit)
+        up = hidden_states[..., hidden_size:].clamp(
+            min=-swiglu_limit,
+            max=swiglu_limit,
+        )
+        return gate * torch.sigmoid(swiglu_alpha * gate) * (up + swiglu_beta)
 
     @staticmethod
     def kv_cache_load(cache_kv_c, cache_k_pe, block_table, context_seq_len_npu, seq_offset, key, value):
@@ -1245,46 +1122,6 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
             seq_offset=seq_offset,
             key=key,
             value=value,
-        )
-
-    # ===== Sparse Attention Metadata & Op Selectors =====
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv_metadata
-
-    @staticmethod
-    def get_dsa_sparse_attn_metadata_kwargs(device):
-        return {"kv_quant_mode": 1}
-
-    @staticmethod
-    def get_dsa_sparse_attn_op():
-        return torch.ops._C_ascend.npu_kv_quant_sparse_attn_sharedkv
-
-    @staticmethod
-    def get_dsa_sparse_attn_base_kwargs():
-        return {"kv_quant_mode": 1, "tile_size": 64, "rope_head_dim": 64}
-
-    @staticmethod
-    def get_dsa_compressor_slot_mapping_format():
-        """A5 kv_compress_epilog consumes flat slot ids."""
-        return DSA_COMPRESSOR_SLOT_MAPPING_FLAT
-
-    # ===== SWA / Compressor KV Scatter =====
-
-    @staticmethod
-    def dsa_kv_compress_scatter(cache, x, slot_mapping):
-        """Scatter KV into cache with fused quantization+compression.
-        A5: kv_compress_epilog handles quant/compress/scatter internally.
-        Input x is unquantized bf16; cache shape is [..., head_dim]."""
-        torch.ops._C_ascend.kv_compress_epilog(
-            kv_compress_cache=cache.view(-1, 1, cache.shape[-1]),
-            x=x.view(-1, x.shape[-1]),
-            slot_mapping=slot_mapping,
-            quant_group_size=64,
-            quant_mode=2,
-            round_scale_flag=True,
-            layout=1,
         )
 
     # ===== Indexer Quant + Scatter =====
@@ -1421,19 +1258,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return slot_mapping
 
     @staticmethod
-    def format_dsa_slot_mapping(slot_mapping, block_size):
-        """A5: 1D pass-through."""
-        return slot_mapping
-
-    @staticmethod
     def get_dsa_decode_cu_seqlens_cmp_kv(cmp_kv_tensor):
         """A5: cu_seqlens_cmp_kv is always None."""
         return None
-
-    @staticmethod
-    def add_dsa_sparse_attn_extra_kwargs(extra_kwargs, **kwargs_to_add):
-        """A5: no-op — A5 ops do not need extra kwargs from this path."""
-        pass
 
     @staticmethod
     def get_dsa_decode_cu_seqlens_ori_kv(

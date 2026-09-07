@@ -17,14 +17,14 @@
 """Pytest configuration for ``scripts/`` unit tests.
 
 The ``select_tests`` module stores ``runner_mapping`` in a module-level
-global that is normally populated by ``main()`` from a two-document YAML
-config. Tests that exercise the routing internals directly need this global
+global that is normally populated by ``main()`` from the routing config.
+Tests that exercise the routing internals directly need this global
 to be set. The :func:`_load_runner_mapping` autouse fixture loads the real
 ``test_config.yaml`` once before each test, so internal-function tests work
 in isolation.
 
 End-to-end tests that call ``main()`` with their own config still need to
-include ``runner_mapping`` in that config (see ``_write_two_doc_config``).
+include ``runner_mapping`` in that config (see ``_write_config``).
 """
 
 from __future__ import annotations
@@ -55,7 +55,6 @@ def _load_runner_mapping():
     """
     config_path = _SCRIPT_DIR / "test_config.yaml"
     if config_path.exists():
-        docs = list(yaml.safe_load_all(config_path.read_text()))
-        meta = docs[1] if len(docs) >= 2 and docs[1] else {}
+        meta = yaml.safe_load(config_path.read_text()) or {}
         select_tests._load_runner_mapping(meta)
     yield

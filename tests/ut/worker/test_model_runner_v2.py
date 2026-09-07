@@ -1,8 +1,9 @@
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
@@ -97,3 +98,51 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
 
     assert num_reqs_padded == 4
     np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
+
+
+def test_sample_tokens_restores_replicated_draft_hidden_states():
+    runner = _make_runner(need_timing=False)
+    runner.is_last_pp_rank = True
+    runner.speculator = SimpleNamespace(replicated_pcp=True)
+    runner.use_spec_pp = False
+
+    aux_hidden_states = [
+        torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    ]
+    state = Mock(aux_hidden_states=aux_hidden_states)
+    restored_state = object()
+    state._replace.return_value = restored_state
+    runner.execute_model_state = state
+
+    target_hidden_states = object()
+    restored_aux_hidden_states = torch.ones(4, 5)
+    runner.pcp_manager = SimpleNamespace(
+        restore_hidden_state_buffer=Mock(),
+        restore_hidden_states=Mock(
+            return_value=restored_aux_hidden_states,
+        ),
+    )
+    runner.model = SimpleNamespace(
+        get_mtp_target_hidden_states=lambda: target_hidden_states,
+    )
+    grammar_output = object()
+    expected_output = object()
+
+    with patch.object(
+        GPUModelRunner,
+        "sample_tokens",
+        return_value=expected_output,
+    ) as parent_sample_tokens:
+        actual = runner.sample_tokens(grammar_output)
+
+    assert actual is expected_output
+    parent_sample_tokens.assert_called_once_with(grammar_output)
+    runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
+    restored_input = runner.pcp_manager.restore_hidden_states.call_args.args[0]
+    torch.testing.assert_close(
+        restored_input,
+        torch.cat(aux_hidden_states, dim=-1),
+    )
+    state._replace.assert_called_once_with(aux_hidden_states=[restored_aux_hidden_states])
+    assert runner.execute_model_state is restored_state

@@ -24,6 +24,10 @@ VLLM_REPOSITORY_URL = "https://github.com/vllm-project/vllm.git"
 VLLM_BASE_BRANCH = "main"
 
 
+class GitCommandError(RuntimeError):
+    """Raised when a Git command cannot complete successfully."""
+
+
 def _git(root: Path, *args: str) -> str:
     command = ["git", "-C", str(root), *args]
     try:
@@ -46,7 +50,7 @@ def _git(root: Path, *args: str) -> str:
             details.extend(("stderr:", stderr))
         if not stdout and not stderr:
             details.append("The Git command produced no output.")
-        raise RuntimeError("\n".join(details)) from None
+        raise GitCommandError("\n".join(details)) from None
 
 
 def resolve_vllm_range(
@@ -65,7 +69,7 @@ def resolve_vllm_range(
     _git(vllm_root, "fetch", "--no-tags", repository_url, base_branch)
     try:
         old_sha = _git(vllm_root, "merge-base", new_sha, "FETCH_HEAD")
-    except subprocess.CalledProcessError:
+    except GitCommandError:
         if _git(vllm_root, "rev-parse", "--is-shallow-repository") != "true":
             raise
         _git(vllm_root, "fetch", "--no-tags", "--unshallow", repository_url, base_branch)

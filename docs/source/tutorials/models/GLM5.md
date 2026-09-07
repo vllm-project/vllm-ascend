@@ -31,7 +31,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication) guide for communication verification.
+If multi-node deployment is required, please follow the [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect) guide for communication verification.
 
 ## 4 Installation
 
@@ -117,13 +117,13 @@ You can use our official docker image to run GLM-5/5.1 directly.
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
-To verify the successful installation of the environment, please refer to [installation](../../installation.md).
+To verify the successful installation of the environment, please refer to [installation](../../getting_started/installation.md).
 
 ### 4.2 Source Code Installation
 
 In addition, if you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -261,12 +261,12 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - For low-latency scenarios, use `dp1tp16` (data-parallel-size 1, tensor-parallel-size 16) and consider reducing `--max-num-seqs` and `--max-num-batched-tokens`.
 - For high-throughput scenarios, increase `--max-num-seqs` and enable `--enable-prefix-caching`.
-- For long-context scenarios (e.g., 200K), use w8a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
+- For long-context scenarios (e.g., 200k), use w8a8 weight (more memory for KV cache) and set `--max-model-len` to the desired context length. Consider enabling `--enable-chunked-prefill`.
 - If you encounter OOM, reduce `--gpu-memory-utilization`, `--max-num-seqs`, or `--max-model-len`. Disabling `additional_config.enable_mlapo` can also reduce memory usage (at the cost of performance).
 
 ### 5.2 Multi-node Deployment
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 Common Issues Tip: If you encounter issues, Refer to [Public FAQs](../../faqs.md).
 
@@ -1241,7 +1241,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 **Prefill node-specific configurations:**
 
 - `additional_config.enable_fused_mc2=1`: Enables fused MC2 operators (`dispatch_ffn_combine`/`mega_moe`) to optimize MoE communication. Constraints: `dispatch_ffn_combine` only for w8a8 and EP≤32; `mega_moe` works for w8a8/w4a8/bf16 with EP≤64. Both are incompatible with MTP and dynamic EPLB.
-- `--additional-config '{"enable_dsa_cp": true}'`: Enables DSA context parallelism on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128K tokens.
+- `--additional-config '{"enable_dsa_cp": true}'`: Enables DSA context parallelism on prefill nodes to accelerate long-context prefill. Required for handling prompts up to 128k tokens.
 
 **Decode node-specific configurations:**
 
@@ -1317,11 +1317,11 @@ The tables below provide recommended parameter configurations for different depl
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|Low Latency<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|Low Latency<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|High Throughput<br>(64K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|High Throughput<br>(128K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
-|Long Context<br>(198K input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Low Latency<br>(64k input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Low Latency<br>(128k input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(64k input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|High Throughput<br>(128k input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
+|Long Context<br>(198k input)|PD Disaggregation, [Prefill-Decode Disaggregation](#53-prefill-decode-disaggregation)|4 nodes (A3)|w8a8c8|P: dp4 tp8 (max-num-seqs 64, max-num-batched-tokens 8192); D: dp8 tp4 (max-num-seqs 32, max-num-batched-tokens 164); MTP3, max-model-len 202752, Mooncake KV transfer|
 
 #### 9.1.2 Table 2: Detailed Node Configuration
 
@@ -1329,16 +1329,16 @@ The tables below provide recommended parameter configurations for different depl
 
 |Scenario|Configuration|NPUs|TP|DP|Max Num Seqs|Max Num Batched Tokens|Max Model Len|MTP Spec Num|
 |--------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
-|Low Latency 64K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
-|Low Latency 64K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
-|Low Latency 128K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
-|Low Latency 128K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
-|High Throughput 64K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
-|High Throughput 64K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
-|High Throughput 128K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
-|High Throughput 128K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
-|Long Context 198K (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
-|Long Context 198K (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|Low Latency 64k (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|Low Latency 64k (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|Low Latency 128k (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|Low Latency 128k (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|High Throughput 64k (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|High Throughput 64k (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|High Throughput 128k (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|High Throughput 128k (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
+|Long Context 198k (A3)|PD — Server-P Node|16|8|2|64|8192|202752|3|
+|Long Context 198k (A3)|PD — Server-D Node|16|4|4|32|164|202752|3|
 
 > For complete startup commands and detailed parameter descriptions, please refer to the deployment examples and Key Parameter Descriptions in [Online Service Deployment](#5-online-service-deployment).
 
@@ -1347,7 +1347,7 @@ The tables below provide recommended parameter configurations for different depl
 |Parameter|Low Latency|High Throughput|Long Context|Description|
 |---------|-----------|---------------|-------------|-----------|
 |`--max-num-seqs`|Lower (4–8)|Higher (16–64)|Controlled (2–8)|Limits concurrent sequences. Lower values reduce scheduling latency; higher values increase throughput.|
-|`--max-model-len`|Shorter (32K–40K)|Longer (128K–200K)|Maximum (128K–200K)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
+|`--max-model-len`|Shorter (32k–40k)|Longer (128k–200k)|Maximum (128k–200k)|Maximum context length. Must accommodate your longest input+output. Larger values consume more KV cache memory.|
 |`--max-num-batched-tokens`|Lower (2048–4096)|Higher (4096–8192)|Higher for prefill (4096)|Controls batch size per step. Lower values reduce per-step latency; higher values improve prefill throughput.|
 |`--gpu-memory-utilization`|0.92–0.95|0.95|0.92–0.95|NPU memory fraction. Higher values leave more memory for KV cache. Reduce if OOM.|
 |`--enable-chunked-prefill`|Enable|Enable|Enable|Splits long prompts into chunks to prevent prefill from blocking decode. Recommended in all scenarios.|

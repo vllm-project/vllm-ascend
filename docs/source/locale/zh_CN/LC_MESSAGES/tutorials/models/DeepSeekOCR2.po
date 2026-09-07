@@ -232,6 +232,13 @@ msgid ""
 msgstr ""
 "请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)了解调优方法。"
 
+msgid ""
+"Please refer to the [Feature "
+"Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr ""
+"请参考[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)了解详细的功能描述。"
+
 msgid "## 10 FAQ"
 msgstr "## 10 常见问题"
 
@@ -288,7 +295,5 @@ msgstr ""
 
 msgid ""
 "For common environment, installation, and general parameter issues, please "
-"refer to the [Public "
-"FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)."
-msgstr ""
-"对于常见的环境、安装和一般参数问题，请参阅[公共常见问题解答](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html)。"
+"refer to the [Public FAQs](../../faqs.md)."
+msgstr "对于常见的环境、安装和一般参数问题，请参阅[公共FAQ](../../faqs.md)。"

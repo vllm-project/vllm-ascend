@@ -61,8 +61,7 @@ def unquantized_gemm_fake(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    output_shape = (x.shape[0], weight.shape[0])
-    return torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
 direct_register_custom_op(
@@ -92,11 +91,14 @@ class AscendUnquantizedLinearMethod(TPWeightSwitchMixin, UnquantizedLinearMethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         super().process_weights_after_loading(layer)
         keep_nd_weight = _should_keep_nd_for_compatibility_weight(layer.weight.data)
+        skip_weight_nz_conversion = getattr(layer, "skip_weight_nz_conversion", False)
         # must use fp32 to avoid accuracy degradation in dsv4.
         if getattr(layer, "precast_fp32_weight", False):
             weight_fp32 = layer.weight.data.to(torch.float32)
-            layer.weight_fp32 = weight_fp32 if keep_nd_weight else maybe_trans_nz(weight_fp32)
-        if "conv1d" not in layer.prefix:
+            layer.weight_fp32 = (
+                weight_fp32 if keep_nd_weight or skip_weight_nz_conversion else maybe_trans_nz(weight_fp32)
+            )
+        if "conv1d" not in layer.prefix and not skip_weight_nz_conversion:
             # 310P torch_npu rejects FRACTAL_NZ matmul when the weight-side
             # matrix has n=1 or k=1. Keep scalar gates such as Qwen MoE's
             # shared_expert_gate in ND format, leaving non-310P policy intact.
@@ -458,9 +460,16 @@ class AscendColumnParallelLinear(ColumnParallelLinear):
         return super().forward(input_)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        if "wo_a" in self.prefix and not get_current_hardware_profile().supports(
+        supports_dynamic_mx_quant_fusion = get_current_hardware_profile().supports(
             HardwareCapability.DYNAMIC_MX_QUANT_FUSION
-        ):
+        )
+        reshape_bf16_wo_a = (
+            "wo_a" in self.prefix
+            and supports_dynamic_mx_quant_fusion
+            and self.quant_config is None
+            and loaded_weight.dtype == torch.bfloat16
+        )
+        if "wo_a" in self.prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a):
             if self.weight.ndim == 2:
                 super().weight_loader(param, loaded_weight)
                 self.weight.data = (

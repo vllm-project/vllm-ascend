@@ -4,7 +4,7 @@ import sys
 import unittest
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import torch
 
@@ -12,6 +12,7 @@ if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl, DSACPMetadata
+from vllm_ascend.device.hardware_profile import HardwareCapability
 from vllm_ascend.quantization.tp_weight_switch import (
     TPWeightGatherSpec,
     TPWeightSwitchMixin,
@@ -49,6 +50,54 @@ class TestAscendDSACPOProjTPParams(unittest.TestCase):
         impl.wo_b = self._OProj()
         impl._o_proj_tp_weight_switch_enabled = False
         return impl
+
+    def test_enablement_is_not_gated_by_hardware_family(self):
+        profile = MagicMock()
+        profile.supports.return_value = False
+        tp_group = SimpleNamespace(world_size=2, rank_in_group=0)
+        layer = self._OProj()
+        with (
+            patch(
+                "vllm_ascend.attention.context_parallel.dsa_cp.enable_dsa_cp_with_o_proj_tp",
+                return_value=True,
+            ),
+            patch("vllm_ascend.attention.context_parallel.dsa_cp.get_tp_group", return_value=tp_group),
+            patch(
+                "vllm_ascend.attention.context_parallel.dsa_cp.get_current_hardware_profile",
+                return_value=profile,
+            ),
+            patch(
+                "vllm_ascend.attention.context_parallel.dsa_cp.get_current_vllm_config",
+                return_value=SimpleNamespace(),
+            ),
+        ):
+            impl = AscendDSACPImpl(
+                n_heads=2,
+                scale=1.0,
+                n_local_heads=1,
+                q_lora_rank=1,
+                o_lora_rank=1,
+                head_dim=2,
+                rope_head_dim=1,
+                nope_head_dim=1,
+                n_groups=2,
+                n_local_groups=1,
+                window_size=1,
+                compress_ratio=1,
+                wq_a=object(),
+                wq_b=object(),
+                wkv=object(),
+                q_norm=object(),
+                kv_norm=object(),
+                swa_cache_layer=SimpleNamespace(prefix="swa"),
+                wo_a=layer,
+                wo_b=layer,
+                eps=1e-6,
+                attn_sink=torch.empty(2),
+            )
+
+        self.assertTrue(impl.enable_dsa_cp_with_o_proj_tp)
+        profile.supports.assert_called_once_with(HardwareCapability.FP8_ATTENTION)
 
     def test_get_tp_weight_switch_method_unwraps_adapter_and_rejects_unsupported(self):
         layer = self._OProj()

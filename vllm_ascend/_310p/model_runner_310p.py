@@ -285,16 +285,9 @@ class NPUModelRunner310(NPUModelRunner):
 
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
-                    np.where(new_mask, 0, prev_idx)
-                ]
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
-            else:
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            # Keep accepted-token ownership by request when async scheduling
+            # condenses/reorders the 310P input batch.
+            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -583,6 +576,7 @@ class NPUModelRunner310(NPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        skip_gdn_state_update: bool = False,
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         # All the spec decoding cases has to run splitfuse op on 310P.
@@ -609,6 +603,7 @@ class NPUModelRunner310(NPUModelRunner):
                     is_graph_capturing=is_graph_capturing,
                     num_active_loras=num_active_loras,
                     profile_seq_lens=profile_seq_lens,
+                    skip_gdn_state_update=skip_gdn_state_update,
                 )
             finally:
                 self._spec_dummy_capture = False

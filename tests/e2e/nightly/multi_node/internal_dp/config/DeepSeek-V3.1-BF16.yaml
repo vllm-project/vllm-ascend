@@ -9,8 +9,6 @@ env_common: &env_common
   OMP_PROC_BIND: false
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   OMP_NUM_THREADS: 1
-  HCCL_INTRA_PCIE_ENABLE: 1
-  HCCL_INTRA_ROCE_ENABLE: 0
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
 
 deployment:
