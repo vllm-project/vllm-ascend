@@ -20,12 +20,12 @@ from vllm_ascend.models.qwen3_dflash2 import (
     DFlash2Qwen3ForCausalLM,
     DFlash2Qwen3Model,
 )
-from vllm_ascend.utils import vllm_version_is
 
-# 0.27.1 predates the hooks and reads the module globals, which the ctors swap.
-requires_upstream_hooks = pytest.mark.skipif(
-    vllm_version_is("0.27.1"),
-    reason="vLLM 0.27.1 has no model_cls / decoder_layer_cls hooks",
+# 0.27.1 and some main snapshots still hardcode DFlashQwen3Model /
+# DFlashQwen3DecoderLayer in the parent ctors; the hooks only exist once
+# upstream PR 52816 is on the tree. The CI pin is one of those snapshots.
+_HAS_UPSTREAM_HOOKS = hasattr(DFlashQwen3ForCausalLM, "model_cls") and hasattr(
+    DFlashQwen3Model, "decoder_layer_cls"
 )
 
 
@@ -37,9 +37,15 @@ def test_decoder_layer_hook_points_at_the_dflash2_layer():
     assert DFlash2Qwen3Model.decoder_layer_cls is DFlash2Qwen3DecoderLayer
 
 
-@requires_upstream_hooks
+def test_dflash2_subclasses_the_upstream_dflash1_types():
+    assert issubclass(DFlash2Qwen3Model, DFlashQwen3Model)
+    assert issubclass(DFlash2Qwen3DecoderLayer, DFlashQwen3DecoderLayer)
+
+
+@pytest.mark.skipif(
+    not _HAS_UPSTREAM_HOOKS,
+    reason="this vLLM pin has no model_cls / decoder_layer_cls hooks",
+)
 def test_hooks_override_the_upstream_dflash1_defaults():
     assert DFlashQwen3ForCausalLM.model_cls is DFlashQwen3Model
     assert DFlashQwen3Model.decoder_layer_cls is DFlashQwen3DecoderLayer
-    assert issubclass(DFlash2Qwen3Model, DFlashQwen3Model)
-    assert issubclass(DFlash2Qwen3DecoderLayer, DFlashQwen3DecoderLayer)
