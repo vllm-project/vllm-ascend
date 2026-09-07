@@ -1313,6 +1313,7 @@ class TestNPUWorker(TestBase):
         worker.profiler.annotate_context_manager.assert_called_once_with(
             "execute_4_context_1(sq3sk13sqsq9sqsk39)_generation_1(sq1sk21sqsq1sqsk21)"
         )
+        cached_reqs.is_context_phase.assert_called_once_with("generation")
 
     @patch("vllm_ascend.worker.worker.compute_iteration_details")
     def test_annotate_profile_skips_annotation_when_schedule_not_running(self, mock_compute_details):

@@ -746,7 +746,7 @@ class NPUWorker(WorkerBase):
                 query_len = num_tokens
                 total_scheduled_tokens += query_len
                 seq_len = num_computed_tokens_by_req.get(req_id, 0) + query_len
-                if scheduler_output.scheduled_cached_reqs.is_context_phase(req_id) or req_id in new_req_ids:
+                if req_id in new_req_ids or scheduler_output.scheduled_cached_reqs.is_context_phase(req_id):
                     ctx_seq_len_sum += seq_len
                     ctx_qq_compute += query_len * query_len
                     ctx_qk_compute += query_len * seq_len
