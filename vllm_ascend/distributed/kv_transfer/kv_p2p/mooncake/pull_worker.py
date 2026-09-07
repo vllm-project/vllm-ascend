@@ -1038,9 +1038,7 @@ class MooncakePullRecvingThread(threading.Thread):
                 block_ids = (local_block_ids, remote_block_ids)
                 previous_block_ids = block_ids_by_request.setdefault(request_id, block_ids)
                 if previous_block_ids != block_ids:
-                    raise ValueError(
-                        f"Mooncake block IDs differ within spec {spec_index} for request {request_id!r}"
-                    )
+                    raise ValueError(f"Mooncake block IDs differ within spec {spec_index} for request {request_id!r}")
 
         if not any(local_block_ids for local_block_ids, _ in block_ids_by_request.values()):
             return
