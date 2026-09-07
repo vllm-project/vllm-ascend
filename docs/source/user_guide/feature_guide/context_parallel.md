@@ -149,7 +149,9 @@ DCP reuses the TP devices and does not increase the world size.
 ### DSA-CP
 
 `enable_dsa_cp` will be deprecated in a future release. Consider trying PCP
-on supported model and deployment configurations. For an existing TP size of
+on supported model and deployment configurations. PCP is currently experimental,
+and support for combining it with some other features is still being adapted.
+For an existing TP size of
 `N > 1`, try `--tensor-parallel-size 1 --prefill-context-parallel-size N`
 to preserve the world size, and remove `enable_dsa_cp` from `additional_config`.
 PCP does not require this switch. With TP size 1, enabling PCP requires additional
