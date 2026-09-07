@@ -331,6 +331,25 @@ class AscendDSparkProposer(AscendDflashProposer):
 
         return num_query_total, token_indices_to_sample, cad, None
 
+    def build_model_inputs_first_pass(self, num_input_tokens: int) -> dict[str, Any]:
+        num_context = self._dflash_num_context
+        # The DSpark draft stores one context KV page per draft layer, so it
+        # consumes the per-layer slot mapping list instead of DFlash's single
+        # primary-group buffer.
+        context_slot_mappings = self._context_slot_mapping_buffers
+        if context_slot_mappings is not None:
+            context_slot_mappings = [
+                None if slot_mapping is None else slot_mapping[:num_context] for slot_mapping in context_slot_mappings
+            ]
+        self.model.precompute_and_store_context_kv(
+            self._dflash_hidden_states[:num_context],
+            self._context_positions_buffer[:num_context],
+            context_slot_mappings,
+        )
+        return dict(
+            input_ids=self.input_ids[:num_input_tokens], positions=self.positions[:num_input_tokens], inputs_embeds=None
+        )
+
     @torch.inference_mode()
     def dummy_run(
         self,

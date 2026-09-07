@@ -10,5 +10,9 @@ def register_model():
         "vllm_ascend.models.deepseek_v4_dspark:DeepSeekV4DSparkMTP",
     )
     ModelRegistry.register_model(
+        "DSparkDraftModel",
+        "vllm_ascend.models.deepseek_v4_dspark_draft:DSparkDeepseekV4ForCausalLM",
+    )
+    ModelRegistry.register_model(
         "LlamaForCausalLMVwnEagle3", "vllm_ascend.models.llama_eagle3_vwn:Eagle3VwnLlamaForCausalLM"
     )

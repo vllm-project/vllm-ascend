@@ -51,10 +51,11 @@ from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.models.deepseek_v4_dspark_draft import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
-from vllm_ascend.utils import enable_sp, lmhead_tp_enable, oproj_tp_enable, shared_expert_dp_enabled
+from vllm_ascend.utils import enable_sp, is_dspark_config, lmhead_tp_enable, oproj_tp_enable, shared_expert_dp_enabled
 
 
 @contextmanager
@@ -502,10 +503,17 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         if self.method == "mtp" and self.vllm_config.model_config.is_deepseek_mla:
             for _, layer_module in self.model.model.layers.items():
+                # DSpark draft layers are plain decoder layers without shared_head.
+                if not hasattr(layer_module, "shared_head"):
+                    continue
                 if torch.equal(layer_module.shared_head.head.weight, model.lm_head.weight):
                     layer_module.shared_head.head = model.lm_head
 
-        if self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_cuda_graph:
+        if (
+            self.vllm_config.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            and self.use_cuda_graph
+            and not is_dspark_config(self.vllm_config)
+        ):
             logger.info(
                 "[spec_decode/base] Wrapping draft model with ACLGraphWrapper:"
                 " runtime_mode=FULL, use_eagle=%s, enable_enpu=%s",
@@ -773,7 +781,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if token_indices_to_sample is None:
             token_indices_to_sample = common_attn_metadata.query_start_loc[1:] - 1
 
-        if self.method in ("eagle3", "dflash"):
+        if self.method in ("eagle3", "dflash") or (self.method == "mtp" and is_dspark_config(self.vllm_config)):
             assert isinstance(
                 self.get_model(),
                 (
@@ -781,6 +789,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     DFlashQwen3ForCausalLM,
                     Eagle3VwnLlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
+                    DSparkDeepseekV4ForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(target_hidden_states)
@@ -1123,7 +1132,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         model_input_ids = self.input_ids[:num_input_tokens]
         model_positions = self._get_positions(num_input_tokens)
 
-        if self.method == "dflash":
+        if self.method == "dflash" or (self.method == "mtp" and is_dspark_config(self.vllm_config)):
             model_kwargs = self.build_model_inputs_first_pass(num_input_tokens)
         else:
             model_kwargs = {
@@ -1207,7 +1216,31 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
-        if get_ascend_config().enable_reduce_sample:
+        if self.method == "mtp" and is_dspark_config(self.vllm_config):
+            # DSpark drafting requires autoregressive application of the
+            # Markov head: each draft position's logits are biased by the
+            # Markov embedding of the previous token, seeded by the target's
+            # last sampled token.
+            raw_logits = self.model.compute_logits(sample_hidden_states)
+            if lmhead_tp_enable():
+                # Remove B_max - B communication padding.
+                raw_logits = raw_logits[:num_indices]
+            logits = raw_logits.view(-1, self.num_speculative_tokens, raw_logits.shape[-1])
+            num_blk = logits.shape[0]
+            draft_token_ids = self._dspark_draft_buffer[:num_blk]
+            draft_token_ids[:, 0].copy_(self._dspark_seed_buffer[:num_blk])
+            for idx in range(self.num_speculative_tokens):
+                markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
+                logits[:, idx].add_(self.model.markov_bias(markov_emb))
+                draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+            if self.dynamic_spec is not None:
+                self.dynamic_spec.update(
+                    model=self.model,
+                    last_hidden_states=last_hidden_states,
+                    draft_token_ids=draft_token_ids,
+                    num_reqs=num_blk,
+                )
+        elif get_ascend_config().enable_reduce_sample:
             if self.method in ("eagle3", "dflash", "mtp"):
                 draft_token_ids = self.compute_draft_token_ids(sample_hidden_states)
                 if lmhead_tp_enable():
@@ -1248,6 +1281,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
             # [batch_size, 1]
+            if self.method == "mtp" and is_dspark_config(self.vllm_config):
+                # The buffer carries [seed, draft_1, ..., draft_D]; drop the seed.
+                return draft_token_ids[:, 1:]
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.pcp_size * self.dcp_size > 1 and is_prefill:
