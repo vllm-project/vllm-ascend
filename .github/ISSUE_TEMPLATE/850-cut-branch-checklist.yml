@@ -71,4 +71,4 @@ body:
 
       - [ ] schedule_image_build_and_push.yaml: Append new tag and branch options
 
-      - [ ] labeled_doctest.yaml: Append the new branch/version to doc_versions list
+      - [ ] mkdocs.yml: Update the released documentation stack after the release artifacts and compatible versions are published and verified
