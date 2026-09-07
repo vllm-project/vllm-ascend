@@ -350,9 +350,7 @@ class TestProfilingChunkScheduler(TestBase):
             stack.enter_context(
                 patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
             )
-            stack.enter_context(
-                patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False)
-            )
+            stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
             scheduler = ProfilingChunkScheduler(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,

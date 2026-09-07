@@ -29,6 +29,8 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeReqInfo,
     RecomputeScheduler,
 )
+
+
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
     return {"tokens_per_state": ratio}
