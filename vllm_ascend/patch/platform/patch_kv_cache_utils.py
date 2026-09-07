@@ -22,6 +22,11 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
+from vllm_ascend.core.kv_cache_capacity import (
+    replicated_draft_max_memory_usage_bytes,
+    replicated_draft_pool_bytes_per_block,
+)
+
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
@@ -455,6 +460,9 @@ def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int
     layout, so using the upstream value changes ``num_blocks`` during the
     re-plan and leaves ranks inconsistent.
     """
+    replicated_bytes = replicated_draft_pool_bytes_per_block(kv_cache_groups)
+    if replicated_bytes is not None:
+        return replicated_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_pool_bytes_per_block(kv_cache_groups)
 
@@ -467,6 +475,9 @@ def _ascend_max_memory_usage_bytes_from_groups(
     kv_cache_groups: list[KVCacheGroupSpec],
 ) -> int:
     """Keep the pre-#51718 DSV4 admission formula for its shared tuples."""
+    replicated_bytes = replicated_draft_max_memory_usage_bytes(vllm_config, kv_cache_groups)
+    if replicated_bytes is not None:
+        return replicated_bytes
     if not _is_deepseek_v4_groups(kv_cache_groups):
         return _orig_max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
 
