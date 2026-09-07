@@ -147,7 +147,6 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     reshape_kv_cache_tensors_for_sparse_kv_offload,
     update_sparse_kv_offload_metadata,
 )
-from vllm_ascend.distributed.utils import get_decode_context_model_parallel_world_size
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.eplb.core.eplb_worker import EplbProcess
@@ -4208,7 +4207,21 @@ class NPUModelRunner(GPUModelRunner):
                 )
                 bind_layer_kv_cache = getattr(layer, "bind_kv_cache", None)
                 if bind_layer_kv_cache is not None:
-                    bind_layer_kv_cache(kv_cache)
+                    cache_tensor = (
+                       kv_cache[0] if isinstance(kv_cache, tuple) else kv_cache
+                    )
+                    if (
+                        hasattr(layer, "key_head_size")
+                        and isinstance(cache_tensor, torch.Tensor)
+                        and cache_tensor.device.type == "npu"
+                        and cache_tensor.ndim == 4
+                        and cache_tensor.shape[-1] >= layer.head_size
+                    ):
+                        bind_layer_kv_cache(
+                            kv_cache, region_validated=True
+                        )
+                    else:
+                        bind_layer_kv_cache(kv_cache)
 
         return kv_caches
 
@@ -4694,10 +4707,19 @@ class NPUModelRunner(GPUModelRunner):
                             * current_kv_cache_spec.head_size
                             * get_dtype_size(current_kv_cache_spec.dtype)
                         )
-                        assert expected_page_bytes == region.page_size_bytes, (
-                            f"{layer_name} cache page mismatch: "
-                            f"view={expected_page_bytes}, region={region.page_size_bytes}"
-                        )
+                        view_head_size = current_kv_cache_spec.head_size
+                        if expected_page_bytes != region.page_size_bytes:
+                            denom = storage_block_size * current_kv_cache_spec.num_kv_heads * get_dtype_size(current_kv_cache_spec.dtype)
+                            if denom <= 0 or region.page_size_bytes % denom != 0:
+                                raise RuntimeError(
+                                    f"{layer_name} cache page mismatch: "
+                                    f"view={expected_page_bytes}, region={region.page_size_bytes}"
+                                )
+                            view_head_size = region.page_size_bytes // denom
+                            logger.warning(
+                                f"{layer_name} cache view uses Ascend-aligned head size "
+                                f"{view_head_size} (model head size {current_kv_cache_spec.head_size})"
+                            )
                         state_cache = make_contiguous_slab_view(
                             raw_slab,
                             dtype=current_kv_cache_spec.dtype,
@@ -4705,7 +4727,7 @@ class NPUModelRunner(GPUModelRunner):
                             item_shape=(
                                 storage_block_size,
                                 current_kv_cache_spec.num_kv_heads,
-                                current_kv_cache_spec.head_size,
+                                view_head_size,
                             ),
                             storage_offset=region.offset,
                         )

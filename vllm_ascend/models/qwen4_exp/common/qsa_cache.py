@@ -729,10 +729,15 @@ class QSAKeyStateCache(_QSAStateCache):
             storage_head_size = self.rope_position_offset + (self._NUM_ROPE_AXES * self._BF16_PER_INT64)
         super().__init__(head_size=storage_head_size, **kwargs)
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        if kv_cache.ndim != 4 or kv_cache.shape[2] != 1:
+    def bind_kv_cache(self, kv_cache: torch.Tensor, *, region_validated: bool = False) -> None:
+        cache_tensor = kv_cache[0] if isinstance(kv_cache, tuple) else kv_cache
+        if cache_tensor.ndim != 4 or cache_tensor.shape[2] != 1:
             raise ValueError("QSA raw cache must be [blocks, block_size, 1, width]")
-        if kv_cache.dtype != torch.bfloat16 or kv_cache.shape[3] != self.head_size:
+        width = cache_tensor.shape[3]
+        # Ascend Qwen3.5 MTP uses a 140-wide BF16 region for the 128-wide
+        # logical raw-key cache. Keep all other QSA layouts strict.
+        aligned_npu_width = region_validated and cache_tensor.device.type == "npu" and width >= self.head_size
+        if cache_tensor.dtype != torch.bfloat16 or (width != self.head_size and not aligned_npu_width):
             raise ValueError("QSA raw cache does not match its packed BF16 cache spec")
         super().bind_kv_cache(kv_cache)
         self.key_cache = kv_cache[..., : self.key_head_size]

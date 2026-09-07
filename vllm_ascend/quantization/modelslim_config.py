@@ -659,7 +659,9 @@ class AscendModelSlimConfig(QuantizationConfig):
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
 
-        if model_type in ("qwen4_exp_mtp", "qwen4_exp") and prefix.startswith("mtp.layers."):
+        if model_type in ("qwen4_exp_mtp", "qwen4_exp", "qwen3_5_mtp", "qwen3_5_moe") and prefix.startswith(
+            "mtp.layers."
+        ):
             # Qwen4-Exp MTP weights are stored with local layer indices
             # (mtp.layers.0), while the runtime module uses global indices
             # (mtp.layers.48).
