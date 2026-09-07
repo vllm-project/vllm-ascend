@@ -308,6 +308,16 @@ class MooncakeBaseConnectorWorker:
         self.transfer_metadata = transfer_metadata
         self.xfer_handshake_metadata = transfer_metadata
 
+        logger.info(
+            "Registered Mooncake KV caches: engine_id=%s, num_layers=%d, "
+            "num_blocks=%d, num_regions=%d, registered_bytes=%d",
+            self.engine_id,
+            len(layer_names),
+            self.num_blocks,
+            len(register_regions.ptrs),
+            sum(register_regions.lengths),
+        )
+
         logger.debug(
             "Mooncake KV cache transfer metadata: metadata=%s, register_ptrs=%s, register_lengths=%s",
             transfer_metadata,

@@ -4,6 +4,7 @@
 
 import queue
 import threading
+import time
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -1255,11 +1256,32 @@ class MooncakePullRecvingThread(threading.Thread):
             return
         tp_metadata = remote_metadata.metadata_by_tp_rank[remote_tp_rank]
         session_id = f"{tp_metadata.local_ip}:{tp_metadata.te_rpc_port}"
+        request_ids = sorted(
+            {
+                request_id
+                for transfer_entries_by_layer in transfer_entries_by_spec.values()
+                for transfer_entries in transfer_entries_by_layer.values()
+                for request_id, _, _ in transfer_entries
+            }
+        )
+        transfer_start_time = time.perf_counter()
         ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list, length_list)
         if ret < 0:
             raise RuntimeError(
                 f"Mooncake KV transfer failed for remote PP rank {remote_pp_rank}, TP rank {remote_tp_rank}, ret={ret}"
             )
+        transfer_elapsed_ms = (time.perf_counter() - transfer_start_time) * 1000
+        logger.info(
+            "KV cache transfer for requests %s took %.2f ms (%d ranges, %d bytes). "
+            "local_ip %s local_device_id %s remote_session_id %s",
+            request_ids,
+            transfer_elapsed_ms,
+            len(length_list),
+            sum(length_list),
+            self.local_metadata.local_ip,
+            self.tp_rank,
+            session_id,
+        )
 
     @staticmethod
     def _validate_remote_metadata(

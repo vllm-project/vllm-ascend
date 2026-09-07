@@ -90,6 +90,19 @@ class MooncakeSchedulerSendingThread(threading.Thread):
                 metadata_by_pp_rank=metadata_by_pp_rank,
             )
         )
+        logger.info(
+            "Initialized Mooncake scheduler handshake metadata: engine_id=%s, "
+            "worker_count=%d, pp_ranks=%s, tp_size=%d, pp_size=%d, "
+            "pcp_size=%d, dcp_size=%d, use_kv_pp=%s",
+            engine_id,
+            len(metadata),
+            sorted(metadata_by_pp_rank),
+            tp_size,
+            pp_size,
+            pcp_size,
+            dcp_size,
+            self.use_kv_pp,
+        )
         self.ready_event = ready_event
         self.delayed_free_requests: OrderedDict[str, float] = OrderedDict()
         self.finished_requests: queue.SimpleQueue[str] = queue.SimpleQueue()
