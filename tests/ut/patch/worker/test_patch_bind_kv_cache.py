@@ -2,22 +2,19 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 import vllm.v1.worker.utils as upstream_utils
 
 from vllm_ascend.patch.worker.patch_bind_kv_cache import bind_kv_cache
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_bind_kv_cache_forwards_replayssm_group_metadata(monkeypatch, legacy) -> None:
+def test_bind_kv_cache_forwards_replayssm_group_metadata(monkeypatch) -> None:
     layer_name = "model.layers.0.self_attn"
     kv_cache = torch.empty(1)
     forward_context = {layer_name: SimpleNamespace(kv_cache=None)}
     runner_kv_caches: list[torch.Tensor] = []
     kv_cache_groups = [SimpleNamespace(layer_names=[layer_name])]
     calls = []
-    monkeypatch.setattr("vllm_ascend.patch.worker.patch_bind_kv_cache.vllm_version_is", lambda _: legacy)
 
     monkeypatch.setattr(
         upstream_utils,
@@ -35,4 +32,4 @@ def test_bind_kv_cache_forwards_replayssm_group_metadata(monkeypatch, legacy) ->
 
     assert runner_kv_caches == [kv_cache]
     assert forward_context[layer_name].kv_cache is kv_cache
-    assert calls == ([] if legacy else [([layer_name], forward_context, kv_cache_groups)])
+    assert calls == [([layer_name], forward_context, kv_cache_groups)]

@@ -455,14 +455,12 @@ class NPUModelRunner310V2(NPUModelRunner):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
-        circular_buffer_spec = None if vllm_version_is("0.27.1") else kv_cache_interface.CircularBufferSpec
+        circular_buffer_spec = kv_cache_interface.CircularBufferSpec
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)
             layer_spec = next(iter(spec.kv_cache_specs.values())) if isinstance(spec, UniformTypeKVCacheSpecs) else spec
-            slot_mapping_enabled.append(
-                circular_buffer_spec is None or not isinstance(layer_spec, circular_buffer_spec)
-            )
+            slot_mapping_enabled.append(not isinstance(layer_spec, circular_buffer_spec))
             max_num_blocks = cdiv(self.max_model_len, spec.block_size)
             if spec.block_size <= 128:
                 alignment = 128 // spec.block_size

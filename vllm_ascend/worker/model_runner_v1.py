@@ -905,9 +905,7 @@ class NPUModelRunner(GPUModelRunner):
         self.num_accepted_tokens_event.record()
 
     def _get_ascend_mamba_state_copy_funcs(self):
-        """Bridge the copy-func tuple-to-mapping contract from vLLM #53896."""
-        if vllm_version_is("0.27.1"):
-            return self.model.get_mamba_state_copy_func()
+        """Get the per-backend copy functions introduced by vLLM #53896."""
         return self._get_mamba_state_copy_funcs()
 
     def _sync_num_accepted_tokens(self, num_reqs: int, has_prev_mapping: bool) -> None:

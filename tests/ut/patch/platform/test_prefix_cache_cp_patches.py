@@ -264,14 +264,11 @@ def test_ascend_mla_storage_geometry_survives_upstream_optional_field() -> None:
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
     assert get_storage_block_size(merged) == 128
     assert merged.page_size_bytes == 128 * 128 * 2
-    if vllm_version_is("0.27.1"):
-        assert spec.storage_block_size == 128
-    else:
-        # #53906's optional override must not be populated with Ascend's
-        # derived physical size, or upstream metadata building changes lanes.
-        assert spec.storage_block_size is None
-        assert resized.storage_block_size is None
-        assert merged.storage_block_size is None
+    # #53906's optional override must not be populated with Ascend's
+    # derived physical size, or upstream metadata building changes lanes.
+    assert spec.storage_block_size is None
+    assert resized.storage_block_size is None
+    assert merged.storage_block_size is None
 
 
 @pytest.mark.parametrize("spec_cls", [MLAAttentionSpec, AscendSFAIndexerCacheSpec])
@@ -280,10 +277,9 @@ def test_optional_mla_storage_size_defaults_to_logical_block(spec_cls) -> None:
     assert get_storage_block_size(spec) == 32
     uniform_spec = UniformTypeKVCacheSpecs(kv_cache_specs={"layer.0": spec, "layer.1": spec}, block_size=32)
     assert get_storage_block_size(uniform_spec) == 32
-    if not vllm_version_is("0.27.1"):
-        assert spec.storage_block_size is None
-        explicit = replace(spec, storage_block_size=16)
-        assert get_storage_block_size(explicit) == 16
+    assert spec.storage_block_size is None
+    explicit = replace(spec, storage_block_size=16)
+    assert get_storage_block_size(explicit) == 16
 
 
 @pytest.mark.parametrize(
@@ -353,7 +349,6 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
 
 
-@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #53896 introduced the packed-group hook")
 def test_deepseek_v4_groups_patch_the_live_packed_group_hook() -> None:
     c128_spec = MLAAttentionSpec(
         block_size=128 * 128,

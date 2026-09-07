@@ -58,7 +58,6 @@ from vllm_ascend.core.dyntra_lb_scheduler import (
     diagnostics_enabled,
     print_scheduler_summary,
 )
-from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass
@@ -975,15 +974,6 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        pending_partial_tail_offloads = None
-        if vllm_version_is("0.27.1"):
-            if (
-                self.connector is not None
-                and self.vllm_config.kv_transfer_config is not None
-                and self.vllm_config.kv_transfer_config.is_kv_producer
-            ):
-                pending_partial_tail_offloads = self.kv_cache_manager.take_partial_tail_offloads() or None
-
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
@@ -1021,11 +1011,6 @@ class RecomputeScheduler(Scheduler):
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
-        # vLLM #51358 moved this hand-off out of SchedulerOutput on main.
-        # Keep populating the legacy field for the v0.27.1 compatibility lane.
-        if vllm_version_is("0.27.1"):
-            scheduler_output.partial_tail_offloads = pending_partial_tail_offloads
-
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
         # 2. Wrap up all the KV cache load / save ops into an opaque object

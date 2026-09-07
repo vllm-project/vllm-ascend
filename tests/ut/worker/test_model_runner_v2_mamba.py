@@ -96,7 +96,7 @@ def test_mrv2_advertises_standardized_shared_kv_backing():
 
 def test_prepare_inputs_tracks_upstream_max_seq_len_contract():
     source = inspect.getsource(NPUModelRunner.prepare_inputs)
-    assert ("max_seq_len_np" in source) is vllm_version_is("0.27.1")
+    assert "max_seq_len_np" not in source
 
 
 def test_prepare_inputs_propagates_padded_request_count():

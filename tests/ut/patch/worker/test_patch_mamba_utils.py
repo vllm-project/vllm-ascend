@@ -4,7 +4,6 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
-import pytest
 import torch
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MambaSpec
@@ -151,8 +150,7 @@ def test_load_only_step_does_not_hide_remote_state_copy_on_next_forward():
     assert mamba_state_idx["req"] == 64
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_layerwise_copy_selects_funcs_from_live_mamba_mapping(monkeypatch, legacy):
+def test_layerwise_copy_selects_funcs_from_live_mamba_mapping():
     from vllm_ascend.patch.worker import patch_mamba_utils as pm
 
     state = torch.zeros((2, 1), dtype=torch.float32)
@@ -181,11 +179,10 @@ def test_layerwise_copy_selects_funcs_from_live_mamba_mapping(monkeypatch, legac
         _layer_copy_metadata={},
     )
 
-    monkeypatch.setattr(pm, "vllm_version_is", lambda _: legacy)
     pm._collect_mamba_copy_meta_with_layers(
         copy_bufs,
         SimpleNamespace(kv_cache_groups=[kv_cache_group]),
-        (copy_func,) if legacy else {mamba_type: (copy_func,)},
+        {mamba_type: (copy_func,)},
         [0],
         0,
         1,

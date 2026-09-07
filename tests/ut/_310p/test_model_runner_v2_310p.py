@@ -85,14 +85,12 @@ def test_310p_v2_does_not_advertise_shared_kv_backing() -> None:
     assert NPUModelRunner310V2.supports_standardized_shared_kv_backing is False
 
 
-@pytest.mark.parametrize("is_vllm_0_27_1", [True, False])
-def test_execute_model_forwards_valid_dummy_state_slots_on_main(is_vllm_0_27_1: bool) -> None:
+def test_execute_model_forwards_valid_dummy_state_slots_on_main() -> None:
     runner = object.__new__(NPUModelRunner310V2)
     scheduler_output = object()
     expected = object()
 
     with (
-        patch.object(model_runner_module, "vllm_version_is", return_value=is_vllm_0_27_1),
         patch.object(NPUModelRunner, "execute_model", return_value=expected) as parent_execute,
     ):
         output = runner.execute_model(
@@ -107,11 +105,7 @@ def test_execute_model_forwards_valid_dummy_state_slots_on_main(is_vllm_0_27_1: 
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
     }
-    if not is_vllm_0_27_1:
-        expected_kwargs.update(
-            context_len=0,
-            valid_dummy_state_slots=True,
-        )
+    expected_kwargs.update(context_len=0, valid_dummy_state_slots=True)
     parent_execute.assert_called_once_with(scheduler_output, **expected_kwargs)
     assert output is expected
     assert runner._force_eager_pc_batch is False
@@ -425,8 +419,7 @@ def test_block_table_expands_logical_blocks_to_310p_kernel_blocks() -> None:
     assert block_tables.block_tables_cpu[0][0, :2].tolist() == [14, 15]
 
 
-@pytest.mark.parametrize("is_vllm_0_27_1", [True, False])
-def test_initialize_kv_cache_gates_circular_slot_mapping_by_version(is_vllm_0_27_1: bool) -> None:
+def test_initialize_kv_cache_disables_circular_slot_mapping() -> None:
     class FakeCircularBufferSpec:
         block_size = 128
 
@@ -450,8 +443,6 @@ def test_initialize_kv_cache_gates_circular_slot_mapping_by_version(is_vllm_0_27
     )
 
     with (
-        patch.object(model_runner_module, "vllm_version_is", return_value=is_vllm_0_27_1),
-        # Expose the type in both lanes: symbol presence must not select behavior.
         patch.object(
             model_runner_module,
             "kv_cache_interface",
@@ -465,7 +456,7 @@ def test_initialize_kv_cache_gates_circular_slot_mapping_by_version(is_vllm_0_27
         runner.initialize_kv_cache(kv_cache_config)
 
     block_tables.assert_called_once()
-    assert block_tables.call_args.kwargs["slot_mapping_enabled"] == [True, is_vllm_0_27_1]
+    assert block_tables.call_args.kwargs["slot_mapping_enabled"] == [True, False]
 
 
 def test_block_table_disables_slot_mapping_for_recurrent_groups() -> None:

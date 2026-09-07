@@ -6,8 +6,6 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 from vllm.v1.worker.utils import defaultdict, extract_layer_index
 
-from vllm_ascend.utils import vllm_version_is
-
 
 # Without this patch, it will raise an exception when initialize kv_cache.
 # TODO To remove the patch, we need check why the original bind_kv_cache raises an NotImplementedError.
@@ -54,8 +52,7 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
 
-    if not vllm_version_is("0.27.1"):
-        utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
+    utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 
 utils.bind_kv_cache = bind_kv_cache

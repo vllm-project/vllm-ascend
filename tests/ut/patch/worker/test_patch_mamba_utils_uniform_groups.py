@@ -14,7 +14,6 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.patch.worker.patch_mamba_utils import _get_mamba_groups
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
@@ -44,15 +43,9 @@ def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
     )
 
     copy_funcs: Any
-    if vllm_version_is("0.27.1"):
-        group_ids, resolved_spec = _get_mamba_groups(kv_cache_config)
-        assert group_ids == [0, 1, 2]
-        assert resolved_spec == mamba_spec
-        copy_funcs = (object(), object())
-    else:
-        assert mamba_utils.get_mamba_groups is not _get_mamba_groups
-        assert mamba_utils.get_mamba_groups(kv_cache_config) == {mamba_spec: [0, 1, 2]}
-        copy_funcs = {mamba_spec.mamba_type: (object(), object())}
+    assert mamba_utils.get_mamba_groups is not _get_mamba_groups
+    assert mamba_utils.get_mamba_groups(kv_cache_config) == {mamba_spec: [0, 1, 2]}
+    copy_funcs = {mamba_spec.mamba_type: (object(), object())}
 
     def make_buffer(n: int, dtype: torch.dtype) -> SimpleNamespace:
         return SimpleNamespace(n=n, dtype=dtype)
