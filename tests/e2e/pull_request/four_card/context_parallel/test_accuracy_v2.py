@@ -29,7 +29,6 @@ import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
-from vllm_ascend.utils import vllm_version_is
 
 MAX_NUM_SEQS = 4
 FULL_DECODE_GRAPH = {
@@ -71,26 +70,16 @@ DSV3_2_SFA_DCP_GOLDENS = (
     ],
 )
 DSV3_2_SFA_PCP_GOLDENS = (
-    (
-        [
-            "The capital of France isoint054 Rund compasses",
-            "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
-            "The president of United States isoint054 Rund959arki",
-        ],
-    )
-    if vllm_version_is("0.27.1")
-    else (
-        [
-            "The capital of France isoint054 Rund compasses",
-            "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
-            "The president of United States isoint054 Rund596\u5e84\u7a3c",
-        ],
-        [
-            "The capital of France isoint054 Rund compasses",
-            "Hello, my name is Tom, I amERIChiretailhallenging",
-            "The president of United States isoint054 Rund596\u5e84\u7a3c",
-        ],
-    )
+    [
+        "The capital of France isoint054 Rund compasses",
+        "Hello, my name is Tom, I am" + "ERIC slicpacelike\u6302",
+        "The president of United States isoint054 Rund596\u5e84\u7a3c",
+    ],
+    [
+        "The capital of France isoint054 Rund compasses",
+        "Hello, my name is Tom, I amERIChiretailhallenging",
+        "The president of United States isoint054 Rund596\u5e84\u7a3c",
+    ],
 )
 
 MTP_PCP_MODEL = "wemaster/deepseek_mtp_main_random_bf16"

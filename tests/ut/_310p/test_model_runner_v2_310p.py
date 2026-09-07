@@ -177,12 +177,9 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=[layer_name])],
-        # vLLM #51718 renamed shared_by to layers; expose both fields so this
-        # focused 310P fixture stays valid on main and v0.27.1.
         kv_cache_tensors=[
             SimpleNamespace(
                 size=160,
-                shared_by=[layer_name],
                 layers=[layer_name],
             )
         ],
@@ -205,10 +202,6 @@ def test_kv_cache_allocation_qwen35_mamba_stays_nd() -> None:
     assert states[0].untyped_storage().nbytes() == 160
 
 
-@pytest.mark.skipif(
-    model_runner_module.vllm_version_is("0.27.1"),
-    reason="vLLM #51718 only changed main descriptors",
-)
 def test_main_mamba_descriptor_allocates_private_per_layer_pages() -> None:
     class FakeMambaSpec:
         block_size = 1
@@ -301,10 +294,7 @@ def test_prepare_inputs_dispatches_to_310p_implementation() -> None:
     expected = object()
 
     with patch.object(runner, "_prepare_inputs_310p", return_value=expected) as prepare_inputs_310p:
-        if model_runner_module.vllm_version_is("0.27.1"):
-            result = runner.prepare_inputs(scheduler_output, batch_desc)
-        else:
-            result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
+        result = runner.prepare_inputs(scheduler_output, MagicMock(), batch_desc)
 
     assert result is expected
     prepare_inputs_310p.assert_called_once_with(scheduler_output, batch_desc)
@@ -423,12 +413,9 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     kv_cache_config = SimpleNamespace(
         num_blocks=2,
         kv_cache_groups=[SimpleNamespace(kv_cache_spec=spec, layer_names=["model.layers.0.self_attn"])],
-        # vLLM #51718 renamed shared_by to layers; expose both fields so this
-        # focused 310P fixture stays valid on main and v0.27.1.
         kv_cache_tensors=[
             SimpleNamespace(
                 size=8192,
-                shared_by=["model.layers.0.self_attn"],
                 layers=["model.layers.0.self_attn"],
             )
         ],
@@ -458,10 +445,6 @@ def test_kv_cache_allocation_uses_separate_nz_k_and_v() -> None:
     assert all(allocation[3] == model_runner_module.ACL_FORMAT_FRACTAL_NZ for allocation in allocations)
 
 
-@pytest.mark.skipif(
-    model_runner_module.vllm_version_is("0.27.1"),
-    reason="vLLM #51718 only changed main descriptors",
-)
 def test_main_attention_descriptor_allocates_private_kv_per_layer() -> None:
     class FakeAttentionSpec:
         block_size = 128

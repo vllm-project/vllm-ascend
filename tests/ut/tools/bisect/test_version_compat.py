@@ -109,8 +109,8 @@ def test_adapter_switches_mismatched_vllm_and_torch_npu(
     # _switch_vllm sets os.environ["VLLM_VERSION"] as a side effect (it is how
     # the bisect worker propagates the switched version to the vllm package).
     # Without restoration this leaks into the shared pytest process, making
-    # later vllm_version_is("0.27.1") calls (e.g. the MRV2 worker UTs on the
-    # v0.27.1 lane) resolve against the leaked "0.25.1" instead of vllm.__version__.
+    # later vllm_version_is calls in worker UTs resolve against the leaked
+    # "0.25.1" instead of vllm.__version__.
     with mock.patch.dict(os.environ, {}):
         adapter.ensure_targets(
             {"vllm": "v0.25.1", "torch-npu": "2.10.0.post2"},
