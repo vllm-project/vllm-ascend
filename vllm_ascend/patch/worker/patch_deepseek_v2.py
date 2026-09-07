@@ -39,7 +39,6 @@ from vllm_ascend.worker.v2 import pp_utils
 from vllm_ascend.worker.v2.pp_utils import (
     add_pp_topk_indices,
     configure_pp_topk_transport,
-    restore_pp_topk_indices,
 )
 
 
@@ -385,12 +384,6 @@ def _patched_forward(
             aux_hidden_states = pp_utils.get_pp_transport_tensors(
                 intermediate_tensors,
                 pp_utils.PPTransportDataType.AUX_HIDDEN_STATES,
-            )
-        if self.receive_pp_topk_indices:
-            assert self.topk_indices_buffer is not None
-            restore_pp_topk_indices(
-                intermediate_tensors,
-                self.topk_indices_buffer,
             )
 
     llama_4_scaling_config = getattr(self.config, "llama_4_scaling", None)
