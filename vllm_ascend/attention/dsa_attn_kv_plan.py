@@ -118,7 +118,7 @@ class DsaAttnKvPlan:
             # ACLGraph capture matches the A5 FP8 / SFA one-dimensional slot
             # convention. Do not clamp PAD_SLOT_ID (-1) to 0: that overwrites
             # a live physical slot. The scatter kernel skips negative indices.
-            flat_cache = cache.view((-1,) + tuple(cache.shape[2:]))
+            flat_cache = cache.flatten(end_dim=1)
             indices = slot_mapping.view(-1, 1)
             updates = x.reshape((slot_mapping.shape[0],) + tuple(flat_cache.shape[1:]))
             torch_npu.npu_scatter_nd_update_(flat_cache, indices, updates)
