@@ -162,9 +162,7 @@ def test_cgdr_310_npu_wy_matches_torch_wy_e2e(monkeypatch, batch, tokens, q_head
         batch=batch, tokens=tokens, q_heads=q_heads, v_heads=v_heads, k_dim=k_dim, v_dim=v_dim
     )
     assert chunk_mod._can_use_npu_compute_wy(q, k, v, g, beta, CHUNK_SIZE)
-    initial_state = torch.zeros(
-        batch, v.shape[2], v.shape[-1], k.shape[-1], dtype=torch.float32, device=q.device
-    )
+    initial_state = torch.zeros(batch, v.shape[2], v.shape[-1], k.shape[-1], dtype=torch.float32, device=q.device)
 
     out_npu, state_npu = _run_cgdr_310(q, k, v, g, beta, initial_state)
 
@@ -219,16 +217,12 @@ def test_compute_wy_qwen35_2b_l2norm_matches_torch():
     q, k, v, g, beta, _ = _colleague_precision_inputs()
     q = l2norm_310p(q)
     k = l2norm_310p(k)
-    q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(
-        q, k, v, g, beta, CHUNK_SIZE
-    )
+    q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(q, k, v, g, beta, CHUNK_SIZE)
     assert chunk_mod._can_use_npu_compute_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
 
     ref = chunk_mod._compute_kernel_inputs_from_torch_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
     dbl = chunk_mod._compute_kernel_inputs_from_doubling_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
-    out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(
-        q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE
-    )
+    out = torch.ops._C_ascend.chunk_gated_delta_rule_compute_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
 
     # g cumsum must match exactly (fp32 path).
     torch.testing.assert_close(out[4].cpu(), ref[4].cpu(), rtol=1e-5, atol=1e-5)
@@ -277,9 +271,7 @@ def test_cgdr_310_colleague_shape_npu_wy_vs_torch_wy(monkeypatch):
     q, k, v, g, beta, initial_state = _colleague_precision_inputs()
 
     # After pad_bthd, T becomes 128 and NPU compute_wy must be eligible.
-    q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(
-        q, k, v, g, beta, CHUNK_SIZE
-    )
+    q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(q, k, v, g, beta, CHUNK_SIZE)
     assert q_pad.shape[1] == 128
     assert chunk_mod._can_use_npu_compute_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
 
@@ -319,9 +311,7 @@ def test_cgdr_310_colleague_shape_vs_pytorch_reference():
     """
     enable_custom_op()
     q, k, v, g, beta, initial_state = _colleague_precision_inputs(dim=128)
-    q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(
-        q, k, v, g, beta, CHUNK_SIZE
-    )
+    q_pad, k_pad, v_pad, g_pad, beta_pad, _, _ = chunk_mod._pad_bthd_to_chunk(q, k, v, g, beta, CHUNK_SIZE)
     assert not chunk_mod._can_use_npu_compute_wy(q_pad, k_pad, v_pad, g_pad, beta_pad, CHUNK_SIZE)
 
     out_npu, _ = _run_cgdr_310(
