@@ -94,11 +94,12 @@ kv_transfer_config = KVTransferConfig(
 
 ### Tuning the filesystem (SSD / 3FS) secondary tier
 
-The `fs` tier reuses vLLM v0.27.1's batched filesystem implementation. It probes `O_DIRECT` at startup and automatically falls back to buffered I/O when the filesystem rejects direct I/O. To get the best disk/3FS offload throughput:
+The `fs` tier reuses vLLM's batched filesystem implementation. It probes `O_DIRECT` at startup and automatically falls back to buffered I/O when the filesystem rejects direct I/O. To get the best disk/3FS offload throughput:
 
 - Increase `blocks_per_chunk` to transfer larger chunks and reduce metadata overhead, while accounting for the resulting coarser cache-hit granularity.
 - Raise `n_read_threads` / `n_write_threads` to match the backend's parallelism (3FS over RDMA benefits from higher concurrency than local SSD).
 - Keep the CPU primary tier (`cpu_bytes_to_use`) large enough that the slower disk tier is only reached for genuinely cold data — a secondary tier only improves performance when the working set exceeds CPU capacity.
+- The kvcache eviction strategy for the filesystem (SSD / 3FS) secondary tier is still under development and will be supported in future versions.
 
 ## How It Works
 
