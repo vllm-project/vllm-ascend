@@ -50,6 +50,26 @@ def test_list_without_dflash2_is_unchanged(monkeypatch, config):
     ]
 
 
+def test_original_sequence_is_not_mutated(monkeypatch, config):
+    original = [DFLASH2_UNSUPPORTED_FEATURE, "diffusion models"]
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_v1_dflash2_support._original_get_v1_unsupported_features",
+        lambda _self: original,
+    )
+
+    assert _patched_get_v1_model_runner_unsupported_features(config) == ["diffusion models"]
+    assert original == [DFLASH2_UNSUPPORTED_FEATURE, "diffusion models"]
+
+
+def test_tuple_blockers_are_filtered(monkeypatch, config):
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_v1_dflash2_support._original_get_v1_unsupported_features",
+        lambda _self: (DFLASH2_UNSUPPORTED_FEATURE, "diffusion models"),
+    )
+
+    assert _patched_get_v1_model_runner_unsupported_features(config) == ["diffusion models"]
+
+
 @pytest.mark.skipif(
     _original_get_v1_unsupported_features is None,
     reason="vLLM does not gate v1 model runner features yet, so there is nothing to patch",
