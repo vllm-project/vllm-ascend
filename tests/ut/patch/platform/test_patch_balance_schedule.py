@@ -45,20 +45,11 @@ import ast
 import inspect
 import subprocess
 import textwrap
-from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
-from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
-from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
 
 # Capture the upstream originals BEFORE importing the patch: importing the patch
 # mutates the module-level ``Scheduler`` / ``DPEngineCoreProc`` symbols, so grab
@@ -97,15 +88,12 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 #   vllm.v1.engine.core.DPEngineCoreProc = BalanceDPEngineCoreProc       (DEFERRED:
 #       swapped inside _balance_run_engine_core only when balance is enabled)
 from vllm_ascend.patch.platform import patch_dyntra_lb_core as _dyntra_patch  # noqa: E402
-from vllm_ascend.patch.platform import patch_balance_schedule as _pbs  # noqa: E402
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
-    BalanceDPEngineCoreProc,
     BalanceScheduler,
     _balance_run_engine_core,
     _balance_scheduling_enabled,
     _OriginalRunEngineCore,
 )
-from vllm_ascend.utils import vllm_version_is
 
 # Importing any vLLM module can activate the Ascend platform plugin before this
 # test module finishes importing, so a direct ``Scheduler`` import may already
@@ -649,6 +637,11 @@ _BLOCK_SIZE = 16
 
 
 def _create_requests(num_requests, num_tokens=10, max_tokens=16, id_offset=0):
+    from vllm.sampling_params import SamplingParams
+    from vllm.utils.hashing import sha256
+    from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+    from vllm.v1.request import Request
+
     init_none_hash(sha256)
     sampling_params = SamplingParams(ignore_eos=False, max_tokens=max_tokens)
     return [
@@ -664,6 +657,8 @@ def _create_requests(num_requests, num_tokens=10, max_tokens=16, id_offset=0):
 
 
 def _make_output(scheduler):
+    from vllm.v1.outputs import ModelRunnerOutput
+
     req_ids = [req.request_id for req in scheduler.running]
     return ModelRunnerOutput(
         req_ids=req_ids,
@@ -676,6 +671,17 @@ def _make_output(scheduler):
 
 
 def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
+    from contextlib import ExitStack
+    from unittest.mock import PropertyMock
+
+    import torch
+    from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig, KVCacheGroupSpec
+    from vllm.v1.structured_output import StructuredOutputManager
+
+    from vllm_ascend.patch.platform import patch_balance_schedule as pbs
+    from vllm_ascend.utils import vllm_version_is
+
     ascend_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(
             enable_balance_scheduling=True,
@@ -686,63 +692,64 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
     mock_hf_config.model_type = "qwen3"
     mock_hf_config.is_encoder_decoder = False
     mock_hf_config.architectures = ["Qwen3ForCausalLM"]
-    model_config = ModelConfig(
-        model=_MODEL,
-        tokenizer=_MODEL,
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        max_model_len=8192,
-    )
-    model_config.hf_config = mock_hf_config
-    model_config.hf_text_config = MagicMock()
-    model_config.hf_text_config.is_encoder_decoder = False
-    model_config.runner_type = "generate"
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=max_num_seqs,
-        max_model_len=8192,
-        long_prefill_token_threshold=0,
-        disable_chunked_mm_input=False,
-        enable_chunked_prefill=True,
-        max_num_batched_tokens=8192,
-        is_encoder_decoder=False,
-    )
-    scheduler_config.max_num_encoder_input_tokens = 10000
-    scheduler_config.encoder_cache_size = 10000
-    scheduler_config.chunked_prefill_enabled = True
-    cache_config = CacheConfig(block_size=_BLOCK_SIZE, gpu_memory_utilization=0.9, cache_dtype="auto")
-    vllm_config = VllmConfig(
-        scheduler_config=scheduler_config,
-        model_config=model_config,
-        cache_config=cache_config,
-    )
-    vllm_config.parallel_config.pipeline_parallel_size = 1
-    vllm_config.parallel_config.data_parallel_size = dp_size
-    vllm_config.model_config.hf_config.is_encoder_decoder = False
-    kv_cache_config = KVCacheConfig(
-        num_blocks=10000,
-        kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(block_size=_BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32),
-            )
-        ],
-    )
-    kv_cache_config.hash_block_size = _BLOCK_SIZE
-    cache_config.num_gpu_blocks = 10000
 
     with ExitStack() as stack:
+        stack.enter_context(patch("vllm.config.ModelConfig.__post_init__", MagicMock()))
+        stack.enter_context(patch("vllm.config.VllmConfig.__post_init__", MagicMock()))
+        stack.enter_context(patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock()))
         stack.enter_context(
             patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
         )
         if not vllm_version_is("0.27.1"):
             stack.enter_context(patch.object(ModelConfig, "uses_mrope", new_callable=PropertyMock, return_value=False))
-        stack.enter_context(patch("vllm.config.ModelConfig.__post_init__", MagicMock()))
-        stack.enter_context(patch("vllm.config.VllmConfig.__post_init__", MagicMock()))
-        stack.enter_context(patch("vllm.config.device.DeviceConfig.__post_init__", MagicMock()))
-        stack.enter_context(patch.object(_pbs, "init_ascend_config", return_value=ascend_config))
+        stack.enter_context(patch.object(pbs, "init_ascend_config", return_value=ascend_config))
         stack.enter_context(patch("vllm_ascend.ascend_config.get_ascend_config", return_value=ascend_config))
+
+        model_config = ModelConfig(
+            model=_MODEL,
+            tokenizer=_MODEL,
+            trust_remote_code=True,
+            dtype="float16",
+            seed=42,
+            max_model_len=8192,
+        )
+        model_config.hf_config = mock_hf_config
+        model_config.hf_text_config = MagicMock()
+        model_config.hf_text_config.is_encoder_decoder = False
+        model_config.runner_type = "generate"
+        scheduler_config = SchedulerConfig(
+            max_num_seqs=max_num_seqs,
+            max_model_len=8192,
+            long_prefill_token_threshold=0,
+            disable_chunked_mm_input=False,
+            enable_chunked_prefill=True,
+            max_num_batched_tokens=8192,
+            is_encoder_decoder=False,
+        )
+        scheduler_config.max_num_encoder_input_tokens = 10000
+        scheduler_config.encoder_cache_size = 10000
+        scheduler_config.chunked_prefill_enabled = True
+        cache_config = CacheConfig(block_size=_BLOCK_SIZE, gpu_memory_utilization=0.9, cache_dtype="auto")
+        vllm_config = VllmConfig(
+            scheduler_config=scheduler_config,
+            model_config=model_config,
+            cache_config=cache_config,
+        )
+        vllm_config.parallel_config.pipeline_parallel_size = 1
+        vllm_config.parallel_config.data_parallel_size = dp_size
+        vllm_config.model_config.hf_config.is_encoder_decoder = False
+        kv_cache_config = KVCacheConfig(
+            num_blocks=10000,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["layer"],
+                    FullAttentionSpec(block_size=_BLOCK_SIZE, num_kv_heads=1, head_size=1, dtype=torch.float32),
+                )
+            ],
+        )
+        kv_cache_config.hash_block_size = _BLOCK_SIZE
+        cache_config.num_gpu_blocks = 10000
         scheduler = BalanceScheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -775,13 +782,15 @@ def _make_balance_scheduler(*, dp_size=2, max_num_seqs=16):
 
 
 def test_balance_gather_all_gathers_when_enabled():
+    from vllm_ascend.patch.platform import patch_balance_schedule as pbs
+
     scheduler = _make_balance_scheduler()
     scheduler.dp_group = object()
-    with patch.object(_pbs.dist, "all_gather") as mock_gather:
+    with patch.object(pbs.dist, "all_gather") as mock_gather:
         scheduler.balance_gather()
     mock_gather.assert_called_once()
     scheduler.dp_group = None
-    with patch.object(_pbs.dist, "all_gather") as mock_gather:
+    with patch.object(pbs.dist, "all_gather") as mock_gather:
         scheduler.balance_gather()
     mock_gather.assert_not_called()
 
@@ -802,6 +811,9 @@ def test_balance_schedule_waiting_and_running_paths():
 
 
 def test_balance_schedule_pause_freeze_and_v2():
+    import torch
+    from vllm.v1.core.sched.interface import PauseState
+
     scheduler = _make_balance_scheduler()
     scheduler._pause_state = PauseState.PAUSED_ALL
     paused = scheduler.schedule()
@@ -832,6 +844,10 @@ def test_balance_schedule_pause_freeze_and_v2():
 
 
 def test_balance_schedule_encoder_lora_preempt_and_blocked():
+    from unittest.mock import PropertyMock
+
+    from vllm.v1.request import Request, RequestStatus
+
     scheduler = _make_balance_scheduler()
     scheduler.need_mamba_block_aligned_split = True
     scheduler._mamba_block_aligned_split = MagicMock(side_effect=lambda req, n, *_a, **_k: n)
@@ -870,11 +886,14 @@ def test_balance_schedule_encoder_lora_preempt_and_blocked():
 
 
 def test_balance_engine_core_hooks(monkeypatch):
+    from vllm_ascend.patch.platform import patch_balance_schedule as pbs
+    from vllm_ascend.patch.platform.patch_balance_schedule import BalanceDPEngineCoreProc
+
     proc = BalanceDPEngineCoreProc.__new__(BalanceDPEngineCoreProc)
     proc.dp_group = "dp"
     proc.scheduler = MagicMock()
     monkeypatch.setattr(
-        _pbs.DPEngineCoreProc,
+        pbs.DPEngineCoreProc,
         "_has_global_unfinished_reqs",
         lambda self, local_unfinished: True,
     )
@@ -882,20 +901,21 @@ def test_balance_engine_core_hooks(monkeypatch):
     assert proc.scheduler.dp_group == "dp"
     proc.scheduler.balance_gather.assert_called_once()
 
-    orig = _pbs._engine_core_mod.DPEngineCoreProc
+    orig = pbs._engine_core_mod.DPEngineCoreProc
     try:
         with (
-            patch.object(_pbs, "_OriginalRunEngineCore", return_value="ok") as mock_orig,
-            patch.object(_pbs, "_balance_scheduling_enabled", return_value=True),
+            patch.object(pbs, "_OriginalRunEngineCore", return_value="ok") as mock_orig,
+            patch.object(pbs, "_balance_scheduling_enabled", return_value=True),
         ):
             assert _balance_run_engine_core(vllm_config=object(), dp_rank=1) == "ok"
-            assert _pbs._engine_core_mod.DPEngineCoreProc is BalanceDPEngineCoreProc
+            assert pbs._engine_core_mod.DPEngineCoreProc is BalanceDPEngineCoreProc
             mock_orig.assert_called_once()
         with (
-            patch.object(_pbs, "_OriginalRunEngineCore", return_value="off"),
-            patch.object(_pbs, "_balance_scheduling_enabled", return_value=False),
+            patch.object(pbs, "_OriginalRunEngineCore", return_value="off"),
+            patch.object(pbs, "_balance_scheduling_enabled", return_value=False),
         ):
             assert _balance_run_engine_core() == "off"
-            assert _pbs._engine_core_mod.DPEngineCoreProc is _pbs._OriginalDPEngineCoreProc
+            assert pbs._engine_core_mod.DPEngineCoreProc is pbs._OriginalDPEngineCoreProc
     finally:
-        _pbs._engine_core_mod.DPEngineCoreProc = orig
+        pbs._engine_core_mod.DPEngineCoreProc = orig
+
