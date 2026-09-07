@@ -287,6 +287,23 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
 
 
+def test_full_decode_request_layout_is_token_sized_only_without_drafts():
+    manager = AscendPCPManager.__new__(AscendPCPManager)
+    decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=0)
+    draft_decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=8)
+    prefill_batch = SimpleNamespace(is_prefilling_np=np.ones(2, dtype=np.bool_), num_draft_tokens=0)
+
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
+    assert manager._full_decode_requests_are_token_sized(decode_batch) is True
+    # Speculative (MTP/Eagle3) decode slots carry more than one token, so
+    # request metadata must stay at the request extent (not the token extent).
+    assert manager._full_decode_requests_are_token_sized(draft_decode_batch) is False
+    assert manager._full_decode_requests_are_token_sized(prefill_batch) is False
+
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.NONE)
+    assert manager._full_decode_requests_are_token_sized(decode_batch) is False
+
+
 def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     """Keep request metadata aligned when upstream already pads tokens."""
     input_buffers = AscendInputBuffers(

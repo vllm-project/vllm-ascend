@@ -190,6 +190,19 @@ class AscendPCPManager(PCPManager):
             num_draft_tokens_per_req=local_draft_counts,
         )
 
+    def _full_decode_requests_are_token_sized(self, global_batch: AscendInputBatch) -> bool:
+        """Whether a FULL_DECODE_ONLY graph replays exactly one token per padded request.
+
+        When that holds, request-shaped metadata must be padded to the token
+        extent. Speculative (MTP/Eagle3) decode slots may carry more than one
+        token, so their request metadata is kept at the request extent instead.
+        """
+        return (
+            not bool(global_batch.is_prefilling_np.any())
+            and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+            and global_batch.num_draft_tokens == 0
+        )
+
     def partition_batch(
         self,
         input_batch: AscendInputBatch,
@@ -212,10 +225,10 @@ class AscendPCPManager(PCPManager):
         is_decode_only = not bool(global_batch.is_prefilling_np.any())
         # FULL_DECODE_ONLY graphs capture one token for every padded request.
         # Other graph modes may pad tokens without padding request metadata.
-        is_full_decode_graph = (
-            is_decode_only and self.vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY
+        is_full_decode_graph = self._full_decode_requests_are_token_sized(global_batch)
+        graph_num_reqs = (
+            global_batch.num_tokens_after_padding if is_full_decode_graph else global_batch.num_reqs_after_padding
         )
-        graph_num_reqs = graph_num_tokens if is_full_decode_graph else global_batch.num_reqs_after_padding
         # On newer vLLM, the base PCP manager may already honor
         # ``padded_num_tokens`` while leaving request-shaped metadata at the
         # actual request count. Pad when either extent is still short so the
