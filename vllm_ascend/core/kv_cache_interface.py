@@ -188,9 +188,15 @@ class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
             raise ValueError(f"dcp_replication_size must be positive, got {self.dcp_replication_size}.")
 
     @property
+    def _lane_spec(self) -> FullAttentionSpec:
+        # Evaluate on a base instance: v0.27.1 page sizing dispatches through
+        # self.real_page_size_bytes, which must not re-enter replicated sizing.
+        return FullAttentionSpec(**{field.name: getattr(self, field.name) for field in fields(FullAttentionSpec)})
+
+    @property
     def lane_page_size_bytes(self) -> int:
         """Padded bytes of one physical draft-DCP lane page."""
-        return super().page_size_bytes
+        return self._lane_spec.page_size_bytes
 
     @property
     def page_size_bytes(self) -> int:
@@ -198,7 +204,11 @@ class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        return self.page_size_bytes
+        return self.dcp_replication_size * self._lane_spec.real_page_size_bytes
+
+    @property
+    def unpadded_page_size_bytes(self) -> int:
+        return self.dcp_replication_size * self._lane_spec.unpadded_page_size_bytes
 
     @classmethod
     def from_full_attention_spec(

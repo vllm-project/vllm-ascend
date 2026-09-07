@@ -425,6 +425,28 @@ def test_kimi_k3_mixed_attention_still_requires_same_block_size() -> None:
     assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
 
 
+@pytest.mark.parametrize("replication_size", [1, 2, 8])
+@pytest.mark.parametrize("block_size", [128, 384])
+@pytest.mark.parametrize("padded", [False, True])
+@pytest.mark.parametrize("head_size_v", [64, 128])
+def test_replicated_draft_page_sizes_match_base_spec(replication_size, block_size, padded, head_size_v):
+    base = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=8,
+        head_size=64,
+        head_size_v=head_size_v,
+        dtype=torch.bfloat16,
+    )
+    if padded:
+        base = replace(base, page_size_padded=base.unpadded_page_size_bytes + 4096)
+    spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(base, replication_size)
+    assert spec.block_size == block_size
+    assert spec.lane_page_size_bytes == base.page_size_bytes
+    assert spec.page_size_bytes == replication_size * base.page_size_bytes
+    assert spec.real_page_size_bytes == replication_size * base.real_page_size_bytes
+    assert spec.unpadded_page_size_bytes == replication_size * base.unpadded_page_size_bytes
+
+
 @pytest.mark.parametrize("legacy_config", [False, True])
 def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
     monkeypatch,
