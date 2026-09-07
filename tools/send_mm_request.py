@@ -42,6 +42,13 @@ def _load_image_data(image_path: str | None = None) -> str:
             local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
         )
         image_path = os.path.join(mm_dir, "test_mm2.jpg")
+    elif not os.path.exists(_resolve_fs_path(image_path)):
+        mm_dir = snapshot_download(
+            image_path,
+            repo_type="dataset",
+            local_files_only=huggingface_hub.constants.HF_HUB_OFFLINE,
+        )
+        image_path = os.path.join(mm_dir, "test_mm2.jpg")
     with open(_resolve_fs_path(image_path), "rb") as image_file:
         return base64.b64encode(image_file.read()).decode("utf-8")
 
