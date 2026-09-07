@@ -289,7 +289,7 @@ templates:
 benchmarks:
   perf_TPOT50_3_5_1_5:
     case_type: performance
-    dataset_path_local: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
+    dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 1024
@@ -300,7 +300,7 @@ benchmarks:
     threshold: 0.95
   perf_TPOT20_3_5_1_5:
     case_type: performance
-    dataset_path_local: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
+    dataset_path: vllm-ascend/GSM8K-in3500-bs4096-prefix0-ds
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 16
@@ -311,7 +311,7 @@ benchmarks:
     threshold: 0.95
   perf_TPOT50_64_1:
     case_type: performance
-    dataset_path_local: GSM8K_prefix0_in65536_bs400_deepseek
+    dataset_path: GSM8K_prefix0_in65536_bs400_deepseek
     request_conf: vllm_api_stream_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
     num_prompts: 64
