@@ -1214,6 +1214,9 @@ def refresh_block_size(vllm_config):
         # logic rather than the generic platform default.
         return
 
+    if cache_config.user_specified_block_size:
+        return
+
     if cache_config.block_size != 128:
         if cache_config.enable_prefix_caching or scheduler_config.enable_chunked_prefill:
             logger.info("Block size is set to 128 if prefix cache or chunked prefill is enabled.")
