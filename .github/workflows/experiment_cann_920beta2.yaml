@@ -38,6 +38,11 @@ jobs:
           submodules: recursive
           persist-credentials: false
           path: baseline
+      - name: Prepare build dependencies and verified CANN source
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/evidence"
+          bash experiment/tools/cann_920beta2_experiment/prepare_build.sh \
+            "$GITHUB_WORKSPACE/evidence" 2>&1 | tee "$GITHUB_WORKSPACE/evidence/build-prepare.log"
       - name: Install matched toolkit and A3 ops
         run: |
           mkdir -p "$GITHUB_WORKSPACE/evidence"

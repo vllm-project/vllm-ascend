@@ -3,23 +3,15 @@ set -euo pipefail
 
 # Only for the disposable A3 job, with the matched CANN environment already active.
 evidence=$(realpath "$1")
-scripts=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 [[ $(uname -m) == aarch64 ]]
 for dependency in git cmake g++ pigz dos2unix; do
-    command -v "$dependency"
+    command -v "$dependency" || { echo "Missing build tool after preparation: $dependency" >&2; exit 1; }
 done
-work=$(mktemp -d /tmp/cann920-opsnn-fixed.XXXXXX)
-src="$work/ops-nn"
-GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch v9.2.0-beta.2 \
-    https://gitcode.com/cann/ops-nn.git "$src"
+src=$(cat "$evidence/fix-source-dir.txt")
 [[ $(git -C "$src" rev-parse HEAD) == 30ef7dd563c8a4b74c3161835c8e47d1d96f87b6 ]]
-git -C "$src" apply --check "$scripts/optional_input_fix.patch"
-git -C "$src" apply "$scripts/optional_input_fix.patch"
-git -C "$src" add -- norm/add_rms_norm_dynamic_quant/op_host/arch22/add_rms_norm_dynamic_quant_tiling.cpp \
-    norm/add_rms_norm_dynamic_quant/tests/ut/op_host/arch22/test_add_rms_norm_dynamic_quant_tiling.cpp
-# Match the complete source tree used by the validated A2 fix, not just a similar diff.
+# Recheck the complete staged tree and reject unstaged changes before compiling.
 [[ $(git -C "$src" write-tree) == c41d331cdab95233834dbca87e0ada238251a5f0 ]]
-git -C "$src" diff --cached > "$evidence/applied-fix.patch"
+git -C "$src" diff --quiet
 cd "$src"
 bash build.sh --pkg --soc=ascend910_93 --ops=add_rms_norm_dynamic_quant \
     --vendor_name=ardqv2_fix_920 --ccache=off -j8 \
