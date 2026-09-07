@@ -94,10 +94,7 @@ class TestDSV4MultiCacheSpecLayers:
 
     def test_layout_without_indexer_only(self):
         # A layer with only main specs (no indexer at all) also works now.
-        layer_specs = {
-            f"model.layers.0.self_attn.{name}": _spec()
-            for name in ("attn", "swa_cache")
-        }
+        layer_specs = {f"model.layers.0.self_attn.{name}": _spec() for name in ("attn", "swa_cache")}
         layout = build_layerwise_reuse_layout(layer_specs, 1, {})
         assert layout.layer_cache_specs[0].indexer is None
         assert layout.layer_cache_specs[0].main.layer_name.endswith(".attn")
