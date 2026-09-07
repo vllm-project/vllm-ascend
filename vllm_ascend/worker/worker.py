@@ -94,7 +94,6 @@ from vllm_ascend.utils import (
     enable_sp,
     register_ascend_customop,
     setup_ascend_local_comm_res,
-    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -292,9 +291,6 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
-
-        if (tags is None or "kv_cache" in tags) and vllm_version_is("0.27.1"):
-            self.model_runner.post_kv_cache_wake_up()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -657,8 +653,6 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
-        if vllm_version_is("0.27.1"):
-            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
