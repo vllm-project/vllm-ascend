@@ -70,29 +70,57 @@ class AttentionMaskBuilder310:
         return mask
 
     @classmethod
+    def _host_query_lens(cls, attn_metadata: AscendMetadata) -> torch.Tensor:
+        """Host qLens for splitfuse row selection. Never D2H from captured NPU tensors."""
+        qlens = getattr(attn_metadata, "query_lens_cpu", None)
+        if isinstance(qlens, torch.Tensor) and qlens.device.type == "cpu":
+            return qlens
+        qsl = attn_metadata.query_start_loc
+        if not isinstance(qsl, torch.Tensor) or qsl.device.type != "cpu":
+            raise RuntimeError(
+                "310P get_splitfuse_mask requires host query_lens_cpu or CPU query_start_loc; "
+                "D2H inside ACLGraph capture is illegal (acl error 107027)."
+            )
+        return qsl[1:] - qsl[:-1]
+
+    @classmethod
+    def _host_seq_lens(cls, attn_metadata: AscendMetadata) -> torch.Tensor:
+        """Host context lengths for splitfuse row selection. Never D2H from captured NPU tensors."""
+        seq_lens_cpu = getattr(attn_metadata, "seq_lens_cpu", None)
+        if isinstance(seq_lens_cpu, torch.Tensor) and seq_lens_cpu.device.type == "cpu":
+            return seq_lens_cpu
+        seq_lens = attn_metadata.seq_lens
+        if not isinstance(seq_lens, torch.Tensor) or seq_lens.device.type != "cpu":
+            raise RuntimeError(
+                "310P get_splitfuse_mask requires seq_lens_cpu or CPU seq_lens; "
+                "D2H inside ACLGraph capture is illegal (acl error 107027)."
+            )
+        return seq_lens
+
+    @classmethod
     def get_splitfuse_mask(cls, attn_metadata: AscendMetadata, device: torch.device):
         """
         Generates and formats the attention mask for SplitFuse (chunked prefill) decoding.
 
-        It calculates the specific indices required based on query start locations
+        It calculates the specific indices required based on host query lengths
         and context lengths, selects the relevant parts from the global chunked
         mask, and converts the result to the NPU-specific fractal format.
 
+        Call this from metadata build() (outside ACLGraph), not from captured forward.
+
         Args:
-            attn_metadata (AscendMetadata): Metadata containing query start locations and sequence lengths.
+            attn_metadata (AscendMetadata): Metadata containing host query/seq lengths.
             device (torch.device): The device to perform operations on.
 
         Returns:
             torch.Tensor: The splitfuse attention mask cast to ACL_FORMAT_FRACTAL_NZ.
         """
-        if cls.chunked_prefill_attn_mask is None:
+        if cls.chunked_prefill_attn_mask is None or cls.chunked_prefill_attn_mask.device != device:
             cls.chunked_prefill_attn_mask = cls.gen_causal_additive_mask(cls.max_seqlen, device)
-        qsl = attn_metadata.query_start_loc.to("cpu", dtype=torch.int32)
-        qlens = qsl[1:] - qsl[:-1]
-        q_list = qlens.tolist()
-        context_lens = attn_metadata.seq_lens.to("cpu", dtype=torch.int32)
-        c_list = context_lens.tolist()
-        pos_list = [p for ql, cl in zip(q_list, c_list) for p in range(cl - ql, cl)]
+        q_list = cls._host_query_lens(attn_metadata).tolist()
+        c_list = cls._host_seq_lens(attn_metadata).tolist()
+        n = min(len(q_list), len(c_list))
+        pos_list = [p for ql, cl in zip(q_list[:n], c_list[:n]) for p in range(int(cl) - int(ql), int(cl))]
         position = torch.tensor(pos_list, dtype=torch.int32, device=device)
         splitfuse_mask = cls.chunked_prefill_attn_mask.index_select(0, position)
         splitfuse_mask_nz = torch_npu.npu_format_cast(nd_to_nz_spec(splitfuse_mask).contiguous(), ACL_FORMAT_FRACTAL_NZ)

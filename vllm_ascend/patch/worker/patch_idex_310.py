@@ -1,6 +1,7 @@
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import QwenGatedDeltaNetAttention
 from vllm.third_party.flash_linear_attention.ops import index as fla_index
 
+import vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310  # noqa: F401
 from vllm_ascend._310p.ops.fla.gdn_310 import AscendGatedDeltaNetAttention310
 from vllm_ascend._310p.ops.fla.idex import (
     prepare_chunk_indices_310,

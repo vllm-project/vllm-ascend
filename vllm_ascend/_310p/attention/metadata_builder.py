@@ -81,6 +81,9 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         self.attn_mask_builder: Any = AttentionMaskBuilder310(self.device, max_model_len)
 
         self._query_lens_cpu_buffer: torch.Tensor | None = None
+        # Stable NZ splitfuse masks keyed by shape so ACLGraph replay can
+        # copy_ into the same addresses captured during dummy_run.
+        self._splitfuse_mask_buffers: dict[tuple, torch.Tensor] = {}
         if device.type != "cpu":
             max_num_seqs = vllm_config.scheduler_config.max_num_seqs
             self._query_lens_cpu_buffer = torch.empty(max_num_seqs, dtype=torch.int32, device="cpu", pin_memory=True)
@@ -105,6 +108,16 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         )
         return buffer
 
+    def _bind_splitfuse_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Reuse a stable NZ buffer so graph capture/replay keep the same data_ptr."""
+        key = (tuple(mask.shape), str(mask.dtype), str(mask.device))
+        buf = self._splitfuse_mask_buffers.get(key)
+        if buf is None:
+            self._splitfuse_mask_buffers[key] = mask
+            return mask
+        buf.copy_(mask)
+        return buf
+
     def build(
         self,
         common_prefix_len: int,
@@ -113,12 +126,15 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
         is_drafting: bool = False,
     ) -> AscendMetadata:
         attn_metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        if not isinstance(attn_metadata.attn_state, AscendAttentionState):
+            return attn_metadata
 
         num_reqs = common_attn_metadata.num_reqs
 
         splitfuse_states = (
             AscendAttentionState.SpecDecoding,
             AscendAttentionState.ChunkedPrefill,
+            AscendAttentionState.PrefillCacheHit,
         )
 
         # Paged and splitfuse attention consume device-side context lengths.
@@ -144,6 +160,13 @@ class AscendAttentionMetadataBuilder310(AscendAttentionMetadataBuilder):
 
         if is_compressed_mask_supported():
             attn_metadata.attn_mask = AttentionMaskBuilder310.get_compressed_splitfuse_mask(self.device)
+        else:
+            # Uncompressed splitfuse mask is position-dependent. Build it here
+            # (CPU q/seq lens, outside ACLGraph) and bind a stable NPU buffer
+            # so captured forward never D2Hs query_start_loc / seq_lens.
+            attn_metadata.attn_mask = self._bind_splitfuse_mask(
+                AttentionMaskBuilder310.get_splitfuse_mask(attn_metadata, self.device)
+            )
 
         return attn_metadata
 
