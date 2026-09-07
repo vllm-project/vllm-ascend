@@ -539,7 +539,7 @@ class AscendConfig:
                     "Remove enable_dsa_cp from additional_config when enabling PCP."
                 )
             logger.warning_once(
-                "enable_dsa_cp will be deprecated in a future release. %s "
+                "enable_dsa_cp will be fully deprecated once PCP is ready. %s "
                 "Check PCP support for your model and deployment configuration.",
                 migration,
             )
