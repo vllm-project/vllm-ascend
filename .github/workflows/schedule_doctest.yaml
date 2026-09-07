@@ -1,0 +1,192 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Doc Test
+
+on:
+  # Explicit case selection; both inputs set to none produce no NPU jobs.
+  workflow_dispatch:
+    inputs:
+      quickstart_device:
+        description: Quick Start device to test
+        required: true
+        type: choice
+        default: none
+        options:
+          - none
+          - a2
+          - 310p
+      installation_method:
+        description: Installation method to test
+        required: true
+        type: choice
+        default: none
+        options:
+          - none
+          - pip
+          - uv
+          - source
+  # Path filtering starts planning; the helper then selects affected marked blocks.
+  pull_request:
+    branches:
+      - main
+      - 'releases/v*'
+    paths:
+      - '.github/workflows/schedule_doctest.yaml'
+      - 'mkdocs.yml'
+      - 'docs/source/getting_started/**'
+      - 'tests/e2e/doctests/scripts/common.sh'
+      - 'tests/e2e/doctests/scripts/run_doctests.sh'
+      - 'tests/e2e/doctests/001-quickstart-test.sh'
+      - 'tests/e2e/doctests/002-installation-test.sh'
+      - 'tests/e2e/doctests/scripts/doctest_helper.py'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+concurrency:
+  group: doctest-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Plan on CPU before allocating NPU runners; image tags come from mkdocs.yml.
+  plan:
+    name: Plan doctests
+    runs-on: linux-amd64-cpu-4-hk
+    container:
+      image: quay.io/ascend-ci/vllm-ascend:lint
+    outputs:
+      quickstart: ${{ steps.plan.outputs.quickstart }}
+      installation: ${{ steps.plan.outputs.installation }}
+      run_quickstart: ${{ steps.plan.outputs.run_quickstart }}
+      run_installation: ${{ steps.plan.outputs.run_installation }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          # Selection needs both Git histories; image planning uses the checked-out head.
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Install doctest tooling
+        run: |
+          python3 -c 'import yaml' 2>/dev/null || python3 -m pip install PyYAML
+
+      - name: Select tests and build matrices
+        id: plan
+        env:
+          DOCTEST_EVENT_NAME: ${{ github.event_name }}
+          DOCTEST_BASE_REF: ${{ github.event.pull_request.base.sha }}
+          DOCTEST_HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          DOCTEST_QUICKSTART_DEVICE: ${{ inputs.quickstart_device }}
+          DOCTEST_INSTALLATION_METHOD: ${{ inputs.installation_method }}
+        run: |
+          # PRs use diff selection; manual runs use the selected input values.
+          if [[ "${DOCTEST_EVENT_NAME}" == "pull_request" ]]; then
+            plan="$(
+              python3 tests/e2e/doctests/scripts/doctest_helper.py \
+                plan --base "${DOCTEST_BASE_REF}" --head "${DOCTEST_HEAD_REF}"
+            )"
+          else
+            plan="$(
+              python3 tests/e2e/doctests/scripts/doctest_helper.py \
+                plan --quickstart "${DOCTEST_QUICKSTART_DEVICE}" \
+                --installation "${DOCTEST_INSTALLATION_METHOD}"
+            )"
+          fi
+
+          # Forward the helper's matrices and booleans without rebuilding them in Bash.
+          {
+            echo "quickstart=$(jq -c '.quickstart' <<<"${plan}")"
+            echo "installation=$(jq -c '.installation' <<<"${plan}")"
+            echo "run_quickstart=$(jq -r '.run_quickstart' <<<"${plan}")"
+            echo "run_installation=$(jq -r '.run_installation' <<<"${plan}")"
+          } >>"${GITHUB_OUTPUT}"
+
+          {
+            echo '## Doctest matrices'
+            echo
+            echo '```json'
+            jq '{quickstart, installation}' <<<"${plan}"
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  quickstart:
+    name: Quick Start (${{ matrix.device }}, ${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.run_quickstart == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.quickstart) }}
+    # Runner routing belongs here; the helper supplies device, OS, and image tag.
+    runs-on: ${{ matrix.device == 'a2' && 'linux-aarch64-a2b3-1' || 'linux-aarch64-310p-1' }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.image_tag }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Show test environment
+        run: |
+          echo "Device: ${{ matrix.device }}"
+          echo "OS: ${{ matrix.os }}"
+          echo "Image tag: ${{ matrix.image_tag }}"
+          npu-smi info
+
+      - name: Run Quick Start doctest
+        run: |
+          runtime_dir="$(mktemp -d)"
+          cd "${runtime_dir}"
+          bash "${GITHUB_WORKSPACE}/tests/e2e/doctests/scripts/run_doctests.sh" \
+            quickstart "${{ matrix.device }}"
+
+  installation:
+    name: Installation (${{ matrix.method }}, ${{ matrix.os }})
+    needs: plan
+    if: needs.plan.outputs.run_installation == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.installation) }}
+    # All installation methods and operating systems are currently tested on A2.
+    runs-on: linux-aarch64-a2b3-1
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Show test environment
+        run: |
+          echo "Method: ${{ matrix.method }}"
+          echo "OS: ${{ matrix.os }}"
+          echo "Image tag: ${{ matrix.image_tag }}"
+          npu-smi info
+
+      - name: Run Installation doctest
+        run: |
+          runtime_dir="$(mktemp -d)"
+          cd "${runtime_dir}"
+          bash "${GITHUB_WORKSPACE}/tests/e2e/doctests/scripts/run_doctests.sh" \
+            installation "${{ matrix.method }}"
