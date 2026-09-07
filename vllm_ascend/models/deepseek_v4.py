@@ -1028,13 +1028,17 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        residual = hidden_states.clone()
+        # No defensive copy of the residual stream: ``hc_pre`` only reads x and
+        # ``hc_post`` allocates a fresh output tensor, so ``residual`` can alias
+        # ``hidden_states``. Cloning a [num_tokens, hc_mult, hidden_size] tensor
+        # twice per layer costs ~4x that tensor in HBM traffic for nothing.
+        residual = hidden_states
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
         hidden_states = self.input_layernorm(hidden_states)
         attn_kwargs = {"positions": positions, "hidden_states": hidden_states, "llama_4_scaling": llama_4_scaling}
         hidden_states = self.self_attn(**attn_kwargs)
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
-        residual = hidden_states.clone()
+        residual = hidden_states
         hidden_states, post, comb = self.hc_pre(hidden_states, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
