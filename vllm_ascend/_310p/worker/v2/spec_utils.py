@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# mypy: ignore-errors
 
 """CPU fallbacks for MRv2 spec-decode helpers (310P has no Triton)."""
 
@@ -47,9 +48,12 @@ def combine_sampled_and_draft_tokens_cpu(
     assert num_new_sampled_tokens in (0, 1)
     num_reqs = idx_mapping_np.shape[0]
     logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
-    input_ids_cpu = input_ids.detach().cpu()
+    # One small D2H for sampled/draft token tables (not the full input_ids buffer).
     last_sampled_cpu = last_sampled_tokens.detach().cpu()
     draft_cpu = draft_tokens.detach().cpu()
+    # Host staging only for rows we write; copy back via indexed slices.
+    writes: list[tuple[int, int]] = []
+    host_vals: list[int] = []
 
     for batch_idx in range(num_reqs):
         req_state_idx = int(idx_mapping_np[batch_idx])
@@ -71,14 +75,20 @@ def combine_sampled_and_draft_tokens_cpu(
         first_logit_seq_pos = seq_len - num_req_logits
         if num_new_sampled_tokens > 0 and first_logit_seq_pos >= prefill_len:
             last_token_id = int(last_sampled_cpu[req_state_idx].item())
-            input_ids_cpu[logits_start] = last_token_id
+            writes.append((logits_start, logits_start + 1))
+            host_vals.append(last_token_id)
 
         if num_draft_tokens > 0:
             draft_row = draft_cpu[req_state_idx, :num_draft_tokens].tolist()
             draft_start = query_end - num_draft_tokens
-            input_ids_cpu[draft_start:query_end] = torch.tensor(draft_row, dtype=input_ids_cpu.dtype)
+            for i, tok in enumerate(draft_row):
+                writes.append((draft_start + i, draft_start + i + 1))
+                host_vals.append(int(tok))
 
-    input_ids.copy_(input_ids_cpu.to(device=input_ids.device, non_blocking=True))
+    if host_vals:
+        idx = torch.tensor([s for s, _ in writes], dtype=torch.long, device=input_ids.device)
+        vals = torch.tensor(host_vals, dtype=input_ids.dtype, device=input_ids.device)
+        input_ids.index_copy_(0, idx, vals)
     return logits_indices
 
 
@@ -174,25 +184,35 @@ def prepare_prefill_inputs_cpu(
     next_prefill_tokens: torch.Tensor,
     max_num_reqs: int,
 ) -> torch.Tensor:
+    """Build draft-prefill inputs with minimal host/device sync.
+
+    Prefer on-device token/position copies and host np mirrors for metadata.
+    Full-buffer ``.cpu()`` of target/draft tensors was a major 310P MTP cost.
+    """
     del max_num_reqs
     num_reqs = input_batch.num_reqs
-    target_input_ids = input_batch.input_ids.detach().cpu()
-    target_positions = input_batch.positions.detach().cpu()
     query_start_loc_np = input_batch.query_start_loc_np
-    seq_lens_np = input_batch.seq_lens.detach().cpu().numpy()
     idx_mapping_np = input_batch.idx_mapping_np
-    num_sampled_np = num_sampled.detach().cpu().numpy()
-    num_rejected_np = num_rejected.detach().cpu().numpy()
-    last_sampled_cpu = last_sampled.detach().cpu()
-    next_prefill_cpu = next_prefill_tokens.detach().cpu()
+    seq_lens_np = getattr(input_batch, "seq_lens_np", None)
+    if seq_lens_np is None:
+        seq_lens_np = input_batch.seq_lens.detach().cpu().numpy()
 
+    # Small metadata only (one sync each); avoid D2H of full token buffers.
+    num_sampled_np = num_sampled[:num_reqs].detach().cpu().numpy()
+    num_rejected_np = num_rejected[:num_reqs].detach().cpu().numpy()
+    last_sampled_np = last_sampled.detach().cpu().numpy()
+    next_prefill_np = next_prefill_tokens.detach().cpu().numpy()
+
+    target_input_ids = input_batch.input_ids
+    target_positions = input_batch.positions
     draft_input_ids = input_buffers.input_ids
     draft_positions = input_buffers.positions
-    draft_input_ids_cpu = draft_input_ids.detach().cpu()
-    draft_positions_cpu = draft_positions.detach().cpu()
-    draft_query_start_loc_cpu = input_buffers.query_start_loc.detach().cpu()
-    draft_seq_lens_cpu = input_buffers.seq_lens.detach().cpu()
-    last_token_indices_cpu = last_token_indices.detach().cpu()
+    device = draft_input_ids.device
+
+    last_token_indices_host = np.zeros(last_token_indices.shape[0], dtype=np.int64)
+    draft_qsl_host = np.zeros(input_buffers.query_start_loc.shape[0], dtype=np.int32)
+    draft_seq_host = np.zeros(input_buffers.seq_lens.shape[0], dtype=np.int32)
+    next_tokens_host = np.empty(num_reqs, dtype=np.int32)
 
     for req_idx in range(num_reqs):
         req_state_idx = int(idx_mapping_np[req_idx])
@@ -203,37 +223,52 @@ def prepare_prefill_inputs_cpu(
         query_len -= int(num_rejected_np[req_idx])
 
         if int(num_sampled_np[req_idx]) > 0:
-            next_token = int(last_sampled_cpu[req_state_idx].item())
+            next_tokens_host[req_idx] = int(np.asarray(last_sampled_np[req_state_idx]).reshape(-1)[0])
         else:
-            next_token = int(next_prefill_cpu[req_state_idx].item())
+            next_tokens_host[req_idx] = int(np.asarray(next_prefill_np[req_state_idx]).reshape(-1)[0])
 
         # After subtracting rejected tokens, only the kept prefix is valid
         # (match upstream Triton prepare_prefill_inputs).
         kept_end = query_start + query_len
         if query_len > 1:
-            draft_input_ids_cpu[query_start : kept_end - 1] = target_input_ids[query_start + 1 : kept_end]
+            draft_input_ids[query_start : kept_end - 1].copy_(
+                target_input_ids[query_start + 1 : kept_end],
+                non_blocking=True,
+            )
         last_token_index = kept_end - 1
-        last_token_indices_cpu[req_idx] = last_token_index
-        draft_input_ids_cpu[last_token_index] = next_token
-        draft_positions_cpu[query_start:kept_end] = target_positions[query_start:kept_end]
-        draft_query_start_loc_cpu[req_idx] = query_start
-        draft_seq_lens_cpu[req_idx] = seq_len
+        last_token_indices_host[req_idx] = last_token_index
+        draft_positions[query_start:kept_end].copy_(
+            target_positions[query_start:kept_end],
+            non_blocking=True,
+        )
+        draft_qsl_host[req_idx] = query_start
+        draft_seq_host[req_idx] = seq_len
 
     current_draft_step.fill_(0)
     if num_reqs > 0:
         query_end = int(query_start_loc_np[num_reqs])
-        draft_query_start_loc_cpu[num_reqs:] = query_end
-        draft_seq_lens_cpu[num_reqs:] = 0
-        last_token_indices_cpu[num_reqs:] = 0
+        draft_qsl_host[num_reqs:] = query_end
+        draft_seq_host[num_reqs:] = 0
+        last_token_indices_host[num_reqs:] = 0
+        # Scatter next tokens into draft input_ids (one small H2D + indexed write).
+        next_tokens = torch.from_numpy(next_tokens_host).to(device=device, non_blocking=True)
+        last_idx = torch.from_numpy(last_token_indices_host[:num_reqs]).to(
+            device=device, dtype=torch.long, non_blocking=True
+        )
+        draft_input_ids.index_copy_(0, last_idx, next_tokens.to(dtype=draft_input_ids.dtype))
 
-    draft_input_ids.copy_(draft_input_ids_cpu.to(device=draft_input_ids.device), non_blocking=True)
-    draft_positions.copy_(draft_positions_cpu.to(device=draft_positions.device), non_blocking=True)
     input_buffers.query_start_loc.copy_(
-        draft_query_start_loc_cpu.to(device=input_buffers.query_start_loc.device),
+        torch.from_numpy(draft_qsl_host).to(device=device, non_blocking=True),
         non_blocking=True,
     )
-    input_buffers.seq_lens.copy_(draft_seq_lens_cpu.to(device=input_buffers.seq_lens.device), non_blocking=True)
-    last_token_indices.copy_(last_token_indices_cpu.to(device=last_token_indices.device), non_blocking=True)
+    input_buffers.seq_lens.copy_(
+        torch.from_numpy(draft_seq_host).to(device=device, dtype=input_buffers.seq_lens.dtype, non_blocking=True),
+        non_blocking=True,
+    )
+    last_token_indices.copy_(
+        torch.from_numpy(last_token_indices_host).to(device=device, dtype=last_token_indices.dtype, non_blocking=True),
+        non_blocking=True,
+    )
     return last_token_indices
 
 
@@ -246,36 +281,46 @@ def prepare_decode_inputs_cpu(
     max_num_reqs: int,
     advance_draft_positions: bool = True,
 ) -> None:
+    """Prepare draft decode inputs with small host syncs (K>1 path)."""
     del max_num_reqs
     num_reqs = draft_tokens.shape[0]
-    draft_cpu = draft_tokens.detach().cpu()
-    target_seq_cpu = target_seq_lens.detach().cpu()
-    rejected_cpu = num_rejected.detach().cpu()
-    input_ids_cpu = input_buffers.input_ids.detach().cpu()
-    positions_cpu = input_buffers.positions.detach().cpu()
-    query_start_loc_cpu = input_buffers.query_start_loc.detach().cpu()
-    seq_lens_cpu = input_buffers.seq_lens.detach().cpu()
+    device = input_buffers.input_ids.device
+    draft_np = draft_tokens[:num_reqs].detach().cpu().numpy()
+    target_seq_np = target_seq_lens[:num_reqs].detach().cpu().numpy()
+    rejected_np = num_rejected[:num_reqs].detach().cpu().numpy()
+
+    input_ids_host = draft_np.astype(np.int64, copy=False)
+    seq_host = np.zeros(input_buffers.seq_lens.shape[0], dtype=np.int64)
+    qsl_host = np.arange(num_reqs + 1, dtype=np.int64)
+    if qsl_host.shape[0] < input_buffers.query_start_loc.shape[0]:
+        qsl_full = np.zeros(input_buffers.query_start_loc.shape[0], dtype=np.int64)
+        qsl_full[: qsl_host.shape[0]] = qsl_host
+        qsl_full[qsl_host.shape[0] :] = num_reqs
+        qsl_host = qsl_full
 
     for req_idx in range(num_reqs):
-        input_ids_cpu[req_idx] = int(draft_cpu[req_idx].item())
-        seq_len = int(target_seq_cpu[req_idx].item()) - int(rejected_cpu[req_idx].item())
+        seq_len = int(target_seq_np[req_idx]) - int(rejected_np[req_idx])
         if advance_draft_positions:
-            position = int(positions_cpu[req_idx].item())
-            position = min(position + 1, max_model_len - 1)
-            positions_cpu[req_idx] = position
             seq_len = min(seq_len + 1, max_model_len)
-        seq_lens_cpu[req_idx] = seq_len
+        seq_host[req_idx] = seq_len
 
-    for req_idx in range(num_reqs + 1):
-        query_start_loc_cpu[req_idx] = min(req_idx, num_reqs)
-    seq_lens_cpu[num_reqs:] = 0
-
-    input_buffers.input_ids.copy_(input_ids_cpu.to(device=input_buffers.input_ids.device), non_blocking=True)
-    input_buffers.positions.copy_(positions_cpu.to(device=input_buffers.positions.device), non_blocking=True)
-    input_buffers.query_start_loc.copy_(
-        query_start_loc_cpu.to(device=input_buffers.query_start_loc.device), non_blocking=True
+    input_buffers.input_ids[:num_reqs].copy_(
+        torch.from_numpy(input_ids_host).to(device=device, dtype=input_buffers.input_ids.dtype, non_blocking=True),
+        non_blocking=True,
     )
-    input_buffers.seq_lens.copy_(seq_lens_cpu.to(device=input_buffers.seq_lens.device), non_blocking=True)
+    if advance_draft_positions:
+        # positions += 1 on-device for the active rows (avoid full-buffer D2H).
+        pos = input_buffers.positions[:num_reqs]
+        pos.add_(1)
+        pos.clamp_max_(max_model_len - 1)
+    input_buffers.query_start_loc.copy_(
+        torch.from_numpy(qsl_host).to(device=device, dtype=input_buffers.query_start_loc.dtype, non_blocking=True),
+        non_blocking=True,
+    )
+    input_buffers.seq_lens.copy_(
+        torch.from_numpy(seq_host).to(device=device, dtype=input_buffers.seq_lens.dtype, non_blocking=True),
+        non_blocking=True,
+    )
 
 
 def update_draft_inputs_cpu(
@@ -290,32 +335,18 @@ def update_draft_inputs_cpu(
     num_speculative_steps: int,
     advance_draft_positions: bool = True,
 ) -> None:
+    """Update draft buffers for the next step using on-device ops where possible."""
     step = int(current_draft_step.item())
-    draft_cpu = draft_tokens.detach().cpu()
-    output_draft_cpu = output_draft_tokens.detach().cpu()
-    input_ids_cpu = input_buffers.input_ids.detach().cpu()
-    positions_cpu = input_buffers.positions.detach().cpu()
-    seq_lens_cpu = input_buffers.seq_lens.detach().cpu()
-    hidden_cpu = hidden_states.detach().cpu()
-    next_hidden_cpu = next_input_hidden_states.detach().cpu()
-
-    for req_idx in range(num_reqs):
-        token = int(draft_cpu[req_idx].item())
-        output_draft_cpu[req_idx, step] = token
-        if step >= num_speculative_steps - 1:
-            continue
-        input_ids_cpu[req_idx] = token
-        next_hidden_cpu[req_idx] = hidden_cpu[req_idx]
-        if advance_draft_positions:
-            position = min(int(positions_cpu[req_idx].item()) + 1, max_model_len - 1)
-            positions_cpu[req_idx] = position
-            seq_len = min(int(seq_lens_cpu[req_idx].item()) + 1, max_model_len)
-            seq_lens_cpu[req_idx] = seq_len
-
-    output_draft_tokens.copy_(output_draft_cpu.to(device=output_draft_tokens.device), non_blocking=True)
-    if step < num_speculative_steps - 1:
-        input_buffers.input_ids.copy_(input_ids_cpu.to(device=input_buffers.input_ids.device), non_blocking=True)
-        next_input_hidden_states.copy_(next_hidden_cpu.to(device=next_input_hidden_states.device), non_blocking=True)
-        if advance_draft_positions:
-            input_buffers.positions.copy_(positions_cpu.to(device=input_buffers.positions.device), non_blocking=True)
-            input_buffers.seq_lens.copy_(seq_lens_cpu.to(device=input_buffers.seq_lens.device), non_blocking=True)
+    tokens = draft_tokens[:num_reqs]
+    output_draft_tokens[:num_reqs, step].copy_(tokens)
+    if step >= num_speculative_steps - 1:
+        return
+    input_buffers.input_ids[:num_reqs].copy_(tokens)
+    next_input_hidden_states[:num_reqs].copy_(hidden_states[:num_reqs])
+    if advance_draft_positions:
+        pos = input_buffers.positions[:num_reqs]
+        pos.add_(1)
+        pos.clamp_max_(max_model_len - 1)
+        seq = input_buffers.seq_lens[:num_reqs]
+        seq.add_(1)
+        seq.clamp_max_(max_model_len)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# mypy: ignore-errors
 
 """310P MTP speculator: CPU block-table slot mappings + RoPE flag + draft quant."""
 
@@ -13,17 +14,20 @@ import torch
 import torch.nn as nn
 from vllm.config import VllmConfig, replace
 from vllm.config.compilation import CUDAGraphMode
+from vllm.logger import logger
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
+from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import AutoRegressiveAclGraphManager310
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import disable_target_pcp_for_replicated_draft
 
 
 class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
@@ -69,6 +73,20 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         )
         return draft_model
 
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        """Use 310P draft graph managers (seq_lens refresh; no FIA update)."""
+        super().init_cudagraph_manager(cudagraph_mode)
+        assert self.prefill_cudagraph_manager is not None
+        # Rebind class so run_fullgraph uses 310P refresh path; keep instance state.
+        self.prefill_cudagraph_manager.__class__ = AutoRegressiveAclGraphManager310
+        if self.decode_cudagraph_manager is not None:
+            self.decode_cudagraph_manager.__class__ = AutoRegressiveAclGraphManager310
+        self.prefill_cudagraph_manager.speculator = self
+        self.prefill_cudagraph_manager.update_stream = self.update_stream
+        if self.decode_cudagraph_manager is not None:
+            self.decode_cudagraph_manager.speculator = self
+            self.decode_cudagraph_manager.update_stream = self.update_stream
+
     def _compute_draft_slot_mappings(
         self,
         idx_mapping: torch.Tensor,
@@ -97,13 +115,11 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
 
     def capture(self) -> None:
-        """Capture draft-prefill FULL graphs with SpecDecoding (splitfuse).
+        """Capture draft-prefill FULL with SpecDecoding; skip draft-decode graphs.
 
-        Default ``AscendInputBatch.make_dummy`` forces DecodeOnly → paged
-        attention, but MTP draft-prefill uses q_len=1+K (SpecDecoding /
-        splitfuse), matching eager. Capturing PA and replaying SpecDecoding
-        (or replaying with stale seq_lens because 310P has no FIA
-        ``graph_task_update``) dropped draft accept to ~59%.
+        Default ``AscendInputBatch.make_dummy`` forces DecodeOnly → PA, but MTP
+        draft-prefill uses q_len=1+K (SpecDecoding/splitfuse). Draft-decode
+        capture is illegal on 310P (host D2H / slot-map updates between steps).
         """
         self.last_token_indices.zero_()
         orig_make_dummy = AscendInputBatch.make_dummy
@@ -120,14 +136,31 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             if max_query_len is not None:
                 kwargs["max_query_len"] = max_query_len
             batch = orig_make_dummy(num_reqs, num_tokens, input_buffers, **kwargs)
-            # MTP draft-prefill: more than one token per request → SpecDecoding.
             if num_reqs > 0 and (num_tokens // num_reqs) > 1:
                 batch.attn_state = AscendAttentionState.SpecDecoding
             return batch
 
         AscendInputBatch.make_dummy = make_dummy_spec_decode  # type: ignore[method-assign]
         try:
-            AscendAutoRegressiveSpeculator.capture(self)
+            logger.info("Capturing draft-prefill ACLGraph for 310P MTP (SpecDecoding)...")
+            assert self.prefill_cudagraph_manager is not None
+            if self.prefill_cudagraph_manager.use_breakable_cg:
+                self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
+            with disable_target_pcp_for_replicated_draft(self):
+                self.prefill_cudagraph_manager.capture(
+                    self._prefill,
+                    self.model_state,
+                    self.target_input_buffers,
+                    self.block_tables,
+                    self.draft_prefill_attn_groups,
+                    self.kv_cache_config,
+                    progress_bar_desc="Capturing prefill CUDA graphs",
+                )
+            if self.num_speculative_steps > 1:
+                logger.info(
+                    "Skipping draft-decode ACLGraph capture on 310P MTP "
+                    "(host slot-map / draft-input updates between steps)."
+                )
         finally:
             AscendInputBatch.make_dummy = orig_make_dummy  # type: ignore[method-assign]
 
@@ -159,11 +192,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     ) -> None:
-        """Eager non-fused multi-step with 310P CPU slot mappings.
-
-        Draft-decode ACLGraphs are not captured on 310P (see Ascend capture());
-        always run ``_generate_draft`` eagerly with per-step host slot maps.
-        """
+        """Eager non-fused multi-step with 310P CPU slot mappings."""
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]

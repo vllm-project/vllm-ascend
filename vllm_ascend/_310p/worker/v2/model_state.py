@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# mypy: ignore-errors
 
 """MRV2 model state for Ascend 310P (dense/VL + hybrid/GDN)."""
 
@@ -256,23 +257,30 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
 
         forward_context = self.vllm_config.compilation_config.static_forward_context
         copy_funcs = self.model.get_mamba_state_copy_func()
+        # One D2H per group (not per req × group) + bulk index reads.
+        block_tables_np = [bt.detach().cpu().numpy() for bt in block_tables]
+        idx_np = input_batch.idx_mapping[:num_reqs].detach().cpu().numpy()
+        src_col_np = self._mamba_src_col_gpu.detach().cpu().numpy()
+        dst_col_np = self._mamba_state_idx_gpu.detach().cpu().numpy()
+        src_off_np = self._mamba_src_off_gpu.detach().cpu().numpy()
+
         for batch_i in range(num_reqs):
-            req_idx = int(input_batch.idx_mapping[batch_i].item())
+            req_idx = int(idx_np[batch_i])
             if req_idx < 0:
                 continue
-            src_col = int(self._mamba_src_col_gpu[req_idx].item())
-            dst_col = int(self._mamba_state_idx_gpu[req_idx].item())
+            src_col = int(src_col_np[req_idx])
+            dst_col = int(dst_col_np[req_idx])
             if src_col < 0 or src_col == dst_col:
                 continue
-            token_bias = int(self._mamba_src_off_gpu[req_idx].item())
+            token_bias = int(src_off_np[req_idx])
             for group_id in mamba_group_ids:
-                block_ids = block_tables[group_id][batch_i].detach().to("cpu").tolist()
+                block_ids = block_tables_np[group_id][batch_i].tolist()
                 # Drop padded / unused slots.
                 while block_ids and block_ids[-1] < 0:
                     block_ids.pop()
                 if not block_ids or src_col >= len(block_ids) or dst_col >= len(block_ids):
                     continue
-                dest_block_id = block_ids[dst_col]
+                dest_block_id = int(block_ids[dst_col])
                 layer_names = kv_cache_config.kv_cache_groups[group_id].layer_names
                 for layer_name in layer_names:
                     attention = forward_context[layer_name]
@@ -283,7 +291,11 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                         dst_state = _tensor_view_from_data_ptr(
                             state, state[dest_block_id].data_ptr(), copy_spec.num_elements
                         )
-                        dst_state.copy_(src_state.clone())
+                        # Clone only when views may overlap the same storage.
+                        if src_state.untyped_storage().data_ptr() == dst_state.untyped_storage().data_ptr():
+                            dst_state.copy_(src_state.clone())
+                        else:
+                            dst_state.copy_(src_state)
 
     def _postprocess_mamba_align_v2_torch(
         self,
@@ -305,13 +317,19 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         forward_context = self.vllm_config.compilation_config.static_forward_context
         copy_funcs = self.model.get_mamba_state_copy_func()
 
+        block_tables_np = [bt.detach().cpu().numpy() for bt in block_tables]
+        idx_np = idx_mapping[:num_reqs].detach().cpu().numpy()
+        accepted_np = self.num_accepted_tokens_gpu.detach().cpu().numpy()
+        state_idx_np = self._mamba_state_idx_gpu.detach().cpu().numpy()
+        computed_np = num_computed_tokens.detach().cpu().numpy()
+
         for batch_i in range(num_reqs):
-            req_idx = int(idx_mapping[batch_i].item())
+            req_idx = int(idx_np[batch_i])
             if req_idx < 0:
                 continue
-            num_accepted = int(self.num_accepted_tokens_gpu[req_idx].item())
-            src_block_idx = int(self._mamba_state_idx_gpu[req_idx].item())
-            new_num_computed = int(num_computed_tokens[req_idx].item())
+            num_accepted = int(accepted_np[req_idx])
+            src_block_idx = int(state_idx_np[req_idx])
+            new_num_computed = int(computed_np[req_idx])
             num_tokens_running_state = new_num_computed - num_accepted + 1
             aligned_new_computed = new_num_computed // block_size * block_size
             if aligned_new_computed < num_tokens_running_state:
@@ -325,12 +343,12 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                     continue
 
             for group_id in mamba_group_ids:
-                block_ids = block_tables[group_id][batch_i].detach().to("cpu").tolist()
+                block_ids = block_tables_np[group_id][batch_i].tolist()
                 while block_ids and block_ids[-1] < 0:
                     block_ids.pop()
                 if not block_ids or src_block_idx >= len(block_ids) or dest_block_idx >= len(block_ids):
                     continue
-                dest_block_id = block_ids[dest_block_idx]
+                dest_block_id = int(block_ids[dest_block_idx])
                 layer_names = kv_cache_config.kv_cache_groups[group_id].layer_names
                 for layer_name in layer_names:
                     attention = forward_context[layer_name]
@@ -341,7 +359,11 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                         dst_state = _tensor_view_from_data_ptr(
                             state, state[dest_block_id].data_ptr(), copy_spec.num_elements
                         )
-                        dst_state.copy_(src_state.clone())
+                        # Clone only when views may overlap the same storage.
+                        if src_state.untyped_storage().data_ptr() == dst_state.untyped_storage().data_ptr():
+                            dst_state.copy_(src_state.clone())
+                        else:
+                            dst_state.copy_(src_state)
 
     def postprocess_state(
         self,

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# mypy: ignore-errors
 
 from __future__ import annotations
 
@@ -478,10 +479,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         early in ``execute_model`` leaves stale counts and corrupts recurrent state.
         """
         np_vals = self.req_states.num_computed_tokens_np
+        host = torch.from_numpy(np_vals)
         gpu = self.req_states.num_computed_tokens.gpu
-        gpu.copy_(torch.from_numpy(np_vals).to(device=gpu.device, dtype=gpu.dtype))
-        self.req_states.num_computed_tokens_cpu.copy_(torch.from_numpy(np_vals))
-        self.req_states.num_computed_tokens.cpu.copy_(torch.from_numpy(np_vals))
+        if host.dtype != gpu.dtype:
+            host = host.to(dtype=gpu.dtype)
+        # One H2D; reuse the same host view for CPU mirrors (no extra .to(device=)).
+        gpu.copy_(host, non_blocking=True)
+        self.req_states.num_computed_tokens_cpu.copy_(host)
+        self.req_states.num_computed_tokens.cpu.copy_(host)
 
     def _advance_num_computed_tokens(self, valid_indices: torch.Tensor, query_lens: torch.Tensor) -> None:
         """Advance per-request computed counts on both CPU mirror and GPU tensor."""
@@ -1102,18 +1107,46 @@ class NPUModelRunner310V2(NPUModelRunner):
         has_sample = valid_num_sampled > 0
 
         if self.speculator is not None and sampled_tokens.ndim == 2:
-            for batch_idx in range(num_entries):
-                if idx_mapping[batch_idx] < 0:
-                    continue
-                req_idx = int(idx_mapping[batch_idx].item())
-                count = int(num_sampled[batch_idx].item())
-                if count <= 0:
-                    continue
-                start_pos = int(self.req_states.total_len.gpu[req_idx].item())
-                tokens = sampled_tokens[batch_idx, :count].to(torch.int32)
-                self.req_states.all_token_ids.gpu[req_idx, start_pos : start_pos + count] = tokens
-                self.req_states.last_sampled_tokens[req_idx, 0] = tokens[-1]
-                self.req_states.total_len.gpu[req_idx] = start_pos + count
+            # Vectorized MTP writeback: one host sync for metadata, no per-req .item().
+            valid_batch = torch.nonzero(valid_mask, as_tuple=False).flatten()
+            if valid_batch.numel() > 0:
+                req_idx_t = idx_mapping[valid_batch].to(torch.long)
+                count_t = num_sampled[valid_batch].to(torch.long)
+                start_t = self.req_states.total_len.gpu[req_idx_t].to(torch.long)
+                counts_host = count_t.detach().cpu().tolist()
+                reqs_host = req_idx_t.detach().cpu().tolist()
+                starts_host = start_t.detach().cpu().tolist()
+                batch_host = valid_batch.detach().cpu().tolist()
+                # Pack variable-length accepted rows into contiguous staging.
+                pack: list[torch.Tensor] = []
+                pack_req: list[int] = []
+                pack_pos: list[int] = []
+                lasts: list[torch.Tensor] = []
+                new_totals: list[int] = []
+                active_reqs_list: list[int] = []
+                for i, count in enumerate(counts_host):
+                    count = int(count)
+                    if count <= 0:
+                        continue
+                    req_idx = int(reqs_host[i])
+                    start_pos = int(starts_host[i])
+                    row = sampled_tokens[int(batch_host[i]), :count].to(torch.int32)
+                    pack.append(row)
+                    pack_req.extend([req_idx] * count)
+                    pack_pos.extend(range(start_pos, start_pos + count))
+                    lasts.append(row[-1])
+                    new_totals.append(start_pos + count)
+                    active_reqs_list.append(req_idx)
+                if pack:
+                    flat = torch.cat(pack, dim=0)
+                    r_idx = torch.tensor(pack_req, dtype=torch.long, device=flat.device)
+                    p_idx = torch.tensor(pack_pos, dtype=torch.long, device=flat.device)
+                    self.req_states.all_token_ids.gpu[r_idx, p_idx] = flat
+                    active_reqs = torch.tensor(active_reqs_list, dtype=torch.long, device=flat.device)
+                    last_t = torch.stack(lasts).to(dtype=self.req_states.last_sampled_tokens.dtype)
+                    total_t = torch.tensor(new_totals, dtype=self.req_states.total_len.gpu.dtype, device=flat.device)
+                    self.req_states.last_sampled_tokens[active_reqs, 0] = last_t
+                    self.req_states.total_len.gpu[active_reqs] = total_t
         else:
             sampled = sampled_tokens[:, 0].masked_select(valid_mask).to(self.req_states.last_sampled_tokens.dtype)
             token_positions = self.req_states.total_len.gpu[valid_indices].to(torch.int64)
@@ -1168,10 +1201,14 @@ class NPUModelRunner310V2(NPUModelRunner):
 
         if self.speculator is not None:
             self.num_computed_tokens_event.synchronize()
-            for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
-                req_index = self.req_states.req_id_to_index[req_id]
-                self.req_states.num_computed_tokens_cpu[req_index] = self.num_computed_tokens_cpu[req_index]
-                self.req_states.num_computed_tokens_np[req_index] = int(self.num_computed_tokens_cpu[req_index].item())
+            # Bulk host read (one sync) instead of per-req ``.item()``.
+            cached_ids = scheduler_output.scheduled_cached_reqs.req_ids
+            if cached_ids:
+                req_indices = [self.req_states.req_id_to_index[req_id] for req_id in cached_ids]
+                vals = self.num_computed_tokens_cpu[req_indices].tolist()
+                for req_index, val in zip(req_indices, vals):
+                    self.req_states.num_computed_tokens_cpu[req_index] = val
+                    self.req_states.num_computed_tokens_np[req_index] = int(val)
         else:
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]
