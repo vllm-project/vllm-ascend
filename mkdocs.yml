@@ -231,6 +231,7 @@ nav:
         - tutorials/models/DeepSeek-V3.1.md
         - tutorials/models/DeepSeek-V3.2.md
         - tutorials/models/DeepSeek-V4-Flash.md
+        - tutorials/models/DeepSeek-V4-Flash-Vision.md
         - tutorials/models/DeepSeek-V4-Pro.md
         - tutorials/models/DeepSeek-R1.md
         - tutorials/models/DeepSeekOCR2.md

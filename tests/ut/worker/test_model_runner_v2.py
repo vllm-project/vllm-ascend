@@ -1,3 +1,5 @@
+import ast
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -21,8 +23,7 @@ def _make_runner(need_timing: bool = True):
     return runner
 
 
-@pytest.mark.parametrize("is_vllm_0_27_1", [True, False], ids=["v0.27.1", "newer"])
-def test_execute_model_records_profiling_time(is_vllm_0_27_1):
+def test_execute_model_records_profiling_time():
     runner = _make_runner()
     scheduler_output = SimpleNamespace(disable_profiling_timing=False)
 
@@ -32,10 +33,6 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
             "execute_model",
             return_value=None,
         ) as mock_execute_model,
-        patch(
-            "vllm_ascend.worker.v2.model_runner.vllm_version_is",
-            return_value=is_vllm_0_27_1,
-        ),
         patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
         patch(
             "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
@@ -52,9 +49,8 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
         "dummy_run": False,
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
+        "context_len": 0,
     }
-    if not is_vllm_0_27_1:
-        expected_kwargs["context_len"] = 0
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -146,3 +142,37 @@ def test_sample_tokens_restores_replicated_draft_hidden_states():
     )
     state._replace.assert_called_once_with(aux_hidden_states=[restored_aux_hidden_states])
     assert runner.execute_model_state is restored_state
+
+
+def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
+    source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    padding_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "num_tokens_after_padding" for target in node.targets)
+    ]
+    partition_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "maybe_partition_pcp_batch"
+    ]
+
+    # prepare_inputs keeps the real global PCP batch when it is larger than the
+    # graph descriptor, and forwards the descriptor as an explicit rank-local
+    # padded extent (upstream vLLM #53515).
+    assert len(padding_assignments) == 1
+    assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
+
+    assert len(partition_calls) == 1
+    padded_num_tokens = next(
+        (keyword.value for keyword in partition_calls[0].keywords if keyword.arg == "padded_num_tokens"),
+        None,
+    )
+    assert isinstance(padded_num_tokens, ast.Attribute)
+    assert padded_num_tokens.attr == "num_tokens"
+    assert isinstance(padded_num_tokens.value, ast.Name)
+    assert padded_num_tokens.value.id == "batch_desc"

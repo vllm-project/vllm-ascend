@@ -6,13 +6,12 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
-from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
+from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
 from vllm_ascend.utils import (
     get_rotation_matrix,
     get_rotation_path,
-    vllm_version_is,
 )
 
 TARGET_EMBED_WEIGHT_NAMES = (
@@ -74,12 +73,6 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
 
         config = self.config
         self.enable_confidence_head = bool(getattr(config, "enable_confidence_head", False))
-        if vllm_version_is("0.27.1") and self.enable_confidence_head:
-            model_prefix = maybe_prefix(prefix, "model")
-            self.model.confidence_head = DSparkConfidenceHead(
-                config=config,
-                prefix=maybe_prefix(model_prefix, "confidence_head"),
-            )
         self.rotation_path = get_rotation_path(vllm_config) if vllm_config.quant_config is not None else None
         self.target_model_path = Path(vllm_config.model_config.model)
 
@@ -116,39 +109,9 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                 processed_weights.append((name, loaded_weight))
             all_weights = processed_weights
 
-        if not vllm_version_is("0.27.1"):
-            # main (cdc4824a21): upstream load_weights already manages
-            # confidence_head (vllm#47808).
-            result = super().load_weights(all_weights)
-        else:
-            base_weights: list[tuple[str, torch.Tensor]] = []
-            confidence_weights: list[tuple[str, torch.Tensor]] = []
-
-            for name, loaded_weight in all_weights:
-                confidence_name = self._get_confidence_relative_name(name)
-                if confidence_name is None:
-                    base_weights.append((name, loaded_weight))
-                else:
-                    confidence_weights.append((confidence_name, loaded_weight))
-
-            result = super().load_weights(base_weights)
-
-            if self.enable_confidence_head:
-                if not confidence_weights:
-                    self.enable_confidence_head = False
-                else:
-                    confidence_weights.sort(key=lambda item: item[0])
-                    loaded_parameters = AutoWeightsLoader(self.model.confidence_head).load_weights(confidence_weights)
-                    expected_parameters = set(self.model.confidence_head.state_dict().keys())
-                    missing_parameters = expected_parameters - loaded_parameters
-
-                    if missing_parameters:
-                        raise RuntimeError(
-                            "Failed to load all confidence-head "
-                            "parameters. Missing: "
-                            f"{sorted(missing_parameters)}; loaded: "
-                            f"{sorted(loaded_parameters)}"
-                        )
+        # main (cdc4824a21): upstream load_weights already manages
+        # confidence_head (vllm#47808).
+        result = super().load_weights(all_weights)
 
         if rotation_weight is not None:
             if not includes_embed_tokens:

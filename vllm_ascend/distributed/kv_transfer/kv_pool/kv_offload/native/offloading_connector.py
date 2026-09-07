@@ -11,9 +11,6 @@ from dataclasses import replace
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
-    is_kv_cache_tensor_packed,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
     OffloadingConnectorWorker,
 )
@@ -31,6 +28,8 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
 )
+
+from vllm_ascend.utils import get_kv_cache_tensor_layers
 
 
 def _make_int8_block_view(
@@ -190,9 +189,9 @@ class AscendOffloadingConnectorWorker(OffloadingConnectorWorker):
 
         num_blocks = kv_cache_config.num_blocks
         layer_is_packed = {
-            layer_name: is_kv_cache_tensor_packed(kv_tensor)
+            layer_name: bool(kv_tensor.block_stride)
             for kv_tensor in kv_cache_config.kv_cache_tensors
-            for layer_name in kv_tensor.shared_by
+            for layer_name in get_kv_cache_tensor_layers(kv_tensor)
         }
 
         canonical_tensors: list[CanonicalKVCacheTensor] = []

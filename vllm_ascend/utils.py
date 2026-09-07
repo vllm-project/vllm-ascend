@@ -153,7 +153,8 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
 
 def clear_enable_sp():
     enable_dsa_cp.cache_clear()
-    enable_dsa_cp_with_o_proj_tp.cache_clear()
+    enable_dsa_cp_full_o_proj.cache_clear()
+    enable_pcp_o_proj_weight_sharding.cache_clear()
     _libc_getenv.cache_clear()
 
 
@@ -597,6 +598,10 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
+        # Strip any PEP 440 local version segment (e.g. "0.27.1+empty" built
+        # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
+        # change the version identity for `vllm_version_is` comparisons.
+        vllm_version = vllm_version.split("+")[0]
         return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
@@ -605,6 +610,17 @@ def vllm_version_is(target_vllm_version: str):
             "to control it by hand. And please make sure the value follows the "
             "format of x.y.z."
         )
+
+
+def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
+    """Layer names covered by a KVCacheTensor.
+
+    vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
+    required `layer_stride` on vLLM main. This helper keeps both lanes readable.
+    """
+    if vllm_version_is("0.27.1"):
+        return kv_cache_tensor.shared_by
+    return kv_cache_tensor.layers
 
 
 def get_max_hidden_layers(hf_config) -> int:
@@ -1340,7 +1356,21 @@ def enable_dsa_cp() -> bool:
 
 
 @lru_cache(maxsize=1)
-def enable_dsa_cp_with_o_proj_tp() -> bool:
+def enable_pcp_o_proj_weight_sharding() -> bool:
+    """Whether SFA-PCP stores O-proj weights as PCP-local resident shards.
+
+    This is a load-time option because it changes the physical parameter shape
+    from a TP-local shard to a TP×PCP-local shard. DSA-CP does not use this
+    user-controlled option.
+    """
+    from vllm_ascend.ascend_config import get_ascend_config
+
+    return get_ascend_config().enable_pcp_o_proj_weight_sharding
+
+
+@lru_cache(maxsize=1)
+def enable_dsa_cp_full_o_proj() -> bool:
+    """Whether this DSA-CP role uses the original full O-proj prefill path."""
     if not enable_dsa_cp():
         return False
     from vllm.config import get_current_vllm_config
@@ -1348,7 +1378,7 @@ def enable_dsa_cp_with_o_proj_tp() -> bool:
     vllm_config = get_current_vllm_config()
     kv_transfer_config = vllm_config.kv_transfer_config
 
-    # Keep the original TP o_proj weight when:
+    # Use the gathered full o_proj weight when:
     # 1) KV pooling is disabled, or
     # 2) KV pooling is enabled on a prefill producer (including kv_both).
     # DSA-CP prefill produces a full-head attention output, so the runtime

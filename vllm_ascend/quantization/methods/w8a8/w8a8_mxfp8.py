@@ -37,7 +37,7 @@ from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
     QuantType,
-    TPWeightGatherSpec,
+    WeightSwitchGatherSpec,
 )
 from ..registry import register_scheme
 
@@ -52,15 +52,15 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
     """
 
     model_dtype = None
-    tp_weight_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight", gather_dim=1),
-        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=1),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
-    supports_tp_weight_switch = True
+    supports_weight_switch = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()
@@ -279,9 +279,6 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
         if topk_weights is None or topk_ids is None:
             raise RuntimeError("topk_weights and topk_ids must be set before fused MoE execution.")
 
-        if x.dtype not in [torch.float8_e4m3fn]:
-            topk_weights = topk_weights.to(x.dtype)
-
         moe_comm_method = _EXTRA_CTX.moe_comm_method
         return moe_comm_method.fused_experts(
             fused_experts_input=build_fused_experts_input(
@@ -498,15 +495,15 @@ class AscendW8A8MXFP8DSDynamicLinearMethod(AscendW8A8MXFP8DynamicLinearMethod):
     """
 
     model_dtype = None
-    tp_weight_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    supports_tp_weight_switch = True
+    supports_weight_switch = True
 
     def __init__(self, weight_block_size):
         super().__init__()
