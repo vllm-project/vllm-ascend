@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
-"""Ascend specs for vLLM v0.27 native KV-cache offloading."""
+"""Ascend specs for vLLM's native KV-cache offloading."""
 
 from __future__ import annotations
 
