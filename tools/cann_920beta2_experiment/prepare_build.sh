@@ -4,7 +4,7 @@ set -euo pipefail
 install_build_dependencies() {
     local evidence=$1
     local dependency resolved
-    local required=(git cmake g++ make pigz dos2unix unzip curl)
+    local required=(git cmake g++ make pigz dos2unix unzip curl patch pkg-config)
     local missing=()
     # These commands have matching Ubuntu package names. Use one list for installation and verification.
     for dependency in "${required[@]}"; do
