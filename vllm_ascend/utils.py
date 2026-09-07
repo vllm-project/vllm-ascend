@@ -616,9 +616,10 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     """Layer names covered by a KVCacheTensor.
 
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
-    required `layer_stride` on vLLM main. This helper keeps both lanes readable.
+    required `layer_stride` on vLLM main. Prefer attribute presence so mocks
+    and dual-field fixtures work on either lane regardless of version checks.
     """
-    if vllm_version_is("0.28.0"):
+    if hasattr(kv_cache_tensor, "shared_by"):
         return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 

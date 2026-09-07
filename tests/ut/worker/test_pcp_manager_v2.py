@@ -29,6 +29,7 @@ from vllm.v1.worker.gpu import model_runner as vllm_model_runner
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2 import states as states_module
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager, _prepare_pcp_inputs_to_capture
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
@@ -136,7 +137,9 @@ def test_pcp_manager_uses_persistent_ascend_input_buffers():
     assert manager._input_buffers.max_num_reqs == 6
     assert manager._input_buffers.seq_lens_np.shape == (6,)
     assert manager._input_buffers.query_start_loc.shape == (7,)
-    assert manager.input_buffers is manager._input_buffers
+    # Public input_buffers is a vLLM main PCP contract (#53515).
+    if not vllm_version_is("0.28.0"):
+        assert manager.input_buffers is manager._input_buffers
 
 
 def _make_local_pcp_batch():
@@ -254,7 +257,10 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
             return_value=local_attn_state,
         ) as build_attn_state,
     ):
-        result = manager.partition_batch(global_batch, padded_num_tokens=12)
+        if vllm_version_is("0.28.0"):
+            result = manager.partition_batch(global_batch)
+        else:
+            result = manager.partition_batch(global_batch, padded_num_tokens=12)
 
     assert isinstance(result, AscendInputBatch)
     assert result is not global_batch
@@ -269,7 +275,7 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     np.testing.assert_array_equal(result.num_scheduled_tokens, np.array([3, 5], dtype=np.int32))
     np.testing.assert_array_equal(result.query_start_loc_np, np.array([0, 3, 8], dtype=np.int32))
     assert result.num_tokens == 8
-    expected_num_tokens_after_padding = 12
+    expected_num_tokens_after_padding = 10 if vllm_version_is("0.28.0") else 12
     assert result.num_tokens_after_padding == expected_num_tokens_after_padding
     assert torch.equal(result.input_ids[:8], torch.tensor([15, 16, 17, 0, 1, 2, 3, 4], dtype=torch.int32))
 
@@ -306,6 +312,8 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
 
 def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     """Keep request metadata aligned when upstream already pads tokens."""
+    if vllm_version_is("0.28.0"):
+        pytest.skip("padded_num_tokens is a vLLM main PCP contract")
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
         max_num_tokens=4,
@@ -402,6 +410,8 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
 
 def test_partition_batch_keeps_piecewise_request_extent():
     """Token padding in PIECEWISE mode must not create dummy requests."""
+    if vllm_version_is("0.28.0"):
+        pytest.skip("padded_num_tokens is a vLLM main PCP contract")
     batch = _make_local_pcp_batch()
     batch.num_reqs = 2
     batch.num_reqs_after_padding = 2
@@ -887,7 +897,10 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
-    state_kwargs: dict = {"dp_sync": None}
+    # vLLM main added the `dp_sync` field to ExecuteModelState; 0.28.0 lacks it.
+    state_kwargs: dict = {}
+    if not vllm_version_is("0.28.0"):
+        state_kwargs["dp_sync"] = None
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,

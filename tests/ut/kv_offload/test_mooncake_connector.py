@@ -104,8 +104,7 @@ def make_mock_kv_caches() -> dict[str, Any]:
 
 def make_mock_kv_cache_tensor(size: int, layer_names: list[str]) -> types.SimpleNamespace:
     """Build a lane-specific descriptor (vLLM #51718 renamed shared_by to layers)."""
-    layer_field = "shared_by" if vllm_version_is("0.28.0") else "layers"
-    return types.SimpleNamespace(size=size, **{layer_field: layer_names})
+    return types.SimpleNamespace(size=size, shared_by=layer_names, layers=layer_names)
 
 
 def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
@@ -410,9 +409,14 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         # one allocation sized by the group's total bytes-per-block
         # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
         # tensor.size is the sum of the two page sizes times num_blocks.
-        group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
-        self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
-        self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
+        # On 0.28.0 each layer still owns a private page-sized allocation.
+        if vllm_version_is("0.28.0"):
+            self.assertEqual(allocated_sizes[main_layer], main_spec.page_size_bytes * num_blocks)
+            self.assertEqual(allocated_sizes[index_layer], index_spec.page_size_bytes * num_blocks)
+        else:
+            group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
+            self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
+            self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
 
         kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
