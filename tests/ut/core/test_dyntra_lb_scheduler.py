@@ -528,7 +528,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
         vllm_config,
         scheduler_cls=DyntraLBScheduler,
     )
-    boundary_state_offloads = {}
+    boundary_state_offloads: dict[str, list[tuple[int, int, int]]] = {}
     encoder_cache_metadata = object()
     block_states = []
 
