@@ -24,9 +24,7 @@ from vllm_ascend.models.qwen3_dflash2 import (
 # 0.27.1 and some main snapshots still hardcode DFlashQwen3Model /
 # DFlashQwen3DecoderLayer in the parent ctors; the hooks only exist once
 # upstream PR 52816 is on the tree. The CI pin is one of those snapshots.
-_HAS_UPSTREAM_HOOKS = hasattr(DFlashQwen3ForCausalLM, "model_cls") and hasattr(
-    DFlashQwen3Model, "decoder_layer_cls"
-)
+_HAS_UPSTREAM_HOOKS = hasattr(DFlashQwen3ForCausalLM, "model_cls") and hasattr(DFlashQwen3Model, "decoder_layer_cls")
 
 
 def test_inner_model_hook_points_at_the_dflash2_model():
