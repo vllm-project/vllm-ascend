@@ -1,11 +1,20 @@
-First, install the system dependencies and configure the pip mirror.
+First, install the system dependencies and configure the pip mirror for the container operating system.
 
+For Ubuntu:
+
+<!-- doctest: installation-common-prerequisites-ubuntu -->
 ```bash
-# Using apt-get with mirror
 sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
 apt-get update -y && apt-get install -y gcc g++ cmake ninja-build libnuma-dev wget git curl jq
-# Or using yum
-# yum update -y && yum install -y gcc g++ cmake ninja-build numactl-devel wget git curl jq
+# Config pip mirror, only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
+pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+```
+
+For openEuler:
+
+<!-- doctest: installation-common-prerequisites-openeuler -->
+```bash
+yum update -y && yum install -y gcc g++ cmake ninja-build numactl-devel wget git curl jq
 # Config pip mirror, only versions 0.11.0 and earlier are supported, if using a version later than 0.11.0, do not execute this command
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
@@ -31,6 +40,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     This installation method currently supports only **A2** builds and does not automatically support A3, Atlas 300I DUO, Atlas 200I Pro, or 950DT. For other hardware, use a prebuilt image, WheelNext, or a source installation.
 
+    <!-- doctest: installation-pip-install -->
     ```bash
     pip install "vllm=={{ release_vllm_version }}"
     pip install \
@@ -48,6 +58,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     Check the device build type:
 
+    <!-- doctest: installation-pip-device-check -->
     ```bash
     python - <<'PY'
     from vllm_ascend._build_info import __device_type__
@@ -61,12 +72,14 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     WheelNext selects a vLLM Ascend wheel that matches the hardware from the variant index. First, install and verify `uv`:
 
+    <!-- doctest: installation-uv-bootstrap -->
     ```bash
     # install uv-wheelnext
     curl -LsSf https://astral.sh/uv/install.sh | sed 's/verify_checksum "$_file"/true/' | INSTALLER_DOWNLOAD_URL=https://wheelnext.astral.sh sh
     source $HOME/.local/bin/env
     ```
 
+    <!-- doctest: installation-uv-install -->
     ```bash
     # Install vllm-project/vllm. The newest supported version is {{ vllm_version }}.
     pip install vllm=={{ release_vllm_version }}
@@ -87,6 +100,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     Check the device build type:
 
+    <!-- doctest: installation-uv-device-check -->
     ```bash
     python - <<'PY'
     from vllm_ascend._build_info import __device_type__
@@ -102,6 +116,7 @@ Choose one of the following methods to install `vllm` and `vllm-ascend`. PyTorch
 
     Install vLLM first, then install vLLM Ascend:
 
+    <!-- doctest: installation-source-install -->
     ```bash
     # Install vLLM.
     git clone --depth 1 --branch {{ vllm_version }} https://github.com/vllm-project/vllm
@@ -124,6 +139,7 @@ Finally, handle `triton` and `triton-ascend` according to the hardware:
 
     To ensure that Triton Ascend matches the current vLLM Ascend version, remove any existing `triton` and `triton-ascend` packages before installing the corresponding version of `triton-ascend`:
 
+    <!-- doctest: installation-post-standard -->
     ```bash
     pip uninstall -y triton triton-ascend
 
