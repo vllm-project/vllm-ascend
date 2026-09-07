@@ -5,7 +5,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
-from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 
 from tests.ut.base import TestBase
@@ -14,7 +13,6 @@ from vllm_ascend.sample.rejection_sampler import (
     apply_sampling_constraints,
     expand_batch_to_tokens,
     expand_pytorch,
-    greedy_sample,
     rejection_greedy_sample_pytorch,
     rejection_greedy_sample_spec_len_1_pytorch,
     rejection_random_sample_block_verify_pytorch,
@@ -27,7 +25,6 @@ from vllm_ascend.sample.rejection_sampler import (
 
 # Global constants
 PLACEHOLDER_TOKEN_ID = -1
-GREEDY_TEMPERATURE = 0.0
 MAX_SPEC_LEN = 8  # Used as MAX_NUM_TOKENS in expand_batch_to_tokens
 
 
@@ -754,21 +751,13 @@ def _pin_memory_stack() -> ExitStack:
     return stack
 
 
-def _ascend_cfg(reduce_sample=False, block_verify=False, entropy_verify=False):
+def _ascend_cfg(block_verify=False, entropy_verify=False):
     cfg = MagicMock()
-    cfg.enable_reduce_sample = reduce_sample
     cfg.rejection_sampler_config.enable_block_verify = block_verify
     cfg.rejection_sampler_config.enable_entropy_verify = entropy_verify
     cfg.rejection_sampler_config.posterior_threshold = 0.95
     cfg.rejection_sampler_config.posterior_alpha = 0.4
     return cfg
-
-
-def _tp_group():
-    group = MagicMock()
-    group.rank_in_group = 0
-    group.all_gather.side_effect = lambda tensor, dim=-1: tensor
-    return group
 
 
 def _replace(obj, **kwargs):
@@ -779,16 +768,6 @@ def _replace(obj, **kwargs):
 
 def test_ascend_rejection_sampler_methods():
     logits = torch.tensor([[0.1, 0.8, 0.1]])
-    with (
-        patch.object(RejectionSampler, "__init__", lambda self, *args, **kwargs: None),
-        patch("vllm_ascend.sample.rejection_sampler.get_ascend_config", return_value=_ascend_cfg()),
-    ):
-        sampler = AscendRejectionSampler(MagicMock(), None, None)
-    sampler.prepare_sampling(4)
-    assert sampler.top_k == 4
-    sampler.prepare_sampling(None)
-    assert sampler.top_k is None
-
     assert AscendRejectionSampler.apply_penalties(logits, SimpleNamespace(no_penalties=True), None, None, []) is logits
     with (
         patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
@@ -871,7 +850,7 @@ def test_ascend_rejection_sampler_methods():
         patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
         patch(
             "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
-            return_value=(forward_logits[:1], None),
+            return_value=forward_logits[:1],
         ),
         patch(
             "vllm_ascend.sample.rejection_sampler.rejection_sample",
@@ -886,7 +865,7 @@ def test_ascend_rejection_sampler_methods():
         patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
         patch(
             "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
-            return_value=(forward_logits[:1], None),
+            return_value=forward_logits[:1],
         ),
         patch(
             "vllm_ascend.sample.rejection_sampler.rejection_sample",
@@ -913,7 +892,7 @@ def test_ascend_rejection_sampler_methods():
 
 def test_rejection_sample_constraint_and_helper_paths():
     with _pin_memory_stack():
-        logits = torch.tensor([[0.1, 0.9], [0.8, 0.2]])
+        logits = torch.tensor([[0.1, 0.9, 0.0], [0.8, 0.2, 0.0]])
         greedy_meta = SimpleNamespace(all_greedy=True, all_random=False, temperature=torch.tensor([0.0]), generators={})
         random_meta = SimpleNamespace(
             all_greedy=False,
@@ -921,16 +900,8 @@ def test_rejection_sample_constraint_and_helper_paths():
             temperature=torch.tensor([1.0]),
             generators={0: torch.Generator().manual_seed(0)},
         )
-        mixed_meta = SimpleNamespace(
-            all_greedy=False,
-            all_random=False,
-            temperature=torch.tensor([GREEDY_TEMPERATURE]),
-            generators={},
-        )
         uniform = torch.tensor([0.1, 0.2, 0.3], dtype=torch.float32)
-        indices = torch.tensor([[0, 1], [0, 1]])
         draft_probs = torch.tensor([[0.2, 0.8, 0.0], [0.7, 0.3, 0.0]])
-        local_draft_probs = draft_probs[:, :2].contiguous()
 
         def run_sample(**kwargs):
             defaults = dict(
@@ -939,7 +910,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                 max_spec_len=2,
                 cu_num_draft_tokens=torch.tensor([2]),
                 draft_probs=None,
-                target_logits_or_tuple=logits.clone(),
+                target_logits=logits.clone(),
                 bonus_token_ids=torch.tensor([[5]], dtype=torch.int32),
                 sampling_metadata=greedy_meta,
                 synthetic_mode=False,
@@ -952,7 +923,6 @@ def test_rejection_sample_constraint_and_helper_paths():
         with (
             patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
             patch("vllm_ascend.sample.rejection_sampler.generate_uniform_probs", return_value=uniform[:2]),
-            patch("vllm_ascend.sample.rejection_sampler.get_tp_group", return_value=_tp_group()),
             patch("vllm_ascend.sample.rejection_sampler.get_ascend_config", return_value=_ascend_cfg()),
         ):
             spec1 = run_sample(
@@ -960,7 +930,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                 num_draft_tokens=[1],
                 max_spec_len=1,
                 cu_num_draft_tokens=torch.tensor([1]),
-                target_logits_or_tuple=torch.tensor([[0.1, 0.9]]),
+                target_logits=torch.tensor([[0.1, 0.9]]),
             )
             assert spec1.shape == (1, 2)
             empty = run_sample(
@@ -968,30 +938,11 @@ def test_rejection_sample_constraint_and_helper_paths():
                 num_draft_tokens=[0],
                 max_spec_len=0,
                 cu_num_draft_tokens=torch.tensor([0]),
-                target_logits_or_tuple=torch.empty(0, 2),
+                target_logits=torch.empty(0, 2),
             )
             assert empty.shape == (1, 1)
             greedy = run_sample()
             assert greedy.shape == (1, 3)
-
-        with (
-            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
-            patch("vllm_ascend.sample.rejection_sampler.generate_uniform_probs", return_value=uniform[:2]),
-            patch("vllm_ascend.sample.rejection_sampler.get_tp_group", return_value=_tp_group()),
-            patch(
-                "vllm_ascend.sample.rejection_sampler.get_ascend_config",
-                return_value=_ascend_cfg(reduce_sample=True),
-            ),
-        ):
-            assert run_sample().shape[0] == 1
-            assert (
-                run_sample(
-                    sampling_metadata=mixed_meta,
-                    target_logits_or_tuple=(logits.clone(), indices.clone()),
-                    draft_probs=draft_probs.clone(),
-                ).shape[0]
-                == 1
-            )
 
         with (
             patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
@@ -1004,7 +955,7 @@ def test_rejection_sample_constraint_and_helper_paths():
             assert (
                 run_sample(
                     sampling_metadata=random_meta,
-                    target_logits_or_tuple=(logits.clone(), indices.clone()),
+                    target_logits=logits.clone(),
                     draft_probs=draft_probs.clone(),
                     ori_target_logits=logits.clone(),
                 ).shape[0]
@@ -1013,17 +964,15 @@ def test_rejection_sample_constraint_and_helper_paths():
             assert (
                 run_sample(
                     sampling_metadata=random_meta,
-                    target_logits_or_tuple=logits.clone(),
-                    draft_probs=local_draft_probs.clone(),
+                    target_logits=logits.clone(),
+                    draft_probs=draft_probs.clone(),
                 ).shape[0]
                 == 1
             )
 
-        block_logits = torch.tensor([[0.1, 0.9], [0.2, 0.8], [0.3, 0.7]])
+        block_logits = torch.tensor([[0.1, 0.9, 0.0], [0.2, 0.8, 0.0], [0.3, 0.7, 0.0]])
         block_ids = torch.tensor([1, 0, 1], dtype=torch.int32)
         block_probs = torch.tensor([[0.2, 0.8, 0.0], [0.6, 0.4, 0.0], [0.3, 0.7, 0.0]])
-        local_block_probs = block_probs[:, :2].contiguous()
-        block_idx = torch.tensor([[0, 1], [0, 1], [0, 1]])
         with (
             patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
             patch("vllm_ascend.sample.rejection_sampler.generate_uniform_probs", return_value=uniform),
@@ -1038,7 +987,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                 max_spec_len=3,
                 cu_num_draft_tokens=torch.tensor([3]),
                 sampling_metadata=random_meta,
-                target_logits_or_tuple=(block_logits.clone(), block_idx.clone()),
+                target_logits=block_logits.clone(),
                 draft_probs=block_probs.clone(),
                 ori_target_logits=block_logits.clone(),
             ).shape == (1, 4)
@@ -1048,8 +997,8 @@ def test_rejection_sample_constraint_and_helper_paths():
                 max_spec_len=3,
                 cu_num_draft_tokens=torch.tensor([3]),
                 sampling_metadata=random_meta,
-                target_logits_or_tuple=block_logits.clone(),
-                draft_probs=local_block_probs.clone(),
+                target_logits=block_logits.clone(),
+                draft_probs=block_probs.clone(),
             ).shape == (1, 4)
             with pytest.raises(ValueError, match="synthetic_mode"):
                 run_sample(
@@ -1058,7 +1007,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                     max_spec_len=3,
                     cu_num_draft_tokens=torch.tensor([3]),
                     sampling_metadata=random_meta,
-                    target_logits_or_tuple=block_logits.clone(),
+                    target_logits=block_logits.clone(),
                     synthetic_mode=True,
                     synthetic_conditional_rates=torch.tensor([0.5, 0.5, 0.5]),
                 )
@@ -1073,7 +1022,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                 num_draft_tokens=[1],
                 max_spec_len=1,
                 cu_num_draft_tokens=torch.tensor([1]),
-                target_logits_or_tuple=torch.tensor([[0.1, 0.9]]),
+                target_logits=torch.tensor([[0.1, 0.9]]),
                 synthetic_mode=True,
                 synthetic_conditional_rates=torch.tensor([0.9]),
             )
@@ -1081,7 +1030,7 @@ def test_rejection_sample_constraint_and_helper_paths():
 
         constraint_logits = torch.tensor([[1.0, 2.0, 3.0], [3.0, 1.0, 0.0]])
         cu = torch.tensor([2])
-        assert apply_sampling_constraints(constraint_logits, cu, SimpleNamespace(all_greedy=True), None)[1] is None
+        assert apply_sampling_constraints(constraint_logits, cu, SimpleNamespace(all_greedy=True)) is constraint_logits
         non_greedy = SimpleNamespace(
             all_greedy=False,
             temperature=torch.tensor([1.0]),
@@ -1092,21 +1041,11 @@ def test_rejection_sample_constraint_and_helper_paths():
             patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
             patch(
                 "vllm_ascend.sample.rejection_sampler.apply_top_k_top_p",
-                return_value=(constraint_logits, indices),
+                return_value=constraint_logits,
             ) as apply_fn,
-            patch(
-                "vllm_ascend.sample.rejection_sampler.get_ascend_config",
-                return_value=_ascend_cfg(reduce_sample=True),
-            ),
         ):
-            apply_sampling_constraints(constraint_logits.clone(), cu, non_greedy, 2)
+            assert apply_sampling_constraints(constraint_logits.clone(), cu, non_greedy) is constraint_logits
             apply_fn.assert_called()
-        with (
-            patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
-            patch("vllm_ascend.sample.rejection_sampler.apply_top_k_top_p", return_value=constraint_logits),
-            patch("vllm_ascend.sample.rejection_sampler.get_ascend_config", return_value=_ascend_cfg()),
-        ):
-            apply_sampling_constraints(constraint_logits.clone(), cu, non_greedy, None)
 
         with patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False):
             recovered = sample_recovered_tokens(
@@ -1185,18 +1124,6 @@ def test_rejection_sample_constraint_and_helper_paths():
                 recovered_out,
                 torch.tensor([2]),
                 torch.tensor([0, 1]),
-                draft_probs.clone(),
-                torch.tensor([[0.1, 0.9], [0.8, 0.2]]),
-                torch.ones((1, 2)),
-                2,
-                IS_NGRAM=False,
-                target_indices=indices.clone(),
-                enable_reduce_sampling=True,
-            )
-            sample_recovered_tokens_pytorch(
-                recovered_out,
-                torch.tensor([2]),
-                torch.tensor([0, 1]),
                 draft_probs[:, :2].clone(),
                 torch.tensor([[0.1, 0.9], [0.8, 0.2]]),
                 torch.ones((1, 2)),
@@ -1238,12 +1165,7 @@ def test_rejection_sample_constraint_and_helper_paths():
                 2,
                 2,
                 IS_NGRAM=False,
-                target_indices=indices.clone(),
-                enable_reduce_sampling=True,
                 synthetic_mode=True,
                 synthetic_conditional_rates=torch.tensor([0.9, 0.1]),
             )
             assert rand_out.shape == (1, 3)
-
-    with patch("vllm_ascend.sample.rejection_sampler.get_tp_group", return_value=_tp_group()):
-        assert greedy_sample(torch.tensor([[1.0, 3.0, 2.0]])).tolist() == [1]
