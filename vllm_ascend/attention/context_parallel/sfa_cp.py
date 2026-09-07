@@ -59,6 +59,8 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     part of the row-parallel layer semantics.
     """
 
+    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
+
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
     o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
 
