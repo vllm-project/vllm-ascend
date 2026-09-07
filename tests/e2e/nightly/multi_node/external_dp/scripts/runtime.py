@@ -698,6 +698,10 @@ def wait_ranks_ready(
 
 def wait_master_rank_stopped(ranks: list[RankInfo], timeout: int) -> None:
     url = master_rank_health_url(ranks)
-    wait_http_ready(url, timeout=SERVER_READY_TIMEOUT_SECONDS)
+    # A follower can finish model initialization several minutes before the
+    # leader on large multi-node models.  Use the configured cluster startup
+    # timeout here as well; the fixed two-minute HTTP timeout otherwise tears
+    # down a healthy follower before the leader becomes ready.
+    wait_http_ready(url, timeout=timeout)
     logger.info("Hanging until master external DP rank stops: %s", url)
     wait_http_unready(url, timeout=timeout)
