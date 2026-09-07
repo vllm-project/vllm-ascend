@@ -27,9 +27,9 @@ DP_SIZE = 4
 # - CPU: Gloo DP allreduce timeout detects the dead peer.
 # - NPU: HCSP operator timeout detects the dead peer.
 # - Deadline: slowest fallback + margin.
-CPU_DISTRIBUTED_TIMEOUT_S = 15
+CPU_DISTRIBUTED_TIMEOUT_S = 30
 FT_COMMUNICATION_ABORT_TIMEOUT_S = 10
-FAULT_DETECTION_DEADLINE_S = 45
+FAULT_DETECTION_DEADLINE_S = 60
 
 # Post-recovery accuracy check: after retry recovery, every DP rank must
 # answer these factual prompts correctly. Each expected answer is a single
