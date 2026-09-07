@@ -56,6 +56,41 @@ def _create_live_recompute_scheduler(*, async_scheduling: bool = False, max_num_
     return vllm_config, create_dyntra_lb_scheduler(vllm_config, scheduler_cls=scheduler_cls)
 
 
+def _make_recompute_scheduler(*, scheduler_cls=RecomputeScheduler):
+    vllm_config = make_dyntra_test_config()
+    vllm_config.kv_transfer_config = None
+    if scheduler_cls is AsyncRecomputeScheduler:
+        vllm_config.scheduler_config.async_scheduling = True
+    scheduler = create_dyntra_lb_scheduler(vllm_config, scheduler_cls=scheduler_cls)
+    defaults = {
+        "current_step": 0,
+        "prefill_capacity_bound": False,
+        "num_sampled_tokens_per_step": 1,
+        "use_v2_model_runner": False,
+        "needs_kv_cache_zeroing": False,
+        "num_spec_tokens": 0,
+        "dynamic_sd_lookup": None,
+        "defer_block_free": False,
+        "sched_step_seq": 0,
+        "need_mamba_block_aligned_split": False,
+        "use_eagle": False,
+        "is_encoder_decoder": False,
+        "is_encoder_only": False,
+        "num_waiting_for_streaming_input": 0,
+        "requires_kv_delivery": False,
+        "enable_return_routed_experts": False,
+        "recompute_kv_load_failures": True,
+    }
+    for name, value in defaults.items():
+        if not hasattr(scheduler, name):
+            setattr(scheduler, name, value)
+    if not hasattr(scheduler, "_inflight_prefills"):
+        scheduler._inflight_prefills = set()
+    if not hasattr(scheduler, "prev_step_scheduled_req_ids"):
+        scheduler.prev_step_scheduled_req_ids = set()
+    return scheduler
+
+
 def _fail_first_allocate(scheduler):
     original_allocate = scheduler.kv_cache_manager.allocate_slots
     fail_once = {"done": False}
