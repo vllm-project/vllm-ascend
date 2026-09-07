@@ -61,9 +61,7 @@ def _make_full_manager(
 ) -> tuple[AscendMLAAttentionSpec, BlockPool, FullAttentionManager]:
     logical_block_size = physical_block_size * compress_ratio
     ratio_kwargs = (
-        {"compress_ratio": compress_ratio}
-        if vllm_version_is("0.28.0")
-        else {"tokens_per_state": compress_ratio}
+        {"compress_ratio": compress_ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": compress_ratio}
     )
     spec = AscendMLAAttentionSpec(
         block_size=logical_block_size,
