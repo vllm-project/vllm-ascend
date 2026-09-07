@@ -540,17 +540,21 @@ def test_sparse_prepare_bypasses_fused_qkv_norm_rope_on_a5() -> None:
     assert "1.0 + self.q_norm.weight" in source
 
 
-def test_a5_index_score_uses_ascendc_with_triton_fallback_available() -> None:
+def test_a5_index_score_uses_ascendc_prefill_and_triton_decode() -> None:
     module_source = inspect.getsource(msa_m3_module)
     a5_branch_start = module_source.index("if get_ascend_device_type() == AscendDeviceType.A5:")
     a5_branch_end = module_source.index("\n\ndef _should_use_tp_sharded_index_decode", a5_branch_start)
     import_branches = module_source[a5_branch_start:a5_branch_end]
 
-    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE is True
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_PREFILL is True
+    assert msa_m3_module._USE_ASCENDC_INDEX_SCORE_DECODE is (
+        msa_m3_module.get_ascend_device_type() != AscendDeviceType.A5
+    )
     assert import_branches.count("minimax_m3_index_decode") == 1
     assert "msa_m3_triton_a5" in import_branches
     assert "msa_m3_triton" not in import_branches.replace("msa_m3_triton_a5", "")
-    assert "_USE_ASCENDC_INDEX_SCORE = True" in module_source
+    assert "_USE_ASCENDC_INDEX_SCORE_PREFILL = True" in module_source
+    assert "_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5" in module_source
     with patch(
         "vllm_ascend.models.minimax_m3.msa_m3.get_ascend_device_type",
         return_value=AscendDeviceType.A5,
@@ -604,7 +608,7 @@ def test_a5_indexer_forward_keeps_original_decode_path() -> None:
     tp_group = SimpleNamespace(world_size=4, rank_in_group=0)
 
     with (
-        patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE", False),
+        patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_DECODE", False),
         patch.object(
             msa_m3_module,
             "get_forward_context",
@@ -684,7 +688,7 @@ def test_a5_indexer_forward_keeps_original_prefill_path() -> None:
     expected = torch.zeros(1, 1, 2, dtype=torch.int32)
 
     with (
-        patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE", False),
+        patch.object(msa_m3_module, "_USE_ASCENDC_INDEX_SCORE_PREFILL", False),
         patch.object(
             msa_m3_module,
             "get_forward_context",

@@ -55,9 +55,10 @@ from vllm_ascend.ops.linear import AscendColumnParallelLinear
 from vllm_ascend.ops.linear_op import get_parallel_op
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel, so A5
-# shares the AscendC scoring path with A2/A3.
-_USE_ASCENDC_INDEX_SCORE = True
+# The bundled MsaIndexScore includes the Ascend 950 arch35 FP8 kernel. Keep it
+# enabled for A5 prefill, while A5 decode uses its lower-latency Triton path.
+_USE_ASCENDC_INDEX_SCORE_PREFILL = True
+_USE_ASCENDC_INDEX_SCORE_DECODE = get_ascend_device_type() != AscendDeviceType.A5
 
 if get_ascend_device_type() == AscendDeviceType.A5:
     from vllm_ascend.models.minimax_m3.ops.msa_m3_triton_a5 import (
@@ -259,7 +260,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
         )
         self.block_size = kv_cache_spec.block_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
-        self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE else None
+        self.attn_mask_builder = AttentionMaskBuilder(device) if _USE_ASCENDC_INDEX_SCORE_PREFILL else None
 
     def _build_tp_score_metadata(
         self,
@@ -334,7 +335,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                         self.block_size,
                         rounding_mode="floor",
                     ).to(dtype=torch.int32)
-                    if _USE_ASCENDC_INDEX_SCORE
+                    if _USE_ASCENDC_INDEX_SCORE_PREFILL
                     else None
                 ),
             )
@@ -348,7 +349,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
             active_decodes = _active_decode_num_reqs(num_decodes, num_decode_tokens, decode_query_len)
             decode_context_lens = None
             decode_cu_seqlens_q = None
-            if _USE_ASCENDC_INDEX_SCORE:
+            if _USE_ASCENDC_INDEX_SCORE_DECODE:
                 decode_context_lens = self.context_len_buffer[:active_decodes]
                 decode_context_lens.copy_(
                     seq_lens[:active_decodes] - decode_query_len,
@@ -363,7 +364,7 @@ class AscendMiniMaxM3IndexerMetadataBuilder(AttentionMetadataBuilder[AscendMiniM
                 cu_seqlens_q=decode_cu_seqlens_q,
                 context_lens=decode_context_lens,
             )
-            if _USE_ASCENDC_INDEX_SCORE and self.tp_size > 1 and active_prefills == 0:
+            if _USE_ASCENDC_INDEX_SCORE_DECODE and self.tp_size > 1 and active_prefills == 0:
                 decode_metadata.tp_score = self._build_tp_score_metadata(
                     decode_metadata.block_table,
                     decode_cu_seqlens_q,
@@ -505,7 +506,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
             assert d is not None
             tp_group = get_tp_group()
             decode_iq = iq[:num_decode_tokens]
-            if _USE_ASCENDC_INDEX_SCORE:
+            if _USE_ASCENDC_INDEX_SCORE_DECODE:
                 if tp_group.world_size > 1 and index_md.num_prefills == 0:
                     decode_topk = minimax_m3_index_tp_block_parallel_decode(
                         decode_iq,
@@ -569,7 +570,7 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
         if index_md.num_prefills > 0:
             p = index_md.prefill
             assert p is not None
-            if _USE_ASCENDC_INDEX_SCORE:
+            if _USE_ASCENDC_INDEX_SCORE_PREFILL:
                 prefill_topk = minimax_m3_index_prefill_ascendc(
                     iq[num_decode_tokens:],
                     kv,
