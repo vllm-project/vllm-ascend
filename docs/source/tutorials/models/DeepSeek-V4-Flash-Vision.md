@@ -462,7 +462,13 @@ Refer to the
 [performance tuning guide](../../developer_guide/performance_and_debug/optimization_and_tuning.md)
 for general tuning methods.
 
-## 10 Limitations
+## 10 FAQ
+
+For common environment, installation, and general parameter issues, please
+refer to the [Public FAQs](../../faqs.md); this chapter only covers
+model-specific issues.
+
+## 11 Limitations
 
 - Colocated serving is documented on either one Atlas 800 A3 server
   (128GB × 8 NPUs) or two Atlas 800 A2 servers (64GB × 8 NPUs each).
