@@ -36,7 +36,7 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import CachedRequestData, KVConnectorBlockState, NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
@@ -974,6 +974,10 @@ class RecomputeScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # vLLM #51358 hands exact boundary blocks to the connector before
+        # releasing CoW retentions; drain offers even without a connector.
+        kv_connector_block_state = self._take_kv_connector_block_state(new_reqs_data, cached_reqs_data)
+
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:
             self._free_cow_retained_blocks(cow_retained_blocks, self.sched_step_seq + 1)
@@ -1006,6 +1010,7 @@ class RecomputeScheduler(Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
+            kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
             preempted_reqs=preempted_req_data,
@@ -1024,6 +1029,9 @@ class RecomputeScheduler(Scheduler):
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
 
+        # This state is scheduler-local and must not be sent to workers.
+        scheduler_output.kv_connector_block_state = None
+
         # Advance the fence only for non-empty steps that will later be
         # processed by update_from_output.
         if self.defer_block_free and total_num_scheduled_tokens > 0:
@@ -1035,6 +1043,25 @@ class RecomputeScheduler(Scheduler):
         if diagnostics_enabled(self.vllm_config):
             print_scheduler_summary(self, scheduler_output)
         return scheduler_output
+
+    def _take_kv_connector_block_state(
+        self, new_reqs_data: list[NewRequestData], cached_reqs_data: CachedRequestData
+    ) -> KVConnectorBlockState | None:
+        """Preserve the exact-block handoff introduced by vLLM #51358."""
+        boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+        if self.connector is None:
+            return None
+        snapshot_req_ids = {req.req_id for req in new_reqs_data}
+        snapshot_req_ids.update(
+            req_id
+            for req_id, block_ids in zip(cached_reqs_data.req_ids, cached_reqs_data.new_block_ids, strict=True)
+            if block_ids
+        )
+        snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+        return KVConnectorBlockState(
+            block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+            boundary_state_offloads=boundary_state_offloads,
+        )
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
