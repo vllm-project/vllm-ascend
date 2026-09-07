@@ -1210,6 +1210,11 @@ def refresh_block_size(vllm_config):
     if not cache_config:
         return
 
+    # Draft configs can share the target cache config. Do not replace its
+    # explicitly selected block geometry with a generic draft-model default.
+    if cache_config.user_specified_block_size:
+        return
+
     if cache_config.block_size is None:
         cache_config.block_size = 128
 
