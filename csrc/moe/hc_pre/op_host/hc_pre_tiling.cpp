@@ -21,6 +21,7 @@ using namespace ge;
 namespace optiling {
 namespace {
 constexpr uint64_t WORKSPACE_SIZE = 32;
+constexpr uint64_t RESERVED_WORKSPACE_SIZE = 16 * 1024 * 1024; // 16MB 预留缓冲
 int64_t CeilDiv(int64_t x, int64_t y)
 {
     if (y != 0) {
@@ -341,10 +342,13 @@ ge::graphStatus HcPreTiling::GetWorkspaceSize()
     uint64_t squareSumSize = RoundUp(tilingData_.get_cubeBlockDimK() *
     RoundUp(tilingData_.get_bs(), 16) * 16 * sizeof(float), 512);
 
-    uint64_t requiredSize = workspaceSize1 + workspaceSize2 + squareSumSize + 16 * 1024 * 1024; // 16MB 预留缓冲
+    uint64_t requiredSize = workspaceSize1 + workspaceSize2 + squareSumSize + RESERVED_WORKSPACE_SIZE;
 
-    uint64_t defaultSize = 16 * 1024 * 1024 + 192 * 1024 * 1024; // 208MB
-    workspaceSize_ = requiredSize > defaultSize ? requiredSize : defaultSize;
+    // The three buffers above are the only workspace this kernel touches, so ask
+    // for exactly that (plus the reserve). The previous 208MB floor was ~10x the
+    // real requirement (~19MB at bs=16, ~68MB at bs=8192) and that memory is taken
+    // away from the KV cache for the whole process lifetime.
+    workspaceSize_ = requiredSize;
 
     return ge::GRAPH_SUCCESS;
 }
