@@ -1,7 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -583,6 +583,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     understand this class
     """
 
+    _request_capacity_factor: ClassVar[int] = 1
+
     def __init__(
         self,
         kv_cache_spec: AscendMLAAttentionSpec,
@@ -667,9 +669,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cache_group_key = layer_names[0]
         self.hadamard = None
         self._init_hadamard(layer_names)
-        self.start_pos_prefill: torch.Tensor = torch.zeros(
-            scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
-        )
+        max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
+        self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
@@ -681,7 +682,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # during graph replay. Full-decode graphs pad the request count beyond
         # max_num_seqs (cudagraph capture sizes plus the FIA dummy request), so
         # size the per-request buffers for the graph-mode maximum.
-        max_qli_reqs = scheduler_config.max_num_seqs
+        max_qli_reqs = max_num_reqs
         compilation_config = self.vllm_config.compilation_config
         if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and compilation_config.cudagraph_capture_sizes:
             max_qli_reqs = max(max_qli_reqs, compilation_config.max_cudagraph_capture_size)
