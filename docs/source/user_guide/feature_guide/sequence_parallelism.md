@@ -14,6 +14,25 @@ boundary instead.
 
 ## Principle
 
+SP MoE 在 Transformer 层的 MoE 边界沿 token 维度切分输入，使不同 TP rank
+分别处理不同的 token，避免各 rank 对同一批 token 重复执行专家计算。
+
+一次 MoE 层的主要数据流如下：
+
+```text
+按序列切分输入
+  -> EP all-gather：收集各 rank 的 token
+  -> 按各 rank 的实际 token 数 unpad
+  -> 路由、dispatch 和专家计算
+  -> 按实际 token 数 zero-pad
+  -> EP reduce-scatter：重新分发 token
+  -> TP all-gather：恢复后续层所需的布局
+```
+
+由于不同 DP rank 的有效 token 数可能不同，all-gather 后的 buffer 不能直接
+当作连续的有效 token 使用，必须依据每个 rank 的 local token size 进行
+unpad 和 zero-pad。这样可以让 token 在专家计算期间保持序列分片，减少
+重复计算和不必要的通信。
 Upstream vLLM owns the SP MoE switch. `ParallelConfig.use_sequence_parallel_moe`
 is true only when all of the following hold:
 
