@@ -1100,7 +1100,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         x_scale = A5DeviceAdaptor._restore_mxfp_semantic_dtype(x_scale, torch.float8_e8m0fnu)
 
         is_list = isinstance(weight, (list, tuple))
-        if not is_list and not weight.is_contiguous():
+        if isinstance(weight, torch.Tensor) and not weight.is_contiguous():
             weight = weight.transpose(1, 2)
         if isinstance(weight_scale, (list, tuple)):
             weight_scale = [
