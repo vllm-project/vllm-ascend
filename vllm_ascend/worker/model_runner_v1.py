@@ -4457,12 +4457,14 @@ class NPUModelRunner(GPUModelRunner):
             else None
         )
         # ExampleHiddenStatesConnector only consumes the dedicated cache-only
-        # layer and does not register or migrate the per-layer Attention/Mamba
-        # buffers. It therefore does not require the independent 2 MiB-aligned
-        # allocations needed by Mooncake/ADXL connectors.
+        # layer. MooncakeConnectorV1 can register the common backing once while
+        # retaining per-layer transfer metadata for its Attention/Mamba views.
         supports_shared_backing_with_kv_transfer = (
             kv_transfer_config is None
-            or kv_connector == "ExampleHiddenStatesConnector"
+            or kv_connector in (
+                "ExampleHiddenStatesConnector",
+                "MooncakeConnectorV1",
+            )
         )
 
         # The restored DSV4 planner on main emits multiple descriptors into a

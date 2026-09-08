@@ -243,6 +243,82 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
 
 
 class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_dsv4_registration_reconstructs_one_entry_per_shared_page(self):
+        alignment = 2 * 1024 * 1024
+        num_blocks = 2
+        block_stride = 80
+        backing_size = num_blocks * block_stride
+        raw_tensor = torch.empty(
+            backing_size + alignment,
+            dtype=torch.uint8,
+        )
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
+
+        indexer_layer = "model.layers.2.self_attn.indexer.k_cache"
+        state_layer = "model.layers.2.self_attn.indexer.compressor.state_cache"
+        indexer_k = backing.as_strided((num_blocks, 64), (block_stride, 1))
+        indexer_scale = backing[64:].as_strided(
+            (num_blocks, 16),
+            (block_stride, 1),
+        )
+        state_cache = backing.as_strided(
+            (num_blocks, 64),
+            (block_stride, 1),
+        )
+        kv_caches = {
+            indexer_layer: [indexer_k, indexer_scale],
+            state_layer: [state_cache],
+        }
+
+        descriptors = [
+            types.SimpleNamespace(
+                size=backing_size,
+                layers=[layer_name],
+                layer_stride=backing_size,
+                block_stride=block_stride,
+                offset=0,
+            )
+            for layer_name in (indexer_layer, state_layer)
+        ]
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(model_config=types.SimpleNamespace(is_deepseek_mla=True))
+        worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=num_blocks,
+            kv_cache_groups=[
+                types.SimpleNamespace(layer_names=[indexer_layer]),
+                types.SimpleNamespace(layer_names=[state_layer]),
+            ],
+            kv_cache_tensors=descriptors,
+        )
+        worker.use_hybrid = True
+        worker.use_mamba = False
+        worker.use_compress = True
+
+        class RegistrationCaptured(Exception):
+            pass
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ),
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches(kv_caches)
+
+        self.assertEqual(
+            worker.kv_caches_base_addr,
+            [backing.data_ptr()],
+        )
+        self.assertEqual(worker.addr_group_idx, [[0, 1]])
+        self.assertEqual(worker.block_stride_per_addr, [block_stride])
+        self.assertEqual(worker.block_len_per_addr, [block_stride])
+        self.assertNotIn(
+            indexer_scale.data_ptr(),
+            worker.kv_caches_base_addr,
+        )
+
     def test_hybrid_registration_uses_actual_merged_tensor_ranges(self):
         alignment = 2 * 1024 * 1024
         backing_size = 4 * alignment
