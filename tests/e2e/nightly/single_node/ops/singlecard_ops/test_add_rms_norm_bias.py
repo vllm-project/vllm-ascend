@@ -151,7 +151,7 @@ def test_quant_fpx_linear(row: int, col: int, dtype, atol, rtol, kernelType):
 @pytest.mark.parametrize("with_bias", [False, True])
 def test_a5_add_rms_norm_bias_outputs(dtype, width, with_bias):
     bootstrap_custom_op_env(include_vendor_lib=True)
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
     generator = torch.Generator().manual_seed(45)
     x = torch.randn(3, width, dtype=dtype, generator=generator)
