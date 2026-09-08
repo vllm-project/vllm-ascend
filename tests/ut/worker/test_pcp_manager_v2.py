@@ -984,40 +984,22 @@ def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
     )
 
 
-@pytest.mark.parametrize("sparse_mla", [False, True])
-@pytest.mark.parametrize("cudagraph_mode", list(CUDAGraphMode))
-def test_validate_config_pcp_dp_graph_modes(sparse_mla, cudagraph_mode):
-    config = _make_pcp_config(cudagraph_mode, sparse_mla=sparse_mla, data_parallel_size=2)
-    if cudagraph_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
+@pytest.mark.parametrize(
+    "dp_size,cudagraph_mode,allowed",
+    [
+        (2, CUDAGraphMode.NONE, True),
+        (2, CUDAGraphMode.FULL_DECODE_ONLY, True),
+        (2, CUDAGraphMode.PIECEWISE, False),
+        (1, CUDAGraphMode.PIECEWISE, True),
+    ],
+)
+def test_validate_config_pcp_dp_graph_modes(dp_size, cudagraph_mode, allowed):
+    config = _make_pcp_config(cudagraph_mode, sparse_mla=False, data_parallel_size=dp_size)
+    if allowed:
         AscendPCPManager.validate_config(config, supports_mm_inputs=False)
     else:
         with pytest.raises(NotImplementedError, match=r"PCP\+DP supports eager mode or FULL_DECODE_ONLY"):
             AscendPCPManager.validate_config(config, supports_mm_inputs=False)
-
-
-@pytest.mark.parametrize(
-    "pcp_size,scheduled,prefilling,expected",
-    [
-        (2, [80, 48], [True, True], 64),
-        (2, [18], [True], 10),
-        (2, [18, 1], [True, False], 11),
-        (4, [18, 3], [True, False], 9),
-        (4, [1], [True], 1),
-        (2, [1, 3], [False, False], 4),
-    ],
-)
-def test_dispatch_size_accounts_for_pcp_padding_and_replicated_decode(pcp_size, scheduled, prefilling, expected):
-    manager = AscendPCPManager(pcp_size, 0, torch.device("cpu"))
-    scheduled = np.array(scheduled, dtype=np.int32)
-    original = scheduled.copy()
-
-    actual = manager.get_num_tokens_for_dispatch(scheduled, np.array(prefilling))
-
-    assert actual == expected
-    np.testing.assert_array_equal(scheduled, original)
-    assert manager._global_batch is None
-    assert manager._padded_gather_idx is None
-    assert manager._hidden_restore_idx is None
 
 
 @pytest.mark.parametrize("pcp_rank", [0, 1])

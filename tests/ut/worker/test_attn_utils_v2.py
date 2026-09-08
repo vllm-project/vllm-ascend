@@ -647,8 +647,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("model_state", CUDAGraphMode.NONE, False, 1, 5),
         ("model_state", CUDAGraphMode.FULL, False, 1, 8),
         ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
-        ("pcp_dummy", CUDAGraphMode.NONE, False, 2, 8),
-        ("pcp_dummy", CUDAGraphMode.FULL, True, 2, 8),
+        ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
     ],
 )
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(

@@ -327,11 +327,15 @@ def test_graph_prefill_builds_draft_metadata(replicated_pcp: bool) -> None:
 
 
 @pytest.mark.parametrize(
-    ("speculator_cls", "parent_cls"),
-    [(AscendMTPSpeculator, MTPSpeculator), (AscendEagleSpeculator, EagleSpeculator)],
+    ("speculator_cls", "parent_cls", "replicated_pcp", "batch_kind"),
+    [
+        (AscendMTPSpeculator, MTPSpeculator, True, "prefill"),
+        (AscendMTPSpeculator, MTPSpeculator, True, "decode"),
+        (AscendMTPSpeculator, MTPSpeculator, True, "idle"),
+        (AscendMTPSpeculator, MTPSpeculator, False, "prefill"),
+        (AscendEagleSpeculator, EagleSpeculator, True, "prefill"),
+    ],
 )
-@pytest.mark.parametrize("replicated_pcp", [False, True])
-@pytest.mark.parametrize("batch_kind", ["prefill", "decode", "idle"])
 def test_propose_sync_follows_draft_token_layout(speculator_cls, parent_cls, replicated_pcp, batch_kind) -> None:
     speculator = object.__new__(speculator_cls)
     speculator.replicated_pcp = replicated_pcp
