@@ -41,7 +41,6 @@ from vllm_ascend.ops.triton.rope import (
     _compute_rope_block_size_head,
 )
 
-
 # ──────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
@@ -163,7 +162,7 @@ class TestComputeBlockSizeHead:
         actual = _compute_rope_block_size_head(head_dim, rope_dim, is_neox)
         expected = _expected_block(head_dim, rope_dim, is_neox, DEFAULT_UB_BYTES)
         assert actual == expected, (
-             f"{desc}: got {actual}, expected {expected} (head_dim={head_dim}, rope_dim={rope_dim}, neox={is_neox})"
+            f"{desc}: got {actual}, expected {expected} (head_dim={head_dim}, rope_dim={rope_dim}, neox={is_neox})"
         )
 
     @pytest.mark.parametrize(
