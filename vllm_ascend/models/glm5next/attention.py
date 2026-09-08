@@ -307,7 +307,7 @@ class Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
-            state_cache=self.state_cache,
+            tail_cache=self.state_cache,
         )
 
     def forward(

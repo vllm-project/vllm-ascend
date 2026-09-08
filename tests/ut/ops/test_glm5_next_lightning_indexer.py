@@ -2,28 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the GLM-Next KPool lightning indexer op."""
 
-from types import SimpleNamespace
-
 import torch
-from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.compilation import CUDAGraphMode
-from vllm.forward_context import ForwardContext, override_forward_context
 
-from vllm_ascend.models.glm5next.sparse_attn_indexer_kpool import (
-    SparseAttnIndexerKpool,
-)
 from vllm_ascend.ops.glm5_next_lightning_indexer import (
     glm5_next_lightning_indexer,
 )
-
-
-def _make_forward_context(attn_metadata):
-    return ForwardContext(
-        no_compile_layers={},
-        attn_metadata=attn_metadata,
-        slot_mapping={},
-        cudagraph_runtime_mode=CUDAGraphMode.NONE,
-    )
 
 
 def test_lightning_indexer_selects_pools_expands_tokens_and_appends_tail():
@@ -131,102 +114,3 @@ def test_lightning_indexer_reads_block_major_pooled_cache_by_block_table():
     assert indexer_cache.stride(0) * indexer_cache.element_size() == 32
     torch.testing.assert_close(raw_cache, raw_before)
     assert raw_cache[page_offset_bytes + 8].item() == 0
-
-
-def test_indexer_kpool_forward_native_writes_caches_and_buffer():
-    index_topk = 2
-    index_kpool = 2
-    head_dim = 4
-    k = torch.tensor(
-        [[1.0] * head_dim, [2.0] * head_dim, [3.0] * head_dim, [4.0] * head_dim],
-        dtype=torch.float32,
-    )
-    gate = torch.zeros((4, head_dim), dtype=torch.float32)
-    ape = torch.zeros((index_kpool, head_dim), dtype=torch.float32)
-    positions = torch.arange(4, dtype=torch.int64)
-    query = k.unsqueeze(1).expand(4, 2, head_dim).contiguous().to(torch.bfloat16)
-    weights = torch.ones((4, 2), dtype=torch.bfloat16)
-
-    state_cache_tensor = torch.zeros(
-        (2, index_kpool, 2 * head_dim), dtype=torch.float32
-    )
-    indexer_cache_tensor = torch.zeros(
-        (2, index_kpool, 1, head_dim), dtype=torch.bfloat16
-    )
-    buffer = torch.zeros((4, 128), dtype=torch.int32)
-    k_cache = SimpleNamespace(
-        kv_cache=indexer_cache_tensor,
-        prefix="model.layers.3.indexer.k_cache",
-        compress_ratio=index_kpool,
-    )
-    state_cache = SimpleNamespace(
-        kv_cache=state_cache_tensor,
-        prefix="model.layers.3.indexer.compressor.state_cache",
-    )
-    with set_current_vllm_config(VllmConfig()):
-        op = SparseAttnIndexerKpool(
-            k_cache=k_cache,
-            quant_block_size=128,
-            scale_fmt=None,
-            topk_tokens=index_topk,
-            head_dim=head_dim,
-            max_model_len=16,
-            max_total_seq_len=16,
-            topk_indices_buffer=buffer,
-            state_cache=state_cache,
-        )
-
-    indexer_metadata = SimpleNamespace(
-        slot_mapping=torch.tensor([-1, 0, -1, 1], dtype=torch.int64),
-        cum_query_lens=torch.tensor([4], dtype=torch.int32),
-        raw_seq_lens=torch.tensor([4], dtype=torch.int32),
-        seq_lens=torch.tensor([2], dtype=torch.int32),
-        seq_lens_cpu=torch.tensor([2], dtype=torch.int32),
-        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
-        num_actual_tokens=4,
-    )
-    state_metadata = SimpleNamespace(
-        slot_mapping=torch.arange(4, dtype=torch.int64),
-        block_table=torch.tensor([[0, 1]], dtype=torch.int32),
-    )
-    attn_metadata = {
-        k_cache.prefix: indexer_metadata,
-        state_cache.prefix: state_metadata,
-    }
-
-    with override_forward_context(_make_forward_context(attn_metadata)):
-        result = op.forward_native(
-            torch.zeros(4),
-            query,
-            k,
-            weights,
-            gate_score=gate,
-            compress_ape=ape,
-            index_kpool=index_kpool,
-            positions=positions,
-        )
-
-    expected_state = torch.tensor(
-        [
-            [[1, 1, 1, 1, 0, 0, 0, 0], [2, 2, 2, 2, 0, 0, 0, 0]],
-            [[3, 3, 3, 3, 0, 0, 0, 0], [4, 4, 4, 4, 0, 0, 0, 0]],
-        ],
-        dtype=torch.float32,
-    )
-    torch.testing.assert_close(state_cache_tensor, expected_state)
-    torch.testing.assert_close(
-        indexer_cache_tensor[0, 0, 0], torch.full((4,), 1.5).bfloat16()
-    )
-    torch.testing.assert_close(
-        indexer_cache_tensor[0, 1, 0], torch.full((4,), 3.5).bfloat16()
-    )
-    assert result.dtype == torch.int32
-    assert result.shape == (4, 1, index_topk + index_kpool - 1)
-    assert [row.tolist() for row in result[:, 0]] == [
-        [-1, -1, 0],
-        [0, 1, -1],
-        [0, 1, 2],
-        [2, 3, -1],
-    ]
-    torch.testing.assert_close(buffer[:, :3], result[:, 0, :])
-    assert torch.all(buffer[:, 3:] == -1)

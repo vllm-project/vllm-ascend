@@ -18,12 +18,7 @@ INDEXER_KPOOL_KEY_CHUNK_SIZE = 2048
 TRITON_HEAD_DIM = 128
 TRITON_MAX_POOL_TOPK = 512
 
-if HAS_TRITON:
-    from vllm_ascend.ops.triton.glm5_next_lightning_indexer import (
-        glm5_next_lightning_indexer_triton,
-    )
-else:
-    glm5_next_lightning_indexer_triton = None
+glm5_next_lightning_indexer_triton = None
 
 
 def _align_key_chunk_size(cache_block_size: int) -> int:
