@@ -531,6 +531,32 @@ class AscendConfig:
             and vc.parallel_config.tensor_parallel_size > 1
         )
 
+        if self.enable_dsa_cp:
+            tp_size = vc.parallel_config.tensor_parallel_size
+            pcp_size = vc.parallel_config.prefill_context_parallel_size
+            if pcp_size > 1:
+                migration = (
+                    "Prefill context parallelism is already enabled; remove enable_dsa_cp from additional_config."
+                )
+            elif tp_size > 1:
+                migration = (
+                    "Consider trying prefill context parallelism with "
+                    f"--tensor-parallel-size 1 --prefill-context-parallel-size {tp_size} "
+                    "to preserve the current world size. Remove enable_dsa_cp from "
+                    "additional_config when enabling PCP."
+                )
+            else:
+                migration = (
+                    "Consider trying prefill context parallelism with "
+                    "--prefill-context-parallel-size greater than 1 (requires additional ranks). "
+                    "Remove enable_dsa_cp from additional_config when enabling PCP."
+                )
+            logger.warning_once(
+                "enable_dsa_cp will be fully deprecated once PCP is ready. %s "
+                "Check PCP support for your model and deployment configuration.",
+                migration,
+            )
+
         # DSA CP is only applicable to models with an indexer (for example,
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
         # available so runtime reads do not depend on vLLM's temporary config
@@ -965,10 +991,13 @@ class FinegrainedTPConfig:
             "mlp_tensor_parallel_size",
             "olora_tensor_parallel_size",
         )
+        self.max_finegrained_tp_size = 1
         for field_name in size_fields:
             value = getattr(self, field_name)
             if value < 0:
                 raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
+            self.max_finegrained_tp_size = max(self.max_finegrained_tp_size, value)
+
         return self
 
     def _validate_preconditions(self, vllm_config: Any):

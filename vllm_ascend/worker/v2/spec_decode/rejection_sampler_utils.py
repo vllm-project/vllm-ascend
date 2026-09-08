@@ -25,167 +25,8 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
 )
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
-    _insert_resampled_kernel,
-)
 
-
-@triton.jit
-def _npu_gumbel_block_argmax(
-    logits,
-    block,
-    mask,
-    token_idx,
-    expanded_idx_mapping_ptr,
-    temp_ptr,
-    seeds_ptr,
-    pos_ptr,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
-    vocab_size,
-    APPLY_TEMPERATURE: tl.constexpr,
-):
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        logits = logits / temp
-
-    if processed_logits_ptr is not None:
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
-        else:
-            col = 0
-        tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
-            logits,
-            mask=mask,
-        )
-
-    logits = logits.to(tl.float32)
-    if temp != 0.0:
-        seed = tl.load(seeds_ptr + req_state_idx)
-        # NPU: cast pos to int32 to avoid uint64 in philox (NPU umulhi only
-        # supports int32/uint32). Position values fit in int32 in practice.
-        pos = tl.load(pos_ptr + token_idx).to(tl.int32)
-        gumbel_seed = tl.randint(seed, pos)
-        # NPU: use tl.rand (float32) instead of tl_rand64 (float64 not supported)
-        r = tl.rand(gumbel_seed, block).to(tl.float32)
-        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
-        logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
-
-    value, idx = tl.max(logits, axis=0, return_indices=True)
-    return value, idx
-
-
-@triton.jit
-def _resample_kernel(
-    # [num_reqs, num_blocks]
-    resampled_local_argmax_ptr,
-    resampled_local_argmax_stride,
-    # [num_reqs, num_blocks]
-    resampled_local_max_ptr,
-    resampled_local_max_stride,
-    # [num_logits, V]
-    target_logits_ptr,
-    target_logits_stride,
-    # [num_reqs]
-    target_rejected_logsumexp_ptr,
-    # [max_num_reqs, num_speculative_steps, V]
-    draft_logits_ptr,
-    draft_logits_stride_0,
-    draft_logits_stride_1,
-    # [num_reqs]
-    draft_rejected_logsumexp_ptr,
-    # [num_reqs]
-    rejected_step_ptr,
-    # [num_reqs + 1]
-    cu_num_logits_ptr,
-    # [num_logits]
-    expanded_idx_mapping_ptr,
-    # [num_logits]
-    draft_sampled_ptr,
-    # [max_num_reqs]
-    temp_ptr,
-    # [max_num_reqs]
-    seed_ptr,
-    # [num_logits]
-    pos_ptr,
-    vocab_size,
-    BLOCK_SIZE: tl.constexpr,
-    HAS_DRAFT_LOGITS: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    resample_idx = tl.load(rejected_step_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
-    end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    resample_token_idx = start_idx + resample_idx
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
-
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    is_bonus = resample_token_idx == end_idx - 1
-    if temp == 0.0 and not is_bonus:
-        return
-
-    block_idx = tl.program_id(1)
-    block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    mask = block < vocab_size
-    target_logits = tl.load(
-        target_logits_ptr + resample_token_idx * target_logits_stride + block,
-        mask=mask,
-        other=float("-inf"),
-    ).to(tl.float32)
-
-    if is_bonus:
-        residual_logits = target_logits
-    elif HAS_DRAFT_LOGITS:
-        draft_logits = tl.load(
-            draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + block,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-        target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
-        draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
-        target_log_probs = target_logits - target_lse
-        draft_log_probs = draft_logits - draft_lse
-        ratio = tl.exp(draft_log_probs - target_log_probs)
-        residual_logits = tl.where(
-            ratio < 1.0,
-            target_log_probs + tl.log(1 - ratio),
-            float("-inf"),
-        ).to(tl.float32)
-    else:
-        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
-        residual_logits = tl.where(
-            block != rejected_draft_token,
-            target_logits,
-            float("-inf"),
-        ).to(tl.float32)
-
-    value, idx = _npu_gumbel_block_argmax(
-        residual_logits,
-        block,
-        mask,
-        resample_token_idx,
-        expanded_idx_mapping_ptr,
-        temp_ptr,
-        seed_ptr,
-        pos_ptr,
-        None,
-        0,
-        None,
-        vocab_size,
-        APPLY_TEMPERATURE=False,
-    )
-    token_id = block_idx * BLOCK_SIZE + idx
-    tl.store(
-        resampled_local_argmax_ptr + req_idx * resampled_local_argmax_stride + block_idx,
-        token_id,
-    )
-    tl.store(
-        resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
-        value,
-    )
+from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
 
 
 @triton.jit
@@ -307,13 +148,11 @@ def _probabilistic_rejection_kernel(
                 target_log_prob = target_logit - target_lse
                 # Draw the acceptance threshold u ~ U(0, 1). Upstream uses
                 # tl_rand64/tl_rand32; NPU Triton lacks float64 tl_rand64 and
-                # scalar tl.rand, so generate u from a 1-element block (same
-                # pattern as _npu_gumbel_block_argmax) and clamp away from 0
-                # so that tl.log(u) stays finite.
+                # scalar tl.rand, so generate u from a 1-element block and
+                # clamp away from 0 so that tl.log(u) stays finite.
                 # NPU: cast pos to int32 so philox uses the 32-bit path.
-                # uint64 umulhi is not supported by the Ascend vector core
-                # (matches _npu_gumbel_block_argmax). Position values fit in
-                # int32 in practice.
+                # uint64 umulhi is not supported by the Ascend vector core.
+                # Position values fit in int32 in practice.
                 u_pos = tl.load(pos_ptr + logit_idx).to(tl.int32)
                 u_seed = tl.randint(seed, u_pos)
                 u = tl.max(tl.rand(u_seed, tl.arange(0, 1)).to(tl.float32), axis=0)
@@ -479,52 +318,19 @@ def rejection_sample(
     )
 
     # Resample the rejected/bonus tokens.
-    RESAMPLE_BLOCK_SIZE = 1024
-    resample_num_blocks = triton.cdiv(vocab_size, RESAMPLE_BLOCK_SIZE)
-    padded_resample_num_blocks = triton.next_power_of_2(resample_num_blocks)
-    resampled_local_argmax = target_logits.new_empty(num_reqs, resample_num_blocks, dtype=torch.int64)
-    # NPU does not support float64; use float32 for resampled_local_max.
-    resampled_local_max = target_logits.new_empty(num_reqs, resample_num_blocks, dtype=torch.float32)
-    _resample_kernel[(num_reqs, resample_num_blocks)](
-        resampled_local_argmax,
-        resampled_local_argmax.stride(0),
-        resampled_local_max,
-        resampled_local_max.stride(0),
+    resample(
+        sampled,
+        num_sampled,
         target_logits,
-        target_logits.stride(0),
         target_rejected_logsumexp,
         draft_logits,
-        draft_logits.stride(0),
-        draft_logits.stride(1),
         draft_rejected_logsumexp,
-        num_sampled,
         cu_num_logits,
         expanded_idx_mapping,
         draft_sampled,
         temperature,
         seed,
         pos,
-        vocab_size,
-        BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
-        HAS_DRAFT_LOGITS=has_draft_logits,
-        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
-        # bug for max-with-index reductions is fixed.
-        has_auto_blockify_blacklist_op=True,
-    )
-
-    # Insert the resampled tokens into the output sampled.
-    _insert_resampled_kernel[(num_reqs,)](
-        sampled,
-        sampled.stride(0),
-        num_sampled,
-        resampled_local_argmax,
-        resampled_local_argmax.stride(0),
-        resampled_local_max,
-        resampled_local_max.stride(0),
-        resample_num_blocks,
-        cu_num_logits,
-        expanded_idx_mapping,
-        temperature,
-        PADDED_RESAMPLE_NUM_BLOCKS=padded_resample_num_blocks,
+        has_draft_logits=has_draft_logits,
     )
     return sampled, num_sampled

@@ -40,10 +40,11 @@
      padding program per group.
   2. Resolve the selected request through `idx_mapping`, then read its token
      interval from `query_start_loc`.
-  3. Load the selected request's block-table row once with a contiguous GM
-     load, then process the interval in `TRITON_BLOCK_SIZE` tiles. Convert
-     positions to INT32, calculate block indices and offsets, and gather the
-     physical block number from the staged row.
+  3. For block-table rows up to the validated staging limit, load the selected
+     request's row once with a contiguous GM load. Larger rows use per-token
+     direct GM loads so the compiler does not allocate an unbounded staged row
+     in UB. Process the interval in `TRITON_BLOCK_SIZE` tiles, convert positions
+     to INT32, and calculate block indices and offsets.
   4. Calculate slot IDs directly for non-CP execution. For CP execution,
      convert virtual offsets to rank-local offsets and replace non-local slots
      with `PAD_ID`.
@@ -76,6 +77,7 @@
 | `PAD_ID` | Attribute | Value written for padding and token positions owned by another CP rank; production uses `PAD_SLOT_ID`. | constexpr INT | scalar |
 | `TRITON_BLOCK_SIZE` | Attribute | Number of token positions processed per loop tile; production uses 1024. | constexpr INT | scalar |
 | `BLOCK_TABLE_PAD_SIZE` | Attribute | Power-of-two upper bound for the allocated row stride. The load is masked by the runtime row stride. | constexpr INT | scalar |
+| `USE_BLOCK_TABLE_STAGING` | Attribute | Selects the contiguous staged-row path for bounded rows; larger rows use direct block-number loads. | constexpr BOOL | scalar |
 
 ## Constraints
 
@@ -96,6 +98,10 @@
   group. `TRITON_BLOCK_SIZE` must be a positive compile-time constant.
 - Every derived block index must be smaller than its group's runtime row stride,
   which in turn must not exceed `BLOCK_TABLE_PAD_SIZE`.
+- `USE_BLOCK_TABLE_STAGING` may only be enabled when the staged row and the
+  per-token temporaries fit the target UB. The host currently enables it for
+  power-of-two row bounds up to 16K entries, the largest size validated by the
+  original optimization on Ascend A3.
 - Graph capture requires the number of groups, request capacity, output
   capacity, and compile-time CP attributes to remain compatible with the
   captured launch.
@@ -109,9 +115,9 @@
     - Converts logical positions from INT64 to INT32 before block-index,
     block-offset, and address calculations, reducing INT64 scalar arithmetic
     on Ascend NPU.
-    - Stages one complete request row with a contiguous masked GM load and uses
-    `tl.gather` for token-to-block lookup, avoiding per-token non-contiguous GM
-    loads.
+    - Stages one complete bounded request row with a contiguous masked GM load
+    and uses `tl.gather` for token-to-block lookup. Rows above the validated
+    staging limit preserve the upstream direct-load algorithm to bound UB use.
     - Replaces the INT32 remainder used for the block offset with
     multiply/subtract to avoid scalar fallback on Ascend.
     - Preserves the upstream launch grid, CP mapping, padding behavior, and
@@ -125,6 +131,7 @@
 The single-operator test compares the Ascend kernel bit-for-bit with the
 upstream MRV2 kernel for two KV-cache groups and CP configurations
 `(size, rank, interleave) = (1, 0, 1), (2, 1, 2), (4, 2, 1)`. It also exercises
+both the staged-row boundary and a 131072-entry direct-load row, then exercises
 the `AscendBlockTables.compute_slot_mappings(..., out=...)` override and checks
 the returned view, physical slot IDs, and padded tail.
 

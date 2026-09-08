@@ -199,7 +199,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     vllm serve /root/.cache/modelscope/hub/models/UploadWeight/DeepSeek-V4-Flash-DSpark-w4a8-test \
         --max-model-len 800000 \
         --max-num-batched-tokens 8192 \
-        --served-model-name dsv4-dspark \
+        --served-model-name dsv4 \
         --gpu-memory-utilization 0.9 \
         --max-num-seqs 32 \
         --data-parallel-size 1 \
@@ -665,7 +665,7 @@ Before you start, please:
             --tensor-parallel-size $7 \
             --enable-expert-parallel \
             --seed 1024 \
-            --served-model-name dsv4-spark \
+            --served-model-name dsv4 \
             --max-model-len 1048576 \
             --max-num-batched-tokens 8192 \
             --max-num-seqs 16 \
