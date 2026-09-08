@@ -526,6 +526,8 @@ def test_dyntra_lb_v026_uses_release_connector_lookup(monkeypatch):
 
 
 def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
+    if dyntra_lb_scheduler_module.KVConnectorBlockState is None:
+        pytest.skip("KVConnectorBlockState is not available on vLLM v0.27.1")
     vllm_config = make_dyntra_test_config()
     scheduler = create_dyntra_lb_scheduler(
         vllm_config,

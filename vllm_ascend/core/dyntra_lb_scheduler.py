@@ -15,10 +15,14 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import (
-    KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
 )
+
+try:
+    from vllm.v1.core.sched.output import KVConnectorBlockState
+except ImportError:  # vLLM v0.27.1
+    KVConnectorBlockState = None
 from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
@@ -1106,25 +1110,25 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
         # Drain every step, including without a connector, to avoid stale
         # Mamba boundary offers. Snapshot exact current block tables for the
         # connector before building its metadata.
-        boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
-
         kv_connector_block_state = None
-        if self.connector is not None:
-            snapshot_req_ids = {req.req_id for req in new_reqs_data}
-            snapshot_req_ids.update(
-                req_id
-                for req_id, block_ids in zip(
-                    cached_reqs_data.req_ids,
-                    cached_reqs_data.new_block_ids,
-                    strict=True,
+        if KVConnectorBlockState is not None:
+            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+            if self.connector is not None:
+                snapshot_req_ids = {req.req_id for req in new_reqs_data}
+                snapshot_req_ids.update(
+                    req_id
+                    for req_id, block_ids in zip(
+                        cached_reqs_data.req_ids,
+                        cached_reqs_data.new_block_ids,
+                        strict=True,
+                    )
+                    if block_ids
                 )
-                if block_ids
-            )
-            snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-            kv_connector_block_state = KVConnectorBlockState(
-                block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-                boundary_state_offloads=boundary_state_offloads,
-            )
+                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                kv_connector_block_state = KVConnectorBlockState(
+                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    boundary_state_offloads=boundary_state_offloads,
+                )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:
@@ -1162,9 +1166,10 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
             kv_cache_block_copies=pending_kv_cache_block_copies,
-            kv_connector_block_state=kv_connector_block_state,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
+        if KVConnectorBlockState is not None:
+            scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
         if self._scheduler_output_supports("ec_manager_metadata"):
             get_manager_metadata = getattr(
                 self.encoder_cache_manager,
@@ -1189,7 +1194,8 @@ class DyntraLBScheduler(DyntraLBPolicyMixin, Scheduler):
             scheduler_output.ec_connector_metadata = ec_meta
 
         # Connector-only block state must not be dispatched to workers.
-        scheduler_output.kv_connector_block_state = None
+        if KVConnectorBlockState is not None:
+            scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
