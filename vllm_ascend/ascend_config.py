@@ -146,10 +146,12 @@ class StairConfig:
             raise ValueError(f"stair_config fields {finite_non_negative} must be finite and non-negative")
         if not math.isfinite(self.imbalance_threshold) or self.imbalance_threshold < 1:
             raise ValueError("stair_config.imbalance_threshold must be finite and at least one")
-        for name in ("hysteresis_relative", "hysteresis_absolute", "min_relative_score_improvement"):
+        for name in ("hysteresis_relative", "hysteresis_absolute"):
             value = getattr(self, name)
-            if not math.isfinite(value) or not 0 < value < 1:
+            if not math.isfinite(value) or not 0 < value <= 1:
                 raise ValueError(f"stair_config.{name} must be between zero and one")
+        if not math.isfinite(self.min_relative_score_improvement) or not 0 <= self.min_relative_score_improvement < 1:
+            raise ValueError("stair_config.min_relative_score_improvement must be in [0, 1)")
         return self
 
 

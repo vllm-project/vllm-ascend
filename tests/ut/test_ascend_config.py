@@ -212,11 +212,20 @@ class TestAscendConfig(TestBase):
         for value in (
             {"sample_size": 0},
             {"z_score": -1},
-            {"hysteresis_relative": 1},
+            {"hysteresis_relative": 0},
+            {"min_relative_score_improvement": 1},
             {"flash_tree_width": -1},
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 EplbConfig(algorithm="stair", stair_config=value)
+
+        self.assertEqual(
+            EplbConfig(
+                algorithm="stair",
+                stair_config={"min_relative_score_improvement": 0},
+            ).resolved_stair_config.min_relative_score_improvement,
+            0,
+        )
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
