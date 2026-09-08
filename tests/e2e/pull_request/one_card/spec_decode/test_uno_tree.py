@@ -101,3 +101,27 @@ def test_fused_kv_compaction_preserves_aliases_pages_padding_and_graph_replay(dt
                 cache.copy_(original)
             graph.replay()
             assert all(torch.equal(a, b) for a, b in zip(caches, reference))
+
+
+@pytest.mark.parametrize("top_k", [2, 32, 128])
+def test_tree_frontier_preserves_rank_ties_and_exhausted_parent_order(top_k):
+    torch.npu.set_device(0)
+    roots = torch.tensor([41], device="npu")
+    logits = torch.zeros(1, 7, 257, device="npu")
+    temperature = torch.ones(1, device="npu")
+    with torch.inference_mode():
+        graph = torch.npu.NPUGraph()
+        build_uno_tree(roots, logits, max_nodes=32, candidate_top_k=top_k, temperature=temperature)
+        torch.npu.synchronize()
+        with torch.npu.graph(graph):
+            replay = build_uno_tree(roots, logits, max_nodes=32, candidate_top_k=top_k, temperature=temperature)
+        for value in [0.0, -torch.inf, -20.0]:
+            logits.fill_(value)
+            if value == -20.0:
+                logits[..., 17] = 20.0
+            reference = build_uno_tree(
+                roots, logits, max_nodes=32, candidate_top_k=top_k, temperature=temperature, use_fused_kernel=False
+            )
+            graph.replay()
+            for field in ("tokens", "parents", "depths", "allowed_attention"):
+                assert torch.equal(getattr(replay, field), getattr(reference, field)), field

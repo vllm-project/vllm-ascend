@@ -21,30 +21,24 @@ def _build_tree(
     K: tl.constexpr,
     NODES: tl.constexpr,
     BLOCK_NODES: tl.constexpr,
-    BLOCK_CANDIDATES: tl.constexpr,
 ):
     batch = tl.program_id(0)
     nodes = tl.arange(0, BLOCK_NODES)
-    slots = tl.arange(0, BLOCK_CANDIDATES)
-    candidate_parents = slots // K
-    ranks = slots % K
-    in_bounds = slots < NODES * K
-    safe_parents = tl.minimum(candidate_parents, BLOCK_NODES - 1)
-    # Triton-Ascend gather accepts floating input but not int32. Depths are
-    # bounded by 15 and therefore represented exactly in FP32 registers.
+    # Each parent's children are sorted by descending mass, then rank. Only
+    # its first unused child can win, so retain one frontier entry per parent
+    # instead of rescanning NODES * K candidates on every selection.
+    ranks = tl.zeros((BLOCK_NODES,), tl.int32)
     depths = tl.zeros((BLOCK_NODES,), tl.float32)
     masses = tl.zeros((BLOCK_NODES,), tl.float32)
     ancestry = tl.where(nodes == 0, 1, 0).to(tl.uint32)
-    used = tl.zeros((BLOCK_CANDIDATES,), tl.int1)
     tl.store(tokens + batch * NODES, tl.load(roots + batch))
     tl.store(parents + batch * NODES, -1)
     for node in range(1, NODES):
-        parent_depth = tl.gather(depths, safe_parents, 0).to(tl.int32)
-        parent_mass = tl.gather(masses, safe_parents, 0)
-        valid = in_bounds & (candidate_parents < node) & (parent_depth < DEPTHS) & ~used
-        offset = batch * DEPTHS * K + tl.minimum(parent_depth, DEPTHS - 1) * K + ranks
+        parent_depth = depths.to(tl.int32)
+        valid = (nodes < node) & (parent_depth < DEPTHS) & (ranks < K)
+        offset = batch * DEPTHS * K + tl.minimum(parent_depth, DEPTHS - 1) * K + tl.minimum(ranks, K - 1)
         candidate_id = tl.load(candidate_tokens + offset, mask=valid, other=0)
-        score = parent_mass + tl.load(candidate_log_probs + offset, mask=valid, other=-float("inf"))
+        score = masses + tl.load(candidate_log_probs + offset, mask=valid, other=-float("inf"))
         best = tl.max(tl.where(valid, score, -float("inf")), 0)
         winner = valid & (score == best)
         best_depth = tl.min(tl.where(winner, parent_depth, 1 << 30), 0)
@@ -53,10 +47,8 @@ def _build_tree(
         winner &= ranks == best_rank
         best_token = tl.min(tl.where(winner, candidate_id, 1 << 30), 0)
         winner &= candidate_id == best_token
-        best_parent = tl.min(tl.where(winner, candidate_parents, 1 << 30), 0)
-        winner &= candidate_parents == best_parent
-        selected = tl.min(tl.where(winner, slots, 1 << 30), 0)
-        used |= slots == selected
+        best_parent = tl.min(tl.where(winner, nodes, 1 << 30), 0)
+        ranks += (nodes == best_parent).to(tl.int32)
         parent_ancestry = tl.sum(tl.where(nodes == best_parent, ancestry, 0), 0)
         new_ancestry = parent_ancestry | (tl.full((), 1, tl.uint32) << node)
         ancestry = tl.where(nodes == node, new_ancestry, ancestry)
@@ -93,7 +85,6 @@ def build_tree_from_candidates(roots, candidate_tokens, candidate_log_probs, nod
         K=top_k,
         NODES=nodes,
         BLOCK_NODES=triton.next_power_of_2(nodes),
-        BLOCK_CANDIDATES=triton.next_power_of_2(nodes * top_k),
     )
     return tokens, parents, depths, allowed
 
