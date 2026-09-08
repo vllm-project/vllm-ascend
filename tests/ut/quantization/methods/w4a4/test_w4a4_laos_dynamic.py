@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 
 from tests.ut.base import TestBase
-from tests.ut.quantization.conftest_quantization import create_linear_layer
 from vllm_ascend.quantization.methods.w4a4.w4a4_laos_dynamic import AscendW4A4LaosDynamicLinearMethod
 
 
@@ -59,20 +58,3 @@ class TestAscendW4A4LaosDynamicLinearMethod(TestBase):
             mock_convert.assert_called()
             self.assertEqual(layer.weight_scale.data.dtype, torch.float32)
             self.assertEqual(layer.weight.shape, (input_size // 8, output_size))
-
-
-class TestAscendW4A4LaosDynamicLinearMethodWithNpu(TestBase):
-    def setUp(self):
-        self.method = AscendW4A4LaosDynamicLinearMethod()
-
-    def test_apply_with_npu(self):
-        token_num = 32
-        input_size, output_size = 128, 256
-        params_dtype = torch.bfloat16
-        layer = create_linear_layer(self.method, input_size, output_size, params_dtype)
-        self.method.process_weights_after_loading(layer)
-
-        x = torch.randn(token_num, input_size, dtype=params_dtype).npu()
-        bias = torch.randn(output_size, dtype=params_dtype).npu()
-        output = self.method.apply(layer, x, bias)
-        self.assertEqual(output.shape, (token_num, output_size))

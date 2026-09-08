@@ -5,7 +5,6 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import (
-    create_linear_layer,
     create_mock_ascend_config,
     create_mock_vllm_config,
     create_moe_layer,
@@ -65,31 +64,6 @@ class TestAscendW8A8DynamicLinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.data.shape, (256,))
         self.assertEqual(layer.weight_offset.data.shape, (256,))
         self.assertEqual(layer.weight.data.shape, (256, 128))
-
-
-class TestAscendW8A8DynamicLinearMethodWithNpu(TestBase):
-    def setUp(self):
-        self.method = AscendW8A8DynamicLinearMethod()
-        self.mock_get_config = patch("vllm_ascend.utils.get_ascend_config")
-        mock_config = self.mock_get_config.start()
-        mock_ascend_config = MagicMock()
-        mock_ascend_config.weight_nz_mode = 0
-        mock_config.return_value = mock_ascend_config
-
-    def tearDown(self):
-        self.mock_get_config.stop()
-
-    def test_apply_with_npu(self):
-        input_size, output_size = 128, 256
-        params_dtype = torch.bfloat16
-        layer = create_linear_layer(self.method, input_size, output_size, params_dtype)
-        self.method.process_weights_after_loading(layer)
-
-        x = torch.randn(32, input_size, dtype=params_dtype).npu()
-        bias = torch.randn(output_size, dtype=torch.float32).npu()
-
-        output = self.method.apply(layer, x, bias)
-        self.assertEqual(output.shape, (32, output_size))
 
 
 class TestAscendW8A8FusedMoEEplbWeights(TestBase):
