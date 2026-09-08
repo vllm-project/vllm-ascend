@@ -10,10 +10,12 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock
 
 V1 = "tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py"
 PREFILL = "tests/ut/distributed/kv_transfer/kv_p2p/test_remote_prefill_lifecycle.py"
@@ -129,6 +131,60 @@ class TestSelectedTestsRouting(unittest.TestCase):
 
 
 class TestDefaultUTInitializationOrder(unittest.TestCase):
+    @staticmethod
+    def watchdog_code():
+        path = Path(__file__).resolve().parents[4] / "tests/ut/conftest.py"
+        tree = ast.parse(path.read_text())
+        hook = next(
+            node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "pytest_runtest_protocol"
+        )
+        hook.decorator_list = []
+        return ast.unparse(hook)
+
+    def test_pd_watchdog_cancels_after_teardown_and_does_not_affect_other_ut(self):
+        for enabled in (False, True):
+            with self.subTest(pd_unit=enabled):
+                handler = MagicMock()
+                scope = {"faulthandler": handler}
+                exec(self.watchdog_code(), scope)
+                item = types.SimpleNamespace(config=types.SimpleNamespace(getoption=lambda _, enabled=enabled: enabled))
+                protocol = scope["pytest_runtest_protocol"](item, None)
+                next(protocol)
+                # A test/fixture exception still runs the hook's finally block.
+                with self.assertRaisesRegex(RuntimeError, "fixture failed"):
+                    protocol.throw(RuntimeError("fixture failed"))
+                if enabled:
+                    handler.dump_traceback_later.assert_called_once_with(60, exit=True)
+                    handler.cancel_dump_traceback_later.assert_called_once_with()
+                else:
+                    handler.dump_traceback_later.assert_not_called()
+                    handler.cancel_dump_traceback_later.assert_not_called()
+
+    def test_pd_watchdog_exits_even_when_executor_teardown_is_blocked(self):
+        # Test the actual production hook in a disposable runner process. The
+        # PD case remains single-process; this only verifies CI timeout machinery.
+        # Shorten the watchdog clock, not the hook's exit/cleanup implementation.
+        program = (
+            """import faulthandler, threading, types
+from concurrent.futures import ThreadPoolExecutor
+real_arm = faulthandler.dump_traceback_later
+faulthandler.dump_traceback_later = lambda seconds, **kw: real_arm(0.2, **kw)
+"""
+            + self.watchdog_code()
+            + """
+item = types.SimpleNamespace(config=types.SimpleNamespace(getoption=lambda _: True))
+protocol = pytest_runtest_protocol(item, None)
+next(protocol)
+with ThreadPoolExecutor(max_workers=1) as executor:
+    future = executor.submit(threading.Event().wait)
+    future.result(timeout=0.01)
+"""
+        )
+        result = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Timeout", result.stderr)
+        self.assertIn("shutdown", result.stderr)
+
     def test_model_patches_remain_at_import_time_except_in_explicit_pd_mode(self):
         """Execute the actual startup guard without importing device dependencies.
 

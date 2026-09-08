@@ -26,6 +26,7 @@ NPU is available. 310P-specific tests live in ``tests/ut/_310p/`` but also
 run on CPU via mocks.
 """
 
+import faulthandler
 import importlib.util
 import subprocess
 import sys
@@ -247,6 +248,24 @@ def pytest_addoption(parser):
         action="store_true",
         help="Run Mooncake V1 CPU UT without unrelated model/worker patches or NPU operators.",
     )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Bound PD setup, test and teardown, even if executor shutdown deadlocks.
+
+    CPython's watchdog exits the isolated pytest process on expiry; raising in
+    the main thread is insufficient when teardown waits for a blocked worker.
+    This is a hang guard, not a product-performance threshold.
+    """
+    if not item.config.getoption("--pd-unit"):
+        yield
+        return
+    faulthandler.dump_traceback_later(60, exit=True)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
 
 
 if "--pd-unit" not in sys.argv:

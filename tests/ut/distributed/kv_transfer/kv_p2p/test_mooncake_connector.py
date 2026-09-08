@@ -14,6 +14,7 @@ import msgspec
 import pytest
 import torch
 import zmq
+from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
 from vllm.v1.kv_cache_interface import (
@@ -51,7 +52,6 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
@@ -137,7 +137,7 @@ def test_k3_registration_recovers_storage_across_alignment_boundary(offset):
 
 
 @pytest.mark.parametrize("invalid", ["one-byte-overrun", "two-allocations", "view-before-aligned-base", "no-views"])
-def test_k3_registration_rejects_unrecoverable_allocation(invalid):
+def test_k3_shared_base_recovery_distinguishes_private_and_ambiguous_storage(invalid):
     size = 4 * 1024 * 1024
     allocation = make_exact_aligned_cpu_buffer(size)
     views = [allocation[128:]]
@@ -153,8 +153,13 @@ def test_k3_registration_rejects_unrecoverable_allocation(invalid):
         size = 128
     else:
         views = []
-    with pytest.raises(RuntimeError, match="Unable to recover one aligned KV tensor base"):
-        MooncakeConnectorWorker._recover_aligned_kv_tensor_base(views, size)
+    if invalid == "two-allocations":
+        with pytest.raises(RuntimeError, match="Unable to recover one aligned KV tensor base"):
+            MooncakeConnectorWorker._recover_aligned_kv_tensor_base(views, size)
+    else:
+        # Main supports private layer storages smaller than the group descriptor.
+        # No shared candidate selects that path; it is not itself corruption.
+        assert MooncakeConnectorWorker._recover_aligned_kv_tensor_base(views, size) is None
 
 
 @pytest.mark.parametrize(
@@ -1911,8 +1916,10 @@ def wire_transfer_contract(monkeypatch, request):
         receiver.executor.shutdown(wait=True)
 
 
-@pytest.mark.parametrize("overrun_bytes", [0, 1], ids=["valid-shared-target-and-draft", "reject-one-byte-overrun"])
-def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract, monkeypatch, overrun_bytes):
+@pytest.mark.parametrize(
+    "invalid_base", [False, True], ids=["valid-shared-target-and-draft", "reject-view-before-base"]
+)
+def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract, monkeypatch, invalid_base):
     """UT integration: real group building and registration, only backend/startup faked.
 
     Fixed MLA + Mamba + draft schema captures K3 padding/aliasing mechanisms;
@@ -1922,6 +1929,8 @@ def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract,
     module = sys.modules[MooncakeConnectorWorker.__module__]
     size = 4 * 1024 * 1024
     target, draft = make_exact_aligned_cpu_buffer(size), make_exact_aligned_cpu_buffer(size)
+    if invalid_base:
+        target = torch.frombuffer(target.numpy(), dtype=torch.uint8, offset=1)
     attention, state, mtp = "model.layers.0.self_attn", "model.layers.1.mamba", "model.mtp.0.self_attn"
     mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.uint8)
     mamba = MambaSpec(block_size=16, shapes=((16,), (16,)), dtypes=(torch.uint8, torch.uint8))
@@ -1934,7 +1943,7 @@ def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract,
     ]
     worker._layer_specs = worker._build_layer_specs_from_kv_cache_config(worker.kv_cache_config)
     worker.kv_cache_config.kv_cache_tensors = [
-        make_kv_cache_tensor(size=size + overrun_bytes, layers=[attention, state]),
+        make_kv_cache_tensor(size=size, layers=[attention, state]),
         make_kv_cache_tensor(size=size, layers=[state]),
         make_kv_cache_tensor(size=size, layers=[mtp]),
     ]
@@ -1953,8 +1962,8 @@ def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract,
 
     monkeypatch.setattr(module.global_te, "register_buffer", backend)
     monkeypatch.setattr(module, "KVCacheRecvingThread", ready_receiver)
-    if overrun_bytes:
-        with pytest.raises(RuntimeError, match="Unable to recover one aligned KV tensor base"):
+    if invalid_base:
+        with pytest.raises(RuntimeError, match="Unable to recover an aligned private KV layer storage"):
             worker.register_kv_caches(caches)
         backend.assert_not_called()
         startup.start.assert_not_called()
@@ -2497,6 +2506,29 @@ class TestHelperFunctions(unittest.TestCase):
 
         hash3 = string_to_int64_hash("different_string")
         self.assertNotEqual(hash1, hash3)
+
+
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+def test_connector_rejects_both_before_creating_role_objects(role):
+    config = MockVllmConfig()
+    # Upstream accepts kv_both for other connectors. V1 cannot treat it as D:
+    # its completion polling only recognizes the two explicit disaggregated roles.
+    config.kv_transfer_config = KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role="kv_both")
+    module = sys.modules[MooncakeConnector.__module__]
+    with (
+        patch.object(module, "MooncakeConnectorScheduler") as scheduler,
+        patch.object(module, "MooncakeConnectorWorker") as worker,
+        pytest.raises(ValueError, match="kv_both is not supported"),
+    ):
+        MooncakeConnector(config, role, MockKVCacheConfig())
+    scheduler.assert_not_called()
+    worker.assert_not_called()
+
+
+@pytest.mark.parametrize("role", [None, "invalid", "producer"])
+def test_upstream_configuration_rejects_missing_or_invalid_role(role):
+    with pytest.raises(ValueError, match="kv_role"):
+        KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role=role)
 
 
 class TestMooncakeConnectorForScheduler(unittest.TestCase):
