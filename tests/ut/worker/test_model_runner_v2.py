@@ -176,3 +176,88 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
     assert padded_num_tokens.attr == "num_tokens"
     assert isinstance(padded_num_tokens.value, ast.Name)
     assert padded_num_tokens.value.id == "batch_desc"
+
+
+@pytest.mark.parametrize("num_rejected", [0, 1, 2, 3])
+def test_spec_pp_non_last_keeps_scheduler_upper_bounds(num_rejected):
+    runner = _make_seq_len_runner(spec_pp=True, last_rank=False, has_speculator=False)
+    runner.req_states.num_computed_tokens_np[:] = 104
+    device_counts = np.array([104 - num_rejected, 0, 0], dtype=np.int32)
+    runner._copy_num_computed_tokens_to_cpu.side_effect = lambda: np.copyto(
+        runner.num_computed_tokens_cpu, device_counts
+    )
+    output = _make_seq_len_output({"decode": 4}, ["decode"])
+
+    NPUModelRunner._update_seq_lens_cpu(runner, output, ["decode"])
+
+    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+    runner.num_computed_tokens_event.synchronize.assert_not_called()
+    assert runner.input_buffers.seq_lens_cpu[0] == 108
+    assert runner.req_states.num_computed_tokens_np[0] == 104
+
+
+@pytest.mark.parametrize("use_pcp", [False, True])
+def test_spec_pp_mixed_chunk_decode_and_new_request_counts(use_pcp):
+    runner = _make_seq_len_runner(spec_pp=True, last_rank=False, has_speculator=False)
+    runner.pcp_manager = object() if use_pcp else None
+    runner.req_states.num_computed_tokens_np[:] = [104, 512, 256]
+    # The saved copy predates an immediate prefill chunk and a new request.
+    runner.num_computed_tokens_cpu[:] = [100, 256, 999]
+    device_counts = np.array([102, 512, 256], dtype=np.int32)
+    runner._copy_num_computed_tokens_to_cpu.side_effect = lambda: np.copyto(
+        runner.num_computed_tokens_cpu, device_counts
+    )
+    output = _make_seq_len_output({"prefill": 512, "new": 8, "decode": 4}, ["decode", "prefill"])
+
+    NPUModelRunner._update_seq_lens_cpu(runner, output, ["prefill", "new", "decode"])
+
+    np.testing.assert_array_equal(runner.input_buffers.seq_lens_cpu, [1024, 264, 106 if use_pcp else 108])
+    np.testing.assert_array_equal(
+        runner.req_states.num_computed_tokens_np, device_counts if use_pcp else [104, 512, 256]
+    )
+    assert runner._copy_num_computed_tokens_to_cpu.call_count == int(use_pcp)
+    assert runner.num_computed_tokens_event.synchronize.call_count == int(use_pcp)
+
+
+@pytest.mark.parametrize(
+    "spec_pp,last_rank,has_speculator,expected",
+    [(True, True, True, 106), (False, True, True, 106), (False, False, False, 108)],
+    ids=["pp-last", "no-pp-speculative", "no-speculative"],
+)
+def test_seq_len_update_preserves_other_paths(spec_pp, last_rank, has_speculator, expected):
+    runner = _make_seq_len_runner(spec_pp, last_rank, has_speculator)
+    runner.req_states.num_computed_tokens_np[0] = 104
+    runner.num_computed_tokens_cpu[0] = 102
+    output = _make_seq_len_output({"decode": 4}, ["decode"])
+
+    NPUModelRunner._update_seq_lens_cpu(runner, output, ["decode"])
+
+    assert runner.input_buffers.seq_lens_cpu[0] == expected
+    runner._copy_num_computed_tokens_to_cpu.assert_not_called()
+    assert runner.num_computed_tokens_event.synchronize.call_count == int(has_speculator)
+
+
+def _make_seq_len_runner(spec_pp, last_rank, has_speculator):
+    computed_tokens = np.zeros(3, dtype=np.int32)
+    return SimpleNamespace(
+        use_spec_pp=spec_pp,
+        is_last_pp_rank=last_rank,
+        speculator=object() if has_speculator else None,
+        pcp_manager=None,
+        req_states=SimpleNamespace(
+            req_id_to_index={"decode": 0, "prefill": 1, "new": 2},
+            num_computed_tokens_cpu=computed_tokens,
+            num_computed_tokens_np=computed_tokens,
+        ),
+        num_computed_tokens_cpu=np.zeros(3, dtype=np.int32),
+        num_computed_tokens_event=SimpleNamespace(synchronize=Mock()),
+        _copy_num_computed_tokens_to_cpu=Mock(),
+        input_buffers=SimpleNamespace(seq_lens_cpu=np.zeros(3, dtype=np.int32)),
+    )
+
+
+def _make_seq_len_output(scheduled, cached):
+    return SimpleNamespace(
+        num_scheduled_tokens=scheduled,
+        scheduled_cached_reqs=SimpleNamespace(req_ids=cached),
+    )

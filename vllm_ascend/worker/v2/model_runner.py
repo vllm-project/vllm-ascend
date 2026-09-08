@@ -512,6 +512,7 @@ class NPUModelRunner(GPUModelRunner):
             prompt_lens=prompt_lens,
             # extra attributes for ascend npus.
             seq_lens_np=self.input_buffers.seq_lens_np,
+            seq_lens_cpu_is_upper_bound=(self.use_spec_pp and not self.is_last_pp_rank and self.pcp_manager is None),
             attn_state=attn_state,
         )
 
@@ -672,10 +673,13 @@ class NPUModelRunner(GPUModelRunner):
     ):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
 
-        # MTP needs D2H copy to get reverted num_computed_tokens after rejection.
-        # req_states.num_computed_tokens_cpu shares storage with its NumPy view,
-        # so this update also corrects the num_computed_tokens_np used by PCP.
-        if self.speculator is not None:
+        # PCP partitions tokens using CPU counts. Ordinary speculative PP
+        # keeps scheduler upper bounds and uses device seq_lens for attention.
+        refresh_pp_counts = self.use_spec_pp and not self.is_last_pp_rank and self.pcp_manager is not None
+        if refresh_pp_counts:
+            self._copy_num_computed_tokens_to_cpu()
+
+        if self.speculator is not None or refresh_pp_counts:
             self.num_computed_tokens_event.synchronize()
             for req_id in scheduler_output.scheduled_cached_reqs.req_ids:
                 req_index = self.req_states.req_id_to_index[req_id]

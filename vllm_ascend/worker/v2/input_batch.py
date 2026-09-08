@@ -74,6 +74,8 @@ class AscendInputBatch(InputBatch):
     # attn_state is used to build attention metadata.
     attn_state: AscendAttentionState | None = None
     is_dummy: bool = False
+    # Non-last speculative PP ranks only have optimistic CPU counts.
+    seq_lens_cpu_is_upper_bound: bool = False
 
     @classmethod
     def make_dummy(
