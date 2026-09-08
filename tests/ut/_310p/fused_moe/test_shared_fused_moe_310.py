@@ -21,6 +21,8 @@ from vllm_ascend.ops.fused_moe.shared_experts import AscendSharedExperts, FusedM
 def _build_runner() -> AscendMoERunner310:
     runner = AscendMoERunner310.__new__(AscendMoERunner310)
     nn.Module.__init__(runner)
+    runner.routed_input_transform = None
+    runner.routed_output_transform = None
     return runner
 
 
@@ -101,6 +103,8 @@ def test_runner_310_installs_specialized_comm():
     runner.gate = None
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
     runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True)
+    upstream_forward_entry = object()
+    runner._select_forward = MagicMock(return_value=upstream_forward_entry)
     comm_method = object()
 
     with (
@@ -118,6 +122,8 @@ def test_runner_310_installs_specialized_comm():
 
         assert routed_experts.quant_method is None
         assert runner.ascend_shared_experts.multistream_overlap is False
+        assert runner._forward_entry is upstream_forward_entry
+        runner._select_forward.assert_called_once_with()
         assert fused_moe_310_module._MoECommMethods[MoECommType.ALLGATHER] is comm_method
         parent_init.assert_called_once()
 
@@ -230,7 +236,8 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
     ascend_shared_experts = SimpleNamespace(
-        prepare_input_before_routed_experts=MagicMock(return_value=(hidden_states, None)),
+        multistream_overlap=False,
+        local_input_from_gathered=MagicMock(return_value=hidden_states),
         forward=MagicMock(return_value=shared_out),
     )
     routed_events = FusedMoEEvents(

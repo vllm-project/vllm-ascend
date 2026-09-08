@@ -21,6 +21,7 @@ from typing import Any
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -183,11 +184,25 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         )
 
     def process_weights_after_loading(self, layer):
+        # Only GMSQ needs native FP4 Tensor metadata. Keep the legacy loader
+        # for other activations and for W2, which is consumed by ordinary GMM2.
+        w13 = layer.w13_weight.data
+        w13_input_dtype = torch_npu.float4_e2m1fn_x2
+        if getattr(layer, "activation", None) in (MoEActivation.SITU, "situ"):
+            # view(dtype) requires a torch.dtype, not torch_npu's integer type ID.
+            w13 = w13.view(torch.float4_e2m1fn_x2)
+            w13_input_dtype = torch.float4_e2m1fn_x2
         layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+            w13,
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=w13_input_dtype,
         )
         layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, 29, customize_dtype=torch.float8_e4m3fn, input_dtype=torch_npu.float4_e2m1fn_x2
+            layer.w2_weight.data,
+            29,
+            customize_dtype=torch.float8_e4m3fn,
+            input_dtype=torch_npu.float4_e2m1fn_x2,
         )
         layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
         layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)

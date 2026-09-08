@@ -219,7 +219,7 @@ Single-node deployment runs both Prefill and Decode on the same node. It is suit
 
 === "A3 series"
 
-    Run the following script to execute online 128K inference on 1 Atlas 800 A3 (64GB x 16), and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
+    Run the following script to execute online 128k inference on 1 Atlas 800 A3 (64GB x 16), and W8A8 deployment on 1 Atlas 800 A3 (64GB x 16) node. The W8A8 version needs `--quantization ascend`.
 
     ```shell
     #!/bin/sh
@@ -904,7 +904,7 @@ The following configurations are validated in specific test environments and are
 | Scenario        | Deployment Mode            | Total NPUs          | Weight Version | Key Considerations                                                                                    |
 | --------------- | -------------------------- | ------------------- | -------------- | ----------------------------------------------------------------------------------------------------- |
 | Long context    | Single-node online serving | 16 A3 NPUs          | W8A8 MTP       | Use larger `--max-model-len` and reserve enough KV cache. Lower `--max-num-seqs` if OOM occurs.       |
-| Long context    | Single-node online serving | 8 Ascend 950DT NPUs  | W4A4 MXFP4 MTP | Use TP=8 and reserve enough KV cache for 133K context. Lower `--max-num-seqs` if OOM occurs.          |
+| Long context    | Single-node online serving | 8 Ascend 950DT NPUs  | W4A4 MXFP4 MTP | Use TP=8 and reserve enough KV cache for 133k context. Lower `--max-num-seqs` if OOM occurs.          |
 | High throughput | Multi-node MP              | 16 A2 NPUs          | W8A8 MTP       | Increase concurrency through DP and tune `--max-num-batched-tokens` for prefill throughput.           |
 | Low latency     | 1P1D PD disaggregation     | 48 A3 NPUs          | W8A8 MTP       | Use separate prefill and decode DP/TP layouts and enable full decode ACLGraph on decode nodes.        |
 | Low latency     | 1P1D PD disaggregation     | 16 Ascend 950DT NPUs | W4A4 MXFP4 MTP | Use one 8-NPU prefill node and one 8-NPU decode node. Enable full decode ACLGraph on the decode node. |

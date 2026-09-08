@@ -317,13 +317,17 @@ at::Tensor npu_sparse_attention_score_meta(
     const c10::optional<at::Tensor> &actual_seq_lengths_kv,
     c10::string_view q_input_layout, c10::string_view kv_input_layout,
     int64_t num_key_value_heads, double scale_value, int64_t block_size,
-    int64_t top_k, int64_t inner_precise)
+    int64_t top_k, int64_t inner_precise,
+    const c10::optional<at::ScalarType> &attention_out_dtype)
 {
     TORCH_CHECK(std::string(q_input_layout) == "TND",
                 "npu_sparse_attention_score only supports query TND layout");
-    at::ScalarType out_dtype = (query.scalar_type() == at::kFloat8_e4m3fn)
-                                   ? at::kHalf
-                                   : query.scalar_type();
+    at::ScalarType out_dtype = query.scalar_type();
+    if (query.scalar_type() == at::kFloat8_e4m3fn) {
+        out_dtype = attention_out_dtype.value_or(at::kBFloat16);
+        TORCH_CHECK(out_dtype == at::kHalf || out_dtype == at::kBFloat16,
+                    "attention_out_dtype must be float16 or bfloat16 for float8_e4m3fn input.");
+    }
     return at::empty_symint(query.sym_sizes(),
                             query.options().dtype(out_dtype).device(c10::kMeta));
 }
@@ -1412,7 +1416,11 @@ at::Tensor npu_sparse_attention_score_prefill_meta(
     (void)inner_precise;
     (void)actual_seq_lengths;
     (void)actual_seq_lengths_kv;
-    return at::empty_like(query);
+    at::ScalarType out_dtype = query.scalar_type();
+    if (query.scalar_type() == at::kFloat8_e4m3fn) {
+        out_dtype = at::kBFloat16;
+    }
+    return at::empty_symint(query.sym_sizes(), query.options().dtype(out_dtype).device(c10::kMeta));
 }
 
 void npu_scatter_nd_update_v2_meta(
@@ -1903,6 +1911,74 @@ std::tuple<at::Tensor, at::Tensor> situ_mx_quant_meta(
     return {y, mxscale};
 }
 
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+std::tuple<at::Tensor, at::Tensor> make_grouped_matmul_situ_quant_meta_output(
+    const at::Tensor &x, const c10::SymInt &n)
+{
+    constexpr int64_t MX_BLOCK_SPAN = 64;
+    constexpr int64_t MX_SCALE_ALIGN = 2;
+    auto m = x.sym_size(0);
+    c10::SymDimVector output_shape = {m, n / 2};
+    c10::SymDimVector scale_shape = {
+        m, (n / 2 + MX_BLOCK_SPAN - 1) / MX_BLOCK_SPAN, MX_SCALE_ALIGN};
+    return {at::empty_symint(output_shape, x.options().dtype(at::kFloat8_e4m3fn)),
+            at::empty_symint(scale_shape, x.options().dtype(at::kFloat8_e8m0fnu))};
+}
+
+std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_meta(
+    const at::Tensor &x, const at::Tensor &weight, const at::Tensor &weight_scale,
+    const std::optional<at::Tensor> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
+    const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
+    int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
+    const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
+{
+    auto k = x.sym_size(1);
+    auto e = weight.sym_size(0);
+    auto n = weight.sym_numel() / (e * (k / 2));
+    (void)weight_scale;
+    (void)weight_assist_matrix;
+    (void)bias;
+    (void)x_scale;
+    (void)smooth_scale;
+    (void)group_list;
+    (void)dequant_mode;
+    (void)dequant_dtype;
+    (void)quant_mode;
+    (void)group_list_type;
+    (void)tuning_config;
+    (void)beta;
+    (void)linear_beta;
+    return make_grouped_matmul_situ_quant_meta_output(x, n);
+}
+
+std::tuple<at::Tensor, at::Tensor> grouped_matmul_situ_quant_list_meta(
+    const at::Tensor &x, const std::vector<at::Tensor> &weight, const std::vector<at::Tensor> &weight_scale,
+    const std::optional<std::vector<at::Tensor>> &weight_assist_matrix, const std::optional<at::Tensor> &bias,
+    const at::Tensor &x_scale, const std::optional<at::Tensor> &smooth_scale, const at::Tensor &group_list,
+    int64_t dequant_mode, int64_t dequant_dtype, int64_t quant_mode, int64_t group_list_type,
+    // symbolic-meta-ok: tuning_config is a non-Tensor runtime tuning argument, not an output shape.
+    const std::optional<std::vector<int64_t>> &tuning_config, double beta, double linear_beta)
+{
+    auto k = x.sym_size(1);
+    auto n = weight[0].sym_numel() / (k / 2);
+    (void)weight_scale;
+    (void)weight_assist_matrix;
+    (void)bias;
+    (void)x_scale;
+    (void)smooth_scale;
+    (void)group_list;
+    (void)dequant_mode;
+    (void)dequant_dtype;
+    (void)quant_mode;
+    (void)group_list_type;
+    (void)tuning_config;
+    (void)beta;
+    (void)linear_beta;
+    return make_grouped_matmul_situ_quant_meta_output(x, n);
+}
+#endif
+
 } // namespace meta
 } // namespace vllm_ascend
 
@@ -1939,6 +2015,13 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("recurrent_kda", &vllm_ascend::meta::recurrent_kda_meta);
     ops.impl("dequant_situ_quant", &vllm_ascend::meta::dequant_situ_quant_meta);
     ops.impl("situ_mx_quant", &vllm_ascend::meta::situ_mx_quant_meta);
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+    ops.impl("grouped_matmul_situ_quant", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
+    ops.impl("grouped_matmul_situ_quant.list", &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+    ops.impl("grouped_matmul_situ_quant_weight_nz", &vllm_ascend::meta::grouped_matmul_situ_quant_meta);
+    ops.impl("grouped_matmul_situ_quant_weight_nz.list",
+             &vllm_ascend::meta::grouped_matmul_situ_quant_list_meta);
+#endif
     // Launch host print from device
     ops.impl("device_print", &vllm_ascend::meta::device_print_meta);
     // launch host print from device for tensors

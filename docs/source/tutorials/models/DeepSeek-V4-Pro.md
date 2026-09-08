@@ -447,7 +447,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-start-rank 0 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
-      --served-model-name dsv4-pro \
+      --served-model-name dsv4 \
       --max-model-len 135000 \
       --max-num-batched-tokens 4096 \
       --max-num-seqs 16 \
@@ -510,7 +510,7 @@ The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800 A3 
       --data-parallel-start-rank 1 \
       --tensor-parallel-size 16 \
       --enable-expert-parallel \
-      --served-model-name dsv4-pro \
+      --served-model-name dsv4 \
       --max-model-len 135000 \
       --max-num-batched-tokens 4096 \
       --max-num-seqs 16 \
@@ -549,7 +549,7 @@ Key Parameter Descriptions:
 - `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.
 - `--tokenizer-mode deepseek_v4`, `--tool-call-parser deepseek_v4`, `--enable-auto-tool-choice`, and `--reasoning-parser deepseek_v4` enable the DeepSeek-V4 tokenizer behavior, automatic tool calling, and reasoning-output parsing.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
-- `--block-size` sets the KV cache block size. To enable the experimental 4K prefix cache hit support, change it from `128` to `32`.
+- `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.
 - `--quantization ascend` enables Ascend quantization for the W4A8 model.
 - `--model-loader-extra-config='{"enable_multithread_load": true, "num_threads": 128}'` selects the multi-thread weight iterator. `enable_multithread_load` must be a JSON boolean and `num_threads` must be a positive integer.
 - `--safetensors-load-strategy prefetch` is an alternative that warms checkpoint files into the OS page cache before the normal iterator loads them. Do not combine it with multi-thread loading: the default loader rejects `prefetch`, `eager`, or `torchao` when `enable_multithread_load` is `true`. The examples in this document use only multi-thread loading.
@@ -749,7 +749,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name auto \
+        --served-model-name dsv4 \
         --max-model-len 131072 \
         --max-num-batched-tokens 4096 \
         --max-num-seqs 16 \
@@ -819,7 +819,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name auto \
+        --served-model-name dsv4 \
         --max-model-len 131072 \
         --max-num-batched-tokens 120 \
         --max-num-seqs 60 \
@@ -918,7 +918,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name dsv4-pro \
+        --served-model-name dsv4 \
         --max-model-len 150000 \
         --max-num-batched-tokens 4096 \
         --max-num-seqs 16 \
@@ -981,7 +981,7 @@ Before you start, please:
         --tensor-parallel-size $7 \
         --enable-expert-parallel \
         --seed 1024 \
-        --served-model-name dsv4-pro \
+        --served-model-name dsv4 \
         --max-model-len 150000 \
         --max-num-batched-tokens 96 \
         --max-num-seqs 8 \
