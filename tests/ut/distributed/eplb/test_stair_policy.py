@@ -5,6 +5,7 @@ from vllm_ascend.distributed.eplb.stair_policy import (
     assign_sources,
     capped_min_max,
     compress_samples,
+    constrained_lpt,
     placement_score,
     replica_candidates,
     weighted_moments,
@@ -76,3 +77,27 @@ def test_source_assignment_prefers_same_node_and_aligns_slots():
 
     np.testing.assert_array_equal(placement, [[0, 1], [0, 2], [0, 4]])
     assert (source_rank[2, 0], source_slot[2, 0]) == (1, 0)
+
+
+def test_constrained_lpt_obeys_placement_and_pair_invariants():
+    old = np.array([[0, 1], [2, 3], [0, 1]])
+    mean = np.array([12.0, 8.0, 3.0, 1.0])
+    variance = np.zeros(4)
+
+    result = constrained_lpt(
+        mean,
+        variance,
+        np.array([2, 2, 1, 1]),
+        old,
+        (0, 0, 1),
+        z_score=0.0,
+        pair_cap=1,
+        max_backtracks=20,
+    )
+
+    assert result is not None
+    placement, source_rank, _, _, _ = result
+    np.testing.assert_array_equal(np.bincount(placement.ravel()), [2, 2, 1, 1])
+    assert all(len(set(row)) == len(row) for row in placement.tolist())
+    pairs = [(int(src), dst) for dst, row in enumerate(source_rank) for src in row if src != dst]
+    assert len(pairs) == len(set(pairs))
