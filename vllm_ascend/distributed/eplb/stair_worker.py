@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist
 from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
+from vllm.logger import logger
 
 from vllm_ascend.distributed.eplb.stair_policy import plan_rebalance
 
@@ -35,20 +36,28 @@ def run_stair_planner(
     shape = (old_mapping.shape[0], num_ranks, slots_per_rank)
 
     if rank == 0:
-        stream = torch.cuda.stream(cuda_stream) if cuda_stream is not None else nullcontext()
-        with stream:
-            bin_sums = stats.global_expert_load_window.cpu().numpy()
-        logical_load = bin_sums / model_state._stair_sample_weights[:, None, None]
-        plan = plan_rebalance(
-            logical_load,
-            old_mapping.numpy().reshape(shape),
-            model_state._stair_accepted_scores,
-            node_by_rank,
-            state._stair_config,
-            sample_weights=model_state._stair_sample_weights,
-        )
-        packed = torch.from_numpy(np.stack((plan.placement, plan.source_rank, plan.source_slot)))
-        scores = torch.from_numpy(plan.accepted_scores)
+        old = old_mapping.numpy().reshape(shape)
+        try:
+            stream = torch.cuda.stream(cuda_stream) if cuda_stream is not None else nullcontext()
+            with stream:
+                bin_sums = stats.global_expert_load_window.cpu().numpy()
+            logical_load = bin_sums / model_state._stair_sample_weights[:, None, None]
+            plan = plan_rebalance(
+                logical_load,
+                old,
+                model_state._stair_accepted_scores,
+                node_by_rank,
+                state._stair_config,
+                sample_weights=model_state._stair_sample_weights,
+            )
+            packed = torch.from_numpy(np.stack((plan.placement, plan.source_rank, plan.source_slot)))
+            scores = torch.from_numpy(plan.accepted_scores)
+        except Exception:
+            logger.exception("STAIR planning failed; retaining the committed placement")
+            source_rank = np.broadcast_to(np.arange(num_ranks)[None, :, None], shape)
+            source_slot = np.broadcast_to(np.arange(slots_per_rank)[None, None, :], shape)
+            packed = torch.from_numpy(np.stack((old, source_rank, source_slot)))
+            scores = torch.full((shape[0],), torch.nan, dtype=torch.float64)
     else:
         packed = torch.empty((3, *shape), dtype=torch.int64)
         scores = torch.empty(shape[0], dtype=torch.float64)

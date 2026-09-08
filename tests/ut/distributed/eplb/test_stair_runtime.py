@@ -61,6 +61,33 @@ def test_rank_zero_plans_for_existing_async_worker(monkeypatch):
     assert np.isfinite(model_state._stair_candidate_scores[0])
 
 
+def test_planner_failure_broadcasts_noop(monkeypatch):
+    group = SimpleNamespace(rank=lambda: 0, size=lambda: 2)
+    monkeypatch.setattr(
+        stair_worker,
+        "get_eplb_group",
+        lambda: SimpleNamespace(device_group=group, cpu_group=SimpleNamespace(size=lambda: 1)),
+    )
+
+    def fail_planning(*_args, **_kwargs):
+        raise ValueError
+
+    monkeypatch.setattr(stair_worker, "plan_rebalance", fail_planning)
+    old = torch.tensor([[0, 1, 2, 3]])
+    model_state = SimpleNamespace(
+        eplb_stats=SimpleNamespace(global_expert_load_window=torch.ones((1, 1, 4))),
+        _stair_sample_weights=np.array([1]),
+        _stair_accepted_scores=np.array([np.nan]),
+        communicator=SimpleNamespace(),
+    )
+    state = SimpleNamespace(_stair_node_by_rank=(0, 0), _stair_config=StairConfig())
+
+    new = stair_worker.run_stair_planner(model_state, state, old, None)
+
+    torch.testing.assert_close(new, old)
+    assert np.isnan(model_state._stair_candidate_scores[0])
+
+
 def test_explicit_transfer_uses_planned_source():
     communicator = FakeCommunicator()
     communicator._stair_source_rank = np.array([[[0, 1], [0, 1]]])

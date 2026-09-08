@@ -124,3 +124,20 @@ def test_plan_rebalance_filters_zero_and_balanced_layers():
 
     np.testing.assert_array_equal(plan.placement, old)
     assert np.isnan(plan.accepted_scores[0])
+
+
+def test_plan_rebalance_moves_an_imbalanced_layer():
+    from vllm_ascend.ascend_config import StairConfig
+
+    load = np.array([[[1, 1, 1, 20]]])
+    old = np.array([[[0, 1, 2], [3, 0, 1]]])
+    config = StairConfig(
+        hysteresis_enabled=False,
+        p95_regression_tolerance=1.0,
+        lpt_max_backtracks=64,
+    )
+
+    plan = plan_rebalance(load, old, np.array([np.nan]), (0, 0), config)
+
+    assert not np.array_equal(plan.placement, old)
+    assert np.isfinite(plan.accepted_scores[0])
