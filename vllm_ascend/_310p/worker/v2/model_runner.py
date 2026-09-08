@@ -40,6 +40,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.utils import bind_kv_cache, copy_kv_cache_blocks_inplace
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
+from vllm_ascend._310p.worker.v2.aclgraph import ModelAclGraphManager310
 from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.spec_utils import (
@@ -50,7 +51,6 @@ from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.core.kv_cache_interface import get_storage_block_size
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
-from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
@@ -383,18 +383,88 @@ class NPUModelRunner310V2(NPUModelRunner):
         return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
 
     def _scheduler_output_needs_spec_eager(self, scheduler_output: SchedulerOutput) -> bool:
-        """Force eager for all 310P MTP verify batches under FULL ACLGraph.
+        """Force eager when MTP verify batch is not uniform SpecDecoding.
 
-        Step 1 prioritizes correctness: concurrent SpecDecoding FULL graphs on
-        310P previously produced garbled tokens. Any MTP schedule with FULL
-        graphs runs verify eagerly.
+        Step 2 (FULL_DECODE_ONLY): mirror MRv1 ``_determine_batch_execution_and_padding``.
+        Uniform decode with ``q_len == decode_query_len`` (1+K) may replay SpecDecoding
+        FULL graphs; mixed / prefill / non-uniform MTP schedules stay eager.
         """
         if self.speculative_config is None:
             return False
         cudagraph_mode = self.compilation_config.cudagraph_mode
         if not cudagraph_mode.has_full_cudagraphs():
             return False
-        return len(scheduler_output.num_scheduled_tokens) > 0
+
+        num_tokens_per_req = scheduler_output.num_scheduled_tokens
+        num_reqs = len(num_tokens_per_req)
+        if num_reqs == 0:
+            return False
+
+        # Prefer stable req order (same as prepare_inputs) for draft counts.
+        req_ids = sort_batch_req_ids(
+            num_tokens_per_req,
+            scheduler_output.scheduled_spec_decode_tokens,
+            self.decode_query_len,
+        )
+        num_scheduled = np.fromiter(
+            (num_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        if not np.all(num_scheduled == self.decode_query_len):
+            return True
+        if scheduler_output.total_num_scheduled_tokens != int(num_scheduled.sum()):
+            return True
+
+        computed_by_req: dict[str, int] = {}
+        for req in scheduler_output.scheduled_new_reqs:
+            computed_by_req[req.req_id] = int(req.num_computed_tokens)
+        cached = scheduler_output.scheduled_cached_reqs
+        if cached is not None:
+            for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens):
+                computed_by_req[req_id] = int(num_computed)
+        for req_id in req_ids:
+            if req_id in computed_by_req:
+                continue
+            req_idx = self.req_states.req_id_to_index.get(req_id)
+            if req_idx is not None:
+                computed_by_req[req_id] = int(self.req_states.num_computed_tokens_np[req_idx])
+
+        if any(computed_by_req.get(req_id, 0) == 0 for req_id in req_ids):
+            return True
+
+        draft_tokens_map = scheduler_output.scheduled_spec_decode_tokens or {}
+        # SpecDecoding requires bonus/valid token count == 1 (rest are drafts).
+        num_valid_tokens = np.fromiter(
+            (int(num_tokens_per_req[req_id]) - len(draft_tokens_map.get(req_id, ())) for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        if not np.all(num_valid_tokens == 1):
+            return True
+
+        # Concurrent SpecDecoding FULL on 310P MRv2 currently poisons hybrid GDN
+        # state (gsm8k batch>1 → ~38% + garble; sequential num_reqs=1 → ~90%).
+        # Keep single-request FULL for decode perf; force eager for num_reqs>1
+        # until concurrent SpecDecoding FULL is root-caused (align MRv1 accuracy).
+        if num_reqs > 1:
+            return True
+
+        seq_lens = np.fromiter(
+            (computed_by_req[req_id] + num_tokens_per_req[req_id] for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        attn_state = build_attn_state(
+            self.vllm_config,
+            seq_lens,
+            num_reqs,
+            num_scheduled,
+            num_valid_tokens,
+        )
+        from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+        return attn_state != AscendAttentionState.SpecDecoding
 
     def _install_pc_eager_cudagraph_dispatch(self) -> None:
         """Wrap ACLGraph dispatch so PrefillCacheHit cannot replay FULL mixed graphs."""
@@ -641,7 +711,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             kv_cache_config=kv_cache_config,
             max_num_reqs=self.max_num_reqs,
         )
-        self.cudagraph_manager = ModelAclGraphManager(
+        self.cudagraph_manager = ModelAclGraphManager310(
             self.vllm_config,
             self.device,
             cudagraph_mode,

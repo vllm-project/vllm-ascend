@@ -4,9 +4,10 @@
 
 """310P MTP speculator: CPU block-table slot mappings + RoPE flag + draft quant.
 
-Step 1 (eager + prefix cache): draft path stays fully eager. Draft ACLGraph is
-intentionally skipped — concurrent SpecDecoding+draft FULL graphs previously
-caused acceptance collapse and garbled output on 310P.
+Step 2 (FULL_DECODE_ONLY): target verify may replay SpecDecoding FULL graphs.
+Draft ACLGraph remains skipped — draft-decode needs host slot-map updates between
+steps, and concurrent draft FULL historically collapsed acceptance on 310P.
+Draft propose stays eager; correctness/perf first land on target graph path.
 """
 
 from __future__ import annotations
@@ -100,11 +101,11 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
 
     def capture(self) -> None:
-        """Skip draft ACLGraph on 310P MTP — eager draft for Step 1 correctness."""
+        """Skip draft ACLGraph on 310P MTP — eager draft propose."""
         self.last_token_indices.zero_()
         logger.info(
             "Skipping draft ACLGraph capture on 310P MTP "
-            "(eager draft-prefill/decode for Step 1 / concurrent correctness)."
+            "(eager draft-prefill/decode; target SpecDecoding FULL is separate)."
         )
 
     @torch.inference_mode()
