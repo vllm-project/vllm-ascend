@@ -60,12 +60,14 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     spec_pp_support = resolve_spec_pp_support(vllm_config)
     bypass_pp_guard = spec_pp_support is not None
     original_get_pp_group = dspark_utils.get_pp_group
-    # ``load_dspark_model`` binds ``_should_share`` via ``from eagle.utils
-    # import _should_share``, so patching only ``eagle_utils`` leaves the
-    # dspark.utils local name pointing at the original and still crashes on
-    # PPMissingLayer.weight under PP.
+    # v0.28.0 binds ``_should_share`` on ``dspark.utils`` at import time
+    # (``from eagle.utils import _should_share``), so eagle-only patches miss
+    # the local name and still crash on PPMissingLayer.weight under PP.
+    # Newer vLLM imports ``_should_share`` inside ``load_dspark_model``, so
+    # ``dspark.utils`` may not expose the attribute at all.
     original_eagle_should_share = eagle_utils._should_share
-    original_dspark_should_share = dspark_utils._should_share
+    dspark_has_should_share = hasattr(dspark_utils, "_should_share")
+    original_dspark_should_share = dspark_utils._should_share if dspark_has_should_share else None
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
     if bypass_pp_guard:
@@ -83,7 +85,8 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
             return original_eagle_should_share(eagle, flag, draft, target)
 
         eagle_utils._should_share = should_share
-        dspark_utils._should_share = should_share
+        if dspark_has_should_share:
+            dspark_utils._should_share = should_share
     try:
         # get_model also reads the config PP size; keep the draft unsharded.
         with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
@@ -94,7 +97,8 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         if bypass_pp_guard:
             dspark_utils.get_pp_group = original_get_pp_group
             eagle_utils._should_share = original_eagle_should_share
-            dspark_utils._should_share = original_dspark_should_share
+            if dspark_has_should_share:
+                dspark_utils._should_share = original_dspark_should_share
 
 
 # The speculator binds ``load_dspark_model`` by name at import time, so both
