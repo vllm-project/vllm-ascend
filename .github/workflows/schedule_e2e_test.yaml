@@ -280,7 +280,8 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       image: ${{ needs.setup-vars.outputs.a2_image }}
-      tests: ${{ matrix.test_config.tests }}
+      tests: ${{ matrix.test_config.tests || '' }}
+      config_file_path: ${{ matrix.test_config.config_file_path || '' }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ needs.setup-vars.outputs.vllm_ascend_ref }}
       soc_version: "a2"
@@ -301,7 +302,8 @@ jobs:
     with:
       runner: ${{ matrix.test_config.os }}
       image: ${{ needs.setup-vars.outputs.a3_image }}
-      tests: ${{ matrix.test_config.tests }}
+      tests: ${{ matrix.test_config.tests || '' }}
+      config_file_path: ${{ matrix.test_config.config_file_path || '' }}
       name: ${{ matrix.test_config.name }}
       vllm_ascend_branch: ${{ needs.setup-vars.outputs.vllm_ascend_ref }}
       soc_version: "a3"
