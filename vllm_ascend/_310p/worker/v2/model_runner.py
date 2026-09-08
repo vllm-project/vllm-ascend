@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.kv_connector import get_kv_connector
-from vllm.v1.worker.gpu.model_runner import sort_batch_req_ids
+from vllm.v1.worker.gpu.model_runner import BatchReqState, sort_batch_req_ids
 from vllm.v1.worker.utils import bind_kv_cache
 
 from vllm_ascend._310p.attention.attention_v1 import AscendAttentionBackend310
@@ -39,20 +39,23 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, vllm_version_is
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
-
-if not vllm_version_is("0.27.1"):
-    from vllm.v1.worker.gpu.model_runner import BatchReqState
 
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
 
 
 class NPUModelRunner310V2(NPUModelRunner):
     """Model runner v2 for Ascend 310P."""
+
+    # 310P Attention requires private ACL NZ K/V buffers while Mamba uses
+    # private contiguous ND state buffers. It cannot consume vLLM main's
+    # standardized shared backing, so the worker must scale multi-group KV
+    # capacity before the engine computes num_blocks.
+    supports_standardized_shared_kv_backing = False
 
     # TODO: Refactor Triton-dependent overrides to register 310P
     # implementations through Triton Dispatcher after vLLM RFC #45133 lands.
@@ -130,14 +133,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
-        if vllm_version_is("0.27.1"):
-            req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
-        else:
-            req_ids = sort_batch_req_ids(
-                num_tokens_per_req,
-                scheduler_output.scheduled_spec_decode_tokens,
-                self.decode_query_len,
-            )
+        req_ids = sort_batch_req_ids(
+            num_tokens_per_req,
+            scheduler_output.scheduled_spec_decode_tokens,
+            self.decode_query_len,
+        )
         self._update_seq_lens_cpu(scheduler_output, req_ids)
 
         num_scheduled_tokens = np.fromiter(
@@ -266,8 +266,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             seq_lens_np=self.input_buffers.seq_lens_np,
             attn_state=attn_state,
         )
-        if not vllm_version_is("0.27.1"):
-            input_batch_kwargs["has_prefill"] = batch_has_prefill
+        input_batch_kwargs["has_prefill"] = batch_has_prefill
         input_batch = AscendInputBatch(**input_batch_kwargs)
         # MRoPE positions are built in ``model_state.prepare_inputs``; the 1D
         # arange buffer above is only for slot-mapping / non-MRoPE paths.
@@ -402,14 +401,6 @@ class NPUModelRunner310V2(NPUModelRunner):
         if not dummy_run:
             self._force_eager_pc_batch = self._scheduler_output_needs_pc_eager(scheduler_output)
         try:
-            if vllm_version_is("0.27.1"):
-                return super().execute_model(
-                    scheduler_output,
-                    intermediate_tensors=intermediate_tensors,
-                    dummy_run=dummy_run,
-                    skip_attn_for_dummy_run=skip_attn_for_dummy_run,
-                    is_profile=is_profile,
-                )
             return super().execute_model(
                 scheduler_output,
                 intermediate_tensors=intermediate_tensors,
@@ -421,25 +412,14 @@ class NPUModelRunner310V2(NPUModelRunner):
         finally:
             self._force_eager_pc_batch = False
 
-    if vllm_version_is("0.27.1"):
-
-        def prepare_inputs(
-            self,
-            scheduler_output: SchedulerOutput,
-            batch_desc: BatchExecutionDescriptor,
-        ) -> AscendInputBatch:
-            return self._prepare_inputs_310p(scheduler_output, batch_desc)
-
-    else:
-
-        def prepare_inputs(  # type: ignore[misc, override]
-            self,
-            scheduler_output: SchedulerOutput,
-            batch_req_state: BatchReqState,
-            batch_desc: BatchExecutionDescriptor,
-        ) -> AscendInputBatch:
-            del batch_req_state
-            return self._prepare_inputs_310p(scheduler_output, batch_desc)
+    def prepare_inputs(  # type: ignore[misc, override]
+        self,
+        scheduler_output: SchedulerOutput,
+        batch_req_state: BatchReqState,
+        batch_desc: BatchExecutionDescriptor,
+    ) -> AscendInputBatch:
+        del batch_req_state
+        return self._prepare_inputs_310p(scheduler_output, batch_desc)
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
         super().finish_requests(scheduler_output)
@@ -596,7 +576,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         }
         kv_caches: dict[str, Any] = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            layer_names = [name for name in kv_cache_tensor.shared_by if name not in shared_layers]
+            layer_names = [name for name in get_kv_cache_tensor_layers(kv_cache_tensor) if name not in shared_layers]
             if not layer_names:
                 continue
             cache_groups: dict[tuple[Any, ...], list[str]] = {}
@@ -620,11 +600,11 @@ class NPUModelRunner310V2(NPUModelRunner):
             for cache_key, cache_layer_names in cache_groups.items():
                 layer_name = cache_layer_names[0]
                 kv_cache_spec = layer_specs[layer_name]
-                if kv_cache_tensor.size % kv_cache_spec.page_size_bytes != 0:
-                    raise ValueError("KV cache allocation is not page aligned.")
-                num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
-                if num_blocks < kv_cache_config.num_blocks:
-                    raise ValueError("KV cache allocation contains fewer blocks than requested.")
+                # On main, descriptor.size is the complete standardized
+                # backing size. 310P does not materialize that backing;
+                # its private tensors must use the manager's per-layer
+                # block count instead.
+                num_blocks = kv_cache_config.num_blocks
 
                 if isinstance(kv_cache_spec, AttentionSpec):
                     backend = cache_key[1]
@@ -643,43 +623,64 @@ class NPUModelRunner310V2(NPUModelRunner):
                         raise NotImplementedError("310P MRV2 does not support asymmetric K/V head sizes.")
                     # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
                     kv_view_shape = kv_cache_shape[1:]
-                    k_cache = torch_npu.empty_with_format(
-                        size=kv_view_shape,
-                        dtype=kv_cache_spec.dtype,
-                        device=self.device,
-                        acl_format=ACL_FORMAT_FRACTAL_NZ,
-                    )
-                    v_cache = torch_npu.empty_with_format(
-                        size=kv_view_shape,
-                        dtype=kv_cache_spec.dtype,
-                        device=self.device,
-                        acl_format=ACL_FORMAT_FRACTAL_NZ,
-                    )
-                    cache: Any = (k_cache, v_cache)
-                elif isinstance(kv_cache_spec, MambaSpec):
-                    # Hybrid recurrent state stays ND (int8 raw + as_strided views).
-                    raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                    state_tensors = []
-                    storage_offset_bytes = 0
-                    for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
-                        dtype_size = get_dtype_size(dtype)
-                        target_shape = (num_blocks, *shape)
-                        stride = torch.empty(target_shape).stride()
-                        state_tensors.append(
-                            torch.as_strided(
-                                raw_tensor.view(dtype),
-                                size=target_shape,
-                                stride=(stride[0], *stride[1:]),
-                                storage_offset=storage_offset_bytes // dtype_size,
-                            )
+                    # Standardized descriptors list distinct layer
+                    # regions. Allocate one private NZ K/V pair per layer;
+                    # only explicit shared_layers below may alias.
+                    for name in cache_layer_names:
+                        kv_caches[name] = (
+                            torch_npu.empty_with_format(
+                                size=kv_view_shape,
+                                dtype=kv_cache_spec.dtype,
+                                device=self.device,
+                                acl_format=ACL_FORMAT_FRACTAL_NZ,
+                            ),
+                            torch_npu.empty_with_format(
+                                size=kv_view_shape,
+                                dtype=kv_cache_spec.dtype,
+                                device=self.device,
+                                acl_format=ACL_FORMAT_FRACTAL_NZ,
+                            ),
                         )
-                        storage_offset_bytes += stride[0] * dtype_size
-                    cache = state_tensors
+                elif isinstance(kv_cache_spec, MambaSpec):
+                    # Hybrid recurrent state stays ND (int8 raw plus views).
+                    # Main's descriptor.size is the entire virtual backing;
+                    # private 310P state uses only this layer's pages.
+                    raw_size = num_blocks * kv_cache_spec.page_size_bytes
+
+                    def allocate_mamba_cache(
+                        raw_size: int = raw_size,
+                        kv_cache_spec: MambaSpec = kv_cache_spec,
+                        num_blocks: int = num_blocks,
+                    ) -> list[torch.Tensor]:
+                        raw_tensor = torch.zeros(
+                            raw_size,
+                            dtype=torch.int8,
+                            device=self.device,
+                        )
+                        state_tensors = []
+                        storage_offset_bytes = 0
+                        for shape, dtype in zip(
+                            kv_cache_spec.shapes,
+                            kv_cache_spec.dtypes,
+                        ):
+                            dtype_size = get_dtype_size(dtype)
+                            target_shape = (num_blocks, *shape)
+                            stride = torch.empty(target_shape).stride()
+                            state_tensors.append(
+                                torch.as_strided(
+                                    raw_tensor.view(dtype),
+                                    size=target_shape,
+                                    stride=(stride[0], *stride[1:]),
+                                    storage_offset=(storage_offset_bytes // dtype_size),
+                                )
+                            )
+                            storage_offset_bytes += target_shape[0] * stride[0] * dtype_size
+                        return state_tensors
+
+                    for name in cache_layer_names:
+                        kv_caches[name] = allocate_mamba_cache()
                 else:
                     raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}.")
-
-                for name in cache_layer_names:
-                    kv_caches[name] = cache
 
         for layer_name, target_layer_name in shared_layers.items():
             kv_caches[layer_name] = kv_caches[target_layer_name]

@@ -25,6 +25,13 @@ from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
 
+# Staging a complete block-table row gives substantially faster contiguous GM
+# access on Ascend, but the staged fp32 row must fit in UB together with the
+# per-token temporaries. PR #15212 validated rows through 16K entries on A3.
+# Larger rows use the direct-load path in the same kernel to keep compilation
+# resource usage bounded.
+_MAX_STAGED_BLOCK_TABLE_PAD_SIZE = 16384
+
 
 class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
@@ -100,5 +107,6 @@ class AscendBlockTables(BlockTables):
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,
             BLOCK_TABLE_PAD_SIZE=self._block_table_pad_size,
+            USE_BLOCK_TABLE_STAGING=(self._block_table_pad_size <= _MAX_STAGED_BLOCK_TABLE_PAD_SIZE),
         )
         return slot_mappings[:, :num_tokens_padded]

@@ -73,7 +73,8 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
-        mock_ascend_config.mc2_comm_alg = ""
+        mock_ascend_config.get_mc2_comm_alg = MagicMock()
+        mock_ascend_config.get_mc2_comm_alg.return_value = ""
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
@@ -1754,6 +1755,17 @@ class TestNPUPlatform(TestBase):
         )
         with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP simultaneously"):
             self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+
+    def test_get_attn_backend_cls_supports_legacy_config_without_use_dcp(self):
+        attn_selector_config = SimpleNamespace(
+            use_mla=True,
+            use_sparse=True,
+            use_pcp=True,
+        )
+
+        result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+
+        self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
 
     def test_get_attn_backend_cls_selects_sfa_pcp_backend(self):
         attn_selector_config = AttentionSelectorConfig(

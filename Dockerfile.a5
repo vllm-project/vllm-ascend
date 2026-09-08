@@ -64,10 +64,19 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[a
 # Install vllm-ascend
 ARG SOC_VERSION="ascend950dt_9582"
 ARG COMPILE_CUSTOM_KERNELS=1
-ENV DEBIAN_FRONTEND=noninteractive
+# Limit cargo parallelism to avoid OOM in constrained build environments.
+# Overridable via --build-arg CARGO_BUILD_JOBS=N (e.g. 32-CPU/128Gi buildkitd
+# runs up to 2 builds in parallel, so 16 jobs keep memory within ~64Gi per build).
+ARG CARGO_BUILD_JOBS=16
+# Limit opc/c++ build parallelism to avoid OOM. Mirrors
+# .github/workflows/_build_csrc_cache.yaml.
+# TODO: auto-detect buildkitd CPU cores and set MAX_JOBS accordingly
+ARG MAX_JOBS=16
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
-    OMP_NUM_THREADS=1
+    OMP_NUM_THREADS=1 \
+    CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS \
+    MAX_JOBS=$MAX_JOBS
 COPY . /vllm-workspace/vllm-ascend/
 
 RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \

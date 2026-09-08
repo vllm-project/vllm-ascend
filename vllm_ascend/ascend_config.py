@@ -258,6 +258,7 @@ class AscendConfig:
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
             "enable_force_eplb": false,
+            "enable_pcp_o_proj_weight_sharding": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
@@ -313,8 +314,7 @@ class AscendConfig:
                 "oproj_tensor_parallel_size": 0,
                 "lmhead_tensor_parallel_size": 0,
                 "embedding_tensor_parallel_size": 0,
-                "mlp_tensor_parallel_size": 0,
-                "olora_tensor_parallel_size": 0
+                "mlp_tensor_parallel_size": 0
             },
             "scheduler_config": {
                 "enable_balance_scheduling": false,
@@ -392,8 +392,13 @@ class AscendConfig:
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     enable_force_eplb: bool = False
+    enable_pcp_o_proj_weight_sharding: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
+    # When non-zero, force the MC2 combine stage's comm quant_mode to this
+    # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
+    # model's quant_type, 0 means disabled (use the model's own quant).
+    combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
     # The same value is passed as dispatch_ffn_combine's max_output_size
@@ -524,6 +529,32 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
+
+        if self.enable_dsa_cp:
+            tp_size = vc.parallel_config.tensor_parallel_size
+            pcp_size = vc.parallel_config.prefill_context_parallel_size
+            if pcp_size > 1:
+                migration = (
+                    "Prefill context parallelism is already enabled; remove enable_dsa_cp from additional_config."
+                )
+            elif tp_size > 1:
+                migration = (
+                    "Consider trying prefill context parallelism with "
+                    f"--tensor-parallel-size 1 --prefill-context-parallel-size {tp_size} "
+                    "to preserve the current world size. Remove enable_dsa_cp from "
+                    "additional_config when enabling PCP."
+                )
+            else:
+                migration = (
+                    "Consider trying prefill context parallelism with "
+                    "--prefill-context-parallel-size greater than 1 (requires additional ranks). "
+                    "Remove enable_dsa_cp from additional_config when enabling PCP."
+                )
+            logger.warning_once(
+                "enable_dsa_cp will be fully deprecated once PCP is ready. %s "
+                "Check PCP support for your model and deployment configuration.",
+                migration,
+            )
 
         # DSA CP is only applicable to models with an indexer (for example,
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
@@ -936,7 +967,7 @@ class DynamicSpecConfig:
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). 5 int fields get lax coercion
+    Migrated to ``@config`` (pydantic dataclass). 4 int fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
     data_parallel divisibility) are validated in ``_validate_preconditions()``,
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
@@ -948,7 +979,6 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 0
     embedding_tensor_parallel_size: int = 0
     mlp_tensor_parallel_size: int = 0
-    olora_tensor_parallel_size: int = 0
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -957,12 +987,14 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
-            "olora_tensor_parallel_size",
         )
+        self.max_finegrained_tp_size = 1
         for field_name in size_fields:
             value = getattr(self, field_name)
             if value < 0:
                 raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
+            self.max_finegrained_tp_size = max(self.max_finegrained_tp_size, value)
+
         return self
 
     def _validate_preconditions(self, vllm_config: Any):
@@ -992,16 +1024,6 @@ class FinegrainedTPConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
-        if self.olora_tensor_parallel_size > 0:
-            enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,
-            # so the o_lora tp split can only be used in graph mode.
-            if vc.model_config and vc.model_config.enforce_eager:
-                raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
-            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
-                raise AssertionError(
-                    "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
-                )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
@@ -1013,7 +1035,6 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
-            self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,
@@ -1278,6 +1299,7 @@ class SparseKVOffloadConfig:
     dram_size_per_dp_GB: int = 128
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
+    use_fused_overlap: bool = False
 
     @model_validator(mode="after")
     def _validate_values(self):

@@ -40,7 +40,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
 
@@ -58,14 +58,19 @@ def _prepare_pcp_inputs_to_capture(
     pcp_manager: Any,
 ) -> cudagraph_utils.AttentionState:
     """Build graph inputs with the same PCP-local layout used on replay."""
-    if vllm_version_is("0.27.1"):
-        input_batch = cudagraph_utils.InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
-    else:
-        input_batch = cudagraph_utils.InputBatch.make_dummy(
-            num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
-        )
-    input_batch = pcp_manager.partition_batch(input_batch)
-    input_block_tables, slot_mappings = pcp_manager.prepare_attn(input_batch)
+    # vLLM #53515 passes PCP-local input buffers into graph capture, so the
+    # dummy batch must not be partitioned a second time. vLLM #53869
+    # supplies capture-only PCP metadata instead. The block tables must
+    # retain the same PCP-local backing that runtime prepare_attn updates,
+    # because the SFA full graph cannot rebind their captured pointer.
+    # The Ascend dummy carries the seq_lens_np/attn_state views consumed
+    # by Ascend metadata builders and doubles as the capture-time PCP
+    # global batch (is_dummy=True).
+    input_batch = AscendInputBatch.make_dummy(  # type: ignore[call-arg]
+        num_reqs, num_tokens, input_buffers, max_query_len=max_query_len
+    )
+    input_block_tables = pcp_manager.get_dummy_block_tables(num_reqs)
+    slot_mappings = pcp_manager.get_dummy_slot_mappings(num_tokens)
     slot_mappings_by_layer = cudagraph_utils.build_slot_mappings_by_layer(slot_mappings, kv_cache_config)
 
     attn_metadata = model_state.prepare_attn(
@@ -108,56 +113,30 @@ def _get_graph_update_backend(
 class ModelAclGraphManager(ModelCudaGraphManager):
     """ACL Model Cuda Graph Manager for Ascend NPUs."""
 
-    if vllm_version_is("0.27.1"):
-
-        def __init__(
-            self,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            cudagraph_mode: CUDAGraphMode,
-            decode_query_len: int,
-            model_runner: Any,
-            lora_capture_cases: list[int] | None = None,
-        ):
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-            )
-            self.model_runner = model_runner
-            self.update_stream = self.model_runner.update_stream
-            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-            if super().needs_capture():
-                set_graph_params(self.capture_sizes)
-
-    else:
-
-        def __init__(  # type: ignore[misc]
-            self,
-            vllm_config: VllmConfig,
-            device: torch.device,
-            cudagraph_mode: CUDAGraphMode,
-            decode_query_len: int,
-            model_runner: Any,
-            lora_capture_cases: list[int] | None = None,
-            varlen_decode: bool = False,
-        ):
-            super().__init__(
-                vllm_config,
-                device,
-                cudagraph_mode,
-                decode_query_len,
-                lora_capture_cases=lora_capture_cases,
-                varlen_decode=varlen_decode,
-            )
-            self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
-            self.model_runner = model_runner
-            self.update_stream = self.model_runner.update_stream
-            self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
-            if super().needs_capture():
-                set_graph_params(self.capture_sizes)
+    def __init__(  # type: ignore[misc]
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+        model_runner: Any,
+        lora_capture_cases: list[int] | None = None,
+        varlen_decode: bool = False,
+    ):
+        super().__init__(
+            vllm_config,
+            device,
+            cudagraph_mode,
+            decode_query_len,
+            lora_capture_cases=lora_capture_cases,
+            varlen_decode=varlen_decode,
+        )
+        self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
+        self.model_runner = model_runner
+        self.update_stream = self.model_runner.update_stream
+        self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
+        if super().needs_capture():
+            set_graph_params(self.capture_sizes)
 
     def init_breakable_cg_runner(self, model: nn.Module) -> None:
         if self.breakable_cg_runner is None:
@@ -218,6 +197,8 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         use_aux_hidden_state_outputs: bool = False,
         lora_capture_hook: Callable[[int, int, int], None] | None = None,
         progress_bar_desc: str = "Capturing CUDA graphs",
+        # vLLM #53869 supplies PCP slot mappings during graph capture.
+        pcp_manager: Any = None,
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         model = ModelWithContext(model)
@@ -236,6 +217,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
+                pcp_manager=pcp_manager,
                 has_lora=has_lora,
                 use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                 lora_capture_hook=lora_capture_hook,

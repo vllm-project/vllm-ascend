@@ -16,6 +16,7 @@
 #
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -27,6 +28,11 @@ from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
     resolve_block_scales,
+)
+from vllm_ascend.weight_switch import (
+    WeightSwitchConfig,
+    WeightSwitchGatherSpec,
+    WeightSwitchRepeatSpec,
 )
 
 MODULE = "vllm_ascend.quantization.methods.w8a8.fp8_block"
@@ -105,11 +111,64 @@ class TestAscendFp8BlockLinearMethod(TestBase):
             scheme = AscendFp8BlockLinearMethod(block_size)
         return scheme
 
+    @staticmethod
+    def _get_weight_switch_specs(scheme, input_sharded):
+        layer = SimpleNamespace(
+            input_size=2,
+            input_size_per_partition=1 if input_sharded else 2,
+            output_size=2,
+            output_size_per_partition=2 if input_sharded else 1,
+        )
+        config = WeightSwitchConfig(group=object(), world_size=2, rank=0)
+        gather_specs, repeat_specs, _ = scheme._get_weight_switch_specs(layer, config)
+        return gather_specs, repeat_specs
+
     def test_get_weight_is_fp8(self):
         scheme = self.build_scheme()
         weight = scheme.get_weight(512, 256, torch.bfloat16)["weight"]
         self.assertEqual(weight.shape, (256, 512))
         self.assertEqual(weight.dtype, torch.float8_e4m3fn)
+
+    def test_weight_switch_specs_follow_mxfp8_execution_method(self):
+        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        input_gather = (WeightSwitchGatherSpec("input_weight"),)
+        output_gather = (WeightSwitchGatherSpec("output_weight", gather_dim=1),)
+        input_repeat = (WeightSwitchRepeatSpec("input_scale"),)
+        output_repeat = (WeightSwitchRepeatSpec("output_scale"),)
+        scheme.mxfp8_method.weight_switch_gather_specs = input_gather
+        scheme.mxfp8_method.weight_switch_output_gather_specs = output_gather
+        scheme.mxfp8_method.weight_switch_repeat_specs = input_repeat
+        scheme.mxfp8_method.weight_switch_output_repeat_specs = output_repeat
+        layer, _, _ = self._make_layer()
+        with patch(f"{MODULE}._mx_quantize") as mock_quantize:
+            mock_quantize.return_value = (
+                torch.zeros(8, 64, dtype=torch.float8_e4m3fn),
+                torch.zeros(8, 2, dtype=torch.uint8),
+            )
+            scheme.process_weights_after_loading(layer)
+
+        self.assertTrue(scheme.supports_weight_switch)
+        self.assertEqual(
+            self._get_weight_switch_specs(scheme, input_sharded=True),
+            (input_gather, input_repeat),
+        )
+        self.assertEqual(
+            self._get_weight_switch_specs(scheme, input_sharded=False),
+            (output_gather, output_repeat),
+        )
+
+    def test_weight_switch_specs_cover_dense_fallback(self):
+        scheme = self.build_scheme(is_950=False)
+
+        self.assertTrue(scheme.supports_weight_switch)
+        self.assertEqual(
+            self._get_weight_switch_specs(scheme, input_sharded=True),
+            ((WeightSwitchGatherSpec("weight", gather_dim=1),), ()),
+        )
+        self.assertEqual(
+            self._get_weight_switch_specs(scheme, input_sharded=False),
+            ((WeightSwitchGatherSpec("weight"),), ()),
+        )
 
     def test_pergroup_param_declares_block_scale_and_loader_hints(self):
         scheme = self.build_scheme(block_size=(128, 64))
@@ -190,10 +249,17 @@ class TestAscendFp8BlockLinearMethod(TestBase):
     def test_falls_back_when_reduction_dim_is_not_mx_aligned(self):
         scheme = self.build_scheme(is_950=True, block_size=(4, 32))
         layer, weight, scale_inv = self._make_layer(out_features=8, in_features=48, block=(4, 32))
-
         with patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor):
             scheme.process_weights_after_loading(layer)
 
+        self.assertEqual(
+            self._get_weight_switch_specs(scheme, input_sharded=True),
+            ((WeightSwitchGatherSpec("weight", gather_dim=1),), ()),
+        )
+        self.assertEqual(
+            self._get_weight_switch_specs(scheme, input_sharded=False),
+            ((WeightSwitchGatherSpec("weight"),), ()),
+        )
         self.assertIsNone(scheme.mxfp8_method)
         self.assertEqual(layer.weight.dtype, torch.bfloat16)
         expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)

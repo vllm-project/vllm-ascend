@@ -29,7 +29,11 @@ from vllm_ascend.core.recompute_scheduler import (
     RecomputeReqInfo,
     RecomputeScheduler,
 )
-from vllm_ascend.utils import vllm_version_is
+
+
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
+    return {"tokens_per_state": ratio}
 
 
 def test_add_request_does_not_inject_placeholder_spec_tokens():
@@ -37,9 +41,8 @@ def test_add_request_does_not_inject_placeholder_spec_tokens():
     scheduler.requests = {}
     scheduler.log_stats = False
     scheduler.connector = None
-    if not vllm_version_is("0.27.1"):
-        # vllm main: Scheduler.add_request reads spec_decode_metrics_level.
-        scheduler.spec_decode_metrics_level = "none"
+    # vllm main: Scheduler.add_request reads spec_decode_metrics_level.
+    scheduler.spec_decode_metrics_level = "none"
 
     enqueued_requests = []
 
@@ -176,7 +179,7 @@ def test_dsv4_decode_node_observes_real_dense_local_cache_hit():
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.uint8,
-                    compress_ratio=4,
+                    **_ratio_kwargs(4),
                     model_version="deepseek_v4",
                 ),
             ),
