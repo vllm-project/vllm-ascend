@@ -61,6 +61,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     bypass_pp_guard = spec_pp_support is not None
     original_get_pp_group = dspark_utils.get_pp_group
     original_should_share = eagle_utils._should_share
+    original_dspark_should_share = dspark_utils._should_share
     if inherits_target_quant:
         model_utils.get_draft_quant_config = lambda _vllm_config: vllm_config.quant_config
     if bypass_pp_guard:
@@ -77,6 +78,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
             return original_should_share(eagle, flag, draft, target)
 
         eagle_utils._should_share = should_share
+        dspark_utils._should_share = should_share
     try:
         # get_model also reads the config PP size; keep the draft unsharded.
         with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
@@ -87,6 +89,7 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         if bypass_pp_guard:
             dspark_utils.get_pp_group = original_get_pp_group
             eagle_utils._should_share = original_should_share
+            dspark_utils._should_share = original_dspark_should_share
 
 
 # The speculator binds ``load_dspark_model`` by name at import time, so both
