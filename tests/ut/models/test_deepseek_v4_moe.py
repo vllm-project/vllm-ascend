@@ -203,7 +203,7 @@ def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
     assert moe.gate.bias_vl.shape == (config.n_routed_experts,)
     assert fused_moe.call_args.kwargs["bias_vl"] is moe.gate.bias_vl
     assert fused_moe.call_args.kwargs["e_score_correction_bias"] is None
-    
+
 
 def test_deepseek_v4_load_weights_skips_hash_layer_gate_bias(monkeypatch):
     model = deepseek_v4_module.AscendDeepseekV4ForCausalLM.__new__(deepseek_v4_module.AscendDeepseekV4ForCausalLM)
