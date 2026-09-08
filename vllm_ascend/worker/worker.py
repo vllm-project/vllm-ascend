@@ -367,6 +367,28 @@ class NPUWorker(WorkerBase):
             if callable(shutdown_fn):
                 shutdown_fn()
 
+        # MegaKernel initializes a collective SHMEM runtime in every TP
+        # worker. Finalize it while torch.distributed is still alive so all
+        # ranks can complete SHMEM's teardown barrier before process exit.
+        try:
+            from blockrt.dist.utils import finalize_shemm
+
+            logger.info(
+                "[MegaKernel] worker shutdown: SHMEM finalize begin, rank=%s",
+                getattr(self, "rank", getattr(self, "local_rank", "unknown")),
+            )
+            finalize_shemm()
+            logger.info(
+                "[MegaKernel] worker shutdown: SHMEM finalize complete, rank=%s",
+                getattr(self, "rank", getattr(self, "local_rank", "unknown")),
+            )
+        except ImportError:
+            logger.info(
+                "[MegaKernel] worker shutdown: SHMEM was not initialized, "
+                "rank=%s",
+                getattr(self, "rank", getattr(self, "local_rank", "unknown")),
+            )
+
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
