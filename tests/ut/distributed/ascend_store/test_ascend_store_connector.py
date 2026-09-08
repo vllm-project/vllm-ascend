@@ -15,6 +15,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import json
+import os
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -65,6 +67,50 @@ class TestAscendStoreKVEvents(unittest.TestCase):
 
 
 class TestAscendStoreConnector(unittest.TestCase):
+    def setUp(self):
+        environment = patch.dict(os.environ, {}, clear=False)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("ASCEND_GLOBAL_RESOURCE_CONFIG", None)
+
+    def test_qos_uses_child_config_before_backend_initialization(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        env = "ASCEND_GLOBAL_RESOURCE_CONFIG"
+        for role, factory in ((KVConnectorRole.SCHEDULER, "KVPoolScheduler"), (KVConnectorRole.WORKER, "KVPoolWorker")):
+            for extra, expected in (({}, 0), ({"qos": 3}, 3)):
+                with (
+                    self.subTest(role=role, extra=extra),
+                    patch.dict(os.environ, {env: '{"comm_resource_config.qos":1}'}),
+                ):
+                    config = self._make_vllm_config(extra_config=extra)
+
+                    def check_injection(*args, expected=expected, **kwargs):
+                        self.assertEqual(
+                            json.loads(os.environ[env]),
+                            {
+                                "comm_resource_config.qos": 1,
+                                "store": {"comm_resource_config.qos": expected},
+                            },
+                        )
+                        return MagicMock()
+
+                    with patch(f"{module}.{factory}", side_effect=check_injection), patch(f"{module}.LookupKeyServer"):
+                        AscendStoreConnector(config, role, MagicMock())
+
+    def test_non_mooncake_backend_does_not_inject_hixl_qos(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+        module = "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector"
+        with patch(f"{module}.KVPoolScheduler"):
+            AscendStoreConnector(
+                self._make_vllm_config(extra_config={"backend": "memcache", "qos": 2}),
+                KVConnectorRole.SCHEDULER,
+                MagicMock(),
+            )
+        self.assertNotIn("ASCEND_GLOBAL_RESOURCE_CONFIG", os.environ)
+
     def _make_vllm_config(self, kv_role="kv_producer", extra_config=None):
         config = MagicMock()
         config.kv_transfer_config.kv_role = kv_role

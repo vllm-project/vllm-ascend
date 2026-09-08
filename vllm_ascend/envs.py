@@ -22,12 +22,17 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+ASCEND_GLOBAL_RESOURCE_CONFIG_ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
 # begin-env-vars-definition
 
 env_variables: dict[str, Callable[[], Any]] = {
+    # External Mooncake/HIXL JSON resource configuration, not sensitive.
+    # Empty by default; connector QoS accepts integers [0, 7].
+    "ASCEND_GLOBAL_RESOURCE_CONFIG": lambda: os.getenv(ASCEND_GLOBAL_RESOURCE_CONFIG_ENV, ""),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which
     # means all number of CPU cores will be used.
