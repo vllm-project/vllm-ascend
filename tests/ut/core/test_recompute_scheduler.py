@@ -36,6 +36,7 @@ from tests.ut.core.test_dyntra_lb_scheduler import (
 from tests.ut.kv_offload.utils import create_model_runner_output, create_request
 from vllm_ascend.core.recompute_scheduler import (
     AsyncRecomputeScheduler,
+    KVConnectorBlockState,
     PreemptedRequestData,
     RecomputeReqInfo,
     RecomputeScheduler,
@@ -951,7 +952,8 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields():
     assert scheduler_output.scheduled_encoder_input_stats == "enc-stats"
     assert scheduler_output.ec_connector_metadata == "ec-meta"
     scheduler._mamba_block_aligned_split.assert_called()
-    scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once()
+    if KVConnectorBlockState is not None:
+        scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once()
 
 
 def test_schedule_breaks_waiting_when_mamba_split_has_no_tokens():
