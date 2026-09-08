@@ -81,7 +81,7 @@ def sample_json_schema():
 )
 def test_guided_json_completion_xgrammar(sample_json_schema, request):
     sampling_params = SamplingParams(
-        temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
+        temperature=0.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
     )
     model_marker = request.node.get_closest_marker("model")
     model_marker.kwargs["env_vars"] = REGEX_COMPILATION_TIMEOUT_ENV
@@ -143,7 +143,7 @@ def test_guided_regex_xgrammar(sample_regex, vllm_runner):
 )
 def test_guided_json_completion_guidance(sample_json_schema, vllm_runner):
     sampling_params = SamplingParams(
-        temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
+        temperature=0.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
     )
     prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
     inputs = vllm_runner.get_inputs(prompts)
@@ -241,7 +241,7 @@ def test_guided_auto_rejects_mixed_structured_output_backends(vllm_runner):
 )
 def test_guided_json_completion_outlines(sample_json_schema, request):
     sampling_params = SamplingParams(
-        temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
+        temperature=0.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
     )
     model_marker = request.node.get_closest_marker("model")
     model_marker.kwargs["env_vars"] = REGEX_COMPILATION_TIMEOUT_ENV
@@ -290,7 +290,7 @@ def test_guided_json_completion_xgrammar_model_runner_v2(sample_json_schema, req
         assert vllm_runner.model.llm_engine.vllm_config.use_v2_model_runner is True
 
         sampling_params = SamplingParams(
-            temperature=1.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
+            temperature=0.0, max_tokens=500, structured_outputs=StructuredOutputsParams(json=sample_json_schema)
         )
         prompts = [f"Give an example JSON for an employee profile that fits this schema: {sample_json_schema}"] * 2
         inputs = vllm_runner.get_inputs(prompts)
