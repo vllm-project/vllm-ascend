@@ -19,9 +19,12 @@ import math
 
 import pytest
 import torch
-import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.glm5_kpool_indexer_ascend import AscendGlm5KpoolIndexerOp
+torch_npu = pytest.importorskip("torch_npu")  # noqa: F401  (registers the NPU backend)
+
+from vllm_ascend.ops.glm5_kpool_indexer_ascend import (  # noqa: E402
+    AscendGlm5KpoolIndexerOp,
+)
 
 
 class _FakeIndexerMetadata:

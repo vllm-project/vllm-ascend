@@ -16,11 +16,15 @@ from __future__ import annotations
 
 import pytest
 import torch
-import torch_npu  # noqa: F401  (registers the NPU backend)
-from vllm.model_executor.kernels.mhc.torch import mhc_post_torch, mhc_pre_torch
 
-from vllm_ascend.ops import mhc_ascendc as m
-from vllm_ascend.utils import enable_custom_op
+torch_npu = pytest.importorskip("torch_npu")  # noqa: F401  (registers the NPU backend)
+from vllm.model_executor.kernels.mhc.torch import (  # noqa: E402
+    mhc_post_torch,
+    mhc_pre_torch,
+)
+
+from vllm_ascend.ops import mhc_ascendc as m  # noqa: E402
+from vllm_ascend.utils import enable_custom_op  # noqa: E402
 
 # GLM-5.3-Flash text_config values the fused kernels were built for.
 HIDDEN = 4096

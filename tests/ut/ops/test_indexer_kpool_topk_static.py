@@ -10,9 +10,10 @@ sets must match per row, allowing bf16 near-ties at the k-boundary.
 
 import pytest
 import torch
-import torch_npu  # noqa: F401
 
-from vllm_ascend.ops.indexer_kpool_topk import (
+torch_npu = pytest.importorskip("torch_npu")  # noqa: F401  (registers the NPU backend)
+
+from vllm_ascend.ops.indexer_kpool_topk import (  # noqa: E402
     indexer_kpool_topk_pytorch,
     indexer_kpool_topk_static,
 )
