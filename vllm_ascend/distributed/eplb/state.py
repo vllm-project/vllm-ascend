@@ -17,6 +17,8 @@ from vllm.distributed.parallel_state import get_node_count
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
+from .stair_policy import replica_counts
+
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
 
 
@@ -112,6 +114,15 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def _initialize_stair_model(self, model_state: Any) -> None:
         model = model_state.model
+        mapping = model_state.physical_to_logical_map
+        num_ranks = get_ep_group().world_size
+        if mapping.ndim != 2 or mapping.shape[1] % num_ranks:
+            raise ValueError("STAIR physical experts must divide evenly across EP ranks")
+        for layer in mapping:
+            replica_counts(
+                layer.reshape(num_ranks, -1).cpu().numpy(),
+                model.num_logical_experts,
+            )
         model_state._stair_load_window = torch.zeros(
             self.expert_load_window_size,
             model.num_moe_layers,

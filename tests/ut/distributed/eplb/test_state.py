@@ -39,6 +39,23 @@ def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
     upstream_step.assert_called_once_with(is_dummy=False, is_profile=False, log_stats=False)
 
 
+def test_stair_initialization_rejects_rank_local_duplicates(monkeypatch):
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(world_size=2))
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.device = torch.device("cpu")
+    state.expert_load_window_size = 4
+    model_state = SimpleNamespace(
+        model=SimpleNamespace(
+            num_moe_layers=1,
+            num_logical_experts=3,
+        ),
+        physical_to_logical_map=torch.tensor([[0, 0, 1, 2]]),
+    )
+
+    with pytest.raises(ValueError, match="rank-local duplicates"):
+        state._initialize_stair_model(model_state)
+
+
 def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
     device_group = SimpleNamespace(size=lambda: 2)
     monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(device_group=device_group))
