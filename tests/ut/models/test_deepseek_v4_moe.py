@@ -36,6 +36,22 @@ class _FakeMoERunner(nn.Module):
         return hidden_states
 
 
+@pytest.mark.parametrize(
+    ("weight_name", "expected"),
+    [
+        ("layers.0.attn.wq_a.weight", False),
+        ("layers.1.ffn.experts.0.w1.weight", True),
+        ("model.layers.1.input_layernorm.weight", True),
+        ("mtp.0.ffn.experts.0.w1.weight", False),
+        ("norm.weight", False),
+    ],
+)
+def test_deepseek_v4_reduced_layer_weight_filter(weight_name, expected):
+    config = SimpleNamespace(num_hidden_layers=1)
+
+    assert deepseek_v4_module.is_reduced_layer_weight(config, weight_name) is expected
+
+
 def test_deepseek_v4_hash_layer_uses_upstream_hash_router(monkeypatch):
     gate = _FakeGate()
 
