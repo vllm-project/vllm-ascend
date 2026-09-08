@@ -24,8 +24,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 - `GLM-5-w8a8`(Quantized version): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5-w8a8).
 - `GLM-5.1-w4a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w4a8).
 - `GLM-5.1-w8a8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8).
-- `GLM-5.1-w8a8c8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP).
-- `GLM-5.1-w4a4`(Ascend950DT mxfp4 Quantized): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4).
+- `GLM-5.1-w8a8c8`(Quantized version): [Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.1-w8a8c8-MTP). The weights have been verified on Atlas 800 A3 and are recommended for use.
+- `GLM-5.1-w4a4`(Ascend950DT mxfp4 Quantized): [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.1-w4a4c8-mxfp4). The weights have been verified on Ascend 950DT and are recommended for use.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
 
