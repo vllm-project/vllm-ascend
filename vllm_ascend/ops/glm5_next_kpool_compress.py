@@ -83,9 +83,15 @@ def _fallback_kpool_compress_and_write_cache(
     scores = slot_score.float() + ape.float().unsqueeze(0)
     compressed_k = (torch.softmax(scores, dim=1) * slot_k.float()).sum(dim=1).to(torch.bfloat16)
     cache_block_size = kv_cache.shape[1]
-    block_ids = torch.div(loc, cache_block_size, rounding_mode="floor")
-    block_offsets = torch.remainder(loc, cache_block_size)
-    kv_cache[block_ids, block_offsets, 0, :] = compressed_k
+    # Mirror the triton kernel's slot masking: graph-captured batches carry
+    # padded rows whose slot is -1, and a raw -1 would index the LAST cache
+    # block via negative indexing and silently corrupt it.
+    valid = (loc >= 0) & (loc < kv_cache.shape[0] * cache_block_size)
+    if valid.any():
+        safe_loc = loc[valid]
+        block_ids = torch.div(safe_loc, cache_block_size, rounding_mode="floor")
+        block_offsets = torch.remainder(safe_loc, cache_block_size)
+        kv_cache[block_ids, block_offsets, 0, :] = compressed_k[valid]
 
 
 def glm5_next_kpool_compress_and_write_cache(
