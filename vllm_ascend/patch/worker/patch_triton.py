@@ -1,7 +1,10 @@
+import os
+
 import vllm.model_executor.layers.mamba.ops.causal_conv1d as _cc1d
 import vllm.third_party.flash_linear_attention.ops as fla_ops
 import vllm.third_party.flash_linear_attention.ops.fused_recurrent as fla_fused_recurrent
 import vllm.third_party.flash_linear_attention.ops.layernorm_guard as fla_layernorm_guard
+from vllm.logger import init_logger
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import next_power_of_2
 
@@ -11,6 +14,8 @@ from vllm_ascend._310p.ops.causal_conv1d import (
 from vllm_ascend._310p.ops.causal_conv1d import causal_conv1d_update as _npu_causal_conv1d_update_impl
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.layernorm_guard import LayerNormFn
+
+logger = init_logger(__name__)
 
 triton.next_power_of_2 = next_power_of_2
 
@@ -93,18 +98,16 @@ try:
     # Kimi-K3 path uses): gate formula / beta sigmoid / spec-decode acceptance
     # all run in-kernel, one launch per call, ACL-graph capturable. Drop back
     # to the Triton implementation with GLM53_ASCENDC_KDA=0.
-    import os as _os_kda
-
-    if _os_kda.environ.get("GLM53_ASCENDC_KDA", "1") == "1":
+    if os.environ.get("GLM53_ASCENDC_KDA", "1") == "1":
         try:
             from vllm_ascend.ops.triton.kda.kda import (
                 fused_recurrent_kda_ascendc as _npu_fused_recurrent_kda_ascendc,
             )
 
             fla_kda.fused_recurrent_kda = _npu_fused_recurrent_kda_ascendc
-            print("[kda-ascendc] bound fused_recurrent_kda_ascendc", flush=True)
+            logger.info("[kda-ascendc] bound fused_recurrent_kda_ascendc")
         except ImportError as _kda_err:
-            print("[kda-ascendc] bind failed:", repr(_kda_err), flush=True)
+            logger.warning("[kda-ascendc] bind failed: %r", _kda_err)
 except ImportError:
     pass
 
@@ -142,7 +145,7 @@ def _sweep_kda_from_imports(dst_module: str, names: list[str]) -> list[str]:
         if hit:
             patched.append(name)
     if patched:
-        print("[kda-ascendc] swept from-imports in:", patched[:6], flush=True)
+        logger.info("[kda-ascendc] swept from-imports in: %s", patched[:6])
     return patched
 
 try:
@@ -152,7 +155,7 @@ try:
          "fused_kda_gate", "fused_gdn_gating"],
     )
 except Exception as _sweep_err:
-    print("[kda-ascendc] sweep failed:", repr(_sweep_err), flush=True)
+    logger.warning("[kda-ascendc] sweep failed: %r", _sweep_err)
 
 # GLM-5.3-Flash vision tower (and any other NVIDIA fused Q/K RMSNorm) launches a
 # CUDA Triton kernel that references tl.extra.cuda.gdc_wait. Ascend Triton has
@@ -298,15 +301,15 @@ if not HAS_TRITON:
 # 7168}, x bf16 / hc params fp32, hc_post_mult_value pinned to 2.0).
 # GLM53_HC_ASCENDC=0 forces the torch path for the whole module.
 try:
-    import torch as _mhc_torch
     from vllm.model_executor.layers import mhc as _mhc_mod
-    from vllm.model_executor.kernels.mhc.torch import (
-        mhc_post_torch as _mhc_post_torch_fb,
-        mhc_pre_torch as _mhc_pre_torch_fb,
-    )
+
     from vllm_ascend.ops.mhc_ascendc import (
         fused_post_pre_ascendc as _mhc_fused_post_pre_ascendc,
+    )
+    from vllm_ascend.ops.mhc_ascendc import (
         hc_pre_ascendc as _mhc_pre_ascendc,
+    )
+    from vllm_ascend.ops.mhc_ascendc import (
         infer_hc_mult as _mhc_infer_hc_mult,
     )
 
@@ -393,8 +396,7 @@ try:
         causal_conv1d_update_ascendc as _cc1d_update_ascendc,
     )
 
-    import os as _os_conv
-    if _os_conv.environ.get("GLM53_ASCENDC_CONV", "0") == "1":
+    if os.environ.get("GLM53_ASCENDC_CONV", "0") == "1":
         _cc1d.causal_conv1d_update = _cc1d_update_ascendc
         try:
             import vllm.models.glm5next.nvidia.kda as _glm_kda_ascendc
@@ -403,9 +405,9 @@ try:
         except ImportError:
             pass
     # else: keep the 310P fallback bound by the earlier block
-    print("[npu_kda_causal_conv1d_ascendc] bound AscendC causal_conv1d_update", flush=True)
+    logger.info("[npu_kda_causal_conv1d_ascendc] bound AscendC causal_conv1d_update")
 except Exception as _cc1d_err:
-    print("[npu_kda_causal_conv1d_ascendc] FAILED:", repr(_cc1d_err), flush=True)
+    logger.warning("[npu_kda_causal_conv1d_ascendc] FAILED: %r", _cc1d_err)
 
 # npu_mamba_state_ops: gather_initial_states / scatter_states assert
 # state.is_cuda and launch Triton kernels that reference

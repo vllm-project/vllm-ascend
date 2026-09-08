@@ -23,50 +23,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
-
-
-def _race_trace_chunked(
-    num_prefills, num_with_context, context_lens_cpu, max_context_chunk,
-    num_chunks, chunk_seq_lens, workspace_size,
-):
-    """Diagnostics only (GLM53_CONV_TRACE=1). build_chunked_metadata is fully
-    host-synchronised already, so these probes cannot mask a host/device race."""
-    import os as _os
-    import sys as _sys
-
-    if _os.environ.get("GLM53_CONV_TRACE") != "1":
-        return
-    cl = context_lens_cpu.tolist()
-    csl = chunk_seq_lens.tolist()
-    problems = []
-    if any(v < 0 for v in cl):
-        problems.append(f"negative_context_len={cl}")
-    if num_chunks * num_prefills != len(csl):
-        problems.append(f"chunk_shape_mismatch chunks={num_chunks} prefills={num_prefills} got={len(csl)}")
-    if any(v > max_context_chunk for row in csl for v in row):
-        problems.append(f"chunk_gt_max_context_chunk max_chunk={max_context_chunk}")
-    per_req = [sum(row[j] for row in csl) for j in range(num_prefills)]
-    mismatch = [(j, per_req[j], cl[j]) for j in range(num_prefills) if per_req[j] != cl[j]]
-    if mismatch:
-        problems.append(f"chunk_sum_mismatch={mismatch[:4]}")
-    capacity = max_context_chunk * num_prefills
-    if capacity > workspace_size:
-        problems.append(f"workspace_overrun capacity={capacity} workspace={workspace_size}")
-    if not problems:
-        # Anomaly-only: an unconditional per-step stderr print inside the
-        # metadata-build path measurably perturbs the timing of the race we
-        # are hunting (E1 started failing once this printed every step).
-        return
-    print(
-        "[chunk-trace] BAD: " + " | ".join(problems) + " || "
-        + f"prefills={num_prefills} with_ctx={num_with_context} ctx={cl} "
-        + f"max_chunk={max_context_chunk} chunks={num_chunks} "
-        + f"chunk_lens={csl} workspace={workspace_size}",
-        file=_sys.stderr,
-        flush=True,
-    )
-
-
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (
@@ -597,15 +553,6 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         self.chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
         self.cu_seq_lens_cpu = torch.zeros(self.num_chunks, self.num_prefills + 1, dtype=torch.int32, pin_memory=True)
         torch.cumsum(self.chunk_seq_lens, dim=1, out=self.cu_seq_lens_cpu[:, 1:], dtype=torch.int32)
-        _race_trace_chunked(
-            self.num_prefills,
-            num_prefills_with_context_cpu,
-            self.context_lens_cpu,
-            self.max_context_chunk,
-            self.num_chunks,
-            self.chunk_seq_lens,
-            self.chunked_prefill_workspace_size,
-        )
         chunk_actual_seq_lengths_kv_list = [
             torch.cumsum(self.chunk_seq_lens[i], dim=0).tolist() for i in range(self.num_chunks)
         ]

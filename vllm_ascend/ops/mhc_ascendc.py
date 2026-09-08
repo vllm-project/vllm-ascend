@@ -29,7 +29,7 @@ norm_eps, hc_eps) -> (y, post, comb)``
 
 Kernel-enforced limits (TORCH_CHECK in op_host):
 
-* ``hc_mult == 4`` (``HC_PRE_HC_LIMIT``, our config is exactly at the limit)
+* ``hc_mult == 4`` (``HC_PRE_HC_LIMIT``; GLM-5.3-Flash is exactly at the limit)
 * ``d in {4096, 7168}`` (``HC_PRE_D_LIMIT`` / ``_EXTEND``)
 * ``hc_fn.shape[0] == 24`` (``HC_PRE_MIX_HC_LIMIT``)
 * ``hc_post_mult_value`` is fixed to 2.0 inside the kernel
@@ -42,7 +42,7 @@ The wrappers below additionally accept the *packed* residual layout
 (``[..., hc * d]``) and, by default, hand the ``post`` mix back with the
 trailing singleton dim restored (``[..., hc, 1]``) so that the return
 contract matches ``vllm.model_executor.kernels.mhc.torch.mhc_pre_torch``
-bit-for-bit in shape -- that is what the vendored
+bit-for-bit in shape -- that is what the GLM-5
 ``Glm5NextDecoderLayer``/``MHCPreOp``/``MHCFusedPostPreOp`` plumbing feeds
 back into ``mhc_post_torch`` (``post_term = post[..., None] * x.unsqueeze(-2)``).
 Set ``post_keepdim=False`` to get the raw operator layout instead.
@@ -53,10 +53,13 @@ Set ``GLM53_HC_ASCENDC=0`` to force the torch fallback for the whole module.
 from __future__ import annotations
 
 import os
-import sys
 from typing import NamedTuple
 
 import torch
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 try:  # torch_npu is a hard requirement on Ascend, but keep the module importable off-device
     import torch_npu  # noqa: F401
@@ -172,10 +175,8 @@ def probe_available(hidden_size: int = HC_PRE_D_LIMIT, hc_mult: int = HC_PRE_HC_
         torch.npu.synchronize()
         return True
     except Exception as op_err:
-        print(
-            f"{_LOG_PREFIX} probe failed, fused mHC unusable: {op_err!r:.600}",
-            flush=True,
-            file=sys.stderr,
+        logger.warning(
+            "%s probe failed, fused mHC unusable: %.600r", _LOG_PREFIX, op_err
         )
         return False
 
@@ -212,9 +213,9 @@ def _stream_layout(
 ) -> tuple[torch.Tensor, int, tuple[int, ...]]:
     """Return (x as [..., hc_mult, d], d, outer_shape), no envelope check.
 
-    Accepts both the packed residual layout ``[..., hc_mult * d]`` (what
-    ``hc_expand``+``view`` produce in A3) and the stream layout
-    ``[..., hc_mult, d]`` (what our vendored ``hc_expand`` produces).
+    Accepts both the packed residual layout ``[..., hc_mult * d]`` (a
+    ``hc_expand``+``view`` calling convention) and the stream layout
+    ``[..., hc_mult, d]`` (what vLLM's ``hc_expand`` produces).
     """
     if x.dim() < 2:
         raise ValueError(f"{_LOG_PREFIX} {name} must be at least 2-D, got {tuple(x.shape)}")
@@ -339,8 +340,9 @@ def infer_hc_mult(residual: torch.Tensor) -> int:
     """hc_mult of a stream- or packed-layout residual.
 
     ``mhc_pre_torch`` derives it from ``residual.shape[-2]``, which is only
-    correct for the stream layout ``[..., hc, d]`` our ``hc_expand`` produces;
-    A3 feeds the packed ``[..., hc * d]`` layout instead.  Models with an
+    correct for the stream layout ``[..., hc, d]`` vLLM's ``hc_expand``
+    produces; callers may feed the packed ``[..., hc * d]`` layout instead.
+    Models with an
     hc_mult other than the operator's limit fall through to the torch
     derivation (the packed case is then ambiguous and stays unsupported).
     """
@@ -394,12 +396,11 @@ def hc_pre_ascendc(
     except Exception as op_err:
         if _PRE_AVAILABLE is True:
             raise
-        print(
-            f"{_LOG_PREFIX} hc_pre op failed, falling back to torch mhc_pre: "
-            f"{op_err!r:.600} | x: {tuple(x.shape)} {x.dtype} | hc_fn: {tuple(hc_fn.shape)} "
-            f"{hc_fn.dtype} | hc_mult: {hc_mult}",
-            flush=True,
-            file=sys.stderr,
+        logger.warning(
+            "%s hc_pre op failed, falling back to torch mhc_pre: %.600r "
+            "| x: %s %s | hc_fn: %s %s | hc_mult: %s",
+            _LOG_PREFIX, op_err, tuple(x.shape), x.dtype,
+            tuple(hc_fn.shape), hc_fn.dtype, hc_mult,
         )
         _PRE_AVAILABLE = False
         return _pre_torch(
@@ -409,7 +410,7 @@ def hc_pre_ascendc(
         )
 
     if _PRE_AVAILABLE is None:
-        print(f"{_LOG_PREFIX} hc_pre active (first call ok)", flush=True, file=sys.stderr)
+        logger.info("%s hc_pre active (first call ok)", _LOG_PREFIX)
     _PRE_AVAILABLE = True
     return y, post, comb
 
@@ -458,7 +459,7 @@ def _run_hc_pre(
     # [T, hc, hc] -> outer + [hc, hc]
     comb = comb.reshape(*outer, hc_mult, hc_mult) if outer else comb.reshape(hc_mult, hc_mult)
     if post_keepdim:
-        # Match mhc_pre_torch's [..., hc, 1] so the vendored plumbing
+        # Match mhc_pre_torch's [..., hc, 1] so the model plumbing
         # (post_term = post * x.unsqueeze(-2)) keeps working unchanged.
         post = post.reshape(*outer, hc_mult, 1) if outer else post.reshape(hc_mult, 1)
     else:
@@ -507,18 +508,17 @@ def hc_post_ascendc(
     except Exception as op_err:
         if _POST_AVAILABLE is True:
             raise
-        print(
-            f"{_LOG_PREFIX} hc_post op failed, falling back to torch mhc_post: "
-            f"{op_err!r:.600} | x: {tuple(x.shape)} {x.dtype} | residual: "
-            f"{tuple(residual.shape)} {residual.dtype}",
-            flush=True,
-            file=sys.stderr,
+        logger.warning(
+            "%s hc_post op failed, falling back to torch mhc_post: %.600r "
+            "| x: %s %s | residual: %s %s",
+            _LOG_PREFIX, op_err, tuple(x.shape), x.dtype,
+            tuple(residual.shape), residual.dtype,
         )
         _POST_AVAILABLE = False
         return _post_torch(x, residual, post_layer_mix, comb_res_mix).reshape(out_shape)
 
     if _POST_AVAILABLE is None:
-        print(f"{_LOG_PREFIX} hc_post active (first call ok)", flush=True, file=sys.stderr)
+        logger.info("%s hc_post active (first call ok)", _LOG_PREFIX)
     _POST_AVAILABLE = True
     return out
 

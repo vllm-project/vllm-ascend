@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+
 import torch
+from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID  # type: ignore
+
+logger = init_logger(__name__)
 
 __all__ = ["PAD_SLOT_ID", "extract_last_width"]
 
@@ -99,16 +103,6 @@ def causal_conv1d_update_ascendc(
                 # prefill value while recurrent_kda kept advancing).
                 sd_view = conv_state.transpose(1, 2) if conv_state.dim() == 3 else None
                 if sd_view is not None:
-                    if globals().get("_CONV_PATH_N", 0) < 2:
-                        globals()["_CONV_PATH_N"] = globals().get("_CONV_PATH_N", 0) + 1
-                        import sys as _sys
-
-                        print(
-                            f"[conv-ascendc] SPEC sd-shadow path (pool "
-                            f"{tuple(conv_state.shape)} sd_contig="
-                            f"{sd_view.is_contiguous()})",
-                            flush=True, file=_sys.stderr,
-                        )
                     shadow = sd_view.contiguous()
                     result = torch.ops._C_ascend.npu_causal_conv1d_custom(
                         out,
@@ -124,17 +118,7 @@ def causal_conv1d_update_ascendc(
                         pad_slot_id=PAD_SLOT_ID,
                         run_mode=1,
                     )
-                    if os.environ.get("GLM53_NO_WRITEBACK") != "1":
-                        sd_view.copy_(shadow)
-                    if (
-                        os.environ.get("GLM53_SYNC_CONV_DECODE") == "1"
-                        and not torch.npu.is_current_stream_capturing()
-                    ):
-                        # Bisect knob: drain after every spec conv (34 layers
-                        # -> 34 syncs per verify step). If the fault disappears
-                        # here, the corrupting work is enqueued between two
-                        # conv calls (KDA recurrent / MLA / MoE), not the conv.
-                        torch.npu.synchronize()
+                    sd_view.copy_(shadow)
                     _CONV_CUSTOM_AVAILABLE = True
                     return result.to(orig_dtype)
                 raise RuntimeError(
@@ -144,12 +128,9 @@ def causal_conv1d_update_ascendc(
             except Exception as _op_err:
                 if _CONV_CUSTOM_AVAILABLE is True:
                     raise
-                import sys as _sys
-
-                print(
-                    "[conv-ascendc] spec path failed, falling back:",
-                    repr(_op_err)[:800],
-                    flush=True, file=_sys.stderr,
+                logger.warning(
+                    "[conv-ascendc] spec path failed, falling back: %.800r",
+                    _op_err,
                 )
                 _CONV_CUSTOM_AVAILABLE = False
 
@@ -195,11 +176,6 @@ def causal_conv1d_update_ascendc(
                     run_mode=1,
                 )
                 sd_view.copy_(shadow)
-                if not _CONV_CUSTOM_AVAILABLE:
-                    import sys as _sys
-
-                    print("[conv-ascendc] plain sd-shadow path active",
-                          flush=True, file=_sys.stderr)
                 _CONV_CUSTOM_AVAILABLE = True
                 return result.to(orig_dtype)
             # Legacy staging for exotic pool layouts the SD-shadow path does
@@ -275,11 +251,9 @@ def causal_conv1d_update_ascendc(
             except Exception as _op_err:
                 if _CONV_CUSTOM_AVAILABLE is True:
                     raise
-                import sys as _sys
-                print(
-                    "[conv-ascendc] op failed, falling back:",
-                    repr(_op_err)[:1200],
-                    flush=True, file=_sys.stderr,
+                logger.warning(
+                    "[conv-ascendc] op failed, falling back: %.1200r",
+                    _op_err,
                 )
                 _CONV_CUSTOM_AVAILABLE = False
 
@@ -320,9 +294,9 @@ def causal_conv1d_update_npu(
     # Fast path: plain decode (one token per sequence) — the hottest call
     # site; a handful of broadcast multiply-adds.
     if query_start_loc is None and x.dim() == 2:
-        import os as _os, time as _time
+        import time as _time
 
-        _timing = _os.environ.get("GLM53_TIME_CONV") == "1"
+        _timing = os.environ.get("GLM53_TIME_CONV") == "1"
         _t0 = _time.perf_counter() if _timing else 0.0
         B, D = x.shape
         rows = (

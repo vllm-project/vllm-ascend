@@ -20,6 +20,7 @@
 import os
 
 import torch
+from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
@@ -30,6 +31,8 @@ from .gate import DEFAULT_KDA_LOWER_BOUND, apply_kda_gate
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril_kda
 from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices
+
+logger = init_logger(__name__)
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [4, 8, 16, 32]
@@ -1619,23 +1622,19 @@ def fused_recurrent_kda_ascendc(
             lower_bound=DEFAULT_KDA_LOWER_BOUND if lower_bound is None else float(lower_bound),
         )
         if _KDA_ASCENDC_AVAILABLE is None:
-            import sys as _sys
-
-            print("[kda-ascendc] active (first call ok)", flush=True, file=_sys.stderr)
+            logger.info("[kda-ascendc] active (first call ok)")
         _KDA_ASCENDC_AVAILABLE = True
     except Exception as op_err:
         if _KDA_ASCENDC_AVAILABLE is True:
             raise
         import sys as _sys
 
-        print(
-            "[kda-ascendc] op failed, falling back to triton:",
-            repr(op_err)[:600],
-            "| q:", tuple(q.shape), q.dtype,
-            "| g:", tuple(g.shape), g.dtype,
-            "| beta:", tuple(beta.shape), beta.dtype,
-            "| state:", tuple(initial_state.shape), initial_state.dtype,
-            flush=True, file=_sys.stderr,
+        logger.warning(
+            "[kda-ascendc] op failed, falling back to triton: %.600r "
+            "| q: %s %s | g: %s %s | beta: %s %s | state: %s %s",
+            op_err, tuple(q.shape), q.dtype, tuple(g.shape), g.dtype,
+            tuple(beta.shape), beta.dtype,
+            tuple(initial_state.shape), initial_state.dtype,
         )
         _KDA_ASCENDC_AVAILABLE = False
         return _ORIG_RECURRENT(
