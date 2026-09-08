@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import functools
-import importlib.util
 import json
 import math
 import os
@@ -590,22 +589,6 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
-    """Map untagged empty-device installs onto the matching release lane.
-
-    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
-    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
-    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.27.1``. Distinguish
-    v0.27.1 from main by where PCP lives: model_executor on 0.27.1, v1 ops
-    after the move on main.
-    """
-    if target_vllm_version != "0.27.1":
-        return False
-    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
-    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
-    return has_legacy_pcp and not has_main_pcp
-
-
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
@@ -619,12 +602,7 @@ def vllm_version_is(target_vllm_version: str):
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         vllm_version = vllm_version.split("+")[0]
-        parsed = Version(vllm_version)
-        if parsed == Version(target_vllm_version):
-            return True
-        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
-            return _vllm_empty_device_matches_release(target_vllm_version)
-        return False
+        return Version(vllm_version) == Version(target_vllm_version)
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
