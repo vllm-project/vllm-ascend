@@ -218,10 +218,24 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 
 ### QoS Configuration
 
-Set `qos` in `kv_connector_extra_config` on both the prefiller and decoder.
+Set `qos` in the transfer initiator's `kv_connector_extra_config`.
 This option is supported by `MooncakeConnectorV1`, `MooncakeHybridConnector`,
 and `MooncakeLayerwiseConnector`. The default P/D QoS is **1**; accepted values
 are integers in **[0, 4]** (booleans are not accepted).
+
+With the HIXL Client/Server transport, the endpoint initiating the connection
+supplies the channel QoS. The peer creates its corresponding channel using
+that received value:
+
+| Transfer mode | Initiator | Operation | QoS configuration used |
+| :--- | :--- | :--- | :--- |
+| Pull | Decoder (D) | READ KV from the prefiller | D-side `qos` |
+| Push | Prefiller (P) | WRITE KV to the decoder | P-side `qos` |
+
+Although KV data flows from P to D in both modes, pull uses D's QoS and push
+uses P's QoS. Configuring only the passive endpoint does not override the
+initiator's channel QoS. Both endpoints support the option, but the effective
+value for a connection comes from its initiator.
 
 For example, add `"qos": 1` alongside your existing parallelism settings:
 
@@ -247,6 +261,13 @@ environment variable if absent. Other resource settings and the `store`
 configuration are preserved. An explicit QoS value, or the default **1** when
 omitted, replaces the existing top-level QoS. Invalid QoS values or malformed
 resource JSON fail before the environment is modified.
+
+The `Injected comm_resource_config.qos=...` log confirms that the local
+environment configuration was written successfully. It does not by itself
+prove that this value was used for a transfer channel. In pull mode, a passive
+P-side HIXL server may not print a local QoS parsing log; in push mode, the
+same applies to the passive D side. Check the initiator's configuration and
+HIXL channel logs to verify the channel QoS.
 
 With `MultiConnector`, set `qos` in the Mooncake P/D child connector's
 `kv_connector_extra_config`. P/D injection only updates the top-level QoS key;
