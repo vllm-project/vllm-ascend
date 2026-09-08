@@ -938,7 +938,7 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields():
     scheduler._make_scheduled_encoder_input_stats = MagicMock(return_value="enc-stats")
     scheduler.ec_connector = MagicMock()
     scheduler.ec_connector.build_connector_meta.return_value = "ec-meta"
-    scheduler.kv_cache_manager.take_partial_tail_offloads = MagicMock(return_value=["offload"])
+    scheduler.kv_cache_manager.take_boundary_state_offloads = MagicMock(return_value={})
     request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
     scheduler.add_request(request)
 
@@ -948,8 +948,8 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields():
     assert scheduler_output.num_spec_tokens_to_schedule == 2
     assert scheduler_output.scheduled_encoder_input_stats == "enc-stats"
     assert scheduler_output.ec_connector_metadata == "ec-meta"
-    assert scheduler_output.partial_tail_offloads == ["offload"]
     scheduler._mamba_block_aligned_split.assert_called()
+    scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once()
 
 
 def test_schedule_breaks_waiting_when_mamba_split_has_no_tokens():
