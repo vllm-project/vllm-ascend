@@ -40,34 +40,51 @@ def _npu_gumbel_block_argmax(
     temp_ptr,
     seeds_ptr,
     pos_ptr,
-    processed_logits_ptr,
-    processed_logits_stride,
-    processed_logits_col_ptr,
+    # [max_num_reqs, num_cols, vocab_size]
+    logits_cache_ptr,
+    logits_cache_stride_0,
+    logits_cache_stride_1,
+    logits_cache_col_ptr,
     vocab_size,
+    IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr = False,
 ):
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
-    if temp != 0.0 and APPLY_TEMPERATURE:
-        logits = logits / temp
-
-    if processed_logits_ptr is not None:
-        if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
+    if logits_cache_ptr is not None:
+        # Store the logits *before* temperature. Dividing first would
+        # produce a value that is generally not representable in the
+        # cache's dtype, forcing it to be fp32. Consumers (the rejection
+        # sampler) divide by the same temperature on load, which
+        # reproduces the value used below bitwise.
+        if PER_TOKEN_COL:
+            col = tl.load(logits_cache_col_ptr + token_idx)
         else:
-            col = 0
+            col = tl.load(logits_cache_col_ptr)
         tl.store(
-            processed_logits_ptr + req_state_idx * processed_logits_stride + col * vocab_size + block,
+            logits_cache_ptr + req_state_idx * logits_cache_stride_0 + col * logits_cache_stride_1 + block,
             logits,
             mask=mask,
         )
 
+    if temp != 0.0 and APPLY_TEMPERATURE:
+        logits = logits / temp
+
+    # NPU: fp64 is unsupported; always reduce in fp32. USE_FP64 is kept
+    # for signature compatibility and guarded at the host level.
     logits = logits.to(tl.float32)
     if temp != 0.0:
         seed = tl.load(seeds_ptr + req_state_idx)
         # NPU: cast pos to int32 to avoid uint64 in philox (NPU umulhi only
         # supports int32/uint32). Position values fit in int32 in practice.
         pos = tl.load(pos_ptr + token_idx).to(tl.int32)
+        # IS_DRAFTING is kept for signature compatibility with upstream
+        # gumbel_block_argmax (upstream #54282). The rejection sampler's
+        # resample is the target side, so callers must always pass False;
+        # salting the noise here would corrupt the target's stream.
+        assert not IS_DRAFTING
         gumbel_seed = tl.randint(seed, pos)
         # NPU: use tl.rand (float32) instead of tl_rand64 (float64 not supported)
         r = tl.rand(gumbel_seed, block).to(tl.float32)
@@ -171,11 +188,14 @@ def _resample_kernel(
         temp_ptr,
         seed_ptr,
         pos_ptr,
-        None,
-        0,
-        None,
+        None,  # logits_cache_ptr
+        0,  # logits_cache_stride_0
+        0,  # logits_cache_stride_1
+        None,  # logits_cache_col_ptr
         vocab_size,
+        IS_DRAFTING=False,
         APPLY_TEMPERATURE=False,
+        USE_FP64=False,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(
