@@ -104,6 +104,13 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Whether to enable the `fused` AttnRes backend for Kimi K3 (CANNBot DSL
+    # kernels when `cannbot_dsl` is installed; pure-Torch `two_phase` as the
+    # fallback). Disabling this env var keeps the previous `two_phase` backend
+    # even when CANNBot DSL operators are available.
+    "VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED": lambda: bool(
+        int(os.getenv("VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED", "1"))
+    ),
 }
 
 # end-env-vars-definition
