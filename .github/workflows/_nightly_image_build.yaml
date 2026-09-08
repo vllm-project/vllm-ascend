@@ -54,6 +54,21 @@ on:
         type: boolean
         default: false
         description: "If true, login to SWR and push built images. Set to false for PR verification builds."
+      cann_swr_url:
+        required: false
+        type: string
+        default: 'swr.cn-north-12.myhuaweicloud.com/base_image/ascend-ci/cann'
+        description: "CANN base image URL (SWR registry) for the job container"
+      cann_image_version:
+        required: false
+        type: string
+        default: '9.1.0'
+        description: "CANN version for the job container image tag"
+      soc:
+        required: false
+        type: string
+        default: '910b'
+        description: "Ascend SoC type for the job container image tag (e.g. 910b, a3, 310p, 950)"
     secrets:
       SWR_USERNAME:
         required: false
@@ -81,6 +96,10 @@ jobs:
     needs: generate-matrix
     name: Build nightly-${{ inputs.target }}-${{ matrix.os }}-${{ matrix.arch_name }}
     runs-on: ${{ matrix.arch_runner }}
+    container:
+      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
+      env:
+        SOC: ${{ inputs.soc }}
     strategy:
       matrix: ${{ fromJSON(needs.generate-matrix.outputs.matrix) }}
     outputs:
