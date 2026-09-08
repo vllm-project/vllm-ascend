@@ -58,12 +58,13 @@ from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 from vllm_ascend.ops.vocab_parallel_embedding import lmhead_all_to_all
+from vllm_ascend.spec_decode.mtp import compact_mtp_topk_indices
 from vllm_ascend.spec_decode.utils import (
     SlidingWindowAdapter,
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_dsa_cp, enable_sp, lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -1285,13 +1286,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
             draft_model.set_skip_topk(True)
             if hasattr(draft_model, "compact_topk_indices"):
-                # Step 0 wrote top-k rows for every query token in the
-                # multi-token batch. Compact the rows of each request's last
-                # token to the buffer front so steps 1+ read request-aligned
-                # rows (mirrors the upstream proposer). Draft predictors
-                # without this method (e.g. vllm-ascend DeepSeekV4MTP) are
-                # left untouched.
-                draft_model.compact_topk_indices(token_indices_to_sample)
+                compact_mtp_topk_indices(
+                    draft_model,
+                    token_indices_to_sample,
+                    num_input_tokens,
+                    tp_group=get_tp_group() if enable_dsa_cp() else None,
+                )
 
         if self.method != "dflash":
             last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
