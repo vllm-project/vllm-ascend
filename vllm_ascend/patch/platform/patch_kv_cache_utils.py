@@ -261,7 +261,7 @@ def _get_kv_cache_groups_uniform_groups(
     # The other uniform KV cache specs will be similarly partitioned into layer tuples.
     # Say we have 21 SWA layers, all with the same page size, then we will have "21"
     # layer tuples.
-    num_layer_tuples_per_group: list[int] = [g_spec.get_num_layer_tuples() for g_spec in grouped_specs]
+    num_layer_tuples_per_group: list[int] = [g_spec.get_max_layers_per_page_size() for g_spec in grouped_specs]
     # Choose `num_layer_tuples` to minimize total padding across groups.
     num_layer_tuples = _approximate_gcd(num_layer_tuples_per_group, lower_bound=num_layer_tuples_per_group[0])
     # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
@@ -360,7 +360,8 @@ def _get_deepseek_v4_cache_layout(
 
     # num_layer_tuples = longest bucket list across all groups. For the
     # full-MLA group this equals the count of layers in the largest
-    # per-page-size bucket (= get_num_layer_tuples()); for SWA sub-groups
+    # per-page-size bucket (= get_max_layers_per_page_size()); for SWA
+    # sub-groups
     # this equals the sub-group size (each has a single page_size).
     num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
 
@@ -475,7 +476,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        group.kv_cache_spec.get_max_layers_per_page_size()
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )

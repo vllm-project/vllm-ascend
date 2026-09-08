@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import torch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
@@ -113,7 +114,7 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
 
         cls = self._make_worker_class()
-        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(np.dtype("float32"),))
+        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(torch.float32,))
         uniform_spec = UniformTypeKVCacheSpecs.from_specs({"mamba.layer": mamba_spec})
         self.assertIsNotNone(uniform_spec)
         kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=uniform_spec)])
@@ -1110,7 +1111,7 @@ class TestKVPoolWorkerProcessLayerData(unittest.TestCase):
             save_keys=["k0"],
         )
         send_thread = object.__new__(KVCacheStoreLayerSendingThread)
-        send_thread.build_shared_data = MagicMock(return_value=shared)
+        send_thread.build_shared_data = MagicMock(return_value=shared)  # type: ignore[method-assign]
         worker.kv_send_thread = send_thread
 
         worker._build_shared_save_data()

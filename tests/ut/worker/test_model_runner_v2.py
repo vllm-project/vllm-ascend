@@ -50,6 +50,7 @@ def test_execute_model_records_profiling_time():
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
         "context_len": 0,
+        "valid_dummy_state_slots": False,
     }
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 

@@ -473,6 +473,14 @@ class NPUPlatform(Platform):
             logger.warning("Model config is missing. Skipping Ascend-specific config updates.")
             return
 
+        # vLLM main ships the Hy4-preview model (hy_v4) behind an NVIDIA-only
+        # platform dispatch: its package raises on ROCm/XPU but lets Ascend
+        # fall through to the CUDA/Blackwell implementation. Reject it here
+        # until an Ascend implementation exists.
+        model_type = getattr(vllm_config.model_config.hf_config, "model_type", None)
+        if model_type == "hy_v4":
+            raise NotImplementedError("The Hy4-preview (hy_v4) model is not supported on Ascend NPU.")
+
         cls._validate_indexer_pp_config(vllm_config)
 
         _validate_draft_decode_context_parallel_config(vllm_config)

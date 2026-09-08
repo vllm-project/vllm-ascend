@@ -254,7 +254,6 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-            max_seq_len_np=None,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
