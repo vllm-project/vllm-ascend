@@ -13,7 +13,7 @@ from vllm.distributed import get_eplb_group
 from vllm.distributed.eplb.rebalance_execute import TransferMetadata
 from vllm.logger import logger
 
-from vllm_ascend.distributed.eplb.stair_policy import plan_rebalance
+from vllm_ascend.distributed.eplb.stair_policy import plan_rebalance, validate_plan
 
 
 def run_stair_planner(
@@ -49,6 +49,12 @@ def run_stair_planner(
                 node_by_rank,
                 state._stair_config,
                 sample_weights=model_state._stair_sample_weights,
+            )
+            validate_plan(
+                old,
+                plan,
+                logical_load.shape[2],
+                state._stair_config.max_expert_transfers_per_rank_pair,
             )
             packed = torch.from_numpy(np.stack((plan.placement, plan.source_rank, plan.source_slot)))
             scores = torch.from_numpy(plan.accepted_scores)

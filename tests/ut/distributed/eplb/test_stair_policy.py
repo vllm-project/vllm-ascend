@@ -1,6 +1,7 @@
 import numpy as np
 
 from vllm_ascend.distributed.eplb.stair_policy import (
+    StairPlan,
     align_slots,
     assign_sources,
     capped_min_max,
@@ -10,6 +11,7 @@ from vllm_ascend.distributed.eplb.stair_policy import (
     placement_score,
     plan_rebalance,
     replica_candidates,
+    validate_plan,
     weighted_moments,
 )
 
@@ -79,6 +81,19 @@ def test_source_assignment_prefers_same_node_and_aligns_slots():
 
     np.testing.assert_array_equal(placement, [[0, 1], [0, 2], [0, 4]])
     assert (source_rank[2, 0], source_slot[2, 0]) == (1, 0)
+
+
+def test_plan_validation_rejects_false_source_ownership():
+    old = np.array([[[0], [1]]])
+    plan = StairPlan(
+        placement=np.array([[[1], [0]]]),
+        source_rank=np.array([[[0], [1]]]),
+        source_slot=np.zeros((1, 2, 1), dtype=np.int64),
+        accepted_scores=np.array([1.0]),
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "does not own"):
+        validate_plan(old, plan, num_experts=2, pair_cap=1)
 
 
 def test_constrained_lpt_obeys_placement_and_pair_invariants():
