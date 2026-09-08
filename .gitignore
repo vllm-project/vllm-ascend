@@ -229,3 +229,10 @@ csrc/third_party/
 .codegraph/
 
 .vllm_ascend/
+
+# Local artifacts from the experimental typed KV-cache allocator.  Keep the
+# reproducible benchmark code, but never publish generated traces, model
+# outputs, server logs, profiling results, or Codex scratch environments.
+/.codex_tmp/
+/benchmarks/kv_cache/datasets/
+/benchmarks/kv_cache/results/

@@ -1,0 +1,65 @@
+{
+  "description": "Synthetic Hybrid Attention/Mamba workload. Replace page sizes with values exported on the target NPU model.",
+  "memory_bytes": 67108864,
+  "page_types": [
+    {
+      "name": "attention",
+      "page_size_bytes": 1048576
+    },
+    {
+      "name": "mamba",
+      "page_size_bytes": 262144
+    }
+  ],
+  "bounded_superpage_sizes_bytes": [
+    2097152,
+    8388608
+  ],
+  "requests": [
+    {
+      "request_id": "r0",
+      "start_step": 0,
+      "duration_steps": 8,
+      "page_counts": {
+        "attention": 10,
+        "mamba": 10
+      }
+    },
+    {
+      "request_id": "r1",
+      "start_step": 1,
+      "duration_steps": 3,
+      "page_counts": {
+        "attention": 16,
+        "mamba": 16
+      }
+    },
+    {
+      "request_id": "r2",
+      "start_step": 2,
+      "duration_steps": 7,
+      "page_counts": {
+        "attention": 20,
+        "mamba": 20
+      }
+    },
+    {
+      "request_id": "r3",
+      "start_step": 4,
+      "duration_steps": 3,
+      "page_counts": {
+        "attention": 16,
+        "mamba": 16
+      }
+    },
+    {
+      "request_id": "r4",
+      "start_step": 5,
+      "duration_steps": 4,
+      "page_counts": {
+        "attention": 12,
+        "mamba": 12
+      }
+    }
+  ]
+}
