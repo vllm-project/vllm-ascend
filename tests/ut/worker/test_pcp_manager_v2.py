@@ -61,12 +61,14 @@ def _make_pcp_config(
     *,
     sparse_mla: bool = True,
     pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
 ):
     hf_text_config = SimpleNamespace(index_topk=2048) if sparse_mla else SimpleNamespace()
     return SimpleNamespace(
         parallel_config=SimpleNamespace(
             prefill_context_parallel_size=2,
             pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
         ),
         model_config=SimpleNamespace(
             use_mla=True,
@@ -980,3 +982,68 @@ def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
         result.dcp_local_seq_lens,
         torch.tensor([4, 5, 0, 0, 0, 0, 0, 0], dtype=torch.int32),
     )
+
+
+@pytest.mark.parametrize("sparse_mla", [False, True])
+@pytest.mark.parametrize("cudagraph_mode", list(CUDAGraphMode))
+def test_validate_config_pcp_dp_graph_modes(sparse_mla, cudagraph_mode):
+    config = _make_pcp_config(cudagraph_mode, sparse_mla=sparse_mla, data_parallel_size=2)
+    if cudagraph_mode in (CUDAGraphMode.NONE, CUDAGraphMode.FULL_DECODE_ONLY):
+        AscendPCPManager.validate_config(config, supports_mm_inputs=False)
+    else:
+        with pytest.raises(NotImplementedError, match=r"PCP\+DP supports eager mode or FULL_DECODE_ONLY"):
+            AscendPCPManager.validate_config(config, supports_mm_inputs=False)
+
+
+@pytest.mark.parametrize(
+    "pcp_size,scheduled,prefilling,expected",
+    [
+        (2, [80, 48], [True, True], 64),
+        (2, [18], [True], 10),
+        (2, [18, 1], [True, False], 11),
+        (4, [18, 3], [True, False], 9),
+        (4, [1], [True], 1),
+        (2, [1, 3], [False, False], 4),
+    ],
+)
+def test_dispatch_size_accounts_for_pcp_padding_and_replicated_decode(pcp_size, scheduled, prefilling, expected):
+    manager = AscendPCPManager(pcp_size, 0, torch.device("cpu"))
+    scheduled = np.array(scheduled, dtype=np.int32)
+    original = scheduled.copy()
+
+    actual = manager.get_num_tokens_for_dispatch(scheduled, np.array(prefilling))
+
+    assert actual == expected
+    np.testing.assert_array_equal(scheduled, original)
+    assert manager._global_batch is None
+    assert manager._padded_gather_idx is None
+    assert manager._hidden_restore_idx is None
+
+
+@pytest.mark.parametrize("pcp_rank", [0, 1])
+@pytest.mark.parametrize("has_stale_batch", [False, True])
+def test_dummy_attention_context_uses_current_batch(pcp_rank, has_stale_batch):
+    manager = AscendPCPManager(2, pcp_rank, torch.device("cpu"))
+    saved_batch = _make_global_pcp_batch() if has_stale_batch else None
+    manager._global_batch = saved_batch
+    manager._hidden_restore_idx = torch.tensor([99]) if has_stale_batch else None
+    saved_indices = manager._hidden_restore_idx
+    manager._block_tables = SimpleNamespace(gather_block_tables=MagicMock())
+    manager._global_batch_slot_mappings = torch.full((2, 32), 99, dtype=torch.int64)
+    dummy = _make_local_pcp_batch()
+    dummy.is_dummy = True
+    dummy.num_tokens = 4  # Exercise padding: the layout stride must still be 6.
+    block_tables = (torch.zeros((2, 1), dtype=torch.int32),) * 2
+    slot_mappings = torch.arange(24, dtype=torch.int64).reshape(2, 12)
+
+    context = manager.build_attention_context(dummy, block_tables, slot_mappings)
+
+    assert context.global_batch is dummy
+    assert context.global_block_tables is block_tables
+    start = pcp_rank * 6
+    torch.testing.assert_close(context.global_slot_mappings, slot_mappings[:, start : start + 6])
+    gathered_hidden = torch.arange(12).reshape(12, 1)
+    torch.testing.assert_close(gathered_hidden[context.hidden_restore_idx], gathered_hidden[start : start + 6])
+    assert manager._global_batch is saved_batch
+    assert manager._hidden_restore_idx is saved_indices
+    manager._block_tables.gather_block_tables.assert_not_called()
