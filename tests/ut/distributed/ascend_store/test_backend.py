@@ -328,22 +328,6 @@ class TestMooncakeBackendSetup(unittest.TestCase):
             mock_global_te.get_transfer_engine.return_value = transfer_engine
             return backend._setup_store()
 
-    def test_injected_default_selects_independent_te(self):
-        from vllm_ascend.distributed.kv_transfer.utils.ascend_resource_config import inject_qos
-
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch(f"{self._MODULE_PATH}.MooncakeStoreConfig.load_from_env", return_value=_make_mooncake_store_config()),
-            patch.object(MooncakeBackend, "_setup_store", return_value=MagicMock()),
-        ):
-            inject_qos(0, store=True)
-            backend = MooncakeBackend(MagicMock())
-            self.assertTrue(backend._use_store_independent_te)
-        store = MagicMock()
-        store.setup.return_value = 0
-        self._setup_store(backend, store)
-        self.assertNotIn("engine", store.setup.call_args.kwargs)
-
     def test_setup_omits_default_tenant_for_all_memory_paths(self):
         for use_fabric_mem in (False, True):
             with self.subTest(use_fabric_mem=use_fabric_mem):

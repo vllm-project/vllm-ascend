@@ -216,6 +216,56 @@ export LD_LIBRARY_PATH=/usr/local/lib64/python3.12/site-packages/mooncake:$LD_LI
 
 We can run the following scripts to launch a server on the prefiller/decoder node, respectively. Please note that each P/D node will occupy ports ranging from kv_port to kv_port + num_chips to initialize socket listeners. To avoid any issues, port conflicts should be prevented. Additionally, ensure that each node's engine_id is uniquely assigned to avoid conflicts.
 
+### QoS Configuration
+
+Set `qos` in `kv_connector_extra_config` on both the prefiller and decoder.
+This option is supported by `MooncakeConnectorV1`, `MooncakeHybridConnector`,
+and `MooncakeLayerwiseConnector`. The default P/D QoS is **1**; accepted values
+are integers in **[0, 4]** (booleans are not accepted).
+
+For example, add `"qos": 1` alongside your existing parallelism settings:
+
+```json
+{
+  "kv_connector": "MooncakeConnectorV1",
+  "kv_role": "kv_consumer",
+  "kv_connector_extra_config": {
+    "qos": 1,
+    "prefill": {"dp_size": 1, "tp_size": 2},
+    "decode": {"dp_size": 1, "tp_size": 2}
+  }
+}
+```
+
+Use `kv_producer` for the prefiller and retain the other deployment-specific
+fields in your `--kv-transfer-config`.
+
+No manual QoS environment export is required. Before initializing the transfer
+engine, the connector merges its QoS into the literal top-level JSON key
+`"comm_resource_config.qos"` in `ASCEND_GLOBAL_RESOURCE_CONFIG`, creating the
+environment variable if absent. Other resource settings and the `store`
+configuration are preserved. An explicit QoS value, or the default **1** when
+omitted, replaces the existing top-level QoS. Invalid QoS values or malformed
+resource JSON fail before the environment is modified.
+
+When combining P/D and Mooncake-backed `AscendStoreConnector` through
+`MultiConnector`, put `qos` in each **child connector's**
+`kv_connector_extra_config`. P/D defaults to **1**, while Mooncake pooling
+defaults to **0**. For example, P/D QoS 1 and pool QoS 0 produce:
+
+```json
+{
+  "comm_resource_config.qos": 1,
+  "store": {"comm_resource_config.qos": 0}
+}
+```
+
+Each connector updates only its own QoS scope, regardless of initialization
+order. The generated resource configuration activates the existing independent
+Store transfer-engine path. This combination requires Mooncake v0.3.12 or later
+with Store-specific resource configuration support. Restart the serving
+processes after changing QoS.
+
 ### kv_port Configuration Guide
 
 On Ascend NPU, Mooncake uses AscendDirectTransport for RDMA data transfer, which randomly allocates ports within range `[20000, 20000 + npu_per_node × 1000)`. If `kv_port` overlaps with this range, intermittent port conflicts may occur. To avoid this, configure `kv_port` according to the table below:

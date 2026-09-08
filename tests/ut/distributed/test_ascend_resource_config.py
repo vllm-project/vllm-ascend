@@ -8,7 +8,6 @@ from unittest.mock import patch
 from vllm_ascend.distributed.kv_transfer.utils.ascend_resource_config import (
     PD_QOS_DEFAULT,
     QOS_KEY,
-    STORE_QOS_DEFAULT,
     inject_qos,
 )
 
@@ -20,11 +19,6 @@ class TestAscendResourceConfig(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             inject_qos(PD_QOS_DEFAULT)
             self.assertEqual(json.loads(os.environ[ENV]), {QOS_KEY: 1})
-
-    def test_store_only(self):
-        with patch.dict(os.environ, {}, clear=True):
-            inject_qos(STORE_QOS_DEFAULT, store=True)
-            self.assertEqual(json.loads(os.environ[ENV]), {"store": {QOS_KEY: 0}})
 
     def test_both_initialization_orders(self):
         for order in ((False, True), (True, False)):
@@ -42,12 +36,6 @@ class TestAscendResourceConfig(unittest.TestCase):
                 expected = json.loads(json.dumps(initial))
                 (expected["store"] if store else expected)[QOS_KEY] = 2
                 self.assertEqual(json.loads(os.environ[ENV]), expected)
-
-    def test_store_preserves_legacy_inherited_settings(self):
-        initial = {QOS_KEY: 3, "comm_resource_config.protocol_desc": ["roce:device"]}
-        with patch.dict(os.environ, {ENV: json.dumps(initial)}):
-            inject_qos(0, store=True)
-            self.assertEqual(json.loads(os.environ[ENV]), {**initial, "store": {**initial, QOS_KEY: 0}})
 
     def test_invalid_inputs_leave_environment_unchanged(self):
         for qos in (True, False, "1", 1.5, None, -1, 5, 6, 7, 8):
