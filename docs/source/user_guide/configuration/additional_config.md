@@ -81,6 +81,29 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_reduce_sample`              | bool | `False` | Whether to enable reduce sample optimization to reduce communication and computation overheads in the tensor parallelism scenario. When enabled, logits are kept partitioned across TP ranks and only the small set of top-k candidate values/indices is communicated, instead of performing a full-vocabulary all-to-all/all-gather. **Note**: This is an experimental feature. **Limitations**: (1) Not supported on PD-disaggregated scenario. (2) Must be disabled when sampling logprobs are requested. When reduce sample is enabled, logprobs are silently computed over partitioned logits instead of the full vocabulary, producing incorrect logprob values and top-k rankings. (3) Cannot be enabled together with lmhead TP.|
 | `combine_quant_mode`                | int  | `0`     | Fused MC2 configuration. This configuration will be passed as the `comm_quant_mode` argument for the `torch_npu.npu_moe_distribute_combine_v2` operator. Please refer to the operator documentation for the valid value range. |
 
+**Short-prefill full-visible indexer bypass**
+
+`enable_sfa_full_visible_index_bypass` is an opt-in boolean, default `False`:
+
+```bash
+vllm serve /path/to/model --additional-config '{"enable_sfa_full_visible_index_bypass": true}'
+```
+
+For eligible SFA layers, the indexer writes its key cache and returns all
+causally visible indices without LightningIndexer scoring. This applies only
+when the model grants scoring-skip permission, to a single sequence in
+`PrefillNoCache` or `PrefillCacheHit`, with at most 2048 total visible KV tokens
+(including cached context), top-k size 2048, and block size 128 on NPU.
+MTP layers, speculative decoding, C8 SFA or indexer caches, PCP/DSA context
+parallelism, chunked prefill, decode, multiple sequences, and unsupported
+metadata, devices or cache geometry retain the existing scoring path.
+Top-k reuse layers retain their existing cache-write and reuse behavior.
+
+The read-only round-robin index table is `[2049, 2048]` with `int32` entries:
+approximately **16.008 MiB per process/device**, shared across layers and
+requests, not allocated per layer. Eligible requests receive zero-copy views.
+The default setting leaves incumbent scoring behavior unchanged.
+
 The details of each configuration option are as follows:
 
 **xlite_graph_config**
