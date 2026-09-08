@@ -7,9 +7,9 @@ Expert balancing for MoE (Mixture of Experts) models in LLM (Large Language) ser
 vLLM Ascend provides two EPLB integration paths:
 
 - **Model Runner V2 (MRv2)** uses the upstream vLLM EPLB controller,
-  configuration, default policy, load window, asynchronous worker, and
-  rearrangement lifecycle. Ascend adds Gloo CPU staging and the
-  `load_collection_phase` extension.
+  configuration, asynchronous worker, and rearrangement lifecycle. Ascend adds
+  Gloo CPU staging, the `load_collection_phase` extension, and the optional
+  experimental STAIR policy.
 - **Model Runner V1 (MRv1)** retains the legacy vLLM Ascend dynamic, recording,
   and static EPLB modes.
 
@@ -120,10 +120,75 @@ MRv2 uses the upstream `EPLBConfig` fields:
 These fields may also be passed together as JSON through `--eplb-config`.
 They must not be placed in `--additional-config` for MRv2.
 
+#### MRv2 STAIR Policy
+
+STAIR combines FlashLB-style temporal load statistics, bounded replica search,
+and risk-aware LPT placement with Swift's hard directed rank-pair transfer
+limit. It then aligns retained experts to their old slots and executes the
+planner-selected source for every incoming expert. Candidate validity, minimum
+mean-score improvement, and p95 regression are checked before admission.
+
+Enable STAIR through the Ascend extension while leaving the upstream
+`--eplb-config.policy` at `default`:
+
+```bash
+vllm serve Qwen/Qwen3-30B-A3B \
+  --tensor-parallel-size 16 \
+  --enable-expert-parallel \
+  --enable-eplb \
+  --eplb-config.num_redundant_experts 16 \
+  --additional-config '{"eplb_config":{"algorithm":"stair"}}'
+```
+
+STAIR currently requires MRv2, asynchronous EPLB, `load_collection_phase=all`,
+the Gloo communicator, non-elastic EP, and at least one redundant expert. The
+total physical expert count must divide evenly across EP ranks, and no rank may
+hold two copies of one logical expert. Unsupported combinations fail at startup.
+
+The defaults below are intended to be usable without tuning. `stair_config` is
+an advanced interface for workload-specific experiments:
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `sample_size` | `64` | Maximum chronological bins used by the planner. |
+| `z_score` | `0.67448975` | Standard-deviation weight in expert and rank risk. |
+| `use_covariance` | `false` | Include cross-expert covariance in rank risk. |
+| `imbalance_threshold` | `1.01` | Skip layers whose current mean imbalance does not exceed this value. |
+| `hysteresis_enabled` | `true` | Gate repeated search against the last committed predicted score. |
+| `hysteresis_relative` | `0.90` | Search after balance falls to this fraction of the committed anchor. |
+| `hysteresis_absolute` | `0.85` | Search when absolute balance falls below this value. |
+| `max_expert_transfers_per_rank_pair` | `1` | Per-layer cap for each directed source/destination rank pair. |
+| `min_relative_score_improvement` | `0.01` | Minimum relative mean-score improvement for admission. |
+| `min_absolute_score_improvement` | `0.0` | Optional absolute mean-score improvement floor. |
+| `p95_regression_tolerance` | `0.0` | Allowed relative p95 imbalance regression. |
+| `flash_tree_depth` | `4` | Number of expert groups in bounded replica search. |
+| `flash_tree_width` | `8` | Replica-budget neighborhood on each side of the baseline. |
+| `max_candidates_per_layer` | `64` | Beam and complete-candidate limit per layer. |
+| `lpt_max_backtracks` | `8` | Maximum constrained-LPT backtracks per replica candidate. |
+| `score_tie_tolerance` | `1e-9` | Numerical tolerance used only for deterministic tie selection. |
+
+For example, a deep user can permit two transfers per directed pair and enable
+covariance modeling:
+
+```json
+{
+  "eplb_config": {
+    "algorithm": "stair",
+    "stair_config": {
+      "max_expert_transfers_per_rank_pair": 2,
+      "use_covariance": true
+    }
+  }
+}
+```
+
+STAIR optimizes step-weighted mean imbalance. Weighted p95 is an admission
+guard, not part of a fixed mean+p95 objective; whether a tail-sensitive metric
+such as CVaR better predicts serving latency remains an evaluation question.
+
 #### MRv2 Load Collection Phase
 
-`load_collection_phase` is the only MRv2 EPLB field under
-`additional_config.eplb_config`. It controls which batch phases contribute to
+`load_collection_phase` controls which batch phases contribute to
 the upstream load window; it does not disable routing or MoE computation for
 non-matching batches.
 

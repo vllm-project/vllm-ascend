@@ -4,8 +4,8 @@ Model Runner V2 on Ascend uses the upstream vLLM Expert Parallelism Load
 Balancer (EPLB) control plane and adds a small Ascend-specific integration
 plane. Upstream code owns load windows, policy execution, placement state, and
 the rearrangement transaction. vLLM Ascend owns device routing, executed-load
-recording, quantized expert-weight views, and the asynchronous Gloo-staged
-movement adapter.
+recording, quantized expert-weight views, the asynchronous Gloo-staged movement
+adapter, and the optional STAIR planner.
 
 This page describes the current asynchronous architecture. For the decisions
 behind this ownership model, see
@@ -53,6 +53,7 @@ flowchart LR
 | Fused MoE EPLB helpers | Device lookup and post-compute physical load recording |
 | Quantization method | View of the expert tensors and metadata actually consumed by its kernel |
 | `AscendGlooEplbCommunicator` | Upstream asynchronous communicator contract implemented with CPU staging over Gloo |
+| STAIR policy and worker hooks | Logical temporal statistics, rank-zero planning, explicit source selection, and fixed-shape result broadcast |
 | Platform patch | Capability adaptation and the narrow construction/commit hooks not exposed by upstream |
 
 The platform patch is an entry adapter. Runtime routing, state management, and
@@ -121,6 +122,28 @@ The current format and execution-mode support table lives in the
 [EPLB user guide](../../user_guide/feature_guide/expert_parallelism_load_balancer.md),
 not in this architecture page.
 
+### STAIR path
+
+When selected, STAIR adds one logical-load ring per model but keeps the existing
+upstream async worker and one-layer-at-a-time commit transaction. Each recorded
+step is converted from physical to logical expert space before a later mapping
+change can invalidate its meaning. At a rearrangement boundary the logical
+time series is reduced across ranks. EPLB-group rank zero runs the deterministic
+NumPy planner and broadcasts placement, source-rank, source-slot, and score
+tensors with fixed shapes.
+
+The planner has six stages: temporal risk modeling; zero-load, balance, and
+hysteresis gates; bounded FlashTree-style replica search; risk-aware LPT with
+directed rank-pair capacity matching; stable rank-local slot alignment; and
+mean-improvement plus p95 admission. Node identities are gathered from the
+actual EPLB group rather than inferred from global rank numbering.
+
+The STAIR transfer hook consumes the selected source directly and returns the
+same metadata used by the upstream install step. It does not add a planner
+process, another controller, custom IPC, or a second transaction state machine.
+The hysteresis anchor advances only after weight installation, mapping commit,
+and Ascend routing-table refresh have all completed.
+
 ## Communication and synchronization
 
 `AscendGlooEplbCommunicator` implements the upstream asynchronous communicator
@@ -150,6 +173,8 @@ Changes to this integration must preserve these invariants:
 8. EPLB-disabled execution and the Model Runner V1 EPLB path remain isolated.
 9. The routing hot path avoids host loops, device-to-host synchronization, and
    mutable Python mapping work.
+10. STAIR source ownership and directed rank-pair limits are decided by the
+    planner and preserved by the transfer adapter.
 
 ## Extension and debugging anchors
 
