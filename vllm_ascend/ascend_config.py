@@ -524,19 +524,25 @@ class AscendConfig:
         # DSA-CP depends on FlashComm: auto-enable FlashComm when DSA-CP is on
         # so users only need `enable_dsa_cp=true` in additional_config.
         if self.enable_dsa_cp and not flashcomm_explicitly_enabled:
-            logger.info_once("DSA-CP is enabled. Auto-enabling FlashComm .")
+            logger.info_once("DSA-CP is enabled. Auto-enabling SP.")
 
         effective_flashcomm = flashcomm_explicitly_enabled or self.enable_dsa_cp
 
-        if not effective_flashcomm:
-            vllm_config.parallel_config.all2all_backend = (
-                "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
-            )
-            logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
-        elif not vc.parallel_config.use_sequence_parallel_moe:
-            logger.warning_once("FlashComm1 is enabled, but the current config does not support sp MoE. Disabling")
-        else:
-            logger.info_once("FlashComm1 is enabled.")
+        # NOTE: ParallelConfig.use_sequence_parallel_moe is a read-only
+        # property derived from all2all_backend, so steer it through the
+        # backend switch: "flashinfer_all2allv" is outside the SP-capable
+        # set and disables SP MoE, the default keeps it enabled.
+        want_sp_moe = (
+            effective_flashcomm
+            and vc.parallel_config.enable_expert_parallel
+            and vc.parallel_config.tensor_parallel_size > 1
+        )
+        if not want_sp_moe and vc.parallel_config.use_sequence_parallel_moe:
+            vc.parallel_config.all2all_backend = "flashinfer_all2allv"
+        logger.info_once(
+            "Sequence-parallel MoE is %s.",
+            "enabled" if vc.parallel_config.use_sequence_parallel_moe else "disabled",
+        )
 
         # DSA CP is only applicable to models with an indexer (for example,
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
@@ -547,7 +553,7 @@ class AscendConfig:
         )
         if self.enable_dsa_cp and not vc.parallel_config.use_sequence_parallel_moe:
             logger.warning_once(
-                "DSA-CP is enabled, but the current config does not support sequence-parallel MoE. Disabling DSA-CP."
+                "DSA-CP is enabled, but the current config does not support sequence-parallel. Disabling DSA-CP."
             )
         self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
 
