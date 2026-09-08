@@ -16,8 +16,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5.2-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
-- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.2-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8). The weights have been verified on Atlas 800 A3 and are recommended for use.
+- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8). The weights have been verified on Atlas 800 A2 and are recommended for use.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
@@ -362,7 +362,6 @@ Before you start, please
     dp_address = args.dp_address
     dp_rpc_port = args.dp_rpc_port
     vllm_start_port = args.vllm_start_port
-    # 一个 DP 副本占 tp×pp 张连续卡（pp=1 时退化为现状的 tp）
     gpus_per_dp_rank = tp_size * pp_size
 
     def run_command(visible_devices, dp_rank, vllm_engine_port):
@@ -560,8 +559,8 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        # 每个 DP rank 使用独立的 engine_id,避免 KV 路由混淆
-        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → engine_id 100-103
+        # Each DP rank uses an independent engine ID to avoid KV route confusion.
+        # $4 = data-parallel-rank. The rank offset within a node is 0 to 3, and the corresponding engine ID is 100 to 103.
         ENGINE_ID=$((100 + $4))
 
         export HCCL_OP_EXPANSION_MODE="AIV"
@@ -634,8 +633,8 @@ Before you start, please
         nic_name="xxxx" # change to your own nic name
         local_ip="xxxx" # change to your own ip
 
-        # 每个 DP rank 使用独立的 engine_id,避免 KV 路由混淆
-        # $4 = data-parallel-rank; 节点内 rank 偏移 0-3 → engine_id 100-103
+        # Each DP rank uses an independent engine ID to avoid KV route confusion.
+        # $4 = data-parallel-rank. The rank offset within a node is 0 to 3, and the corresponding engine ID is 100 to 103.
         ENGINE_ID=$((100 + $4))
 
         export HCCL_OP_EXPANSION_MODE="AIV"
