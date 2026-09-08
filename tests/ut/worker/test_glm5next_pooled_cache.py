@@ -20,8 +20,8 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_kv_cache_groups,
     get_glm5_pool_bytes_per_block,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.utils import vllm_version_is
 
 MAIN = "model.layers.1.attn"
 INDEXER = "model.layers.1.indexer.k_cache"
@@ -196,7 +196,7 @@ def test_glm5_runner_allocates_contiguous_slot_backings():
     descriptors = {
         name: descriptor
         for descriptor in plan.kv_cache_tensors
-        for name in descriptor.shared_by
+        for name in get_kv_cache_tensor_layers(descriptor)
     }
     main_cache, main_rope_cache = caches[MAIN]
     (indexer_cache,) = caches[INDEXER]
@@ -248,7 +248,7 @@ def test_glm5_runner_splits_main_mla_components_within_each_page():
     page_size = next(
         descriptor.size // plan.num_blocks
         for descriptor in plan.kv_cache_tensors
-        if MAIN in descriptor.shared_by
+        if MAIN in get_kv_cache_tensor_layers(descriptor)
     )
     assert kv_c_cache.stride(0) * kv_c_cache.element_size() == page_size
     assert k_pe_cache.stride(0) * k_pe_cache.element_size() == page_size

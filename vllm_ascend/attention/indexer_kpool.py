@@ -16,7 +16,10 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolStateSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
+    get_kv_cache_compression_ratio,
+)
 from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
 )
@@ -105,10 +108,11 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 "Ascend Indexer KPool backend requires MLAAttentionSpec, "
                 f"got {type(kv_cache_spec).__name__}."
             )
-        if kv_cache_spec.compress_ratio <= 1:
+        compress_ratio = get_kv_cache_compression_ratio(kv_cache_spec)
+        if compress_ratio <= 1:
             raise ValueError(
                 "Ascend Indexer KPool cache requires compress_ratio > 1, "
-                f"got {kv_cache_spec.compress_ratio}."
+                f"got {compress_ratio}."
             )
         if not layer_names or any(
             not name.endswith(".indexer.k_cache") for name in layer_names
@@ -117,7 +121,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = kv_cache_spec.storage_block_size
-        self.compress_ratio = kv_cache_spec.compress_ratio
+        self.compress_ratio = compress_ratio
         if self.logical_block_size % GLM5_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
                 "GLM-5 logical block size must be divisible by the SFA "

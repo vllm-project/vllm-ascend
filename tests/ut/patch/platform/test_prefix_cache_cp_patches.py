@@ -30,7 +30,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
+    AscendMLAAttentionSpec,
+)
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     _is_deepseek_v4_kv_cache_spec,
@@ -307,13 +310,14 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
         model_version="glm5_next",
         **_ratio_kwargs(16),
     )
-    state_spec = SlidingWindowMLASpec(
+    state_spec = AscendIndexerKPoolStateSpec(
         block_size=16,
         sliding_window=16,
         num_kv_heads=1,
         head_size=256,
         dtype=torch.float32,
         model_version="glm5_next",
+        cache_role="indexer_state",
     )
     full_group_spec = UniformTypeKVCacheSpecs.from_specs(
         {"layer.main": main_spec, "layer.indexer": indexer_spec}

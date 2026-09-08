@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio
+from vllm_ascend.utils import vllm_version_is
 
 
 @dataclass(frozen=True)
@@ -488,6 +489,17 @@ def get_glm5_kv_cache_config(
     )
     tensors: list[KVCacheTensor] = []
 
+    def make_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
+        if vllm_version_is("0.28.0"):
+            return KVCacheTensor(size=size, shared_by=layer_names)
+        return KVCacheTensor(
+            size=size,
+            layers=layer_names,
+            offset=0,
+            layer_stride=0,
+            block_stride=page_size,
+        )
+
     # Layers in independent scheduler groups can reuse the same physical slot
     # because their block IDs are allocated independently. A standard unpacked
     # descriptor lets the existing model-runner allocator create one backing
@@ -500,9 +512,10 @@ def get_glm5_kv_cache_config(
             if slot < len(group.layer_names):
                 shared_by.append(group.layer_names[slot])
         tensors.append(
-            KVCacheTensor(
-                size=layout.main_page_size * num_blocks,
-                shared_by=shared_by,
+            make_tensor(
+                layout.main_page_size * num_blocks,
+                shared_by,
+                layout.main_page_size,
             )
         )
 
@@ -510,9 +523,10 @@ def get_glm5_kv_cache_config(
         layout.indexer_names, layout.state_names
     ):
         tensors.append(
-            KVCacheTensor(
-                size=layout.small_page_size * num_blocks,
-                shared_by=[indexer_name, state_name],
+            make_tensor(
+                layout.small_page_size * num_blocks,
+                [indexer_name, state_name],
+                layout.small_page_size,
             )
         )
 

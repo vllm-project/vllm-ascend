@@ -23,7 +23,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_max_memory_usage,
     get_glm5_pool_bytes_per_block,
 )
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
@@ -126,7 +126,7 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     placements = {
         layer_name: tensor
         for tensor in plan.kv_cache_tensors
-        for layer_name in tensor.shared_by
+        for layer_name in get_kv_cache_tensor_layers(tensor)
     }
     main = placements[layout.mla_names[0]]
     indexer = placements[layout.indexer_names[0]]
@@ -134,11 +134,11 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     assert main.offset == 0
     assert indexer.offset == 0
     assert state is indexer
-    assert set(main.shared_by) == {
+    assert set(get_kv_cache_tensor_layers(main)) == {
         layout.mla_names[0],
         *(group.layer_names[0] for group in layout.mamba_groups),
     }
-    assert set(indexer.shared_by) == {
+    assert set(get_kv_cache_tensor_layers(indexer)) == {
         layout.indexer_names[0],
         layout.state_names[0],
     }
@@ -197,7 +197,9 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     )
     assert plan.num_blocks == 10
     assert len(plan.kv_cache_tensors) == 1
-    assert plan.kv_cache_tensors[0].shared_by == [local_mamba_name]
+    assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [
+        local_mamba_name
+    ]
 
 
 def test_missing_paired_cache_is_rejected():
