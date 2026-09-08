@@ -60,6 +60,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
+
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
