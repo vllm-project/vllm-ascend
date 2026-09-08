@@ -1030,7 +1030,7 @@ def _reshape_kv_cache_v2(
                 continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
-            if is_hidden_state_cache_spec(kv_cache_spec) or "cache_only_layers" in layer_name:
+            if is_hidden_state_cache_spec(kv_cache_spec):
                 # Single tensor for extract_hidden_states (no K/V split).
                 # HiddenStateCacheSpec subclasses MLAAttentionSpec, so this
                 # must run before the generic MLA reshape path.
