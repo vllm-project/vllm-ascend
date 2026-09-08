@@ -68,24 +68,27 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         single_rank_pp_group = SimpleNamespace(world_size=1)
         dspark_utils.get_pp_group = lambda: single_rank_pp_group
 
-        def should_share(eagle, flag, draft, target):
-            # The last PP rank has no target embedding. Keep the draft's own
-            # embedding instead of replacing it with PPMissingLayer.
-            if flag == "has_own_embed_tokens":
-                return False
-            return original_should_share(eagle, flag, draft, target)
+    def should_share(eagle, flag, draft, target):
+        # The last PP rank has no target embedding. Keep the draft's own
+        # embedding instead of replacing it with PPMissingLayer.
+        if flag == "has_own_embed_tokens" and bypass_pp_guard:
+            return False
+        # v0.27.1 _should_share compares target.weight; PPMissingLayer has none.
+        if not hasattr(target, "weight"):
+            return False
+        return original_should_share(eagle, flag, draft, target)
 
-        eagle_utils._should_share = should_share
+    eagle_utils._should_share = should_share
     try:
         # get_model also reads the config PP size; keep the draft unsharded.
         with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
             return _original_load_dspark_model(target_model, vllm_config)
     finally:
+        eagle_utils._should_share = original_should_share
         if inherits_target_quant:
             model_utils.get_draft_quant_config = _original_get_draft_quant_config
         if bypass_pp_guard:
             dspark_utils.get_pp_group = original_get_pp_group
-            eagle_utils._should_share = original_should_share
 
 
 # The speculator binds ``load_dspark_model`` by name at import time, so both

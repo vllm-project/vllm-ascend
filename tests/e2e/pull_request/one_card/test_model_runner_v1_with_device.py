@@ -36,7 +36,9 @@ FAKE_WEIGHT_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "ut
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int) -> KVCacheTensor:
-    """Build the vLLM main descriptor (vLLM #51718 layout)."""
+    """Build the lane-specific descriptor changed by vLLM #51718."""
+    if "shared_by" in KVCacheTensor.__dataclass_fields__:
+        return KVCacheTensor(size=size, shared_by=layer_names)
     return KVCacheTensor(
         size=size,
         layers=layer_names,

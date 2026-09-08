@@ -12,6 +12,8 @@ from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class MockSubscriber:
     """Helper class to receive and verify published events"""
@@ -146,6 +148,8 @@ def test_cpu_offloading(tmp_path, enable_tiering: bool) -> None:
     """
     Tests the native CPU-only and multi-tier offloading specs.
     """
+    if enable_tiering and vllm_version_is("0.27.1"):
+        pytest.skip("v0.27.1 SharedOffloadRegion.madvise returns EINVAL on Ascend CI")
 
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     extra_config: dict[str, Any] = {
