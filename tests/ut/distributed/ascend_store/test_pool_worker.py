@@ -90,6 +90,34 @@ def make_worker(
     return KVPoolWorker(config, use_layerwise=use_layerwise)
 
 
+class _SparseSWAHitManager:
+    """SWA manager: right-to-left search for a cached aligned segment tail."""
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        **kwargs,
+    ):
+        block_size = kv_cache_spec.block_size
+        max_num_blocks = max_length // block_size
+        for block_idx in range(max_num_blocks - 1, -1, -1):
+            cached = block_pool.get_cached_block(block_hashes[block_idx], kv_cache_group_ids)
+            if not cached:
+                continue
+            if (block_idx + 1) * block_size % alignment_tokens != 0:
+                continue
+            computed: tuple[list, ...] = tuple([] for _ in kv_cache_group_ids)
+            return computed, (block_idx + 1) * block_size
+        return tuple([] for _ in kv_cache_group_ids), 0
+
+
 class TestKVPoolWorkerHelpers(unittest.TestCase):
     """Test the pure helper methods on KVPoolWorker without full init."""
 
@@ -218,41 +246,99 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
         hits = [[16, 32, 48], [32, 48], [16, 32], [32, 48, 64]]
         self.assertEqual(32, cls._max_intersection_hit_position(hits))
 
-    def test_external_coordinator_lookup_uses_only_lookup_mask(self):
-        cls = self._make_worker_class()
+    def _make_sparse_swa_coordinator(self):
+        import torch
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec, SlidingWindowSpec
+
+        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._get_manager_class",
+            return_value=_SparseSWAHitManager,
+        ):
+            return AscendStoreCoordinator(
+                [
+                    KVCacheGroupSpec(
+                        ["layer.0"],
+                        SlidingWindowSpec(
+                            block_size=128, num_kv_heads=1, head_size=1, dtype=torch.float32, sliding_window=256
+                        ),
+                    )
+                ],
+                scheduler_block_size=256,
+                hash_block_size=128,
+                group_block_sizes=[128],
+                group_cache_families=["c1"],
+            )
+
+    @staticmethod
+    def _make_lookup_worker(cls, coordinator):
         worker = object.__new__(cls)
         worker.hash_block_size = 128
         worker.num_kv_cache_groups = 1
-        worker.cache_coordinator = MagicMock()
-        worker.cache_coordinator.lcm_block_size = 128
-        worker.cache_coordinator.lookup_mask.return_value = ([True],)
-        worker.cache_coordinator.store_mask.return_value = ([False],)
-        worker.cache_coordinator.find_longest_cache_hit.return_value = ((), 128)
+        worker.cache_coordinator = coordinator
         worker.m_store = MagicMock()
+        worker.token_database = MagicMock()
+
+        def process_token_key_strings(token_len, block_hashes, mask_num, kv_cache_group_id, chunk_filter):
+            return [
+                (start, start + 128, f"key{start // 128}", f"h{start // 128}".encode())
+                for start in range(mask_num, token_len, 128)
+                if chunk_filter(start)
+            ]
+
+        worker.token_database.process_token_key_strings.side_effect = process_token_key_strings
+        return worker
+
+    def test_external_coordinator_lookup_uses_only_lookup_mask(self):
+        cls = self._make_worker_class()
+        worker = self._make_lookup_worker(cls, self._make_sparse_swa_coordinator())
         worker.m_store.exists.return_value = [1]
 
-        worker.token_database = MagicMock()
-        worker.token_database.get_block_size.return_value = 128
-        worker.token_database.group_cache_families = {"kv": {0: "default"}}
-        worker.token_database.process_token_key_strings.side_effect = lambda *args, chunk_filter, **kwargs: (
-            [(0, 128, "key", "ab" * 32)] if chunk_filter(0) else []
-        )
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+                return_value=[False, True],
+            ),
+            patch.object(worker.cache_coordinator, "store_mask") as store_mask,
+        ):
+            hit = worker._lookup_with_coordinator(
+                256,
+                [b"h0", b"h1"],
+                [0],
+                use_layerwise=False,
+                include_all_ranks=False,
+            )
 
-        hit = worker._lookup_with_coordinator(
-            128,
-            [b"h0"],
-            [0],
-            use_layerwise=False,
-            include_all_ranks=False,
-        )
-
-        self.assertEqual(hit, 128)
-        worker.cache_coordinator.lookup_mask.assert_called_once_with(128)
-        worker.cache_coordinator.store_mask.assert_not_called()
-        worker.m_store.exists.assert_called_once_with(["key"])
-        worker.cache_coordinator.find_longest_cache_hit.assert_called_once()
-        self.assertFalse(worker.cache_coordinator.find_longest_cache_hit.call_args.kwargs["apply_eagle"])
+        # Only the reachable tail block is queried; its presence covers the
+        # whole segment, so the hit still spans the full token length.
+        self.assertEqual(hit, 256)
+        worker.m_store.exists.assert_called_once_with(["key1"])
+        store_mask.assert_not_called()
         worker.token_database.process_tokens.assert_not_called()
+
+    def test_external_coordinator_lookup_preseeds_hbm_hits(self):
+        cls = self._make_worker_class()
+        worker = self._make_lookup_worker(cls, self._make_sparse_swa_coordinator())
+        worker.m_store.exists.return_value = [1]
+
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator._reachable_block_mask",
+            return_value=[True, True],
+        ):
+            hit = worker._lookup_with_coordinator(
+                256,
+                [b"h0", b"h1"],
+                [0],
+                use_layerwise=False,
+                include_all_ranks=False,
+                hbm_hit_tokens=128,
+            )
+
+        # The locally computed block is preseeded and never queried; only the
+        # tail block beyond the HBM hit goes to the pool.
+        self.assertEqual(hit, 256)
+        worker.m_store.exists.assert_called_once_with(["key1"])
 
     def test_layerwise_multi_group_layout_includes_mtp(self):
         import torch

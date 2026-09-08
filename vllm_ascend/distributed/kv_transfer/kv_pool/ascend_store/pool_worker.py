@@ -36,10 +36,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     require_aligned_batch_results,
 )
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import (
-    AscendStoreCoordinator,
-    ExternalCachedBlockPool,
-)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
     KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
@@ -69,7 +66,6 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LayerMultiBlockReqMeta,
     LayerTransferTask,
     ReqMeta,
-    block_hash_to_bytes,
     block_hash_to_str,
     get_block_hashes,
     get_group_block_size,
@@ -2765,28 +2761,20 @@ class KVPoolWorker:
             return None
         if sorted(kv_cache_group_ids) != list(range(self.num_kv_cache_groups)):
             return None
+        coordinator = self.cache_coordinator
 
-        exists: set[tuple[int, bytes]] = set()
-        aligned_len = (
-            (token_len + self.cache_coordinator.lcm_block_size - 1)
-            // self.cache_coordinator.lcm_block_size
-            * self.cache_coordinator.lcm_block_size
-        )
-        lookup_masks = self.cache_coordinator.lookup_mask(aligned_len)
-
-        for group_id in kv_cache_group_ids:
-            keys: list[str] = []
-            chunk_hashes: list[BlockHash | str] = []
-            variant_counts: list[int] = []
-            group_block_size = self.token_database.get_block_size(group_id)
+        def query_group_hits(
+            group_id: int,
+            group_block_hashes: Sequence[BlockHash | str],
+            lookup_mask: Sequence[bool] | None,
+        ) -> list[BlockHash | str]:
+            group_block_size = coordinator.group_effective_block_sizes[group_id]
+            present: list[BlockHash | str] = []
             if hbm_hit_tokens:
-                grouped_hashes = get_block_hashes(block_hashes, group_block_size, self.token_database.hash_block_size)
-                exists.update(
-                    (group_id, block_hash_to_bytes(chunk_hash))
-                    for chunk_hash in grouped_hashes[: hbm_hit_tokens // group_block_size]
-                )
+                # Blocks already computed locally are present by construction;
+                # the pool only has to confirm the blocks beyond them.
+                present.extend(group_block_hashes[: hbm_hit_tokens // group_block_size])
             lookup_start = hbm_hit_tokens // group_block_size * group_block_size
-            lookup_mask = lookup_masks[group_id] if lookup_masks is not None and group_id < len(lookup_masks) else None
 
             def chunk_filter(
                 start: int,
@@ -2796,6 +2784,9 @@ class KVPoolWorker:
                 chunk_idx = start // group_block_size
                 return lookup_mask is None or (chunk_idx < len(lookup_mask) and lookup_mask[chunk_idx])
 
+            keys: list[str] = []
+            chunk_hashes: list[BlockHash | str] = []
+            variant_counts: list[int] = []
             for _, _, key_string, chunk_hash in self.token_database.process_token_key_strings(
                 token_len,
                 block_hashes,
@@ -2808,39 +2799,31 @@ class KVPoolWorker:
                 chunk_hashes.append(chunk_hash)
                 variant_counts.append(len(variants))
 
-            if not keys:
-                continue
-            res = self.m_store.exists(keys)  # type: ignore[assignment]
-            offset = 0
-            for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
-                values = res[offset : offset + count]  # type: ignore[index]
-                if values and all(value == 1 for value in values):
-                    exists.add((group_id, block_hash_to_bytes(chunk_hash)))
-                offset += count
+            if keys:
+                res = self.m_store.exists(keys)  # type: ignore[assignment]
+                offset = 0
+                for chunk_hash, count in zip(chunk_hashes, variant_counts, strict=True):
+                    values = res[offset : offset + count]  # type: ignore[index]
+                    if values and all(value == 1 for value in values):
+                        present.append(chunk_hash)
+                    offset += count
 
             logger.debug(
-                "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d/%d sample_keys=%s",
+                "KV pool coordinator lookup group=%d token_len=%d keys=%d exists_chunks=%d sample_keys=%s",
                 group_id,
                 token_len,
                 len(keys),
-                sum(1 for group, _ in exists if group == group_id),
-                len(chunk_hashes),
+                len(present),
                 keys[:3],
             )
+            return present
 
-        _, hit_length = self.cache_coordinator.find_longest_cache_hit(
+        return coordinator.find_reachable_hit_tokens(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(self.hash_block_size, exists),
-            apply_eagle=False,
+            query_group_hits,
+            log_context="KV pool coordinator lookup",
         )
-        logger.debug(
-            "KV pool coordinator lookup final token_len=%d groups=%s hit=%d",
-            token_len,
-            kv_cache_group_ids,
-            hit_length,
-        )
-        return hit_length
 
     def lookup_scheduler(
         self,
