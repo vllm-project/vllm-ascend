@@ -49,8 +49,11 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     infer_group_block_sizes,
     infer_group_cache_families,
     infer_tp_mismatch_info,
+    is_block_key_layerwise,
+    make_layerwise_block_key,
     normalize_block_ids_by_group,
     uses_hybrid_kv_cache,
+    validate_mooncake_layerwise_topology,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -169,6 +172,19 @@ class KVPoolScheduler:
 
         backend_name = str(vllm_config.kv_transfer_config.kv_connector_extra_config.get("backend", "mooncake"))
         self.backend_name = backend_name.lower()
+        self.use_block_key_layerwise = is_block_key_layerwise(self.use_layerwise, self.backend_name)
+        validate_mooncake_layerwise_topology(
+            vllm_config.parallel_config,
+            self.backend_name,
+            self.use_layerwise,
+        )
+        if self.backend_name == "mooncake" and self.use_layerwise and self.use_hybrid:
+            raise ValueError("Mooncake layerwise does not yet support hybrid or multi-group KV cache layouts")
+        if self.backend_name == "mooncake" and self.use_layerwise and self.tp_mismatch:
+            raise ValueError("Mooncake layerwise does not yet support prefill/decode TP mismatch")
+        self.layerwise_max_transfer_blocks = int(
+            vllm_config.kv_transfer_config.kv_connector_extra_config.get("layerwise_max_transfer_blocks", 0)
+        )
         # Resolve the backend's layerwise protocol (if any) once through the
         # registry; generic code never imports the protocol module by name.
         self.layerwise_protocol = get_layerwise_protocol(self.backend_name)
@@ -400,6 +416,80 @@ class KVPoolScheduler:
         )
         return hit_tokens
 
+    def _get_mooncake_layerwise_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
+        del num_computed_tokens
+        num_hash_blocks = token_len // self.hash_block_size
+        block_hashes = get_block_hashes(
+            request.block_hashes[:num_hash_blocks],
+            self._block_size,
+            self.hash_block_size,
+        )
+        if not block_hashes:
+            return 0
+        head_or_tp_ranks = self.tp_size // self.put_step
+        keys_by_block = [
+            [
+                make_layerwise_block_key(
+                    self.model_name,
+                    block_hash_to_str(block_hash),
+                    head_or_tp_rank,
+                )
+                for head_or_tp_rank in range(head_or_tp_ranks)
+            ]
+            for block_hash in block_hashes
+        ]
+        all_keys = [key for block_keys in keys_by_block for key in block_keys]
+        batch_size = (
+            self.layerwise_max_transfer_blocks * head_or_tp_ranks
+            if self.layerwise_max_transfer_blocks > 0
+            else max(1, len(all_keys))
+        )
+        batch_results: list[int] = []
+        for start in range(0, len(all_keys), batch_size):
+            key_batch = all_keys[start : start + batch_size]
+            results = self.store_scheduler.batch_is_exist(key_batch)
+            if len(results) != len(key_batch):
+                raise RuntimeError(
+                    "KV pool batch_is_exist returned unexpected number of results for "
+                    f"request {request.request_id}: expected={len(key_batch)}, actual={len(results)}"
+                )
+            batch_results.extend(int(result) for result in results)
+        if any(result not in (0, 1) for result in batch_results):
+            raise RuntimeError(
+                f"KV pool batch_is_exist failed for request {request.request_id}: states={batch_results}"
+            )
+
+        num_hit_blocks = 0
+        offset = 0
+        for block_keys in keys_by_block:
+            block_results = batch_results[offset : offset + len(block_keys)]
+            offset += len(block_keys)
+            if not all(result == 1 for result in block_results):
+                break
+            num_hit_blocks += 1
+        logger.info(
+            "Mooncake layerwise hit check request=%s hit_blocks=%d/%d",
+            request.request_id,
+            num_hit_blocks,
+            len(keys_by_block),
+        )
+        return num_hit_blocks * self._block_size
+
+    def _get_block_key_layerwise_hit_tokens(
+        self,
+        request: "Request",
+        token_len: int,
+        num_computed_tokens: int,
+    ) -> int:
+        if self.backend_name == "mooncake":
+            return self._get_mooncake_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+        raise RuntimeError(f"Unsupported block-key layerwise backend: {self.backend_name}")
+
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
@@ -479,7 +569,12 @@ class KVPoolScheduler:
         ):
             return 0, False
 
-        if self.use_layerwise_transfer:
+        if self.use_block_key_layerwise:
+            token_len = self._floor_to_cache_transfer_granularity(prompt_token_len)
+            if token_len < self.cache_transfer_granularity:
+                return 0, False
+            num_external_hit_tokens = self._get_block_key_layerwise_hit_tokens(request, token_len, num_computed_tokens)
+        elif self.use_layerwise_transfer:
             token_len = prompt_token_len
             num_external_hit_tokens = self._get_layerwise_hit_tokens(request, token_len, num_computed_tokens)
         else:

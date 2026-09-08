@@ -1692,6 +1692,16 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
         )
         worker.m_store.get.assert_not_called()
 
+    def test_mooncake_layerwise_rejects_tp_mismatch(self):
+        with self.assertRaisesRegex(ValueError, "TP mismatch"):
+            self._make_worker(
+                tp_size=2,
+                kv_role="kv_consumer",
+                extra_config={"backend": "mooncake", "prefill_tp_size": 4},
+                num_kv_heads=8,
+                use_layerwise=True,
+            )
+
     def test_register_kv_caches_initializes_tp_mismatch_strides(self):
         worker = self._make_worker(
             tp_size=2, kv_role="kv_consumer", extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8
