@@ -21,7 +21,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -34,8 +34,8 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from ..base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
-from ..registry import register_scheme
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .registry import register_scheme
 
 
 @register_scheme("W4A4_MXFP4", "linear")
@@ -135,6 +135,10 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
+        self.use_aclgraph = (
+            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not vllm_config.model_config.enforce_eager
+        )
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
 
     @staticmethod

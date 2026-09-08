@@ -19,7 +19,7 @@
 import math
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -467,7 +467,6 @@ def _run_precision_check(
     )
 
 
-@patch("vllm_ascend.quantization.utils.detect_quantization_method", new=MagicMock(return_value=None))
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V3.2-Exp"])
 @pytest.mark.parametrize("batch_spec_name", list(BATCH_SPECS.keys()))

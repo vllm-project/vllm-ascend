@@ -21,7 +21,8 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.distributed import get_ep_group
 from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -32,8 +33,8 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from ..base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
-from ..registry import register_scheme
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .registry import register_scheme
 
 
 @register_scheme("W4A8_MXFP", "linear")
@@ -103,10 +104,15 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
 
     def __init__(self, *, use_weight_packed: bool = False):
         self.use_weight_packed = use_weight_packed
+        self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
+        self.use_aclgraph = (
+            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not vllm_config.model_config.enforce_eager
+        )
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
 
     def get_weight(
@@ -263,55 +269,3 @@ class AscendW4A8MXFPDynamicFusedMoEMethod(AscendMoEScheme):
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
         g, n, k = layer.w2_weight_scale.shape
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).transpose(-3, -2)
-
-
-@register_scheme("FP8", "w4a8_moe")
-class AscendW4A8MXFPDSDynamicFusedMoEMethod(AscendW4A8MXFPDynamicFusedMoEMethod):
-    """FusedMoe method for DS original w4a8 mxfp quantization."""
-
-    model_dtype = None
-    quant_type: QuantType = QuantType.W4A8MXFP
-
-    def __init__(self, quant_config, tid2eid=None):
-        super().__init__()
-        self.tid2eid = tid2eid
-
-    def get_dynamic_quant_param(
-        self, num_experts: int, intermediate_size_per_partition: int, hidden_sizes: int, params_dtype: torch.dtype
-    ) -> dict[str, Any]:
-        param_dict = {}
-        param_dict["w13_weight_scale"] = torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_sizes // self.group_size,
-            dtype=torch.float8_e8m0fnu,
-        )
-
-        param_dict["w2_weight_scale"] = torch.empty(
-            num_experts, hidden_sizes, intermediate_size_per_partition // self.group_size, dtype=torch.float8_e8m0fnu
-        )
-        return param_dict
-
-    def process_weights_after_loading(self, layer):
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data.view(torch.uint8),
-            29,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data.view(torch.uint8),
-            29,
-            customize_dtype=torch.float8_e4m3fn,
-            input_dtype=torch_npu.float4_e2m1fn_x2,
-        )
-        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
-        g, n, k = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = (
-            layer.w13_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
-        )
-        g, n, k = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = (
-            layer.w2_weight_scale.data.reshape(g, n, k // 2, 2).view(torch.uint8).transpose(-3, -2)
-        )

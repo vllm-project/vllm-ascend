@@ -13,7 +13,7 @@ from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.configs.modelslim_config import (
+from vllm_ascend.quantization.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
     get_linear_quant_type,
@@ -141,11 +141,11 @@ class TestAscendModelSlimConfig(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer",
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
                 return_value=MagicMock(),
             ) as create_scheme,
             patch(
@@ -210,11 +210,11 @@ class TestAscendModelSlimConfig(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer",
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
                 return_value=scheme,
             ) as create_scheme,
             patch(
@@ -252,11 +252,11 @@ class TestAscendModelSlimConfig(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
+                "vllm_ascend.quantization.modelslim_config.get_current_vllm_config",
                 return_value=vllm_config,
             ),
             patch(
-                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer",
+                "vllm_ascend.quantization.modelslim_config.create_scheme_for_layer",
                 return_value=scheme,
             ) as create_scheme,
             patch(
@@ -301,9 +301,7 @@ class TestAscendModelSlimConfig(TestBase):
         linear_layer = MagicMock(spec=LinearBase)
         # Test skipped layer
         with (
-            patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
-            ),
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
         ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
@@ -313,12 +311,8 @@ class TestAscendModelSlimConfig(TestBase):
         mock_scheme = MagicMock()
         with (
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
-            patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
-            ),
-            patch(
-                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
-            ),
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendLinearMethod", return_value=MagicMock()
             ) as mock_ascend_linear,
@@ -333,12 +327,8 @@ class TestAscendModelSlimConfig(TestBase):
         mock_config.model_config.hf_config.model_type = None
         mock_scheme = MagicMock()
         with (
-            patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
-            ),
-            patch(
-                "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
-            ),
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
+            patch("vllm_ascend.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendKVCacheMethod", return_value=MagicMock()
             ) as mock_ascend_kvcache,
@@ -364,12 +354,9 @@ class TestAscendModelSlimConfig(TestBase):
         mock_vllm_config_for_kv_c8.kv_transfer_config = None
 
         with (
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_vllm_config),
             patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
-                return_value=mock_vllm_config,
-            ),
-            patch(
-                "vllm_ascend.quantization.methods.kv_cache.kv_c8.get_current_vllm_config",
+                "vllm_ascend.quantization.methods.kv_c8.get_current_vllm_config",
                 return_value=mock_vllm_config_for_kv_c8,
             ),
             patch(
@@ -379,7 +366,7 @@ class TestAscendModelSlimConfig(TestBase):
             method = c8_config.get_quant_method(attention_layer, "model.layers.0.self_attn.attn")
             self.assertIs(method, mock_kvcache.return_value)
             args, _ = mock_kvcache.call_args
-            from vllm_ascend.quantization.methods.kv_cache.kv_c8 import AscendC8KVCacheAttentionMethod
+            from vllm_ascend.quantization.methods.kv_c8 import AscendC8KVCacheAttentionMethod
 
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
 
@@ -571,7 +558,7 @@ class TestGetCacheScaleMapper(TestBase):
         config = AscendModelSlimConfig({"kv_cache_type": "C8"})
         mapper = config.get_cache_scale_mapper()
         self.assertIsNotNone(mapper)
-        # C8 mappings: k_proj -> attn
+        # C8 mappings: k_proj → attn
         self.assertEqual(
             mapper._map_name("model.layers.0.k_proj.kv_cache_scale"),
             "model.layers.0.attn.k_cache_scale",
@@ -785,7 +772,7 @@ class TestGetKvQuantDtype(TestBase):
 
 
 class TestGetKvQuantSplitFactor(TestBase):
-    @patch("vllm_ascend.quantization.configs.modelslim_config.calc_split_factor")
+    @patch("vllm_ascend.quantization.modelslim_config.calc_split_factor")
     def test_enable_fa_quant_true(self, mock_calc_split_factor):
         mock_calc_split_factor.return_value = 2.0
         config = AscendModelSlimConfig(
@@ -800,7 +787,7 @@ class TestGetKvQuantSplitFactor(TestBase):
         self.assertEqual(result, 2.0)
         mock_calc_split_factor.assert_called_once_with([64, 128])
 
-    @patch("vllm_ascend.quantization.configs.modelslim_config.calc_split_factor")
+    @patch("vllm_ascend.quantization.modelslim_config.calc_split_factor")
     def test_enable_fa_quant_false(self, mock_calc_split_factor):
         mock_calc_split_factor.return_value = 1.0
         config = AscendModelSlimConfig({})

@@ -106,10 +106,7 @@ class TestAscendModelSlimConfig310(TestBase):
         with (
             patch("vllm.config.vllm.get_current_vllm_config", return_value=mock_config),
             patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
-                return_value=mock_config,
-            ),
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
         ):
             method = self.ascend_config.get_quant_method(fused_moe_layer, ".moe")
@@ -121,10 +118,7 @@ class TestAscendModelSlimConfig310(TestBase):
             patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch("vllm.config.vllm.get_current_vllm_config", return_value=mock_config),
             patch("vllm_ascend._310p.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
-            patch(
-                "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config",
-                return_value=mock_config,
-            ),
+            patch("vllm_ascend.quantization.modelslim_config.get_current_vllm_config", return_value=mock_config),
             patch("vllm_ascend._310p.quantization.modelslim_config.create_scheme_for_layer", return_value=mock_scheme),
             patch(
                 "vllm_ascend._310p.quantization.modelslim_config.AscendFusedMoEMethod", return_value=MagicMock()

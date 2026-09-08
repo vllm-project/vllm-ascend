@@ -19,15 +19,14 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
 
 from vllm_ascend.utils import (
     COMPRESSED_TENSORS_METHOD,
     maybe_trans_nz,
 )
 
-from ..base import AscendLinearScheme
-from ..registry import register_scheme
+from .base import AscendLinearScheme
+from .registry import register_scheme
 
 
 @register_scheme("W8A8", "linear")
@@ -39,7 +38,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
     """
 
     def __init__(self) -> None:
-        self.quant_method = get_current_vllm_config().quant_config.get_name()
+        pass
 
     def get_weight(
         self,
@@ -89,7 +88,11 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
 
         quant_bias = layer.quant_bias if tp_rank == 0 else None
 
-        if self.quant_method == COMPRESSED_TENSORS_METHOD:
+        try:
+            ascend_quant_method = layer.ascend_quant_method
+        except AttributeError:
+            ascend_quant_method = ""
+        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
             quant_bias = bias
 
         output = torch_npu.npu_quant_matmul(
@@ -117,6 +120,7 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         layer.weight.data = maybe_trans_nz(layer.weight.data)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
-        if self.quant_method == COMPRESSED_TENSORS_METHOD:
+        ascend_quant_method = getattr(layer, "ascend_quant_method", "")
+        if ascend_quant_method == COMPRESSED_TENSORS_METHOD:
             deq_scale = layer.input_scale.data * layer.weight_scale.data
             layer.deq_scale = torch.nn.Parameter(deq_scale, requires_grad=False)

@@ -21,7 +21,8 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
+from vllm.distributed import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
@@ -32,8 +33,8 @@ from vllm_ascend.device.mxfp_compat import (
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 
-from ..base import AscendMoEScheme, QuantType, get_moe_num_logical_experts
-from ..registry import register_scheme
+from .base import AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .registry import register_scheme
 
 
 # Unpack the weights to FP4 and return them in float32 format
@@ -60,10 +61,15 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
     def __init__(self, *, use_weight_packed: bool = False) -> None:
         ensure_mxfp4_moe_available("W4A16_MXFP4 MoE quantization")
         self.use_weight_packed = use_weight_packed
+        self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
         self.group_size = vllm_config.quant_config.quant_description.get("group_size", 32)
         ascend_config = get_ascend_config()
+        self.use_aclgraph = (
+            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not vllm_config.model_config.enforce_eager
+        )
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
 
     def get_weight(

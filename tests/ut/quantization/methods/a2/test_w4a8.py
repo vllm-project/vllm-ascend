@@ -5,16 +5,13 @@ import torch
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import identity
-from vllm_ascend.quantization.methods.w4a8.w4a8 import (
-    AscendW4A8DynamicFusedMoEMethod,
-    AscendW4A8DynamicLinearMethod,
-)
+from vllm_ascend.quantization.methods.w4a8 import AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
     def setUp(self, mock_get_current_vllm_config, mock_get_tp_world_size):
         mock_get_tp_world_size.return_value = 1
         mock_vllm_config = Mock()
@@ -57,7 +54,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(params["scale_bias"].dtype, torch.float32)
         self.assertEqual(params["scale_bias"].shape, (32, 16))
 
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_convert_weight_to_int4pack")
     @patch("torch.Tensor.npu")
     @patch("torch_npu.npu_format_cast")
@@ -110,7 +107,7 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.method.apply(layer, x)
         mock_matmul.assert_called_once()
 
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     def test_process_weights_after_loading_asserts_new_quant_packed_dim(self, mock_maybe_trans_nz):
         self.method.new_quant_version = True
         mock_maybe_trans_nz.side_effect = identity
@@ -133,8 +130,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
 
 
 class TestAscendW4A8DynamicLinearMethodWithNpu(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_tensor_model_parallel_world_size")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_tensor_model_parallel_world_size")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
     def setUp(self, mock_get_current_vllm_config, mock_get_tp_world_size):
         mock_get_tp_world_size.return_value = 1
         mock_vllm_config = Mock()
@@ -162,9 +159,9 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
     output_size = 56
     group_size = 2
 
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_mc2_group")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_mc2_group")
     @patch("torch.distributed.get_rank", return_value=0)
     def setUp(self, mock_get_rank, mock_get_mc2_group, get_current_vllm_config, mock_get_ascend_config):
         # Mock ascend config
@@ -283,10 +280,10 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
             )
         return layer
 
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", new=lambda: None)
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: False)
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config", new=lambda: None)
+    @patch("vllm_ascend.quantization.methods.w4a8.use_cann_megamoe", new=lambda _: False)
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
     @patch("torch.Tensor.npu", new=lambda self: self)
@@ -355,10 +352,10 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(result["w13_weight_scale"].dtype, torch.bfloat16)
         self.assertEqual(result["w2_weight_scale"].dtype, torch.bfloat16)
 
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_current_vllm_config", new=lambda: None)
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.use_cann_megamoe", new=lambda _: False)
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.get_ascend_config")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.maybe_trans_nz")
+    @patch("vllm_ascend.quantization.methods.w4a8.get_current_vllm_config", new=lambda: None)
+    @patch("vllm_ascend.quantization.methods.w4a8.use_cann_megamoe", new=lambda _: False)
+    @patch("vllm_ascend.quantization.methods.w4a8.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a8.maybe_trans_nz")
     @patch("torch_npu.npu_format_cast")
     @patch("torch_npu.npu_quantize")
     @patch("torch.Tensor.npu", new=lambda self: self)
@@ -385,9 +382,9 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(per_channel_layer.w13_weight_scale.data.shape, (self.experts, 2 * self.input_size))
         self.assertEqual(per_channel_layer.w2_weight_scale.data.shape, (self.experts, 1, self.output_size))
 
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8._EXTRA_CTX")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.select_experts")
-    @patch("vllm_ascend.quantization.methods.w4a8.w4a8.build_fused_experts_input")
+    @patch("vllm_ascend.quantization.methods.w4a8._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w4a8.select_experts")
+    @patch("vllm_ascend.quantization.methods.w4a8.build_fused_experts_input")
     def test_apply_comprehensive(self, mock_build_input, mock_select, mock_ctx):
         tokens = 4
         num_experts = self.experts

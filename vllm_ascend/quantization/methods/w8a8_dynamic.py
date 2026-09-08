@@ -20,7 +20,7 @@ from typing import Any
 
 import torch
 import torch_npu
-from vllm.config import get_current_vllm_config
+from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -30,8 +30,8 @@ from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_expe
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, enable_dsa_cp, maybe_trans_nz
 
-from ..base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
-from ..registry import register_scheme
+from .base import AscendLinearScheme, AscendMoEScheme, QuantType, get_moe_num_logical_experts
+from .registry import register_scheme
 
 
 def scale_from_float_to_int64(scale):
@@ -161,6 +161,10 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
     def __init__(self):
         vllm_config = get_current_vllm_config()
         ascend_config = get_ascend_config()
+        self.use_aclgraph = (
+            vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+            and not vllm_config.model_config.enforce_eager
+        )
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
         self.in_dtype = vllm_config.model_config.dtype
         self.supports_eplb = True
