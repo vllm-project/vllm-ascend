@@ -332,15 +332,21 @@ class TestAscendAttentionBackendImpl(TestBase):
         self.config_patcher = patch(
             "vllm_ascend.attention.attention_v1.get_current_vllm_config", return_value=self.mock_vllm_config
         )
+        self.ascend_config_patcher = patch(
+            "vllm_ascend.attention.attention_v1.get_ascend_config",
+            return_value=SimpleNamespace(enable_prefill_bnsd=False),
+        )
         self.utils_config_patcher = patch(
             "vllm_ascend.attention.utils.get_current_vllm_config", return_value=self.mock_vllm_config
         )
         self.config_patcher.start()
+        self.ascend_config_patcher.start()
         self.utils_config_patcher.start()
         needs_layer_aware_fia_graph_replay.cache_clear()
         self.addCleanup(needs_layer_aware_fia_graph_replay.cache_clear)
         self.addCleanup(self.utils_config_patcher.stop)
         self.addCleanup(self.config_patcher.stop)
+        self.addCleanup(self.ascend_config_patcher.stop)
 
         self.impl = AscendAttentionBackendImpl(
             num_heads=8,
@@ -633,6 +639,78 @@ class TestAscendAttentionBackendImpl(TestBase):
 
         mock_npu_fused_infer_attention_score.assert_called_once()
         assert output.shape == (10, 8, 64)
+
+    @patch("vllm_ascend.attention.attention_v1.BNSD_PREFILL_MIN_QUERY_TOKENS", 8)
+    @patch("vllm_ascend.attention.attention_v1.get_current_hardware_profile")
+    @patch("vllm_ascend.attention.attention_v1.DeviceOperator.npu_fused_infer_attention_score")
+    def test_bnsd_prefill_keeps_decode_in_tnd(
+        self,
+        mock_fia,
+        mock_hardware_profile,
+    ):
+        impl = self.impl
+        impl.enable_prefill_bnsd = True
+        impl.pcp_enabled = False
+        impl.attn_type = attn_module.AttentionType.DECODER
+        impl.num_heads = 12
+        impl.num_kv_heads = 2
+        impl.head_size = 256
+        impl.key_cache = torch.empty(4, 128, 2, 256, dtype=torch.bfloat16)
+        impl.value_cache = torch.empty_like(impl.key_cache)
+
+        query = torch.randn(20, 12, 256, dtype=torch.bfloat16)
+        key = impl.key_cache.view(4, 128, -1)
+        value = impl.value_cache.view(4, 128, -1)
+        output = torch.empty_like(query)
+        metadata = AscendMetadata(
+            attn_mask=torch.zeros(8, 8, dtype=torch.bool),
+            attn_state=AscendAttentionState.ChunkedPrefill,
+            num_actual_tokens=20,
+            num_decode_tokens=12,
+            num_prefills=1,
+            num_decodes=3,
+            block_tables=torch.zeros(4, 2, dtype=torch.int32),
+            seq_lens_list=[100, 101, 102, 110],
+            actual_seq_lengths_q=[4, 8, 12, 20],
+        )
+        mock_hardware_profile.return_value = get_hardware_profile(AscendDeviceType.A2)
+
+        def fake_fia(**kwargs):
+            fill_value = 2 if kwargs["input_layout"] == "BNSD" else 1
+            return torch.full_like(kwargs["query"], fill_value), None
+
+        mock_fia.side_effect = fake_fia
+
+        use_bnsd = impl._can_use_bnsd_prefill(query, key, value, 128, metadata.block_tables, metadata)
+        result = impl._forward_fia_chunked_prefill_split(
+            query,
+            key,
+            value,
+            key,
+            value,
+            128,
+            metadata.block_tables,
+            metadata,
+            output,
+            use_bnsd_prefill=use_bnsd,
+        )
+
+        self.assertTrue(use_bnsd)
+        self.assertEqual(mock_fia.call_count, 2)
+        decode_call, prefill_call = mock_fia.call_args_list
+        self.assertEqual(decode_call.kwargs["input_layout"], "TND")
+        self.assertEqual(tuple(decode_call.kwargs["query"].shape), (12, 12, 256))
+        self.assertEqual(prefill_call.kwargs["input_layout"], "BNSD")
+        self.assertEqual(tuple(prefill_call.kwargs["query"].shape), (1, 12, 8, 256))
+        self.assertEqual(prefill_call.kwargs["actual_seq_lengths"], [8])
+        self.assertEqual(prefill_call.kwargs["pre_tokens"], 2147483647)
+        self.assertEqual(prefill_call.kwargs["next_tokens"], 0)
+        self.assertEqual(prefill_call.kwargs["inner_precise"], 0)
+        self.assertTrue(torch.all(result[:12] == 1))
+        self.assertTrue(torch.all(result[12:20] == 2))
+
+        metadata.num_prefills = 2
+        self.assertFalse(impl._can_use_bnsd_prefill(query, key, value, 128, metadata.block_tables, metadata))
 
     @patch("vllm_ascend.attention.attention_v1._EXTRA_CTX")
     @patch("vllm_ascend.attention.attention_v1.DeviceOperator.reshape_and_cache")
