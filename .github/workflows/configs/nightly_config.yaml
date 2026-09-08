@@ -265,6 +265,15 @@ a3:
       - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
+      - name: acceptace_rate_deepseekv4-flash-w8a8-mtp
+        os: linux-aarch64-nightly-a3-8
+        config_file_path: acceptace_rate_deepseekv4-flash-w8a8-mtp.yaml
+      - name: kimi-k2.6_max_model_len
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: kimi-k2.6_max_model_len.yaml
+      - name: kimi25_w4a8_step_3_7
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: kimi25_w4a8_step_3_7.yaml
   multi_card:
     test_config:
       # pytest-driven tests
