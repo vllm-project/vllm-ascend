@@ -59,6 +59,8 @@ The operator supports:
 
 Individual `-inf` vocabulary entries are valid and contribute zero probability mass.
 
+When the surrounding rejection path uses synthetic acceptance rates (`synthetic_conditional_rates` is not `None`), only the per-step acceptance decision changes — it is drawn from the provided rates instead of the draft/target logits ratio. The residual resampling performed by this operator is unchanged. Synthetic acceptance rates and block verification are mutually exclusive (enforced by the `rejection_sample` host).
+
 ### Two-stage categorical flow
 
 With `_RESAMPLE_BLOCK_SIZE = 1024`:
