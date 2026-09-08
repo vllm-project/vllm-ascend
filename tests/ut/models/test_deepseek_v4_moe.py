@@ -206,9 +206,7 @@ def test_deepseek_v4_hash_vision_layer_exposes_bias_vl(monkeypatch):
     
 
 def test_deepseek_v4_load_weights_skips_hash_layer_gate_bias(monkeypatch):
-    model = deepseek_v4_module.AscendDeepseekV4ForCausalLM.__new__(
-        deepseek_v4_module.AscendDeepseekV4ForCausalLM
-    )
+    model = deepseek_v4_module.AscendDeepseekV4ForCausalLM.__new__(deepseek_v4_module.AscendDeepseekV4ForCausalLM)
     nn.Module.__init__(model)
     model.config = SimpleNamespace(
         n_routed_experts=4,
@@ -245,12 +243,8 @@ def test_deepseek_v4_load_weights_skips_hash_layer_gate_bias(monkeypatch):
         lambda *args, **kwargs: [],
     )
     monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_rank", lambda: 0)
-    monkeypatch.setattr(
-        deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1
-    )
-    monkeypatch.setattr(
-        deepseek_v4_module, "is_pp_missing_parameter", lambda name, model: False
-    )
+    monkeypatch.setattr(deepseek_v4_module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(deepseek_v4_module, "is_pp_missing_parameter", lambda name, model: False)
 
     # Hash layers route text tokens through tid2eid, so the checkpoint's
     # text correction bias has no destination parameter there. Both the
