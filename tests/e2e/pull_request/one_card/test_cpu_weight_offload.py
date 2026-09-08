@@ -11,43 +11,29 @@ Tests verify that offloading produces the same outputs
 as the baseline (no offloading).
 """
 
-import pytest
-
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request import utils as e2e_utils
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
 MODEL = "Qwen/Qwen3-0.6B"
-# 4 short prompts x 3 tokens. Unpinned capture / default max_num_batched_tokens
-# make torch.compile and ACL graphs dominate runtime.
+# Default Ascend weight_nz_mode. ND (mode 0) is omitted to keep this file
+# near 10 minutes; each Qwen3-0.6B engine is ~1.5-2 min of cold start.
 _BASE_KWARGS = {
     "model_name": MODEL,
     "max_model_len": 512,
     "max_num_seqs": 8,
     "max_num_batched_tokens": 256,
+    "additional_config": {"weight_nz_mode": 1},
 }
 _CUDAGRAPH_CAPTURE_SIZES = [1, 2, 4, 8]
-_PREFETCH_KWARGS = {
-    "offload_backend": "prefetch",
-    "offload_group_size": 4,
-    "offload_num_in_group": 1,
-}
 
 
-def _generate(runner_kwargs: dict):
-    with VllmRunner(**runner_kwargs) as runner:
+def _generate(**runner_kwargs):
+    with VllmRunner(**{**_BASE_KWARGS, **runner_kwargs}) as runner:
         return runner.model.generate(
             prompts=PROMPTS_SHORT,
             sampling_params=e2e_utils._LOGPROB_SAMPLING_PARAMS,
         )
-
-
-def _eager_baseline_kwargs(nz_mode: int) -> dict:
-    return {
-        **_BASE_KWARGS,
-        "enforce_eager": True,
-        "additional_config": {"weight_nz_mode": nz_mode},
-    }
 
 
 def _assert_offload_logprobs(baseline_outputs, offload_outputs, atol: float = 0.0689) -> None:
@@ -69,60 +55,33 @@ def _assert_offload_logprobs(baseline_outputs, offload_outputs, atol: float = 0.
             e2e_utils._check_decode_token(base_seq, offload_seq, token_idx, prompt_idx, decode_atol)
 
 
-@pytest.fixture(scope="module")
-def nd_baseline_outputs():
-    """Eager, no offload, weight_nz_mode=0. Shared by ND eager and graph cases."""
-    return _generate(_eager_baseline_kwargs(0))
-
-
-@pytest.fixture(scope="module")
-def nz_baseline_outputs():
-    """Eager, no offload, weight_nz_mode=1 (Ascend default). Shared by NZ and selective."""
-    return _generate(_eager_baseline_kwargs(1))
-
-
-def _prefetch_runner_kwargs(nz_mode: int, enforce_eager: bool) -> dict:
-    kwargs = {
-        **_BASE_KWARGS,
-        **_PREFETCH_KWARGS,
-        "additional_config": {"weight_nz_mode": nz_mode},
-    }
-    if enforce_eager:
-        kwargs["enforce_eager"] = True
-    else:
-        kwargs["cudagraph_capture_sizes"] = _CUDAGRAPH_CAPTURE_SIZES
-    return kwargs
-
-
-@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
 @wait_until_npu_memory_free()
-def test_prefetch_offload_accuracy_nd(nd_baseline_outputs, enforce_eager):
-    """Prefetch offload vs shared ND eager baseline (eager and graph)."""
-    offload_outputs = _generate(_prefetch_runner_kwargs(nz_mode=0, enforce_eager=enforce_eager))
-    _assert_offload_logprobs(nd_baseline_outputs, offload_outputs)
+def test_prefetch_offload_accuracy() -> None:
+    """Eager / graph / selective-MLP prefetch vs one NZ no-offload baseline."""
+    baseline_outputs = _generate(enforce_eager=True)
 
-
-@pytest.mark.parametrize("enforce_eager", [True, False], ids=["eager", "graph"])
-@wait_until_npu_memory_free()
-def test_prefetch_offload_accuracy_nz(nz_baseline_outputs, enforce_eager):
-    """Prefetch offload vs shared NZ eager baseline (eager and graph)."""
-    offload_outputs = _generate(_prefetch_runner_kwargs(nz_mode=1, enforce_eager=enforce_eager))
-    _assert_offload_logprobs(nz_baseline_outputs, offload_outputs)
-
-
-@wait_until_npu_memory_free()
-def test_prefetch_offload_selective_params(nz_baseline_outputs):
-    """Offload MLP weights only; compare against the shared NZ no-offload baseline."""
-    offload_outputs = _generate(
-        {
-            **_BASE_KWARGS,
-            "enforce_eager": True,
-            "additional_config": {"weight_nz_mode": 1},
-            "offload_backend": "prefetch",
-            "offload_group_size": 8,
-            "offload_num_in_group": 2,
-            "offload_prefetch_step": 1,
-            "offload_params": {"gate_up_proj", "down_proj"},
-        }
+    eager_outputs = _generate(
+        enforce_eager=True,
+        offload_backend="prefetch",
+        offload_group_size=4,
+        offload_num_in_group=1,
     )
-    _assert_offload_logprobs(nz_baseline_outputs, offload_outputs)
+    _assert_offload_logprobs(baseline_outputs, eager_outputs)
+
+    graph_outputs = _generate(
+        offload_backend="prefetch",
+        offload_group_size=4,
+        offload_num_in_group=1,
+        cudagraph_capture_sizes=_CUDAGRAPH_CAPTURE_SIZES,
+    )
+    _assert_offload_logprobs(baseline_outputs, graph_outputs)
+
+    selective_outputs = _generate(
+        enforce_eager=True,
+        offload_backend="prefetch",
+        offload_group_size=8,
+        offload_num_in_group=2,
+        offload_prefetch_step=1,
+        offload_params={"gate_up_proj", "down_proj"},
+    )
+    _assert_offload_logprobs(baseline_outputs, selective_outputs)
