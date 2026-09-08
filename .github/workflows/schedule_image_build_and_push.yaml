@@ -69,30 +69,30 @@ on:
         options:
           - release
           - daily
-      memcache:
-        description: 'Memcache version and date (JSON array: ["version", "date"])'
+      mem_deps:
+        description: 'Memcache and Memfabric versions (JSON object: {"memcache":["date","version"],"memfabric":["date","version"]})'
         required: false
-        default: '["1.2.0", "20260725.3"]'
-        type: string
-      memfabric:
-        description: 'Memfabric version and date (JSON array: ["version", "date"])'
-        required: false
-        default: '["1.2.0", "20260725.3"]'
+        default: '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}'
         type: string
       torch_npu:
-        description: 'Torch NPU version and date (JSON array: ["version", "date"])'
+        description: 'Torch NPU version and date (JSON array: ["date", "version"])'
         required: false
-        default: '["26.1.0", "20260715.4"]'
+        default: '["20260725.3", "26.1.0"]'
         type: string
       cann:
         description: 'CANN Quay URL and version (JSON array: ["url", "version"])'
         required: false
-        default: '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "2026.08.03"]'
+        default: '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "9.1.0_20260731131545"]'
         type: string
       triton_ascend:
         description: 'Triton Ascend version and package version (JSON array: ["version", "package_version"])'
         required: false
         default: '["", "3.2.2"]'
+        type: string
+      chips:
+        description: 'Chips to build (JSON array: ["a2","a3","310p","a5"]). Default builds all.'
+        required: false
+        default: '["a2","a3","310p","a5"]'
         type: string
 
 permissions:
@@ -100,39 +100,38 @@ permissions:
   contents: read
 
 jobs:
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      build_meta: ${{ steps.filter.outputs.build_meta }}
+    steps:
+      - name: Filter build matrix by chips
+        id: filter
+        run: |
+          CHIPS='${{ inputs.chips || '["a2","a3","310p","a5"]' }}'
+          ALL_MATRIX=$(jq -nc '[
+            {name: "A2 Ubuntu",      dockerfile: "Dockerfile",              suffix: "",               chip: "a2"},
+            {name: "A3 Ubuntu",      dockerfile: "Dockerfile.a3",            suffix: "a3",             chip: "a3"},
+            {name: "310P Ubuntu",    dockerfile: "Dockerfile.310p",          suffix: "310p",           chip: "310p"},
+            {name: "A5 Ubuntu",      dockerfile: "Dockerfile.a5",            suffix: "a5",             chip: "a5"},
+            {name: "A2 openeuler",   dockerfile: "Dockerfile.openEuler",     suffix: "openeuler",      chip: "a2"},
+            {name: "A3 openEuler",   dockerfile: "Dockerfile.a3.openEuler",  suffix: "a3-openeuler",   chip: "a3"},
+            {name: "310P openEuler", dockerfile: "Dockerfile.310p.openEuler",suffix: "310p-openeuler",  chip: "310p"},
+            {name: "A5 openEuler",   dockerfile: "Dockerfile.a5.openEuler",  suffix: "a5-openeuler",   chip: "a5"}
+          ]')
+          FILTERED=$(echo "$ALL_MATRIX" | jq -c --argjson chips "$CHIPS" '[.[] | select(.chip as $c | $chips | index($c))]')
+          echo "build_meta=$FILTERED" >> $GITHUB_OUTPUT
+
   image_build:
     name: ${{ matrix.build_meta.name }}
+    needs: setup-matrix
     if: ${{ !((github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'image-build')))
         && !(github.event_name == 'workflow_dispatch' && inputs.vllm_commit != '' && inputs.vllm_ascend_commit != '') }}
     strategy:
       fail-fast: false
       max-parallel: 4
       matrix:
-        build_meta:
-          - name: A2 Ubuntu
-            dockerfile: Dockerfile
-            suffix: ''        
-          - name: A3 Ubuntu
-            dockerfile: Dockerfile.a3
-            suffix: 'a3'
-          - name: 310P Ubuntu
-            dockerfile: Dockerfile.310p
-            suffix: '310p'
-          - name: A5 Ubuntu
-            dockerfile: Dockerfile.a5
-            suffix: 'a5'
-          - name: A2 openeuler
-            dockerfile: Dockerfile.openEuler
-            suffix: 'openeuler'
-          - name: A3 openEuler
-            dockerfile: Dockerfile.a3.openEuler
-            suffix: 'a3-openeuler'        
-          - name: 310P openEuler
-            dockerfile: Dockerfile.310p.openEuler
-            suffix: '310p-openeuler'
-          - name: A5 openEuler
-            dockerfile: Dockerfile.a5.openEuler
-            suffix: 'a5-openeuler'
+        build_meta: ${{ fromJSON(needs.setup-matrix.outputs.build_meta) }}
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
@@ -150,19 +149,18 @@ jobs:
       branch_ref: ${{ inputs.branch != 'none' && inputs.branch || '' }}
       schedule_tag_pattern: 'main'
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1] }}
+      cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "9.1.0_20260731131545"]')[1] }}
       
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
-        ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
-        MEMCACHE_VERSION=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[0] }}
-        MEMCACHE_DATE=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[1] }}
-        MEMFABRIC_VERSION=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[0] }}
-        MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
-        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
-        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
-        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[0]) || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1]) || '' }}
+        MEMCACHE_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[1] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[0] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[1] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[0] }}
+        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[1] }}
+        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[0] }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "9.1.0_20260731131545"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "9.1.0_20260731131545"]')[1]) || '' }}
         TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
         TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
       
@@ -174,6 +172,7 @@ jobs:
 
   image_build_by_commit:
     name: ${{ matrix.build_meta.name }} (commit mode)
+    needs: setup-matrix
     if: ${{ github.event_name == 'workflow_dispatch'
         && inputs.vllm_commit != ''
         && inputs.vllm_ascend_commit != ''
@@ -183,31 +182,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        build_meta:
-          - name: A2 Ubuntu
-            dockerfile: Dockerfile
-            suffix: ''        
-          - name: A3 Ubuntu
-            dockerfile: Dockerfile.a3
-            suffix: 'a3'
-          - name: 310P Ubuntu
-            dockerfile: Dockerfile.310p
-            suffix: '310p'
-          - name: A5 Ubuntu
-            dockerfile: Dockerfile.a5
-            suffix: 'a5'
-          - name: A2 openeuler
-            dockerfile: Dockerfile.openEuler
-            suffix: 'openeuler'
-          - name: A3 openEuler
-            dockerfile: Dockerfile.a3.openEuler
-            suffix: 'a3-openeuler'        
-          - name: 310P openEuler
-            dockerfile: Dockerfile.310p.openEuler
-            suffix: '310p-openeuler'
-          - name: A5 openEuler
-            dockerfile: Dockerfile.a5.openEuler
-            suffix: 'a5-openeuler'
+        build_meta: ${{ fromJSON(needs.setup-matrix.outputs.build_meta) }}
     uses: ./.github/workflows/_schedule_image_build.yaml
     with:
       dockerfile: ${{ matrix.build_meta.dockerfile }}
@@ -221,19 +196,18 @@ jobs:
       workflow_dispatch_tag: ''
       branch_ref: ''
       build_type: ${{ inputs.build_type || 'release' }}
-      cann_version: ${{ fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1] }}
+      cann_version: ${{ fromJSON(inputs.cann || '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "9.1.0_20260731131545"]')[1] }}
 
       build_args: |
         BUILD_TYPE=${{ inputs.build_type || 'release' }}
-        ${{ inputs.build_type == 'daily' && format('BASE_OS={0}', contains(matrix.build_meta.suffix, 'openeuler') && 'openeuler24.03-lts-sp4' || 'ubuntu24.04') || '' }}
-        MEMCACHE_VERSION=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[0] }}
-        MEMCACHE_DATE=${{ fromJSON(inputs.memcache || '["1.2.0", "20260725.3"]')[1] }}
-        MEMFABRIC_VERSION=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[0] }}
-        MEMFABRIC_DATE=${{ fromJSON(inputs.memfabric || '["1.2.0", "20260725.3"]')[1] }}
-        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[0] }}
-        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["26.1.0", "20260715.4"]')[1] }}
-        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[0]) || '' }}
-        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["quay.io/atlas_inference/cann", "2026.08.03"]')[1]) || '' }}
+        MEMCACHE_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[1] }}
+        MEMCACHE_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memcache[0] }}
+        MEMFABRIC_VERSION=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[1] }}
+        MEMFABRIC_DATE=${{ fromJSON(inputs.mem_deps || '{"memcache":["20260811.14","1.2.0"],"memfabric":["20260811.7","1.2.0"]}').memfabric[0] }}
+        TORCH_NPU_VERSION=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[1] }}
+        TORCH_NPU_DATE=${{ fromJSON(inputs.torch_npu || '["20260725.3", "26.1.0"]')[0] }}
+        ${{ inputs.build_type == 'daily' && format('CANN_QUAY_URL={0}', fromJSON(inputs.cann || '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "9.1.0_20260731131545"]')[0]) || '' }}
+        ${{ inputs.build_type == 'daily' && format('CANN_VERSION={0}', fromJSON(inputs.cann || '["swr.cn-north-4.myhuaweicloud.com/inference/cann", "9.1.0_20260731131545"]')[1]) || '' }}
         TRITON_ASCEND_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[0] }}
         TRITON_ASCEND_PACKAGE_VERSION=${{ fromJSON(inputs.triton_ascend || '["", "3.2.2"]')[1] }}
 

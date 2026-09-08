@@ -1,0 +1,181 @@
+test_name: "MiniMax-M2.5-w8a8-QuaRot—step"
+model: "Eco-Tech/MiniMax-M2.5-w8a8-QuaRot"
+num_nodes: 2
+npu_per_node: 16
+env_common: &env_common
+    HCCL_BUFFSIZE: "1200"
+    HCCL_OP_EXPANSION_MODE: "AIV"
+    PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+    TASK_QUEUE_ENABLE: "1"
+    VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+    VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
+    ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+    SERVER_PORT: "${PORT}"
+
+# TODO: need to identify why TP and mtp+1 divisibility rules break on dual-node case
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 13321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 2
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 13321
+    dp_size: 16
+    dp_size_local: 16
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_common
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --max-model-len
+      - "8192"
+      - --max-num-batched-tokens
+      - "16384"
+      - --max-num-seqs
+      - "104"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.7"
+      - --quantization
+      - "ascend"
+      - --enforce-eager
+      - --no-enable-prefix_caching
+      - --speculative_config
+      - '{"method":"eagle3", "model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens":3}'
+      - --additional-config
+      - '{"recompute_scheduler_enable":true}'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1",
+        "kv_role":"kv_producer",
+        "kv_port":"30000",
+        "engine_id":"0",
+        "kv_connector_extra_config":{
+             "use_ascend_direct":true,
+             "prefill":{
+                    "dp_size":8,
+                    "tp_size":2
+             },
+             "decode":{
+                    "dp_size":16,
+                    "tp_size":1
+             }
+        }
+        }'
+  - node_index: 1
+    envs:
+      <<: *env_common
+      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+      HCCL_BUFFSIZE: "1024"
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --max-model-len
+      - "8192"
+      - --max-num-batched-tokens
+      - "256"
+      - --max-num-seqs
+      - "52"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.8"
+      - --quantization
+      - "ascend"
+      - --speculative_config
+      - '{"method":"eagle3", "model":"vllm-ascend/MiniMax-M2.5-eagle-model-0318", "num_speculative_tokens":3}'
+      - --async-scheduling
+      - --compilation-config
+      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --additional-config
+      - '{
+        "recompute_scheduler_enable":true,
+        "multistream_overlap_shared_expert":true
+      }'
+      - --kv-transfer-config
+      - '{"kv_connector":"MooncakeConnectorV1",
+        "kv_role":"kv_consumer",
+        "kv_port":"30100",
+        "engine_id":"1",
+        "kv_connector_extra_config":{
+             "use_ascend_direct":true,
+             "prefill":{
+                    "dp_size":8,
+                    "tp_size":2
+             },
+             "decode":{
+                    "dp_size":16,
+                    "tp_size":1
+             }
+        }
+        }'
+
+test_content:
+  - chat_completion
+chat_prompts:
+  - seed: "x "
+    target_tokens: 3496
+api_keyword_args:
+  max_tokens: 1500
+  temperature: 0.0
+expected_response:
+  prompt_tokens: 3496
+  completion_tokens: 1500
+
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in3500-bs400
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 128
+    max_out_len: 1024
+    batch_size: 32
+    request_rate: 0
+    baseline: 1
+    threshold: 0.97
+

@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from vllm_ascend.attention.context_parallel.dsa_cp import AscendDSACPImpl
-from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.models.deepseek_v4.compressor import Compressor
 
 
@@ -48,10 +47,14 @@ def test_compressor_metadata_uses_physical_storage_geometry(
         captured["args"] = args
         return expected
 
+    plan = SimpleNamespace(get_dsa_compressor_slot_mapping_format=lambda: 2)
     monkeypatch.setattr(
-        DeviceOperator,
-        "get_dsa_compressor_slot_mapping_format",
-        staticmethod(lambda: 2),
+        "vllm_ascend.attention.dsa_attn_kv_plan.get_dsa_attn_kv_plan",
+        lambda vllm_config: plan,
+    )
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_cp.get_dsa_attn_kv_plan",
+        lambda vllm_config: plan,
     )
     monkeypatch.setattr(
         torch.ops._C_ascend,
@@ -61,6 +64,7 @@ def test_compressor_metadata_uses_physical_storage_geometry(
     )
     owner = owner_cls.__new__(owner_cls)
     owner.compress_ratio = compress_ratio
+    owner.vllm_config = SimpleNamespace()
 
     result = getattr(owner, method_name)(metadata)
 

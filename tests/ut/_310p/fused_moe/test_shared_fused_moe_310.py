@@ -229,7 +229,10 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
-    ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
+    ascend_shared_experts = SimpleNamespace(
+        prepare_input_before_routed_experts=MagicMock(return_value=(hidden_states, None)),
+        forward=MagicMock(return_value=shared_out),
+    )
     routed_events = FusedMoEEvents(
         before_routed_experts=None,
         after_routed_experts=None,

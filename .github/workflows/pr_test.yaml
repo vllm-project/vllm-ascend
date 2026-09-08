@@ -47,7 +47,6 @@ jobs:
       image: quay.io/ascend-ci/vllm-ascend:lint
     outputs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
-      release_tag: ${{ steps.vllm.outputs.release_tag }}
     steps:
       - name: Validate PR title prefix
         run: |
@@ -85,19 +84,11 @@ jobs:
         id: vllm
         run: |
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
             echo "::error file=.github/vllm-main-verified.commit::invalid vLLM main commit: ${main_commit}"
             exit 1
           }
-          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
-            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
-            exit 1
-          }
-          {
-            echo "main_commit=${main_commit}"
-            echo "release_tag=${release_tag}"
-          } >> "$GITHUB_OUTPUT"
+          echo "main_commit=${main_commit}" >> "$GITHUB_OUTPUT"
 
       - name: cp problem matchers
         run: |
@@ -193,8 +184,9 @@ jobs:
     needs: pre-commit
     # Skip the coverage-based recommendation path when the PR opts into the
     # full suite via the ready-all label; select-tests will produce the test
-    # groups in that case.
-    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
+    # groups in that case. The pre-commit check is explicit so the job can
+    # never be made to run after a failed pre-commit by adding !cancelled().
+    if: ${{ needs.pre-commit.result == 'success' && !contains(github.event.pull_request.labels.*.name, 'ready-all') }}
     runs-on: linux-amd64-cpu-8-hk
     outputs:
       coverage_paths: ${{ steps.export-paths.outputs.coverage_paths }}
@@ -290,15 +282,18 @@ jobs:
 
   select-tests:
     needs:
+      - pre-commit
       - recommend-tests-from-coverage
     # select-tests is the single producer of test_groups / base_sha / has_tests.
     # !cancelled() is required so this job still runs when recommend-tests-from-coverage
-    # is skipped under ready-all, but not when the workflow itself is cancelled. Modes:
+    # is skipped under ready-all, but not when the workflow itself is cancelled.
+    # The explicit pre-commit success check stops it from running when pre-commit
+    # failed (!cancelled() alone would override the transitive skip). Modes:
     #   recommended - recommend job succeeded with coverage paths
     #   all         - ready-all forced (full selected suite)
     #   none        - recommend job succeeded but produced no paths (no tests)
     # Recommend job failure does not fall back to all; this job fails instead.
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.pre-commit.result == 'success' }}
     runs-on: linux-amd64-cpu-8-hk
     container:
       image: quay.io/ascend-ci/vllm-ascend:lint
@@ -425,16 +420,13 @@ jobs:
           python3 .github/workflows/scripts/select_tests.py \
             --test-list-file "$LIST_FILE"
 
-      - name: Select tests based on changed files
+      - name: Select all tests
         id: scope-all
         if: steps.decide.outputs.mode == 'all' && steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           pip install regex
-          python3 .github/workflows/scripts/select_tests.py \
-            --diff-base ${{ steps.source-snapshot.outputs.base_sha }} \
-            --filtered-changed-files-json '${{ steps.filter.outputs.src_files }}' \
-            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+          python3 .github/workflows/scripts/select_tests.py --all-tests
 
       - name: Set no-tests output when no tests selected
         id: noop
@@ -454,13 +446,10 @@ jobs:
         if: steps.filter.outputs.src == 'true'
         run: |
           git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
-          git fetch origin ${{ github.base_ref }}
           pip install regex
           python3 .github/workflows/scripts/select_tests.py \
-            --diff-base origin/${{ github.base_ref }} \
-            --modules a5 \
-            --runner-label-override linux-aarch64-a5-4 \
-            --pr-labels "${{ join(github.event.pull_request.labels.*.name, ',') }}"
+            --curated a5 \
+            --runner-label-override linux-aarch64-a5-4
 
       - name: Set no-tests output for A5 when source paths unchanged
         id: noop-a5
@@ -532,7 +521,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -560,7 +548,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests_upstream.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -585,7 +572,6 @@ jobs:
       matrix:
         vllm_version:
           - ${{ needs.pre-commit.outputs.main_commit }}
-          - ${{ needs.pre-commit.outputs.release_tag }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -605,6 +591,8 @@ jobs:
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
+          SELECTION_SOURCE: ${{ needs.select-tests.outputs.source }}
+          MATCHED_MODULES: ${{ needs.select-tests.outputs.matched_modules }}
         run: |
           set -euo pipefail
 
@@ -615,17 +603,23 @@ jobs:
 
           echo "=== CI Gate Summary ==="
           echo "pre-commit: ${PRE_COMMIT_RESULT}"
-          echo "select-tests: ${SELECT_TESTS_RESULT}"
+          echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
+          echo "labels: ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
+          if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
+            echo "matched_modules: ${MATCHED_MODULES}"
+          fi
 
           if [ "${PRE_COMMIT_RESULT}" != "success" ]; then
-            echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})"
+            echo "::error::pre-commit did not succeed (result: ${PRE_COMMIT_RESULT})."
+            echo "::error::This job runs lint / markdownlint / mypy / gitleaks on all files. Open the failed 'pre-commit' job above, fix the reported issues in your PR, and push again. No test label is needed for this failure."
             exit 1
           fi
 
           if [ "${SELECT_TESTS_RESULT}" != "success" ]; then
-            echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})"
+            echo "::error::select-tests did not succeed (result: ${SELECT_TESTS_RESULT})."
+            echo "::error::Open the failed 'select-tests' job above to see which step failed (checkout/rebase, coverage config validation, or test selection). Fix the reported issue and push again."
             exit 1
           fi
 
@@ -645,11 +639,20 @@ jobs:
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
             if [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
-              echo "::error::Selected tests are required; add the ready-precise or ready-all label"
+              echo "::error::This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge."
+              if [ -n "${MATCHED_MODULES// /}" ]; then
+                echo "::error::Affected modules: ${MATCHED_MODULES}"
+              fi
+              echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), or 'ready-all' to run the full suite. The workflow reruns automatically once the label is added."
               exit 1
             fi
             if [ "${TESTS_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})"
+              echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})."
+              if [ "${HAS_READY_ALL_LABEL}" = "true" ]; then
+                echo "::error::The 'ready-all' suite failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
+              else
+                echo "::error::The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above. If you believe the failures are unrelated to your change, you may ask a maintainer to switch to 'ready-all' for a broader comparison."
+              fi
               exit 1
             fi
           fi
@@ -660,7 +663,8 @@ jobs:
             if [ "${TESTS_A5_RESULT}" = "skipped" ] && [ "${HAS_READY_A5_LABEL}" != "true" ]; then
               echo "::notice::run-selected-tests-a5 was skipped because ready-a5 is not set"
             elif [ "${TESTS_A5_RESULT}" != "success" ]; then
-              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})"
+              echo "::error::run-selected-tests-a5 did not succeed (result: ${TESTS_A5_RESULT})."
+              echo "::error::The A5 test suite failed. Open the failed run-selected-tests-a5 job above for details."
               exit 1
             fi
           fi

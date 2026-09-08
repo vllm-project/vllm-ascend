@@ -50,7 +50,7 @@ These are the recommended numbers of cards, which can be adjusted according to t
 
 ### 3.2 Verify Multi-node Communication
 
-If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+If you need to deploy a multi-node environment, verify the multi-node communication according to [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -194,7 +194,7 @@ Expected result: The version information is displayed, matching the pulled image
 
 ### 4.2 Source Code Installation
 
-If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../installation.md).
+If you prefer to build from source instead of using the Docker image, install vLLM-Ascend following the [Installation Guide](../../getting_started/installation.md).
 
 !!! note
 
@@ -238,7 +238,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
         --served-model-name qwen3 \
         --trust-remote-code \
         --quantization ascend \
-        --distributed-executor-backend mp \
+        --distributed-executor-backend "mp" \
         --tensor-parallel-size 4 \
         --max-model-len 5500 \
         --max-num-batched-tokens 40960 \
@@ -338,7 +338,7 @@ Single-node deployment completes both Prefill and Decode within the same node, s
 
 !!! note
 
-    - [vLLM Serving Arguments documentation](https://docs.vllm.com.cn/en/latest/cli/serve/?h=block+size#arguments) — Additional parameter details for vLLM serve commands.
+    - [vLLM Serving Arguments documentation](https://docs.vllm.ai/en/latest/cli/serve/#arguments) — Additional parameter details for vLLM serve commands.
     - [Environment Variables](../../user_guide/configuration/env_vars.md) — Ascend-specific environment variables (`HCCL_*`, etc.).
 
 **Service Verification:**
@@ -493,6 +493,8 @@ After several minutes, you will get the performance evaluation result.
 
 ## 9 Performance Tuning
 
+Please refer to the [vLLM Features](https://docs.vllm.ai/en/stable/features), [vLLM Ascend Additional Configuration](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/configuration/additional_config.html), [vLLM Ascend Feature Matrix](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/feature_matrix.html) and [vLLM Ascend Feature Guide](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/feature_guide) for detailed key parameter descriptions.
+
 ### 9.1 Recommended Configurations
 
 > **Note**: The following configurations are validated in specific test environments and are for reference only. The optimal configuration depends on factors such as maximum input/output length, prefix cache hit rate, precision requirements, and deployment machine ratios. It is recommended to refer to Section 9.2 for tuning based on actual conditions.
@@ -515,19 +517,19 @@ After several minutes, you will get the performance evaluation result.
 | Long Context | Single-Node | 4 | 4 | 1 | Off | Off | On |
 | Low Latency | Single-Node | 8 | 8 | 1 | Off | Off | On |
 
-For detailed parameter descriptions, please refer to the deployment examples in [Section 5](#5-online-service-deployment)
+>For detailed parameter descriptions, please refer to the deployment examples in [Section 5.1](#51-single-node-online-deployment).
 
 <u>High Throughput Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 4 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
@@ -544,9 +546,9 @@ vllm serve your_model_path \
 <u>Long Context Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --host <host_ip> \
@@ -569,14 +571,14 @@ vllm serve your_model_path \
 <u>Low Latency Configuration:</u>
 
 ```bash
+export HCCL_OP_EXPANSION_MODE="AIV"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export HCCL_OP_EXPANSION_MODE="AIV"
 
 vllm serve your_model_path \
     --served-model-name qwen3 \
     --trust-remote-code \
-    --distributed-executor-backend mp \
+    --distributed-executor-backend "mp" \
     --tensor-parallel-size 8 \
     --max-model-len 5500 \
     --max-num-batched-tokens 40960 \
@@ -598,4 +600,4 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). This section only covers issues specific to Qwen3 Dense models.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md). This section only covers issues specific to Qwen3 Dense models.

@@ -5,7 +5,7 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
-from vllm_ascend.quantization.methods.w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
+from vllm_ascend.quantization.methods.wna16.w4a16_mxfp4 import AscendW4A16MXFP4FusedMoEMethod
 
 
 class TestAscendW4A16MXFP4MoEMethod(TestBase):
@@ -13,13 +13,11 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
     hidden_size = 128
     intermediate_size = 256
 
-    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.get_ep_group")
-    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.get_ascend_config")
-    def setUp(self, mock_ascend, mock_vllm, mock_ep):
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.get_ascend_config")
+    def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
-        mock_ep.return_value = Mock()
         self.scheme = AscendW4A16MXFP4FusedMoEMethod()
 
     def test_get_weight_static_method(self):
@@ -42,7 +40,7 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
-    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.torch_npu")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.torch_npu")
     def test_process_weights_transposes_weights(self, mock_torch_npu):
         mock_torch_npu.npu_format_cast.side_effect = lambda x, *args, **kwargs: x
         mock_torch_npu.npu_convert_weight_to_int4pack.side_effect = lambda x: x
@@ -60,8 +58,8 @@ class TestAscendW4A16MXFP4MoEMethod(TestBase):
         self.assertEqual(layer.w2_weight.shape, (8, 256, 128))
         self.assertEqual(layer.w2_weight_scale.shape, (8, 8, 128))
 
-    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4.torch_npu")
-    @patch("vllm_ascend.quantization.methods.w4a16_mxfp4._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4.torch_npu")
+    @patch("vllm_ascend.quantization.methods.wna16.w4a16_mxfp4._EXTRA_CTX")
     def test_apply_full_params(self, mock_ctx, mock_npu):
         tokens = 4
         layer = nn.Module()

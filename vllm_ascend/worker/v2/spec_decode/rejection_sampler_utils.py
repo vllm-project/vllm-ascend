@@ -411,6 +411,9 @@ def rejection_sample(
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+        # bug for max-with-index reductions is fixed.
+        has_auto_blockify_blacklist_op=True,
     )
 
     # Sample up until the first rejected/bonus token, and store
@@ -481,6 +484,9 @@ def rejection_sample(
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        # TODO: Remove this workaround after the Triton Ascend AutoBlockify
+        # bug for max-with-index reductions is fixed.
+        has_auto_blockify_blacklist_op=True,
     )
 
     # Insert the resampled tokens into the output sampled.

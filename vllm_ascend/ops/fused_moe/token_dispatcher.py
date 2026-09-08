@@ -31,6 +31,7 @@ from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import get_mc2_tokens_capacity
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.lora.fused_moe import (
     all2all_lora_indices,
@@ -49,12 +50,7 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 )
 from vllm_ascend.ops.fused_moe.moe_utils import async_all_to_all, gather_from_sequence_parallel_region
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-    is_hierarchical_communication_enabled,
-    should_skip_allreduce_across_dp_group,
-)
+from vllm_ascend.utils import should_skip_allreduce_across_dp_group
 
 EXPERT_TOKEN_NUMS_TYPE_CUMSUM = 0
 EXPERT_TOKEN_NUMS_TYPE_COUNT = 1
@@ -120,14 +116,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
         self.ep_rank_id = get_mc2_group().rank_in_group
         self.ep_world_size = get_mc2_group().world_size
-        self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
-        self.need_extra_args = get_ascend_device_type() in [AscendDeviceType.A3, AscendDeviceType.A5]
-        self.a5_need_extra_args = get_ascend_device_type() == AscendDeviceType.A5
-        # NOTE: When in A2, setting the environment variables HCCL_INTRA_PCIE_ENABLE=1 and
-        # HCCL_INTRA_ROCE_ENABLE=0 can reduce cross-machine communication traffic and significantly
-        # improve communication performance.
-        # When enable hierarchical communication, param `expert_scales` need to be passed in.
-        self.need_expert_scale = is_hierarchical_communication_enabled()
+        profile = get_current_hardware_profile()
+        self.need_extra_args = profile.supports(HardwareCapability.MOE_DISPATCH_EXTRA_ARGS)
+        self.need_shared_expert_args = profile.supports(HardwareCapability.MOE_DISPATCH_SHARED_EXPERT_ARGS)
+        self.mc2_comm_alg = get_ascend_config().get_mc2_comm_alg()
+
+        # When enable hierarchical communication or A5 case, param `expert_scales` need to be passed in.
+        self.need_expert_scale = self.need_shared_expert_args or self.mc2_comm_alg == "hierarchy"
 
         # Here we need to calculate the global_bs = max_bs_per_rank * ep_world_size to execute
         # dispatch & combine operators with different input num_tokens per rank.
@@ -147,14 +142,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
-
-        # NOTE: When enable_mc2_hierarchy_comm is true, we need pass in `comm_alg` to mc2 op.
-        self.need_comm_alg = get_ascend_config().enable_mc2_hierarchy_comm
-
-        if not self.enable_dispatch_v2 and self.need_comm_alg:
-            raise RuntimeError(
-                "PTA and CANN version is too old to support mc2 hierarchy comm, please upgrade your version."
-            )
 
     def refresh_hccl_group(self) -> None:
         """Refresh MC2 communicator metadata after HCCL groups are recreated."""
@@ -181,7 +168,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         if comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif token_dispatch_input.quant.dispatch_with_quant:
-            quant_mode = 4 if self.a5_need_extra_args and token_dispatch_input.quant.is_mxfp else 2
+            quant_mode = 4 if self.need_shared_expert_args and token_dispatch_input.quant.is_mxfp else 2
         else:
             quant_mode = 0
         self.moe_expert_num = len(expert_map) + global_redundant_expert_num
@@ -204,6 +191,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "group_ep": self.moe_all_to_all_group_name,
             "ep_world_size": self.ep_world_size,
             "ep_rank_id": self.ep_rank_id,
+            "comm_alg": self.mc2_comm_alg,
         }
         if self.need_extra_args:
             stage1_kwargs.update(
@@ -215,7 +203,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             )
         # Only dispatch-enabled MXFP paths pass y_dtype through MC2.
         if (
-            self.a5_need_extra_args
+            self.need_shared_expert_args
             and (token_dispatch_input.quant.is_mxfp or token_dispatch_input.quant.is_fp8)
             and token_dispatch_input.quant.dispatch_with_quant
         ):
@@ -226,14 +214,12 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             ):
                 y_dtype = token_dispatch_input.quant.mxfp.act_quant_type
             stage1_kwargs.update({"tp_world_size": 1, "tp_rank_id": 0, "y_dtype": y_dtype})
-        if self.need_expert_scale or self.a5_need_extra_args:
+        if self.need_expert_scale:
             stage1_kwargs.update(
                 {
                     "expert_scales": topk_weights.to(torch.float32),
                 }
             )
-        if self.need_comm_alg:
-            stage1_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage1_kwargs)
         return kwargs_mc2
@@ -243,11 +229,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         token_dispatch_input: MoETokenDispatchInput,
     ):
         kwargs_mc2 = self.get_dispatch_mc2_kwargs(token_dispatch_input)
-        output = (
-            torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
-        )
+        output = torch_npu.npu_moe_distribute_dispatch_v2(**kwargs_mc2)
         # comm_stream.wait_stream(torch.npu.current_stream())
         (
             expand_x,
@@ -320,12 +302,9 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
             "ep_rank_id": self.ep_rank_id,
             "expand_scales": expand_scales,
             "comm_quant_mode": quant_mode,
+            "comm_alg": self.mc2_comm_alg,
+            "assist_info_for_combine": assist_info_for_combine,
         }
-
-        if self.enable_dispatch_v2:
-            stage3_kwargs["assist_info_for_combine"] = assist_info_for_combine
-        else:
-            stage3_kwargs["expand_idx"] = assist_info_for_combine
 
         if self.need_extra_args:
             stage3_kwargs.update(
@@ -336,8 +315,6 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
                     "tp_rank_id": 0,
                 }
             )
-        if self.need_comm_alg:
-            stage3_kwargs.update({"comm_alg": "hierarchy"})
 
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
@@ -346,11 +323,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         assert bias is None, "Bias is not supported in MoEAlltoAllvTokenDispatcher."
 
         kwargs_mc2 = self.get_combine_mc_kwargs(hidden_states, combine_metadata)
-        combined_output = (
-            torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
-            if self.enable_dispatch_v2
-            else torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
-        )
+        combined_output = torch_npu.npu_moe_distribute_combine_v2(**kwargs_mc2)
 
         return combined_output
 

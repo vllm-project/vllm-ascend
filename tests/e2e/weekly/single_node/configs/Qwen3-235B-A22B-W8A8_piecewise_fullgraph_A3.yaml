@@ -47,7 +47,7 @@ _server_cmd: &server_cmd
 _benchmarks: &benchmarks
   acc:
     case_type: accuracy
-    dataset_path: vllm-ascend/gsm8k_lite
+    dataset_path: vllm-ascend/gsm8k-lite
     request_conf: vllm_api_general_chat
     dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
     max_out_len: 38912

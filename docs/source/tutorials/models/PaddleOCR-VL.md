@@ -28,7 +28,7 @@ It is recommended to download the model weights to the cache directory and set `
 
 You can use our official docker image to run `PaddleOCR-VL` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "A2 series"
 
@@ -80,7 +80,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -161,7 +161,7 @@ Startup Command:
     - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'` enables full decode graph compilation for improved performance.
     - `--additional_config '{"enable_cpu_binding":true}'` enables CPU binding to improve performance.
 
-Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter startup issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ### 5.2 Multi-Node PD Separation Deployment
 
@@ -366,7 +366,7 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: What are the deployment requirements for Atlas 300I DUO?**
 

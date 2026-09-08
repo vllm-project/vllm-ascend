@@ -7,10 +7,9 @@ from vllm.model_executor.layers.linear import RowParallelLinear, UnquantizedLine
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import COMPRESSED_TENSORS_W8A8_CONFIG
-from vllm_ascend.quantization.compressed_tensors_config import AscendCompressedTensorsConfig
+from vllm_ascend.quantization.configs.compressed_tensors_config import AscendCompressedTensorsConfig
 from vllm_ascend.quantization.method_adapters import AscendLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
 
 
 class TestAscendCompressedTensorsQuanType(TestBase):
@@ -84,14 +83,12 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
         mock_method.return_value = None
         layer = MagicMock(spec=RowParallelLinear)
         result = self.config.get_quant_method(layer, "model.layers.0.self_attn.q_proj")
-        self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
         self.assertTrue(isinstance(result, AscendLinearMethod))
         self.assertTrue(isinstance(layer.scheme, AscendW8A8DynamicLinearMethod))
 
     def test_get_linear_unquantized_method(self):
         layer = MagicMock(spec=RowParallelLinear)
         result = self.config.get_quant_method(layer, "lm_head")
-        self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
         self.assertTrue(isinstance(result, UnquantizedLinearMethod))
 
     def test_adds_routed_experts_target_for_linear_scheme(self):
@@ -101,7 +98,7 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
 
         self.assertIs(self.config.target_scheme_map["RoutedExperts"], linear_scheme)
 
-    @patch("vllm_ascend.quantization.compressed_tensors_config.find_matched_target", return_value=None)
+    @patch("vllm_ascend.quantization.configs.compressed_tensors_config.find_matched_target", return_value=None)
     def test_get_scheme_dict_returns_none_for_unmatched_target(self, _mock_find_target):
         layer = MagicMock(spec=Attention)
 
@@ -110,7 +107,7 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
         self.assertIsNone(result)
 
     @patch(
-        "vllm_ascend.quantization.compressed_tensors_config.find_matched_target",
+        "vllm_ascend.quantization.configs.compressed_tensors_config.find_matched_target",
         return_value="Linear",
     )
     def test_get_scheme_dict_returns_none_for_none_scheme(self, _mock_find_target):
@@ -132,7 +129,6 @@ class TestAscendCompressedTensorsConfigGetQuantMethod(TestBase):
             result = self.config.get_quant_method(layer, "model.layers.0.mlp.experts")
 
         self.assertIs(result, mock_method.return_value)
-        self.assertEqual(layer.ascend_quant_method, COMPRESSED_TENSORS_METHOD)
         self.assertIs(layer.scheme, moe_scheme)
         mock_method.assert_called_once_with(moe_scheme, layer.moe_config, None)
 

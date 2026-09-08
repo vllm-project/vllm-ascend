@@ -594,6 +594,24 @@ class AscendMiniMaxM3IndexerImpl(nn.Module):
                 )
         return decode_topk, prefill_topk
 
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        """No-op: indexer replay parameters are owned by its metadata builder,
+        not by the full-graph parameter-update channel.
+
+        Selection note: _get_graph_update_backend picks the first executable
+        backend, so correct updates for mixed-attention models rely on the
+        full-attention (GQA) group being scanned first — M3's full-attention
+        layers are the first layers registered, which holds today.
+        """
+
 
 class AscendMiniMaxM3Indexer(nn.Module):
     def __init__(
@@ -891,6 +909,24 @@ class AscendMiniMaxM3SparseImpl(AttentionImplBase[AscendMiniMaxM3SparseMetadata]
                 block_size=self.block_size,
             )
         return output
+
+    @staticmethod
+    def update_graph_params(
+        update_stream,
+        forward_context,
+        num_tokens,
+        vllm_config,
+        speculative_config=None,
+        draft_attn_metadatas=None,
+    ):
+        """No-op: sparse-attention replay parameters are owned by its metadata
+        builder, not by the full-graph parameter-update channel.
+
+        Selection note: _get_graph_update_backend picks the first executable
+        backend, so correct updates for mixed-attention models rely on the
+        full-attention (GQA) group being scanned first — M3's full-attention
+        layers are the first layers registered, which holds today.
+        """
 
 
 class AscendMiniMaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
