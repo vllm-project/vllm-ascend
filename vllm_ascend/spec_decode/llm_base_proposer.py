@@ -1444,7 +1444,18 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # `markov_emb` should also be full to match it.
                 # We changed `flash_comm_v1_enabled` to avoid `markov_emb` from being split.
                 with _disable_flash_comm_v1_context():
-                    raw_logits = self.model.compute_logits(sample_hidden_states)
+                    # When the draft model has a reduced vocab (draft_id_to_target_id),
+                    # draft logits live in draft-vocab space while markov_bias also stays
+                    # in draft vocab, so the bias can only be added there.
+                    dspark_has_vocab_mapping = getattr(self.model, "draft_id_to_target_id", None) is not None
+                    # With vocab remapping, run the Markov loop in draft space:
+                    # compute_draft_logits skips the d2t scatter so the draft-vocab
+                    # Markov bias can be added directly (qwen3_dspark documents this
+                    # contract); sampled ids are remapped to target vocab below.
+                    if dspark_has_vocab_mapping:
+                        raw_logits = self.model.compute_draft_logits(sample_hidden_states)
+                    else:
+                        raw_logits = self.model.compute_logits(sample_hidden_states)
                     if lmhead_tp_enable():
                         # Keep the padded shape through the LMHead TP collective,
                         # then remove dummy sampling rows before grouping them by
@@ -1458,7 +1469,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         markov_emb = self.model.markov_embed(draft_token_ids[:, idx])
                         logits_bias = self.model.markov_bias(markov_emb)
                         logits[:, idx].add_(logits_bias)
-                        draft_token_ids[:, idx + 1].copy_(logits[:, idx].argmax(dim=-1))
+                        next_ids = logits[:, idx].argmax(dim=-1)
+                        if dspark_has_vocab_mapping:
+                            # markov_embed and draft_token_ids stay in target
+                            # vocab; only the logits/argmax are in draft vocab.
+                            next_ids = self.model.map_draft_to_target(next_ids)
+                        draft_token_ids[:, idx + 1].copy_(next_ids)
             else:
                 logits = self.model.compute_logits(sample_hidden_states)
                 if lmhead_tp_enable():
