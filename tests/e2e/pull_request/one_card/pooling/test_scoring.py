@@ -28,6 +28,17 @@ TEXTS_2 = [
 ]
 
 DTYPE = "half"
+# Short query/doc pairs; max_model_len=None lets the model default (up to 8k)
+# and inflates compile/capture. One VllmRunner per model is reused for
+# 1-to-1 / 1-to-N / N-to-N so we do not pay nine pooling cold starts.
+_VLLM_KWARGS = {
+    "runner": "pooling",
+    "dtype": DTYPE,
+    "cudagraph_capture_sizes": [4],
+    "max_model_len": 256,
+    "max_num_seqs": 8,
+    "max_num_batched_tokens": 256,
+}
 
 
 @pytest.fixture(scope="module", params=CROSS_ENCODER_MODELS)
@@ -38,61 +49,56 @@ def model_name(request):
     )
 
 
-def test_cross_encoder_score_1_to_1(model_name):
-    text_pair = [TEXTS_1[0], TEXTS_2[0]]
-
-    with HfRunner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
-        hf_outputs = hf_model.predict([text_pair]).tolist()
-
-    with VllmRunner(
-        model_name, runner="pooling", dtype=DTYPE, cudagraph_capture_sizes=[4], max_model_len=None
-    ) as vllm_model:
-        vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
-
-    assert len(vllm_outputs) == 1
-    assert len(hf_outputs) == 1
-
-    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
-
-
-def test_cross_encoder_score_1_to_N(model_name):
-    text_pairs = [
+@pytest.fixture(scope="module")
+def cross_encoder_goldens(model_name):
+    pair_1_1 = [[TEXTS_1[0], TEXTS_2[0]]]
+    pairs_1_n = [
         [TEXTS_1[0], TEXTS_2[0]],
         [TEXTS_1[0], TEXTS_2[1]],
     ]
-
+    pairs_n_n = [
+        [TEXTS_1[0], TEXTS_2[0]],
+        [TEXTS_1[1], TEXTS_2[1]],
+    ]
     with HfRunner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
-        hf_outputs = hf_model.predict(text_pairs).tolist()
+        return {
+            "1_1": hf_model.predict(pair_1_1).tolist(),
+            "1_n": hf_model.predict(pairs_1_n).tolist(),
+            "n_n": hf_model.predict(pairs_n_n).tolist(),
+        }
 
-    with VllmRunner(
-        model_name, runner="pooling", dtype=DTYPE, cudagraph_capture_sizes=[4], max_model_len=None
-    ) as vllm_model:
-        vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
+
+@pytest.fixture(scope="module")
+def vllm_cross_encoder(model_name, cross_encoder_goldens):
+    with VllmRunner(model_name, **_VLLM_KWARGS) as vllm_model:
+        yield vllm_model
+
+
+def test_cross_encoder_score_1_to_1(vllm_cross_encoder, cross_encoder_goldens):
+    hf_outputs = cross_encoder_goldens["1_1"]
+    vllm_outputs = vllm_cross_encoder.score(TEXTS_1[0], TEXTS_2[0])
+
+    assert len(vllm_outputs) == 1
+    assert len(hf_outputs) == 1
+    assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
+
+
+def test_cross_encoder_score_1_to_N(vllm_cross_encoder, cross_encoder_goldens):
+    hf_outputs = cross_encoder_goldens["1_n"]
+    vllm_outputs = vllm_cross_encoder.score(TEXTS_1[0], TEXTS_2)
 
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
-
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
-def test_cross_encoder_score_N_to_N(model_name):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
-
-    with HfRunner(model_name, dtype=DTYPE, is_cross_encoder=True) as hf_model:
-        hf_outputs = hf_model.predict(text_pairs).tolist()
-
-    with VllmRunner(
-        model_name, runner="pooling", dtype=DTYPE, cudagraph_capture_sizes=[4], max_model_len=None
-    ) as vllm_model:
-        vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
+def test_cross_encoder_score_N_to_N(vllm_cross_encoder, cross_encoder_goldens):
+    hf_outputs = cross_encoder_goldens["n_n"]
+    vllm_outputs = vllm_cross_encoder.score(TEXTS_1, TEXTS_2)
 
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
-
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
@@ -105,63 +111,49 @@ def emb_model_name(request):
     )
 
 
-def test_embedding_score_1_to_1(emb_model_name):
-    text_pair = [TEXTS_1[0], TEXTS_2[0]]
-
+@pytest.fixture(scope="module")
+def embedding_goldens(emb_model_name):
     with HfRunner(emb_model_name, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
-        hf_embeddings = hf_model.encode(text_pair)
-        hf_outputs = [F.cosine_similarity(*map(torch.tensor, hf_embeddings), dim=0)]
+        pair_1_1 = hf_model.encode([TEXTS_1[0], TEXTS_2[0]])
+        pairs_1_n = [hf_model.encode(pair) for pair in [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[0], TEXTS_2[1]]]]
+        pairs_n_n = [hf_model.encode(pair) for pair in [[TEXTS_1[0], TEXTS_2[0]], [TEXTS_1[1], TEXTS_2[1]]]]
+        return {
+            "1_1": [F.cosine_similarity(*map(torch.tensor, pair_1_1), dim=0)],
+            "1_n": [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in pairs_1_n],
+            "n_n": [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in pairs_n_n],
+        }
 
-    with VllmRunner(
-        emb_model_name, runner="pooling", dtype=DTYPE, cudagraph_capture_sizes=[4], max_model_len=None
-    ) as vllm_model:
-        vllm_outputs = vllm_model.score(text_pair[0], text_pair[1])
+
+@pytest.fixture(scope="module")
+def vllm_embedding(emb_model_name, embedding_goldens):
+    with VllmRunner(emb_model_name, **_VLLM_KWARGS) as vllm_model:
+        yield vllm_model
+
+
+def test_embedding_score_1_to_1(vllm_embedding, embedding_goldens):
+    hf_outputs = embedding_goldens["1_1"]
+    vllm_outputs = vllm_embedding.score(TEXTS_1[0], TEXTS_2[0])
 
     assert len(vllm_outputs) == 1
     assert len(hf_outputs) == 1
-
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
 
 
-def test_embedding_score_1_to_N(emb_model_name):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[0], TEXTS_2[1]],
-    ]
-
-    with HfRunner(emb_model_name, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
-        hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
-        hf_outputs = [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in hf_embeddings]
-
-    with VllmRunner(
-        emb_model_name, runner="pooling", dtype=DTYPE, cudagraph_capture_sizes=[4], max_model_len=None
-    ) as vllm_model:
-        vllm_outputs = vllm_model.score(TEXTS_1[0], TEXTS_2)
+def test_embedding_score_1_to_N(vllm_embedding, embedding_goldens):
+    hf_outputs = embedding_goldens["1_n"]
+    vllm_outputs = vllm_embedding.score(TEXTS_1[0], TEXTS_2)
 
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
-
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
 
 
-def test_embedding_score_N_to_N(emb_model_name):
-    text_pairs = [
-        [TEXTS_1[0], TEXTS_2[0]],
-        [TEXTS_1[1], TEXTS_2[1]],
-    ]
-
-    with HfRunner(emb_model_name, dtype=DTYPE, is_sentence_transformer=True) as hf_model:
-        hf_embeddings = [hf_model.encode(text_pair) for text_pair in text_pairs]
-        hf_outputs = [F.cosine_similarity(*map(torch.tensor, pair), dim=0) for pair in hf_embeddings]
-
-    with VllmRunner(
-        emb_model_name, runner="pooling", dtype=DTYPE, cudagraph_capture_sizes=[4], max_model_len=None
-    ) as vllm_model:
-        vllm_outputs = vllm_model.score(TEXTS_1, TEXTS_2)
+def test_embedding_score_N_to_N(vllm_embedding, embedding_goldens):
+    hf_outputs = embedding_goldens["n_n"]
+    vllm_outputs = vllm_embedding.score(TEXTS_1, TEXTS_2)
 
     assert len(vllm_outputs) == 2
     assert len(hf_outputs) == 2
-
     assert hf_outputs[0] == pytest.approx(vllm_outputs[0], rel=0.01)
     assert hf_outputs[1] == pytest.approx(vllm_outputs[1], rel=0.01)
