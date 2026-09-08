@@ -194,7 +194,6 @@ from vllm_ascend.utils import (
     kv_cache_spec_uses_sparse_sfa_c8,
     lmhead_tp_enable,
     model_uses_kpool_indexer,
-    oproj_tp_enable,
     set_potential_max_tokens,
     should_skip_allreduce_across_dp_group,
     vllm_version_is,
