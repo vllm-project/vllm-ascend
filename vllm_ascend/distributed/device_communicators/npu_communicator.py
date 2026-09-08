@@ -23,21 +23,13 @@ from vllm.distributed.device_communicators.base_device_communicator import Devic
 class _NpuAll2AllManager:
     """All2All-manager adapter for MC2 fault tolerance.
 
-    Owns the dead-rank mask together with the `elastic_info` tensor the mask
-    is encoded into: the MC2 dispatch/combine operators take `elastic_info`
-    fresh on every call, so this tensor doubles as the mask (there is no
-    kernel-side mask buffer like DeepEP/nixl-ep). The public interface mirrors
-    the upstream All2AllManagerBase mask API so the upstream FT sentinel
-    drives it unchanged; future Ascend operators with FT support are expected
-    to follow the same shape.
+    Owns the dead-rank mask, encoded into the ``elastic_info`` tensor consumed
+    by the MC2 dispatch/combine operators. The public interface mirrors the
+    upstream All2AllManagerBase mask API.
     """
 
-    # Unlike DeepEP/nixl-ep, the MC2 kernels neither detect faults nor set
-    # the mask themselves on timeout — a dead peer surfaces as an aborted op
-    # raising out of the forward, and the mask is only ever written host-side
-    # by FT recovery (scale_down, plus the retry mask replay). A per-step
-    # query_fault() could therefore never observe anything; reporting False
-    # keeps the upstream runners from paying for that query every step.
+    # MC2 kernels do not detect faults themselves; the mask is written
+    # host-side by FT recovery, so a per-step query can never observe one.
     support_fault_tolerance = False
 
     def __init__(self, ep_world_size: int, device: torch.device | None = None) -> None:
@@ -77,35 +69,18 @@ class _NpuAll2AllManager:
         return mask
 
     def query_fault(self) -> torch.Tensor:
-        # NPU counterpart of the upstream per-step fault check. Unlike
-        # DeepEP/nixl-ep there is no in-kernel timeout that flips the mask,
-        # so a fault can never be observed this way — always report no fault.
-        # (Faults surface as aborted HCCL ops raising out of execute_model;
-        # see support_fault_tolerance.)
+        # MC2 has no in-kernel fault detection; faults surface as aborted ops.
         return torch.tensor(False)
 
     def clean_buffers(self) -> None:
-        """No-op, kept for the upstream retry flow which calls it
-        unconditionally.
-
-        Unlike DeepEP/nixl-ep there is no kernel-side mask buffer or RDMA
-        state to clean: the elastic_info tensor is passed fresh to every MC2
-        call, so the mask itself is intentionally left untouched (it survives
-        across recovery rounds via the replayed cumulative dead set).
-        """
+        """No-op, kept for the upstream retry flow which calls it unconditionally."""
 
     def get_elastic_info(self) -> torch.Tensor:
         """The device elastic_info tensor for the next MC2 dispatch/combine."""
         return self._elastic_info
 
     def set_num_local_physical_experts(self, num_local_experts: int) -> None:
-        """Record the physical expert slots per EP rank.
-
-        No rebuild here: the shrunk physical-expert count is derived as
-        ``alive_ranks * num_local_experts`` inside ``_rebuild_elastic_info``,
-        which the ``update_mask`` calls of the upstream retry flow trigger, so
-        the next rebuild already reflects this value.
-        """
+        """Record the physical expert slots per EP rank."""
         self._num_local_experts = num_local_experts
 
     def _rebuild_elastic_info(self) -> None:
