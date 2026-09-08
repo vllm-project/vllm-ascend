@@ -658,9 +658,6 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
-        # v0.28.0 lacks CacheConfig.get_resolved_kv_cache_layout (#51718 main).
-        if vllm_version_is("0.28.0"):
-            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
@@ -684,6 +681,8 @@ class NPUWorker(WorkerBase):
         # preserve that contract for hybrid attention/Mamba models while still
         # exposing contiguous per-layer views to its existing backends. Do not
         # shrink the planner budget when the runner can consume that layout.
+        # v0.28.0 lacks CacheConfig.get_resolved_kv_cache_layout; keep scaling so
+        # 310p hybrid (attn+mamba) per-layer allocators do not OOM.
         per_layer_specs = []
         for group in kv_cache_groups:
             group_spec = group.kv_cache_spec
@@ -694,9 +693,10 @@ class NPUWorker(WorkerBase):
         has_attention = any(isinstance(spec, AttentionSpec) for spec in per_layer_specs)
         has_mamba = any(isinstance(spec, MambaSpec) for spec in per_layer_specs)
         model_runner = getattr(self, "model_runner", None)
-        layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()
+        layout = None if vllm_version_is("0.28.0") else self.vllm_config.cache_config.get_resolved_kv_cache_layout()
         if (
-            has_attention
+            layout is not None
+            and has_attention
             and has_mamba
             and layout.is_layer_compact
             and layout.is_block_compact
