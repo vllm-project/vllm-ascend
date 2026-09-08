@@ -20,6 +20,7 @@ import pytest
 import torch
 
 from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.lora import lora_ops
 from vllm_ascend.lora.punica_npu import PunicaWrapperNPU
 
@@ -57,7 +58,10 @@ def _make_wrapper(*, is_prefill=False, no_lora=False) -> PunicaWrapperNPU:
 )
 def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_torch_ops) -> None:
     with (
-        patch("vllm_ascend.lora.punica_npu.get_ascend_device_type", return_value=device_type),
+        patch(
+            "vllm_ascend.lora.punica_npu.get_current_hardware_profile",
+            return_value=get_hardware_profile(device_type),
+        ),
         patch("vllm_ascend.lora.punica_npu.refresh_all_lora_classes") as refresh,
     ):
         wrapper = PunicaWrapperNPU(

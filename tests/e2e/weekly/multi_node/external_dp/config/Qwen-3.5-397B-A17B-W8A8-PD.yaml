@@ -53,7 +53,6 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   VLLM_NIXL_ABORT_REQUEST_TIMEOUT: "300000"
   HCCL_BUFFSIZE: "1536"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
   VLLM_TORCH_PROFILER_WITH_STACK: "0"
   VLLM_USE_V1: "1"
 
@@ -116,6 +115,8 @@ templates:
             }
         }'
 
+      - --additional-config
+      - '{"enable_fused_mc2":1}'
   - node_index: 1
     envs:
       <<: *env_common
@@ -157,7 +158,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}'
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",
@@ -216,7 +217,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}'
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding":true,"enable_fused_mc2":1}'
       - --kv-transfer-config
       - '{"kv_connector": "MooncakeConnectorV1",
         "kv_role": "kv_consumer",

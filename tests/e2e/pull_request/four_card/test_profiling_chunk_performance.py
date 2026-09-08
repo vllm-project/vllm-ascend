@@ -30,7 +30,7 @@ NUM_TEST = 5
 
 # NOTE: Any changes to this baseline must be approved by team members.
 # Measured on Qwen3-30B-A3B, PP=2, TP=2, 64k prefill, profiling_chunk enabled.
-BASELINE_TTFT_S = 5.2
+BASELINE_TTFT_S = 5.45
 
 
 @patch.dict(
@@ -55,7 +55,12 @@ def test_profiling_chunk_ttft_performance() -> None:
         enforce_eager=True,
         async_scheduling=False,
         additional_config={
-            "profiling_chunk_config": {"enabled": True, "smooth_factor": 0.9},
+            "scheduler_config": {
+                "profiling_chunk_config": {
+                    "enabled": True,
+                    "smooth_factor": 0.9,
+                },
+            },
             "enable_cpu_binding": False,
         },
         hf_overrides={

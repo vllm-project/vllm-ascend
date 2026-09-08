@@ -1,0 +1,409 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-08-25 01:53+0000\n"
+"PO-Revision-Date: 2026-08-25 01:53+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# Cohere Transcribe"
+msgstr "# Cohere Transcribe"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid ""
+"Cohere Transcribe is a family of automatic speech recognition (ASR) models "
+"from Cohere, based on a 2B-parameter Conformer encoder-decoder architecture "
+"that supports 14 languages (English, French, German, Italian, Spanish, "
+"Portuguese, Greek, Dutch, Polish, Chinese (Mandarin), Japanese, Korean, "
+"Vietnamese, and Arabic)."
+msgstr ""
+"Cohere Transcribe 是 Cohere 推出的一系列自动语音识别（ASR）模型，基于 2B 参数的 Conformer 编码器-"
+"解码器架构，支持 14 种语言（英语、法语、德语、意大利语、西班牙语、葡萄牙语、希腊语、荷兰语、波兰语、中文（普通话）、日语、韩语、越南语和阿拉伯语）。"
+
+msgid "This document covers two model versions verified on Ascend NPUs:"
+msgstr "本文档涵盖在昇腾 NPU 上验证的两个模型版本："
+
+msgid "| Version | Description | Verified by |"
+msgstr "| 版本 | 描述 | 验证方 |"
+
+msgid ""
+"| `CohereLabs/cohere-transcribe-03-2026` | Base multilingual model (14 "
+"languages) | Colleague verification, results recorded in the internal "
+"evaluation report |"
+msgstr ""
+"| `CohereLabs/cohere-transcribe-03-2026` | 基础多语言模型（14 种语言） | "
+"同事验证，结果记录在内部评估报告中 |"
+
+msgid ""
+"| `CohereLabs/cohere-transcribe-arabic-07-2026` | Arabic fine-tuned model | "
+"Internal evaluation report (WER / RTFx measured on Atlas A2 products) |"
+msgstr ""
+"| `CohereLabs/cohere-transcribe-arabic-07-2026` | 阿拉伯语微调模型 | 内部评估报告（在 Atlas "
+"A2 产品上测量 WER / RTFx） |"
+
+msgid ""
+"This document describes the supported features, environment preparation, "
+"single-node deployment, functional verification, and evaluation workflow for"
+" Cohere Transcribe on Ascend NPUs."
+msgstr "本文档介绍了 Cohere Transcribe 在昇腾 NPU 上支持的功能、环境准备、单节点部署、功能验证和评估流程。"
+
+msgid ""
+"Cohere Transcribe is supported by upstream vLLM (via the `cohere_asr` model "
+"implementation). Use a vLLM-Ascend image that matches your vLLM version, and"
+" refer to the support matrix for the current release status."
+msgstr ""
+"Cohere Transcribe 由上游 vLLM 支持（通过 `cohere_asr` 模型实现）。请使用与您的 vLLM 版本匹配的 vLLM-"
+"Ascend 镜像，并参考支持矩阵了解当前发布状态。"
+
+msgid ""
+"The current release is adapted for Atlas A2 inference products. Support for "
+"the Ascend 950DT series is planned for the next phase."
+msgstr "当前版本适配 Atlas A2 推理产品。对 Ascend 950DT 系列的支持计划在下一阶段提供。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的功能"
+
+msgid ""
+"Please refer to the [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) for the model "
+"support matrix."
+msgstr ""
+"请参阅[支持的功能列表](../../user_guide/support_matrix/supported_models.md)了解模型支持矩阵。"
+
+msgid ""
+"Please refer to the [Feature Guide](../../user_guide/feature_guide/index.md)"
+" for feature configuration information."
+msgstr "请参阅[功能指南](../../user_guide/feature_guide/index.md)了解功能配置信息。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid ""
+"The BF16 model can be deployed with one Atlas A2 64 GB NPU. Download the "
+"model weights from any of the following sources:"
+msgstr "BF16 模型可以使用一个 Atlas A2 64 GB NPU 进行部署。可从以下任一来源下载模型权重："
+
+msgid ""
+"- GitCode mirror (03-2026): [weixin_62994174/CohereLabs_cohere-transcribe-03-2026](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)\n"
+"- Hugging Face: [CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) or [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026)\n"
+"- ModelScope: [CohereLabs/cohere-transcribe-03-2026](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026)"
+msgstr ""
+"- GitCode 镜像（03-2026）：[weixin_62994174/CohereLabs_cohere-transcribe-03-2026](https://ai.gitcode.com/weixin_62994174/CohereLabs_cohere-transcribe-03-2026)\n"
+"- Hugging Face：[CohereLabs/cohere-transcribe-03-2026](https://huggingface.co/CohereLabs/cohere-transcribe-03-2026) 或 [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026)\n"
+"- ModelScope：[CohereLabs/cohere-transcribe-03-2026](https://modelscope.cn/models/CohereLabs/cohere-transcribe-03-2026)"
+
+msgid ""
+"Note that the model repository ships custom modeling code, so `--trust-"
+"remote-code` is required when serving."
+msgstr "请注意，模型仓库附带自定义建模代码，因此在提供服务时需要 `--trust-remote-code` 参数。"
+
+msgid ""
+"Download the weights to a directory that is accessible from the deployment "
+"environment. For multi-node deployments, use a shared directory; for "
+"example, `/root/.cache/`."
+msgstr "将权重下载到部署环境可访问的目录中。对于多节点部署，请使用共享目录；例如 `/root/.cache/`。"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid ""
+"Use the vLLM-Ascend Docker image that corresponds to your hardware. Replace "
+"the model-weight mount with the path used in your environment."
+msgstr "使用与您的硬件对应的 vLLM-Ascend Docker 镜像。将模型权重挂载路径替换为您环境中使用的路径。"
+
+msgid ""
+"Verify that the container is running and that the installed package version "
+"matches the image tag:"
+msgstr "验证容器正在运行，并且已安装的软件包版本与镜像标签匹配："
+
+msgid ""
+"Expected result: `docker ps` lists the container with status `Up`, and `pip "
+"show` displays version information for both packages."
+msgstr "预期结果：`docker ps` 列出状态为 `Up` 的容器，`pip show` 显示两个软件包的版本信息。"
+
+msgid ""
+"If you build a custom image (for example, based on a vLLM-Ascend image "
+"matching your vLLM version), make sure `librosa` is installed in the "
+"container before serving Cohere Transcribe:"
+msgstr ""
+"如果您构建自定义镜像（例如，基于与您的 vLLM 版本匹配的 vLLM-Ascend 镜像），请确保在提供 Cohere Transcribe "
+"服务之前，容器中已安装 `librosa`："
+
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
+
+msgid ""
+"If you prefer to build from source instead of using the Docker image, "
+"install vLLM-Ascend following the [Installation "
+"Guide](../../installation.md)."
+msgstr ""
+"如果您希望从源码构建而不是使用 Docker 镜像，请按照[安装指南](../../installation.md)安装 vLLM-Ascend。"
+
+msgid "To verify the source installation:"
+msgstr "要验证源码安装："
+
+msgid "## 5 Online Service Deployment {: #5-online-service-deployment }"
+msgstr "## 5 在线服务部署 {: #5-online-service-deployment }"
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr "### 5.1 单节点在线部署"
+
+msgid ""
+"Single-node deployment runs both audio prefill and decoding on one NPU, "
+"making it suitable for development, testing, and small-scale ASR services. "
+"Both model versions can be deployed on one Atlas A2 NPU with the same "
+"parameters; only the model weight path changes."
+msgstr ""
+"单节点部署在单个 NPU 上同时运行音频预填充和解码，适用于开发、测试和小规模 ASR 服务。两个模型版本都可以使用相同的参数部署在一个 Atlas "
+"A2 NPU 上；只需更改模型权重路径。"
+
+msgid "=== \"Atlas A2 inference products\""
+msgstr "=== \"Atlas A2 推理产品\""
+
+msgid "The following examples are for Atlas A2 inference products."
+msgstr "以下示例适用于 Atlas A2 推理产品。"
+
+msgid "=== \"cohere-transcribe-03-2026\""
+msgstr "=== \"cohere-transcribe-03-2026\""
+
+msgid "=== \"cohere-transcribe-arabic-07-2026\""
+msgstr "=== \"cohere-transcribe-arabic-07-2026\""
+
+msgid ""
+"- `--trust-remote-code` is required because the model repository ships custom modeling code.\n"
+"        - `--block-size 128` is required: the model must be served with a block size of at least 128.\n"
+"        - `--tensor-parallel-size 1` uses one NPU. Increase it only after confirming that the hardware and deployment topology support the chosen parallel configuration.\n"
+"        - `--dtype bfloat16` matches the BF16 deployment validated on Atlas A2 products.\n"
+"        - `HF_HUB_OFFLINE` and `TRANSFORMERS_OFFLINE` are recommended when the model weights are downloaded to a local directory in advance."
+msgstr ""
+"- 需要 `--trust-remote-code`，因为模型仓库附带自定义建模代码。\n"
+"        - 需要 `--block-size 128`：模型必须以至少 128 的块大小提供服务。\n"
+"        - `--tensor-parallel-size 1` 使用一个 NPU。仅在确认硬件和部署拓扑支持所选并行配置后，才可增加该值。\n"
+"        - `--dtype bfloat16` 与在 Atlas A2 产品上验证的 BF16 部署相匹配。\n"
+"        - 当模型权重预先下载到本地目录时，建议使用 `HF_HUB_OFFLINE` 和 `TRANSFORMERS_OFFLINE`。"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid ""
+"After the service is started, the model can be invoked by sending an audio "
+"prompt."
+msgstr "服务启动后，可以通过发送音频提示来调用模型。"
+
+msgid "**Chat Completions API:**"
+msgstr "**Chat Completions API：**"
+
+msgid ""
+"Replace `localhost`, `8000`, and `cohere-transcribe` with the address, port,"
+" and `--served-model-name` used by your deployment. Expected result: HTTP "
+"200 and a JSON response containing the transcription in the `choices` field."
+msgstr ""
+"将 `localhost`、`8000` 和 `cohere-transcribe` 替换为您部署中使用的地址、端口和 `--served-model-"
+"name`。预期结果：HTTP 200 以及包含 `choices` 字段中转写文本的 JSON 响应。"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid ""
+"Evaluate transcription quality with Word Error Rate (WER) for word-level "
+"recognition and Character Error Rate (CER) for character-level recognition."
+msgstr "使用词错误率（WER）评估词级识别的转写质量，使用字符错误率（CER）评估字符级识别的转写质量。"
+
+msgid "### 7.1 cohere-transcribe-03-2026 (base multilingual model)"
+msgstr "### 7.1 cohere-transcribe-03-2026（基础多语言模型）"
+
+msgid ""
+"Verified by a colleague on the same benchmark as 07-2026 (see Section 7.2). "
+"Results are recorded in the internal evaluation report, which compares the "
+"two versions side by side."
+msgstr "由同事在与07-2026相同的基准上验证（参见第7.2节）。结果记录在内部评估报告中，该报告对两个版本进行了并排比较。"
+
+msgid "| WER | 9.06% |"
+msgstr "| WER | 9.06% |"
+
+msgid "| CER | 2.96% |"
+msgstr "| CER | 2.96% |"
+
+msgid "### 7.2 cohere-transcribe-arabic-07-2026 (Arabic fine-tuned model)"
+msgstr "### 7.2 cohere-transcribe-arabic-07-2026（阿拉伯语微调模型）"
+
+msgid "Measured in the internal evaluation report on Atlas A2 products."
+msgstr "在Atlas A2产品上的内部评估报告中测得。"
+
+msgid ""
+"On the Common Voice 18 (CV18) Arabic test set (10,471 samples), the model "
+"achieves a WER of 5.69%, close to the official result (5.82%). The WER "
+"distribution is as follows:"
+msgstr ""
+"在Common Voice "
+"18（CV18）阿拉伯语测试集（10,471个样本）上，该模型的WER为5.69%，接近官方结果（5.82%）。WER分布如下："
+
+msgid "| Metric | Result |"
+msgstr "| 指标 | 结果 |"
+
+msgid "| WER = 0 (perfect recognition) | 2,931 / 10,471 (28.0%) |"
+msgstr "| WER = 0（完美识别） | 2,931 / 10,471（28.0%） |"
+
+msgid "| WER < 5% | 6,990 / 10,471 (66.8%) |"
+msgstr "| WER < 5% | 6,990 / 10,471（66.8%） |"
+
+msgid "| WER < 10% | 8,116 / 10,471 (77.5%) |"
+msgstr "| WER < 10% | 8,116 / 10,471（77.5%） |"
+
+msgid "| WER < 20% | 9,145 / 10,471 (87.3%) |"
+msgstr "| WER < 20% | 9,145 / 10,471（87.3%） |"
+
+msgid ""
+"On the same 100 Common Voice Arabic samples used for 03-2026, the 07-2026 "
+"model achieves:"
+msgstr "在与03-2026相同的100个Common Voice阿拉伯语样本上，07-2026模型达到："
+
+msgid "| Metric | Result (100 Common Voice Arabic samples) |"
+msgstr "| 指标 | 结果（100个Common Voice阿拉伯语样本） |"
+
+msgid "| WER | 5.28% |"
+msgstr "| WER | 5.28% |"
+
+msgid "| CER | 1.27% |"
+msgstr "| CER | 1.27% |"
+
+msgid ""
+"The 07-2026 Arabic fine-tuned model significantly outperforms the 03-2026 "
+"base model on Arabic (WER 5.28% vs 9.06%, CER 1.27% vs 2.96%), confirming "
+"that the fine-tuned version is recommended for Arabic production use."
+msgstr ""
+"07-2026阿拉伯语微调模型在阿拉伯语上显著优于03-2026基础模型（WER 5.28%对比9.06%，CER "
+"1.27%对比2.96%），证实了微调版本推荐用于阿拉伯语生产环境。"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid ""
+"Measure ASR serving performance with audio samples that represent the "
+"production workload. Record at least the audio duration, request "
+"concurrency, end-to-end latency, real-time factor, and throughput. This "
+"ensures that audio preprocessing, request construction, API communication, "
+"inference, and response parsing are included in the result."
+msgstr ""
+"使用代表生产工作负载的音频样本测量ASR服务性能。至少记录音频时长、请求并发数、端到端延迟、实时因子和吞吐量。这确保音频预处理、请求构建、API通信、推理和响应解析都包含在结果中。"
+
+msgid ""
+"Both models were evaluated on the same 100 Common Voice Arabic samples (440 "
+"seconds total audio) with the same inference stack (vLLM 0.23.0 + vllm-"
+"ascend). Results from the internal evaluation report:"
+msgstr ""
+"两个模型在相同的100个Common Voice阿拉伯语样本（总音频时长440秒）上使用相同的推理栈（vLLM 0.23.0 + vllm-"
+"ascend）进行了评估。内部评估报告的结果："
+
+msgid "| Metric | 07-2026 Arabic | 03-2026 (base) |"
+msgstr "| 指标 | 07-2026阿拉伯语 | 03-2026（基础） |"
+
+msgid "| Inference time for 100 samples | 44 s | 47 s |"
+msgstr "| 100个样本的推理时间 | 44秒 | 47秒 |"
+
+msgid ""
+"The 07-2026 Arabic model is slightly faster (RTF 0.100 vs 0.107, about 6.5% "
+"faster) while providing significantly better Arabic accuracy."
+msgstr "07-2026阿拉伯语模型略快（RTF 0.100对比0.107，约快6.5%），同时提供显著更好的阿拉伯语准确性。"
+
+msgid ""
+"Actual performance varies with hardware, audio duration, concurrency, and "
+"deployment configuration. Evaluate short audio, long audio, and concurrent "
+"requests separately before selecting a production configuration."
+msgstr "实际性能因硬件、音频时长、并发数和部署配置而异。在选择生产配置之前，请分别评估短音频、长音频和并发请求。"
+
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
+
+msgid ""
+"The following settings are starting points rather than globally optimal "
+"configurations. Tune them according to audio duration, concurrency, latency "
+"requirements, and available NPU memory."
+msgstr "以下设置是起点而非全局最优配置。请根据音频时长、并发数、延迟要求和可用NPU内存进行调整。"
+
+msgid "| Scenario | Recommended Starting Point | Key Considerations |"
+msgstr "| 场景 | 推荐起点 | 关键考虑因素 |"
+
+msgid ""
+"| Low latency | `--tensor-parallel-size 1`, `--block-size 128` | Use short "
+"audio inputs and avoid sharing the NPU with other workloads. |"
+msgstr ""
+"| 低延迟 | `--tensor-parallel-size 1`、`--block-size 128` | "
+"使用短音频输入，避免与其他工作负载共享NPU。 |"
+
+msgid ""
+"| High throughput | Increase request concurrency after establishing the "
+"latency baseline | Monitor NPU memory and end-to-end latency; do not use "
+"synthetic text-only requests as a proxy for ASR traffic. |"
+msgstr "| 高吞吐量 | 在建立延迟基线后增加请求并发数 | 监控NPU内存和端到端延迟；不要使用合成的纯文本请求作为ASR流量的代理。 |"
+
+msgid ""
+"| Long audio | Increase `--max-model-len` only as required | Keep the value "
+"conservative because attention-mask memory grows with the configured maximum"
+" length. |"
+msgstr "| 长音频 | 仅在需要时增加`--max-model-len` | 保持值保守，因为注意力掩码内存随配置的最大长度增长。 |"
+
+msgid ""
+"For general parameter tuning, refer to the [Public Performance Tuning "
+"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)."
+msgstr ""
+"有关一般参数调优，请参阅[公共性能调优文档](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
+
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
+
+msgid "### The server fails to start with an out-of-memory error"
+msgstr "### 服务器因内存不足错误而无法启动"
+
+msgid ""
+"**Symptom:** The server fails with an out-of-memory error while initializing"
+" attention."
+msgstr "**症状：** 服务器在初始化注意力时因内存不足错误而失败。"
+
+msgid ""
+"**Cause:** An automatically detected large context length can create a full "
+"causal attention mask whose memory consumption grows quadratically with "
+"`max_model_len`."
+msgstr "**原因：** 自动检测到的大上下文长度可能会创建完整的因果注意力掩码，其内存消耗随`max_model_len`呈二次方增长。"
+
+msgid ""
+"**Solution:** If an out-of-memory error occurs, set `--max-model-len` "
+"explicitly to a conservative value (for example `4096`) and increase it only"
+" after verifying available NPU memory. Also confirm that `--block-size 128` "
+"is used as required by the model."
+msgstr ""
+"**解决方案：** 如果发生内存不足错误，请将`--max-model-"
+"len`显式设置为保守值（例如`4096`），并在验证可用NPU内存后再增加。同时确认按照模型要求使用了`--block-size 128`。"
+
+msgid ""
+"When the service starts successfully, the log contains `Application startup "
+"complete`. If startup fails, see the [Public FAQs](../../faqs.md)."
+msgstr ""
+"当服务成功启动时，日志中包含 `Application startup "
+"complete`。如果启动失败，请参阅[公共FAQ](../../faqs.md)。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, see the "
+"[Public FAQs](../../faqs.md). This section covers model- and hardware-"
+"specific guidance."
+msgstr "对于常见的环境、安装和通用参数问题，请参阅[公共FAQ](../../faqs.md)。本节涵盖模型和硬件特定的指导。"

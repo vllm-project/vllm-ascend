@@ -30,14 +30,24 @@ from vllm_ascend.worker.worker import NPUWorker, init_workspace_manager
 
 
 class NPUWorker310(NPUWorker):
+    def _create_model_runner(self):
+        if self.use_v2_model_runner:
+            from vllm_ascend._310p.worker.v2.model_runner import NPUModelRunner310V2
+
+            model_runner = NPUModelRunner310V2(self.vllm_config, self.device)
+            logger.info_once("Using NPUWorker310 and NPUModelRunner310V2.")
+            return model_runner
+
+        model_runner = NPUModelRunner310(self.vllm_config, self.device)
+        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+        return model_runner
+
     def init_device(self):
         self.device = self._init_device()
         torch_npu.npu.set_compile_mode(jit_compile=False)
 
         init_workspace_manager(self.device, num_ubatches=1)
-
-        self.model_runner = NPUModelRunner310(self.vllm_config, self.device)
-        logger.info_once("Using NPUWorker310 and NPUModelRunner310.")
+        self.model_runner = self._create_model_runner()
 
     def save_sharded_state(
         self,
@@ -113,6 +123,10 @@ class NPUWorker310(NPUWorker):
             self.available_kv_cache_memory_bytes = (
                 self.requested_memory - profile_result.non_kv_cache_memory - non_torch_memory_cleared_by_empty_cache
             ) // 2
+
+        self.available_kv_cache_memory_bytes = self._scale_kv_cache_memory_for_multi_group(
+            self.available_kv_cache_memory_bytes,
+        )
 
         logger.debug(profile_result)
         logger.info_once(

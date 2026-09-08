@@ -283,17 +283,27 @@ def test_sync_lora_context_updates_available_setters() -> None:
     quant.set_lora_context.assert_called_once_with("ctx")
 
 
-def test_assert_rejects_dynamic_eplb_and_fused_mc2(monkeypatch) -> None:
+def test_assert_rejects_dynamic_eplb_and_fused_mc2() -> None:
     with pytest.raises(AssertionError, match="dynamic EPLB"):
         _assert_ascend_moe_lora_supported(SimpleNamespace(dynamic_eplb=True, _shared_experts=None))
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "1")
-    with pytest.raises(AssertionError, match="FusedMC2"):
+    with (
+        patch(
+            "vllm_ascend.lora.fused_moe.get_ascend_config",
+            return_value=SimpleNamespace(enable_fused_mc2=1),
+        ),
+        pytest.raises(AssertionError, match="FusedMC2"),
+    ):
         _assert_ascend_moe_lora_supported(SimpleNamespace(dynamic_eplb=False, _shared_experts=None))
 
 
-def test_assert_warns_once_for_shared_experts(monkeypatch) -> None:
-    monkeypatch.setenv("VLLM_ASCEND_ENABLE_FUSED_MC2", "0")
-    with patch("vllm_ascend.lora.fused_moe.logger.warning_once") as warn:
+def test_assert_warns_once_for_shared_experts() -> None:
+    with (
+        patch(
+            "vllm_ascend.lora.fused_moe.get_ascend_config",
+            return_value=SimpleNamespace(enable_fused_mc2=0),
+        ),
+        patch("vllm_ascend.lora.fused_moe.logger.warning_once") as warn,
+    ):
         _assert_ascend_moe_lora_supported(SimpleNamespace(dynamic_eplb=False, _shared_experts=object()))
     warn.assert_called_once()
     assert "shared_experts" in warn.call_args.args[0]

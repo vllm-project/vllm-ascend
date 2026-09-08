@@ -30,6 +30,7 @@
 #include "utils.h"
 #include "aclnn_torch_adapter/op_api_common.h"
 #include "moe/add_rms_norm_bias/add_rms_norm_bias_torch_adpt.h"
+#include "moe/rms_norm_cast/rms_norm_cast_torch_adpt.h"
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
 #include "batch_matmul_transpose/batch_matmul_transpose_torch_adpt.h"
 #include "mla_preprocess/mla_preprocess_torch_adpt.h"
@@ -41,25 +42,39 @@
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
+#include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
 #include "moe/causal_conv1d_v310/causal_conv1d_310_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule/recurrent_gated_delta_rule_torch_adpt.h"
+#include "attention/recurrent_kda/recurrent_kda_torch_adpt.h"
+#include "attention/chunk_kda_fwd/chunk_kda_fwd_torch_adpt.h"
+#include "attention/kda_gate_cumsum/kda_gate_cumsum_torch_adpt.h"
+#include "attention/kda_layout_swap12/kda_layout_swap12_torch_adpt.h"
 #include "attention/recurrent_gated_delta_rule_v310/recurrent_gated_delta_rule_310_torch_adpt.h"
 #include "attention/k2q_csr/k2q_csr_torch_adpt.h"
 #include "attention/msa_index_score/msa_index_score_torch_adpt.h"
 #include "attention/sparse_attention_score/sparse_attention_score_torch_adpt.h"
-#include "attention/sparse_attention_score_prefill/sparse_attention_score_prefill_torch_adpt.h"
 #include "attention/store_kv_block/store_kv_block_torch_adpt.h"
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
+#include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
+#include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
+#include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Logging.h>
+#ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
+#include <omp.h>
+#endif
+#include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <numeric>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -1033,6 +1048,41 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tens
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
+std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_tensor(const at::Tensor& query, const at::Tensor& key,
+                                                           int64_t sparse_count, std::string query_layout_str,
+                                                           std::string key_layout_str, int64_t return_value)
+{
+    constexpr int64_t SIZE = 8;
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    at::SmallVector<int64_t, SIZE> output_size;
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+            "than 0, but shape[", i, "] is ", query.size(i));
+    }
+    for (size_t i = 0; i < key.sizes().size(); i++) {
+        TORCH_CHECK(key.size(i) > 0, "All values within key's shape should be greater "
+            "than 0, but shape[", i, "] is ", key.size(i));
+    }
+    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
+    int64_t keyHeadNum = (key_layout_str == "TND") ? key.size(DIM_1) : key.size(DIM_2);
+    if (query_layout_str == "BSND") {
+        output_size = {query.size(DIM_0), query.size(DIM_1), keyHeadNum, sparse_count};
+    } else {
+        output_size = {query.size(DIM_0), keyHeadNum, sparse_count};
+    }
+    at::Tensor sparse_indices_out = at::empty(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_values_out;
+    if (return_value) {
+        sparse_values_out = at::empty(output_size, query.options().dtype(at::kBFloat16));
+    } else {
+        sparse_values_out = at::empty({0}, query.options().dtype(at::kBFloat16));
+    }
+
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_npu(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -1070,6 +1120,50 @@ std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_npu(
         block_table, metadata, query_quant_mode, key_quant_mode, query_layout_ptr, key_layout_ptr, sparse_count, sparse_mode,
         pre_tokens, next_tokens, cmp_ratio, return_value, stride, scale_stride, sparse_indices_out, sparse_values_out);
 
+
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_npu(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
+    int64_t topk, int64_t quant_mode,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &output_idx_offset,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
+    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value)
+{
+    TORCH_CHECK(query.numel() > 0, "Tensor query is empty.");
+    TORCH_CHECK(key.numel() > 0, "Tensor key is empty.");
+    std::string query_layout_str = std::string(layout_q);
+    std::string key_layout_str = std::string(layout_k);
+
+    std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_output = construct_quant_lightning_indexer_v2_output_tensor(
+            query, key, topk, query_layout_str, key_layout_str, return_value);
+    at::Tensor sparse_indices_out = std::get<0>(quant_lightning_indexer_output);
+    at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
+    char *query_layout_ptr = const_cast<char *>(query_layout_str.c_str());
+    char *key_layout_ptr = const_cast<char *>(key_layout_str.c_str());
+
+    if (key_layout_str == "PA_BSND" || key_layout_str == "PA_BBND") {
+        auto contiguous_axes_result_key = is_contiguous_axes(key);
+        TORCH_CHECK(contiguous_axes_result_key[1] && contiguous_axes_result_key[2],
+                    "key must be contiguous on all axes except axis 0");
+        auto contiguous_axes_result_key_scale = is_contiguous_axes(key_dequant_scale);
+        TORCH_CHECK(contiguous_axes_result_key_scale[1] && contiguous_axes_result_key_scale[2],
+                    "key_dequant_scale must be contiguous on all axes except axis 0");
+    }
+
+    EXEC_NPU_CMD(aclnnQuantLightningIndexerV2, query, key, weights, query_dequant_scale, key_dequant_scale,
+        cu_seqlens_q, cu_seqlens_k, seqused_q, seqused_k, cmp_residual_k, block_table, output_idx_offset, metadata,
+        topk, quant_mode, max_seqlen_q, query_layout_ptr, key_layout_ptr, mask_mode, cmp_ratio, return_value,
+        sparse_indices_out, sparse_values_out);
 
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
@@ -1221,6 +1315,47 @@ at::Tensor npu_vllm_quant_lightning_indexer_metadata_npu(
                     num_heads_q, num_heads_k, head_dim, query_quant_mode, key_quant_mode, batch_size,
                     max_seqlen_q, max_seqlen_k, layout_query_ptr, layout_key_ptr, sparse_count,
                     sparse_mode, pre_tokens, next_tokens, cmp_ratio, output);
+
+    return output;
+}
+
+at::Tensor npu_quant_lightning_indexer_v2_metadata_npu(
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k,
+    const c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio,
+    const c10::string_view device)
+{
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    at::Device output_device = at::Device(std::string(device));
+    if (cu_seqlens_q.has_value()) {
+        output_device = cu_seqlens_q.value().device();
+    } else if (seqused_k.has_value()) {
+        output_device = seqused_k.value().device();
+    } else if (cu_seqlens_k.has_value()) {
+        output_device = cu_seqlens_k.value().device();
+    } else if (seqused_q.has_value()) {
+        output_device = seqused_q.value().device();
+    } else if (cmp_residual_k.has_value()) {
+        output_device = cmp_residual_k.value().device();
+    }
+
+    at::Tensor output = torch::empty({OUTPUT_SIZE}, torch::dtype(torch::kInt32).device(output_device));
+    auto cu_seqlens_q_val = get_valid_tensor(cu_seqlens_q, output_device);
+    auto cu_seqlens_k_val = get_valid_tensor(cu_seqlens_k, output_device);
+    auto seqused_q_val = get_valid_tensor(seqused_q, output_device);
+    auto seqused_k_val = get_valid_tensor(seqused_k, output_device);
+    auto cmp_residual_k_val = get_valid_tensor(cmp_residual_k, output_device);
+
+    std::string layout_q_str = std::string(layout_q);
+    char *layout_q_ptr = const_cast<char *>(layout_q_str.c_str());
+    std::string layout_k_str = std::string(layout_k);
+    char *layout_k_ptr = const_cast<char *>(layout_k_str.c_str());
+
+    EXEC_NPU_CMD(aclnnQuantLightningIndexerV2Metadata, cu_seqlens_q_val, cu_seqlens_k_val, seqused_q_val, seqused_k_val,
+                 cmp_residual_k_val, num_heads_q, num_heads_k, head_dim, topk, quant_mode, batch_size, max_seqlen_q,
+                 max_seqlen_k, layout_q_ptr, layout_k_ptr, mask_mode, cmp_ratio, output);
 
     return output;
 }
@@ -1775,14 +1910,14 @@ std::tuple<at::Tensor, at::Tensor> npu_dequant_swiglu_quant(
     return std::make_tuple(y, scale);
 }
 
-void npu_scatter_nd_update_v2(
+void npu_scatter_nd_update_sk(
     at::Tensor& var,
     const at::Tensor& indices,
     const at::Tensor& update)
 {
     // construct the output tensor
     at::IntArrayRef var_stride = var.strides();
-    EXEC_NPU_CMD(aclnnScatterNdUpdateV2, var, indices, update, var_stride);
+    EXEC_NPU_CMD(aclnnScatterNdUpdateSk, var, indices, update, var_stride);
     return;
 }
 
@@ -1881,6 +2016,60 @@ at::Tensor chunk_fwd_o(
     return o;
 }
 
+at::Tensor npu_sparse_attention_score_prefill(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &value,
+    const at::Tensor &block_table,
+    const at::Tensor &k2q_row_ptr,
+    const at::Tensor &k2q_q_indices,
+    const at::Tensor &k2q_slot_indices,
+    int64_t num_key_value_heads, double scale_value, int64_t block_size,
+    int64_t top_k, int64_t inner_precise,
+    const c10::optional<at::Tensor> &actual_seq_lengths,
+    const c10::optional<at::Tensor> &actual_seq_lengths_kv)
+{
+    for (size_t i = 0; i < query.sizes().size(); i++) {
+        TORCH_CHECK(query.size(i) > 0, "All values within query's shape should be greater "
+                                       "than 0, but shape[", i, "] is ", query.size(i));
+    }
+
+    at::ScalarType out_dtype = query.scalar_type();
+    if (query.scalar_type() == at::kFloat8_e4m3fn) {
+        out_dtype = at::kBFloat16;
+    }
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(out_dtype));
+    // MinimaxSparseAttentionSplitKv always exposes softmaxLse as its second
+    // ACLNN output. Prefill does not consume it, so keep the flag disabled and
+    // pass the empty FP32 placeholder required by the operator interface.
+    at::Tensor softmax_lse = at::empty({0}, query.options().dtype(at::kFloat));
+    bool softmax_lse_flag = false;
+    std::string input_layout = "TND";
+    char *input_layout_ptr = const_cast<char *>(input_layout.c_str());
+
+    EXEC_NPU_CMD(
+        aclnnMinimaxSparseAttentionSplitKv,
+        query,
+        key,
+        value,
+        block_table,
+        k2q_row_ptr,
+        k2q_q_indices,
+        k2q_slot_indices,
+        actual_seq_lengths,
+        actual_seq_lengths_kv,
+        num_key_value_heads,
+        scale_value,
+        block_size,
+        top_k,
+        inner_precise,
+        softmax_lse_flag,
+        input_layout_ptr,
+        output,
+        softmax_lse
+    );
+
+    return output;
+}
+
 std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
 {
     TORCH_CHECK(
@@ -1891,6 +2080,641 @@ std::vector<int64_t> get_npu_storage_shape(const at::Tensor& tensor)
     return std::vector<int64_t>(desc.storage_sizes_.begin(), desc.storage_sizes_.end());
 }
 
+#ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
+#if defined(__GNUC__) || defined(__clang__)
+  #define HOT_FUNCTION __attribute__((hot))
+  #define FORCE_INLINE inline __attribute__((always_inline))
+  #define LIKELY(x) __builtin_expect(!!(x), 1)
+  #define UNLIKELY(x) __builtin_expect(!!(x), 0)
+  #define RESTRICT __restrict__
+#else
+  #define HOT_FUNCTION
+  #define FORCE_INLINE inline
+  #define LIKELY(x) (x)
+  #define UNLIKELY(x) (x)
+  #define RESTRICT
+#endif
+
+constexpr int32_t EPOCH_RESET_THRESHOLD = 1 << 30;
+constexpr int16_t DIRECT_SELECTION_LAYOUT_MARKER = 0x5A44;
+
+FORCE_INLINE int choose_lru_resident_threads(const int num_reqs, const int workspace_threads,
+                                             const int requested_threads) {
+  if (num_reqs <= 1) {
+    return 1;
+  }
+  int active_threads = num_reqs;
+  if (workspace_threads > 0) {
+    active_threads = std::min(active_threads, workspace_threads);
+  }
+  if (requested_threads > 0) {
+    active_threads = std::min(active_threads, requested_threads);
+  }
+  return std::max(active_threads, 1);
+}
+
+int64_t warmup_lru_resident_threads(const int64_t requested_threads) {
+  const int active_threads = std::max(1, std::min(static_cast<int>(requested_threads), omp_get_max_threads()));
+  if (active_threads == 1) {
+    return 1;
+  }
+  int observed_threads = 0;
+#pragma omp parallel num_threads(active_threads) reduction(+ : observed_threads)
+  {
+    observed_threads += 1;
+  }
+  TORCH_CHECK(observed_threads == active_threads,
+              "OpenMP planner warmup created an unexpected thread count: expected=", active_threads,
+              ", actual=", observed_threads);
+  return observed_threads;
+}
+
+FORCE_INLINE bool is_valid_lru_resident_token(const int32_t token, const int32_t max_token) {
+  return token >= 0 && token < max_token;
+}
+
+FORCE_INLINE void reset_lru_resident_row(int32_t* RESTRICT slot_to_token_row, int32_t* RESTRICT lru_slots_row,
+                                         const int32_t capacity) {
+  std::fill(slot_to_token_row, slot_to_token_row + capacity, -1);
+  for (int32_t slot = 0; slot < capacity; ++slot) {
+    lru_slots_row[slot] = slot;
+  }
+}
+
+FORCE_INLINE int32_t next_lru_resident_epoch(int32_t* RESTRICT token_mark, int32_t* RESTRICT token_pos,
+                                             int32_t* RESTRICT epoch, const int32_t max_token) {
+  int32_t base = epoch[0] + 1;
+  if (UNLIKELY(base >= EPOCH_RESET_THRESHOLD)) {
+    std::fill(token_mark, token_mark + max_token, 0);
+    std::fill(token_pos, token_pos + max_token, -1);
+    base = 1;
+  }
+  epoch[0] = base;
+  return base;
+}
+
+FORCE_INLINE void process_one_lru_resident_row(
+    const int logical_row, const int physical_row, const int32_t topk, const int32_t capacity, const int32_t max_token,
+    const int64_t* RESTRICT req_ids, int64_t* RESTRICT last_req_ids, const int32_t* RESTRICT topk_indices,
+    const int32_t* RESTRICT stable_prefix_lens, int32_t* RESTRICT slot_to_token, int32_t* RESTRICT lru_slots,
+    int32_t* RESTRICT current_slots, int32_t* RESTRICT miss_count, int32_t* RESTRICT miss_tokens_out,
+    int32_t* RESTRICT miss_slots_out, int32_t* RESTRICT token_mark, int32_t* RESTRICT token_pos,
+    int32_t* RESTRICT slot_workspace, int32_t* RESTRICT miss_positions, int32_t* RESTRICT epoch,
+    int32_t* RESTRICT current_token_slots, int16_t* RESTRICT encoded_plan, const int32_t encoded_plan_stride,
+    const bool encode_physical_row, const int32_t* RESTRICT visible_seq_lens) {
+  int32_t* RESTRICT slot_to_token_row = slot_to_token + static_cast<int64_t>(physical_row) * capacity;
+  int32_t* RESTRICT lru_slots_row = lru_slots + static_cast<int64_t>(physical_row) * capacity;
+  int32_t* RESTRICT current_slots_row = current_slots + static_cast<int64_t>(logical_row) * topk;
+  int32_t* RESTRICT miss_tokens_row = miss_tokens_out + static_cast<int64_t>(logical_row) * topk;
+  int32_t* RESTRICT miss_slots_row = miss_slots_out + static_cast<int64_t>(logical_row) * topk;
+  const int32_t* RESTRICT topk_row = topk_indices + static_cast<int64_t>(logical_row) * topk;
+  int32_t* RESTRICT hit_slots = slot_workspace;
+  int32_t* RESTRICT evictable_slots = slot_workspace + capacity;
+  int32_t* RESTRICT assigned_miss_slots = slot_workspace + static_cast<int64_t>(capacity) * 2;
+  int16_t* RESTRICT encoded_plan_row =
+      encoded_plan == nullptr ? nullptr : encoded_plan + static_cast<int64_t>(logical_row) * encoded_plan_stride;
+  const int32_t resident_capacity = current_token_slots == nullptr ? capacity : capacity - 1;
+  if (UNLIKELY(resident_capacity <= 0)) {
+    return;
+  }
+
+  std::fill(current_slots_row, current_slots_row + topk, -1);
+  std::fill(miss_tokens_row, miss_tokens_row + topk, -1);
+  std::fill(miss_slots_row, miss_slots_row + topk, -1);
+  if (encoded_plan_row != nullptr) {
+    std::fill(encoded_plan_row, encoded_plan_row + topk, static_cast<int16_t>(0));
+    if (encode_physical_row) {
+      encoded_plan_row[topk + 4] = static_cast<int16_t>(physical_row);
+      encoded_plan_row[topk + 5] = DIRECT_SELECTION_LAYOUT_MARKER;
+      encoded_plan_row[topk + 6] = static_cast<int16_t>(capacity);
+    }
+  }
+  miss_count[logical_row] = 0;
+
+  const int64_t req_id = req_ids[logical_row];
+  if (UNLIKELY(last_req_ids[physical_row] != req_id)) {
+    reset_lru_resident_row(slot_to_token_row, lru_slots_row, resident_capacity);
+    last_req_ids[physical_row] = req_id;
+  }
+  const int32_t stable_prefix_len = std::clamp(stable_prefix_lens[logical_row], 0, max_token);
+  const int32_t visible_seq_len =
+      visible_seq_lens == nullptr ? max_token : std::clamp(visible_seq_lens[logical_row], 0, max_token);
+  int32_t current_token_slot = resident_capacity;
+
+  const int32_t base = next_lru_resident_epoch(token_mark, token_pos, epoch, max_token);
+  for (int32_t pos = 0; pos < topk; ++pos) {
+    const int32_t token = topk_row[pos];
+    if (LIKELY(is_valid_lru_resident_token(token, max_token)) && token < visible_seq_len && token_mark[token] != base) {
+      token_mark[token] = base;
+      token_pos[token] = pos;
+    }
+  }
+
+  int32_t hit_count = 0;
+  int32_t evictable_count = 0;
+  for (int32_t order = 0; order < resident_capacity; ++order) {
+    const int32_t slot = lru_slots_row[order];
+    if (UNLIKELY(slot < 0 || slot >= resident_capacity)) {
+      continue;
+    }
+    int32_t token = slot_to_token_row[slot];
+    // The speculative suffix may have been overwritten in the CPU KV pool.
+    if (LIKELY(is_valid_lru_resident_token(token, max_token)) && UNLIKELY(token >= stable_prefix_len)) {
+      slot_to_token_row[slot] = -1;
+      token = -1;
+    }
+    if (LIKELY(is_valid_lru_resident_token(token, max_token)) && token_mark[token] == base) {
+      const int32_t pos = token_pos[token];
+      current_slots_row[pos] = slot;
+      if (token == visible_seq_len - 1) {
+        current_token_slot = slot;
+      }
+      if (encoded_plan_row != nullptr) {
+        encoded_plan_row[pos] = static_cast<int16_t>(slot + 1);
+      }
+      hit_slots[hit_count] = slot;
+      ++hit_count;
+    } else {
+      evictable_slots[evictable_count] = slot;
+      ++evictable_count;
+    }
+  }
+
+  int32_t local_miss_count = 0;
+  for (int32_t pos = 0; pos < topk; ++pos) {
+    const int32_t token = topk_row[pos];
+    if (LIKELY(is_valid_lru_resident_token(token, max_token)) && token < visible_seq_len &&
+        current_slots_row[pos] < 0) {
+      miss_tokens_row[local_miss_count] = token;
+      miss_positions[local_miss_count] = pos;
+      ++local_miss_count;
+    }
+  }
+
+  const int32_t assign_count = std::min(local_miss_count, evictable_count);
+  for (int32_t miss_idx = 0; miss_idx < assign_count; ++miss_idx) {
+    const int32_t slot = evictable_slots[miss_idx];
+    const int32_t token = miss_tokens_row[miss_idx];
+    const int32_t pos = miss_positions[miss_idx];
+    slot_to_token_row[slot] = token;
+    current_slots_row[pos] = slot;
+    if (token == visible_seq_len - 1) {
+      current_token_slot = slot;
+    }
+    if (encoded_plan_row != nullptr) {
+      const bool is_current_token = visible_seq_lens != nullptr && token == visible_seq_len - 1;
+      encoded_plan_row[pos] = static_cast<int16_t>(is_current_token ? slot + 1 : -(slot + 1));
+    }
+    miss_slots_row[miss_idx] = slot;
+    assigned_miss_slots[miss_idx] = slot;
+    miss_count[logical_row] = miss_idx + 1;
+  }
+
+  int32_t write_pos = 0;
+  for (int32_t idx = assign_count; idx < evictable_count; ++idx) {
+    lru_slots_row[write_pos] = evictable_slots[idx];
+    ++write_pos;
+  }
+  for (int32_t idx = 0; idx < assign_count; ++idx) {
+    lru_slots_row[write_pos] = assigned_miss_slots[idx];
+    ++write_pos;
+  }
+  for (int32_t idx = 0; idx < hit_count; ++idx) {
+    lru_slots_row[write_pos] = hit_slots[idx];
+    ++write_pos;
+  }
+  if (current_token_slots != nullptr) {
+    current_token_slots[logical_row] = physical_row * capacity + current_token_slot;
+  }
+}
+
+HOT_FUNCTION void lru_resident_compact_impl(
+    uintptr_t req_ids_ptr, uintptr_t last_req_ids_ptr, uintptr_t topk_indices_ptr, uintptr_t stable_prefix_lens_ptr,
+    uintptr_t slot_to_token_ptr, uintptr_t lru_slots_ptr, uintptr_t current_slots_ptr, uintptr_t miss_count_ptr,
+    uintptr_t miss_tokens_ptr, uintptr_t miss_slots_ptr, uintptr_t token_mark_workspace_ptr,
+    uintptr_t token_pos_workspace_ptr, uintptr_t slot_workspace_ptr, uintptr_t miss_position_workspace_ptr,
+    uintptr_t epochs_ptr, int64_t num_reqs, int64_t topk, int64_t capacity, int64_t max_token,
+    int64_t workspace_threads, int64_t requested_threads, uintptr_t encoded_plan_ptr, int64_t encoded_plan_stride,
+    uintptr_t physical_row_workspace_ptr, int64_t physical_row_capacity, uintptr_t visible_seq_lens_ptr) {
+  if (num_reqs <= 0 || topk <= 0 || capacity <= 0 || max_token <= 0 || physical_row_capacity < num_reqs) {
+    return;
+  }
+
+  auto* RESTRICT req_ids = reinterpret_cast<int64_t*>(req_ids_ptr);
+  auto* RESTRICT last_req_ids = reinterpret_cast<int64_t*>(last_req_ids_ptr);
+  auto* RESTRICT topk_indices = reinterpret_cast<int32_t*>(topk_indices_ptr);
+  auto* RESTRICT stable_prefix_lens = reinterpret_cast<int32_t*>(stable_prefix_lens_ptr);
+  auto* RESTRICT slot_to_token = reinterpret_cast<int32_t*>(slot_to_token_ptr);
+  auto* RESTRICT lru_slots = reinterpret_cast<int32_t*>(lru_slots_ptr);
+  auto* RESTRICT current_slots = reinterpret_cast<int32_t*>(current_slots_ptr);
+  auto* RESTRICT miss_count = reinterpret_cast<int32_t*>(miss_count_ptr);
+  auto* RESTRICT miss_tokens = reinterpret_cast<int32_t*>(miss_tokens_ptr);
+  auto* RESTRICT miss_slots = reinterpret_cast<int32_t*>(miss_slots_ptr);
+  auto* RESTRICT token_mark_workspace = reinterpret_cast<int32_t*>(token_mark_workspace_ptr);
+  auto* RESTRICT token_pos_workspace = reinterpret_cast<int32_t*>(token_pos_workspace_ptr);
+  auto* RESTRICT slot_workspace = reinterpret_cast<int32_t*>(slot_workspace_ptr);
+  auto* RESTRICT miss_position_workspace = reinterpret_cast<int32_t*>(miss_position_workspace_ptr);
+  auto* RESTRICT epochs = reinterpret_cast<int32_t*>(epochs_ptr);
+  auto* RESTRICT encoded_plan = reinterpret_cast<int16_t*>(encoded_plan_ptr);
+  auto* RESTRICT physical_row_workspace = reinterpret_cast<int32_t*>(physical_row_workspace_ptr);
+
+  const int num_reqs_int = static_cast<int>(num_reqs);
+  const int topk_int = static_cast<int>(topk);
+  const int capacity_int = static_cast<int>(capacity);
+  const int max_token_int = static_cast<int>(max_token);
+  const int physical_row_capacity_int = static_cast<int>(physical_row_capacity);
+  int32_t* RESTRICT logical_to_physical = physical_row_workspace;
+  int32_t* RESTRICT physical_row_used =
+      physical_row_workspace == nullptr ? nullptr : physical_row_workspace + physical_row_capacity_int;
+  int32_t* RESTRICT current_token_slots =
+      physical_row_workspace == nullptr ? nullptr
+                                        : physical_row_workspace + static_cast<int64_t>(physical_row_capacity_int) * 2;
+  const int32_t* RESTRICT visible_seq_lens = reinterpret_cast<int32_t*>(visible_seq_lens_ptr);
+  if (logical_to_physical == nullptr) {
+    physical_row_capacity = num_reqs;
+  } else {
+    std::fill(logical_to_physical, logical_to_physical + num_reqs_int, -1);
+    std::fill(physical_row_used, physical_row_used + physical_row_capacity_int, 0);
+    for (int logical_row = 0; logical_row < num_reqs_int; ++logical_row) {
+      for (int physical_row = 0; physical_row < physical_row_capacity_int; ++physical_row) {
+        if (physical_row_used[physical_row] == 0 && last_req_ids[physical_row] == req_ids[logical_row]) {
+          logical_to_physical[logical_row] = physical_row;
+          physical_row_used[physical_row] = 1;
+          break;
+        }
+      }
+    }
+    for (int logical_row = 0; logical_row < num_reqs_int; ++logical_row) {
+      if (logical_to_physical[logical_row] >= 0) {
+        continue;
+      }
+      int physical_row = -1;
+      for (int candidate = 0; candidate < physical_row_capacity_int; ++candidate) {
+        if (physical_row_used[candidate] == 0 && last_req_ids[candidate] == -1) {
+          physical_row = candidate;
+          break;
+        }
+      }
+      if (physical_row < 0) {
+        for (int candidate = 0; candidate < physical_row_capacity_int; ++candidate) {
+          if (physical_row_used[candidate] == 0) {
+            physical_row = candidate;
+            break;
+          }
+        }
+      }
+      if (physical_row < 0) {
+        return;
+      }
+      logical_to_physical[logical_row] = physical_row;
+      physical_row_used[physical_row] = 1;
+    }
+  }
+  const int active_threads = choose_lru_resident_threads(num_reqs_int, static_cast<int>(workspace_threads),
+                                                         static_cast<int>(requested_threads));
+
+  if (active_threads == 1) {
+    for (int row = 0; row < num_reqs_int; ++row) {
+      const int physical_row = logical_to_physical == nullptr ? row : logical_to_physical[row];
+      process_one_lru_resident_row(row, physical_row, topk_int, capacity_int, max_token_int, req_ids, last_req_ids,
+                                   topk_indices, stable_prefix_lens, slot_to_token, lru_slots, current_slots,
+                                   miss_count, miss_tokens, miss_slots, token_mark_workspace, token_pos_workspace,
+                                   slot_workspace, miss_position_workspace, epochs, current_token_slots, encoded_plan,
+                                   static_cast<int32_t>(encoded_plan_stride), logical_to_physical != nullptr,
+                                   visible_seq_lens);
+    }
+    return;
+  }
+
+#pragma omp parallel num_threads(active_threads)
+  {
+    const int thread_id = omp_get_thread_num();
+    int32_t* RESTRICT token_mark = token_mark_workspace + static_cast<int64_t>(thread_id) * max_token_int;
+    int32_t* RESTRICT token_pos = token_pos_workspace + static_cast<int64_t>(thread_id) * max_token_int;
+    int32_t* RESTRICT slots = slot_workspace + static_cast<int64_t>(thread_id) * capacity_int * 3;
+    int32_t* RESTRICT miss_positions = miss_position_workspace + static_cast<int64_t>(thread_id) * topk_int;
+    int32_t* RESTRICT epoch = epochs + thread_id;
+    for (int row = thread_id; row < num_reqs_int; row += active_threads) {
+      const int physical_row = logical_to_physical == nullptr ? row : logical_to_physical[row];
+      process_one_lru_resident_row(row, physical_row, topk_int, capacity_int, max_token_int, req_ids, last_req_ids,
+                                   topk_indices, stable_prefix_lens, slot_to_token, lru_slots, current_slots,
+                                   miss_count, miss_tokens, miss_slots, token_mark, token_pos, slots, miss_positions,
+                                   epoch, current_token_slots, encoded_plan, static_cast<int32_t>(encoded_plan_stride),
+                                   logical_to_physical != nullptr, visible_seq_lens);
+    }
+  }
+}
+
+HOT_FUNCTION void lru_resident_compact(int64_t req_ids_ptr, int64_t last_req_ids_ptr, int64_t topk_indices_ptr,
+                                       int64_t stable_prefix_lens_ptr, int64_t slot_to_token_ptr,
+                                       int64_t lru_slots_ptr, int64_t current_slots_ptr, int64_t miss_count_ptr,
+                                       int64_t miss_tokens_ptr, int64_t miss_slots_ptr,
+                                       int64_t token_mark_workspace_ptr, int64_t token_pos_workspace_ptr,
+                                       int64_t slot_workspace_ptr, int64_t miss_position_workspace_ptr,
+                                       int64_t epochs_ptr, int64_t num_reqs, int64_t topk, int64_t capacity,
+                                       int64_t max_token, int64_t workspace_threads, int64_t requested_threads) {
+  lru_resident_compact_impl(req_ids_ptr, last_req_ids_ptr, topk_indices_ptr, stable_prefix_lens_ptr, slot_to_token_ptr,
+                            lru_slots_ptr, current_slots_ptr, miss_count_ptr, miss_tokens_ptr, miss_slots_ptr,
+                            token_mark_workspace_ptr, token_pos_workspace_ptr, slot_workspace_ptr,
+                            miss_position_workspace_ptr, epochs_ptr, num_reqs, topk, capacity, max_token,
+                            workspace_threads, requested_threads, 0, 0, 0, num_reqs, 0);
+}
+
+HOT_FUNCTION void lru_resident_compact_with_plan_stable_rows(
+    int64_t req_ids_ptr, int64_t last_req_ids_ptr, int64_t topk_indices_ptr, int64_t stable_prefix_lens_ptr,
+    int64_t slot_to_token_ptr, int64_t lru_slots_ptr, int64_t current_slots_ptr, int64_t miss_count_ptr,
+    int64_t miss_tokens_ptr, int64_t miss_slots_ptr, int64_t token_mark_workspace_ptr,
+    int64_t token_pos_workspace_ptr, int64_t slot_workspace_ptr, int64_t miss_position_workspace_ptr,
+    int64_t epochs_ptr, int64_t physical_row_workspace_ptr, int64_t physical_row_capacity,
+    int64_t encoded_plan_ptr, int64_t encoded_plan_stride, int64_t num_reqs, int64_t topk, int64_t capacity,
+    int64_t max_token, int64_t workspace_threads, int64_t requested_threads, int64_t visible_seq_lens_ptr) {
+  TORCH_CHECK(physical_row_workspace_ptr != 0, "stable-row planner requires physical_row_workspace_ptr");
+  TORCH_CHECK(physical_row_capacity >= num_reqs, "stable-row planner capacity must cover all logical rows");
+  TORCH_CHECK(physical_row_capacity <= std::numeric_limits<int16_t>::max(),
+              "stable-row planner capacity exceeds int16 row encoding");
+  TORCH_CHECK(encoded_plan_ptr != 0, "stable-row planner requires encoded_plan_ptr");
+  TORCH_CHECK(encoded_plan_stride >= topk + 7, "stable-row encoded_plan_stride must include control row");
+  TORCH_CHECK(capacity <= std::numeric_limits<int16_t>::max(), "resident capacity exceeds int16 plan encoding");
+  TORCH_CHECK(visible_seq_lens_ptr != 0, "stable-row planner requires visible_seq_lens_ptr");
+  lru_resident_compact_impl(req_ids_ptr, last_req_ids_ptr, topk_indices_ptr, stable_prefix_lens_ptr, slot_to_token_ptr,
+                            lru_slots_ptr, current_slots_ptr, miss_count_ptr, miss_tokens_ptr, miss_slots_ptr,
+                            token_mark_workspace_ptr, token_pos_workspace_ptr, slot_workspace_ptr,
+                            miss_position_workspace_ptr, epochs_ptr, num_reqs, topk, capacity, max_token,
+                            workspace_threads, requested_threads, encoded_plan_ptr, encoded_plan_stride,
+                            physical_row_workspace_ptr, physical_row_capacity, visible_seq_lens_ptr);
+}
+
+int64_t compute_lru_resident_addrs(const at::Tensor& miss_count, const at::Tensor& miss_tokens,
+                                   const at::Tensor& miss_slots, const at::Tensor& block_table,
+                                   const int64_t block_size, const int64_t token_size_bytes_k,
+                                   const int64_t token_size_bytes_v, const int64_t gvas_k_base,
+                                   const int64_t gvas_v_base, const int64_t addr_k_base, const int64_t addr_v_base,
+                                   const int64_t resident_capacity, const int64_t max_num_threads,
+                                   at::Tensor& gvas_buffer, at::Tensor& addr_buffer, at::Tensor& size_buffer,
+                                   at::Tensor& num_tokens_buffer) {
+  const int32_t num_reqs = miss_tokens.size(0);
+  const int32_t topk = miss_tokens.size(1);
+  const int32_t max_num_tokens_to_load = num_reqs * topk;
+  const int32_t max_num_blocks = block_table.size(1);
+  const int64_t block_size_bytes_k = block_size * token_size_bytes_k;
+  const int64_t block_size_bytes_v = block_size * token_size_bytes_v;
+  TORCH_CHECK(miss_count.size(0) >= num_reqs, "miss_count size not enough for loading.");
+  TORCH_CHECK(miss_slots.size(0) == num_reqs && miss_slots.size(1) == topk,
+              "miss_slots shape should match miss_tokens.");
+  TORCH_CHECK(gvas_buffer.size(0) >= max_num_tokens_to_load * 2, "gvas_buffer size not enough for loading.");
+  TORCH_CHECK(addr_buffer.size(0) >= max_num_tokens_to_load * 2, "addr_buffer size not enough for loading.");
+  TORCH_CHECK(size_buffer.size(0) >= max_num_tokens_to_load * 2, "size_buffer size not enough for loading.");
+  TORCH_CHECK(miss_count.scalar_type() == at::kInt, "miss_count wrong dtype, should be int32.");
+  TORCH_CHECK(miss_tokens.scalar_type() == at::kInt, "miss_tokens wrong dtype, should be int32.");
+  TORCH_CHECK(miss_slots.scalar_type() == at::kInt, "miss_slots wrong dtype, should be int32.");
+  TORCH_CHECK(block_table.scalar_type() == at::kInt, "block_table wrong dtype, should be int32.");
+  TORCH_CHECK(gvas_buffer.scalar_type() == at::kLong, "gvas_buffer wrong dtype, should be int64.");
+  TORCH_CHECK(addr_buffer.scalar_type() == at::kLong, "addr_buffer wrong dtype, should be int64.");
+  TORCH_CHECK(size_buffer.scalar_type() == at::kInt, "size_buffer wrong dtype, should be int32.");
+
+  const int32_t* miss_count_ptr = static_cast<int32_t*>(miss_count.data_ptr());
+  const int32_t* miss_tokens_ptr = static_cast<int32_t*>(miss_tokens.data_ptr());
+  const int32_t* miss_slots_ptr = static_cast<int32_t*>(miss_slots.data_ptr());
+  const int32_t* block_table_ptr = static_cast<int32_t*>(block_table.data_ptr());
+  int64_t* gvas_buffer_ptr = static_cast<int64_t*>(gvas_buffer.data_ptr());
+  int64_t* addr_buffer_ptr = static_cast<int64_t*>(addr_buffer.data_ptr());
+  int32_t* size_buffer_ptr = static_cast<int32_t*>(size_buffer.data_ptr());
+  int32_t* num_tokens_buffer_ptr = static_cast<int32_t*>(num_tokens_buffer.data_ptr());
+
+  int n_threads = static_cast<int>(std::min(static_cast<int64_t>(num_reqs), max_num_threads));
+  n_threads = std::max(n_threads, 1);
+
+  std::vector<int32_t> num_tokens_to_load_req(num_reqs);
+#pragma omp parallel for num_threads(n_threads)
+  for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
+    int32_t count = miss_count_ptr[req_idx];
+    count = std::max(count, 0);
+    count = std::min(count, topk);
+    num_tokens_to_load_req[req_idx] = count;
+  }
+  int32_t num_tokens_to_load_sum = std::accumulate(num_tokens_to_load_req.begin(), num_tokens_to_load_req.end(), 0);
+  std::vector<int32_t> req_start_locs(num_reqs);
+  int32_t cumsum = 0;
+  for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
+    req_start_locs[req_idx] = cumsum;
+    cumsum += num_tokens_to_load_req[req_idx];
+  }
+
+#pragma omp parallel for num_threads(n_threads)
+  for (size_t req_idx = 0; req_idx < num_reqs; ++req_idx) {
+    int32_t req_start_loc_k = req_start_locs[req_idx];
+    int32_t req_start_loc_v = num_tokens_to_load_sum + req_start_loc_k;
+    for (int32_t idx = 0; idx < num_tokens_to_load_req[req_idx]; ++idx) {
+      const int32_t token = miss_tokens_ptr[req_idx * topk + idx];
+      const int32_t slot = miss_slots_ptr[req_idx * topk + idx];
+      if (token < 0 || slot < 0 || slot >= resident_capacity) {
+        continue;
+      }
+      const int32_t block_id = token / static_cast<int32_t>(block_size);
+      if (block_id < 0 || block_id >= max_num_blocks) {
+        continue;
+      }
+      const int32_t offset_in_block = token % static_cast<int32_t>(block_size);
+      const int32_t block_indice = block_table_ptr[req_idx * max_num_blocks + block_id];
+      const int64_t gvas_k = gvas_k_base + block_indice * block_size_bytes_k + offset_in_block * token_size_bytes_k;
+      const int64_t gvas_v = gvas_v_base + block_indice * block_size_bytes_v + offset_in_block * token_size_bytes_v;
+      const int64_t addr_k = addr_k_base + (req_idx * resident_capacity + slot) * token_size_bytes_k;
+      const int64_t addr_v = addr_v_base + (req_idx * resident_capacity + slot) * token_size_bytes_v;
+      gvas_buffer_ptr[req_start_loc_k + idx] = gvas_k;
+      gvas_buffer_ptr[req_start_loc_v + idx] = gvas_v;
+      addr_buffer_ptr[req_start_loc_k + idx] = addr_k;
+      addr_buffer_ptr[req_start_loc_v + idx] = addr_v;
+    }
+  }
+
+  std::fill_n(size_buffer_ptr, num_tokens_to_load_sum, token_size_bytes_k);
+  std::fill_n(&(size_buffer_ptr[num_tokens_to_load_sum]), num_tokens_to_load_sum, token_size_bytes_v);
+
+  num_tokens_buffer_ptr[0] = num_tokens_to_load_sum * 2;
+  return num_tokens_to_load_sum;
+}
+
+namespace {
+
+struct LruResidentCompactWithPlanPayload {
+  uintptr_t req_ids_ptr;
+  uintptr_t last_req_ids_ptr;
+  uintptr_t topk_indices_ptr;
+  uintptr_t stable_prefix_lens_ptr;
+  uintptr_t slot_to_token_ptr;
+  uintptr_t lru_slots_ptr;
+  uintptr_t current_slots_ptr;
+  uintptr_t miss_count_ptr;
+  uintptr_t miss_tokens_ptr;
+  uintptr_t miss_slots_ptr;
+  uintptr_t token_mark_workspace_ptr;
+  uintptr_t token_pos_workspace_ptr;
+  uintptr_t slot_workspace_ptr;
+  uintptr_t miss_position_workspace_ptr;
+  uintptr_t epochs_ptr;
+  uintptr_t encoded_plan_ptr;
+  int64_t encoded_plan_stride;
+  uintptr_t physical_row_workspace_ptr;
+  int64_t physical_row_capacity;
+  uintptr_t visible_seq_lens_ptr;
+  int64_t num_reqs;
+  int64_t topk;
+  int64_t capacity;
+  int64_t max_token;
+  int64_t workspace_threads;
+  int64_t requested_threads;
+  bool delete_after_run;
+};
+
+struct LruResidentCompactGraphPayloadRegistry {
+  aclmdlRI model_ri;
+  std::vector<std::unique_ptr<LruResidentCompactWithPlanPayload>> payloads;
+};
+
+std::mutex& lru_resident_compact_graph_registry_mutex() {
+  static auto* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::unordered_map<aclmdlRI, std::unique_ptr<LruResidentCompactGraphPayloadRegistry>>&
+lru_resident_compact_graph_registries() {
+  static auto* registries = new std::unordered_map<aclmdlRI, std::unique_ptr<LruResidentCompactGraphPayloadRegistry>>();
+  return *registries;
+}
+
+void delete_lru_resident_compact_graph_payloads(void* args) noexcept {
+  auto* registry = static_cast<LruResidentCompactGraphPayloadRegistry*>(args);
+  std::unique_ptr<LruResidentCompactGraphPayloadRegistry> owned_registry;
+  {
+    std::lock_guard<std::mutex> lock(lru_resident_compact_graph_registry_mutex());
+    auto& registries = lru_resident_compact_graph_registries();
+    const auto it = registries.find(registry->model_ri);
+    if (it != registries.end() && it->second.get() == registry) {
+      owned_registry = std::move(it->second);
+      registries.erase(it);
+    }
+  }
+}
+
+LruResidentCompactWithPlanPayload* retain_lru_resident_compact_graph_payload(
+    aclmdlRI model_ri, std::unique_ptr<LruResidentCompactWithPlanPayload> payload) {
+  auto* raw_payload = payload.get();
+  std::lock_guard<std::mutex> lock(lru_resident_compact_graph_registry_mutex());
+  auto& registries = lru_resident_compact_graph_registries();
+  auto it = registries.find(model_ri);
+  if (it == registries.end()) {
+    auto registry = std::make_unique<LruResidentCompactGraphPayloadRegistry>();
+    registry->model_ri = model_ri;
+    auto* raw_registry = registry.get();
+    it = registries.emplace(model_ri, std::move(registry)).first;
+    const aclError register_ret =
+        aclmdlRIDestroyRegisterCallback(model_ri, delete_lru_resident_compact_graph_payloads, raw_registry);
+    if (register_ret != ACL_SUCCESS) {
+      registries.erase(it);
+    }
+    TORCH_CHECK(
+        register_ret == ACL_SUCCESS,
+        "failed to bind stable-row external LRU payload registry to graph lifetime, error code: ", register_ret);
+  }
+  it->second->payloads.push_back(std::move(payload));
+  return raw_payload;
+}
+
+void lru_resident_compact_with_plan_callback(void* args) noexcept {
+  auto* payload = static_cast<LruResidentCompactWithPlanPayload*>(args);
+  lru_resident_compact_impl(
+      payload->req_ids_ptr, payload->last_req_ids_ptr, payload->topk_indices_ptr, payload->stable_prefix_lens_ptr,
+      payload->slot_to_token_ptr, payload->lru_slots_ptr, payload->current_slots_ptr, payload->miss_count_ptr,
+      payload->miss_tokens_ptr, payload->miss_slots_ptr, payload->token_mark_workspace_ptr,
+      payload->token_pos_workspace_ptr, payload->slot_workspace_ptr, payload->miss_position_workspace_ptr,
+      payload->epochs_ptr, payload->num_reqs, payload->topk, payload->capacity, payload->max_token,
+      payload->workspace_threads, payload->requested_threads, payload->encoded_plan_ptr, payload->encoded_plan_stride,
+      payload->physical_row_workspace_ptr, payload->physical_row_capacity, payload->visible_seq_lens_ptr);
+  if (payload->delete_after_run) {
+    delete payload;
+  }
+}
+
+}  // namespace
+
+void enqueue_lru_resident_compact_with_plan_stable_rows(
+    int64_t req_ids_ptr, int64_t last_req_ids_ptr, int64_t topk_indices_ptr, int64_t stable_prefix_lens_ptr,
+    int64_t slot_to_token_ptr, int64_t lru_slots_ptr, int64_t current_slots_ptr, int64_t miss_count_ptr,
+    int64_t miss_tokens_ptr, int64_t miss_slots_ptr, int64_t token_mark_workspace_ptr,
+    int64_t token_pos_workspace_ptr, int64_t slot_workspace_ptr, int64_t miss_position_workspace_ptr,
+    int64_t epochs_ptr, int64_t physical_row_workspace_ptr, int64_t physical_row_capacity,
+    int64_t encoded_plan_ptr, int64_t encoded_plan_stride, int64_t num_reqs, int64_t topk, int64_t capacity,
+    int64_t max_token, int64_t workspace_threads, int64_t requested_threads, int64_t visible_seq_lens_ptr) {
+  TORCH_CHECK(physical_row_workspace_ptr != 0, "stable-row planner requires physical_row_workspace_ptr");
+  TORCH_CHECK(physical_row_capacity >= num_reqs, "stable-row planner capacity must cover all logical rows");
+  TORCH_CHECK(physical_row_capacity <= std::numeric_limits<int16_t>::max(),
+              "stable-row planner capacity exceeds int16 row encoding");
+  TORCH_CHECK(encoded_plan_ptr != 0, "stable-row planner requires encoded_plan_ptr");
+  TORCH_CHECK(encoded_plan_stride >= topk + 7, "stable-row encoded_plan_stride must include control row");
+  TORCH_CHECK(capacity <= std::numeric_limits<int16_t>::max(), "resident capacity exceeds int16 plan encoding");
+  TORCH_CHECK(visible_seq_lens_ptr != 0, "stable-row planner requires visible_seq_lens_ptr");
+
+  const auto stream = c10_npu::getCurrentNPUStream().stream();
+  aclmdlRICaptureStatus capture_status = ACL_MODEL_RI_CAPTURE_STATUS_NONE;
+  aclmdlRI model_ri = nullptr;
+  const aclError capture_ret = aclmdlRICaptureGetInfo(stream, &capture_status, &model_ri);
+  TORCH_CHECK(capture_ret == ACL_SUCCESS,
+              "aclmdlRICaptureGetInfo for stable-row external LRU plan failed, error code: ", capture_ret);
+  TORCH_CHECK(capture_status != ACL_MODEL_RI_CAPTURE_STATUS_INVALIDATED,
+              "stable-row external LRU plan cannot enqueue on an invalidated graph capture");
+  const bool graph_lifetime = capture_status == ACL_MODEL_RI_CAPTURE_STATUS_ACTIVE;
+  TORCH_CHECK(!graph_lifetime || model_ri != nullptr, "active graph capture returned a null model runtime instance");
+
+  auto payload =
+      std::make_unique<LruResidentCompactWithPlanPayload>(LruResidentCompactWithPlanPayload{
+          static_cast<uintptr_t>(req_ids_ptr),
+          static_cast<uintptr_t>(last_req_ids_ptr),
+          static_cast<uintptr_t>(topk_indices_ptr),
+          static_cast<uintptr_t>(stable_prefix_lens_ptr),
+          static_cast<uintptr_t>(slot_to_token_ptr),
+          static_cast<uintptr_t>(lru_slots_ptr),
+          static_cast<uintptr_t>(current_slots_ptr),
+          static_cast<uintptr_t>(miss_count_ptr),
+          static_cast<uintptr_t>(miss_tokens_ptr),
+          static_cast<uintptr_t>(miss_slots_ptr),
+          static_cast<uintptr_t>(token_mark_workspace_ptr),
+          static_cast<uintptr_t>(token_pos_workspace_ptr),
+          static_cast<uintptr_t>(slot_workspace_ptr),
+          static_cast<uintptr_t>(miss_position_workspace_ptr),
+          static_cast<uintptr_t>(epochs_ptr),
+          static_cast<uintptr_t>(encoded_plan_ptr),
+          encoded_plan_stride,
+          static_cast<uintptr_t>(physical_row_workspace_ptr),
+          physical_row_capacity,
+          static_cast<uintptr_t>(visible_seq_lens_ptr),
+          num_reqs,
+          topk,
+          capacity,
+          max_token,
+          workspace_threads,
+          requested_threads,
+          !graph_lifetime});
+  auto* raw_payload = payload.get();
+  if (graph_lifetime) {
+    raw_payload = retain_lru_resident_compact_graph_payload(model_ri, std::move(payload));
+  }
+  const aclError ret = aclrtLaunchHostFunc(stream, lru_resident_compact_with_plan_callback, raw_payload);
+  if (ret == ACL_SUCCESS && !graph_lifetime) {
+    payload.release();
+  }
+  TORCH_CHECK(ret == ACL_SUCCESS, "aclrtLaunchHostFunc for stable-row external LRU plan failed, error code: ", ret);
+}
+
+at::Tensor restore_tensor(uintptr_t ptr_val, const std::vector<int64_t>& shape,
+                          torch::ScalarType dtype = torch::kBFloat16) {
+  if (ptr_val == 0) {
+    return at::Tensor();
+  }
+  auto options = torch::TensorOptions().dtype(dtype).device(torch::kCPU);
+  return torch::from_blob(reinterpret_cast<void*>(ptr_val), shape, options);
+}
+
+#endif
 
 } // namespace vllm_ascend
 
@@ -1935,6 +2759,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "chunk_fwd_o(Tensor q, Tensor k, Tensor v, Tensor h, float scale, *, Tensor? g=None, Tensor? g_gamma=None, int[]? cu_seqlens=None, int[]? chunk_indices=None, int? chunk_size=None, bool? transpose_state_layout=False) -> Tensor"
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
+
+    ops.def(
+        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? safe_gate=False, float? lower_bound=None, bool? use_gate_in_kernel=False, Tensor? A_log=None, Tensor? dt_bias=None, bool? disable_recompute=False, bool? return_intermediate_states=False, bool? state_v_first=False) -> (Tensor o, Tensor? final_state, Tensor? gk, Tensor aqk, Tensor akk, Tensor? w, Tensor? u, Tensor? qg, Tensor? kg, Tensor? v_new, Tensor? h, Tensor? initial_state_out)"
+    );
+    ops.impl("chunk_kda_fwd", torch::kPrivateUse1, &vllm_ascend::chunk_kda_fwd);
+
+    ops.def(
+        "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
+    );
+    ops.impl("kda_gate_cumsum", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum);
+
+    ops.def(
+        "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
+    );
+    ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
 }
 #else
 // Pybind on other platform
@@ -1965,6 +2804,37 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "                               Tensor? g=None, "
         "                               Tensor? gk=None) -> Tensor");
     ops.impl("npu_recurrent_gated_delta_rule", torch::kPrivateUse1, &vllm_ascend::npu_recurrent_gated_delta_rule);
+
+    ops.def(
+        "recurrent_kda(Tensor query, Tensor key, Tensor value, Tensor gate, Tensor beta, "
+        "Tensor(a!) initial_state, Tensor cu_seqlens, Tensor ssm_state_indices, Tensor A_log, Tensor dt_bias, *, "
+        "Tensor? num_accepted_tokens=None, float scale=0.08838834764831845, "
+        "bool use_qk_l2norm_in_kernel=True, bool use_gate_in_kernel=True, "
+        "bool use_beta_sigmoid_in_kernel=False, bool allow_neg_eigval=False, "
+        "bool safe_gate=True, float lower_bound=-5.0) -> Tensor output");
+    ops.impl("recurrent_kda", torch::kPrivateUse1, &vllm_ascend::recurrent_kda);
+
+    ops.def(
+        "dequant_situ_quant(Tensor x, "
+        "                   *, Tensor? weight_scale=None, "
+        "                   Tensor? activation_scale=None, "
+        "                   Tensor? bias=None, "
+        "                   Tensor? quant_scale=None, "
+        "                   Tensor? quant_offset=None, "
+        "                   Tensor? group_index=None, "
+        "                   float beta=4.0, "
+        "                   float linear_beta=25.0, "
+        "                   bool activate_left=True, "
+        "                   str quant_mode=\"dynamic\") -> (Tensor y, Tensor scale)");
+    ops.impl("dequant_situ_quant", torch::kPrivateUse1, &vllm_ascend::dequant_situ_quant);
+
+    ops.def(
+        "situ_mx_quant(Tensor x, "
+        "              float beta=1.0, "
+        "              float linear_beta=0.0, "
+        "              bool activate_left=False, "
+        "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
+    ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
@@ -2006,11 +2876,92 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("swap_blocks", torch::kPrivateUse1, &vllm_ascend::swap_blocks);
 #endif
 
+    // npu_mla_prolog_v3: aligned with torch_npu; underlying aclnn op is MlaPrologV3 (950-only).
+    ops.def(
+        "npu_mla_prolog_v3(Tensor token_x, Tensor weight_dq, Tensor weight_uq_qr, Tensor weight_uk,"
+        "           Tensor weight_dkv_kr, Tensor rmsnorm_gamma_cq, Tensor rmsnorm_gamma_ckv,"
+        "           Tensor rope_sin, Tensor rope_cos, Tensor(a!) kv_cache, Tensor(b!) kr_cache, *,"
+        "           Tensor? cache_index=None, Tensor? dequant_scale_x=None,"
+        "           Tensor? dequant_scale_w_dq=None, Tensor? dequant_scale_w_uq_qr=None,"
+        "           Tensor? dequant_scale_w_dkv_kr=None, Tensor? quant_scale_ckv=None,"
+        "           Tensor? quant_scale_ckr=None, Tensor? smooth_scales_cq=None,"
+        "           Tensor? actual_seq_len=None, Tensor? k_nope_clip_alpha=None,"
+        "           float rmsnorm_epsilon_cq=1e-05, float rmsnorm_epsilon_ckv=1e-05,"
+        "           str cache_mode=\"PA_BSND\", bool query_norm_flag=False,"
+        "           int weight_quant_mode=0, int kv_cache_quant_mode=0, int query_quant_mode=0,"
+        "           int ckvkr_repo_mode=0, int quant_scale_repo_mode=0, int tile_size=128,"
+        "           float qc_qr_scale=1.0, float kc_scale=1.0)"
+        " -> (Tensor, Tensor, Tensor, Tensor, Tensor)");
+    ops.impl("npu_mla_prolog_v3", torch::kPrivateUse1, &vllm_ascend::npu_mla_prolog_v3);
+
     // swap_blocks_batch takes CPU tensors (int64 pointer/size arrays), not NPU
     // tensors, so dispatch must be registered on the CPU backend. The function
     // internally submits async memcpy on the current NPU stream.
     ops.def("swap_blocks_batch(Tensor x, Tensor y, Tensor z, int direction) -> ()");
     ops.impl("swap_blocks_batch", torch::kCPU, &vllm_ascend::swap_blocks_batch);
+
+#ifdef VLLM_ASCEND_ENABLE_SPARSE_KV_OFFLOAD
+    ops.def("sparse_kv_warmup_lru_resident_threads(int requested_threads) -> int");
+    ops.impl("sparse_kv_warmup_lru_resident_threads", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::warmup_lru_resident_threads);
+
+    ops.def("sparse_kv_lru_resident_compact(int req_ids_ptr, int last_req_ids_ptr, int topk_indices_ptr, "
+            "int stable_prefix_lens_ptr, int slot_to_token_ptr, int lru_slots_ptr, int current_slots_ptr, "
+            "int miss_count_ptr, int miss_tokens_ptr, int miss_slots_ptr, int token_mark_workspace_ptr, "
+            "int token_pos_workspace_ptr, int slot_workspace_ptr, int miss_position_workspace_ptr, "
+            "int epochs_ptr, int num_reqs, int topk, int capacity, int max_token, int workspace_threads, "
+            "int requested_threads) -> ()");
+    ops.impl("sparse_kv_lru_resident_compact", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::lru_resident_compact);
+
+    ops.def("sparse_kv_lru_resident_compact_with_plan_stable_rows(int req_ids_ptr, int last_req_ids_ptr, "
+            "int topk_indices_ptr, int stable_prefix_lens_ptr, int slot_to_token_ptr, int lru_slots_ptr, "
+            "int current_slots_ptr, int miss_count_ptr, int miss_tokens_ptr, int miss_slots_ptr, "
+            "int token_mark_workspace_ptr, int token_pos_workspace_ptr, int slot_workspace_ptr, "
+            "int miss_position_workspace_ptr, int epochs_ptr, int physical_row_workspace_ptr, "
+            "int physical_row_capacity, int encoded_plan_ptr, int encoded_plan_stride, int num_reqs, "
+            "int topk, int capacity, int max_token, int workspace_threads, int requested_threads, "
+            "int visible_seq_lens_ptr) -> ()");
+    ops.impl("sparse_kv_lru_resident_compact_with_plan_stable_rows", c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::lru_resident_compact_with_plan_stable_rows);
+
+    ops.def("sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows(int req_ids_ptr, int last_req_ids_ptr, "
+            "int topk_indices_ptr, int stable_prefix_lens_ptr, int slot_to_token_ptr, int lru_slots_ptr, "
+            "int current_slots_ptr, int miss_count_ptr, int miss_tokens_ptr, int miss_slots_ptr, "
+            "int token_mark_workspace_ptr, int token_pos_workspace_ptr, int slot_workspace_ptr, "
+            "int miss_position_workspace_ptr, int epochs_ptr, int physical_row_workspace_ptr, "
+            "int physical_row_capacity, int encoded_plan_ptr, int encoded_plan_stride, int num_reqs, "
+            "int topk, int capacity, int max_token, int workspace_threads, int requested_threads, "
+            "int visible_seq_lens_ptr) -> ()");
+    ops.impl("sparse_kv_enqueue_lru_resident_compact_with_plan_stable_rows",
+             c10::DispatchKey::CompositeExplicitAutograd,
+             &vllm_ascend::enqueue_lru_resident_compact_with_plan_stable_rows);
+
+    ops.def("sparse_kv_compute_lru_resident_addrs(Tensor miss_count, Tensor miss_tokens, Tensor miss_slots, "
+            "Tensor block_table, int block_size, int token_size_bytes_k, int token_size_bytes_v, "
+            "int gvas_k_base, int gvas_v_base, int addr_k_base, int addr_v_base, int resident_capacity, "
+            "int max_num_threads, Tensor(a!) gvas_buffer, Tensor(b!) addr_buffer, Tensor(c!) size_buffer, "
+            "Tensor(d!) num_tokens_buffer) -> int");
+    ops.impl("sparse_kv_compute_lru_resident_addrs", torch::kCPU,
+             &vllm_ascend::compute_lru_resident_addrs);
+
+    ops.def("sparse_kv_restore_bfloat16_tensor(int ptr_val, int[] shape) -> Tensor");
+    ops.impl("sparse_kv_restore_bfloat16_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             [](int64_t ptr_val, const std::vector<int64_t>& shape) {
+                 TORCH_CHECK(ptr_val != 0, "restore_bfloat16_tensor requires a non-zero pointer");
+                 auto options = torch::TensorOptions().dtype(torch::kBFloat16).device(torch::kCPU);
+                 return at::from_blob(reinterpret_cast<void*>(ptr_val), shape, options);
+             });
+
+    ops.def("sparse_kv_restore_int16_tensor(int ptr_val, int[] shape) -> Tensor");
+    ops.impl("sparse_kv_restore_int16_tensor", c10::DispatchKey::CompositeExplicitAutograd,
+             [](int64_t ptr_val, const std::vector<int64_t>& shape) {
+                 TORCH_CHECK(ptr_val != 0, "restore_int16_tensor requires a non-zero pointer");
+                 auto options = torch::TensorOptions().dtype(torch::kInt16).device(torch::kCPU);
+                 return at::from_blob(reinterpret_cast<void*>(ptr_val), shape, options);
+             });
+#endif
+
     ops.def("device_print(str msg) -> ()");
     ops.impl("device_print", c10::DispatchKey::CompositeExplicitAutograd,
              static_cast<void (*)(c10::string_view)>(&vllm_ascend::device_print));
@@ -2160,6 +3111,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         );
     ops.impl("npu_add_rms_norm_bias", torch::kPrivateUse1, &vllm_ascend::npu_add_rms_norm_bias);
 
+    ops.def(
+        "npu_rms_norm_cast(Tensor x, Tensor gamma, float epsilon=1e-6)"
+        " -> (Tensor y, Tensor y_fp32)"
+    );
+    ops.impl("npu_rms_norm_cast", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_cast);
+
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
 
@@ -2275,6 +3232,26 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_vllm_quant_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_vllm_quant_lightning_indexer_npu);
 
     ops.def(
+        "npu_quant_lightning_indexer_v2("
+            "Tensor query, Tensor key, Tensor weights, "
+            "Tensor query_dequant_scale, Tensor key_dequant_scale, "
+            "int topk, int quant_mode, *, "
+            "Tensor? cu_seqlens_q=None, "
+            "Tensor? cu_seqlens_k=None, "
+            "Tensor? seqused_q=None, "
+            "Tensor? seqused_k=None, "
+            "Tensor? cmp_residual_k=None, "
+            "Tensor? block_table=None, "
+            "Tensor? output_idx_offset=None, "
+            "Tensor? metadata=None, "
+            "int max_seqlen_q=-1, "
+            "str layout_q=\"TND\", str layout_k=\"PA_BBND\", "
+            "int mask_mode=3, int cmp_ratio=4, int return_value=0"
+        ") -> (Tensor sparse_indices, Tensor sparse_values)"
+        );
+    ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_v2_npu);
+
+    ops.def(
         "npu_sparse_attn_sharedkv("
             "Tensor q, *, "
             "Tensor? ori_kv=None, "
@@ -2355,6 +3332,30 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor metadata)"
         );
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", torch::kPrivateUse1, &vllm_ascend::npu_vllm_quant_lightning_indexer_metadata_npu);
+
+    ops.def(
+        "npu_quant_lightning_indexer_v2_metadata("
+            "int num_heads_q, "
+            "int num_heads_k, "
+            "int head_dim, "
+            "int topk, "
+            "int quant_mode, *, "
+            "Tensor? cu_seqlens_q=None, "
+            "Tensor? cu_seqlens_k=None, "
+            "Tensor? seqused_q=None, "
+            "Tensor? seqused_k=None, "
+            "Tensor? cmp_residual_k=None, "
+            "int batch_size=0, "
+            "int max_seqlen_q=-1, "
+            "int max_seqlen_k=-1, "
+            "str layout_q=\"TND\", "
+            "str layout_k=\"PA_BBND\", "
+            "int mask_mode=3, "
+            "int cmp_ratio=4, "
+            "str device=\"npu\""
+        ") -> (Tensor metadata)"
+        );
+    ops.impl("npu_quant_lightning_indexer_v2_metadata", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_v2_metadata_npu);
 
     ops.def(
           "npu_hc_post("
@@ -2513,11 +3514,11 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     ops.impl("npu_dequant_swiglu_quant", torch::kPrivateUse1, &vllm_ascend::npu_dequant_swiglu_quant);
 
     ops.def(
-        "npu_scatter_nd_update_v2("
+        "npu_scatter_nd_update_sk("
                 "Tensor(a!) var, Tensor indices, Tensor update"
             ") -> ()"
     );
-    ops.impl("npu_scatter_nd_update_v2", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_v2);
+    ops.impl("npu_scatter_nd_update_sk", torch::kPrivateUse1, &vllm_ascend::npu_scatter_nd_update_sk);
 
     // This operator is planned to be integrated into PTA in the near future.
     // Once that happens, the implementation in csrc will be removed.
@@ -2541,6 +3542,21 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("chunk_fwd_o", torch::kPrivateUse1, &vllm_ascend::chunk_fwd_o);
 
+    ops.def(
+        "chunk_kda_fwd(Tensor q, Tensor k, Tensor v, Tensor g, Tensor beta, float scale, int chunk_size, str layout=\"BSND\", *, Tensor? initial_state=None, bool? output_final_state=False, int[]? cu_seqlens=None, int[]? chunk_indices=None, bool? safe_gate=False, float? lower_bound=None, bool? use_gate_in_kernel=False, Tensor? A_log=None, Tensor? dt_bias=None, bool? disable_recompute=False, bool? return_intermediate_states=False, bool? state_v_first=False) -> (Tensor o, Tensor? final_state, Tensor? gk, Tensor aqk, Tensor akk, Tensor? w, Tensor? u, Tensor? qg, Tensor? kg, Tensor? v_new, Tensor? h, Tensor? initial_state_out)"
+    );
+    ops.impl("chunk_kda_fwd", torch::kPrivateUse1, &vllm_ascend::chunk_kda_fwd);
+
+    ops.def(
+        "kda_gate_cumsum(Tensor g, int chunk_size, *, Tensor? A_log=None, Tensor? dt_bias=None, int[]? cu_seqlens=None, bool? use_gate_in_kernel=False, bool? safe_gate=False, float? lower_bound=-5.0, str layout=\"BSND\") -> Tensor"
+    );
+    ops.impl("kda_gate_cumsum", torch::kPrivateUse1, &vllm_ascend::kda_gate_cumsum);
+
+    ops.def(
+        "kda_layout_swap12(Tensor x, *, Tensor? dependency=None) -> Tensor"
+    );
+    ops.impl("kda_layout_swap12", torch::kPrivateUse1, &vllm_ascend::kda_layout_swap12);
+
     //store_kv_block
      ops.def(
         "store_kv_block_metadata(Tensor slot_mapping_npu, Tensor group_len, Tensor group_key_idx, Tensor group_key_cache_idx, int block_size=0)"
@@ -2563,7 +3579,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
         "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
         "int num_key_value_heads=1, float scale_value=1.0, "
-        "int block_size=128, int top_k=16, int inner_precise=0) -> Tensor"
+        "int block_size=128, int top_k=16, int inner_precise=0, "
+        "ScalarType? attention_out_dtype=None) -> Tensor"
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);
@@ -2578,5 +3595,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
     );
     ops.impl("npu_msa_index_score", torch::kPrivateUse1,
              &vllm_ascend::npu_msa_index_score);
+
+    ops.def(
+        "npu_fused_sparse_attention_overlap(Tensor query, Tensor(a!) selection_k_rope, "
+        "Tensor(b!) selection_kv_cache, Tensor(c!) selection_kv_block_table, "
+        "Tensor(d!) selection_kv_block_status, Tensor(e!) selection_membership_map, "
+        "Tensor selection_topk_indices, "
+        "Tensor full_k_rope, Tensor full_kv_cache, Tensor full_kv_block_table, "
+        "Tensor full_kv_actual_seq, Tensor full_q_actual_seq, "
+        "float scale_value, int sparse_block_size, int selection_topk_block_size, *, "
+        "str layout_query='TND', str layout_kv='PA_BSND', int sparse_mode=3) -> Tensor"
+    );
+    ops.impl("npu_fused_sparse_attention_overlap", torch::kPrivateUse1,
+             &vllm_ascend::npu_fused_sparse_attention_overlap);
 }
 #endif

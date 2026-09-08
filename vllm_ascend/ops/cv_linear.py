@@ -4,7 +4,7 @@
 import torch
 import torch_npu
 
-from vllm_ascend.quantization.methods.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 
 
 class CVLinearWrapper:

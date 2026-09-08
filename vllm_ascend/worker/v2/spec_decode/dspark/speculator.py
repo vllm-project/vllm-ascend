@@ -27,6 +27,11 @@ from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
     DSparkSpeculator,
 )
 
+from vllm_ascend.models.qwen3_dspark import process_weight
+from vllm_ascend.utils import (
+    get_rotation_matrix,
+    get_rotation_path,
+)
 from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
@@ -40,7 +45,29 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
 
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        model = super().load_draft_model(target_model, target_attn_layer_names)
+        # Upstream load_dspark_model overrides the drafter's quant_config with
+        # get_draft_quant_config (None for a bf16 drafter), so the drafter's
+        # __init__ derives rotation_path=None and its fc projection is loaded
+        # unrotated. The target is QuaRot-quantized, so the aux hidden states it
+        # feeds the drafter are in rotated space; fc must be rotated (W @ R) to
+        # project them back to model space.
+        rotation_path = get_rotation_path(self.vllm_config)
+        if rotation_path is not None and hasattr(model.model, "fc"):
+            rotation_weight = get_rotation_matrix(rotation_path)
+            fc = model.model.fc
+            with torch.no_grad():
+                fc.weight.data.copy_(process_weight(fc.weight.data.cpu(), rotation_weight))
+        return model
+
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
@@ -142,9 +169,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
+        sync_state = dp_sync
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(
@@ -163,7 +193,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,

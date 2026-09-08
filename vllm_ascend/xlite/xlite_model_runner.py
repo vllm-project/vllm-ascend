@@ -16,28 +16,53 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # isort: skip_file
+from contextlib import contextmanager
+
 import torch.nn as nn
 from vllm.config import CUDAGraphMode
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.xlite.xlite import XliteWrapper
 
 
 class XliteModelRunner(NPUModelRunner):
+    fallback_model: nn.Module
+    """The fallback model from the native :class:`NPUModelRunner` implementation."""
+    runner_cls: type[XliteWrapper] = XliteWrapper
+    """The class of the xlite model forward backend; consistent with :data:`runner_model`."""
+    runner_model: XliteWrapper
+    """The xlite model forward backend; consistent with :data:`runner_cls`."""
+    _runner_enabled: bool = False
+    """If :data:`runner_model` is the current model forward backend; otherwise, :data:`fallback_model`."""
+
     def get_model(self) -> nn.Module:
-        """See :meth:`NPUModelRunner.get_model` and :meth:`XliteWrapper.unwrap` for details."""
-        if not hasattr(self, "xlite_model"):
+        """Returns the unwrapper fallback model. See :meth:`NPUModelRunner.get_model` for details."""
+        with self._bypass_xlite_wrapper():
             return super().get_model()
-        return self.xlite_model.unwrap()
 
     def load_model(self) -> None:
-        from vllm_ascend.xlite.xlite import XliteWrapper
-
         super().load_model()
-        self.model = self.xlite_model = XliteWrapper(self.model, self.vllm_config, device=self.device)
+        self.fallback_model = self.model
+        # NOTE: this will create a circular reference between XliteModelRunner and XliteWrapper instances,
+        # but this should be fine since they are both long-lived objects
+        self.model = self.runner_model = self.runner_cls(self, self.vllm_config, device=self.device)  # type: ignore[assignment]
+
+    @contextmanager
+    def _bypass_xlite_wrapper(self):
+        """Temporarily route ``self.model`` to the native runnable."""
+        if not self.runner_enabled:
+            yield
+            return
+
+        self.model = self.fallback_model
+        try:
+            yield
+        finally:
+            self.model = self.runner_model  # type: ignore[assignment]
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         super().initialize_kv_cache(kv_cache_config)
-        self.xlite_model.register_kv_caches(self.kv_caches)
+        self.runner_model.register_kv_caches(self.kv_caches)  # type: ignore[arg-type]
 
     def _should_build_dummy_attn_metadata(
         self,
@@ -53,3 +78,18 @@ class XliteModelRunner(NPUModelRunner):
         base_condition = super()._should_build_dummy_attn_metadata(force_attention, is_profile, cudagraph_runtime_mode)
         xlite_condition = self.ascend_config.xlite_graph_config.enabled and not is_profile
         return base_condition or xlite_condition
+
+    @property
+    def model(self) -> nn.Module:
+        """The current model forward backend."""
+        return self._model
+
+    @model.setter
+    def model(self, value: nn.Module) -> None:
+        self._model = value
+        self._runner_enabled = isinstance(value, self.runner_cls)
+
+    @property
+    def runner_enabled(self) -> bool:
+        """If the current model forward backend is the xlite runner."""
+        return self._runner_enabled

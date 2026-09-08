@@ -124,6 +124,9 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
 
     Notes:
       - This scheme is discovered via 310P local registry.
+      - Uses true per-token dynamic act quant (``npu_dynamic_quant``) +
+        ``npu_quant_matmul``. Known accuracy issues on some shapes/Graph paths
+        are deferred; do not fall back to load-time fp16 dequant / ``F.linear``.
     """
 
     def get_perchannel_param(
@@ -143,6 +146,7 @@ class AscendW8A8DynamicLinearMethod310(AscendW8A8Linear310pScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+        del tp_rank
         # NOTE(310P):
         # - There is an accuracy issue currently, which is expected to be fixed in the next version.
         quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(x)

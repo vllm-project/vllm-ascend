@@ -13,8 +13,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       VLLM_ASCEND_ENABLE_DENSE_OPTIMIZE: "1"
-      VLLM_ASCEND_ENABLE_NZ: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--tensor-parallel-size"
@@ -33,7 +31,7 @@ test_cases:
       - "--gpu-memory-utilization"
       - "0.95"
       - "--additional-config"
-      - '{"enable_cpu_binding":true, "enable_weight_nz_layout":true}'
+      - '{"enable_cpu_binding": true, "weight_nz_mode": 1,"enable_fused_mc2":1}'
       - "--speculative_config"
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
       - "--compilation-config"

@@ -70,7 +70,9 @@ fi
 # --- Local development server ---------------------------------------------
 if [ "${DOCS_SERVE:-}" = true ]; then
     echo "[rtd-build] Serving docs locally (DOCS_LANG=$DOCS_LANG, DOCS_IS_RELEASE=$DOCS_IS_RELEASE)..."
-    exec mkdocs serve
+    # Click 8.3.x can incorrectly disable MkDocs 1.6.x live reload when the
+    # option is omitted. Pass it explicitly so local serving remains watched.
+    exec mkdocs serve --livereload
 fi
 
 # --- Output directory ------------------------------------------------------

@@ -11,7 +11,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.modelopt_mxfp8_config import AscendModelOptMxFp8Config
+from vllm_ascend.quantization.configs.modelopt_mxfp8_config import AscendModelOptMxFp8Config
 
 
 class TestAscendModelOptMxFp8Config(TestBase):
@@ -81,7 +81,7 @@ class TestAscendModelOptMxFp8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.AscendW8A8MXFP8DynamicLinearMethod",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.AscendW8A8MXFP8DynamicLinearMethod",
                 return_value=scheme,
             ),
             patch(
@@ -107,11 +107,11 @@ class TestAscendModelOptMxFp8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.modelopt_mxfp8_config._is_fused_moe_layer",
+                "vllm_ascend.quantization.configs.modelopt_mxfp8_config.is_fused_moe_layer",
                 return_value=True,
             ),
             patch(
-                "vllm_ascend.quantization.methods.w8a8_mxfp8.AscendW8A8MXFP8DynamicFusedMoEMethod",
+                "vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.AscendW8A8MXFP8DynamicFusedMoEMethod",
                 return_value=scheme,
             ),
             patch(

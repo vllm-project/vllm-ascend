@@ -82,20 +82,20 @@ def correct_optimistic_seq_lens_cpu(
 
 class SlidingWindowAdapter:
     """
-    Sliding-window draft attention for the draft model (EAGLE3 and DFlash).
+    Sliding-window draft attention for the draft model (EAGLE3 / DFlash / DSpark).
     Caps the draft model's attention to the most recent ``window_size`` (W) tokens
     by (a) cropping its block table to the window's blocks and (b) keeping every
     KV-length tensor the FIA kernel can read (notably ``_seq_lens_cpu`` for EAGLE3,
-    GPU ``seq_lens`` for DFlash's ``parallel_drafting``) capped at W. Slot-mapping
-    is untouched and still addresses the full, absolute KV cache via
+    GPU ``seq_lens`` for DFlash/DSpark ``parallel_drafting``) capped at W.
+    Slot-mapping is untouched and still addresses the full, absolute KV cache via
     :attr:`full_block_table`.
 
     ``future_offset`` is the number of tokens beyond ``seq_lens`` (at :meth:`apply`
     time) that the window end must cover:
       * EAGLE3 passes ``num_speculative_tokens`` — its ``seq_lens`` is context-only
         and the K draft positions lie beyond it, so ``final = seq_lens + K``.
-      * DFlash passes ``0`` — its ``set_inputs_first_pass`` already bakes the query
-        stretch (bonus + mask) into ``seq_lens``, so ``final = seq_lens``.
+      * DFlash / DSpark pass ``0`` — ``set_inputs_first_pass`` already bakes the
+        query stretch (bonus + mask) into ``seq_lens``, so ``final = seq_lens``.
     """
 
     def __init__(
@@ -126,14 +126,13 @@ class SlidingWindowAdapter:
         w = self.window_size
         b = self.block_size
         num_reqs = common_attn_metadata.seq_lens.shape[0]
+        full_cols = self.full_block_table.shape[1]
 
         # Window math on the (NPU) seq_lens. Pure arithmetic -> stays on NPU.
         self.start_tokens_in_window_rounding = ((common_attn_metadata.seq_lens + k_future - w).clamp(min=0) // b) * b
         self._windowed_seq_lens = common_attn_metadata.seq_lens - self.start_tokens_in_window_rounding
         start_block_indices = self.start_tokens_in_window_rounding // b
-        needed_blocks_per_req = (self._windowed_seq_lens + b - 1) // b
 
-        full_cols = self.full_block_table.shape[1]
         # column offset grid [1, max_window_blocks]
         cols = torch.arange(self.max_window_blocks, device=self.full_block_table.device).unsqueeze(0)
         # source column per (row, col): start_block_indices[:, None] + cols
@@ -142,8 +141,8 @@ class SlidingWindowAdapter:
         src_cols_clamped = src_cols.clamp(max=full_cols - 1)
 
         gathered = torch.gather(self.full_block_table, 1, src_cols_clamped)
-        needed = torch.clamp(needed_blocks_per_req, max=self.max_window_blocks).unsqueeze(1)
-        # keep only columns within `needed` and within the full table; zero the rest
+
+        needed = torch.clamp((self._windowed_seq_lens + b - 1) // b, max=self.max_window_blocks).unsqueeze(1)
         valid_mask = (cols < needed) & (src_cols < full_cols)
         out[:num_reqs].copy_(gathered * valid_mask.to(gathered.dtype))
 
@@ -163,13 +162,11 @@ class SlidingWindowAdapter:
         # update NPU seq_lens: reuse the value computed in compute().
         common_attn_metadata.seq_lens = self._windowed_seq_lens
 
-        # update CPU mirrors: recompute from each one's own CPU tensor -> stays on CPU,
-        # no D2H sync. numerically identical to the NPU
         for name in ("seq_lens_cpu", "_seq_lens_cpu", "seq_lens_cpu_upper_bound"):
             src = getattr(common_attn_metadata, name, None)
             if src is not None:
-                _windowed_cpu = src - ((src + k_future - w).clamp(min=0) // b) * b
-                setattr(common_attn_metadata, name, _windowed_cpu)
+                _windowed = src - ((src + k_future - w).clamp(min=0) // b) * b
+                setattr(common_attn_metadata, name, _windowed)
 
 
 @contextmanager

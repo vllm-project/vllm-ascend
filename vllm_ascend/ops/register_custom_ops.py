@@ -160,7 +160,13 @@ def _rope_forward_oot_impl_fake(
     head_dim: int,
     rotary_dim: int,
     is_neox_style: bool = True,
+    offsets: torch.Tensor | None = None,
+    out_dtype: torch.dtype | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if out_dtype is not None and out_dtype != torch.float8_e4m3fn:
+        raise NotImplementedError(f"Unsupported RoPE output dtype: {out_dtype}")
+    if out_dtype is not None:
+        return torch.empty_like(query, dtype=out_dtype), torch.empty_like(key, dtype=out_dtype)
     return query, key
 
 

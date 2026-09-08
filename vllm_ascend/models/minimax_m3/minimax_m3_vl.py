@@ -31,6 +31,7 @@ from vllm.distributed import (
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
@@ -165,7 +166,14 @@ class MiniMaxM3VLModel(nn.Module):
     info=MiniMaxM3VLProcessingInfo,
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
-class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsEagle3):
+class MiniMaxM3SparseForConditionalGeneration(
+    nn.Module,
+    SupportsMultiModal,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle3,
+    MixtureOfExperts,
+):
     supports_encoder_tp_data = True
 
     packed_modules_mapping = {
@@ -228,6 +236,32 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
         self.vision_tower = self.model.vision_tower
         self.language_model = self.model.language_model
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self._sync_moe_parameters()
+
+    def _sync_moe_parameters(self) -> None:
+        language_model = self.language_model
+        self.expert_weights = language_model.expert_weights
+        self.num_expert_groups = language_model.num_expert_groups
+        self.moe_layers = language_model.moe_layers
+        self.moe_mlp_layers = language_model.moe_mlp_layers
+        self.num_moe_layers = language_model.num_moe_layers
+        self.num_logical_experts = language_model.num_logical_experts
+        self.num_physical_experts = language_model.num_physical_experts
+        self.num_local_physical_experts = language_model.num_local_physical_experts
+        self.num_routed_experts = language_model.num_routed_experts
+        self.num_shared_experts = language_model.num_shared_experts
+        self.num_redundant_experts = language_model.num_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts,
+            num_local_physical_experts,
+        )
+        self._sync_moe_parameters()
 
     @property
     def lm_head(self) -> nn.Module:

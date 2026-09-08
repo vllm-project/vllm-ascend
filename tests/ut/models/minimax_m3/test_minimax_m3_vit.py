@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import torch
 import vllm
 from torch import nn
 from vllm.model_executor.models.utils import StageMissingLayer
@@ -44,6 +45,17 @@ class _DummyLanguageModel(nn.Module):
     def __init__(self, **kwargs) -> None:
         super().__init__()
         self.lm_head = nn.Identity()
+        self.expert_weights: list[list[torch.Tensor]] = []
+        self.num_expert_groups = 1
+        self.moe_layers: list[nn.Module] = []
+        self.moe_mlp_layers: list[nn.Module] = []
+        self.num_moe_layers = 0
+        self.num_logical_experts = 0
+        self.num_physical_experts = 0
+        self.num_local_physical_experts = 0
+        self.num_routed_experts = 0
+        self.num_shared_experts = 0
+        self.num_redundant_experts = 0
 
     def make_empty_intermediate_tensors(self, *args, **kwargs):
         return None

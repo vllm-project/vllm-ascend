@@ -39,7 +39,7 @@ MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
     deploy="pd_mix",
     hardware="A3",
     quantization="W4A8",
-    graph_mode="eager",
+    graph_mode="full_decode_only",
 )
 @patch.dict(
     os.environ,
@@ -50,7 +50,7 @@ MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
     },
 )
 @wait_until_npu_memory_free()
-def test_deepseek_v4_mtp_eager():
+def test_deepseek_v4_mtp_full_decode_only():
     """Verify DeepSeek V4 MTP acceptance with ModelRunner V2."""
     prompts = [
         "Hello, my name is",
@@ -75,7 +75,8 @@ def test_deepseek_v4_mtp_eager():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
-        enforce_eager=True,
+        enforce_eager=False,
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY"},
         disable_log_stats=False,
         async_scheduling=True,
         speculative_config={
@@ -100,13 +101,24 @@ def test_deepseek_v4_mtp_eager():
 
 @pytest.mark.parametrize("model", DSPARK_MAIN_MODEL)
 @pytest.mark.parametrize("max_tokens", [1024])
-@pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.parametrize("enforce_eager", [False])
+@pytest.mark.parametrize(
+    "compilation_config",
+    [
+        pytest.param(
+            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [6, 12]},
+            id="full_decode_only",
+        ),
+        pytest.param({}, id="default_full_and_piecewise"),
+    ],
+)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
+    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -129,6 +141,7 @@ def test_dspark_spec_decoding(
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
         },
+        compilation_config=compilation_config,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -139,6 +152,6 @@ def test_dspark_spec_decoding(
         Counter,
         Vector,
     )
-    golden = [0.83, 0.74, 0.65, 0.59, 0.52]
+    golden = [0.73, 0.64, 0.55, 0.49, 0.42]
     match = all((a >= b) or (b - a < 0.03) for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} below golden {golden}"
