@@ -19,7 +19,6 @@
 """
 
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -40,13 +39,13 @@ class MsaIndexScoreGoldenInputs:
 
     query: np.ndarray
     key: np.ndarray
-    block_table: Optional[np.ndarray]
+    block_table: np.ndarray | None
     actual_seq_qlen: np.ndarray
     actual_seq_klen: np.ndarray
     start_loc: np.ndarray
     sparse_mode: int = SPARSE_MODE_RIGHT_DOWN
     block_size: int = DEFAULT_BLOCK_SIZE
-    scale: Optional[np.ndarray] = None
+    scale: np.ndarray | None = None
     init_blocks: int = DEFAULT_INIT_BLOCKS
     local_blocks: int = DEFAULT_LOCAL_BLOCKS
 
@@ -97,13 +96,11 @@ def msa_index_score_golden(inputs):
             blocks = (kv + block_size - 1) // block_size
             if blocks > max_blocks:
                 max_blocks = blocks
-        num_kv_heads = key.shape[1]
         k = key.astype(np.float32)[:, 0, :]
     else:
         batch = len(actual_seq_klen)
         max_blocks = block_table.shape[1]
         is_bnbd = key.shape[2] == block_size and key.shape[1] != block_size
-        num_kv_heads = key.shape[1] if is_bnbd else key.shape[2]
         if is_bnbd:
             k = key.astype(np.float32)[:, 0, :, :]
         else:

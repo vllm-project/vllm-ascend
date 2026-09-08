@@ -165,7 +165,7 @@ public:
 
     // outShape
     CATLASS_HOST_DEVICE
-    Index const &dout() const
+    Index const &dout() const // codespell:ignore dout
     {
         return out6HDShape_[1];
     }

@@ -363,7 +363,6 @@ aclnnStatus aclnnMsaIndexScore(
 - 精度自验证矩阵：36 条 fp16/bf16/int8（含 PA key dim0 stride 与宽 `blockTable`）+ 4 条 FP8。950 通过标准末行 `[PASS]: 40/40 cases passed`。A2/A3 跳过 FP8，期望 36/36（skipped 4）。容差 fp16/bf16/int8 为 $1\mathrm{e}{-3}$，FP8 为 $2\mathrm{e}{-2}$。
 - Ascend 950 核实现位于 `op_kernel/arch35/`：当前与 A2 共用 8-page S workspace（非量化 fp16 / int8 fp32）；Cube 原生三种 FP8。`--run_example` 默认 soc 为 910b，950 必须显式 `--soc=ascend950`。
 
-
 ## 调用示例
 
 示例代码如下（BBND PageAttention）。TND：`layoutKeyOptional="TND"`，`key` 为 $[T2, N2, D]$，`blockTableOptional` 传 `nullptr`，`actualSeqKlenOptional` 为 $[B+1]$ 前缀和。BNBD：`layoutKeyOptional="BNBD"`，`key` 为 $[block\_num, N2, block\_size, D]$。含 TND/BNBD 的精度自验证见 [test_aclnn_msa_index_score.cpp](../examples/test_aclnn_msa_index_score.cpp)。
