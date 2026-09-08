@@ -1,9 +1,9 @@
-# Diagnostic-only controlled client-concurrency comparison. Do not merge this
+# Diagnostic-only client-concurrency knee-point sweep. Do not merge this
 # temporary case as a permanent nightly entry. All measurements share one
-# four-node allocation and one service lifetime. The six measured legs follow
-# the three-run alternating schedule A1-B1-B2-A2-A3-B3 so both states have
-# enough samples for mean, sample deviation, and CV calculations.
-test_name: "ryk-dsv4pro-w4a8-pc-pd-aba"
+# four-node allocation and one service lifetime. The eight measured legs use a
+# mirrored 48-40-32-24-24-32-40-48 order, giving every concurrency two samples
+# while exposing time and cache drift at the two ends of the sequence.
+test_name: "ryk-dsv4pro-w4a8-pc-pd-sweep"
 model: "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp"
 num_nodes: 4
 npu_per_node: 16
@@ -303,7 +303,7 @@ benchmarks:
     request_rate: 0
     baseline: 0
     threshold: 0.95
-  perf_TPOT50_128k_1_prefix90_bs48_a1:
+  perf_TPOT50_128k_1_prefix90_bs48_r1:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
     request_conf: vllm_api_stream_chat
@@ -313,10 +313,21 @@ benchmarks:
     batch_size: 48
     request_rate: 1
     # Diagnostic collection only. Keep verification non-blocking so every
-    # state in the A-B-A sequence runs even when the inherited baseline fails.
+    # point in the mirrored sweep runs even when the inherited baseline fails.
     baseline: 0
     threshold: 0.95
-  perf_TPOT50_128k_1_prefix90_bs32_b1:
+  perf_TPOT50_128k_1_prefix90_bs40_r1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 40
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs32_r1:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
     request_conf: vllm_api_stream_chat
@@ -327,7 +338,29 @@ benchmarks:
     request_rate: 1
     baseline: 0
     threshold: 0.95
-  perf_TPOT50_128k_1_prefix90_bs32_b2:
+  perf_TPOT50_128k_1_prefix90_bs24_r1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 24
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs24_r2:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 24
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs32_r2:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
     request_conf: vllm_api_stream_chat
@@ -338,7 +371,18 @@ benchmarks:
     request_rate: 1
     baseline: 0
     threshold: 0.95
-  perf_TPOT50_128k_1_prefix90_bs48_a2:
+  perf_TPOT50_128k_1_prefix90_bs40_r2:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 40
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs48_r2:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
     request_conf: vllm_api_stream_chat
@@ -346,28 +390,6 @@ benchmarks:
     num_prompts: 192
     max_out_len: 1024
     batch_size: 48
-    request_rate: 1
-    baseline: 0
-    threshold: 0.95
-  perf_TPOT50_128k_1_prefix90_bs48_a3:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 192
-    max_out_len: 1024
-    batch_size: 48
-    request_rate: 1
-    baseline: 0
-    threshold: 0.95
-  perf_TPOT50_128k_1_prefix90_bs32_b3:
-    case_type: performance
-    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
-    request_conf: vllm_api_stream_chat
-    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
-    num_prompts: 192
-    max_out_len: 1024
-    batch_size: 32
     request_rate: 1
     baseline: 0
     threshold: 0.95
