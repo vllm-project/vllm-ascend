@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import huggingface_hub
 import pytest
 import torch
@@ -31,7 +33,7 @@ DTYPE = "half"
 # Short query/doc pairs; max_model_len=None lets the model default (up to 8k)
 # and inflates compile/capture. One VllmRunner per model is reused for
 # 1-to-1 / 1-to-N / N-to-N so we do not pay nine pooling cold starts.
-_VLLM_KWARGS = {
+_VLLM_KWARGS: dict[str, Any] = {
     "runner": "pooling",
     "dtype": DTYPE,
     "cudagraph_capture_sizes": [4],
