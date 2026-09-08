@@ -881,6 +881,9 @@ class NPUWorker(WorkerBase):
         with context, set_current_vllm_config(self.vllm_config):
             self.model_runner.load_model()
 
+        if self.worker_sentinel is not None and self.use_v2_model_runner:
+            self.worker_sentinel.init_num_local_experts()
+
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
                 WeightTransferEngineFactory,
