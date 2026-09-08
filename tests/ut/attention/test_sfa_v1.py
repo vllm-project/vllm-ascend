@@ -272,6 +272,46 @@ class TestAscendSFACacheComposition(TestBase):
         self.assertFalse(impl._use_li_c8_reshape_optim())
 
     @patch(
+        "vllm_ascend.device.device_op.torch_npu.npu_lightning_indexer",
+        create=True,
+    )
+    def test_li_indexer_uses_torch_npu_operator(self, mock_indexer):
+        expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
+        mock_indexer.return_value = expected_topk, torch.empty(0)
+        q_li = torch.zeros(2, 1, 128, dtype=torch.bfloat16)
+        weights = torch.ones(2, 1, dtype=torch.bfloat16)
+        indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.bfloat16)
+        kv_cache = (
+            torch.empty(2, 16, 1, 512, dtype=torch.bfloat16),
+            torch.empty(2, 16, 1, 64, dtype=torch.bfloat16),
+            indexer_k_cache,
+        )
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.enable_sparse_sfa_c8 = False
+        impl.use_torch_npu_lightning_indexer = False
+        attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
+
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            impl,
+            q_li,
+            None,
+            None,
+            weights,
+            kv_cache,
+            attn_metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([2], dtype=torch.int32),
+            False,
+            False,
+        )
+
+        self.assertIs(result, expected_topk)
+        call_kwargs = mock_indexer.call_args.kwargs
+        self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(call_kwargs["layout_query"], "TND")
+        self.assertEqual(call_kwargs["layout_key"], "PA_BSND")
+
+    @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
     )

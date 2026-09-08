@@ -328,9 +328,6 @@ class BaseDeviceAdaptor:
         enable_sparse_li_c8: bool,
         use_torch_npu_lightning_indexer: bool,
     ) -> torch.Tensor:
-        # DSV3.2 currently has graph compilation issues when using torch_npu.npu.lightning_indexer.
-        # So two branches are maintained temporarily.
-        # TODO: torch.ops._C_ascend.npu_lightning_indexer needs to be removed.
         indexer_cache_idx = sfa_impl.kv_cache_indexer_k_idx
         indexer_scale_cache_idx = sfa_impl.kv_cache_indexer_scale_idx
 
@@ -355,21 +352,8 @@ class BaseDeviceAdaptor:
                 sparse_count=2048,
                 sparse_mode=3,
             )
-        elif sfa_impl.use_torch_npu_lightning_indexer:
-            topk_indices, _ = torch_npu.npu_lightning_indexer(
-                query=q_li,
-                key=kv_cache[indexer_cache_idx],
-                weights=weights,
-                actual_seq_lengths_query=actual_seq_lengths_query,
-                actual_seq_lengths_key=actual_seq_lengths_key,
-                block_table=attn_metadata.block_table,
-                layout_query="TND",
-                layout_key="PA_BSND",
-                sparse_count=2048,
-                sparse_mode=3,
-            )
         else:
-            topk_indices, _ = torch.ops._C_ascend.npu_lightning_indexer(
+            topk_indices, _ = torch_npu.npu_lightning_indexer(
                 query=q_li,
                 key=kv_cache[indexer_cache_idx],
                 weights=weights,
