@@ -62,6 +62,7 @@ class NPUInputBatch(InputBatch):
         reasoning_config: "ReasoningConfig | None" = None,
         use_replayssm: bool = False,
         slot_mapping_modes: list | None = None,
+        page_address_tables: list[list[int] | tuple[int, ...] | None] | None = None,
     ):
         self.use_replayssm = use_replayssm
         self.slot_mapping_modes = slot_mapping_modes
@@ -141,6 +142,7 @@ class NPUInputBatch(InputBatch):
             kernel_sizes=kernel_block_sizes,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             kv_cache_groups=kv_cache_groups,
+            page_address_tables=page_address_tables,
         )
 
         # Sampling-related.

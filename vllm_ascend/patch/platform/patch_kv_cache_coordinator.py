@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import sys
 from collections.abc import Mapping
 from math import lcm
@@ -29,6 +29,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
+from vllm_ascend.core.typed_kv_cache import get_typed_kv_cache_plan
+from vllm_ascend.core.typed_kv_cache_coordinator import (
+    TypedKVCacheCoordinatorNoPrefixCache,
+)
 
 USE_MULTI_GROUPS_KV_CACHE = True
 
@@ -406,6 +410,23 @@ def get_kv_cache_coordinator(
     # compatibility; platform validation guarantees that it is one.
     del pcp_world_size
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
+    typed_plan = get_typed_kv_cache_plan(kv_cache_config)
+    if typed_plan is not None:
+        if enable_caching:
+            raise ValueError("typed KV cache MVP requires prefix caching to be disabled")
+        if enable_kv_cache_events:
+            raise ValueError("typed KV cache MVP does not support KV cache events")
+        typed_scheduler_block_size = scheduler_block_size or lcm(*(spec.block_size_tokens for spec in typed_plan.specs))
+        return TypedKVCacheCoordinatorNoPrefixCache(
+            kv_cache_config=kv_cache_config,
+            plan=typed_plan,
+            max_model_len=max_model_len,
+            max_in_flight_tokens=token_budget,
+            scheduler_block_size=typed_scheduler_block_size,
+            dcp_world_size=dcp_world_size,
+            pcp_world_size=1,
+            metrics_collector=metrics_collector,
+        )
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):
         return AscendHybridKVCacheCoordinator(
             kv_cache_config,

@@ -70,6 +70,15 @@ env_variables: dict[str, Callable[[], Any]] = {
     # This feature will get better performance when concurrency is large.
     # DEPRECATED: use additional_config.enable_flashcomm1 instead.
     "VLLM_ASCEND_ENABLE_FLASHCOMM1": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0"))),
+    # Experimental heterogeneous KV cache allocator. Disabled by default.
+    # When enabled, hybrid Attention/Mamba groups use group-typed physical
+    # pages translated through a shared-arena address table.
+    "VLLM_ASCEND_ENABLE_TYPED_KV_CACHE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TYPED_KV_CACHE", "0"))),
+    # Physical allocation policy used by the experimental typed KV cache.
+    # ``address_table`` reuses released byte intervals across cache groups;
+    # ``static_partition`` reserves one fixed contiguous region per group and
+    # provides an experimental comparison with the same translation path.
+    "VLLM_ASCEND_TYPED_KV_CACHE_MODE": lambda: os.getenv("VLLM_ASCEND_TYPED_KV_CACHE_MODE", "address_table"),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.

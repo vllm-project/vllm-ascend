@@ -132,6 +132,11 @@ from vllm_ascend.compilation.acl_graph import (
     set_graph_params,
     update_full_graph_params,
 )
+from vllm_ascend.core.typed_kv_cache import (
+    get_typed_kv_cache_plan,
+    make_block_byte_view,
+    make_group_byte_view,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
 )
@@ -797,7 +802,82 @@ class NPUModelRunner(GPUModelRunner):
                     req_state.prev_num_draft_len = 0
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
+        if get_typed_kv_cache_plan(self.kv_cache_config) is not None:
+            self._zero_typed_kv_cache_blocks(scheduler_output)
+            # The upstream field flattens block IDs from all groups and is not
+            # meaningful when IDs are group-local. Group-aware zeroing above
+            # replaces it for the typed allocator.
+            scheduler_output.new_block_ids_to_zero = None
         return super()._update_states(scheduler_output)
+
+    def _zero_typed_kv_cache_blocks(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> None:
+        """Clear newly allocated group pages before an address is reused."""
+
+        plan = get_typed_kv_cache_plan(self.kv_cache_config)
+        assert plan is not None
+        block_ids_by_group = [set() for _ in plan.specs]
+        for request in scheduler_output.scheduled_new_reqs:
+            if len(request.block_ids) != len(block_ids_by_group):
+                raise ValueError("typed block table group count is inconsistent")
+            for group_id, block_ids in enumerate(request.block_ids):
+                block_ids_by_group[group_id].update(
+                    block_id for block_id in block_ids if block_id != 0
+                )
+        for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
+            if new_block_ids is None:
+                continue
+            if len(new_block_ids) != len(block_ids_by_group):
+                raise ValueError("typed block table group count is inconsistent")
+            for group_id, block_ids in enumerate(new_block_ids):
+                block_ids_by_group[group_id].update(
+                    block_id for block_id in block_ids if block_id != 0
+                )
+
+        raw_tensors = getattr(self, "_typed_kv_cache_raw_tensors", ())
+        if not raw_tensors and any(block_ids_by_group):
+            raise RuntimeError("typed KV cache raw tensors are not initialized")
+        if any(block_ids_by_group):
+            logger.debug(
+                "Clearing newly allocated typed KV pages: %s",
+                [sorted(block_ids) for block_ids in block_ids_by_group],
+            )
+        for group_id, block_ids in enumerate(block_ids_by_group):
+            if not block_ids:
+                continue
+            max_block_id = plan.num_blocks(group_id)
+            if min(block_ids) < 0 or max(block_ids) >= max_block_id:
+                raise ValueError("typed group-local block ID is out of range")
+            for raw_tensor in raw_tensors:
+                page_views = [
+                    make_block_byte_view(
+                        raw_tensor, plan, group_id, block_id
+                    )
+                    for block_id in block_ids
+                ]
+                ranges = sorted(
+                    (
+                        page.storage_offset(),
+                        page.storage_offset() + page.numel(),
+                    )
+                    for page in page_views
+                )
+                # Coalesce physically adjacent pages even when their logical
+                # IDs are unrelated entries in the group address table.
+                range_start, range_end = ranges[0]
+                for start, end in ranges[1:]:
+                    if start == range_end:
+                        range_end = end
+                        continue
+                    raw_tensor.narrow(
+                        0, range_start, range_end - range_start
+                    ).zero_()
+                    range_start, range_end = start, end
+                raw_tensor.narrow(
+                    0, range_start, range_end - range_start
+                ).zero_()
 
     def _pad_query_start_loc_for_fia(
         self,
@@ -3746,6 +3826,33 @@ class NPUModelRunner(GPUModelRunner):
         """
         # Initialize the memory buffer for KV cache
         kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+        typed_plan = get_typed_kv_cache_plan(kv_cache_config)
+        if typed_plan is not None:
+            unique_raw_tensors: dict[int, torch.Tensor] = {}
+            for raw_tensor in kv_cache_raw_tensors.values():
+                if not isinstance(raw_tensor, torch.Tensor):
+                    raise ValueError(
+                        "typed KV cache MVP requires a single raw tensor per layer"
+                    )
+                unique_raw_tensors.setdefault(id(raw_tensor), raw_tensor)
+            self._typed_kv_cache_raw_tensors = tuple(unique_raw_tensors.values())
+            # Physical address zero backs the NULL block for every group. Padding and
+            # inactive block-table entries may read it, so make it read-safe
+            # before any request is scheduled. Request-owned pages are cleared
+            # lazily by _zero_typed_kv_cache_blocks.
+            for raw_tensor in self._typed_kv_cache_raw_tensors:
+                if typed_plan.is_addressed:
+                    null_page_size = max(
+                        spec.page_size_bytes for spec in typed_plan.specs
+                    )
+                    raw_tensor[:null_page_size].zero_()
+                elif typed_plan.is_partitioned:
+                    for group_id, _ in enumerate(typed_plan.specs):
+                        make_group_byte_view(
+                            raw_tensor, typed_plan, group_id
+                        )[0].zero_()
+                else:
+                    raw_tensor[: typed_plan.superpage_size_bytes].zero_()
         # Change the memory buffer to the desired shape
         kv_caches = self._reshape_kv_cache_tensors(
             kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
@@ -4167,6 +4274,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         if self.hybrid_with_attn_and_mamba:
+            typed_plan = get_typed_kv_cache_plan(kv_cache_config)
             has_attn, has_mamba = False, False
             for group in self._kv_cache_spec_attn_group_iterator():
                 if group.kv_cache_group_id == len(kernel_block_sizes):
@@ -4180,6 +4288,12 @@ class NPUModelRunner(GPUModelRunner):
                         continue
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     assert isinstance(raw_tensor, torch.Tensor)
+                    if typed_plan is not None:
+                        raw_tensor = make_group_byte_view(
+                            raw_tensor,
+                            typed_plan,
+                            group.kv_cache_group_id,
+                        ).view(-1)
                     assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                     num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
@@ -4586,6 +4700,14 @@ class NPUModelRunner(GPUModelRunner):
                 max_num_blocks_per_req += kv_cache_group.kv_cache_spec.num_speculative_blocks
             max_num_blocks.append(max_num_blocks_per_req)
 
+        typed_plan = get_typed_kv_cache_plan(kv_cache_config)
+        page_address_tables = None
+        if typed_plan is not None and typed_plan.is_addressed:
+            page_address_tables = [
+                list(typed_plan.kernel_page_address_table(group_id))
+                for group_id in range(len(typed_plan.specs))
+            ]
+
         if (block_sizes != [self.cache_config.block_size]
                 or kernel_block_sizes != [self.cache_config.block_size]
                 or len(kv_cache_config.kv_cache_groups) > 1):
@@ -4615,6 +4737,7 @@ class NPUModelRunner(GPUModelRunner):
                 kv_cache_groups=kv_cache_config.kv_cache_groups,
                 cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
                 reasoning_config = getattr(self.vllm_config, "reasoning_config", None),
+                page_address_tables=page_address_tables,
             )
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:

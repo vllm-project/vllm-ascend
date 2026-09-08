@@ -2,22 +2,336 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 import math
 from collections import defaultdict
+from dataclasses import replace
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
+from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.core.typed_kv_cache import (
+    TypedAddressPool,
+    TypedKVCachePlan,
+    TypedPageSpec,
+    get_typed_kv_cache_plan,
+    set_typed_kv_cache_plan,
+)
+from vllm_ascend.device.device_config import is_310p
+
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_get_kv_cache_configs = vllm.v1.core.kv_cache_utils.get_kv_cache_configs
+_orig_update_kv_cache_capacity = vllm.v1.core.kv_cache_utils.update_kv_cache_capacity
+
+
+def _typed_base_spec(spec: KVCacheSpec) -> KVCacheSpec:
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        return next(iter(spec.kv_cache_specs.values()))
+    return spec
+
+
+def _without_uniform_page_padding(
+    spec: KVCacheSpec,
+    attention_block_size: int,
+) -> KVCacheSpec:
+    """Restore each group's physical page instead of the HMA common page."""
+
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        inner = {
+            name: _without_uniform_page_padding(layer_spec, attention_block_size)
+            for name, layer_spec in spec.kv_cache_specs.items()
+        }
+        block_sizes = {layer_spec.block_size for layer_spec in inner.values()}
+        if len(block_sizes) != 1:
+            raise ValueError("typed KV cache group has non-uniform block sizes")
+        return UniformTypeKVCacheSpecs(
+            block_size=next(iter(block_sizes)),
+            kv_cache_specs=inner,
+        )
+    if isinstance(spec, AttentionSpec):
+        return replace(
+            spec,
+            block_size=attention_block_size,
+            page_size_padded=None,
+        )
+    if isinstance(spec, MambaSpec):
+        return replace(spec, page_size_padded=None)
+    raise ValueError(f"typed KV cache MVP only supports AttentionSpec and MambaSpec, got {type(spec).__name__}")
+
+
+def _validate_typed_kv_cache_mode(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    if is_310p():
+        raise ValueError("typed KV cache MVP is not supported on Ascend 310P")
+    cache_config = vllm_config.cache_config
+    parallel_config = vllm_config.parallel_config
+    if cache_config.enable_prefix_caching:
+        raise ValueError("typed KV cache MVP requires prefix caching to be disabled")
+    if cache_config.num_gpu_blocks_override is not None:
+        raise ValueError("typed KV cache MVP does not support num_gpu_blocks_override")
+    if vllm_config.speculative_config is not None:
+        raise ValueError("typed KV cache MVP does not support speculative decoding")
+    if vllm_config.kv_transfer_config is not None:
+        raise ValueError("typed KV cache MVP does not support KV transfer/offload")
+    if parallel_config.decode_context_parallel_size != 1:
+        raise ValueError("typed KV cache MVP does not support DCP")
+    if getattr(parallel_config, "prefill_context_parallel_size", 1) != 1:
+        raise ValueError("typed KV cache MVP does not support PCP")
+    if parallel_config.pipeline_parallel_size != 1:
+        raise ValueError("typed KV cache MVP does not support pipeline parallelism")
+    if any(tensor.offset or tensor.block_stride for tensor in kv_cache_config.kv_cache_tensors):
+        raise ValueError("typed KV cache MVP does not support packed KV tensors")
+
+    base_specs = [_typed_base_spec(group.kv_cache_spec) for group in kv_cache_config.kv_cache_groups]
+    if not any(isinstance(spec, AttentionSpec) for spec in base_specs) or not any(
+        isinstance(spec, MambaSpec) for spec in base_specs
+    ):
+        raise ValueError("typed KV cache MVP requires a hybrid Attention/Mamba model")
+
+    group_layers = [set(group.layer_names) for group in kv_cache_config.kv_cache_groups]
+    for tensor in kv_cache_config.kv_cache_tensors:
+        shared = set(tensor.shared_by)
+        if any(len(shared & layers) != 1 for layers in group_layers):
+            raise ValueError("each typed raw tensor must be shared by exactly one layer from every KV cache group")
+
+
+def _enable_typed_kv_cache_config(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    _validate_typed_kv_cache_mode(vllm_config, kv_cache_config)
+    attention_block_size = getattr(
+        vllm_config.cache_config,
+        "_ascend_typed_attention_block_size",
+        None,
+    )
+    if attention_block_size is None:
+        raise ValueError(
+            "typed KV cache requires the native attention kernel block size "
+            "captured by NPUPlatform.update_block_size_for_backend"
+        )
+    for group in kv_cache_config.kv_cache_groups:
+        group.kv_cache_spec = _without_uniform_page_padding(
+            group.kv_cache_spec,
+            attention_block_size,
+        )
+
+    specs = tuple(
+        TypedPageSpec(
+            group_id=group_id,
+            page_size_bytes=group.kv_cache_spec.page_size_bytes,
+            block_size_tokens=group.kv_cache_spec.block_size,
+        )
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups)
+    )
+    tensor_sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
+    if len(tensor_sizes) != 1:
+        raise ValueError("typed KV cache MVP requires equal raw tensor budgets")
+    original_tensor_size = next(iter(tensor_sizes))
+    mode = envs_ascend.VLLM_ASCEND_TYPED_KV_CACHE_MODE
+    if mode == "address_table":
+        # The scheduler and worker independently construct the same immutable
+        # address tables. Candidate intervals deliberately overlap across
+        # groups; the typed allocator ensures that only non-overlapping pages
+        # are live.
+        plan = TypedKVCachePlan.addressed(specs, original_tensor_size)
+    elif mode == "static_partition":
+        # Reserve a fixed address range for every group. Keep using the same
+        # address-table worker and kernel path as the dynamic mode so the A/B
+        # changes allocation policy only. The end-to-end correctness gate must
+        # still verify that every device operator honors the resulting stride.
+        # ranges deliberately do not overlap: released Attention bytes can
+        # never become Mamba pages (or vice versa).
+        blocks_per_request = tuple(
+            math.ceil(group.kv_cache_spec.max_memory_usage_bytes(vllm_config) / group.kv_cache_spec.page_size_bytes)
+            for group in kv_cache_config.kv_cache_groups
+        )
+        null_bytes = max(spec.page_size_bytes for spec in specs)
+        bytes_per_request = sum(blocks * spec.page_size_bytes for spec, blocks in zip(specs, blocks_per_request))
+        full_requests = (original_tensor_size - null_bytes) // bytes_per_request
+
+        def build_tables(
+            data_block_counts: list[int],
+        ) -> tuple[tuple[tuple[int, ...], ...], int]:
+            tables = []
+            offset = null_bytes
+            for spec, count in zip(specs, data_block_counts):
+                offset = (offset + spec.page_size_bytes - 1) // spec.page_size_bytes * spec.page_size_bytes
+                tables.append((0,) + tuple(offset + block_id * spec.page_size_bytes for block_id in range(count)))
+                offset += count * spec.page_size_bytes
+            return tuple(tables), offset
+
+        # Alignment gaps between fixed regions mean the byte-only estimate can
+        # be one request too optimistic.  Tighten it against the actual layout.
+        while full_requests > 0:
+            data_block_counts = [full_requests * blocks for blocks in blocks_per_request]
+            _, used_bytes = build_tables(data_block_counts)
+            if used_bytes <= original_tensor_size:
+                break
+            full_requests -= 1
+        if full_requests < 1:
+            raise ValueError("typed static partition cannot hold one max-length request")
+
+        # Spend remaining whole pages on the group with the lowest equivalent
+        # max-length request capacity. Rebuilding the tiny table list also
+        # accounts for alignment shifts caused by growing an earlier region.
+        while True:
+            candidates = []
+            for group_id in range(len(specs)):
+                candidate_counts = data_block_counts.copy()
+                candidate_counts[group_id] += 1
+                _, candidate_end = build_tables(candidate_counts)
+                if candidate_end <= original_tensor_size:
+                    candidates.append(group_id)
+            if not candidates:
+                break
+            group_id = min(
+                candidates,
+                key=lambda candidate: (
+                    data_block_counts[candidate] / blocks_per_request[candidate],
+                    specs[candidate].page_size_bytes,
+                    candidate,
+                ),
+            )
+            data_block_counts[group_id] += 1
+
+        page_address_tables, _ = build_tables(data_block_counts)
+        plan = TypedKVCachePlan.addressed(
+            specs,
+            original_tensor_size,
+            page_address_tables,
+        )
+    else:
+        raise ValueError(f"VLLM_ASCEND_TYPED_KV_CACHE_MODE must be address_table or static_partition, got {mode!r}")
+
+    kv_cache_config.num_blocks = min(plan.num_blocks(spec.group_id) for spec in plan.specs)
+    for tensor in kv_cache_config.kv_cache_tensors:
+        tensor.size = plan.total_managed_bytes
+    set_typed_kv_cache_plan(kv_cache_config, plan)
+    logger.info(
+        "Enabled typed KV cache: mode=%s superpage_size=%d, num_superpages=%d managed_bytes_per_tensor=%d, groups=%s",
+        mode,
+        plan.superpage_size_bytes,
+        plan.num_superpages,
+        plan.total_managed_bytes,
+        [
+            {
+                "group_id": spec.group_id,
+                "page_size": spec.page_size_bytes,
+                "block_size": spec.block_size_tokens,
+                "logical_pages": plan.num_blocks(spec.group_id),
+                "last_physical_offset": (
+                    plan.page_address_tables_bytes[spec.group_id][-1]
+                    if plan.is_addressed
+                    else plan.region_offset_bytes(spec.group_id)
+                    + (plan.num_blocks(spec.group_id) - 1) * spec.page_size_bytes
+                ),
+            }
+            for spec in plan.specs
+        ],
+    )
+
+
+def _ascend_get_kv_cache_configs(
+    vllm_config: VllmConfig,
+    kv_cache_specs: list[dict[str, KVCacheSpec]],
+    available_memory: list[int],
+) -> list[KVCacheConfig]:
+    configs = _orig_get_kv_cache_configs(
+        vllm_config,
+        kv_cache_specs,
+        available_memory,
+    )
+    if envs_ascend.VLLM_ASCEND_ENABLE_TYPED_KV_CACHE:
+        for config in configs:
+            _enable_typed_kv_cache_config(vllm_config, config)
+    return configs
+
+
+def _typed_max_concurrency(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+    plan: TypedKVCachePlan,
+) -> float:
+    blocks_per_request = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        blocks_per_request.append(math.ceil(spec.max_memory_usage_bytes(vllm_config) / spec.page_size_bytes))
+
+    if plan.is_addressed:
+        pool = TypedAddressPool(plan)
+
+        def fits(num_requests: int) -> bool:
+            return pool.can_allocate(
+                {group_id: num_requests * blocks for group_id, blocks in enumerate(blocks_per_request)}
+            )
+
+        low, high = 0, 1
+        while fits(high):
+            low, high = high, high * 2
+        while low + 1 < high:
+            mid = (low + high) // 2
+            if fits(mid):
+                low = mid
+            else:
+                high = mid
+        return float(low)
+
+    if plan.is_partitioned:
+        return float(
+            min((plan.num_blocks(group_id) - 1) // blocks for group_id, blocks in enumerate(blocks_per_request))
+        )
+
+    def fits(num_requests: int) -> bool:
+        used = sum(
+            math.ceil(num_requests * blocks / plan.capacity(group_id))
+            for group_id, blocks in enumerate(blocks_per_request)
+        )
+        return used <= plan.num_superpages - 1
+
+    low, high = 0, 1
+    while fits(high):
+        low, high = high, high * 2
+    while low + 1 < high:
+        mid = (low + high) // 2
+        if fits(mid):
+            low = mid
+        else:
+            high = mid
+    return float(low)
+
+
+def _ascend_update_kv_cache_capacity(
+    vllm_config: VllmConfig,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    plan = get_typed_kv_cache_plan(kv_cache_config)
+    if plan is None:
+        return _orig_update_kv_cache_capacity(vllm_config, kv_cache_config)
+    concurrency = _typed_max_concurrency(vllm_config, kv_cache_config, plan)
+    max_model_len = vllm_config.model_config.max_model_len
+    vllm_config.cache_config.kv_cache_size_tokens = int(concurrency * max_model_len)
+    vllm_config.cache_config.kv_cache_max_concurrency = concurrency
+    logger.info_once(
+        "Typed GPU KV cache size: %s tokens, maximum safe concurrency for %s tokens per request: %.2fx",
+        f"{int(concurrency * max_model_len):,}",
+        f"{max_model_len:,}",
+        concurrency,
+    )
 
 
 def _ascend_resolve_kv_cache_block_sizes(
@@ -246,6 +560,8 @@ def _get_kv_cache_config_deepseek_v4(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.core.kv_cache_utils.get_kv_cache_configs = _ascend_get_kv_cache_configs
+vllm.v1.core.kv_cache_utils.update_kv_cache_capacity = _ascend_update_kv_cache_capacity
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to _get_kv_cache_config_packed and
@@ -257,3 +573,5 @@ vllm.v1.core.kv_cache_utils._get_kv_cache_config_packed = _get_kv_cache_config_d
 import vllm.v1.engine.core  # noqa: E402
 
 vllm.v1.engine.core.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
+vllm.v1.engine.core.get_kv_cache_configs = _ascend_get_kv_cache_configs
+vllm.v1.engine.core.update_kv_cache_capacity = _ascend_update_kv_cache_capacity

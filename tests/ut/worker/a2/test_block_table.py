@@ -50,6 +50,7 @@ class TestBlockTableComputeSlotMapping(TestBase):
         dcp_rank,
         cp_kv_cache_interleave_size,
         num_speculative_tokens=0,
+        page_address_table=None,
     ):
         """Helper method to create BlockTable with mocked distributed groups"""
 
@@ -72,9 +73,32 @@ class TestBlockTableComputeSlotMapping(TestBase):
                 kernel_sizes=self.kernel_sizes,
                 cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
                 num_speculative_tokens=num_speculative_tokens,
+                page_address_table=page_address_table,
             )
 
             return block_table
+
+    def test_page_address_table_translates_for_slot_mapping_and_metadata(self):
+        block_table = self.create_block_table(
+            dcp_world_size=1,
+            dcp_rank=0,
+            cp_kv_cache_interleave_size=1,
+            page_address_table=[0, 3, 7],
+        )
+        block_table.add_row([1, 2], 0)
+        block_table.commit_block_table(1)
+
+        np.testing.assert_array_equal(block_table.block_table.np[0, :2], [1, 2])
+        np.testing.assert_array_equal(block_table.get_device_tensor(1).cpu().numpy()[0, :2], [3, 7])
+
+        block_table.compute_slot_mapping_draft(
+            np.array([0, 0], dtype=np.int32),
+            np.array([0, self.block_size], dtype=np.int64),
+        )
+        np.testing.assert_array_equal(
+            block_table.slot_mapping.np[:2],
+            [3 * self.block_size, 7 * self.block_size],
+        )
 
     def test_compute_slot_mapping_draft_reserves_mtp_slots(self):
         """MTP5 draft slots can exceed the scheduler token capacity."""

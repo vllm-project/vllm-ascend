@@ -26,6 +26,7 @@ class BlockTable:
         cp_kv_cache_interleave_size: int = 1,
         num_speculative_tokens: int = 0,
         kv_cache_group: KVCacheGroupSpec = None,
+        page_address_table: list[int] | tuple[int, ...] | None = None,
     ):
         self.max_num_reqs = max_num_reqs
         self.dcp_world_size = get_dcp_group().world_size
@@ -95,6 +96,33 @@ class BlockTable:
         if self.dcp_world_size > 1:
             duplicate_size += num_speculative_tokens
         self.block_table = self._make_buffer(max_num_reqs * duplicate_size, logical_table_size, dtype=torch.int32)
+        self._physical_block_table = None
+        self._kernel_page_address_table = None
+        if page_address_table is not None:
+            page_address_table_np = np.asarray(page_address_table, dtype=np.int32)
+            if (
+                page_address_table_np.ndim != 1
+                or page_address_table_np.size < 2
+                or page_address_table_np[0] != 0
+                or np.any(page_address_table_np < 0)
+            ):
+                raise ValueError("invalid group-specific page address table")
+            kernel_addresses = (
+                page_address_table_np.reshape(-1, 1) * self.blocks_per_phys_block
+                + np.arange(self.blocks_per_phys_block, dtype=np.int32)
+            ).reshape(-1)
+            self._kernel_page_address_table = kernel_addresses
+            self._physical_block_table = self._make_buffer(
+                max_num_reqs * duplicate_size,
+                logical_table_size,
+                dtype=torch.int32,
+            )
+            # Inactive rows and padding entries must always resolve to the
+            # physical NULL page.
+            self.block_table.cpu.zero_()
+            self.block_table.gpu.zero_()
+            self._physical_block_table.cpu.zero_()
+            self._physical_block_table.gpu.zero_()
         self.num_blocks_per_row = np.zeros(max_num_reqs, dtype=np.int32)
         # MTP slot preparation appends up to num_speculative_tokens - 1
         # draft positions for every request beyond the scheduler token limit.
@@ -181,8 +209,8 @@ class BlockTable:
                 self.max_num_batched_tokens,
                 query_start_loc,
                 positions,
-                self.block_table.gpu,
-                self.block_table.gpu.stride(0),
+                self._device_block_table,
+                self._device_block_table.stride(0),
                 self.block_size,
                 self.slot_mapping.gpu,
                 **kernel_kwargs,
@@ -230,7 +258,7 @@ class BlockTable:
             )
 
             block_offsets = positions % self.block_size
-            block_numbers = self.block_table.np.ravel()[block_table_indices]
+            block_numbers = self._physical_block_table_np.ravel()[block_table_indices]
             np.add(
                 block_numbers * self.block_size,
                 block_offsets,
@@ -277,20 +305,43 @@ class BlockTable:
         block_offsets = local_physical_offsets % self.block_size
 
         if block_table_indices.device.type != "cpu":
-            block_numbers = self.block_table.gpu.flatten()[block_table_indices]
+            block_numbers = self._device_block_table.flatten()[block_table_indices]
             slot_mapping = block_numbers * self.block_size + block_offsets
             self.slot_mapping.gpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
         else:
-            block_numbers = self.block_table.cpu.flatten()[block_table_indices]
+            block_numbers = self._physical_block_table_cpu.flatten()[block_table_indices]
             slot_mapping = block_numbers * self.block_size + block_offsets
             self.slot_mapping.cpu[: req_indices.shape[0]] = torch.where(mask, slot_mapping, -1)
 
     def commit_block_table(self, num_reqs: int) -> None:
-        self.block_table.copy_to_gpu(num_reqs)
+        if self._physical_block_table is None:
+            self.block_table.copy_to_gpu(num_reqs)
+            return
+
+        assert self._kernel_page_address_table is not None
+        physical_np = self._physical_block_table.np
+        logical_np = self.block_table.np
+        physical_np[:num_reqs].fill(0)
+        for row_idx in range(num_reqs):
+            num_blocks = self.num_blocks_per_row[row_idx]
+            if num_blocks == 0:
+                continue
+            logical_ids = logical_np[row_idx, :num_blocks]
+            if logical_ids.min() < 0 or logical_ids.max() >= len(self._kernel_page_address_table):
+                raise ValueError("logical block ID is outside the page address table")
+            np.take(
+                self._kernel_page_address_table,
+                logical_ids,
+                out=physical_np[row_idx, :num_blocks],
+            )
+        self._physical_block_table.copy_to_gpu(num_reqs)
 
     def clear(self) -> None:
         self.block_table.fill_(0)
         self.block_table.cpu.fill_(0)
+        if self._physical_block_table is not None:
+            self._physical_block_table.gpu.fill_(0)
+            self._physical_block_table.cpu.fill_(0)
 
     def _convert_physical_to_logical_blocks(self, physical_blocks: np.ndarray) -> np.ndarray:
         """Convert physical block IDs to logical block IDs."""
@@ -312,8 +363,8 @@ class BlockTable:
     def get_device_tensor(self, num_reqs: int | None = None) -> torch.Tensor:
         """Returns the device tensor of the block table."""
         if num_reqs is not None:
-            return self.block_table.gpu[:num_reqs]
-        return self.block_table.gpu
+            return self._device_block_table[:num_reqs]
+        return self._device_block_table
 
     def get_cpu_tensor(self) -> torch.Tensor:
         """Returns the CPU tensor of the block table."""
@@ -321,6 +372,24 @@ class BlockTable:
 
     def get_numpy_array(self) -> np.ndarray:
         """Returns the numpy array of the block table."""
+        return self.block_table.np
+
+    @property
+    def _device_block_table(self) -> torch.Tensor:
+        if self._physical_block_table is not None:
+            return self._physical_block_table.gpu
+        return self.block_table.gpu
+
+    @property
+    def _physical_block_table_cpu(self) -> torch.Tensor:
+        if self._physical_block_table is not None:
+            return self._physical_block_table.cpu
+        return self.block_table.cpu
+
+    @property
+    def _physical_block_table_np(self) -> np.ndarray:
+        if self._physical_block_table is not None:
+            return self._physical_block_table.np
         return self.block_table.np
 
     def _make_buffer(self, *size: int | torch.SymInt, dtype: torch.dtype) -> CpuGpuBuffer:
@@ -343,6 +412,7 @@ class MultiGroupBlockTable:
         kernel_sizes: list[int] | None = None,
         cp_kv_cache_interleave_size: int = 1,
         kv_cache_groups: KVCacheGroupSpec = None,
+        page_address_tables: list[list[int] | tuple[int, ...] | None] | None = None,
     ) -> None:
         if kernel_sizes is None:
             kernel_sizes = [0] * len(block_sizes)
@@ -367,6 +437,11 @@ class MultiGroupBlockTable:
                 f"max_num_blocks length ({len(max_num_blocks)}) must match block_sizes length ({len(block_sizes)})"
             )
 
+        if page_address_tables is None:
+            page_address_tables = [None] * len(block_sizes)
+        elif len(page_address_tables) != len(block_sizes):
+            raise ValueError("page_address_tables length must match block_sizes length")
+
         # Use zip to pair block_sizes with kernel_sizes one-to-one
         if kv_cache_groups is not None:
             self.block_tables = [
@@ -381,9 +456,14 @@ class MultiGroupBlockTable:
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
                     kv_cache_group,
+                    page_address_table=page_address_table,
                 )
-                for block_size, kernel_size, max_num_blocks_per_req, kv_cache_group in zip(
-                    block_sizes, kernel_sizes, max_num_blocks, kv_cache_groups
+                for block_size, kernel_size, max_num_blocks_per_req, kv_cache_group, page_address_table in zip(
+                    block_sizes,
+                    kernel_sizes,
+                    max_num_blocks,
+                    kv_cache_groups,
+                    page_address_tables,
                 )
             ]
         else:
@@ -398,9 +478,13 @@ class MultiGroupBlockTable:
                     [kernel_size],
                     cp_kv_cache_interleave_size,
                     num_speculative_tokens,
+                    page_address_table=page_address_table,
                 )
-                for block_size, kernel_size, max_num_blocks_per_req in zip(
-                    block_sizes, kernel_sizes, max_num_blocks
+                for block_size, kernel_size, max_num_blocks_per_req, page_address_table in zip(
+                    block_sizes,
+                    kernel_sizes,
+                    max_num_blocks,
+                    page_address_tables,
                 )
             ]
 

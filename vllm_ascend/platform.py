@@ -322,13 +322,27 @@ class NPUPlatform(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: VllmConfig) -> None:
+        # Preserve the backend's native token granularity before upstream HMA
+        # enlarges cache_config.block_size to match the Mamba page. The
+        # default-off typed KV experiment restores this size at sizing time.
+        from vllm.config.cache import CacheConfig
+        from vllm.config.vllm import set_current_vllm_config
+
+        cache_config = vllm_config.cache_config
+        backend_cls = cls._find_non_ssm_backend(vllm_config)
+        if backend_cls is not None:
+            if cache_config.user_specified_block_size:
+                native_block_size = cache_config.block_size
+            else:
+                with set_current_vllm_config(vllm_config):
+                    native_block_size = backend_cls.get_preferred_block_size(CacheConfig.DEFAULT_BLOCK_SIZE)
+            cache_config._ascend_typed_attention_block_size = native_block_size
         super().update_block_size_for_backend(vllm_config)
         # TODO: NPU still sets block_size in check_and_update_config.
         # Move that logic here so block_size is chosen by the backend.
         using_kv_transfer_with_hybrid = (
             not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager and vllm_config.kv_transfer_config
         )
-        cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
         if (
             not cache_config.enable_prefix_caching
