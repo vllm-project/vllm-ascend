@@ -7,6 +7,8 @@ from vllm_ascend.distributed.eplb.stair_policy import (
     compress_samples,
     constrained_lpt,
     placement_score,
+    passes_hysteresis,
+    plan_rebalance,
     replica_candidates,
     weighted_moments,
 )
@@ -101,3 +103,24 @@ def test_constrained_lpt_obeys_placement_and_pair_invariants():
     assert all(len(set(row)) == len(row) for row in placement.tolist())
     pairs = [(int(src), dst) for dst, row in enumerate(source_rank) for src in row if src != dst]
     assert len(pairs) == len(set(pairs))
+
+
+def test_hysteresis_uses_last_committed_score():
+    from vllm_ascend.ascend_config import StairConfig
+
+    config = StairConfig(hysteresis_relative=0.9, hysteresis_absolute=0.8)
+
+    assert not passes_hysteresis(1.05, 1.0, config)
+    assert passes_hysteresis(1.2, 1.0, config)
+
+
+def test_plan_rebalance_filters_zero_and_balanced_layers():
+    from vllm_ascend.ascend_config import StairConfig
+
+    load = np.array([[[0, 0]], [[0, 0]]])
+    old = np.array([[[0], [1]]])
+
+    plan = plan_rebalance(load, old, np.array([np.nan]), (0, 0), StairConfig())
+
+    np.testing.assert_array_equal(plan.placement, old)
+    assert np.isnan(plan.accepted_scores[0])

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from vllm_ascend.ascend_config import StairConfig
+
 
 @dataclass(frozen=True)
 class BalanceScore:
@@ -419,3 +421,112 @@ def constrained_lpt(
                 else:
                     cross_node += 1
     return placement, source_rank, source_slot, cross_node, same_node
+
+
+def passes_hysteresis(current_score: float, accepted_score: float, config: StairConfig) -> bool:
+    if not config.hysteresis_enabled or np.isnan(accepted_score):
+        return True
+    current_balance = 1.0 / current_score
+    accepted_balance = 1.0 / accepted_score
+    return (
+        current_balance / accepted_balance <= config.hysteresis_relative
+        or current_balance <= config.hysteresis_absolute
+    )
+
+
+def _plan_layer(
+    samples: np.ndarray,
+    weights: np.ndarray,
+    old: np.ndarray,
+    node_by_rank: tuple[int, ...],
+    config: StairConfig,
+) -> LayerPlan | None:
+    current = placement_score(samples, weights, old)
+    mean, moments = weighted_moments(samples, weights, covariance=config.use_covariance)
+    diagonal = np.diag(moments) if moments.ndim == 2 else moments
+    risk = mean + config.z_score * np.sqrt(np.maximum(diagonal, 0.0))
+
+    def screening(replicas: np.ndarray) -> float:
+        try:
+            placement = unconstrained_lpt(mean, moments, replicas, old.shape[0], config.z_score)
+        except ValueError:
+            return float("inf")
+        return placement_score(samples, weights, placement).mean
+
+    candidates = []
+    for replicas in replica_candidates(
+        risk,
+        old.size,
+        old.shape[0],
+        depth=config.flash_tree_depth,
+        width=config.flash_tree_width,
+        limit=config.max_candidates_per_layer,
+        score=screening,
+    ):
+        result = constrained_lpt(
+            mean,
+            moments,
+            replicas,
+            old,
+            node_by_rank,
+            z_score=config.z_score,
+            pair_cap=config.max_expert_transfers_per_rank_pair,
+            max_backtracks=config.lpt_max_backtracks,
+        )
+        if result is None:
+            continue
+        placement, source_rank, source_slot, cross_node, same_node = result
+        score = placement_score(samples, weights, placement)
+        relative_gain = (current.mean - score.mean) / current.mean
+        if (
+            relative_gain >= config.min_relative_score_improvement
+            and current.mean - score.mean >= config.min_absolute_score_improvement
+            and score.p95 <= current.p95 * (1 + config.p95_regression_tolerance)
+        ):
+            key = (cross_node, same_node, tuple(placement.ravel()), tuple(source_rank.ravel()))
+            candidates.append((score.mean, key, LayerPlan(placement, source_rank, source_slot, score)))
+    if not candidates:
+        return None
+    minimum = min(score for score, _, _ in candidates)
+    tied = [item for item in candidates if item[0] <= minimum + config.score_tie_tolerance]
+    return min(tied, key=lambda item: item[1])[2]
+
+
+def plan_rebalance(
+    logical_load: np.ndarray,
+    old_placement: np.ndarray,
+    accepted_scores: np.ndarray,
+    node_by_rank: tuple[int, ...],
+    config: StairConfig,
+) -> StairPlan:
+    """Run STAIR's six stages for every eligible layer."""
+    samples, weights = compress_samples(logical_load, config.sample_size)
+    old = np.asarray(old_placement, dtype=np.int64)
+    if old.ndim != 3 or samples.shape[1] != old.shape[0] or len(node_by_rank) != old.shape[1]:
+        raise ValueError("STAIR load, placement, and topology shapes disagree")
+    anchors = np.asarray(accepted_scores, dtype=np.float64)
+    if anchors.shape != (old.shape[0],):
+        raise ValueError("STAIR accepted scores must match the layer count")
+
+    placement = old.copy()
+    source_rank = np.broadcast_to(np.arange(old.shape[1])[None, :, None], old.shape).copy()
+    source_slot = np.broadcast_to(np.arange(old.shape[2])[None, None, :], old.shape).copy()
+    new_scores = np.full(old.shape[0], np.nan, dtype=np.float64)
+    eligible = []
+    for layer in range(old.shape[0]):
+        replica_counts(old[layer], samples.shape[2])
+        if np.sum(samples[:, layer], dtype=np.float64) == 0:
+            continue
+        current = placement_score(samples[:, layer], weights, old[layer])
+        if current.mean > config.imbalance_threshold and passes_hysteresis(current.mean, anchors[layer], config):
+            deterioration = 0.0 if np.isnan(anchors[layer]) else current.mean / anchors[layer] - 1.0
+            eligible.append((-current.mean, -deterioration, layer))
+
+    for _, _, layer in sorted(eligible):
+        result = _plan_layer(samples[:, layer], weights, old[layer], node_by_rank, config)
+        if result is not None:
+            placement[layer] = result.placement
+            source_rank[layer] = result.source_rank
+            source_slot[layer] = result.source_slot
+            new_scores[layer] = result.score.mean
+    return StairPlan(placement, source_rank, source_slot, new_scores)
