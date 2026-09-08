@@ -60,10 +60,13 @@ def _resample_kernel(
         req_idx = task_idx // num_blocks
         block_idx = task_idx - req_idx * num_blocks
         resample_idx = tl.load(rejected_step_ptr + req_idx)
-        start_idx = tl.load(cu_num_logits_ptr + req_idx)
+        # Cast to int64 before pointer arithmetic: triton-ascend computes
+        # offsets in int32, which overflows when num_logits exceeds INT32_MAX
+        # (upstream vllm #46560).
+        start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
         end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
         resample_token_idx = start_idx + resample_idx
-        req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+        req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
         temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
         is_bonus = resample_token_idx == end_idx - 1
         needs_resample = (temperature != 0.0) | is_bonus
@@ -145,10 +148,13 @@ def _categorical_finalize_kernel(
     """Select the final token using one global categorical threshold per request."""
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    # Cast to int64 before pointer arithmetic: triton-ascend computes
+    # offsets in int32, which overflows when num_logits exceeds INT32_MAX
+    # (upstream vllm #46560).
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     resample_token_idx = start_idx + resample_idx
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
 
     temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temperature == 0.0

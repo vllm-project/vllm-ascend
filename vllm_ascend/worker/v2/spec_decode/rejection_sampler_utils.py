@@ -82,8 +82,11 @@ def _probabilistic_rejection_kernel(
     SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    # Cast to int64 before pointer arithmetic: triton-ascend computes
+    # offsets in int32, which overflows when num_logits exceeds INT32_MAX
+    # (upstream vllm #46560).
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_tokens = end_idx - start_idx
     seed = tl.load(seed_ptr + req_state_idx)  # noqa: F841
