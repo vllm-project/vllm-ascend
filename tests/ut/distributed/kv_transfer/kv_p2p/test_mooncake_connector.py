@@ -101,11 +101,12 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     return MooncakeAgentMetadata(**metadata)
 
 
-def make_kv_cache_tensor(size, layers, **kwargs):
+def make_kv_cache_tensor(size, layers, *, block_stride, **kwargs):
     """Use the installed dependency's real type, including release-wheel APIs."""
     if "layers" in KVCacheTensor.__dataclass_fields__:
-        return KVCacheTensor(size=size, layers=layers, layer_stride=size, **kwargs)
-    return KVCacheTensor(size=size, shared_by=layers, **kwargs)
+        kwargs.setdefault("layer_stride", size)
+        return KVCacheTensor(size=size, layers=layers, block_stride=block_stride, **kwargs)
+    return KVCacheTensor(size=size, shared_by=layers, block_stride=block_stride, **kwargs)
 
 
 def make_exact_aligned_cpu_buffer(size):
@@ -127,7 +128,7 @@ def test_k3_registration_recovers_storage_across_alignment_boundary(offset):
     allocation = make_exact_aligned_cpu_buffer(size)
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.kv_cache_config = types.SimpleNamespace(
-        kv_cache_tensors=[make_kv_cache_tensor(size=size, layers=["target", "state"])]
+        kv_cache_tensors=[make_kv_cache_tensor(size=size, layers=["target", "state"], block_stride=1)]
     )
     assert allocation.untyped_storage().nbytes() == size
     assert allocation.data_ptr() % (2 * 1024 * 1024) == 0
@@ -1943,9 +1944,9 @@ def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract,
     ]
     worker._layer_specs = worker._build_layer_specs_from_kv_cache_config(worker.kv_cache_config)
     worker.kv_cache_config.kv_cache_tensors = [
-        make_kv_cache_tensor(size=size, layers=[attention, state]),
-        make_kv_cache_tensor(size=size, layers=[state]),
-        make_kv_cache_tensor(size=size, layers=[mtp]),
+        make_kv_cache_tensor(size=size, layers=[attention, state], block_stride=16),
+        make_kv_cache_tensor(size=size, layers=[state], block_stride=16),
+        make_kv_cache_tensor(size=size, layers=[mtp], block_stride=16),
     ]
     caches = {
         attention: target[128:160].view(2, 16),
@@ -4611,6 +4612,156 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
+
+
+@pytest.mark.parametrize("payload", ["tokens", "embeds", "missing"])
+@pytest.mark.parametrize("guard", ["normal", "already-truncated", "single-token", "no-params"])
+def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    count = 1 if guard == "single-token" else 3
+    tokens = list(range(count))
+    embeds = torch.arange(count * 2).reshape(count, 2)
+    params = None if guard == "no-params" else {"_p_side_truncated": guard == "already-truncated"}
+    request = types.SimpleNamespace(
+        kv_transfer_params=params,
+        prompt_token_ids=tokens.copy() if payload == "tokens" else None,
+        prompt_embeds=embeds.clone() if payload == "embeds" else None,
+        _all_token_ids=tokens.copy(),
+        num_prompt_tokens=count,
+        max_tokens=16,
+    )
+    should_truncate = guard == "normal" and payload != "missing"
+    for _ in range(2):  # Preemption/reschedule must not drop a second token.
+        scheduler._truncate_request_for_prefill(request)
+        expected = tokens[:-1] if should_truncate else tokens
+        assert request._all_token_ids == expected
+        assert request.num_prompt_tokens == len(expected)
+        assert request.max_tokens == (1 if should_truncate else 16)
+        if payload == "tokens":
+            assert request.prompt_token_ids == expected
+        if payload == "embeds":
+            assert torch.equal(request.prompt_embeds, embeds[: len(expected)])
+        assert request.kv_transfer_params == (
+            None if params is None else {"_p_side_truncated": should_truncate or guard == "already-truncated"}
+        )
+
+
+@pytest.mark.parametrize("truncate", [False, True])
+@pytest.mark.parametrize("tokens", [0, 1, 2, 32])
+def test_state_prefill_token_count_boundary(truncate, tokens):
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.need_truncate = truncate
+    assert scheduler._state_prefill_token_count(tokens) == (tokens - 1 if truncate and tokens > 1 else tokens)
+
+
+@pytest.mark.parametrize("mode", ["empty", "legacy", "pp-key", "invalid-pp-key"])
+def test_worker_handshake_mapping_preserves_previous_entries_and_updates_atomically(mode):
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.vllm_config = types.SimpleNamespace(kv_transfer_config=types.SimpleNamespace(kv_port=6000))
+    original = {"9": {"host": "old-host", "engine_id": "old-engine", "handshake_port": 6009}}
+    scheduler.multi_nodes_meta_mapping = original.copy()
+    metadata = {}
+    if mode != "empty":
+        key = 2 if mode == "legacy" else (0, 1, 2)
+        metadata[key] = make_agent_metadata(
+            local_ip="new-host", engine_id="new-engine", handshake_port=6002 if mode == "pp-key" else 0
+        )
+    if mode == "invalid-pp-key":
+        # Even if an earlier entry is valid, a later invalid entry must not
+        # publish a partial mapping to the next request.
+        metadata = {1: make_agent_metadata(local_ip="other-host"), **metadata}
+        with pytest.raises(ValueError, match="missing handshake_port"):
+            scheduler.set_xfer_handshake_metadata(metadata)
+        assert scheduler.multi_nodes_meta_mapping == original
+    else:
+        scheduler.set_xfer_handshake_metadata(metadata)
+        expected = original.copy()
+        if mode != "empty":
+            expected["2"] = {"host": "new-host", "engine_id": "new-engine", "handshake_port": 6002}
+        assert scheduler.multi_nodes_meta_mapping == expected
+
+
+@pytest.mark.parametrize("finish_order", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])
+def test_recv_completion_waits_for_all_submitted_pulls(finish_order):
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.request_task_counts_lock = threading.Lock()
+    receiver.request_task_counts = defaultdict(int)
+    receiver.finished_request_markers = set()
+    for index in range(3):
+        receiver._mark_request_task_submitted({"request_id": "r", "all_task_done": index == 2})
+    completions = [receiver._mark_request_task_done("r", index == 2) for index in finish_order]
+    assert completions == [False, False, True]
+    assert not receiver.request_task_counts
+    assert not receiver.finished_request_markers
+    # A subsequent request must not inherit the preceding completion marker.
+    receiver._mark_request_task_submitted({"request_id": "next", "all_task_done": False})
+    assert receiver._mark_request_task_done("next", False) is False
+    receiver._mark_request_task_submitted({"request_id": "next", "all_task_done": True})
+    assert receiver._mark_request_task_done("next", True) is True
+
+
+@pytest.mark.parametrize("primary", [False, True])
+@pytest.mark.parametrize("has_ports", [False, True])
+def test_unused_remote_ports_are_notified_once_by_primary_receiver(primary, has_ports):
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.side_channel_port = 6000 if primary else 6001
+    receiver.local_handshake_port = 6000
+    receiver.proc_not_transfer_request_lock = threading.Lock()
+    receiver.proc_not_transfer_request = {}
+    sent = []
+    receiver._send_done_recv_signal = lambda *args: sent.append(args)
+    ports = {7000: {"num": 0, "host": "idle-peer"}, 7001: {"num": 2, "host": "busy-peer"}} if has_ports else {}
+    for _ in range(2):
+        receiver._send_done_signal_to_free_remote_port("r", "default-peer", ports)
+    assert sent == ([("r", "idle-peer", 7000, ports)] if primary and has_ports else [])
+
+
+@pytest.mark.parametrize("pulls", [1, 2, 4])
+def test_head_reformat_preserves_token_head_order_at_scatter_boundary(monkeypatch, pulls):
+    """Validate PD's CPU reshape arithmetic, not the external NPU scatter op."""
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.block_size = 2
+    blocks, heads, dim = 2, 4, 2
+    source = torch.arange(blocks * 2 * heads * dim).reshape(blocks * 2, heads, dim)
+    slots = torch.tensor([6, 7, 2, 3], dtype=torch.int32)
+    k_cache, v_cache = torch.zeros(1), torch.zeros(1)
+    captured = []
+    module = sys.modules[KVCacheRecvingThread.__module__]
+    monkeypatch.setattr(module.torch_npu, "npu_scatter_pa_kv_cache", lambda **kwargs: captured.append(kwargs))
+    receiver._cat_kv_cache(k_cache, v_cache, source, source + 1000, pulls, blocks, blocks * 2, slots, heads)
+    # Scalar indexing oracle independent of the implementation's view/transpose.
+    expected = torch.empty_like(source)
+    width = heads * dim // pulls
+    flat = source.flatten()
+    for block in range(blocks):
+        for token in range(2):
+            for pull in range(pulls):
+                offset = ((block * pulls + pull) * 2 + token) * width
+                expected[block * 2 + token].flatten()[pull * width : (pull + 1) * width] = flat[offset : offset + width]
+    assert len(captured) == 1
+    assert torch.equal(captured[0]["key"], expected)
+    assert torch.equal(captured[0]["value"], expected + 1000)
+    assert captured[0]["key_cache"] is k_cache
+    assert captured[0]["value_cache"] is v_cache
+    assert captured[0]["slot_mapping"] is slots
+    assert captured[0]["cache_mode"] == "Norm"
+
+
+@pytest.mark.parametrize("layout", ["empty", "aligned", "unaligned"])
+def test_legacy_hybrid_registration_checks_actual_base(layout):
+    allocation = make_exact_aligned_cpu_buffer(128)
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(
+        kv_cache_tensors=[types.SimpleNamespace(size=128, shared_by=["layer"])]
+    )
+    caches = {"layer": () if layout == "empty" else (allocation[1:] if layout == "unaligned" else allocation)}
+    if layout == "unaligned":
+        with pytest.raises(RuntimeError, match="not aligned to 2 MiB"):
+            worker._get_registered_kv_tensor_buffers_hybrid(caches)
+    else:
+        assert worker._get_registered_kv_tensor_buffers_hybrid(caches) == (
+            ([], []) if layout == "empty" else ([allocation.data_ptr()], [128])
+        )
 
 
 if __name__ == "__main__":
