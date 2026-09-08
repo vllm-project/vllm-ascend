@@ -658,6 +658,9 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        # v0.28.0 lacks CacheConfig.get_resolved_kv_cache_layout (#51718 main).
+        if vllm_version_is("0.28.0"):
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
