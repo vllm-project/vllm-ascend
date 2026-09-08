@@ -8,8 +8,16 @@ from unittest.mock import patch
 import pytest
 import torch
 from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
+from vllm_ascend.attention.indexer_kpool import (
+    AscendIndexerKPoolBackend,
+    AscendIndexerKPoolMetadataBuilder,
+    AscendIndexerKPoolStateBackend,
+    select_indexer_block_size,
+)
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     register_ascend_kv_cache_specs,
@@ -80,6 +88,20 @@ def test_invalid_pool_geometry_is_rejected(ratio):
         )
 
 
+@pytest.mark.parametrize(
+    ("storage_block_size", "expected"),
+    [(16, (16, 1)), (1024, (1024, 1)), (2048, (1024, 2)), (1536, (768, 2))],
+)
+def test_indexer_block_size_selection(storage_block_size, expected):
+    assert select_indexer_block_size(storage_block_size) == expected
+
+
+@pytest.mark.parametrize("storage_block_size", [0, 7, 17])
+def test_invalid_indexer_block_size_is_rejected(storage_block_size):
+    with pytest.raises(ValueError):
+        select_indexer_block_size(storage_block_size)
+
+
 def test_model_cache_layers_publish_source_compatible_specs():
     current_config = SimpleNamespace(
         parallel_config=SimpleNamespace(pipeline_parallel_size=2),
@@ -119,7 +141,53 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert state_spec.head_size == 256
     assert state_spec.dtype == torch.float32
     assert state_spec.indexes_kv_by_block_stride
+    assert indexer.get_attn_backend() is AscendIndexerKPoolBackend
+    assert state.get_attn_backend() is AscendIndexerKPoolStateBackend
     assert set(current_config.compilation_config.static_forward_context) == {
         indexer.prefix,
         state.prefix,
     }
+
+
+def test_indexer_metadata_preserves_raw_request_boundaries():
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=16,
+            max_num_seqs=2,
+        ),
+        model_config=SimpleNamespace(max_model_len=512),
+    )
+    builder = AscendIndexerKPoolMetadataBuilder(
+        MLAAttentionSpec(
+            block_size=256,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            compress_ratio=16,
+            model_version="glm5_next",
+        ),
+        ["model.layers.0.indexer.k_cache"],
+        config,
+        torch.device("cpu"),
+    )
+    common = AscendCommonAttentionMetadata(
+        query_start_loc=torch.tensor([0, 2, 5], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 2, 5], dtype=torch.int32),
+        seq_lens=torch.tensor([18, 35], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([18, 35], dtype=torch.int32),
+        num_reqs=2,
+        num_actual_tokens=5,
+        max_query_len=3,
+        num_input_tokens=5,
+        max_seq_len=35,
+        block_table_tensor=torch.tensor([[0, -1], [1, 2]], dtype=torch.int32),
+        slot_mapping=torch.tensor([16, 17, 32, 33, 34]),
+        positions=torch.tensor([16, 17, 32, 33, 34]),
+    )
+
+    metadata = builder.build(0, common)
+
+    assert metadata.cum_query_lens.tolist() == [2, 5]
+    assert metadata.raw_seq_lens.tolist() == [18, 35]
+    assert metadata.seq_lens.tolist() == [1, 2]
+    assert metadata.num_actual_tokens == 5

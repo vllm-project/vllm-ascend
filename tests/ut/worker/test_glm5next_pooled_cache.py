@@ -73,12 +73,12 @@ def _make_config():
     )
 
 
-def _make_specs():
+def _make_specs(main_head_size=4):
     return {
         MAIN: AscendMLAAttentionSpec(
             block_size=8,
             num_kv_heads=1,
-            head_size=4,
+            head_size=main_head_size,
             dtype=torch.bfloat16,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
@@ -107,7 +107,7 @@ def _make_specs():
     }
 
 
-def _make_runner(config):
+def _make_runner(config, main_cache_dims=(4, 0)):
     runner = NPUModelRunner.__new__(NPUModelRunner)
     runner.device = torch.device("cpu")
     runner.vllm_config = config
@@ -152,15 +152,17 @@ def _make_runner(config):
         ),
     ]
     runner._kv_cache_spec_attn_group_iterator = lambda: iter(attn_groups)
-    runner._get_attention_kv_cache_dims = lambda _name, _spec: (4, 0)
+    runner._get_attention_kv_cache_dims = lambda _name, _spec: main_cache_dims
     return runner
 
 
-def _make_plan(num_blocks=3):
+def _make_plan(num_blocks=3, main_head_size=4):
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
     config = _make_config()
-    groups = get_glm5_kv_cache_groups(config, _make_specs())
+    groups = get_glm5_kv_cache_groups(
+        config, _make_specs(main_head_size)
+    )
     bytes_per_block = get_glm5_pool_bytes_per_block(groups)
     plan = get_glm5_kv_cache_config(
         config,
@@ -185,10 +187,11 @@ def test_glm5_runner_allocates_contiguous_slot_backings():
         for descriptor in plan.kv_cache_tensors
         for name in descriptor.shared_by
     }
-    (main_cache,) = caches[MAIN]
+    main_cache, main_rope_cache = caches[MAIN]
     (indexer_cache,) = caches[INDEXER]
     (state_cache,) = caches[STATE]
     assert main_cache.shape == (3, 8, 1, 4)
+    assert main_rope_cache.shape == (3, 8, 1, 0)
     assert main_cache.is_contiguous()
     assert indexer_cache.shape == (3, 4, 1, 4)
     assert state_cache.shape == (3, 2, 3)
@@ -215,6 +218,29 @@ def test_glm5_runner_allocates_contiguous_slot_backings():
     state_payload_size = state_cache[0].numel() * state_cache.element_size()
     state_padding = 2 * (descriptors[STATE].size // plan.num_blocks) + state_payload_size
     assert raw_caches[STATE][state_padding].item() == 0
+
+
+def test_glm5_runner_splits_main_mla_components_within_each_page():
+    config, _, plan = _make_plan(main_head_size=6)
+    runner = _make_runner(config, main_cache_dims=(4, 2))
+
+    raw_caches = runner._allocate_kv_cache_tensors(plan)
+    caches = runner._reshape_kv_cache_tensors(plan, raw_caches)
+
+    kv_c_cache, k_pe_cache = caches[MAIN]
+    assert kv_c_cache.shape == (3, 8, 1, 4)
+    assert k_pe_cache.shape == (3, 8, 1, 2)
+    page_size = next(
+        descriptor.size // plan.num_blocks
+        for descriptor in plan.kv_cache_tensors
+        if MAIN in descriptor.shared_by
+    )
+    assert kv_c_cache.stride(0) * kv_c_cache.element_size() == page_size
+    assert k_pe_cache.stride(0) * k_pe_cache.element_size() == page_size
+    assert (
+        k_pe_cache.data_ptr() - raw_caches[MAIN].data_ptr()
+        == kv_c_cache[0].numel() * kv_c_cache.element_size()
+    )
 
 
 def test_standalone_mtp_uses_existing_compressed_cache_allocator():

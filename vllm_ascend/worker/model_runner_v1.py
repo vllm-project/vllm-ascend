@@ -4913,6 +4913,27 @@ class NPUModelRunner(GPUModelRunner):
                     kv_cache_dtype_list = [current_kv_cache_spec.dtype]
                     overlap_full_kv_cache = False
 
+                    # A page-strided MLA cache still exposes its latent KV and
+                    # RoPE components as separate logical tensors. They share
+                    # one standard backing allocation, but the attention
+                    # implementation addresses them independently.
+                    if (
+                        isinstance(current_kv_cache_spec, AscendMLAAttentionSpec)
+                        and current_kv_cache_spec.compress_ratio == 1
+                    ):
+                        k_dim, v_dim = self._get_attention_kv_cache_dims(
+                            layer_name, current_kv_cache_spec
+                        )
+                        cache_prefix = kv_cache_shape[:-1]
+                        kv_cache_shape_list = [
+                            (*cache_prefix, k_dim),
+                            (*cache_prefix, v_dim),
+                        ]
+                        kv_cache_dtype_list = [
+                            current_kv_cache_spec.dtype,
+                            current_kv_cache_spec.dtype,
+                        ]
+
                     if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
                         indexer_k_shape = kv_cache_shape
                         indexer_scale_shape = attn_backend.get_kv_cache_shape(

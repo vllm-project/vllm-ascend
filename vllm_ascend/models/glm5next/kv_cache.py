@@ -131,9 +131,11 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         )
 
     def get_attn_backend(self):
-        raise NotImplementedError(
-            "GLM-5.3-Flash sparse kpool attention is not implemented on Ascend."
+        from vllm_ascend.attention.indexer_kpool import (
+            AscendIndexerKPoolBackend,
         )
+
+        return AscendIndexerKPoolBackend
 
     def forward(self): ...
 
@@ -192,8 +194,10 @@ class Glm5NextStateCache(nn.Module, AttentionLayerBase):
         )
 
     def get_attn_backend(self):
-        raise NotImplementedError(
-            "GLM-5.3-Flash sparse kpool attention is not implemented on Ascend."
+        from vllm_ascend.attention.indexer_kpool import (
+            AscendIndexerKPoolStateBackend,
         )
+
+        return AscendIndexerKPoolStateBackend
 
     def forward(self): ...
