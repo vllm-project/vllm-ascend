@@ -1,6 +1,8 @@
 import numpy as np
 
 from vllm_ascend.distributed.eplb.stair_policy import (
+    align_slots,
+    assign_sources,
     capped_min_max,
     compress_samples,
     placement_score,
@@ -56,3 +58,21 @@ def test_flash_tree_candidates_are_bounded_and_deterministic():
     assert len(first) <= 4
     assert [item.tolist() for item in first] == [item.tolist() for item in second]
     assert all(item.sum() == 6 and np.all(item <= 2) for item in first)
+
+
+def test_source_assignment_enforces_pair_cap():
+    old = np.array([[0, 1], [2, 3]])
+
+    assert assign_sources(old, [{2, 3}, {0, 1}], (0, 0), 1) is None
+
+
+def test_source_assignment_prefers_same_node_and_aligns_slots():
+    old = np.array([[0, 1], [0, 2], [3, 4]])
+    desired = [{0, 1}, {0, 2}, {0, 4}]
+
+    sources = assign_sources(old, desired, (0, 1, 1), 1)
+    assert sources == {(2, 0): (1, 0)}
+    placement, source_rank, source_slot = align_slots(old, desired, sources)
+
+    np.testing.assert_array_equal(placement, [[0, 1], [0, 2], [0, 4]])
+    assert (source_rank[2, 0], source_slot[2, 0]) == (1, 0)

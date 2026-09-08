@@ -3,6 +3,7 @@
 
 """Pure NumPy implementation of the STAIR placement policy."""
 
+from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
@@ -183,3 +184,126 @@ def replica_candidates(
         if candidate is not None:
             complete[candidate.astype("<i4").tobytes()] = candidate
     return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:limit]
+
+
+def _minimum_source_cost(
+    demands: list[tuple[int, int]],
+    owners: dict[int, tuple[int, ...]],
+    capacity: dict[tuple[int, int], int],
+    node_by_rank: tuple[int, ...],
+) -> int | None:
+    """Solve the directed pair-capacity matching problem."""
+    if not demands:
+        return 0
+    pairs = sorted({(src, dst) for dst, expert in demands for src in owners[expert] if capacity[(src, dst)]})
+    pair_nodes = {pair: len(demands) + index + 1 for index, pair in enumerate(pairs)}
+    sink = len(demands) + len(pairs) + 1
+    graph: list[list[list[int]]] = [[] for _ in range(sink + 1)]
+
+    def add_edge(start: int, end: int, cap: int, cost: int) -> None:
+        graph[start].append([end, len(graph[end]), cap, cost])
+        graph[end].append([start, len(graph[start]) - 1, 0, -cost])
+
+    scale = len(demands) + 1
+    for index, (dst, expert) in enumerate(demands, 1):
+        add_edge(0, index, 1, 0)
+        for src in owners[expert]:
+            if (src, dst) in pair_nodes:
+                cost = 1 if node_by_rank[src] == node_by_rank[dst] else scale
+                add_edge(index, pair_nodes[(src, dst)], 1, cost)
+    for pair, node in pair_nodes.items():
+        add_edge(node, sink, capacity[pair], 0)
+
+    total = 0
+    for _ in demands:
+        distance = [10**18] * len(graph)
+        parent: list[tuple[int, int] | None] = [None] * len(graph)
+        distance[0] = 0
+        queue, queued = deque([0]), {0}
+        while queue:
+            node = queue.popleft()
+            queued.discard(node)
+            for edge_index, edge in enumerate(graph[node]):
+                target, _, cap, cost = edge
+                if cap and distance[node] + cost < distance[target]:
+                    distance[target] = distance[node] + cost
+                    parent[target] = (node, edge_index)
+                    if target not in queued:
+                        queue.append(target)
+                        queued.add(target)
+        if parent[sink] is None:
+            return None
+        total += distance[sink]
+        node = sink
+        while node:
+            previous, edge_index = parent[node]  # type: ignore[misc]
+            edge = graph[previous][edge_index]
+            edge[2] -= 1
+            graph[node][edge[1]][2] += 1
+            node = previous
+    return total
+
+
+def assign_sources(
+    old_placement: np.ndarray,
+    destination_experts: list[set[int]],
+    node_by_rank: tuple[int, ...],
+    pair_cap: int,
+) -> dict[tuple[int, int], tuple[int, int]] | None:
+    """Choose real sources while minimizing cross-node transfers."""
+    old = np.asarray(old_placement, dtype=np.int64)
+    locations: dict[int, list[tuple[int, int]]] = {}
+    for rank, row in enumerate(old):
+        for slot, expert in enumerate(row):
+            locations.setdefault(int(expert), []).append((rank, slot))
+    demands = sorted(
+        (dst, expert) for dst, experts in enumerate(destination_experts) for expert in experts if expert not in old[dst]
+    )
+    owners = {expert: tuple(rank for rank, _ in values) for expert, values in locations.items()}
+    slots = {(expert, rank): slot for expert, values in locations.items() for rank, slot in values}
+    capacity = {(src, dst): pair_cap for src in range(old.shape[0]) for dst in range(old.shape[0]) if src != dst}
+    target = _minimum_source_cost(demands, owners, capacity, node_by_rank)
+    if target is None:
+        return None
+
+    assignment = {}
+    for index, demand in enumerate(demands):
+        dst, expert = demand
+        for src in owners[expert]:
+            pair = (src, dst)
+            if not capacity.get(pair, 0):
+                continue
+            cost = 1 if node_by_rank[src] == node_by_rank[dst] else len(demands) + 1
+            capacity[pair] -= 1
+            future = _minimum_source_cost(demands[index + 1 :], owners, capacity, node_by_rank)
+            if future is not None and cost + future == target:
+                assignment[demand] = (src, slots[(expert, src)])
+                target -= cost
+                break
+            capacity[pair] += 1
+        else:
+            return None
+    return assignment
+
+
+def align_slots(
+    old_placement: np.ndarray,
+    rank_experts: list[set[int]],
+    sources: dict[tuple[int, int], tuple[int, int]],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Keep retained experts in place and fill empty slots by expert id."""
+    old = np.asarray(old_placement, dtype=np.int64)
+    new = np.full_like(old, -1)
+    source_rank = np.full_like(old, -1)
+    source_slot = np.full_like(old, -1)
+    for rank, desired in enumerate(rank_experts):
+        for slot, expert in enumerate(old[rank]):
+            if int(expert) in desired:
+                new[rank, slot] = expert
+                source_rank[rank, slot], source_slot[rank, slot] = rank, slot
+        empty = iter(np.flatnonzero(new[rank] < 0))
+        for expert in sorted(desired - set(old[rank])):
+            slot = int(next(empty))
+            new[rank, slot] = expert
+            source_rank[rank, slot], source_slot[rank, slot] = sources[(rank, expert)]
+    return new, source_rank, source_slot
