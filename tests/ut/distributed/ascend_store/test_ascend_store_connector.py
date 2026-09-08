@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import os
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -66,12 +65,6 @@ class TestAscendStoreKVEvents(unittest.TestCase):
 
 
 class TestAscendStoreConnector(unittest.TestCase):
-    def setUp(self):
-        environment = patch.dict(os.environ, {}, clear=False)
-        environment.start()
-        self.addCleanup(environment.stop)
-        os.environ.pop("ASCEND_GLOBAL_RESOURCE_CONFIG", None)
-
     def _make_vllm_config(self, kv_role="kv_producer", extra_config=None):
         config = MagicMock()
         config.kv_transfer_config.kv_role = kv_role

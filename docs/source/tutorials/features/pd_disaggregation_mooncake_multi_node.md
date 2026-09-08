@@ -248,23 +248,10 @@ configuration are preserved. An explicit QoS value, or the default **1** when
 omitted, replaces the existing top-level QoS. Invalid QoS values or malformed
 resource JSON fail before the environment is modified.
 
-When combining P/D and Mooncake-backed `AscendStoreConnector` through
-`MultiConnector`, put `qos` in each **child connector's**
-`kv_connector_extra_config`. P/D defaults to **1**, while Mooncake pooling
-defaults to **0**. For example, P/D QoS 1 and pool QoS 0 produce:
-
-```json
-{
-  "comm_resource_config.qos": 1,
-  "store": {"comm_resource_config.qos": 0}
-}
-```
-
-Each connector updates only its own QoS scope, regardless of initialization
-order. The generated resource configuration activates the existing independent
-Store transfer-engine path. This combination requires Mooncake v0.3.12 or later
-with Store-specific resource configuration support. Restart the serving
-processes after changing QoS.
+With `MultiConnector`, set `qos` in the Mooncake P/D child connector's
+`kv_connector_extra_config`. P/D injection only updates the top-level QoS key;
+it does not configure or validate pooling backends or modify their `store`
+settings. Restart the serving processes after changing P/D QoS.
 
 ### kv_port Configuration Guide
 

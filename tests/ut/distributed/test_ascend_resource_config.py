@@ -20,22 +20,17 @@ class TestAscendResourceConfig(unittest.TestCase):
             inject_qos(PD_QOS_DEFAULT)
             self.assertEqual(json.loads(os.environ[ENV]), {QOS_KEY: 1})
 
-    def test_both_initialization_orders(self):
-        for order in ((False, True), (True, False)):
-            for pd_qos, store_qos in ((1, 0), (0, 4), (3, 2)):
-                with self.subTest(order=order, pd=pd_qos, pool=store_qos), patch.dict(os.environ, {}, clear=True):
-                    for store in order:
-                        inject_qos(store_qos if store else pd_qos, store=store)
-                    self.assertEqual(json.loads(os.environ[ENV]), {QOS_KEY: pd_qos, "store": {QOS_KEY: store_qos}})
-
-    def test_preserves_other_fields_and_opposite_qos(self):
+    def test_preserves_other_fields(self):
         initial = {QOS_KEY: 3, "other": {"x": [1, 2]}, "store": {QOS_KEY: 4, "pool_other": 9}}
-        for store in (False, True):
-            with self.subTest(store=store), patch.dict(os.environ, {ENV: json.dumps(initial)}):
-                inject_qos(2, store=store)
-                expected = json.loads(json.dumps(initial))
-                (expected["store"] if store else expected)[QOS_KEY] = 2
-                self.assertEqual(json.loads(os.environ[ENV]), expected)
+        with patch.dict(os.environ, {ENV: json.dumps(initial)}):
+            inject_qos(2)
+            self.assertEqual(json.loads(os.environ[ENV]), {**initial, QOS_KEY: 2})
+
+    def test_explicit_pd_qos(self):
+        for qos in range(5):
+            with self.subTest(qos=qos), patch.dict(os.environ, {}, clear=True):
+                inject_qos(qos)
+                self.assertEqual(json.loads(os.environ[ENV]), {QOS_KEY: qos})
 
     def test_invalid_inputs_leave_environment_unchanged(self):
         for qos in (True, False, "1", 1.5, None, -1, 5, 6, 7, 8):
@@ -43,7 +38,7 @@ class TestAscendResourceConfig(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     inject_qos(qos)
                 self.assertEqual(os.environ[ENV], "{}")
-        for raw in ("{unquoted: 1}", "[]", "null", '{"store": 3}'):
+        for raw in ("{unquoted: 1}", "[]", "null"):
             with self.subTest(raw=raw), patch.dict(os.environ, {ENV: raw}):
                 with self.assertRaises(ValueError):
                     inject_qos(1)
@@ -52,8 +47,6 @@ class TestAscendResourceConfig(unittest.TestCase):
     def test_repeated_injection_is_idempotent(self):
         with patch.dict(os.environ, {}, clear=True):
             inject_qos(1)
-            inject_qos(0, store=True)
             before = os.environ[ENV]
             inject_qos(1)
-            inject_qos(0, store=True)
             self.assertEqual(os.environ[ENV], before)

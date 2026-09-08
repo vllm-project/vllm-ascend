@@ -29,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
     get_layerwise_protocol,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import memcache_backend as memcache_module
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import mooncake_backend as mooncake_module
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
     Backend,
     parse_qos_from_extra_config,
@@ -47,6 +48,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_b
     MooncakeBackend,
     MooncakeStoreConfig,
     _convert_to_bytes,
+    _inject_store_qos,
     _parse_global_segment_size,
     _ssd_setup_kwargs,
     _validate_store_qos,
@@ -531,7 +533,7 @@ class TestMooncakeStoreQosValidation(unittest.TestCase):
 
     @staticmethod
     def _store_qos_env(qos) -> dict:
-        return {"ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config.qos": qos}})}
+        return {"ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": qos}}})}
 
     def test_unset_env_passes(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -585,7 +587,7 @@ class TestMooncakeStoreQosValidation(unittest.TestCase):
         try:
             env = {
                 "MOONCAKE_CONFIG_PATH": path,
-                "ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config.qos": 6}}),
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": 6}}}),
             }
             with (
                 patch.dict(os.environ, env),
@@ -644,6 +646,111 @@ class TestExtraConfigQos(unittest.TestCase):
             self.assertRaisesRegex(ValueError, "kv_connector_extra_config"),
         ):
             fetch_qos_from_current_config()
+
+
+class TestMooncakeStoreQosInjection(unittest.TestCase):
+    _ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
+
+    @staticmethod
+    def _qos(qos):
+        return patch.object(mooncake_module, "fetch_qos_from_current_config", return_value=qos)
+
+    def test_inject_creates_config_when_unset(self):
+        with patch.dict(os.environ, {}, clear=True), self._qos(3):
+            _inject_store_qos()
+            self.assertEqual(
+                json.loads(os.environ[self._ENV]),
+                {"store": {"comm_resource_config": {"qos": 3}}},
+            )
+
+    def test_inject_noop_without_qos(self):
+        with patch.dict(os.environ, {}, clear=True), self._qos(None):
+            _inject_store_qos()
+            self.assertNotIn(self._ENV, os.environ)
+
+    def test_inject_merges_into_existing_config(self):
+        existing = {
+            "comm_resource_config": {"protocol_desc": ["hccs:device"]},
+            "store": {"comm_resource_config": {"protocol_desc": ["roce:device"]}},
+            "fabric_memory": {"max_capacity": 32},
+        }
+        with patch.dict(os.environ, {self._ENV: json.dumps(existing)}), self._qos(2):
+            _inject_store_qos()
+            merged = json.loads(os.environ[self._ENV])
+            self.assertEqual(merged["store"]["comm_resource_config"]["qos"], 2)
+            # Other HIXL fields are preserved.
+            self.assertEqual(merged["store"]["comm_resource_config"]["protocol_desc"], ["roce:device"])
+            self.assertEqual(merged["comm_resource_config"], {"protocol_desc": ["hccs:device"]})
+            self.assertEqual(merged["fabric_memory"], {"max_capacity": 32})
+
+    def test_inject_overrides_existing_qos(self):
+        with (
+            patch.dict(os.environ, self._store_qos_env(1)),
+            patch.object(mooncake_module, "logger") as mock_logger,
+            self._qos(4),
+        ):
+            _inject_store_qos()
+            self.assertEqual(json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"], 4)
+            mock_logger.warning.assert_called_once()
+
+    def test_inject_same_qos_does_not_warn(self):
+        with (
+            patch.dict(os.environ, self._store_qos_env(3)),
+            patch.object(mooncake_module, "logger") as mock_logger,
+            self._qos(3),
+        ):
+            _inject_store_qos()
+            mock_logger.warning.assert_not_called()
+
+    def test_inject_rejects_malformed_json(self):
+        with (
+            patch.dict(os.environ, {self._ENV: "not-json"}),
+            self._qos(3),
+            self.assertRaisesRegex(ValueError, "not valid JSON"),
+        ):
+            _inject_store_qos()
+
+    def test_inject_rejects_non_object_json(self):
+        for bad in ("[]", '"str"', "3"):
+            with (
+                self.subTest(bad=bad),
+                patch.dict(os.environ, {self._ENV: bad}),
+                self._qos(3),
+                self.assertRaisesRegex(ValueError, "must be a JSON object"),
+            ):
+                _inject_store_qos()
+
+    def test_inject_rejects_non_object_store_fields(self):
+        for bad in ('{"store": 1}', '{"store": {"comm_resource_config": 2}}'):
+            with (
+                self.subTest(bad=bad),
+                patch.dict(os.environ, {self._ENV: bad}),
+                self._qos(3),
+                self.assertRaisesRegex(ValueError, "must be a JSON object"),
+            ):
+                _inject_store_qos()
+
+    def test_init_injects_qos_before_validation(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"metadata_server": "192.168.0.1:2379"}, f)
+            path = f.name
+        try:
+            with (
+                patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": path}, clear=True),
+                patch.object(MooncakeBackend, "_setup_store"),
+                self._qos(3),
+            ):
+                MooncakeBackend(MagicMock())
+                self.assertEqual(
+                    json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"],
+                    3,
+                )
+        finally:
+            os.unlink(path)
+
+    @staticmethod
+    def _store_qos_env(qos) -> dict:
+        return {"ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config": {"qos": qos}}})}
 
 
 class TestMemcacheQosInjection(unittest.TestCase):
