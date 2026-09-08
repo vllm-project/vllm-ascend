@@ -2,36 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM Ascend project
 """NPU expert redistribution and weight reload for fault-tolerance scale-down.
 
-Device-agnostic placement math is imported from the upstream
-``vllm.v1.worker.sentinel.eplb_redistribute``; this module only carries the
-Ascend-specific pieces:
-
-- ``reload_experts_from_disk``: reload reassigned experts from checkpoint and
-  write them back in place, mirroring the runtime layout produced by
-  ``process_weights_after_loading`` (transpose / NZ cast / per-slot lists /
-  quant scales), so captured graphs keep working. It mirrors the upstream
-  signature (a set of ``(layer, logical)`` reassignments) so the shared
-  sentinel flow can drive it directly; the destination local slot on this rank
-  is recovered from the rebuilt ``logical_to_physical_map``.
-
-The EPLB structures (physical_to_logical / logical_to_physical /
-logical_replica_count) keep the upstream slot model end to end: full width,
-original physical ids. The one exception is the kernel-facing
-``expert_replica_routing_table`` values: in scale-down mode the MC2 kernels
-override their world view from elastic_info (dense ep size / dense physical
-expert count / own rank = table1[orig]) and route each token via
-``table2[expert_id // num_local]``, while the combine kernel silently drops
-any id >= the shrunk physical expert count — so the ids consumed by the
-kernels must live in the densified space ``dense_rank * num_local + slot``
-(see ``densify_routing_table_physical_ids``). Only the table *values* are
-renumbered; shapes never change and updates are in-place, so captured graphs
-stay valid. Densified rank numbering otherwise lives only in the elastic_info
-tensor (table1/table2, consumed by the kernels) and in the rebuilt gloo cpu
-groups, exactly like upstream.
-
-All functions are deterministic with stable iteration order, so every
-surviving rank running them with the same inputs produces bit-identical
-results — no cross-rank communication during recovery.
+Reuses the upstream placement math and adds the Ascend-specific pieces:
+``reload_experts_from_disk`` (checkpoint reload that mirrors the runtime weight
+layout) and ``densify_routing_table_physical_ids`` (kernel-facing routing id
+renumbering).
 """
 
 from collections.abc import Callable, Generator
