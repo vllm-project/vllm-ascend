@@ -86,13 +86,7 @@ class WorkerSentinel(GPUWorkerSentinel):
         self.worker_faulted = False
 
     def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
-        """Report the dead-rank mask (upstream convention: 0=live, 1=dead).
-
-        Pure CPU read: on NPU the mask is only ever written host-side during
-        FT recovery, so on a first fault this is all zeros and the
-        orchestrator's retry-vs-scale_down decision must come from its own
-        cluster knowledge.
-        """
+        """Report the dead-rank mask (upstream convention: 0=live, 1=dead)."""
         return {"mask": get_ep_all2all_manager().query_active_mask().tolist()}
 
     def reset_device(self) -> None:
@@ -103,10 +97,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         torch.npu.synchronize()
 
     def retry(self, ft_request: FaultToleranceRequest):
-        # reset the device first so any hung device-side collectives are
-        # aborted, then run the base class flow (synchronize, clean worker
-        # state, re-initialize the DP group). The quarantine is lifted only
-        # after the groups are rebuilt below.
+        # Reset first so hung device collectives are aborted, then run the
+        # base flow and lift the quarantine after the groups are rebuilt.
         self.reset_device()
         super().retry(ft_request)
         self.worker_faulted = False
@@ -120,10 +112,8 @@ class WorkerSentinel(GPUWorkerSentinel):
         and a dummy-batch runnability check on top.
         """
         self._validate_scale_down_preconditions()
-        # Record the per-rank physical slot count first: every elastic_info
-        # rebuild (the update_mask calls inside retry, and the rebuild after
-        # redistribution) derives the shrunk physical-expert width from the
-        # surviving ranks, so no separate width setter is needed downstream.
+        # Set the per-rank physical slot count before super().scale_down so
+        # elastic_info rebuilds derive the shrunk expert width from it.
         eplb_model_state = self._eplb_model_state()
         num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
         get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
