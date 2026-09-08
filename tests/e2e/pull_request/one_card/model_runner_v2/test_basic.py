@@ -35,6 +35,23 @@ DSPARK_MAIN_MODEL = ["Qwen/Qwen3-8B"]
 DSPARK_MODELS = ["deepseek-ai/dspark_qwen3_8b_block7"]
 MTP_MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 
+# Keep default cudagraph_mode (FULL_AND_PIECEWISE when unspecified) but pin
+# capture sizes. The workload is 4 prompts; leaving sizes unset enumerates
+# graphs up to min(max_num_seqs * (1+K), 512) and dominates runtime.
+CUDAGRAPH_CAPTURE_SIZES = [4, 8]
+COMPILATION_CONFIGS = [
+    pytest.param(
+        {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES},
+        id="full_decode_only",
+    ),
+    pytest.param(
+        {"cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES},
+        id="default_full_and_piecewise",
+    ),
+]
+# Matches the 4-prompt batch; also shrinks KV/draft padding vs default 256.
+MAX_NUM_SEQS = 8
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
@@ -67,6 +84,7 @@ def test_qwen3_dense_eager_mode(
     with VllmRunner(
         model,
         max_model_len=1024,
+        max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=enforce_eager,
         async_scheduling=True,
     ) as runner:
@@ -77,16 +95,7 @@ def test_qwen3_dense_eager_mode(
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config",
-    [
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
-            id="full_decode_only",
-        ),
-        pytest.param({}, id="default_full_and_piecewise"),
-    ],
-)
+@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_egale_spec_decoding(
     model: str,
@@ -106,6 +115,7 @@ def test_egale_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=1024,
+        max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=enforce_eager,
         disable_log_stats=False,
         async_scheduling=True,
@@ -134,16 +144,7 @@ def test_egale_spec_decoding(
 @pytest.mark.parametrize("dflash_model", DFLASH_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config",
-    [
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
-            id="full_decode_only",
-        ),
-        pytest.param({}, id="default_full_and_piecewise"),
-    ],
-)
+@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_dflash_spec_decoding(
     model: str,
@@ -164,6 +165,7 @@ def test_dflash_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=1024,
+        max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=enforce_eager,
         disable_log_stats=False,
         async_scheduling=True,
@@ -193,16 +195,7 @@ def test_dflash_spec_decoding(
 @pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config",
-    [
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
-            id="full_decode_only",
-        ),
-        pytest.param({}, id="default_full_and_piecewise"),
-    ],
-)
+@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
@@ -224,6 +217,7 @@ def test_dspark_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=1024,
+        max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=enforce_eager,
         disable_log_stats=False,
         async_scheduling=True,
@@ -251,16 +245,7 @@ def test_dspark_spec_decoding(
 @pytest.mark.parametrize("model", MTP_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config",
-    [
-        pytest.param(
-            {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [4, 8]},
-            id="full_decode_only",
-        ),
-        pytest.param({}, id="default_full_and_piecewise"),
-    ],
-)
+@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_spec_decoding(
@@ -283,6 +268,7 @@ def test_mtp_spec_decoding(
     with VllmRunner(
         model,
         max_model_len=1024,
+        max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=enforce_eager,
         async_scheduling=True,
         enable_expert_parallel=True,
@@ -300,13 +286,7 @@ def test_mtp_spec_decoding(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize(
-    "compilation_config",
-    [
-        pytest.param({"cudagraph_mode": "FULL_DECODE_ONLY"}, id="full_decode_only"),
-        pytest.param({}, id="default_full_and_piecewise"),
-    ],
-)
+@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen3_dense_graph_mode(
@@ -326,6 +306,7 @@ def test_qwen3_dense_graph_mode(
     with VllmRunner(
         model,
         max_model_len=1024,
+        max_num_seqs=MAX_NUM_SEQS,
         enforce_eager=enforce_eager,
         compilation_config=compilation_config,
     ) as runner:
