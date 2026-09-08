@@ -4,13 +4,34 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-from vllm.model_executor.layers.linear import ReplicatedLinear, UnquantizedLinearMethod
+import pytest
+from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
 from tests.ut.quantization.conftest_quantization import COMPRESSED_TENSORS_W8A8_CONFIG
 from vllm_ascend.models.deepseek_v4.mtp import DeepSeekMultiTokenPredictorLayer
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.configs.compressed_tensors_config import AscendCompressedTensorsConfig
 from vllm_ascend.quantization.method_adapters import AscendLinearMethod
+
+
+class _MockTPGroup:
+    """Minimal TP=1 group stand-in for get_tp_group() on CPU runners."""
+
+    rank_in_group = 0
+    world_size = 1
+
+
+@pytest.fixture(autouse=True)
+def _mock_tp_group():
+    """ReplicatedLinear/ParallelLMHead query the TP group during __init__,
+    but parallel state is not initialized on CPU test runners."""
+    mock = _MockTPGroup()
+    with (
+        patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=mock),
+        patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock),
+        patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=mock),
+    ):
+        yield
 
 
 def _make_mtp_layer(prefix: str) -> DeepSeekMultiTokenPredictorLayer:
@@ -51,26 +72,8 @@ def test_mtp_projection_prefixes_match_compressed_tensors_ignore_rules() -> None
     )
     layer_prefix = "model.mtp.0.e_proj"
 
-    with patch("vllm_ascend.quantization.method_adapters.AscendLinearMethod.__init__", return_value=None):
-        prefixed_layer = ReplicatedLinear(
-            128,
-            128,
-            bias=False,
-            return_bias=False,
-            quant_config=quant_config,
-            prefix=layer_prefix,
-        )
-        empty_prefix_layer = ReplicatedLinear(
-            128,
-            128,
-            bias=False,
-            return_bias=False,
-            quant_config=quant_config,
-            prefix="",
-        )
-
-    prefixed_method = quant_config.get_quant_method(prefixed_layer, layer_prefix)
-    empty_prefix_method = quant_config.get_quant_method(empty_prefix_layer, "")
+    prefixed_method = quant_config.get_quant_method(MagicMock(spec=LinearBase), layer_prefix)
+    empty_prefix_method = quant_config.get_quant_method(MagicMock(spec=LinearBase), "")
 
     assert isinstance(prefixed_method, AscendUnquantizedLinearMethod)
     assert isinstance(empty_prefix_method, AscendLinearMethod)
