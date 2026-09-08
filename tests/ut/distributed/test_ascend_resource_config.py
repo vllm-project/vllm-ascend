@@ -5,7 +5,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from vllm_ascend.distributed.kv_transfer.utils.ascend_resource_config import (
+from vllm_ascend.distributed.kv_transfer.utils.utils import (
     PD_QOS_DEFAULT,
     QOS_KEY,
     inject_qos,

@@ -58,12 +58,13 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec, AscendSlidingWindowMLASpec
-from vllm_ascend.distributed.kv_transfer.utils.ascend_resource_config import PD_QOS_DEFAULT, inject_qos
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    PD_QOS_DEFAULT,
     RegisterRegions,
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
+    inject_qos,
     tensor_storage_key,
     validate_register_region_count,
 )

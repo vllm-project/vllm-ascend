@@ -55,9 +55,9 @@ from vllm.v1.worker.utils import extract_layer_index
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import GET_META_MSG
-from vllm_ascend.distributed.kv_transfer.utils.ascend_resource_config import PD_QOS_DEFAULT, inject_qos
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
+    PD_QOS_DEFAULT,
     RegisterRegions,
     align_memory,
     collect_storage_merged_register_regions,
@@ -66,6 +66,7 @@ from vllm_ascend.distributed.kv_transfer.utils.utils import (
     get_local_remote_block_port_mappings,
     get_transfer_mappings,
     get_transfer_timeout_value,
+    inject_qos,
     kv_alltoall_and_rearrange,
     parallel_info,
     validate_register_region_count,
