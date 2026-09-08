@@ -236,7 +236,7 @@ jobs:
         id: set-matrix
         env:
           MATRIX_FILE: ${{ env.DAILY_CONFIG }}
-          MATRIX_OUTPUTS: '{"a2_nightly_hf":"a2.nightly_hf","a3_nightly_hf":"a3.nightly_hf"}'
+          MATRIX_OUTPUTS: '{"a2_nightly_hf":"daily.a2.nightly_hf","a3_nightly_hf":"daily.a3.nightly_hf"}'
         run: |
           set -x
           python3 -m pip install pyyaml -q
