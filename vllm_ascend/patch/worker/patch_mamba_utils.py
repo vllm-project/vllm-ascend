@@ -97,15 +97,16 @@ def _do_mamba_copy_block_npu(copy_bufs: mamba_utils.MambaCopyBuffers) -> None:
         return
     if os.environ.get("GLM53_BATCH_MEMCPY") != "1":
         pairs = getattr(copy_bufs, "_tensor_copy_pairs", None)
-        if pairs is not None and len(pairs) == n:
-            for src_state, dst_state in pairs:
-                dst_state.copy_(src_state.clone())
+        if pairs is not None:
+            if len(pairs) == n:
+                for src_state, dst_state in pairs:
+                    dst_state.copy_(src_state.clone())
+                copy_bufs._tensor_copy_pairs = []
+                return
+            # A partial collection must not leak into the next step's
+            # collection (it would corrupt the len == n check below); drop
+            # it and let the pointer kernel handle this batch.
             copy_bufs._tensor_copy_pairs = []
-            return
-        if pairs is not None and len(pairs) == 0:
-            # No pairs collected (should not happen - the torch collector is
-            # bound below) - fall through to the pointer kernel.
-            pass
     _batch_memcpy_triton(
         copy_bufs.src_ptrs.gpu[:n],
         copy_bufs.dst_ptrs.gpu[:n],
