@@ -20,6 +20,7 @@ import torch
 import torch.nn.functional as F
 import torch_npu
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention  # type: ignore
+
 import vllm_ascend.envs as envs_ascend
 
 MIN_PAD_SIZE: int = 64  # min_size to pad weight

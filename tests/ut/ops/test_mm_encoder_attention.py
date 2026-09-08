@@ -1,3 +1,4 @@
+import os
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -137,6 +138,56 @@ class TestAscendMMEncoderAttentionEager(FIAMockMixin):
         self.assertEqual(out.shape, query.shape)
         self.assertEqual(self.captured["actual_seq_lengths"], [3, 10, 12])
         self.assertEqual(self.captured["q_shape"], (len(seq_lens) * max_q_len, 4, MAX_PAD_SIZE))
+
+
+class TestAscendMMEncoderAttentionPadSwitch(FIAMockMixin):
+    ENV_NAME = "VLLM_ASCEND_MM_ENCODER_ENABLE_PAD"
+
+    def setUp(self):
+        self._install_vllm_config_mock()
+        self._install_fia_mocks(capture=False)
+
+    def _make_env(self, value):
+        env = {k: v for k, v in os.environ.items() if k != self.ENV_NAME}
+        if value is not None:
+            env[self.ENV_NAME] = value
+        return env
+
+    def test_enable_pad_env_unset(self):
+        with patch.dict(os.environ, self._make_env(None)):
+            layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
+        self.assertTrue(layer.enable_pad)
+
+    def test_enable_pad_env_set_to_1(self):
+        with patch.dict(os.environ, self._make_env("1")):
+            layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
+        self.assertTrue(layer.enable_pad)
+
+    def test_enable_pad_env_set_to_0(self):
+        with patch.dict(os.environ, self._make_env("0")):
+            layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
+        self.assertFalse(layer.enable_pad)
+
+    def test_enable_pad_env_set_to_1_with_unsupported_head_size(self):
+        # The head_size guard is preserved: padding never applies outside (64, 128).
+        with patch.dict(os.environ, self._make_env("1")):
+            layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=128)
+        self.assertFalse(layer.enable_pad)
+
+    def test_forward_oot_without_padding(self):
+        with patch.dict(os.environ, self._make_env("0")):
+            layer = self._make_layer(num_heads=4, num_kv_heads=4, head_size=72)
+        bsz, q_len = 2, 4
+        query = torch.randn(bsz, q_len, layer.num_heads, 72, dtype=torch.bfloat16)
+        key = torch.randn_like(query)
+        value = torch.randn_like(query)
+        cu_seqlens = torch.arange(0, (bsz + 1) * q_len, step=q_len, dtype=torch.int32)
+
+        out = layer.forward_oot(query, key, value, cu_seqlens=cu_seqlens)
+
+        self.assertEqual(out.shape, query.shape)
+        # q/k/v are fed to FIA with the original head_size, not MAX_PAD_SIZE.
+        self.assertEqual(self.captured["q_shape"], (bsz * q_len, 4, 72))
 
 
 class TestAscendMMEncoderAttentionCapture(FIAMockMixin):
