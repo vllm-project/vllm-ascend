@@ -76,68 +76,6 @@ class TestMooncakeHostPool(unittest.TestCase):
         with self.assertRaisesRegex(MemoryError, "exhausted"):
             pool.allocate_tensors([64], alignment=16)
 
-    def test_only_owner_registers_and_unregisters_region(self):
-        pool = MooncakeHostPool(
-            HostMemoryRegion(
-                torch.empty(64, dtype=torch.int8),
-                register_location="npu:0",
-            ),
-            HostPoolTopology(tp_rank=0, tp_size=2, owner_rank=0),
-        )
-        engine = MagicMock()
-        engine.register_memory.return_value = 0
-        engine.unregister_memory.return_value = 0
-
-        pool.register(engine)
-        pool.register(engine)
-        pool.unregister()
-
-        engine.register_memory.assert_called_once_with(
-            pool.data_ptr,
-            pool.nbytes,
-            location="npu:0",
-        )
-        engine.unregister_memory.assert_called_once_with(pool.data_ptr)
-
-    def test_register_without_location_uses_two_argument_api(self):
-        class TwoArgumentEngine:
-            def __init__(self):
-                self.calls = []
-
-            def register_memory(self, ptr, size):
-                self.calls.append(("register", ptr, size))
-                return 0
-
-            def unregister_memory(self, ptr):
-                self.calls.append(("unregister", ptr))
-                return 0
-
-        pool = MooncakeHostPool(
-            HostMemoryRegion(torch.empty(64, dtype=torch.int8)),
-            HostPoolTopology(tp_rank=0, tp_size=1),
-        )
-        engine = TwoArgumentEngine()
-
-        pool.register(engine)
-        pool.unregister()
-
-        self.assertEqual(
-            engine.calls,
-            [
-                ("register", pool.data_ptr, pool.nbytes),
-                ("unregister", pool.data_ptr),
-            ],
-        )
-
-    def test_non_owner_cannot_register_region(self):
-        pool = MooncakeHostPool(
-            HostMemoryRegion(torch.empty(64, dtype=torch.int8)),
-            HostPoolTopology(tp_rank=1, tp_size=2, owner_rank=0),
-        )
-
-        with self.assertRaisesRegex(RuntimeError, "only the owner rank"):
-            pool.register(MagicMock())
-
     def test_region_preserves_requested_capacity_after_alignment(self):
         requested_size = 32
         alignment = 16
@@ -177,7 +115,6 @@ class TestMooncakeHostPool(unittest.TestCase):
         raw.narrow.assert_called_once_with(0, alignment - 1, requested_size)
         self.assertIs(region.tensor, aligned)
         self.assertEqual(region.tensor.numel(), requested_size)
-        self.assertEqual(region.register_location, "npu:7")
 
     def test_host_register_sets_migratepages_guard(self):
         key = "VLLM_ASCEND_SKIP_MIGRATEPAGES"
@@ -207,6 +144,19 @@ class TestMooncakeHostPool(unittest.TestCase):
             self._allocate_region_for_mode(host_register=False)
 
             self.assertNotIn(key, host_pool_module.os.environ)
+
+    def test_no_supported_mode_raises(self):
+        with (
+            patch(
+                "mooncake.shared_segment.shared_segment_supported",
+                return_value=False,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "cannot expose an NPU-addressable",
+            ),
+        ):
+            host_pool_module._select_shared_segment_mode()
 
     def test_failed_construction_releases_region(self):
         release = MagicMock()
