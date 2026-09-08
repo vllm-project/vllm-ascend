@@ -15,6 +15,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     MLAAttentionSpec,
 )
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolStateSpec
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_cache_layout,
     get_glm5_kv_cache_config,
@@ -22,7 +23,6 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_max_memory_usage,
     get_glm5_pool_bytes_per_block,
 )
-from vllm_ascend.models.glm5next.kv_cache import AscendIndexerKPoolStateSpec
 
 
 def make_config():
@@ -67,6 +67,8 @@ def make_specs(pool: int = 16):
             num_kv_heads=1,
             head_size=256,
             dtype=torch.float32,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
         ),
     }
     for layer_idx in range(3):

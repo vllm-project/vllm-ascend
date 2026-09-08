@@ -2,59 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """KV cache layers and metadata helpers for the GLM-Next pooled indexer."""
 
-import copy
-from dataclasses import dataclass
-
 import torch
 from torch import nn
-from typing_extensions import Self
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
-    AscendSlidingWindowMLASpec,
 )
 
 
 def is_glm5_cache_spec(spec: KVCacheSpec) -> bool:
     return getattr(spec, "model_version", None) == "glm5_next"
-
-
-@dataclass(frozen=True, kw_only=True)
-class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
-    """Paged FP32 state used by the GLM-Next indexer compressor."""
-
-    cache_role: str = "indexer_state"
-    model_version: str = "glm5_next"
-    indexes_kv_by_block_stride: bool = True
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.dtype != torch.float32:
-            raise ValueError(f"GLM-Next compressor state must use FP32, got {self.dtype}.")
-        if self.block_size != self.sliding_window:
-            raise ValueError(
-                "GLM-Next compressor state requires block_size == "
-                f"sliding_window, got {self.block_size} and {self.sliding_window}."
-            )
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        assert all(isinstance(spec, cls) for spec in specs)
-        assert all(spec == specs[0] for spec in specs[1:]), (
-            "All GLM-Next compressor-state layers in one cache group must "
-            "have the same layout and cache role."
-        )
-        return copy.deepcopy(specs[0])
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        del vllm_config
-        # The state group keeps only the current incomplete pool. Since its
-        # sliding window and block size are identical, one page per request is
-        # sufficient on every context-parallel rank.
-        return self.page_size_bytes
 
 
 def format_indexer_kpool_slot_mapping(
@@ -197,6 +158,7 @@ class Glm5NextStateCache(nn.Module, AttentionLayerBase):
             cache_dtype_str=None,
             model_version="glm5_next",
             cache_role=self.cache_role,
+            indexes_kv_by_block_stride=True,
         )
 
     def get_attn_backend(self):

@@ -19,11 +19,11 @@ from vllm_ascend.attention.indexer_kpool import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
     register_ascend_kv_cache_specs,
 )
 from vllm_ascend.models.glm5next.kv_cache import (
-    AscendIndexerKPoolStateSpec,
     Glm5NextIndexerCache,
     Glm5NextStateCache,
     format_indexer_kpool_slot_mapping,
@@ -140,6 +140,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert state_spec.block_size == state_spec.sliding_window == 16
     assert state_spec.head_size == 256
     assert state_spec.dtype == torch.float32
+    assert state_spec.model_version == "glm5_next"
     assert state_spec.indexes_kv_by_block_stride
     assert indexer.get_attn_backend() is AscendIndexerKPoolBackend
     assert state.get_attn_backend() is AscendIndexerKPoolStateBackend

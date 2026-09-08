@@ -11,14 +11,14 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import MambaSpec
 
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
+    AscendMLAAttentionSpec,
+)
 from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_kv_cache_config,
     get_glm5_kv_cache_groups,
     get_glm5_pool_bytes_per_block,
-)
-from vllm_ascend.models.glm5next.kv_cache import (
-    AscendIndexerKPoolStateSpec,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -98,6 +98,8 @@ def _make_specs(main_head_size=4):
             num_kv_heads=1,
             head_size=3,
             dtype=torch.float32,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
         ),
         MAMBA: MambaSpec(
             block_size=8,

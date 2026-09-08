@@ -16,8 +16,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.core.kv_cache_interface import AscendIndexerKPoolStateSpec
 from vllm_ascend.models.glm5next.kv_cache import (
-    AscendIndexerKPoolStateSpec,
     format_indexer_kpool_slot_mapping,
 )
 

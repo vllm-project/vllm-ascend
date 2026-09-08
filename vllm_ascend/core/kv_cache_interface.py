@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -242,6 +243,41 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+@dataclass(frozen=True, kw_only=True)
+class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
+    """Paged FP32 state used by an indexer K-pool compressor."""
+
+    cache_role: str = "indexer_state"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.dtype != torch.float32:
+            raise ValueError(
+                f"Indexer K-pool compressor state must use FP32, got {self.dtype}."
+            )
+        if self.block_size != self.sliding_window:
+            raise ValueError(
+                "Indexer K-pool compressor state requires block_size == "
+                f"sliding_window, got {self.block_size} and {self.sliding_window}."
+            )
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, cls) for spec in specs)
+        assert all(spec == specs[0] for spec in specs[1:]), (
+            "All indexer K-pool compressor-state layers in one cache group "
+            "must have the same layout and cache role."
+        )
+        return copy.deepcopy(specs[0])
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        # The state group keeps only the current incomplete pool. Since its
+        # sliding window and block size are identical, one page per request is
+        # sufficient on every context-parallel rank.
+        return self.page_size_bytes
+
+
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
@@ -258,9 +294,6 @@ def register_ascend_kv_cache_specs() -> None:
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )
-
-    # Imported lazily so this module stays independent of any single model.
-    from vllm_ascend.models.glm5next.kv_cache import AscendIndexerKPoolStateSpec
 
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendIndexerKPoolStateSpec,
