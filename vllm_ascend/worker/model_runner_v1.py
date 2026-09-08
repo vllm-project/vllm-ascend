@@ -3125,24 +3125,12 @@ class NPUModelRunner(GPUModelRunner):
         num_encoder_reqs: int = 0,
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        # A one-token chunk can still be a prefill, notably at a P/D handoff.
-        # Under speculative decoding, dispatch a decode graph only after every
-        # prompt is fully computed. A spec-width prefill tail has the same
-        # shape as a speculative decode row, but its graph buffers do not
-        # contain valid decode state.
-        if self.speculative_config:
-            is_all_decode = bool(
-                np.all(
-                    self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                    >= self.input_batch.num_prompt_tokens[:num_reqs]
-                )
-            )
-        else:
-            # Preserve stateful non-speculative P/D handoff behavior.
-            is_all_decode = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        # A stateful P/D handoff can use a uniform decode graph even at
+        # prompt_len - 1 computed tokens. Keep first-token prefills out.
+        has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
         uniform_decode = (
             (
-                is_all_decode
+                has_initial_state
                 and (max_num_scheduled_tokens == self.uniform_decode_query_len)
                 and (num_tokens == max_num_scheduled_tokens * num_reqs)
             )
