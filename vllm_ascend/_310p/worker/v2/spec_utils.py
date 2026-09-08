@@ -86,9 +86,11 @@ def combine_sampled_and_draft_tokens_cpu(
                 host_vals.append(int(tok))
 
     if host_vals:
+        # Avoid NPU index_copy_/IndexPutV2 (unreliable on some 310P layouts).
+        # Direct indexing matches gdn_310._merge_spec_and_non_spec_outputs_310.
         idx = torch.tensor([s for s, _ in writes], dtype=torch.long, device=input_ids.device)
         vals = torch.tensor(host_vals, dtype=input_ids.dtype, device=input_ids.device)
-        input_ids.index_copy_(0, idx, vals)
+        input_ids[idx] = vals
     return logits_indices
 
 
@@ -231,10 +233,16 @@ def prepare_prefill_inputs_cpu(
         # (match upstream Triton prepare_prefill_inputs).
         kept_end = query_start + query_len
         if query_len > 1:
+            # 310P: NPU slice-assign can corrupt the destination tail element
+            # (see llm_base_proposer_310.set_inputs_first_pass). Save/restore
+            # draft_input_ids[kept_end-1] around the shift copy.
+            tail_idx = kept_end - 1
+            tail_save = draft_input_ids[tail_idx].clone()
             draft_input_ids[query_start : kept_end - 1].copy_(
                 target_input_ids[query_start + 1 : kept_end],
                 non_blocking=True,
             )
+            draft_input_ids[tail_idx] = tail_save
         last_token_index = kept_end - 1
         last_token_indices_host[req_idx] = last_token_index
         draft_positions[query_start:kept_end].copy_(
@@ -250,12 +258,12 @@ def prepare_prefill_inputs_cpu(
         draft_qsl_host[num_reqs:] = query_end
         draft_seq_host[num_reqs:] = 0
         last_token_indices_host[num_reqs:] = 0
-        # Scatter next tokens into draft input_ids (one small H2D + indexed write).
+        # Scatter next tokens without index_copy_ (310P IndexPutV2 issues).
         next_tokens = torch.from_numpy(next_tokens_host).to(device=device, non_blocking=True)
         last_idx = torch.from_numpy(last_token_indices_host[:num_reqs]).to(
             device=device, dtype=torch.long, non_blocking=True
         )
-        draft_input_ids.index_copy_(0, last_idx, next_tokens.to(dtype=draft_input_ids.dtype))
+        draft_input_ids[last_idx] = next_tokens.to(dtype=draft_input_ids.dtype)
 
     input_buffers.query_start_loc.copy_(
         torch.from_numpy(draft_qsl_host).to(device=device, non_blocking=True),

@@ -383,57 +383,19 @@ class NPUModelRunner310V2(NPUModelRunner):
         return attn_state.name in ("PrefillCacheHit", "ChunkedPrefill")
 
     def _scheduler_output_needs_spec_eager(self, scheduler_output: SchedulerOutput) -> bool:
-        """Force eager when MTP verify batch is not uniform spec-decode."""
+        """Force eager for all 310P MTP verify batches under FULL ACLGraph.
+
+        Concurrent SpecDecoding FULL (incl. K>1) still produces garbled tokens
+        on 310P even after draft ACLGraph is disabled. Prefer correctness:
+        any MTP schedule with FULL graphs runs verify eagerly.
+        """
         if self.speculative_config is None:
             return False
         cudagraph_mode = self.compilation_config.cudagraph_mode
         if not cudagraph_mode.has_full_cudagraphs():
             return False
-
-        num_tokens_per_req = scheduler_output.num_scheduled_tokens
-        num_reqs = len(num_tokens_per_req)
-        if num_reqs == 0:
-            return False
-
-        num_scheduled = np.fromiter(num_tokens_per_req.values(), dtype=np.int32, count=num_reqs)
-        if not np.all(num_scheduled == self.decode_query_len):
-            return True
-        if scheduler_output.total_num_scheduled_tokens != int(num_scheduled.sum()):
-            return True
-
-        computed_by_req: dict[str, int] = {}
-        for req in scheduler_output.scheduled_new_reqs:
-            computed_by_req[req.req_id] = int(req.num_computed_tokens)
-        cached = scheduler_output.scheduled_cached_reqs
-        if cached is not None:
-            for req_id, num_computed in zip(cached.req_ids, cached.num_computed_tokens):
-                computed_by_req[req_id] = int(num_computed)
-        for req_id in num_tokens_per_req:
-            if req_id in computed_by_req:
-                continue
-            req_idx = self.req_states.req_id_to_index.get(req_id)
-            if req_idx is not None:
-                computed_by_req[req_id] = int(self.req_states.num_computed_tokens_np[req_idx])
-
-        req_ids = list(num_tokens_per_req.keys())
-        if any(computed_by_req.get(req_id, 0) == 0 for req_id in req_ids):
-            return True
-
-        seq_lens = np.fromiter(
-            (computed_by_req[req_id] + num_tokens_per_req[req_id] for req_id in req_ids),
-            dtype=np.int32,
-            count=num_reqs,
-        )
-        attn_state = build_attn_state(
-            self.vllm_config,
-            seq_lens,
-            num_reqs,
-            num_scheduled,
-            num_scheduled,
-        )
-        from vllm_ascend.attention.attention_v1 import AscendAttentionState
-
-        return attn_state != AscendAttentionState.SpecDecoding
+        # Non-empty MTP batch → eager (ignore uniform SpecDecoding eligibility).
+        return len(scheduler_output.num_scheduled_tokens) > 0
 
     def _install_pc_eager_cudagraph_dispatch(self) -> None:
         """Wrap ACLGraph dispatch so PrefillCacheHit cannot replay FULL mixed graphs."""
@@ -479,11 +441,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         early in ``execute_model`` leaves stale counts and corrupts recurrent state.
         """
         np_vals = self.req_states.num_computed_tokens_np
-        host = torch.from_numpy(np_vals)
+        # Copy host buffer so non-blocking H2D cannot race later np mutations.
+        host = torch.tensor(np_vals, dtype=torch.int32)
         gpu = self.req_states.num_computed_tokens.gpu
         if host.dtype != gpu.dtype:
             host = host.to(dtype=gpu.dtype)
-        # One H2D; reuse the same host view for CPU mirrors (no extra .to(device=)).
         gpu.copy_(host, non_blocking=True)
         self.req_states.num_computed_tokens_cpu.copy_(host)
         self.req_states.num_computed_tokens.cpu.copy_(host)
@@ -1107,7 +1069,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         has_sample = valid_num_sampled > 0
 
         if self.speculator is not None and sampled_tokens.ndim == 2:
-            # Vectorized MTP writeback: one host sync for metadata, no per-req .item().
+            # MTP writeback: UVA all_token_ids — contiguous per-req slices only
+            # (avoid advanced-index scatter / index_copy_ on 310P).
             valid_batch = torch.nonzero(valid_mask, as_tuple=False).flatten()
             if valid_batch.numel() > 0:
                 req_idx_t = idx_mapping[valid_batch].to(torch.long)
@@ -1117,36 +1080,18 @@ class NPUModelRunner310V2(NPUModelRunner):
                 reqs_host = req_idx_t.detach().cpu().tolist()
                 starts_host = start_t.detach().cpu().tolist()
                 batch_host = valid_batch.detach().cpu().tolist()
-                # Pack variable-length accepted rows into contiguous staging.
-                pack: list[torch.Tensor] = []
-                pack_req: list[int] = []
-                pack_pos: list[int] = []
-                lasts: list[torch.Tensor] = []
-                new_totals: list[int] = []
-                active_reqs_list: list[int] = []
                 for i, count in enumerate(counts_host):
                     count = int(count)
                     if count <= 0:
                         continue
                     req_idx = int(reqs_host[i])
                     start_pos = int(starts_host[i])
-                    row = sampled_tokens[int(batch_host[i]), :count].to(torch.int32)
-                    pack.append(row)
-                    pack_req.extend([req_idx] * count)
-                    pack_pos.extend(range(start_pos, start_pos + count))
-                    lasts.append(row[-1])
-                    new_totals.append(start_pos + count)
-                    active_reqs_list.append(req_idx)
-                if pack:
-                    flat = torch.cat(pack, dim=0)
-                    r_idx = torch.tensor(pack_req, dtype=torch.long, device=flat.device)
-                    p_idx = torch.tensor(pack_pos, dtype=torch.long, device=flat.device)
-                    self.req_states.all_token_ids.gpu[r_idx, p_idx] = flat
-                    active_reqs = torch.tensor(active_reqs_list, dtype=torch.long, device=flat.device)
-                    last_t = torch.stack(lasts).to(dtype=self.req_states.last_sampled_tokens.dtype)
-                    total_t = torch.tensor(new_totals, dtype=self.req_states.total_len.gpu.dtype, device=flat.device)
-                    self.req_states.last_sampled_tokens[active_reqs, 0] = last_t
-                    self.req_states.total_len.gpu[active_reqs] = total_t
+                    row = sampled_tokens[int(batch_host[i]), :count].to(dtype=self.req_states.all_token_ids.gpu.dtype)
+                    self.req_states.all_token_ids.gpu[req_idx, start_pos : start_pos + count] = row
+                    self.req_states.last_sampled_tokens[req_idx, 0] = row[-1].to(
+                        dtype=self.req_states.last_sampled_tokens.dtype
+                    )
+                    self.req_states.total_len.gpu[req_idx] = start_pos + count
         else:
             sampled = sampled_tokens[:, 0].masked_select(valid_mask).to(self.req_states.last_sampled_tokens.dtype)
             token_positions = self.req_states.total_len.gpu[valid_indices].to(torch.int64)

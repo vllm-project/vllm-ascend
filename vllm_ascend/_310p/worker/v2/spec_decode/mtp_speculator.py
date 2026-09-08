@@ -22,12 +22,9 @@ from vllm.v1.worker.gpu.spec_decode.mtp.speculator import MTPSpeculator
 
 from vllm_ascend._310p.ops.rotary_embedding import AscendRotaryEmbedding310
 from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import AutoRegressiveAclGraphManager310
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.spec_decode.autoregressive.speculator import (
     AscendAutoRegressiveSpeculator,
 )
-from vllm_ascend.worker.v2.spec_decode.pcp_utils import disable_target_pcp_for_replicated_draft
 
 
 class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
@@ -115,54 +112,17 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
 
     def capture(self) -> None:
-        """Capture draft-prefill FULL with SpecDecoding; skip draft-decode graphs.
+        """Skip draft ACLGraph on 310P MTP — eager draft for correctness.
 
-        Default ``AscendInputBatch.make_dummy`` forces DecodeOnly → PA, but MTP
-        draft-prefill uses q_len=1+K (SpecDecoding/splitfuse). Draft-decode
-        capture is illegal on 310P (host D2H / slot-map updates between steps).
+        Draft-decode graphs are illegal (host D2H / slot-map between steps).
+        Draft-prefill FULL also garbles under concurrent multi-req batches
+        (seen as acceptance collapse + Chinese/ASCII junk mid-answer). Keep
+        draft eager until SpecDecoding pad/replay is proven for batch>1.
         """
         self.last_token_indices.zero_()
-        orig_make_dummy = AscendInputBatch.make_dummy
-
-        @classmethod
-        def make_dummy_spec_decode(
-            cls,
-            num_reqs: int,
-            num_tokens: int,
-            input_buffers: Any,
-            max_query_len: int | None = None,
-        ) -> AscendInputBatch:
-            kwargs: dict[str, Any] = {}
-            if max_query_len is not None:
-                kwargs["max_query_len"] = max_query_len
-            batch = orig_make_dummy(num_reqs, num_tokens, input_buffers, **kwargs)
-            if num_reqs > 0 and (num_tokens // num_reqs) > 1:
-                batch.attn_state = AscendAttentionState.SpecDecoding
-            return batch
-
-        AscendInputBatch.make_dummy = make_dummy_spec_decode  # type: ignore[method-assign]
-        try:
-            logger.info("Capturing draft-prefill ACLGraph for 310P MTP (SpecDecoding)...")
-            assert self.prefill_cudagraph_manager is not None
-            if self.prefill_cudagraph_manager.use_breakable_cg:
-                self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
-            with disable_target_pcp_for_replicated_draft(self):
-                self.prefill_cudagraph_manager.capture(
-                    self._prefill,
-                    self.model_state,
-                    self.target_input_buffers,
-                    self.block_tables,
-                    self.draft_prefill_attn_groups,
-                    self.kv_cache_config,
-                    progress_bar_desc="Capturing prefill CUDA graphs",
-                )
-            if self.num_speculative_steps > 1:
-                logger.info(
-                    "Skipping draft-decode ACLGraph capture on 310P MTP "
-                    "(host slot-map / draft-input updates between steps)."
-                )
-        finally:
-            AscendInputBatch.make_dummy = orig_make_dummy  # type: ignore[method-assign]
+        logger.info(
+            "Skipping draft ACLGraph capture on 310P MTP (eager draft-prefill/decode for concurrent correctness)."
+        )
 
     @torch.inference_mode()
     def _run_model(
@@ -184,6 +144,26 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                 mm_inputs,
             )
 
+    def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
+        """Match prepare_decode_inputs: seq = target - rejected + step."""
+        next_seqs_cpu = seq_lens_cpu[:num_reqs_padded].clone()
+        rejected = getattr(self, "_last_num_rejected_cpu", None)
+        if rejected is not None and rejected.numel() >= num_reqs:
+            next_seqs_cpu[:num_reqs] = next_seqs_cpu[:num_reqs] - rejected[:num_reqs].to(next_seqs_cpu.dtype)
+        next_seqs_cpu = torch.clamp(next_seqs_cpu + step, max=self.max_model_len)
+        next_seqs_cpu[num_reqs:].fill_(0)
+        return next_seqs_cpu
+
+    @torch.inference_mode()
+    def propose(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+        # Cache num_rejected for K>1 draft attn seq_lens (mainline leaves this TODO).
+        num_rejected = kwargs.get("num_rejected")
+        if num_rejected is None and len(args) >= 7:
+            num_rejected = args[6]
+        if isinstance(num_rejected, torch.Tensor):
+            self._last_num_rejected_cpu = num_rejected.detach().to("cpu")
+        return super().propose(*args, **kwargs)
+
     def _multi_step_decode(
         self,
         num_reqs: int,
@@ -192,11 +172,31 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     ) -> None:
-        """Eager non-fused multi-step with 310P CPU slot mappings."""
+        """Eager non-fused multi-step with 310P CPU slot mappings.
+
+        Concurrent (num_reqs>1) multi-step draft still garbles on 310P even in
+        pure eager mode; skip extra steps so batch>1 behaves like K=1 while
+        single-request keeps full K.
+        """
+        if num_reqs > 1 and self.num_speculative_steps > 1:
+            logger.warning_once(
+                "310P MTP: skipping K>1 multi-step draft for concurrent batch "
+                "(num_reqs=%s); using first draft token only for correctness.",
+                num_reqs,
+            )
+            # Invalidate remaining slots — stale draft ids would poison verify.
+            self.draft_tokens[:num_reqs, 1:].fill_(0)
+            return
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         idx_mapping = self.idx_mapping[:num_reqs]
+        # Align draft attn seq_lens with prepare_decode (subtract rejected).
+        seq_ub = seq_lens_cpu_upper_bound
+        rejected = getattr(self, "_last_num_rejected_cpu", None)
+        if rejected is not None and rejected.numel() >= num_reqs:
+            seq_ub = seq_lens_cpu_upper_bound.clone()
+            seq_ub[:num_reqs] = seq_ub[:num_reqs] - rejected[:num_reqs].to(seq_ub.dtype)
 
         attn_metadata = None
         slot_mappings_by_layer = None
@@ -212,7 +212,7 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
                     num_reqs=num_reqs,
                     num_reqs_padded=batch_desc.num_reqs or num_reqs,
                     num_tokens_padded=batch_desc.num_tokens,
-                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                    seq_lens_cpu_upper_bound=seq_ub,
                     step=step,
                 )
 
