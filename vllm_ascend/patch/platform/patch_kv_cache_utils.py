@@ -79,8 +79,27 @@ def _validate_typed_kv_cache_mode(
         raise ValueError("typed KV cache MVP is not supported on Ascend 310P")
     cache_config = vllm_config.cache_config
     parallel_config = vllm_config.parallel_config
-    if cache_config.enable_prefix_caching:
-        raise ValueError("typed KV cache MVP requires prefix caching to be disabled")
+    mode = envs_ascend.VLLM_ASCEND_TYPED_KV_CACHE_MODE
+    valid_modes = {"address_table", "static_partition", "jenga_lcm_prefix"}
+    if mode not in valid_modes:
+        raise ValueError(
+            "VLLM_ASCEND_TYPED_KV_CACHE_MODE must be address_table, "
+            f"static_partition, or jenga_lcm_prefix, got {mode!r}"
+        )
+    if cache_config.enable_prefix_caching and mode != "jenga_lcm_prefix":
+        raise ValueError("typed prefix caching requires VLLM_ASCEND_TYPED_KV_CACHE_MODE=jenga_lcm_prefix")
+    if mode == "jenga_lcm_prefix" and not cache_config.enable_prefix_caching:
+        raise ValueError("jenga_lcm_prefix mode requires prefix caching to be enabled")
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    scheduler_watermark = getattr(scheduler_config, "watermark", 0.0)
+    if mode == "jenga_lcm_prefix" and scheduler_watermark != 0.0:
+        # This coordinator performs an atomic heterogeneous-page admission and
+        # exposes it through a boolean 0/1 scalar sentinel.  A uniform-block
+        # watermark has no sound conversion to that unit, so fail before pool
+        # construction instead of silently rejecting every request.
+        raise ValueError(
+            "jenga_lcm_prefix requires scheduler watermark=0; heterogeneous large-page headroom is not implemented"
+        )
     if cache_config.num_gpu_blocks_override is not None:
         raise ValueError("typed KV cache MVP does not support num_gpu_blocks_override")
     if vllm_config.speculative_config is not None:
@@ -143,7 +162,13 @@ def _enable_typed_kv_cache_config(
         raise ValueError("typed KV cache MVP requires equal raw tensor budgets")
     original_tensor_size = next(iter(tensor_sizes))
     mode = envs_ascend.VLLM_ASCEND_TYPED_KV_CACHE_MODE
-    if mode == "address_table":
+    if mode == "jenga_lcm_prefix":
+        # Jenga's L0 eviction/retyping decision is defined over a large page
+        # that can be divided exactly into every cache group's native page.
+        # Keep this explicit instead of pretending arbitrary overlapping
+        # address-table intervals have the same all-children state.
+        plan = TypedKVCachePlan.exact_lcm(specs, original_tensor_size)
+    elif mode == "address_table":
         # The scheduler and worker independently construct the same immutable
         # address tables. Candidate intervals deliberately overlap across
         # groups; the typed allocator ensures that only non-overlapping pages
@@ -216,7 +241,9 @@ def _enable_typed_kv_cache_config(
             page_address_tables,
         )
     else:
-        raise ValueError(f"VLLM_ASCEND_TYPED_KV_CACHE_MODE must be address_table or static_partition, got {mode!r}")
+        # Mode validation above makes this unreachable; retain a defensive
+        # failure if the control flow changes independently.
+        raise AssertionError(f"unhandled typed KV cache mode {mode!r}")
 
     kv_cache_config.num_blocks = min(plan.num_blocks(spec.group_id) for spec in plan.specs)
     for tensor in kv_cache_config.kv_cache_tensors:

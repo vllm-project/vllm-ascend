@@ -37,6 +37,7 @@ def _make_vllm_config() -> SimpleNamespace:
         ),
         speculative_config=None,
         kv_transfer_config=None,
+        scheduler_config=SimpleNamespace(watermark=0.0),
         model_config=SimpleNamespace(max_model_len=32768),
     )
 
@@ -111,7 +112,7 @@ def test_typed_plan_propagates_to_scheduler_and_worker_config() -> None:
     assert get_typed_kv_cache_plan(scheduler_copy) == plan
 
 
-def test_typed_mode_rejects_prefix_cache() -> None:
+def test_address_table_mode_rejects_prefix_cache() -> None:
     config = _make_uniform_qwen35_config()
     vllm_config = _make_vllm_config()
     vllm_config.cache_config.enable_prefix_caching = True
@@ -119,9 +120,70 @@ def test_typed_mode_rejects_prefix_cache() -> None:
     try:
         _enable_typed_kv_cache_config(vllm_config, config)
     except ValueError as error:
-        assert "prefix caching" in str(error)
+        assert "jenga_lcm_prefix" in str(error)
     else:
         raise AssertionError("typed mode accepted prefix caching")
+
+
+def test_jenga_lcm_prefix_mode_builds_exact_two_level_plan(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "VLLM_ASCEND_TYPED_KV_CACHE_MODE",
+        "jenga_lcm_prefix",
+    )
+    config = _make_uniform_qwen35_config()
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.enable_prefix_caching = True
+
+    _enable_typed_kv_cache_config(vllm_config, config)
+
+    plan = get_typed_kv_cache_plan(config)
+    assert plan is not None
+    assert not plan.is_addressed
+    assert not plan.is_partitioned
+    assert plan.superpage_size_bytes == math.lcm(*(spec.page_size_bytes for spec in plan.specs))
+    assert plan.num_superpages >= 2
+    assert all(plan.superpage_size_bytes % spec.page_size_bytes == 0 for spec in plan.specs)
+
+
+def test_jenga_lcm_prefix_mode_requires_prefix_cache(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "VLLM_ASCEND_TYPED_KV_CACHE_MODE",
+        "jenga_lcm_prefix",
+    )
+
+    try:
+        _enable_typed_kv_cache_config(
+            _make_vllm_config(),
+            _make_uniform_qwen35_config(),
+        )
+    except ValueError as error:
+        assert "requires prefix caching" in str(error)
+    else:
+        raise AssertionError("jenga_lcm_prefix accepted a no-prefix config")
+
+
+def test_jenga_lcm_prefix_mode_rejects_nonzero_scheduler_watermark(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "VLLM_ASCEND_TYPED_KV_CACHE_MODE",
+        "jenga_lcm_prefix",
+    )
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.enable_prefix_caching = True
+    vllm_config.scheduler_config.watermark = 0.01
+
+    try:
+        _enable_typed_kv_cache_config(
+            vllm_config,
+            _make_uniform_qwen35_config(),
+        )
+    except ValueError as error:
+        assert "watermark=0" in str(error)
+    else:
+        raise AssertionError("jenga_lcm_prefix accepted a nonzero watermark")
 
 
 def test_typed_mode_rejects_ascend_310p(monkeypatch) -> None:

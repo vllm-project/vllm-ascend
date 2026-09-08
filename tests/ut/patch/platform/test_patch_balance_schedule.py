@@ -76,6 +76,7 @@ _UPSTREAM_SCHED_FILE = _upstream_sched_mod.__file__
 #   EngineCoreProc.run_engine_core = _balance_run_engine_core            (eager)
 #   vllm.v1.engine.core.DPEngineCoreProc = BalanceDPEngineCoreProc       (DEFERRED:
 #       swapped inside _balance_run_engine_core only when balance is enabled)
+from vllm_ascend.patch.platform import patch_balance_schedule as _balance_patch  # noqa: E402
 from vllm_ascend.patch.platform import patch_dyntra_lb_core as _dyntra_patch  # noqa: E402
 from vllm_ascend.patch.platform.patch_balance_schedule import (  # noqa: E402
     BalanceScheduler,
@@ -509,4 +510,71 @@ def test_upstream_scheduler_seams_still_exist():
         "hook the per-step balance_gather immediately after the cross-rank "
         "all-reduce. It MUST be called every non-idle iteration by run_busy_loop "
         "(incl. dummy-batch) or the all_gather deadlocks."
+    )
+
+
+def test_jenga_checkpoint_wrapper_clips_only_configured_coordinator(
+    monkeypatch,
+):
+    def passthrough(
+        self,
+        request,
+        num_new_tokens,
+        num_new_local_computed_tokens=0,
+        num_external_computed_tokens=0,
+    ):
+        del (
+            self,
+            request,
+            num_new_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+        return num_new_tokens
+
+    monkeypatch.setattr(
+        _balance_patch,
+        "_original_mamba_block_aligned_split",
+        passthrough,
+    )
+    request = SimpleNamespace(
+        num_computed_tokens=0,
+        num_prompt_tokens=700,
+        num_tokens=700,
+    )
+    jenga_scheduler = SimpleNamespace(
+        kv_cache_manager=SimpleNamespace(
+            coordinator=SimpleNamespace(
+                effective_state_checkpoint_interval_tokens=512,
+            )
+        )
+    )
+    ordinary_scheduler = SimpleNamespace(kv_cache_manager=SimpleNamespace(coordinator=SimpleNamespace()))
+
+    assert (
+        _balance_patch._jenga_mamba_block_aligned_split(
+            jenga_scheduler,
+            request,
+            700,
+        )
+        == 512
+    )
+    assert (
+        _balance_patch._jenga_mamba_block_aligned_split(
+            ordinary_scheduler,
+            request,
+            700,
+        )
+        == 700
+    )
+
+    request.num_computed_tokens = 400
+    assert (
+        _balance_patch._jenga_mamba_block_aligned_split(
+            jenga_scheduler,
+            request,
+            100,
+            num_new_local_computed_tokens=80,
+            num_external_computed_tokens=16,
+        )
+        == 16
     )

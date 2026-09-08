@@ -79,6 +79,64 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.core.jenga_prefix_policy import (
+    clip_prefill_to_state_checkpoint,
+)
+
+_JENGA_ORIGINAL_SPLIT_ATTR = "_ascend_jenga_original_mamba_block_aligned_split"
+if not hasattr(Scheduler, _JENGA_ORIGINAL_SPLIT_ATTR):
+    setattr(
+        Scheduler,
+        _JENGA_ORIGINAL_SPLIT_ATTR,
+        Scheduler._mamba_block_aligned_split,
+    )
+_original_mamba_block_aligned_split = getattr(
+    Scheduler,
+    _JENGA_ORIGINAL_SPLIT_ATTR,
+)
+
+
+def _jenga_mamba_block_aligned_split(
+    self,
+    request: Request,
+    num_new_tokens: int,
+    num_new_local_computed_tokens: int = 0,
+    num_external_computed_tokens: int = 0,
+) -> int:
+    """Add Jenga's periodic state boundary to upstream Mamba splitting."""
+
+    aligned_tokens = _original_mamba_block_aligned_split(
+        self,
+        request,
+        num_new_tokens,
+        num_new_local_computed_tokens,
+        num_external_computed_tokens,
+    )
+    coordinator = getattr(getattr(self, "kv_cache_manager", None), "coordinator", None)
+    interval = getattr(
+        coordinator,
+        "effective_state_checkpoint_interval_tokens",
+        None,
+    )
+    if interval is None:
+        return aligned_tokens
+    start_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
+    prefill_end_tokens = max(
+        request.num_prompt_tokens,
+        request.num_tokens - 1,
+    )
+    return clip_prefill_to_state_checkpoint(
+        start_tokens,
+        aligned_tokens,
+        prefill_end_tokens,
+        interval,
+    )
+
+
+# Every supported Ascend scheduler calls this inherited hook after its own
+# token-budget calculation.  Patching the common base therefore covers the
+# default, balance, recompute, dynamic-batch, and profiling scheduler classes.
+Scheduler._mamba_block_aligned_split = _jenga_mamba_block_aligned_split
 
 
 def _balance_scheduling_enabled(vllm_config) -> bool:

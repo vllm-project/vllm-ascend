@@ -136,6 +136,7 @@ from vllm_ascend.core.typed_kv_cache import (
     get_typed_kv_cache_plan,
     make_block_byte_view,
     make_group_byte_view,
+    typed_block_ids_to_zero,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
@@ -823,8 +824,18 @@ class NPUModelRunner(GPUModelRunner):
             if len(request.block_ids) != len(block_ids_by_group):
                 raise ValueError("typed block table group count is inconsistent")
             for group_id, block_ids in enumerate(request.block_ids):
+                # A new/resumed request carries its entire block table. The
+                # leading computed blocks are prefix-cache hits and already
+                # contain valid KV/state, so clearing them would silently turn
+                # a hit into corrupt data. Only clear the suffix allocated for
+                # work that has not been computed yet.
                 block_ids_by_group[group_id].update(
-                    block_id for block_id in block_ids if block_id != 0
+                    typed_block_ids_to_zero(
+                        block_ids,
+                        num_computed_tokens=request.num_computed_tokens,
+                        block_size_tokens=plan.spec(group_id).block_size_tokens,
+                        prefix_caching_enabled=self.cache_config.enable_prefix_caching,
+                    )
                 )
         for new_block_ids in scheduler_output.scheduled_cached_reqs.new_block_ids:
             if new_block_ids is None:

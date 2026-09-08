@@ -14,6 +14,18 @@ cache sizing, no-prefix-cache scheduling, atomic multi-group admission,
 logical-to-physical BlockTable translation, group-specific worker views, and
 page clearing before reuse.
 
+The separate `jenga_lcm_prefix` mode adds a tested policy reproduction for
+cache-group/layer-type combinations of attention and recurrent state. It
+covers prefix legality, five-tier allocation, small/large-page LRU eviction,
+stale-hash invalidation, and in-place ownership rebind after metadata
+invalidation; no payload migration is implemented. Its first runtime adapter
+supports whole-page prefix hits on an exact-LCM layout only, clips scheduler
+chunks at configured recurrent-state checkpoint boundaries, and rolls back
+partly completed multi-group allocation/touch operations consistently. Correct
+NPU state materialization at those boundaries has not yet been validated.
+See [PREFIX_CACHE_REPRODUCTION.md](PREFIX_CACHE_REPRODUCTION.md) for commands
+and the precise evidence boundary.
+
 The framework-side allocator and address-translation tests pass, and offline
 trace replay shows workload-dependent capacity potential.  End-to-end serving
 performance is **not** a validated result: a correctness gate found that the
@@ -23,8 +35,9 @@ TTFT, TPOT, and generated-text comparisons from this prototype are diagnostic
 only.
 
 Generated datasets, prompts, model outputs, server logs, profiles, plots, and
-result archives are intentionally ignored by Git.  Recreate them locally and
-review them before sharing.
+result archives must be written under `benchmarks/kv_cache/datasets/` or
+`benchmarks/kv_cache/results/`. Those two trees and `*.log` are ignored by
+Git; review any output written elsewhere before sharing.
 
 ## Compared allocation policies
 
@@ -36,9 +49,10 @@ review them before sharing.
 - `address_table`: current runtime experiment; released byte intervals can be
   retyped and reused by another cache group.
 
-Exact LCM is not the final design.  It worked for the small-model geometry but
-grew to 391.5 MiB for the Qwen3.5-27B cache specification, larger than the
-374.5 MiB managed budget per shared layer slice.
+Exact LCM is not the final design. In a local cache-profile capture it worked
+for the small-model geometry but grew to 391.5 MiB for the Qwen3.5-27B cache
+specification, larger than the 374.5 MiB managed budget per shared layer
+slice. The raw profile contains environment metadata and is not published.
 
 ## 1. Run the dependency-free allocator smoke test
 
@@ -116,6 +130,22 @@ export VLLM_ASCEND_TYPED_KV_CACHE_MODE=address_table
 Use `static_partition` for the fixed-region comparison.  The MVP rejects
 prefix caching, cache events, speculative decoding, KV transfer/offload,
 DCP/PCP/PP, packed KV tensors, and cross attention.
+
+To exercise the experimental exact-LCM prefix path instead, enable vLLM prefix
+caching and select:
+
+```shell
+export VLLM_ASCEND_TYPED_KV_CACHE_MODE=jenga_lcm_prefix
+```
+
+This path still rejects cache events, speculative decoding, KV
+transfer/offload, DCP/PCP/PP, packed KV tensors, cross attention, and
+fine-grained partial-block copy-on-write. It also requires vLLM's scheduler
+watermark to be configured as zero. It is not usable for the measured
+Qwen3.5-27B geometry because one exact-LCM large page exceeds that layer
+slice's managed budget. The recurrent checkpoint interval defaults to 512
+tokens and is coarsened to its least common multiple with the scheduler block
+size when whole-page alignment requires it.
 
 ## 6. Correctness gate before performance testing
 

@@ -76,8 +76,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_TYPED_KV_CACHE": lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TYPED_KV_CACHE", "0"))),
     # Physical allocation policy used by the experimental typed KV cache.
     # ``address_table`` reuses released byte intervals across cache groups;
-    # ``static_partition`` reserves one fixed contiguous region per group and
-    # provides an experimental comparison with the same translation path.
+    # ``static_partition`` reserves one fixed contiguous region per group;
+    # ``jenga_lcm_prefix`` enables the exact-LCM two-level layout used by the
+    # experimental cache-group prefix-policy subset.
     "VLLM_ASCEND_TYPED_KV_CACHE_MODE": lambda: os.getenv("VLLM_ASCEND_TYPED_KV_CACHE_MODE", "address_table"),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),

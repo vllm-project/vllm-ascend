@@ -28,6 +28,9 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.core.jenga_prefix_coordinator import (
+    JengaPrefixKVCacheCoordinator,
+)
 from vllm_ascend.core.single_type_kv_cache_manager import get_manager_for_kv_cache_spec
 from vllm_ascend.core.typed_kv_cache import get_typed_kv_cache_plan
 from vllm_ascend.core.typed_kv_cache_coordinator import (
@@ -406,17 +409,28 @@ def get_kv_cache_coordinator(
     metrics_collector: KVCacheMetricsCollector | None = None,
     max_num_batched_tokens: int | None = None,
 ) -> KVCacheCoordinator:
-    # Keep pcp_world_size in this patched function for upstream call
-    # compatibility; platform validation guarantees that it is one.
-    del pcp_world_size
     token_budget = _select_kv_token_budget(max_model_len, max_in_flight_tokens, max_num_batched_tokens)
     typed_plan = get_typed_kv_cache_plan(kv_cache_config)
     if typed_plan is not None:
-        if enable_caching:
-            raise ValueError("typed KV cache MVP requires prefix caching to be disabled")
         if enable_kv_cache_events:
             raise ValueError("typed KV cache MVP does not support KV cache events")
         typed_scheduler_block_size = scheduler_block_size or lcm(*(spec.block_size_tokens for spec in typed_plan.specs))
+        if enable_caching:
+            if typed_plan.is_addressed or typed_plan.is_partitioned:
+                raise ValueError("typed prefix caching requires an exact-LCM Jenga plan")
+            return JengaPrefixKVCacheCoordinator(
+                kv_cache_config=kv_cache_config,
+                plan=typed_plan,
+                max_model_len=max_model_len,
+                max_in_flight_tokens=token_budget,
+                scheduler_block_size=typed_scheduler_block_size,
+                hash_block_size=hash_block_size,
+                dcp_world_size=dcp_world_size,
+                pcp_world_size=pcp_world_size,
+                use_eagle=use_eagle,
+                enable_kv_cache_events=False,
+                metrics_collector=metrics_collector,
+            )
         return TypedKVCacheCoordinatorNoPrefixCache(
             kv_cache_config=kv_cache_config,
             plan=typed_plan,
@@ -424,7 +438,7 @@ def get_kv_cache_coordinator(
             max_in_flight_tokens=token_budget,
             scheduler_block_size=typed_scheduler_block_size,
             dcp_world_size=dcp_world_size,
-            pcp_world_size=1,
+            pcp_world_size=pcp_world_size,
             metrics_collector=metrics_collector,
         )
     if _is_deepseek_v4_kv_cache_config(kv_cache_config):

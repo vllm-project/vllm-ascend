@@ -21,6 +21,7 @@ TypedRegionPool = typed_kv_cache.TypedRegionPool
 TypedAddressPool = typed_kv_cache.TypedAddressPool
 make_block_byte_view = typed_kv_cache.make_block_byte_view
 make_group_byte_view = typed_kv_cache.make_group_byte_view
+typed_block_ids_to_zero = typed_kv_cache.typed_block_ids_to_zero
 
 
 def _plan(num_superpages: int = 4):
@@ -52,6 +53,38 @@ def test_slot_mapping_preserves_existing_kernel_formula() -> None:
 
     assert plan.slot_mapping(group_id=0, block_id=5, offset=3) == 23
     assert plan.slot_mapping(group_id=1, block_id=8, offset=1) == 17
+
+
+def test_prefix_hit_pages_are_excluded_from_worker_zeroing() -> None:
+    assert typed_block_ids_to_zero(
+        [2, 3, 4, 0, 5],
+        num_computed_tokens=8,
+        block_size_tokens=4,
+        prefix_caching_enabled=True,
+    ) == (4, 5)
+    assert typed_block_ids_to_zero(
+        [2, 3, 4],
+        num_computed_tokens=8,
+        block_size_tokens=4,
+        prefix_caching_enabled=False,
+    ) == (2, 3, 4)
+
+
+def test_prefix_zeroing_rejects_unaligned_or_oversized_hits() -> None:
+    with pytest.raises(ValueError, match="aligned"):
+        typed_block_ids_to_zero(
+            [2, 3],
+            num_computed_tokens=6,
+            block_size_tokens=4,
+            prefix_caching_enabled=True,
+        )
+    with pytest.raises(ValueError, match="exceeds"):
+        typed_block_ids_to_zero(
+            [2],
+            num_computed_tokens=8,
+            block_size_tokens=4,
+            prefix_caching_enabled=True,
+        )
 
 
 def test_group_facades_allocate_dense_ids_from_typed_superpages() -> None:

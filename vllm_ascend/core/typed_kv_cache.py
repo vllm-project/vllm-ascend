@@ -333,6 +333,41 @@ class TypedKVCachePlan:
         return tuple(result)
 
 
+def typed_block_ids_to_zero(
+    block_ids: Iterable[int],
+    *,
+    num_computed_tokens: int,
+    block_size_tokens: int,
+    prefix_caching_enabled: bool,
+) -> tuple[int, ...]:
+    """Select newly allocated pages without clearing prefix-cache hits.
+
+    A scheduled new request carries its complete group block table. When a
+    prefix was reused, the leading pages already contain valid KV/state and
+    must not be cleared. Block zero is the shared read-safe NULL page.
+    """
+
+    block_ids = tuple(block_ids)
+    if isinstance(num_computed_tokens, bool) or not isinstance(num_computed_tokens, int) or num_computed_tokens < 0:
+        raise ValueError("num_computed_tokens must be a non-negative integer")
+    if isinstance(block_size_tokens, bool) or not isinstance(block_size_tokens, int) or block_size_tokens <= 0:
+        raise ValueError("block_size_tokens must be a positive integer")
+
+    first_new_block = 0
+    if prefix_caching_enabled:
+        first_new_block, remainder = divmod(
+            num_computed_tokens,
+            block_size_tokens,
+        )
+        if remainder:
+            raise ValueError(
+                "typed prefix cache only supports common-prefix hits aligned to every group's physical page"
+            )
+        if first_new_block > len(block_ids):
+            raise ValueError("computed prefix exceeds the typed block table")
+    return tuple(block_id for block_id in block_ids[first_new_block:] if block_id != 0)
+
+
 def get_typed_kv_cache_plan(kv_cache_config) -> TypedKVCachePlan | None:
     """Read the experimental plan carried by ``KVCacheConfig``.
 
