@@ -226,7 +226,6 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, attn_selector_config, num_heads: int | None = None):
         use_compress = getattr(attn_selector_config, "use_compress", False)
-        use_dcp = getattr(attn_selector_config, "use_dcp", False)
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
         # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
