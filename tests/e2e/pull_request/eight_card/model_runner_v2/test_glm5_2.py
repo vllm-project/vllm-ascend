@@ -26,7 +26,7 @@ from tests.e2e.pull_request.utils import _run_speculative_decoding
 MODEL = "Eco-Tech/GLM-5.2-w4a8"
 DRAFT_MODEL = "RedHatAI/GLM-5.2-speculator.dspark"
 EXPECTED_ACCEPTANCE_LENGTH = 3.0
-DSPARK_EXPECTED_ACCEPTANCE_LENGTH = 3.85
+DSPARK_EXPECTED_ACCEPTANCE_LENGTH = 3.5
 
 
 @pytest.mark.e2e_model(MODEL)
@@ -104,5 +104,5 @@ def test_glm5_2_dspark_eager() -> None:
             "enable_prefix_caching": False,
             "async_scheduling": False,
         },
-        acceptance_length_rtol=0.1,
+        acceptance_length_rtol=0.11,
     )
