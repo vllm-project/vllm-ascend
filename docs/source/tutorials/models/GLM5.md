@@ -1387,7 +1387,7 @@ In addition to the single-node and multi-node parameters described above, the fo
 
 **MTP in PD scenarios:**
 
-- Prefill nodes use `"num_speculative_tokens": 3` in the A3 scenario and `1` in the Ascend950DT scenario (see the scripts above).
+- Prefill nodes use `"num_speculative_tokens": 1` in both scenarios (see the scripts above).
 - Decode nodes use `"num_speculative_tokens": 3` in both scenarios to maximize decode throughput.
 - All prefill and decode nodes must use the same `"method": "deepseek_mtp"` and `"enforce_eager": true`.
 
@@ -1457,11 +1457,11 @@ Test cases use the notation `input/output`, e.g., `128k/1k` means 128K input tok
 |--------|--------------|-------------|-----|--|--|------------|----------------------|--------------|-------------|
 |Dual-Node Co-Located 198K High Throughput (A3)|w8a8c8|Dual-Node Co-Located Node (0/1)|16|4|4|6|4096|202752|3|
 |Dual-Node Co-Located 198K Low Latency (A3)|w8a8c8|Dual-Node Co-Located Node (0/1)|16|16|1|16|4096|202752|3|
-|PD 198K High Throughput (A3)|w8a8c8|PD — Server-P Node (PP2)|16|16|1|64|16384|202752|3|
+|PD 198K High Throughput (A3)|w8a8c8|PD — Server-P Node (PP2)|16|16|1|64|16384|202752|1|
 |PD 198K High Throughput (A3)|w8a8c8|PD — Server-D Node|16|4|4|32|164|202752|3|
-|PD 198K High Throughput (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|3|
+|PD 198K High Throughput (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|1|
 |PD 198K High Throughput (Ascend950DT)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
-|PD 198K Low Latency (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|3|
+|PD 198K Low Latency (Ascend950DT)|w4a4|PD — Server-P Node (DSA CP 8)|8|8|1|20|8192|202752|1|
 |PD 198K Low Latency (Ascend950DT)|w4a4|PD — Server-D Node|8|1|8|60|240|202752|3|
 
 #### 9.1.2 Table 2: Optimizations Requiring Explicit Enablement
