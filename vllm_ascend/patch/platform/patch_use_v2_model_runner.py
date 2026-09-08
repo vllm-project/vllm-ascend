@@ -1,7 +1,7 @@
 import vllm.envs as envs
 from vllm.config.vllm import VllmConfig
 
-from vllm_ascend.utils import is_310p, vllm_version_is
+from vllm_ascend.utils import is_310p
 from vllm_ascend.worker.v2.pp_utils import resolve_spec_pp_support
 
 _original_validate_v2_model_runner = VllmConfig._validate_v2_model_runner
@@ -51,8 +51,10 @@ def _patched_validate_v2_model_runner(self) -> None:
 
 VllmConfig._validate_v2_model_runner = _patched_validate_v2_model_runner
 
-# `_get_v1_model_runner_unsupported_features` is not on vllm v0.28.0.
-if not vllm_version_is("0.28.0"):
+# vLLM main exposes this helper; v0.28.0 does not. Prefer hasattr over
+# vllm_version_is(): CI installs from a commit SHA can report __version__="dev"
+# and would otherwise apply the main-only patch on a release-lane checkout.
+if hasattr(VllmConfig, "_get_v1_model_runner_unsupported_features"):
     _original_get_v1_model_runner_unsupported_features = VllmConfig._get_v1_model_runner_unsupported_features
 
     def _patched_get_v1_model_runner_unsupported_features(self) -> list[str]:

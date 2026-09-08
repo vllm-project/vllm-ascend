@@ -36,11 +36,12 @@ from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
+    _get_kv_cache_config_deepseek_v4,
     _get_kv_cache_config_deepseek_v4_main,
     group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
-from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
@@ -225,6 +226,7 @@ def test_ascend_mla_page_size_includes_scale_storage() -> None:
 
 
 def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
+    legacy_layout_kwargs = {"indexes_kv_by_block_stride": True} if vllm_version_is("0.28.0") else {}
     spec = AscendMLAAttentionSpec(
         block_size=512,
         num_kv_heads=1,
@@ -236,6 +238,7 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
         scale_dim=1,
         scale_dtype=torch.float16,
         **_ratio_kwargs(4),
+        **legacy_layout_kwargs,
     )
 
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
@@ -243,11 +246,11 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
     assert merged.block_size == spec.block_size
     assert merged.real_page_size_bytes == (512 // 4) * (128 * 2 + 2)
     assert merged.page_size_bytes == spec.page_size_padded
-    if vllm_version_is("0.28.0"):
-        assert merged.compress_ratio == spec.compress_ratio
-    else:
-        assert merged.tokens_per_state == spec.tokens_per_state
+    ratio_field = "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state"
+    assert getattr(merged, ratio_field) == getattr(spec, ratio_field)
     assert merged.model_version == spec.model_version
+    if vllm_version_is("0.28.0"):
+        assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
     assert merged.scale_dim == spec.scale_dim
     assert merged.scale_dtype == spec.scale_dtype
 
@@ -372,6 +375,31 @@ def test_kimi_k3_gqa_mixed_groups_preserve_scheduler_and_mamba_contracts() -> No
     }
     assert scheduler_mamba_widths == worker_mamba_widths
     assert scheduler_config.needs_kv_cache_zeroing
+
+
+@pytest.mark.skipif(not vllm_version_is("0.28.0"), reason="shared_by planner is only installed on v0.28.0")
+def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> None:
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(_make_kimi_k3_dspark_kv_cache_specs())
+    assert groups is not None
+    page_size = 488448
+    expected_num_blocks = 100
+    available_memory = page_size * 29 * expected_num_blocks
+    monkeypatch.setattr(
+        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        lambda _config, num_blocks: num_blocks,
+    )
+
+    num_blocks, tensors = _get_kv_cache_config_deepseek_v4(
+        SimpleNamespace(),
+        groups,
+        available_memory,
+    )
+
+    assert num_blocks == expected_num_blocks
+    assert len(tensors) == 29
+    assert [len(get_kv_cache_tensor_layers(tensor)) for tensor in tensors] == [4] * 23 + [1] * 6
+    assert all(tensor.size == page_size * expected_num_blocks for tensor in tensors)
+    assert sum(tensor.size for tensor in tensors) == available_memory
 
 
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:

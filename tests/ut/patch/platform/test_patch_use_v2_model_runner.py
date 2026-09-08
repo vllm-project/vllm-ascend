@@ -1,11 +1,11 @@
+import pytest
+from vllm.config.vllm import VllmConfig
+
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
-from vllm_ascend.utils import vllm_version_is
 
 
 def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
-    if vllm_version_is("0.28.0"):
-        import pytest
-
+    if not hasattr(VllmConfig, "_get_v1_model_runner_unsupported_features"):
         pytest.skip("V1 model runner validation is only present on vLLM main")
 
     monkeypatch.setattr(

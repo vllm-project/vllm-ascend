@@ -137,7 +137,6 @@ def test_pcp_manager_uses_persistent_ascend_input_buffers():
     assert manager._input_buffers.max_num_reqs == 6
     assert manager._input_buffers.seq_lens_np.shape == (6,)
     assert manager._input_buffers.query_start_loc.shape == (7,)
-    # Public input_buffers is a vLLM main PCP contract (#53515).
     if not vllm_version_is("0.28.0"):
         assert manager.input_buffers is manager._input_buffers
 
@@ -310,10 +309,9 @@ def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     assert manager._full_decode_requests_are_token_sized(decode_batch) is False
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="padded_num_tokens is a vLLM main PCP contract")
 def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     """Keep request metadata aligned when upstream already pads tokens."""
-    if vllm_version_is("0.28.0"):
-        pytest.skip("padded_num_tokens is a vLLM main PCP contract")
     input_buffers = AscendInputBuffers(
         max_num_reqs=4,
         max_num_tokens=4,
@@ -408,10 +406,9 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     np.testing.assert_array_equal(args[1], np.array([11, 21, 31], dtype=np.int32))
 
 
+@pytest.mark.skipif(vllm_version_is("0.28.0"), reason="padded_num_tokens is a vLLM main PCP contract")
 def test_partition_batch_keeps_piecewise_request_extent():
     """Token padding in PIECEWISE mode must not create dummy requests."""
-    if vllm_version_is("0.28.0"):
-        pytest.skip("padded_num_tokens is a vLLM main PCP contract")
     batch = _make_local_pcp_batch()
     batch.num_reqs = 2
     batch.num_reqs_after_padding = 2
@@ -822,6 +819,10 @@ def test_main_pcp_capture_does_not_repartition_local_dummy_batch() -> None:
 
     with (
         patch(
+            "vllm_ascend.worker.v2.aclgraph_utils.vllm_version_is",
+            return_value=False,
+        ),
+        patch(
             "vllm_ascend.worker.v2.aclgraph_utils.cudagraph_utils.InputBatch.make_dummy",
             return_value=input_batch,
         ) as make_dummy,
@@ -897,7 +898,7 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
-    # vLLM main added the `dp_sync` field to ExecuteModelState; 0.28.0 lacks it.
+    # vLLM main added the `dp_sync` field to ExecuteModelState; v0.28.0 lacks it.
     state_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         state_kwargs["dp_sync"] = None
