@@ -504,9 +504,17 @@ def plan_rebalance(
     accepted_scores: np.ndarray,
     node_by_rank: tuple[int, ...],
     config: StairConfig,
+    *,
+    sample_weights: np.ndarray | None = None,
 ) -> StairPlan:
     """Run STAIR's six stages for every eligible layer."""
-    samples, weights = compress_samples(logical_load, config.sample_size)
+    if sample_weights is None:
+        samples, weights = compress_samples(logical_load, config.sample_size)
+    else:
+        samples = np.asarray(logical_load, dtype=np.float64)
+        weights = np.asarray(sample_weights, dtype=np.int64)
+        if samples.ndim != 3 or weights.shape != (samples.shape[0],) or np.any(weights <= 0):
+            raise ValueError("STAIR compressed samples and weights disagree")
     old = np.asarray(old_placement, dtype=np.int64)
     if old.ndim != 3 or samples.shape[1] != old.shape[0] or len(node_by_rank) != old.shape[1]:
         raise ValueError("STAIR load, placement, and topology shapes disagree")

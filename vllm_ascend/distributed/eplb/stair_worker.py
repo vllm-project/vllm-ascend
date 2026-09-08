@@ -25,10 +25,6 @@ def run_stair_planner(
     stats = model_state.eplb_stats
     if stats is None or stats.global_expert_load_window.ndim != 3:
         raise RuntimeError("STAIR requires a temporal logical-load window")
-    stream = torch.cuda.stream(cuda_stream) if cuda_stream is not None else nullcontext()
-    with stream:
-        logical_load = stats.global_expert_load_window.cpu()
-
     coordinator = get_eplb_group()
     rank = coordinator.device_group.rank()
     num_ranks = coordinator.device_group.size()
@@ -39,12 +35,17 @@ def run_stair_planner(
     shape = (old_mapping.shape[0], num_ranks, slots_per_rank)
 
     if rank == 0:
+        stream = torch.cuda.stream(cuda_stream) if cuda_stream is not None else nullcontext()
+        with stream:
+            bin_sums = stats.global_expert_load_window.cpu().numpy()
+        logical_load = bin_sums / model_state._stair_sample_weights[:, None, None]
         plan = plan_rebalance(
-            logical_load.numpy(),
+            logical_load,
             old_mapping.numpy().reshape(shape),
             model_state._stair_accepted_scores,
             node_by_rank,
             state._stair_config,
+            sample_weights=model_state._stair_sample_weights,
         )
         packed = torch.from_numpy(np.stack((plan.placement, plan.source_rank, plan.source_slot)))
         scores = torch.from_numpy(plan.accepted_scores)

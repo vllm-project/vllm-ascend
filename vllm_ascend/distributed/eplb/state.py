@@ -136,6 +136,7 @@ class AscendEplbState(_eplb_state.EplbState):
             dtype=torch.int64,
             device=self.device,
         )
+        model_state._stair_valid_size = 0
         model_state._stair_accepted_scores = np.full(model.num_moe_layers, np.nan)
 
     def add_model(self, model, model_config) -> None:
@@ -163,7 +164,29 @@ class AscendEplbState(_eplb_state.EplbState):
                     model_state.physical_to_logical_map.long(),
                     model_state.expert_load_pass.to(torch.int64),
                 )
+                model_state._stair_valid_size = min(
+                    model_state._stair_valid_size + 1,
+                    self.expert_load_window_size,
+                )
         super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
+
+    def _compress_stair_window(self, model_state: Any) -> tuple[torch.Tensor, np.ndarray]:
+        valid_size = model_state._stair_valid_size
+        if valid_size < 1:
+            raise RuntimeError("STAIR cannot compress an empty load window")
+        if valid_size < self.expert_load_window_size:
+            ordered = model_state._stair_load_window[:valid_size]
+        else:
+            ordered = torch.roll(
+                model_state._stair_load_window,
+                shifts=-self.expert_load_window_step,
+                dims=0,
+            )
+        bins = min(valid_size, self._stair_config.sample_size)
+        boundaries = np.arange(bins + 1) * valid_size // bins
+        weights = np.diff(boundaries).astype(np.int64)
+        sums = torch.stack([ordered[start:end].sum(dim=0) for start, end in zip(boundaries[:-1], boundaries[1:])])
+        return sums, weights
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""
@@ -196,12 +219,9 @@ class AscendEplbState(_eplb_state.EplbState):
         num_ranks = ep_group.size()
         num_nodes = len(set(self._stair_node_by_rank))
         for model_state in self.model_states.values():
-            logical_load = torch.roll(
-                model_state._stair_load_window,
-                shifts=-self.expert_load_window_step,
-                dims=0,
-            ).clone()
+            logical_load, weights = self._compress_stair_window(model_state)
             all_reduce(logical_load, group=ep_group)
+            model_state._stair_sample_weights = weights
             model = model_state.model
             model_state.eplb_stats = _eplb_state.EplbStats(
                 global_expert_load_window=logical_load,

@@ -40,6 +40,7 @@ def test_rank_zero_plans_for_existing_async_worker(monkeypatch):
             num_nodes=1,
         ),
         _stair_accepted_scores=np.array([np.nan]),
+        _stair_sample_weights=np.array([1]),
         communicator=communicator,
     )
     state = SimpleNamespace(

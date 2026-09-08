@@ -4,6 +4,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 from vllm.distributed.eplb import eplb_state as upstream_eplb_state
@@ -24,10 +25,12 @@ def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
     monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
     state = AscendEplbState.__new__(AscendEplbState)
     state._stair_config = object()
+    state.expert_load_window_size = 1
     state.expert_load_window_step = 0
     state._should_record_current_step = lambda log_stats=False: True
     model_state = SimpleNamespace(
         _stair_load_window=torch.zeros((1, 1, 3), dtype=torch.int64),
+        _stair_valid_size=0,
         physical_to_logical_map=torch.tensor([[0, 1, 0, 2]]),
         expert_load_pass=torch.tensor([[2, 3, 5, 7]]),
     )
@@ -36,6 +39,7 @@ def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
     state.step()
 
     torch.testing.assert_close(model_state._stair_load_window[0], torch.tensor([[7, 3, 7]]))
+    assert model_state._stair_valid_size == 1
     upstream_step.assert_called_once_with(is_dummy=False, is_profile=False, log_stats=False)
 
 
@@ -75,12 +79,15 @@ def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
     monkeypatch.setattr(eplb_state, "all_reduce", reduce)
     model_state = SimpleNamespace(
         _stair_load_window=torch.tensor([[[1, 2]], [[3, 4]]]),
+        _stair_valid_size=2,
         model=SimpleNamespace(num_physical_experts=4, num_expert_groups=1),
         rebalanced=False,
     )
     state = AscendEplbState.__new__(AscendEplbState)
     state.model_states = {"model": model_state}
     state._stair_node_by_rank = (0, 0)
+    state._stair_config = SimpleNamespace(sample_size=64)
+    state.expert_load_window_size = 2
     state.expert_load_window_step = 1
     state.rearrange_event = MagicMock()
 
@@ -90,6 +97,22 @@ def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
     assert model_state.rebalanced
     reduce.assert_called_once()
     state.rearrange_event.record.assert_called_once_with()
+
+
+def test_stair_compression_ignores_unwritten_window_slots():
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.expert_load_window_size = 4
+    state.expert_load_window_step = 2
+    state._stair_config = SimpleNamespace(sample_size=1)
+    model_state = SimpleNamespace(
+        _stair_valid_size=2,
+        _stair_load_window=torch.tensor([[[1]], [[3]], [[0]], [[0]]]),
+    )
+
+    sums, weights = state._compress_stair_window(model_state)
+
+    torch.testing.assert_close(sums, torch.tensor([[[4]]]))
+    np.testing.assert_array_equal(weights, [2])
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
