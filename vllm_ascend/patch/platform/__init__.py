@@ -48,4 +48,3 @@ import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
 import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
-import vllm_ascend.patch.platform.patch_vision  # noqa
