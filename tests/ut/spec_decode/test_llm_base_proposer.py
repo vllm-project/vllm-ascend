@@ -43,6 +43,37 @@ NON_FULL_CUDAGRAPH_MODES = [
 ]
 
 
+def test_draft_vllm_config_marks_draft_without_replacing_model_config():
+    target_model_config = SimpleNamespace(runner_type="generate")
+    base_vllm_config = SimpleNamespace(
+        model_config=target_model_config,
+        additional_config={"existing": "value"},
+    )
+    expected_vllm_config = SimpleNamespace(
+        model_config=target_model_config,
+        additional_config={"existing": "value", "_ascend_is_draft_model": True},
+    )
+    proposer = AscendSpecDecodeBaseProposer.__new__(AscendSpecDecodeBaseProposer)
+
+    with (
+        patch(
+            "vllm.v1.spec_decode.llm_base_proposer.SpecDecodeBaseProposer._create_draft_vllm_config",
+            return_value=base_vllm_config,
+        ),
+        patch(
+            "vllm_ascend.spec_decode.llm_base_proposer.replace",
+            return_value=expected_vllm_config,
+        ) as mock_replace,
+    ):
+        draft_vllm_config = proposer._create_draft_vllm_config()
+
+    assert draft_vllm_config is expected_vllm_config
+    mock_replace.assert_called_once_with(
+        base_vllm_config,
+        additional_config={"existing": "value", "_ascend_is_draft_model": True},
+    )
+
+
 class TestMultimodalImageTokenIndex:
     @pytest.mark.parametrize(
         "model_name",
