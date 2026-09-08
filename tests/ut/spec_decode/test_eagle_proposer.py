@@ -4265,7 +4265,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         if not supports_compact:
             predictor = SimpleNamespace(set_skip_topk=predictor.set_skip_topk)
 
-        observed = []
+        observed: list[tuple[bool, torch.Tensor]] = []
         step0_rows = torch.arange(32, dtype=torch.int32).reshape(8, 4)
         indices = torch.tensor([1, 6], dtype=torch.int32)
         group = MagicMock(world_size=2, rank_in_group=0)
