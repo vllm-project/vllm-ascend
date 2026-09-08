@@ -235,11 +235,15 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
             return attn_metadata
 
         graph_batch_size = common_attn_metadata.num_reqs
+        # Spec metadata is request-granular (see vLLM GDN comment). Do not gate
+        # on ``num_spec_decode_tokens``: concurrent MTP has tokens = reqs*(1+K),
+        # which can equal/exceed ``decode_cudagraph_max_bs`` (often set from
+        # max capture *token* size). Skipping pad then leaves ephemeral tensors
+        # that FULL replay cannot refresh — concurrent SpecDecoding poison.
         if (
             attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes == 0
             and attn_metadata.num_spec_decodes <= self.decode_cudagraph_max_bs
-            and attn_metadata.num_spec_decode_tokens <= self.decode_cudagraph_max_bs
         ):
             self._pad_spec_decode_metadata(attn_metadata, graph_batch_size)
         elif (

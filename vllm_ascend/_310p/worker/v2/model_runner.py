@@ -264,6 +264,8 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_scheduled_tokens=num_scheduled_tokens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
+        # Pad rows must not carry stale host seq_lens into GDN/attention metadata.
+        self.input_buffers.seq_lens_np[num_reqs:num_reqs_padded] = 0
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
         total_num_logits = num_reqs if not draft_tokens_map else int(cu_num_logits_np[-1])
         logits_indices = self._combine_sampled_and_draft_tokens(
@@ -443,13 +445,8 @@ class NPUModelRunner310V2(NPUModelRunner):
         if not np.all(num_valid_tokens == 1):
             return True
 
-        # Concurrent SpecDecoding FULL on 310P MRv2 currently poisons hybrid GDN
-        # state (gsm8k batch>1 → ~38% + garble; sequential num_reqs=1 → ~90%).
-        # Keep single-request FULL for decode perf; force eager for num_reqs>1
-        # until concurrent SpecDecoding FULL is root-caused (align MRv1 accuracy).
-        if num_reqs > 1:
-            return True
-
+        # Allow concurrent uniform SpecDecoding FULL (MRv1 contract). Accuracy
+        # regressions are caught by E2E; do not blanket-eager on num_reqs.
         seq_lens = np.fromiter(
             (computed_by_req[req_id] + num_tokens_per_req[req_id] for req_id in req_ids),
             dtype=np.int32,

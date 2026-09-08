@@ -8,6 +8,10 @@ Target verify on 310P maps MTP uniform batches (q_len = 1+K) to SpecDecoding
 (splitfuse), not DecodeOnly (PA). Upstream ``AscendInputBatch.make_dummy``
 always tags DecodeOnly, so FULL capture would record the wrong attention path
 and replay would diverge from runtime SpecDecoding. Wrap capture only on 310P.
+
+MRv1 concurrent SpecDecoding FULL relies on buffer-address refresh (no FIA
+``graph_task`` on 310P). Mirror that: sync before replay so H2D into capture-
+stable seq_lens / slot_mapping / GDN pad buffers is visible to the graph.
 """
 
 from __future__ import annotations
@@ -15,10 +19,12 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+import torch
 import torch.nn as nn
 from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.utils import AttentionGroup
@@ -29,6 +35,13 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 
 class ModelAclGraphManager310(ModelAclGraphManager):
     """310P target ACLGraph manager: MTP capture uses SpecDecoding metadata."""
+
+    def run_fullgraph(self, desc: BatchExecutionDescriptor) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
+        # MRv1 ``_model_forward`` synchronizes before speculative FULL replay so
+        # CPU→NPU refreshes of capture-stable buffers land before the graph.
+        if self.vllm_config.speculative_config is not None:
+            torch.npu.current_stream().synchronize()
+        return super().run_fullgraph(desc)
 
     def capture(
         self,

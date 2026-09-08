@@ -21,6 +21,8 @@ from vllm_ascend.worker.v2 import spec_decode as ascend_spec_decode
 ar_speculator.prepare_prefill_inputs = prepare_prefill_inputs_cpu
 ar_speculator.prepare_decode_inputs = prepare_decode_inputs_cpu
 ar_speculator.update_draft_inputs = update_draft_inputs_cpu
+# Draft ACLGraph manager override is applied in patch/worker/__init__.py
+# *after* patch_eagle_speculator (which would otherwise win).
 
 
 def _embed_input_ids(self: nn.Module, input_ids: torch.Tensor, **kwargs):

@@ -62,5 +62,16 @@ import vllm_ascend.patch.worker.patch_v2.patch_eagle_speculator  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_dflash_speculator  # noqa
 import vllm_ascend.patch.worker.patch_v2.patch_dspark  # noqa
 
+# 310P: draft FULL must use AutoRegressiveAclGraphManager310 (no FIA graph_task).
+# patch_eagle_speculator above installs the 910 manager; re-override here.
+if not get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PATCHES):
+    from vllm.v1.worker.gpu.spec_decode.autoregressive import speculator as _ar_spec
+
+    from vllm_ascend._310p.worker.v2.spec_decode.aclgraph import (
+        AutoRegressiveAclGraphManager310,
+    )
+
+    _ar_spec.SpeculatorCudaGraphManager = AutoRegressiveAclGraphManager310
+
 # only patch routed experts capture in main2main.
 import vllm_ascend.patch.worker.patch_routed_experts_capture  # noqa

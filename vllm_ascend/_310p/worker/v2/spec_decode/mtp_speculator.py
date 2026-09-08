@@ -4,10 +4,10 @@
 
 """310P MTP speculator: CPU block-table slot mappings + RoPE flag + draft quant.
 
-Step 2 (FULL_DECODE_ONLY): target verify may replay SpecDecoding FULL graphs.
-Draft ACLGraph remains skipped — draft-decode needs host slot-map updates between
-steps, and concurrent draft FULL historically collapsed acceptance on 310P.
-Draft propose stays eager; correctness/perf first land on target graph path.
+Target path aligns with MRv1 concurrent uniform SpecDecoding FULL (hybrid
+``prepare_attn`` actual/pad split). Draft ACLGraph stays skipped for K=1 until
+AR draft-prefill FULL recovers accept rate (~90% eager vs ~55% graph; see docs
+Step2-E2E-4). ``AutoRegressiveAclGraphManager310`` remains wired for retries.
 """
 
 from __future__ import annotations
@@ -101,11 +101,10 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
 
     def capture(self) -> None:
-        """Skip draft ACLGraph on 310P MTP — eager draft propose."""
+        """Skip draft ACLGraph until AR draft-prefill FULL recovers accept rate."""
         self.last_token_indices.zero_()
         logger.info(
-            "Skipping draft ACLGraph capture on 310P MTP "
-            "(eager draft-prefill/decode; target SpecDecoding FULL is separate)."
+            "Skipping draft ACLGraph capture on 310P MTP (eager draft; E2E-4: draft FULL accept ~55% vs eager ~90%)."
         )
 
     @torch.inference_mode()
@@ -155,20 +154,11 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     ) -> None:
-        """Eager non-fused multi-step with 310P CPU slot mappings.
-
-        Concurrent K>1 is supported under Step-1 eager. The previous
-        ``num_reqs>1`` short-circuit (zero drafts after the first) forced
-        effective K=1 under gsm8k concurrency (accept rates ``[p0, 0, 0]``).
-        Concurrent garble was from index_copy_/missing tail-save/draft
-        ACLGraph — already fixed — not from multi-step draft itself.
-        """
+        """Eager non-fused multi-step with 310P CPU slot mappings."""
         assert seq_lens_cpu_upper_bound is not None
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         idx_mapping = self.idx_mapping[:num_reqs]
-        # Align draft attn seq_lens with prepare_decode_inputs_cpu:
-        # seq = target_seq - num_rejected (+ step inside _build_draft_attn_metadata).
         seq_ub = seq_lens_cpu_upper_bound
         rejected = getattr(self, "_last_num_rejected_cpu", None)
         if rejected is not None and rejected.numel() >= num_reqs:
