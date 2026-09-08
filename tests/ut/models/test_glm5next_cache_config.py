@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for GLM-Next cache grouping, packing, and capacity accounting."""
+"""Tests for GLM-Next cache grouping, physical layout, and capacity accounting."""
 
 from types import SimpleNamespace
 
@@ -11,12 +11,9 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-)
-
-from vllm_ascend.core.kv_cache_interface import (
-    AscendIndependentKVCacheTensor,
 )
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_cache_layout,
@@ -108,18 +105,12 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     plan = get_glm5_kv_cache_config(config, groups, budget)
     assert plan.num_blocks == 20
     assert len(plan.kv_cache_tensors) == 2
-    assert all(
-        isinstance(tensor, AscendIndependentKVCacheTensor)
-        for tensor in plan.kv_cache_tensors
-    )
+    assert all(isinstance(tensor, KVCacheTensor) for tensor in plan.kv_cache_tensors)
     assert {tensor.size for tensor in plan.kv_cache_tensors} == {
         20 * layout.main_page_size,
         20 * layout.small_page_size,
     }
-    assert {tensor.block_stride for tensor in plan.kv_cache_tensors} == {
-        layout.main_page_size,
-        layout.small_page_size,
-    }
+    assert all(tensor.block_stride == 0 for tensor in plan.kv_cache_tensors)
 
     placements = {
         layer_name: tensor

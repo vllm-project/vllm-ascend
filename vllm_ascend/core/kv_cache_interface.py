@@ -13,7 +13,6 @@ from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager, Slid
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
-    KVCacheTensor,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
@@ -21,17 +20,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.utils import vllm_version_is
-
-
-@dataclass
-class AscendIndependentKVCacheTensor(KVCacheTensor):
-    """A KV cache tensor that owns an independent physical allocation.
-
-    Upstream uses ``block_stride > 0`` to describe descriptors packed into one
-    global backing tensor. Some Ascend kernels instead require every physical
-    cache slot to be contiguous. This marker makes that allocation policy
-    explicit without teaching the model runner about a particular model.
-    """
 
 
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:

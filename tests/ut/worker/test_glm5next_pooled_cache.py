@@ -115,6 +115,13 @@ def _make_runner(config):
     runner.runner_only_attn_layers = set()
     runner.shared_kv_cache_layers = {}
     runner.kv_caches = []
+    runner.use_sparse = False
+    runner.use_compress = True
+    runner.use_hybrid_blocks = True
+    runner.sparse_kv_offload_enabled = False
+    runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)
+    runner.tp_rank = 0
+    runner.attn_backend = _AttentionBackend
     # The runner must consume the descriptor/spec contract without inspecting
     # a model type.
     runner.model_config = SimpleNamespace()
@@ -152,11 +159,11 @@ def _make_plan(num_blocks=3):
     register_all_kvcache_specs(None)
     config = _make_config()
     groups = get_glm5_kv_cache_groups(config, _make_specs())
-    block_stride = get_glm5_pool_bytes_per_block(groups)
+    bytes_per_block = get_glm5_pool_bytes_per_block(groups)
     plan = get_glm5_kv_cache_config(
         config,
         groups,
-        num_blocks * block_stride,
+        num_blocks * bytes_per_block,
     )
     return config, groups, plan
 
@@ -176,52 +183,53 @@ def test_glm5_runner_allocates_contiguous_slot_backings():
         for descriptor in plan.kv_cache_tensors
         for name in descriptor.shared_by
     }
-    main_k_cache, main_v_cache = caches[MAIN]
-    assert main_k_cache.shape == (3, 8, 1, 4)
-    assert main_v_cache.shape == (3, 8, 1, 0)
-    assert main_k_cache.is_contiguous()
-    assert caches[INDEXER].shape == (3, 4, 1, 4)
-    assert caches[STATE].shape == (3, 2, 3)
+    (main_cache,) = caches[MAIN]
+    (indexer_cache,) = caches[INDEXER]
+    (state_cache,) = caches[STATE]
+    assert main_cache.shape == (3, 8, 1, 4)
+    assert main_cache.is_contiguous()
+    assert indexer_cache.shape == (3, 4, 1, 4)
+    assert state_cache.shape == (3, 2, 3)
     assert [cache.shape for cache in caches[MAMBA]] == [
         (3, 2, 2),
         (3, 1, 2, 2),
     ]
 
-    for name in (INDEXER, STATE):
-        cache = caches[name]
-        descriptor = descriptors[name]
-        assert (
-            cache.stride(0) * cache.element_size()
-            == descriptor.block_stride
-        )
-        assert (
-            cache.data_ptr() - raw_caches[name].data_ptr()
-            == descriptor.offset
-        )
+    for name, cache in ((INDEXER, indexer_cache), (STATE, state_cache)):
+        page_size = descriptors[name].size // plan.num_blocks
+        assert cache.stride(0) * cache.element_size() == page_size
+        assert cache.data_ptr() == raw_caches[name].data_ptr()
     for cache in caches[MAMBA]:
-        assert (
-            cache.stride(0) * cache.element_size()
-            == descriptors[MAMBA].block_stride
-        )
+        page_size = descriptors[MAMBA].size // plan.num_blocks
+        assert cache.stride(0) * cache.element_size() == page_size
 
-    mamba_second_offset = (
-        descriptors[MAMBA].offset
-        + caches[MAMBA][0][0].numel()
-        * caches[MAMBA][0].element_size()
-    )
+    mamba_second_offset = caches[MAMBA][0][0].numel() * caches[MAMBA][0].element_size()
     assert (
         caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr()
         == mamba_second_offset
     )
 
-    caches[STATE][2].fill_(7)
-    state_payload_size = caches[STATE][0].numel() * caches[STATE].element_size()
-    state_padding = (
-        2 * descriptors[STATE].block_stride
-        + descriptors[STATE].offset
-        + state_payload_size
-    )
+    state_cache[2].fill_(7)
+    state_payload_size = state_cache[0].numel() * state_cache.element_size()
+    state_padding = 2 * (descriptors[STATE].size // plan.num_blocks) + state_payload_size
     assert raw_caches[STATE][state_padding].item() == 0
+
+
+def test_standalone_mtp_uses_existing_compressed_cache_allocator():
+    config = _make_config()
+    specs = {
+        name: spec
+        for name, spec in _make_specs().items()
+        if not isinstance(spec, MambaSpec)
+    }
+    groups = get_glm5_kv_cache_groups(config, specs)
+    bytes_per_block = get_glm5_pool_bytes_per_block(groups)
+    plan = get_glm5_kv_cache_config(config, groups, 3 * bytes_per_block)
+
+    raw_caches = _make_runner(config)._allocate_kv_cache_tensors(plan)
+
+    assert set(raw_caches) == {MAIN, INDEXER, STATE}
+    assert raw_caches[INDEXER] is raw_caches[STATE]
 
 
 def test_glm5_initialize_passes_all_pooled_views_to_cache_binding():

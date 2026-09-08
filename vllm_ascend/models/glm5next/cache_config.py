@@ -4,8 +4,8 @@
 
 The main MLA cache and compressed indexer cache share scheduler block IDs,
 while compressor state and every KDA/Mamba group allocate IDs independently.
-Physical storage uses independently allocated contiguous slots with two
-page-size classes: main MLA/KDA pages and compressed-indexer/state pages.
+Physical storage uses standard unpacked KV cache descriptors with two page-size
+classes: main MLA/KDA pages and compressed-indexer/state pages.
 """
 
 from dataclasses import dataclass
@@ -20,14 +20,11 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
-)
-
-from vllm_ascend.core.kv_cache_interface import (
-    AscendIndependentKVCacheTensor,
 )
 
 
@@ -477,22 +474,22 @@ def get_glm5_kv_cache_config(
     groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> KVCacheConfig:
-    """Allocate one contiguous backing tensor for each physical cache slot."""
+    """Describe one standard unpacked tensor per physical cache slot."""
 
     layout = _get_glm5_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
 
-    block_stride = get_glm5_pool_bytes_per_block(groups)
+    bytes_per_block = get_glm5_pool_bytes_per_block(groups)
     num_blocks = may_override_num_blocks(
-        vllm_config, max(available_memory // block_stride, 0)
+        vllm_config, max(available_memory // bytes_per_block, 0)
     )
-    tensors: list[AscendIndependentKVCacheTensor] = []
+    tensors: list[KVCacheTensor] = []
 
     # Layers in independent scheduler groups can reuse the same physical slot
-    # because their block IDs are allocated independently. Each slot receives
-    # its own contiguous allocation; the NPU paged-attention kernels reject a
-    # layer view whose block dimension strides across unrelated cache pages.
+    # because their block IDs are allocated independently. A standard unpacked
+    # descriptor lets the existing model-runner allocator create one backing
+    # tensor per slot without a model-specific allocation path.
     for slot in range(layout.main_slot_count):
         shared_by: list[str] = []
         if slot < len(layout.mla_names):
@@ -501,11 +498,9 @@ def get_glm5_kv_cache_config(
             if slot < len(group.layer_names):
                 shared_by.append(group.layer_names[slot])
         tensors.append(
-            AscendIndependentKVCacheTensor(
+            KVCacheTensor(
                 size=layout.main_page_size * num_blocks,
                 shared_by=shared_by,
-                offset=0,
-                block_stride=layout.main_page_size,
             )
         )
 
@@ -513,11 +508,9 @@ def get_glm5_kv_cache_config(
         layout.indexer_names, layout.state_names
     ):
         tensors.append(
-            AscendIndependentKVCacheTensor(
+            KVCacheTensor(
                 size=layout.small_page_size * num_blocks,
                 shared_by=[indexer_name, state_name],
-                offset=0,
-                block_stride=layout.small_page_size,
             )
         )
 

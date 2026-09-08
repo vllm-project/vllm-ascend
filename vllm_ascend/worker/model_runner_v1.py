@@ -249,11 +249,6 @@ from vllm_ascend.core.kv_cache_interface import (
     AscendSFAIndexerCacheSpec,
     AscendSlidingWindowMLASpec,
 )
-from vllm_ascend.worker.kv_cache_layout import (
-    allocate_independent_kv_cache_tensors,
-    has_independent_kv_cache_tensors,
-    reshape_independent_kv_cache_tensors,
-)
 
 # if true, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
@@ -4559,20 +4554,18 @@ class NPUModelRunner(GPUModelRunner):
                     for layer_name, start, layer_size in regions:
                         kv_cache_raw_tensors[layer_name] = backing[start : start + layer_size]
 
-        if has_independent_kv_cache_tensors(kv_cache_config):
-            self.hybrid_with_attn_and_mamba = False
-            return allocate_independent_kv_cache_tensors(
-                kv_cache_config,
-                self.runner_only_attn_layers,
-                lambda size: self._allocate_int8_cache_tensor(size, alignment),
-            )
-
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             shared_layers = get_kv_cache_tensor_layers(kv_cache_tensor)
-            use_mamba = False
+            use_mamba, use_compressed_cache = False, False
             for layer_name in shared_layers:
-                if isinstance(layer_kv_cache_spec[layer_name], MambaSpec):
+                layer_spec = layer_kv_cache_spec[layer_name]
+                if isinstance(layer_spec, MambaSpec):
                     use_mamba = True
+                if self.use_compress and isinstance(
+                    layer_spec,
+                    (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
+                ):
+                    use_compressed_cache = True
             for idx in range(len(shared_layers)):
                 layer_name = shared_layers[idx]
                 # Single tensor path for: mamba, hybrid attn-mamba, or cache_only_layers
@@ -4645,7 +4638,7 @@ class NPUModelRunner(GPUModelRunner):
                                 tensor = self._align_memory(tensor, alignment)[: layer_size]
                             kv_cache_raw_tensors[layer_name_inner] = tensor
 
-                elif "attn" in layer_name and self.use_compress and layer_name not in kv_cache_raw_tensors:
+                elif use_compressed_cache and layer_name not in kv_cache_raw_tensors:
                     if self.vllm_config.kv_transfer_config is None:
                         tensor = torch.zeros(kv_cache_tensor.size,
                                                 dtype=torch.int8,
@@ -4887,16 +4880,6 @@ class NPUModelRunner(GPUModelRunner):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         layer_kv_cache_spec = self._get_layer_kv_cache_specs(kv_cache_config)
-        if has_independent_kv_cache_tensors(kv_cache_config):
-            return reshape_independent_kv_cache_tensors(
-                kv_cache_config,
-                kv_cache_raw_tensors,
-                layer_kv_cache_spec,
-                self._kv_cache_spec_attn_group_iterator(),
-                self.runner_only_attn_layers,
-                self._get_attention_kv_cache_dims,
-            )
-
         for group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             current_kv_cache_spec = group.kv_cache_spec
@@ -5253,24 +5236,32 @@ class NPUModelRunner(GPUModelRunner):
                     # different GPUs, and `kv_cache_config.num_blocks` is set to
                     # the min of all `num_blocks`. Verify it here.
 
-                    state_tensors = []
-                    target_idx = 0
-                    start_idx = 0
-                    # NOTE(zxr): in order to keep all tensor contiguous, we align ssm and kv block
-                    # with same page size, so have to add extra padding block for kv, the overall
-                    # layout of hybrid kv_cache on Ascend is:
-                    # tensor1: [(kv_padding), conv           , ...]
-                    # tensor2: [k           , ssm            , ...]
-                    # tensor3: [v           , (mamba_padding), ...]
-                    for shape, dtype in zip(current_kv_cache_spec.shapes, current_kv_cache_spec.dtypes):
-                        # normally, there is conv state and ssm state in this loop. And there is only
-                        # a conv state in some special models.
-                        target_shape = (num_blocks, *shape)
-
-                        target_idx += math.prod(target_shape) * get_dtype_size(dtype)
-                        tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
-                        start_idx = target_idx
-                        state_tensors.append(tensor)
+                    target_shapes = [
+                        (num_blocks, *shape)
+                        for shape in current_kv_cache_spec.shapes
+                    ]
+                    if current_kv_cache_spec.page_size_padded is not None:
+                        # A padded Mamba allocation is block-major: every
+                        # physical page contains all states followed by page
+                        # padding. Reuse the standard page metadata to expose
+                        # each state with the physical page stride.
+                        state_tensors = self._adjust_kv_layout(
+                            raw_tensor,
+                            target_shapes,
+                            list(current_kv_cache_spec.dtypes),
+                            current_kv_cache_spec.page_size_bytes,
+                        )
+                    else:
+                        state_tensors = []
+                        target_idx = 0
+                        start_idx = 0
+                        for target_shape, dtype in zip(
+                            target_shapes, current_kv_cache_spec.dtypes
+                        ):
+                            target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                            tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
+                            start_idx = target_idx
+                            state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")

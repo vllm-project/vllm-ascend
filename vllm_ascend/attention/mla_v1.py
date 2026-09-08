@@ -1425,7 +1425,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache[idx // block_size, idx % block_size] = token.view(-1, *cache.shape[2:])
         if is_prefill:
             return k_pe, k_nope
-        return kv_cache[1], kv_cache[0]
+        # No physical RoPE cache is needed when its head dimension is zero.
+        # Keep the decode interface uniform without requiring the allocator to
+        # materialize a second, empty cache tensor.
+        cached_k_pe = cache.new_empty((*cache.shape[:-1], 0))
+        return cached_k_pe, cache
 
     def exec_kv_decode(
         self,
