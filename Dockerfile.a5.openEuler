@@ -70,6 +70,7 @@ ARG COMPILE_CUSTOM_KERNELS=1
 ARG CARGO_BUILD_JOBS=16
 # Limit opc/c++ build parallelism to avoid OOM. Mirrors
 # .github/workflows/_build_csrc_cache.yaml.
+# TODO: auto-detect buildkitd CPU cores and set MAX_JOBS accordingly
 ARG MAX_JOBS=16
 ENV SOC_VERSION=$SOC_VERSION \
     TASK_QUEUE_ENABLE=1 \
