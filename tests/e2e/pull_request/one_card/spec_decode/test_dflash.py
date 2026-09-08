@@ -13,7 +13,7 @@ MAX_NUM_SEQS = 256
 DYNAMIC_DFLASH_BASELINES = {
     # DFlash drafts a block in parallel, so changing K changes the block input
     # shape and its acceptance profile. Do not reuse the K=8 baseline for K=4.
-    ("dflash", 4): [0.8, 0.5, 0.3, 0.2],
+    ("dflash", 4): [0.58, 0.42, 0.25, 0.0],
 }
 
 
