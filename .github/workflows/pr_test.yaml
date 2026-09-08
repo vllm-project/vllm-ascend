@@ -175,7 +175,6 @@ jobs:
               - '.github/workflows/scripts/select_tests.py'
               - '.github/workflows/scripts/test_selector.py'
               - '.github/workflows/scripts/run_selected_tests.sh'
-              - '.github/workflows/scripts/test_config.yaml'
               - '.github/workflows/scripts/runner_label.json'
               - '.github/workflows/scripts/coverage.py'
 
