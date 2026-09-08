@@ -845,6 +845,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             SimpleNamespace(kv_connector="ExampleHiddenStatesConnector"),
             SimpleNamespace(kv_connector="MooncakeConnectorV2"),
             SimpleNamespace(kv_connector="MooncakePullConnector"),
+            SimpleNamespace(kv_connector="MooncakeConnectorV1"),
         ):
             with self.subTest(kv_transfer_config=kv_transfer_config):
                 runner = self._build_runner()

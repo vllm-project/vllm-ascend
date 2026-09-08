@@ -4536,9 +4536,6 @@ class NPUModelRunner(GPUModelRunner):
             if kv_transfer_config is not None
             else None
         )
-        # Mooncake V2 retains per-layer transfer metadata while registering the
-        # standardized Attention/Mamba backing allocation once. The example
-        # connector only consumes its dedicated cache-only layer.
         supports_shared_backing_with_kv_transfer = (
             kv_transfer_config is None
             or kv_connector
@@ -4546,6 +4543,7 @@ class NPUModelRunner(GPUModelRunner):
                 "ExampleHiddenStatesConnector",
                 "MooncakeConnectorV2",
                 "MooncakePullConnector",
+                "MooncakeConnectorV1",
             }
         )
 
