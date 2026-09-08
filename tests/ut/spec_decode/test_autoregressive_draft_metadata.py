@@ -22,7 +22,7 @@ def test_gqa_draft_block_table_matches_padded_batch():
         for node in speculator_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "_init_decode_draft_attn_metadatas"
     )
-    namespace = {
+    namespace: dict[str, Any] = {
         "Any": Any,
         "copy": copy,
         "AscendAttentionState": SimpleNamespace(DecodeOnly="decode_only"),
