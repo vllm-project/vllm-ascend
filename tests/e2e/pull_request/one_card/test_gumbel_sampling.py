@@ -9,6 +9,7 @@
 
 import pytest
 import torch
+from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
 from vllm_ascend.worker.v2.sample.gumbel import apply_temperature, gumbel_sample
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
@@ -586,6 +587,27 @@ class TestGumbelSampling:
                 True,
                 logits_cache=torch.empty(1, 1, 31, device=DEVICE),
             )
+
+    def test_dspark_uses_ascend_gumbel(self):
+        """Exercise the inherited DSpark entry point with real NPU sampling."""
+        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is gumbel_sample
+        speculator = DSparkSpeculator.__new__(DSparkSpeculator)
+        speculator._d2t_scatter_index = None
+        speculator.temperature = torch.tensor([0.5, 1.5], device=DEVICE)
+        speculator.seeds = torch.tensor([3, 7], dtype=torch.int64, device=DEVICE)
+        speculator._step_cols = torch.arange(2, dtype=torch.int32, device=DEVICE)
+        speculator.draft_logits = torch.zeros(2, 2, 1031, device=DEVICE)
+        speculator.use_fp64_gumbel = False
+        logits = torch.randn(2, 1031, device=DEVICE)
+        idx_mapping = torch.tensor([1, 0], dtype=torch.int32, device=DEVICE)
+        sample_pos = torch.tensor([8, 12], dtype=torch.int32, device=DEVICE)
+
+        sampled = speculator._sample_logits(logits, idx_mapping, sample_pos, step=1)
+
+        assert sampled.shape == (2,)
+        assert ((sampled >= 0) & (sampled < logits.shape[-1])).all()
+        torch.testing.assert_close(speculator.draft_logits[idx_mapping.long(), 1], logits, rtol=0, atol=0)
+        assert (speculator.draft_logits[:, 0] == 0).all()
 
     @pytest.mark.parametrize("temp", [0.5, 2.0])
     @pytest.mark.parametrize("vocab_size", [31, 1031])
