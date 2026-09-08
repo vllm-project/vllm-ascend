@@ -46,6 +46,7 @@ def _check_cache(rank, sfa_c8, li_c8, is_mtp):
         k_li_scale[local] if is_mtp and li_c8 else None,
         False,
     )
+    cache: tuple[torch.Tensor, ...]
     if sfa_c8:
         cache = (torch.zeros((1, 128, 1, fused_kv.shape[-1]), device="npu", dtype=dtype),)
     else:
