@@ -1,5 +1,8 @@
-# Diagnostic A-B-A sequence for a controlled client-concurrency comparison.
-# All measurements share one four-node allocation and one service lifetime.
+# Diagnostic-only controlled client-concurrency comparison. Do not merge this
+# temporary case as a permanent nightly entry. All measurements share one
+# four-node allocation and one service lifetime. The six measured legs follow
+# the three-run alternating schedule A1-B1-B2-A2-A3-B3 so both states have
+# enough samples for mean, sample deviation, and CV calculations.
 test_name: "ryk-dsv4pro-w4a8-pc-pd-aba"
 model: "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp"
 num_nodes: 4
@@ -313,7 +316,18 @@ benchmarks:
     # state in the A-B-A sequence runs even when the inherited baseline fails.
     baseline: 0
     threshold: 0.95
-  perf_TPOT50_128k_1_prefix90_bs32_b:
+  perf_TPOT50_128k_1_prefix90_bs32_b1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 32
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs32_b2:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
     request_conf: vllm_api_stream_chat
@@ -332,6 +346,28 @@ benchmarks:
     num_prompts: 192
     max_out_len: 1024
     batch_size: 48
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs48_a3:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 48
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs32_b3:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 32
     request_rate: 1
     baseline: 0
     threshold: 0.95

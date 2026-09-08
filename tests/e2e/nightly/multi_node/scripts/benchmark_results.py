@@ -100,7 +100,12 @@ def build_task_entry(case_key: str, case_config: dict[str, Any], result: Any) ->
     if case_config.get("threshold") is not None:
         target["threshold"] = case_config["threshold"]
 
-    entry: dict[str, Any] = {"name": task_name, "metrics": metrics, "test_input": test_input}
+    entry: dict[str, Any] = {
+        "case_name": case_key,
+        "name": task_name,
+        "metrics": metrics,
+        "test_input": test_input,
+    }
     if target:
         entry["target"] = target
     entry["pass_fail"] = "pass" if task_passed(case_config, result) else "fail"
