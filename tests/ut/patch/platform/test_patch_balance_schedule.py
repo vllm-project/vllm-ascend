@@ -279,6 +279,8 @@ def test_mamba_waiting_path_schedules_without_argument_mismatch():
             block_size=block_size,
         )
     vllm_config.additional_config = {"scheduler_config": {"enable_balance_scheduling": True}}
+    # Exercise non-PD Mamba alignment without the KV consumer bypass.
+    vllm_config.kv_transfer_config = None
     vllm_config.cache_config.num_gpu_blocks = 64
     kv_cache_config = KVCacheConfig(
         num_blocks=64,
