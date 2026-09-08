@@ -118,7 +118,14 @@ def _compute_rope_block_size_head(
     # When rope_dim is unknown (-1), head_dim is a safe upper bound
     # because rope_dim <= head_dim is always asserted by the caller.
     effective_rope_dim = rope_dim if rope_dim > 0 else head_dim
-    pad_rope_dim = triton.next_power_of_2(effective_rope_dim)
+    # Compute next power-of-2 without relying on triton.next_power_of_2,
+    # which is not available on all triton versions (e.g. CPU CI env).
+    # The result is only used for UB footprint estimation, not for
+    # kernel constexpr values, so an exact match to triton's helper
+    # is not required.
+    pad_rope_dim = 1
+    while pad_rope_dim < effective_rope_dim:
+        pad_rope_dim *= 2
     half_dim = pad_rope_dim // 2
 
     if is_neox_style:
