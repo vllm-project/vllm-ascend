@@ -4,10 +4,8 @@
 """Qwen3.6 BF16 MTP acceptance on MRV2 with fixed goldens on two NPUs.
 
 Use the same 40 MT-Bench prompts, chat formatting, output limit and
-acceptance-length tolerance as vllm-ascend#13960. The fixed goldens come
-from the supplied MRV2 GPQA_diamond results (dataset version b1ed2c),
-not an MT-Bench calibration. Use temperature 1 to match the reported
-sampling configuration.
+acceptance-length tolerance as vllm-ascend#13960. The fixed goldens use
+the supplied MRV2 measurements with greedy decoding (temperature 0).
 
 Run with:
     pytest -sv tests/e2e/pull_request/two_card/model_runner_v2/test_qwen3_6_mtp.py
@@ -27,15 +25,15 @@ from tests.e2e.pull_request.utils import ACCEPTANCE_LENGTH_RTOL, SPEC_DECODE_PRO
 
 QWEN36_MOE_MODEL = "Qwen/Qwen3.6-35B-A3B"
 QWEN36_DENSE_MODEL = "Qwen/Qwen3.6-27B"
-QWEN36_MOE_EXPECTED_ACCEPTANCE_LENGTH = 2.7973276711020088
-QWEN36_MOE_EXPECTED_ACCEPTANCE_PER_POS = (0.7654563538152992, 0.582090357957278, 0.4497809593294313)
-QWEN36_DENSE_EXPECTED_ACCEPTANCE_LENGTH = 3.0694649182980305
-QWEN36_DENSE_EXPECTED_ACCEPTANCE_PER_POS = (0.8388937655465181, 0.6803979908633908, 0.5501731618881214)
+QWEN36_MOE_EXPECTED_ACCEPTANCE_LENGTH = 3.141271769947347
+QWEN36_MOE_EXPECTED_ACCEPTANCE_PER_POS = (0.8663426488456865, 0.7049817739975699, 0.5699473471040907)
+QWEN36_DENSE_EXPECTED_ACCEPTANCE_LENGTH = 3.1607901975493875
+QWEN36_DENSE_EXPECTED_ACCEPTANCE_PER_POS = (0.8668833875135451, 0.7126781695423856, 0.5812286404934567)
 NUM_SPECULATIVE_TOKENS = 3
 MAX_TOKENS = 1024
 MAX_MODEL_LEN = 4096
 SEED = 42
-TEMPERATURE = 1.0
+TEMPERATURE = 0.0
 
 
 def _read_mtp_counters(metrics: list[Metric]) -> tuple[int, int, list[int]]:
