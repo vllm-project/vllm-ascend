@@ -1,0 +1,159 @@
+test_name: "vllm_pd_dsv31_w4a4c8_fc_A5_perf_0001"
+model: "/root/.cache/modelscope/hub/models/Eco-Tech/DeepSeek-V3.1-w4a4c8-mxfp4"
+num_nodes: 2
+npu_per_node: 8
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 2
+    dp_size_local: 2
+    dp_rank_start: 0
+    tp_size: 4
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 1
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  #VLLM_USE_MODELSCOPE: "true"
+  SERVER_PORT: "${PORT}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_EXEC_TIMEOUT: "204"
+  HCCL_CONNECT_TIMEOUT: "120"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "10"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  TASK_QUEUE_ENABLE: "1"
+  VLLM_TORCH_PROFILER_WITH_STACK: "1"
+  VLLM_USE_V1: "1"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+
+env_prefill: &env_prefill
+  <<: *env_common
+  HCCL_BUFFSIZE: "512"
+
+env_decode: &env_decode
+  <<: *env_common
+  HCCL_BUFFSIZE: "1100"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "80000"
+      - --max-num-batched-tokens
+      - "8192"
+      - --max-num-seqs
+      - "8"
+      - --enforce-eager
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.9"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --speculative-config
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable":true,"enable_shared_expert_dp":true}'
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "deepseek_v31"
+      - --chat-template
+      - "/root/.cache/modelscope/hub/models/vllm-ascend/tool_chat_template_deepseekv31.jinja"
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_producer", "kv_port": "30000", "engine_id": "0", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 1},"ascend_local_comm_res_path": "/etc/hixlep"}}'
+
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --seed
+      - "1024"
+      - --max-model-len
+      - "80000"
+      - --max-num-batched-tokens
+      - "256"
+      - --max-num-seqs
+      - "40"
+      - --trust-remote-code
+      - --gpu-memory-utilization
+      - "0.94"
+      - --quantization
+      - "ascend"
+      - --no-enable-prefix-caching
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - "deepseek_v31"
+      - --chat-template
+      - "/root/.cache/modelscope/hub/models/vllm-ascend/tool_chat_template_deepseekv31.jinja"
+      - --speculative-config
+      - '{"num_speculative_tokens": 1, "method":"deepseek_mtp"}'
+      - --additional-config
+      - '{"recompute_scheduler_enable":true,"multistream_overlap_shared_expert":true,"finegrained_tp_config": {"lmhead_tensor_parallel_size":4}}'
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_role": "kv_consumer", "kv_port": "30200", "engine_id": "2", "kv_connector_extra_config": {"use_ascend_direct": true,"prefill": {"dp_size": 2, "tp_size": 4}, "decode": {"dp_size": 8, "tp_size": 1},"ascend_local_comm_res_path": "/etc/hixlep"}}'
+
+benchmarks:
+  perf_3.5k:
+    case_type: performance
+    dataset_path: /root/.cache/modelscope/hub/datasets/vllm-ascend/GSM8K_in3500_bs400_dsv3.1_w4a8
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 180
+    max_out_len: 1500
+    batch_size: 45
+    temperature: 0
+    ignore_eos: true
+    request_rate: 0
+    baseline: 1180.7548
+    threshold: 0.97
