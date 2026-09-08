@@ -12,6 +12,7 @@ import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.distributed.parallel_state import get_node_count
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
@@ -173,6 +174,30 @@ class AscendEplbState(_eplb_state.EplbState):
         all_reduce(flag, group=device_group)
         return bool(flag.item())
 
+    def _rearrange_stair(self) -> None:
+        ep_group = get_ep_group().device_group
+        num_ranks = ep_group.size()
+        num_nodes = get_node_count()
+        if num_ranks % num_nodes:
+            num_nodes = 1
+        for model_state in self.model_states.values():
+            logical_load = torch.roll(
+                model_state._stair_load_window,
+                shifts=-self.expert_load_window_step,
+                dims=0,
+            ).clone()
+            all_reduce(logical_load, group=ep_group)
+            model = model_state.model
+            model_state.eplb_stats = _eplb_state.EplbStats(
+                global_expert_load_window=logical_load,
+                num_replicas=model.num_physical_experts,
+                num_groups=model.num_expert_groups,
+                num_nodes=num_nodes,
+                num_gpus=num_ranks,
+            )
+            model_state.rebalanced = True
+        self.rearrange_event.record()
+
     def rearrange(
         self,
         is_profile: bool = False,
@@ -187,10 +212,16 @@ class AscendEplbState(_eplb_state.EplbState):
         if should_gate and not self._has_global_fresh_recorded_load():
             return None
 
-        result = super().rearrange(
-            is_profile=is_profile,
-            rank_mapping=rank_mapping,
-        )
+        if getattr(self, "_stair_config", None) is not None and not is_profile:
+            if rank_mapping is not None:
+                raise ValueError("STAIR does not support elastic expert parallelism")
+            self._rearrange_stair()
+            result = None
+        else:
+            result = super().rearrange(
+                is_profile=is_profile,
+                rank_mapping=rank_mapping,
+            )
         if not is_profile and not self.is_async:
             for model_state in self.model_states.values():
                 refresh_model_routing_tables(model_state)

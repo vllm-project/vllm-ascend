@@ -39,6 +39,30 @@ def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
     upstream_step.assert_called_once_with(is_dummy=False, is_profile=False, log_stats=False)
 
 
+def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
+    device_group = SimpleNamespace(size=lambda: 2)
+    monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(device_group=device_group))
+    monkeypatch.setattr(eplb_state, "get_node_count", lambda: 1)
+    reduce = MagicMock()
+    monkeypatch.setattr(eplb_state, "all_reduce", reduce)
+    model_state = SimpleNamespace(
+        _stair_load_window=torch.tensor([[[1, 2]], [[3, 4]]]),
+        model=SimpleNamespace(num_physical_experts=4, num_expert_groups=1),
+        rebalanced=False,
+    )
+    state = AscendEplbState.__new__(AscendEplbState)
+    state.model_states = {"model": model_state}
+    state.expert_load_window_step = 1
+    state.rearrange_event = MagicMock()
+
+    state._rearrange_stair()
+
+    torch.testing.assert_close(model_state.eplb_stats.global_expert_load_window, torch.tensor([[[3, 4]], [[1, 2]]]))
+    assert model_state.rebalanced
+    reduce.assert_called_once()
+    state.rearrange_event.record.assert_called_once_with()
+
+
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
     monkeypatch,
 ):
