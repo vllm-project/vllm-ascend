@@ -369,19 +369,24 @@ def test_single_indexer_spec_is_the_primary_spec():
     assert layout.layer_cache_specs[0].indexer is None
 
 
-def test_ambiguous_multi_spec_layer_is_rejected():
+def test_multi_main_spec_layer_selects_attn_as_main():
     main_spec = _make_sfa_main_spec()
     specs = {
         "model.layers.0.self_attn.attn": main_spec,
         "model.layers.0.self_attn.other_cache": main_spec,
     }
 
-    with pytest.raises(ValueError, match="multiple cache specs"):
-        build_layerwise_reuse_layout(
-            specs,
-            1,
-            {"layerwise_num_shared_buffers": 1},
-        )
+    layout = build_layerwise_reuse_layout(
+        specs,
+        1,
+        {"layerwise_num_shared_buffers": 1},
+    )
+
+    layer_specs = layout.layer_cache_specs[0]
+    assert layer_specs.main.layer_name == "model.layers.0.self_attn.attn"
+    assert [s.layer_name for s in layer_specs.extra_main_specs] == [
+        "model.layers.0.self_attn.other_cache"
+    ]
 
 
 def test_multi_group_sfa_descriptors_are_merged_by_main_component():
