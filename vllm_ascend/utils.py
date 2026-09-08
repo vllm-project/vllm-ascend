@@ -427,13 +427,7 @@ def enable_custom_op():
     # FIXME(linfeng): Currently custom op compilation and execution are partially available
     # in ASCEND950 chip, we temporarily disable all custom ops. Please refer to
     # https://github.com/vllm-project/vllm-ascend/issues/7157 for latest update about custom op.
-    import os as _os
-    if envs.VLLM_BATCH_INVARIANT or (
-        not get_current_hardware_profile().supports(
-            HardwareCapability.RUNTIME_CUSTOM_OPS
-        )
-        and _os.environ.get("MK_ENABLE_CUSTOM_OP", "0") != "1"
-    ):
+    if envs.VLLM_BATCH_INVARIANT or not get_current_hardware_profile().supports(HardwareCapability.RUNTIME_CUSTOM_OPS):
         _CUSTOM_OP_ENABLED = False
         return _CUSTOM_OP_ENABLED
 
