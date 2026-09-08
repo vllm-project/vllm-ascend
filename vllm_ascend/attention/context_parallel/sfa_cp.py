@@ -467,8 +467,6 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
         k_pe,
         k_nope,
         knope_scale,
-        k_li,
-        k_li_scale,
         full_gather_o_proj_enabled,
     ):
         assert k_pe is not None and k_nope is not None
@@ -482,32 +480,20 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                 knope_scale.view(-1, knope_scale.shape[-1]),
             ]
         else:
-            parts = [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1])]
             # With the indexer k computed inside ``indexer.forward`` right
             # before the cache write, k_li no longer joins this fused gather:
-            # the indexer backend gathers it separately. The branches below
-            # stay for callers that still pass k_li explicitly.
-            if k_li is not None and not self.enable_sparse_li_c8:
-                parts.append(k_li.view(-1, k_li.shape[-1]))
+            # the indexer backend gathers it separately.
+            parts = [k_pe.view(-1, k_pe.shape[-1]), k_nope.view(-1, k_nope.shape[-1])]
         fused_kv, handle = all_gather_async(torch.cat(parts, dim=1), get_tp_group(), async_op=async_op)
         if handle is not None:
             handles.append(handle)
-        if k_li is not None and (self.enable_sparse_sfa_c8 or self.enable_sparse_li_c8):
-            k_li, handle = all_gather_async(k_li, get_tp_group(), async_op=async_op)
-            if handle is not None:
-                handles.append(handle)
-        if k_li is not None and k_li_scale is not None and self.enable_sparse_li_c8:
-            k_li_scale, handle = all_gather_async(k_li_scale, get_tp_group(), async_op=async_op)
-            if handle is not None:
-                handles.append(handle)
-        return k_li, k_li_scale, fused_kv, handles
+        return fused_kv, handles
 
     def _store_parallel_kv(
         self,
         k_pe,
         k_nope,
         knope_scale,
-        k_li,
         fused_kv_no_split,
         kv_ag_handles,
         kv_cache,
@@ -529,12 +515,6 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                     fused_kv_no_split[: attn_metadata.num_actual_tokens],
                 )
                 k_pe = k_nope = None
-            elif not self.has_indexer:
-                k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
-            elif k_li is not None and not self.enable_sparse_li_c8:
-                k_pe, k_nope, k_li = fused_kv_no_split.split(
-                    [self.qk_rope_head_dim, self.kv_lora_rank, self.head_dim], dim=-1
-                )
             else:
                 k_pe, k_nope = fused_kv_no_split.split([self.qk_rope_head_dim, self.kv_lora_rank], dim=-1)
             if not self.enable_sparse_sfa_c8:
@@ -548,7 +528,7 @@ class AscendSFADSACPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
                     value_cache=kv_cache[1],
                     slot_mapping=slot_mapping_sfa[: attn_metadata.num_actual_tokens],
                 )
-        return k_pe, k_nope, k_li
+        return k_pe, k_nope
 
     def _apply_o_proj_full_weight(self, attn_output: torch.Tensor) -> torch.Tensor:
         return self._get_o_proj_weight_switch_method().apply(self.o_proj, attn_output)
@@ -1183,7 +1163,6 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         k_pe: torch.Tensor | None,
         k_nope: torch.Tensor | None,
         knope_scale: torch.Tensor | None,
-        k_li: torch.Tensor | None,
         fused_kv_no_split: torch.Tensor | None,
         kv_ag_handles: list[torch.distributed.Work],
         kv_cache: tuple[torch.Tensor, ...] | None,
@@ -1193,13 +1172,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
-        torch.Tensor | None,
     ]:
         result = super()._store_parallel_kv(
             k_pe,
             k_nope,
             knope_scale,
-            k_li,
             fused_kv_no_split,
             kv_ag_handles,
             kv_cache,

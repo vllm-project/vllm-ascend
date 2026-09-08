@@ -1127,24 +1127,19 @@ class AscendSFAImpl(MLAAttentionImpl):
         k_pe: torch.Tensor | None,
         k_nope: torch.Tensor | None,
         knope_scale: torch.Tensor | None,
-        k_li: torch.Tensor | None,
-        k_li_scale: torch.Tensor | None,
         full_gather_o_proj_enabled: bool,
     ) -> tuple[
-        torch.Tensor | None,
-        torch.Tensor | None,
         torch.Tensor | None,
         list[torch.distributed.Work],
     ]:
         """Prepare native KV tensors for an optional parallel layout."""
-        return k_li, k_li_scale, None, []
+        return None, []
 
     def _store_parallel_kv(
         self,
         k_pe: torch.Tensor | None,
         k_nope: torch.Tensor | None,
         knope_scale: torch.Tensor | None,
-        k_li: torch.Tensor | None,
         fused_kv_no_split: torch.Tensor | None,
         kv_ag_handles: list[torch.distributed.Work],
         kv_cache: tuple[torch.Tensor, ...] | None,
@@ -1152,7 +1147,6 @@ class AscendSFAImpl(MLAAttentionImpl):
         attn_metadata: M,
         full_gather_o_proj_enabled: bool,
     ) -> tuple[
-        torch.Tensor | None,
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
@@ -1178,7 +1172,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 packed_kv.view(-1, packed_head_dim),
             )
 
-        return k_pe, k_nope, k_li
+        return k_pe, k_nope
 
     def _get_parallel_forward_context(
         self,
@@ -1395,12 +1389,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             # k_li no longer exists at this point: it is computed by
             # indexer.forward_k below and gathered at cache-write time, so
             # the fused gather below only carries the main KV.
-            _, _, fused_kv_no_split, kv_ag_handles = self._prepare_kv_for_parallel(
+            fused_kv_no_split, kv_ag_handles = self._prepare_kv_for_parallel(
                 k_pe,
                 k_nope,
                 knope_scale,
-                None,
-                None,
                 parallel_context.gather_full_o_proj,
             )
 
@@ -1415,12 +1407,10 @@ class AscendSFAImpl(MLAAttentionImpl):
             (
                 k_pe,
                 k_nope,
-                _,
             ) = self._store_parallel_kv(
                 k_pe,
                 k_nope,
                 knope_scale,
-                None,
                 fused_kv_no_split,
                 kv_ag_handles,
                 kv_cache,
