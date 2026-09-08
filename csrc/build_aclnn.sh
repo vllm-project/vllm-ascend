@@ -38,6 +38,7 @@ resolve_op_dir() {
     for candidate_dir in \
         "${ROOT_DIR}/csrc/moe/${op_name}" \
         "${ROOT_DIR}/csrc/gmm/${op_name}" \
+        "${ROOT_DIR}/csrc/qbmm/${op_name}" \
         "${ROOT_DIR}/csrc/attention/${op_name}" \
         "${ROOT_DIR}/csrc/mc2/${op_name}" \
         "${ROOT_DIR}/csrc/ffn/${op_name}" \
@@ -86,6 +87,7 @@ if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
         "recurrent_gated_delta_rule_v310"
         "chunk_fwd_o"
         "chunk_gated_delta_rule_fwd_h"
+        "quant_batch_matmul_v3_x"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
