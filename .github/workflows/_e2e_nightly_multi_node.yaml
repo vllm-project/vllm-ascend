@@ -320,10 +320,27 @@ jobs:
           kubectl apply -f ./lws.yaml
 
       - name: Wait for pods ready
+        id: wait_for_pods
         run: |
           set -euo pipefail
           SIZE="${{ inputs.size }}"
           TIMEOUT=1200
+
+          get_pod_state() {
+            local pod_name="$1"
+            local state
+            local rc
+
+            if state=$(kubectl get pod "$pod_name" -n "$NAMESPACE" \
+              -o jsonpath='{.status.phase}{"|"}{.status.containerStatuses[*].ready}' 2>&1); then
+              printf '%s\n' "$state"
+              return 0
+            else
+              rc=$?
+              echo "Pod [$pod_name] is not available yet (kubectl exit $rc): $state" >&2
+              return "$rc"
+            fi
+          }
 
           echo "Waiting for all pods to become Running and Ready (timeout ${TIMEOUT}s)..."
           START_TIME=$(date +%s)
@@ -331,27 +348,36 @@ jobs:
             ELAPSED=$(( $(date +%s) - START_TIME ))
             if [[ $ELAPSED -ge $TIMEOUT ]]; then
               echo "Timeout reached after ${ELAPSED}s, dumping pod status:"
-              kubectl get pods -n "$NAMESPACE"
-              kubectl describe pod "$LEADER_POD" -n "$NAMESPACE"
+              kubectl get pods -n "$NAMESPACE" \
+                -l "leaderworkerset.sigs.k8s.io/name=$LWS_NAME" -o wide
               exit 1
             fi
 
             ALL_READY=true
             for ((i=1; i<SIZE; i++)); do
               POD="${LWS_NAME}-0-${i}"
-              PHASE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-              READY=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
-              echo "Worker [$POD] phase=$PHASE ready=$READY"
+              if POD_STATE=$(get_pod_state "$POD"); then
+                PHASE="${POD_STATE%%|*}"
+                READY="${POD_STATE#*|}"
+                echo "Worker [$POD] phase=$PHASE ready=$READY"
+              else
+                ALL_READY=false
+                break
+              fi
               if [[ "$PHASE" != "Running" || "$READY" != "true" ]]; then
                 ALL_READY=false
                 break
               fi
             done
 
-            LEADER_PHASE=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-            LEADER_READY=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
-            echo "Leader [$LEADER_POD] phase=$LEADER_PHASE ready=$LEADER_READY"
-            if [[ "$LEADER_PHASE" != "Running" || "$LEADER_READY" != "true" ]]; then
+            if LEADER_STATE=$(get_pod_state "$LEADER_POD"); then
+              LEADER_PHASE="${LEADER_STATE%%|*}"
+              LEADER_READY="${LEADER_STATE#*|}"
+              echo "Leader [$LEADER_POD] phase=$LEADER_PHASE ready=$LEADER_READY"
+              if [[ "$LEADER_PHASE" != "Running" || "$LEADER_READY" != "true" ]]; then
+                ALL_READY=false
+              fi
+            else
               ALL_READY=false
             fi
 
@@ -361,6 +387,44 @@ jobs:
             fi
             sleep 2
           done
+
+      - name: Dump pod startup diagnostics
+        if: ${{ failure() && steps.wait_for_pods.outcome == 'failure' }}
+        run: |
+          set +e
+          SIZE="${{ inputs.size }}"
+          POD_STATUS_JSONPATH='name={.metadata.name}{"\n"}phase={.status.phase}{"\n"}reason={.status.reason}{"\n"}message={.status.message}{"\n"}node={.spec.nodeName}{"\n"}{range .status.conditions[*]}condition={.type} status={.status} reason={.reason} message={.message}{"\n"}{end}{range .status.containerStatuses[*]}container={.name} ready={.ready} restartCount={.restartCount}{"\n"}{end}'
+
+          echo "LeaderWorkerSet [$LWS_NAME]:"
+          kubectl get leaderworkerset "$LWS_NAME" -n "$NAMESPACE" \
+            -o custom-columns='NAME:.metadata.name,REPLICAS:.status.replicas,READY:.status.readyReplicas,UPDATED:.status.updatedReplicas'
+          kubectl get events -n "$NAMESPACE" \
+            --field-selector "involvedObject.name=$LWS_NAME" \
+            --sort-by='.lastTimestamp'
+
+          echo "Pods owned by [$LWS_NAME]:"
+          kubectl get pods -n "$NAMESPACE" \
+            -l "leaderworkerset.sigs.k8s.io/name=$LWS_NAME" -o wide
+
+          for ((i=0; i<SIZE; i++)); do
+            if [[ "$i" -eq 0 ]]; then
+              POD="$LEADER_POD"
+            else
+              POD="${LWS_NAME}-0-${i}"
+            fi
+
+            echo "Pod diagnostics [$POD]:"
+            kubectl get pod "$POD" -n "$NAMESPACE" \
+              -o jsonpath="$POD_STATUS_JSONPATH"
+            kubectl get events -n "$NAMESPACE" \
+              --field-selector "involvedObject.name=$POD" \
+              --sort-by='.lastTimestamp'
+          done
+
+          echo "Namespace resource quotas:"
+          kubectl get resourcequota -n "$NAMESPACE" \
+            -o custom-columns='NAME:.metadata.name,HARD:.status.hard,USED:.status.used'
+          true
 
       - name: Stream logs
         id: stream_logs

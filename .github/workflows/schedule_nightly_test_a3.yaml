@@ -16,8 +16,8 @@
 #
 
 # This workflow related to the resources atlas 800 A3
-# **Please note**: current A3 resource pool's maximum allowed concurrency is 5*16 NPUs
-# We will limit the concurrency of jobs on A3 to avoid the risk of insufficient resources
+# The A3 pool is shared. max-parallel limits only this workflow; it does not
+# reserve nodes or account for workloads submitted by other community users.
 name: Nightly-A3
 
 on:
@@ -33,6 +33,14 @@ on:
         required: false
         default: 'all'
         type: string
+      multi_node_max_parallel:
+        description: 'Maximum concurrent multi-node jobs (use 1 and 2 for resource-contention comparison)'
+        required: false
+        default: '2'
+        type: choice
+        options:
+          - '1'
+          - '2'
       request_id:
         description: 'Unique request ID from the triggering workflow for run identification'
         required: false
@@ -210,7 +218,7 @@ jobs:
       (needs.build-image.result == 'success' || needs.build-image.result == 'skipped')
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: ${{ fromJSON(inputs.multi_node_max_parallel) }}
       matrix:
         vllm_ascend_branch: ${{ fromJSON(needs.setup-vars.outputs.vllm_ascend_branches) }}
         test_config: ${{ fromJson(needs.setup-vars.outputs.multi_node) }}
