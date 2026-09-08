@@ -18,6 +18,7 @@ from __future__ import annotations
 import dataclasses
 import importlib.util
 import json
+import math
 import os
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
@@ -102,6 +103,56 @@ class AscendFusionConfig:
     fusion_ops_gmmswigluquant: bool = True
 
 
+@config(frozen=True)
+class StairConfig:
+    """Advanced tuning for the MRv2 STAIR policy."""
+
+    sample_size: int = 64
+    z_score: float = 0.67448975
+    use_covariance: bool = False
+    imbalance_threshold: float = 1.01
+    hysteresis_enabled: bool = True
+    hysteresis_relative: float = 0.90
+    hysteresis_absolute: float = 0.85
+    max_expert_transfers_per_rank_pair: int = 1
+    min_relative_score_improvement: float = 0.01
+    min_absolute_score_improvement: float = 0.0
+    p95_regression_tolerance: float = 0.0
+    flash_tree_depth: int = 4
+    flash_tree_width: int = 8
+    max_candidates_per_layer: int = 64
+    lpt_max_backtracks: int = 8
+    score_tie_tolerance: float = 1e-9
+
+    @model_validator(mode="after")
+    def _validate(self):
+        positive = (
+            "sample_size",
+            "max_expert_transfers_per_rank_pair",
+            "flash_tree_depth",
+            "max_candidates_per_layer",
+        )
+        if any(getattr(self, name) < 1 for name in positive):
+            raise ValueError(f"stair_config fields {positive} must be positive")
+        if self.flash_tree_width < 0 or self.lpt_max_backtracks < 0:
+            raise ValueError("STAIR search limits must be non-negative")
+        finite_non_negative = (
+            "z_score",
+            "min_absolute_score_improvement",
+            "p95_regression_tolerance",
+            "score_tie_tolerance",
+        )
+        if any(not math.isfinite(getattr(self, name)) or getattr(self, name) < 0 for name in finite_non_negative):
+            raise ValueError(f"stair_config fields {finite_non_negative} must be finite and non-negative")
+        if not math.isfinite(self.imbalance_threshold) or self.imbalance_threshold < 1:
+            raise ValueError("stair_config.imbalance_threshold must be finite and at least one")
+        for name in ("hysteresis_relative", "hysteresis_absolute", "min_relative_score_improvement"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or not 0 < value < 1:
+                raise ValueError(f"stair_config.{name} must be between zero and one")
+        return self
+
+
 @config
 class EplbConfig:
     """Configuration Object for ``additional_config["eplb_config"]``.
@@ -125,6 +176,12 @@ class EplbConfig:
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
+    algorithm: Literal["default", "stair"] = "default"
+    stair_config: StairConfig | None = None
+
+    @property
+    def resolved_stair_config(self) -> StairConfig:
+        return self.stair_config or StairConfig()
 
     @model_validator(mode="after")
     def _validate_config(self):

@@ -202,6 +202,22 @@ class TestAscendConfig(TestBase):
         with self.assertRaisesRegex(ValueError, "load_collection_phase must be one of"):
             EplbConfig(load_collection_phase="prompt")
 
+    def test_stair_config_defaults_and_overrides(self):
+        config = EplbConfig(algorithm="stair", stair_config={"max_expert_transfers_per_rank_pair": 2})
+
+        self.assertEqual(config.resolved_stair_config.max_expert_transfers_per_rank_pair, 2)
+        self.assertEqual(config.resolved_stair_config.sample_size, 64)
+
+    def test_stair_config_rejects_invalid_values(self):
+        for value in (
+            {"sample_size": 0},
+            {"z_score": -1},
+            {"hysteresis_relative": 1},
+            {"flash_tree_width": -1},
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                EplbConfig(algorithm="stair", stair_config=value)
+
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_init_ascend_config_without_additional_config(self, mock_fix_incompatible_config):
