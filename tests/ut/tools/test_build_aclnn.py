@@ -1,6 +1,7 @@
 from pathlib import Path
 
 BUILD_ACLNN_SCRIPT = Path(__file__).parents[3] / "csrc" / "build_aclnn.sh"
+TORCH_BINDING_SOURCE = Path(__file__).parents[3] / "csrc" / "torch_binding.cpp"
 
 
 def _custom_ops_for_soc(script: str, soc_pattern: str) -> set[str]:
@@ -26,3 +27,16 @@ def test_a3_uses_official_rms_norm_dynamic_quant() -> None:
 
     assert "rms_norm_dynamic_quant" in a2_ops
     assert "rms_norm_dynamic_quant" not in a3_ops
+
+
+def test_official_rms_norm_dynamic_quant_signature() -> None:
+    source = TORCH_BINDING_SOURCE.read_text()
+    invocation = (
+        "EXEC_NPU_CMD(aclnnRmsNormDynamicQuant, x, gamma, smooth_scale, beta, "
+        "epsilon, DST_TYPE_INT8, y_out, scale_out);"
+    )
+
+    assert invocation in source
+    assert "smooth_scale2" not in source
+    assert "y2_out" not in source
+    assert "scale2_out" not in source

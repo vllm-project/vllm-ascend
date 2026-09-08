@@ -1550,22 +1550,17 @@ std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
     TORCH_CHECK(epsilon > 0, "epsilon should be greater than 0.");
     TORCH_CHECK(x.dtype() == at::kHalf || x.dtype() == at::kBFloat16, "x should be FLOAT16, BFLOAT16.");
 
-    at::Tensor smooth_scale2{nullptr};
     auto options = x.options();
     at::Tensor y_out = at::empty_like(x, options.dtype(at::kChar));
-    at::Tensor y2_out = at::empty({1}, options.dtype(at::kChar));
 
     c10::SmallVector<int64_t, SIZE> scale_out_shape;
     for (size_t i = 0; i < x.sizes().size() - 1; i++) {
         scale_out_shape.push_back(x.sizes()[i]);
     }
     at::Tensor scale_out = at::empty(scale_out_shape, options.dtype(at::kFloat));
-    at::Tensor scale2_out = at::empty_like(scale_out);
-    std::array<bool, 2>* output_mask = nullptr;
-    int64_t* dst_type = nullptr;
+    constexpr int64_t DST_TYPE_INT8 = 2;
 
-    EXEC_NPU_CMD(aclnnRmsNormDynamicQuant, x, gamma, smooth_scale, smooth_scale2, beta, epsilon, output_mask, dst_type,
-                 y_out, y2_out, scale_out, scale2_out);
+    EXEC_NPU_CMD(aclnnRmsNormDynamicQuant, x, gamma, smooth_scale, beta, epsilon, DST_TYPE_INT8, y_out, scale_out);
 
     return std::make_tuple(y_out, scale_out);
 }
