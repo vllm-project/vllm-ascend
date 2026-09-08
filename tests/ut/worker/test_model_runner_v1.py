@@ -507,9 +507,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             num_kv_heads=1,
             head_size=4,
             dtype=torch.bfloat16,
-            compress_ratio=2,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
+            **_ratio_kwargs(2),
         )
         state_spec = AscendIndexerKPoolStateSpec(
             block_size=2,

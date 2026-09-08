@@ -304,8 +304,8 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
-        compress_ratio=16,
         model_version="glm5_next",
+        **_ratio_kwargs(16),
     )
     state_spec = SlidingWindowMLASpec(
         block_size=16,
@@ -356,7 +356,10 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
     scheduler_full_spec = scheduler_config.kv_cache_groups[0].kv_cache_spec
     assert isinstance(scheduler_full_spec, MLAAttentionSpec)
     assert scheduler_full_spec.head_size == main_spec.head_size
-    assert scheduler_full_spec.compress_ratio == 1
+    ratio_field = (
+        "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state"
+    )
+    assert getattr(scheduler_full_spec, ratio_field) == 1
 
     vllm_config = _make_vllm_config(
         enable_prefix_caching=True,

@@ -21,6 +21,7 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
+    get_kv_cache_compression_ratio,
     register_ascend_kv_cache_specs,
 )
 from vllm_ascend.models.glm5next.kv_cache import (
@@ -28,6 +29,15 @@ from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextStateCache,
     format_indexer_kpool_slot_mapping,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    return (
+        {"compress_ratio": ratio}
+        if vllm_version_is("0.28.0")
+        else {"tokens_per_state": ratio}
+    )
 
 
 def test_state_uses_sliding_pages_and_full_precision():
@@ -134,7 +144,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert isinstance(indexer_spec, AscendMLAAttentionSpec)
     assert indexer_spec.block_size == 256
     assert indexer_spec.storage_block_size == 16
-    assert indexer_spec.compress_ratio == 16
+    assert get_kv_cache_compression_ratio(indexer_spec) == 16
     assert indexer_spec.model_version == "glm5_next"
     assert indexer_spec.indexes_kv_by_block_stride
     assert state_spec.block_size == state_spec.sliding_window == 16
@@ -164,8 +174,8 @@ def test_indexer_metadata_preserves_raw_request_boundaries():
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
-            compress_ratio=16,
             model_version="glm5_next",
+            **_ratio_kwargs(16),
         ),
         ["model.layers.0.indexer.k_cache"],
         config,

@@ -27,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.core.kv_cache_interface import get_kv_cache_compression_ratio
+
 
 @dataclass(frozen=True)
 class _Glm5CacheLayout:
@@ -74,7 +76,7 @@ def _is_glm5_main_spec(spec: KVCacheSpec) -> bool:
     return (
         isinstance(spec, MLAAttentionSpec)
         and _is_glm5_spec(spec)
-        and spec.compress_ratio == 1
+        and get_kv_cache_compression_ratio(spec) == 1
     )
 
 
@@ -82,7 +84,7 @@ def _is_glm5_indexer_spec(spec: KVCacheSpec) -> bool:
     return (
         isinstance(spec, MLAAttentionSpec)
         and _is_glm5_spec(spec)
-        and spec.compress_ratio > 1
+        and get_kv_cache_compression_ratio(spec) > 1
     )
 
 
@@ -183,7 +185,7 @@ def _create_glm5_attention_groups(
         assert isinstance(indexer_spec, MLAAttentionSpec)
         assert isinstance(state_spec, SlidingWindowMLASpec)
 
-        compress_ratio = indexer_spec.compress_ratio
+        compress_ratio = get_kv_cache_compression_ratio(indexer_spec)
         if main_spec.block_size % compress_ratio:
             raise ValueError(
                 "GLM-Next logical block size must be divisible by the indexer "

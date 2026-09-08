@@ -21,11 +21,20 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_pool_bytes_per_block,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.utils import vllm_version_is
 
 MAIN = "model.layers.1.attn"
 INDEXER = "model.layers.1.indexer.k_cache"
 STATE = "model.layers.1.indexer.state_cache"
 MAMBA = "model.layers.0.linear_attn"
+
+
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    return (
+        {"compress_ratio": ratio}
+        if vllm_version_is("0.28.0")
+        else {"tokens_per_state": ratio}
+    )
 
 
 class _AttentionBackend:
@@ -88,9 +97,9 @@ def _make_specs(main_head_size=4):
             num_kv_heads=1,
             head_size=4,
             dtype=torch.bfloat16,
-            compress_ratio=2,
             model_version="glm5_next",
             indexes_kv_by_block_stride=True,
+            **_ratio_kwargs(2),
         ),
         STATE: AscendIndexerKPoolStateSpec(
             block_size=2,

@@ -23,6 +23,15 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_max_memory_usage,
     get_glm5_pool_bytes_per_block,
 )
+from vllm_ascend.utils import vllm_version_is
+
+
+def _ratio_kwargs(ratio: int) -> dict[str, int]:
+    return (
+        {"compress_ratio": ratio}
+        if vllm_version_is("0.28.0")
+        else {"tokens_per_state": ratio}
+    )
 
 
 def make_config():
@@ -58,8 +67,8 @@ def make_specs(pool: int = 16):
             num_kv_heads=1,
             head_size=128,
             dtype=torch.bfloat16,
-            compress_ratio=pool,
             model_version="glm5_next",
+            **_ratio_kwargs(pool),
         ),
         "model.layers.3.indexer.state_cache": AscendIndexerKPoolStateSpec(
             block_size=pool,
@@ -201,7 +210,9 @@ def test_missing_paired_cache_is_rejected():
 def test_misaligned_logical_block_is_rejected():
     specs = make_specs(pool=16)
     object.__setattr__(
-        specs["model.layers.3.indexer.k_cache"], "compress_ratio", 15
+        specs["model.layers.3.indexer.k_cache"],
+        "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state",
+        15,
     )
     with pytest.raises(ValueError, match="divisible"):
         get_glm5_kv_cache_groups(make_config(), specs)
