@@ -107,11 +107,10 @@ def _run_ec_cpu_offloading() -> None:
     quantization="BF16",
     graph_mode="eager",
 )
-@pytest.mark.parametrize("use_v2_model_runner", [False, True], ids=["v1", "v2"])
 @wait_until_npu_memory_free()
-def test_ec_cpu_offloading(use_v2_model_runner: bool) -> None:
+def test_ec_cpu_offloading() -> None:
     env = {
-        "VLLM_USE_V2_MODEL_RUNNER": "1" if use_v2_model_runner else "0",
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     }
     with patch.dict(os.environ, env):

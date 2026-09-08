@@ -21,7 +21,6 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -41,37 +40,60 @@ from vllm_ascend.models.glm5next.kv_cache import (
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
-from vllm_ascend.utils import AscendDeviceType
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _is_ec_producer_only
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
 
-class TestECConnectorRoleRouting(unittest.TestCase):
-    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=True)
-    def test_producer_only_uses_encoder_only_path(self, _mock_has_ec_transfer, mock_get_ec_transfer):
-        mock_get_ec_transfer.return_value = SimpleNamespace(is_producer=True, is_consumer=False)
+class TestGlm5MtpGraphMetadata(unittest.TestCase):
+    @staticmethod
+    def _build_dispatch_runner(speculative: bool) -> NPUModelRunner:
+        runner = NPUModelRunner.__new__(NPUModelRunner)
+        runner.uniform_decode_query_len = 6
+        runner.speculative_config = object() if speculative else None
+        # ``use_dcp`` is derived from this field in production initialization.
+        runner.dcp_size = 1
+        runner._pad_for_sequence_parallelism = lambda num_tokens: num_tokens
+        runner.input_batch = SimpleNamespace(
+            num_computed_tokens_cpu=np.array([9, 10], dtype=np.int32),
+            num_prompt_tokens=np.array([10, 10], dtype=np.int32),
+            lora_id_to_lora_request={},
+        )
+        runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+        runner.cudagraph_dispatcher = MagicMock(
+            dispatch=MagicMock(
+                return_value=(
+                    CUDAGraphMode.NONE,
+                    SimpleNamespace(num_tokens=12),
+                )
+            )
+        )
+        runner.vllm_config = SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=1,
+                data_parallel_size=1,
+            ),
+            observability_config=SimpleNamespace(cudagraph_metrics=False),
+        )
+        return runner
 
-        self.assertTrue(_is_ec_producer_only())
+    def test_partial_prompt_with_state_dispatches_speculative_decode_graph(self):
+        runner = self._build_dispatch_runner(speculative=True)
 
-    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=True)
-    def test_consumer_does_not_use_encoder_only_path(self, _mock_has_ec_transfer, mock_get_ec_transfer):
-        mock_get_ec_transfer.return_value = SimpleNamespace(is_producer=False, is_consumer=True)
+        with patch(
+            "vllm_ascend.worker.model_runner_v1.enable_sp",
+            return_value=False,
+        ):
+            runner._determine_batch_execution_and_padding(
+                num_tokens=12,
+                num_reqs=2,
+                num_scheduled_tokens_np=np.array([6, 6], dtype=np.int32),
+                max_num_scheduled_tokens=6,
+                use_cascade_attn=False,
+            )
 
-        self.assertFalse(_is_ec_producer_only())
-
-    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=True)
-    def test_both_does_not_use_encoder_only_path(self, _mock_has_ec_transfer, mock_get_ec_transfer):
-        mock_get_ec_transfer.return_value = SimpleNamespace(is_producer=True, is_consumer=True)
-
-        self.assertFalse(_is_ec_producer_only())
-
-    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
-    def test_disabled_ec_does_not_read_connector(self, _mock_has_ec_transfer, mock_get_ec_transfer):
-        self.assertFalse(_is_ec_producer_only())
-        mock_get_ec_transfer.assert_not_called()
+        call_kwargs = runner.cudagraph_dispatcher.dispatch.call_args.kwargs
+        self.assertTrue(call_kwargs["uniform_decode"])
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
@@ -2027,61 +2049,6 @@ class TestNPUModelRunnerDebugger(unittest.TestCase):
             skip_gdn_state_update=True,
         )
         runner._start_dump_data.assert_not_called()
-
-    @patch("vllm_ascend.worker.model_runner_v1.get_ec_transfer")
-    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=True)
-    @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
-    @patch("vllm_ascend.worker.model_runner_v1.get_pp_group")
-    @patch("vllm_ascend.worker.model_runner_v1.record_function_or_nullcontext")
-    def test_execute_model_polls_ec_for_empty_local_batch(
-        self,
-        mock_record_function,
-        mock_get_pp_group,
-        _mock_has_kv_transfer_group,
-        _mock_has_ec_transfer,
-        mock_get_ec_transfer,
-    ):
-        from contextlib import nullcontext
-
-        mock_record_function.return_value = nullcontext()
-        mock_get_pp_group.return_value = SimpleNamespace(world_size=1, is_first_rank=True, is_last_rank=True)
-        mock_get_ec_transfer.return_value = SimpleNamespace(is_consumer=True)
-        runner = self._build_runner(MagicMock(spec=["start", "stop", "step"]))
-        runner.vllm_config = MagicMock()
-        runner.vllm_config.model_config.enable_return_routed_experts = False
-        runner.ascend_config = SimpleNamespace(
-            scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(enabled=False, need_timing=False))
-        )
-        runner.execute_model_state = None
-        runner.speculative_config = None
-        runner.use_async_scheduling = False
-        runner.num_spec_tokens = 0
-        runner._draft_token_ids = None
-        runner.supports_mm_inputs = False
-        runner.model_config.is_encoder_decoder = False
-        runner.synchronize_input_prep = nullcontext
-        runner._update_states = MagicMock(return_value=None)
-        runner.parallel_config = SimpleNamespace(
-            distributed_executor_backend="external_launcher",
-            data_parallel_size=2,
-            enable_dbo=False,
-        )
-        runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False)
-        runner.input_batch = SimpleNamespace(num_reqs=0, req_ids=[], prev_req_id_to_index=None)
-        runner.requests = {}
-        runner.encoder_cache = {}
-        expected_output = object()
-        runner.ec_connector_no_forward = MagicMock(return_value=expected_output)
-        scheduler_output = SimpleNamespace(total_num_scheduled_tokens=1, num_scheduled_tokens={})
-
-        output = runner.execute_model(scheduler_output)
-
-        self.assertIs(output, expected_output)
-        runner.ec_connector_no_forward.assert_called_once_with(
-            scheduler_output,
-            runner.encoder_cache,
-            EMPTY_MODEL_RUNNER_OUTPUT,
-        )
 
     @patch("vllm_ascend.worker.model_runner_v1.has_kv_transfer_group", return_value=False)
     @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)

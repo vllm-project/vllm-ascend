@@ -6,7 +6,7 @@ memory instead of running the encoder again.
 
 ## Support scope
 
-- vLLM V1 and V2 model runners
+- vLLM Model Runner V2
 - An Ascend device with a CANN build that provides both `aclrtMemcpyBatchAsync` and
   `aclrtHostRegisterV2(..., ACL_HOST_REG_PINNED)`
 - Linux kernel newer than 5.10, as required by CANN when converting an mmap
