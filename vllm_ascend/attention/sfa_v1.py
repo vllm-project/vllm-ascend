@@ -1273,11 +1273,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         if not self.has_indexer:
             return None
         prefix = self.indexer.k_cache.prefix
-        if self.kv_sharing_target_layer_name is not None:
+        kv_sharing_target = getattr(self, "kv_sharing_target_layer_name", None)
+        if kv_sharing_target is not None:
             # A KV-sharing layer (e.g. an MTP draft layer) owns no cache of
             # its own, so no metadata is built under its own prefix; resolve
             # to the sharing target's indexer cache prefix instead.
-            target_base = self.kv_sharing_target_layer_name.removesuffix(".attn")
+            target_base = kv_sharing_target.removesuffix(".attn")
             prefix = f"{target_base}.indexer.k_cache"
         forward_metadata = get_forward_context().attn_metadata
         indexer_metadata = forward_metadata.get(prefix) if isinstance(forward_metadata, dict) else None

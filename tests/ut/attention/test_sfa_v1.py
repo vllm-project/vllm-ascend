@@ -317,6 +317,25 @@ class TestAscendSFACacheComposition(TestBase):
 
         self.assertIs(impl._get_indexer_attn_metadata(), main_metadata)
 
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_resolves_kv_sharing_target(self, mock_get_forward_context):
+        # During draft propose the forward context is the main runner's, which
+        # only keys main-layer prefixes; a KV-sharing draft layer resolves its
+        # indexer metadata via the sharing target's indexer cache prefix.
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.kv_sharing_target_layer_name = "model.layers.77.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        target_metadata = SimpleNamespace(slot_mapping=torch.tensor([5, 6]))
+        mock_get_forward_context.return_value.attn_metadata = {
+            "model.layers.77.self_attn.indexer.k_cache": target_metadata
+        }
+
+        self.assertIs(impl._get_indexer_attn_metadata(), target_metadata)
+
     @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
