@@ -602,7 +602,7 @@ class KVPoolWorker:
                     ready_event,
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
-                    record_load_get=self._record_load_get,
+                    record_operation=self._record_kv_connector_operation,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -953,10 +953,12 @@ class KVPoolWorker:
                 key_list_c[:3],
             )
             load_get_start = time.perf_counter()
-            try:
-                ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
-            finally:
-                self._record_load_get(load_get_start, len(key_list_c))
+            ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            self._record_kv_connector_operation(
+                "load_get",
+                time.perf_counter() - load_get_start,
+                len(key_list_c),
+            )
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
@@ -995,10 +997,9 @@ class KVPoolWorker:
                 len(key_list_c),
             )
 
-    def _record_load_get(self, start_time: float, num_keys: int) -> None:
-        duration = time.perf_counter() - start_time
+    def _record_kv_connector_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
         with self._kv_stats_lock:
-            self._kv_stats.record_load_get(duration, num_keys)
+            self._kv_stats.record_operation(operation, duration_seconds, num_keys)
 
     def get_stats(self) -> AscendStoreKVConnectorStats | None:
         with self._kv_stats_lock:
@@ -2003,10 +2004,12 @@ class KVPoolWorker:
             keys_c[:3],
         )
         load_get_start = time.perf_counter()
-        try:
-            ret = self.m_store.get(keys_c, addrs_c, sizes_c)
-        finally:
-            self._record_load_get(load_get_start, len(keys_c))
+        ret = self.m_store.get(keys_c, addrs_c, sizes_c)
+        self._record_kv_connector_operation(
+            "load_get",
+            time.perf_counter() - load_get_start,
+            len(keys_c),
+        )
         if ret is not None and any(r != 0 for r in ret):
             missing_block_ids = record_failed_blocks(block_ids_c, ret)
             with self._invalid_block_ids_lock:

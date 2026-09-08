@@ -114,6 +114,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._mamba_copy_bufs = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
 
+        self.connector_scheduler: KVPoolScheduler | None = None
+        self.connector_worker: KVPoolWorker | None = None
+
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
             self.connector_scheduler = KVPoolScheduler(vllm_config, self.use_layerwise, kv_cache_config)
@@ -218,7 +221,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         class of regression structurally impossible and supersedes the
         connector-side flag entirely.
         """
-        if getattr(self, "connector_worker", None) is None:
+        if self.connector_worker is None:
             return False
         return self.connector_worker.set_external_slot_release_waiter(waiter)
 
@@ -330,12 +333,10 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        connector_scheduler: KVPoolScheduler | None = getattr(self, "connector_scheduler", None)
-        if connector_scheduler is not None:
-            return connector_scheduler.get_stats()
-        connector_worker: KVPoolWorker | None = getattr(self, "connector_worker", None)
-        if connector_worker is not None:
-            return connector_worker.get_stats()
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
+        if self.connector_worker is not None:
+            return self.connector_worker.get_stats()
         return None
 
     @classmethod

@@ -63,7 +63,8 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
             reduced["load_get_total_keys"] = self.data.get("load_get_keys", 0)
         return reduced
 
-    def record_load_get(self, duration_seconds: float, num_keys: int) -> None:
+    def record_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
+        assert operation == "load_get"
         self.data.setdefault("load_get_duration_seconds", []).append(duration_seconds)
         self.data["load_get_keys"] = self.data.get("load_get_keys", 0) + num_keys
 
@@ -109,7 +110,7 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         self._load_get_keys = create_metric_per_engine(
             self._counter_cls(
                 name="vllm:ascend_store_load_get_keys_total",
-                documentation="Number of keys fetched by AscendStore Backend.get.",
+                documentation="Number of keys passed to completed AscendStore Backend.get calls.",
                 labelnames=labelnames,
             ),
             per_engine_labelvalues,

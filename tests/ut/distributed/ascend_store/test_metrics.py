@@ -3,6 +3,8 @@
 
 from unittest.mock import MagicMock
 
+from prometheus_client import Counter, Gauge, Histogram
+
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
     AscendStoreKVConnectorStats,
@@ -35,10 +37,10 @@ class _Metric:
 def test_stats_aggregate():
     first = AscendStoreKVConnectorStats()
     first.set_delayed_release(1, 2)
-    first.record_load_get(0.01, 3)
+    first.record_operation("load_get", 0.01, 3)
     second = AscendStoreKVConnectorStats()
     second.set_delayed_release(2, 5)
-    second.record_load_get(0.02, 5)
+    second.record_operation("load_get", 0.02, 5)
 
     first.aggregate(second)
 
@@ -53,7 +55,7 @@ def test_stats_aggregate():
 def test_prom_metrics_observe():
     prom = AscendStorePromMetrics(
         MagicMock(),
-        {"gauge": _Metric, "counter": _Metric, "histogram": _Metric},
+        {Gauge: _Metric, Counter: _Metric, Histogram: _Metric},
         ["model_name"],
         {0: ["test-model"]},
     )

@@ -620,7 +620,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
     def test_start_load_kv_sync(self):
         worker = self._make_worker()
-        worker.m_store.get = MagicMock()
+        worker.m_store.get = MagicMock(return_value=[0])
         # Setup token database
         worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
 
@@ -636,6 +636,13 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
+        stats = worker.get_stats()
+        self.assertEqual(stats.data["load_get_keys"], 1)
+
+        worker.m_store.get.side_effect = RuntimeError("get failed")
+        with self.assertRaisesRegex(RuntimeError, "get failed"):
+            worker.start_load_kv(meta)
+        self.assertIsNone(worker.get_stats())
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
