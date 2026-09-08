@@ -57,14 +57,13 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str], page_size: int = 0)
 def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttentionSpec:
     """Build a DSV4 AscendMLAAttentionSpec; #51718 moved compress_ratio ->
     tokens_per_state on main."""
-    ratio_kwargs = {"tokens_per_state": compress_ratio}
     return AscendMLAAttentionSpec(
         block_size=block_size,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.bfloat16,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        tokens_per_state=compress_ratio,
     )
 
 
@@ -428,8 +427,9 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         forward_context: dict[str, Any],
         runner_kv_caches_: list[Any],
         num_attn_module: int = 1,
+        kv_cache_groups: Any | None = None,
     ) -> None:
-        del num_attn_module
+        del num_attn_module, kv_cache_groups
         assert len(runner_kv_caches_) == 0
         for kv_cache in kv_caches.values():
             runner_kv_caches_.append(kv_cache)
@@ -670,7 +670,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
                 prefill_context_parallel_size=pcp_size,
             ),
         )
-        model_state.pcp_manager = pcp_manager
+        model_state.pcp_manager = pcp_manager  # type: ignore[assignment]
         input_batch = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
@@ -687,7 +687,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             attn_state=None,
         )
         metadata = model_state.prepare_attn(
-            input_batch=input_batch,
+            input_batch=input_batch,  # type: ignore[arg-type]
             cudagraph_mode=cudagraph_mode,
             block_tables=block_tables,
             slot_mappings=slot_mappings,

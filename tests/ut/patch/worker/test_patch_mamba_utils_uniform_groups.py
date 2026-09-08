@@ -3,15 +3,15 @@
 from types import SimpleNamespace
 
 import torch
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
-
-from vllm_ascend.patch.worker.patch_mamba_utils import _get_mamba_groups
 
 
 def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
@@ -40,9 +40,9 @@ def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
         kv_cache_groups=groups,
     )
 
-    group_ids, resolved_spec = _get_mamba_groups(kv_cache_config)
-    assert group_ids == [0, 1, 2]
-    assert resolved_spec == mamba_spec
+    # vLLM main returns a per-spec dict (upstream get_mamba_groups unwraps
+    # UniformType group wrappers itself).
+    assert mamba_utils.get_mamba_groups(kv_cache_config) == {mamba_spec: [0, 1, 2]}
 
     def make_buffer(n: int, dtype: torch.dtype) -> SimpleNamespace:
         return SimpleNamespace(n=n, dtype=dtype)
@@ -50,7 +50,7 @@ def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
     copy_bufs = MambaCopyBuffers.create(
         max_num_reqs=2,
         kv_cache_config=kv_cache_config,
-        copy_funcs=(object(), object()),
+        copy_funcs={MambaAttentionBackendEnum.MAMBA2: (object(), object())},
         make_buffer=make_buffer,
     )
     assert copy_bufs.mamba_group_ids == [0, 1, 2]
