@@ -148,6 +148,14 @@ DCP reuses the TP devices and does not increase the world size.
 
 ### DSA-CP
 
+DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,
+with support for some feature combinations still in progress.
+
+To try PCP with the same world size, replace TP size `N > 1` with
+`--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove
+`enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional
+ranks. Check the compatibility and limitations above before migrating.
+
 ```bash
 vllm serve <glm-5.2-model> \
   --tensor-parallel-size <N> \

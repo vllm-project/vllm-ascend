@@ -5,7 +5,7 @@ comment command, without running the PR-selected test suite.
 
 ## Background
 
-The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-all`, or `ready-a5` labels.
+The `E2E` workflow ([`pr_test.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/pr_test.yaml)) runs a PR-selected set of tests when a PR has one of the `ready-precise`, `ready-all`, `ready-a5`, or `main2main` labels. `main2main` runs the full suite twice, once against the verified vLLM main commit and once against the matched vLLM release tag.
 This is expensive in CI resources and time.
 
 Authorized users can trigger only the specific test files they care about by posting a

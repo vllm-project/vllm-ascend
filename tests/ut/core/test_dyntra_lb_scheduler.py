@@ -522,18 +522,19 @@ def test_dyntra_lb_v026_uses_release_connector_lookup(monkeypatch):
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
-def test_dyntra_lb_forwards_partial_tail_and_encoder_cache_metadata(monkeypatch):
+def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     vllm_config = make_dyntra_test_config()
     scheduler = create_dyntra_lb_scheduler(
         vllm_config,
         scheduler_cls=DyntraLBScheduler,
     )
-    partial_tail_offloads = [object()]
+    boundary_state_offloads: dict[str, list[tuple[int, int, int]]] = {}
     encoder_cache_metadata = object()
+    block_states = []
 
     class RecordingSchedulerOutput(SimpleNamespace):
         __dataclass_fields__ = {
-            "partial_tail_offloads": object(),
+            "kv_connector_block_state": object(),
             "ec_manager_metadata": object(),
         }
 
@@ -547,9 +548,8 @@ def test_dyntra_lb_forwards_partial_tail_and_encoder_cache_metadata(monkeypatch)
     )
     monkeypatch.setattr(
         scheduler.kv_cache_manager,
-        "take_partial_tail_offloads",
-        lambda: partial_tail_offloads,
-        raising=False,
+        "take_boundary_state_offloads",
+        lambda: boundary_state_offloads,
     )
     monkeypatch.setattr(
         scheduler.encoder_cache_manager,
@@ -560,16 +560,19 @@ def test_dyntra_lb_forwards_partial_tail_and_encoder_cache_metadata(monkeypatch)
     monkeypatch.setattr(
         scheduler,
         "_build_kv_connector_meta",
-        lambda connector, scheduler_output: None,
+        lambda connector, scheduler_output: block_states.append(scheduler_output.kv_connector_block_state),
     )
 
     scheduler_output = scheduler.schedule()
 
-    assert scheduler_output.partial_tail_offloads is partial_tail_offloads
+    assert len(block_states) == 1
+    assert block_states[0].boundary_state_offloads is boundary_state_offloads
+    assert block_states[0].block_ids == {}
+    assert scheduler_output.kv_connector_block_state is None
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
 
 
-def test_dyntra_lb_v026_omits_unsupported_scheduler_output_fields(monkeypatch):
+def test_dyntra_lb_omits_unsupported_encoder_cache_metadata(monkeypatch):
     vllm_config = make_dyntra_test_config()
     scheduler = create_dyntra_lb_scheduler(
         vllm_config,
