@@ -69,9 +69,10 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         dspark_utils.get_pp_group = lambda: single_rank_pp_group
 
         def should_share(eagle, flag, draft, target):
-            # The last PP rank has no target embedding. Keep the draft's own
-            # embedding instead of replacing it with PPMissingLayer.
-            if flag == "has_own_embed_tokens":
+            # A PP rank without the relevant target layer receives a
+            # PPMissingLayer. Never ask upstream to compare/share its absent
+            # weight; retain the draft's own layer instead.
+            if not hasattr(target, "weight"):
                 return False
             return original_should_share(eagle, flag, draft, target)
 
