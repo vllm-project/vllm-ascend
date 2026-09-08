@@ -58,7 +58,7 @@ BATCH_INVARIANT_RUN_FILE="cann-ops-batch_invariant-${BATCH_INVARIANT_DEVICE}-2.0
 
 log "Downloading batch_invariant run package..."
 unset ASCEND_CUSTOM_OPP_PATH
-if curl --max-time 60 -sS -k -O "${BATCH_INVARIANT_RUN_URL}" && [[ -f "${BATCH_INVARIANT_RUN_FILE}" ]]; then
+if curl --max-time 120 -sS -k -O "${BATCH_INVARIANT_RUN_URL}" && [[ -f "${BATCH_INVARIANT_RUN_FILE}" ]]; then
     chmod +x "${BATCH_INVARIANT_RUN_FILE}"
     log "Running installer: ${BATCH_INVARIANT_RUN_FILE}"
     if "./${BATCH_INVARIANT_RUN_FILE}"; then
@@ -77,7 +77,7 @@ BATCH_INVARIANT_WHL_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/vl
 BATCH_INVARIANT_WHL_FILE="batch_invariant-torch_ops_extension-2.0.0.zip"
 
 log "Downloading batch_invariant whl package..."
-if curl --max-time 3 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1 && [[ -f "${BATCH_INVARIANT_WHL_FILE}" ]]; then
+if curl --max-time 5 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1 && [[ -f "${BATCH_INVARIANT_WHL_FILE}" ]]; then
     if python -m zipfile -e "${BATCH_INVARIANT_WHL_FILE}" . >/dev/null 2>&1; then
         if [[ -d "torch_ops_extension/batch_invariant_ops" ]]; then
             cd torch_ops_extension/batch_invariant_ops
