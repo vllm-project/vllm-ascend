@@ -32,6 +32,11 @@ from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
+from vllm_ascend.models.glm5next.kv_cache import (
+    AscendIndexerKPoolStateSpec,
+    Glm5NextIndexerCache,
+    Glm5NextStateCache,
+)
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -468,6 +473,85 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         self.assertIsInstance(spec, AscendMLAAttentionSpec)
         self.assertEqual(spec.model_version, attn_module.model_version)
         self.assertTrue(spec.indexes_kv_by_block_stride)
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mamba_alignment_excludes_auxiliary_glm_caches(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        class FakeMamba:
+            def __init__(self, spec):
+                self.spec = spec
+
+            def get_kv_cache_spec(self, _vllm_config):
+                return self.spec
+
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+
+        main_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
+        indexer_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            compress_ratio=2,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
+        state_spec = AscendIndexerKPoolStateSpec(
+            block_size=2,
+            sliding_window=2,
+            num_kv_heads=1,
+            head_size=3,
+            dtype=torch.float32,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((128,),),
+            dtypes=(torch.float32,),
+        )
+
+        main_module = SimpleNamespace(
+            get_kv_cache_spec=lambda _config: main_spec
+        )
+        indexer_module = Glm5NextIndexerCache.__new__(
+            Glm5NextIndexerCache
+        )
+        torch.nn.Module.__init__(indexer_module)
+        indexer_module.get_kv_cache_spec = lambda _config: indexer_spec
+        state_module = Glm5NextStateCache.__new__(Glm5NextStateCache)
+        torch.nn.Module.__init__(state_module)
+        state_module.get_kv_cache_spec = lambda _config: state_spec
+        mock_get_layers.return_value = {
+            "model.layers.1.attn": main_module,
+            "model.layers.1.indexer.k_cache": indexer_module,
+            "model.layers.1.indexer.state_cache": state_module,
+            "model.layers.0.linear_attn": FakeMamba(mamba_spec),
+        }
+
+        with patch("vllm_ascend.worker.model_runner_v1.MambaBase", FakeMamba):
+            specs = runner.get_kv_cache_spec()
+
+        self.assertEqual(
+            specs["model.layers.1.attn"].page_size_padded,
+            mamba_spec.page_size_bytes,
+        )
+        self.assertIsNone(
+            specs["model.layers.1.indexer.k_cache"].page_size_padded
+        )
+        self.assertIsNone(
+            specs["model.layers.1.indexer.state_cache"].page_size_padded
+        )
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):

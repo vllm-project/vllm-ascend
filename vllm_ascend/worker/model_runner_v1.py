@@ -5657,7 +5657,9 @@ class NPUModelRunner(GPUModelRunner):
 
             elif spec := attn_module.get_kv_cache_spec(self.vllm_config):
                 kv_cache_spec[layer_name] = spec
-                if isinstance(spec, AttentionSpec):
+                if isinstance(spec, AttentionSpec) and getattr(
+                    attn_module, "align_kv_cache_with_mamba", True
+                ):
                     attn_layer_names.add(layer_name)
 
         if len(mamba_layers) > 0:
