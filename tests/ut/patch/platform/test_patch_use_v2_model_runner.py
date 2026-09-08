@@ -1,7 +1,13 @@
+import pytest
+from vllm.config.vllm import VllmConfig
+
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
 
 
 def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
+    if not hasattr(VllmConfig, "_get_v1_model_runner_unsupported_features"):
+        pytest.skip("V1 model runner validation is only present on vLLM main")
+
     monkeypatch.setattr(
         patch_use_v2_model_runner,
         "_original_get_v1_model_runner_unsupported_features",

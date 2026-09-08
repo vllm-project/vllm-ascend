@@ -57,7 +57,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens
+from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -515,11 +515,19 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=attn_state,
         )
 
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-        )
+        # vLLM #53515 / #15196 pass padded_num_tokens into PCP partition on main;
+        # v0.28.0 maybe_partition_pcp_batch does not accept that kwarg.
+        if vllm_version_is("0.28.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+            )
+        else:
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,
+            )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)

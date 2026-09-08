@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import functools
+import importlib.util
 import json
 import math
 import os
@@ -589,7 +590,28 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+@torch._dynamo.disable
+def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
+    """Map untagged empty-device installs onto the matching release lane.
+
+    cpu-ut checks out vLLM by SHA with ``--no-tags`` and builds
+    ``VLLM_TARGET_DEVICE=empty``, so setuptools-scm reports
+    ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
+    v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
+    after the move on main.
+
+    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
+    must not be traced when version gates run during torch.compile.
+    """
+    if target_vllm_version != "0.28.0":
+        return False
+    has_legacy_pcp = importlib.util.find_spec("vllm.model_executor.layers.attention.pcp") is not None
+    has_main_pcp = importlib.util.find_spec("vllm.v1.attention.ops.pcp") is not None
+    return has_legacy_pcp and not has_main_pcp
+
+
 @functools.cache
+@torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
         vllm_version = envs_ascend.VLLM_VERSION
@@ -598,11 +620,16 @@ def vllm_version_is(target_vllm_version: str):
 
         vllm_version = vllm.__version__
     try:
-        # Strip any PEP 440 local version segment (e.g. "0.27.1+empty" built
+        # Strip any PEP 440 local version segment (e.g. "0.28.0+empty" built
         # with VLLM_TARGET_DEVICE=empty): it is a build artifact and must not
         # change the version identity for `vllm_version_is` comparisons.
         vllm_version = vllm_version.split("+")[0]
-        return Version(vllm_version) == Version(target_vllm_version)
+        parsed = Version(vllm_version)
+        if parsed == Version(target_vllm_version):
+            return True
+        if parsed.release[:2] == (0, 1) and parsed.dev is not None:
+            return _vllm_empty_device_matches_release(target_vllm_version)
+        return False
     except InvalidVersion:
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
@@ -616,9 +643,9 @@ def get_kv_cache_tensor_layers(kv_cache_tensor) -> list[str]:
     """Layer names covered by a KVCacheTensor.
 
     vLLM #51718 renamed the `shared_by` field to `layers` and introduced a
-    required `layer_stride` on vLLM main. This helper keeps both lanes readable.
+    required `layer_stride` on vLLM main. Gate by release vs main lane.
     """
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         return kv_cache_tensor.shared_by
     return kv_cache_tensor.layers
 
