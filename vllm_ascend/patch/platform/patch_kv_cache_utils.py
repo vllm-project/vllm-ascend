@@ -22,7 +22,6 @@ from vllm.v1.kv_cache_interface import (
     get_kv_cache_spec_kind,
 )
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.models.glm5next.cache_config import (
     _get_glm5_cache_layout,
     get_glm5_kv_cache_config,
@@ -31,6 +30,7 @@ from vllm_ascend.models.glm5next.cache_config import (
     get_glm5_pool_bytes_per_block,
 )
 from vllm_ascend.models.glm5next.kv_cache import is_glm5_cache_spec
+from vllm_ascend.utils import vllm_version_is
 
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
