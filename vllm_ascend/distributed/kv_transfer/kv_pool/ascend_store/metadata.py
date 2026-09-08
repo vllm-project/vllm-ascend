@@ -1044,7 +1044,7 @@ class ReqMeta:
         # The save would also be wasted work — the bytes are being looked up
         # in the store right now. Later cached_reqs steps save new tokens
         # normally.
-        if load_spec is not None and load_spec.can_load:
+        if load_spec is not None and load_spec.can_load and not save_partial_block:
             skip_save = True
         if skip_save and load_spec is None:
             return None
