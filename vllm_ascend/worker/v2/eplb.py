@@ -11,6 +11,7 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.v1.worker.gpu.eplb_utils import EPLBController
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.distributed.eplb.state import AscendEplbState
 
 
@@ -39,16 +40,18 @@ class AscendEPLBController(EPLBController):
         parallel_config: Any,
         device: torch.device,
         load_collection_phase: str = "all",
+        stair_config: StairConfig | None = None,
     ) -> None:
         super().__init__(parallel_config, device)
         self.load_collection_phase = load_collection_phase
+        self.stair_config = stair_config
         self._load_collection_phase_matched = True
 
     def prepare_load(self) -> None:
         self.state = None
         self._has_registered_models = False
         if self.parallel_config.enable_eplb:
-            self.state = AscendEplbState(self.parallel_config, self.device)
+            self.state = AscendEplbState(self.parallel_config, self.device, self.stair_config)
 
     def set_batch_phase(self, batch_has_prefill: bool) -> None:
         self._load_collection_phase_matched = is_eplb_load_collection_phase_matched(
@@ -93,5 +96,7 @@ class AscendEPLBController(EPLBController):
         )
         if old_num_physical_experts is not None:
             from_mapping_kwargs["num_valid_physical_experts"] = old_num_physical_experts
+        if self.stair_config is not None:
+            from_mapping_kwargs["stair_config"] = self.stair_config
         self.state = AscendEplbState.from_mapping(**from_mapping_kwargs)
         self._has_registered_models = True

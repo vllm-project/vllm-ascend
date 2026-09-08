@@ -133,7 +133,7 @@ class AscendEplbState(_eplb_state.EplbState):
         log_stats: bool = False,
     ) -> None:
         if (
-            self._stair_config is not None
+            getattr(self, "_stair_config", None) is not None
             and not is_dummy
             and not is_profile
             and self._should_record_current_step(log_stats=log_stats)
@@ -238,6 +238,7 @@ class AscendEplbState(_eplb_state.EplbState):
         parallel_config,
         expanded_physical_to_logical: torch.Tensor,
         num_valid_physical_experts: int | None = None,
+        stair_config: StairConfig | None = None,
     ) -> "AscendEplbState":
         from_mapping_kwargs: dict[str, Any] = {
             "model": model,
@@ -251,6 +252,9 @@ class AscendEplbState(_eplb_state.EplbState):
                 raise TypeError("num_valid_physical_experts is required by the selected vLLM release mapping contract")
             from_mapping_kwargs["num_valid_physical_experts"] = num_valid_physical_experts
         state = super().from_mapping(**from_mapping_kwargs)
+        state._stair_config = stair_config
         for model_state in state.model_states.values():
+            if stair_config is not None:
+                state._initialize_stair_model(model_state)
             refresh_model_routing_tables(model_state)
         return state

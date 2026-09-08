@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.worker.v2.eplb import AscendEPLBController, _unwrap_moe
 
 
@@ -54,6 +55,20 @@ class TestAscendEPLBController(unittest.TestCase):
         ascend_state.assert_called_once_with(
             controller.parallel_config,
             controller.device,
+            None,
+        )
+
+    def test_prepare_load_passes_stair_config(self):
+        controller = self._make_controller()
+        controller.stair_config = StairConfig()
+
+        with patch("vllm_ascend.worker.v2.eplb.AscendEplbState") as ascend_state:
+            controller.prepare_load()
+
+        ascend_state.assert_called_once_with(
+            controller.parallel_config,
+            controller.device,
+            controller.stair_config,
         )
 
     def test_set_batch_phase_updates_match(self):
@@ -206,6 +221,20 @@ class TestAscendEPLBController(unittest.TestCase):
         )
         self.assertIs(controller.state, state)
         self.assertTrue(controller._has_registered_models)
+
+    def test_setup_from_mapping_passes_stair_config(self):
+        controller = self._make_controller()
+        controller.stair_config = StairConfig()
+        model = nn.Linear(2, 2)
+
+        with (
+            patch("vllm_ascend.worker.v2.eplb._unwrap_moe", return_value=model),
+            patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
+            patch("vllm_ascend.worker.v2.eplb.AscendEplbState.from_mapping") as from_mapping,
+        ):
+            controller.setup_from_mapping(model, SimpleNamespace(), torch.tensor([[0, 1]]))
+
+        self.assertIs(from_mapping.call_args.kwargs["stair_config"], controller.stair_config)
 
     def test_setup_from_mapping_rejects_non_moe_model(self):
         controller = self._make_controller()
