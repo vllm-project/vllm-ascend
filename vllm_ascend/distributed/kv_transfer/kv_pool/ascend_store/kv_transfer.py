@@ -2046,10 +2046,10 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
                     raise TypeError(f"Expected GVA layer metadata, got {type(built_meta).__name__}")
                 req_meta: LayerBatchReqMeta | None = built_meta
             else:
-                built_meta = builder.build(task, is_save=False)
-                if built_meta is not None and not isinstance(built_meta, LayerBatchReqMeta):
-                    raise TypeError(f"Expected GVA layer metadata, got {type(built_meta).__name__}")
-                req_meta = built_meta
+                candidate_meta = builder.build(task, is_save=False)
+                if candidate_meta is not None and not isinstance(candidate_meta, LayerBatchReqMeta):
+                    raise TypeError(f"Expected GVA layer metadata, got {type(candidate_meta).__name__}")
+                req_meta = candidate_meta
             if req_meta is not None:
                 task_metas.append((task, req_meta))
 
