@@ -243,6 +243,57 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
         )
 
 
+def format_indexer_kpool_slot_mapping(
+    slot_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    logical_block_size: int,
+    compress_ratio: int,
+) -> torch.Tensor:
+    """Map token slots to completed GLM-5 kpool slots.
+
+    Tokens before the end of a pool map to ``-1`` because they only update the
+    full-resolution state cache.  The final token maps to the corresponding
+    entry in the compressed indexer cache.
+    """
+    if logical_block_size % compress_ratio:
+        raise ValueError(
+            f"logical_block_size={logical_block_size} must be divisible by compress_ratio={compress_ratio}."
+        )
+    valid = (slot_mapping >= 0) & (torch.remainder(positions + 1, compress_ratio) == 0)
+    safe_slots = slot_mapping.clamp_min(0)
+    block_ids = torch.div(safe_slots, logical_block_size, rounding_mode="floor")
+    offsets = torch.remainder(safe_slots, logical_block_size)
+    compressed_slots = block_ids * (logical_block_size // compress_ratio) + torch.div(
+        offsets, compress_ratio, rounding_mode="floor"
+    )
+    return torch.where(valid, compressed_slots, torch.full_like(compressed_slots, -1))
+
+
+@dataclass(frozen=True, kw_only=True)
+class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
+    """Sliding-window state used by the GLM-5 indexer compressor."""
+
+    cache_role: str
+
+    def __post_init__(self):
+        # The parent accepts only None/"deepseek_v4" as model_version; GLM-5
+        # layers identify as "glm5_next". The rest of the parent post-init is
+        # alignment padding, which does not apply (alignment stays None).
+        assert self.model_version in (None, "glm5_next"), (
+            f"Unsupported model version: {self.model_version}"
+        )
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        assert all(isinstance(spec, AscendIndexerKPoolStateSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be AscendIndexerKPoolStateSpec."
+        )
+        assert all(spec == specs[0] for spec in specs[1:]), (
+            "All GLM-5 compressor-state layers in one cache group must have the same layout and cache role."
+        )
+        return specs[0]
+
+
 def register_ascend_kv_cache_specs() -> None:
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendMLAAttentionSpec,
@@ -256,6 +307,11 @@ def register_ascend_kv_cache_specs() -> None:
     )
     KVCacheSpecRegistry.register(
         kvcache_spec_cls=AscendSlidingWindowMLASpec,
+        manager_class=SlidingWindowManager,
+        uniform_type_base_spec=SlidingWindowMLASpec,
+    )
+    KVCacheSpecRegistry.register(
+        kvcache_spec_cls=AscendIndexerKPoolStateSpec,
         manager_class=SlidingWindowManager,
         uniform_type_base_spec=SlidingWindowMLASpec,
     )

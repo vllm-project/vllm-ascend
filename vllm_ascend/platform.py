@@ -219,6 +219,15 @@ class NPUPlatform(Platform):
         use_mla = attn_selector_config.use_mla
         use_sparse = attn_selector_config.use_sparse
         # index_kpool GLM is not DeepSeek SFA; keep MLA backend.
+        # GLM-5.3 kpool sparse attention (GLM53_KPOOL_INDEXER=1): route the
+        # NoPE MLA layers to the kpool backend (pool-compressed indexer +
+        # sparse MLA consumer) instead of the plain dense MLA backend. The
+        # DeepSeek SFA backend below is per-token indexing and must not be
+        # used for the kpool layout. Checked BEFORE the enable_sfa gate:
+        # enable_sfa() is False for GLM (it has index_kpool), which would
+        # clear use_sparse before we could see it.
+        if use_mla and use_sparse and os.environ.get("GLM53_KPOOL_INDEXER", "0") == "1":
+            return "vllm_ascend.attention.indexer_kpool_mla_v1.AscendIndexerKPoolMLABackend"
         try:
             from vllm.config import get_current_vllm_config
             from vllm_ascend.utils import enable_sfa

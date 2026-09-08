@@ -1503,6 +1503,7 @@ class AscendSFAImpl(MLAAttentionImpl):
         hidden_states: torch.Tensor,  # query in unified attn
         kv_cache: tuple[torch.Tensor, ...],
         attn_metadata: M,
+        need_gather_q_kv: bool = False,
         output: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."

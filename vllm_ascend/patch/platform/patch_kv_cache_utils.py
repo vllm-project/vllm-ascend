@@ -195,6 +195,16 @@ def group_and_unify_kv_cache_specs(
     if not any(isinstance(spec, SlidingWindowMLASpec) for spec in kv_cache_spec.values()):
         return None
 
+    # GLM-5.3 (hybrid mamba + MLA + kpool indexer) has MambaSpec layers and
+    # must keep its dedicated grouping path (_get_kv_cache_groups_glm5_next);
+    # the D4 uniform-group path below merges the main MLA and indexer layers
+    # (both MLAAttentionSpec, same block_size, different head_size) into one
+    # 22-layer group, breaking GLM layout recognition and over-costing KV
+    # memory ~6x. DeepSeekV4 has no mamba layers, so this guard is a no-op
+    # for the models this path was written for.
+    if any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.values()):
+        return None
+
     logical_block_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     grouped_swa_mla_specs: dict[int, dict[str, KVCacheSpec]] = defaultdict(dict)
     for name, spec in kv_cache_spec.items():

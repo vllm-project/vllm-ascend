@@ -182,12 +182,12 @@ def dsa_forward(
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a
         # zero input so HCCL collectives are captured by the ACL graph.
-        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, output)
+        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, output=output)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)
 
-    self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
+    self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, output=output)
     return
 
 

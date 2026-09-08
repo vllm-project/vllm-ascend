@@ -41,6 +41,109 @@ else:
 
 
 class BaseDeviceAdaptor:
+    @staticmethod
+    def supports_sharedkv_indexer_kpool_mla() -> bool:
+        """Whether Indexer KPool MLA should build shared-KV fused metadata.
+
+        The fused sparse-attention metadata operator exists on A5 only;
+        older devices return False and the backend builds the metadata in
+        PyTorch.
+        """
+        return False
+
+    @staticmethod
+    def _format_sparse_flash_attention_output(
+        attn_output: torch.Tensor,
+        softmax_max: torch.Tensor,
+        softmax_sum: torch.Tensor,
+        return_lse: bool,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if not return_lse:
+            return attn_output
+
+        softmax_lse = softmax_max.to(torch.float32) + torch.log(softmax_sum.to(torch.float32))
+        softmax_lse = softmax_lse.permute(1, 0, 2).reshape(softmax_lse.shape[1], -1, 1)
+        return attn_output, softmax_lse
+
+    @staticmethod
+    def execute_sparse_attention_indexer_kpool_mla(
+        sfa_impl,
+        ql_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        packed_kv_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata,
+        actual_seq_lengths_query: torch.Tensor,
+        actual_seq_lengths_key: torch.Tensor,
+        *,
+        block_table: torch.Tensor | None = None,
+        sparse_mode: int = 3,
+        return_lse: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Execute Indexer KPool MLA attention via npu_sparse_flash_attention.
+
+        Rope-less TND query over the paged latent cache with
+        token-granular sparse indices (910B path).
+        """
+        if return_lse:
+            raise NotImplementedError("Indexer KPool MLA attention does not expose LSE.")
+        if sparse_mode != 3:
+            raise ValueError(f"Indexer KPool MLA only supports sparse_mode=3, got {sparse_mode}.")
+        if block_table is None:
+            block_table = attn_metadata.block_table
+        query = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
+        if topk_indices.shape[0] != query.shape[0]:
+            num_actual_tokens = attn_metadata.num_actual_tokens
+            if topk_indices.shape[0] != num_actual_tokens or num_actual_tokens > query.shape[0]:
+                raise RuntimeError(
+                    f"topk_indices rows {topk_indices.shape[0]} align with neither "
+                    f"query tokens {query.shape[0]} nor actual tokens {num_actual_tokens}."
+                )
+            pad_rows = query.shape[0] - num_actual_tokens
+            topk_indices = torch.cat(
+                [
+                    topk_indices,
+                    topk_indices.new_zeros((pad_rows, *topk_indices.shape[1:])),
+                ],
+                dim=0,
+            )
+        result = torch.ops._C_ascend.npu_sparse_flash_attention(
+            query=query,
+            key=packed_kv_cache,
+            value=packed_kv_cache,
+            sparse_indices=topk_indices,
+            scale_value=sfa_impl.scale,
+            sparse_block_size=1,
+            block_table=block_table,
+            actual_seq_lengths_query=actual_seq_lengths_query,
+            actual_seq_lengths_kv=actual_seq_lengths_key,
+            query_rope=None,
+            key_rope=None,
+            layout_query="TND",
+            layout_kv="PA_BSND",
+            sparse_mode=sparse_mode,
+            attention_mode=2,
+            return_softmax_lse=return_lse,
+        )
+        if not isinstance(result, tuple):
+            return result
+        attn_output, softmax_max, softmax_sum = result
+        return BaseDeviceAdaptor._format_sparse_flash_attention_output(
+            attn_output,
+            softmax_max,
+            softmax_sum,
+            return_lse,
+        )
+
+    @staticmethod
+    def get_sparse_attention_metadata_op_indexer_kpool_mla():
+        raise NotImplementedError("Indexer KPool MLA fused sparse attention is A5-only.")
+
+    @staticmethod
+    def get_sparse_attention_metadata_kwargs_indexer_kpool_mla(device):
+        del device
+        raise NotImplementedError("Indexer KPool MLA fused sparse attention is A5-only.")
+
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
         torch_npu.npu_scatter_pa_kv_cache(

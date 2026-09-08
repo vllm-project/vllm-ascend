@@ -56,9 +56,31 @@ class IndexerWrapper(nn.Module):
         self.softmax_scale = vllm_indexer.softmax_scale
         self.k_cache = getattr(vllm_indexer, "k_cache", None)
         vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
+        # Keep the wrapped indexer reachable: the GLM-5 kpool MLA backend
+        # invokes the indexer per forward (its forward computes the kpool
+        # compression + topk) and reads kpool-specific attributes
+        # (index_kpool, compress gate/ape, state cache) that this wrapper
+        # does not mirror. Without this, the previous no-op forward silently
+        # disabled sparse attention for GLM-5.3. Stored via object.__setattr__
+        # so nn.Module does not register it as a submodule (its parameters
+        # are already mirrored above; double registration would duplicate
+        # them in state_dict) and __getattr__ can find it in __dict__.
+        object.__setattr__(self, "_inner", vllm_indexer)
 
-    def forward(self):
-        return
+    def __getattr__(self, name: str):
+        # Forward kpool-specific attributes to the wrapped indexer so the
+        # sparse MLA backend can consume them through this wrapper. Fall
+        # back to nn.Module.__getattr__ (parameters/buffers/submodules live
+        # in _modules/_parameters, not __dict__).
+        inner = self.__dict__.get("_inner")
+        if inner is not None and hasattr(inner, name):
+            return getattr(inner, name)
+        return super().__getattr__(name)
+
+    def forward(self, hidden_states, qr, positions, rotary_emb=None):
+        # Delegate to the wrapped indexer (GLM-5 kpool path); returns the
+        # sparse top-k indices for the sparse MLA backend.
+        return self._inner(hidden_states, qr, positions, rotary_emb)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
@@ -183,7 +205,7 @@ def mla_forward(
     else:
         attn_metadata = forward_context.attn_metadata
     kv_cache = self.mla_attn.kv_cache
-    self.mla_attn.impl.forward(self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
+    self.mla_attn.impl.forward(self.mla_attn.layer_name, hidden_states, kv_cache, attn_metadata, output=output)
     return
 
 
