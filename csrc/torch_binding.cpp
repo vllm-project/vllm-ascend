@@ -637,11 +637,15 @@ at::Tensor npu_causal_conv1d_custom(
     int64_t  pad_slot_id,
     int64_t  run_mode)
 {
+    // ACLNN requires dense convolution state. Its implicit input materialization
+    // does not propagate in-place state updates back to a strided cache view.
+    // Preserve those updates explicitly; dense state keeps the zero-copy path.
+    auto dense_conv_state = conv_state.contiguous();
     EXEC_NPU_CMD(aclnnCausalConv1d,
                     x,
                     weight,
                     bias_opt,
-                    conv_state,
+                    dense_conv_state,
                     query_start_loc_opt,
                     cache_indices_opt,
                     initial_state_mode_opt,
@@ -652,6 +656,9 @@ at::Tensor npu_causal_conv1d_custom(
                     output
                 );
 
+    if (!conv_state.is_contiguous()) {
+        conv_state.copy_(dense_conv_state);
+    }
     return output;
 }
 

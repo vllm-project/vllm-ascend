@@ -415,6 +415,49 @@ def test_ascend_mamba_manager_uses_logical_block_size_with_prefix_caching() -> N
     assert manager.block_size == mamba_spec.block_size
 
 
+@pytest.mark.parametrize(
+    ("running", "local_tokens", "total_tokens", "target_tokens", "legacy", "expected"),
+    [
+        pytest.param(True, 8, 8, 16, False, 1, id="running-local-chunk"),
+        pytest.param(False, 0, 8, 16, False, 2, id="synchronous-external-kv"),
+        pytest.param(False, 0, 8, 8, False, 1, id="external-kv-without-new-tokens"),
+        pytest.param(False, 0, 8, 16, True, 2, id="legacy-external-kv-call"),
+    ],
+)
+def test_ascend_mamba_counts_only_external_kv_extra_page(
+    running: bool,
+    local_tokens: int,
+    total_tokens: int,
+    target_tokens: int,
+    legacy: bool,
+    expected: int,
+) -> None:
+    spec = MambaSpec(
+        block_size=8,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    manager = AscendMambaManager(
+        kv_cache_spec=spec,
+        block_pool=BlockPool(10, True, 8, False, MagicMock()),
+        enable_caching=True,
+        kv_cache_group_id=1,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        scheduler_block_size=8,
+    )
+    if running:
+        assert len(manager.allocate_new_blocks("request", 8, 8)) == 1
+    if legacy:
+        count = manager.get_num_blocks_to_allocate("request", target_tokens, [], total_tokens, target_tokens)
+    else:
+        count = manager.get_num_blocks_to_allocate(
+            "request", target_tokens, [], total_tokens, local_tokens, target_tokens
+        )
+    assert count == expected
+
+
 def test_swa_reachable_block_mask_sparse_with_lcm_alignment() -> None:
     """Regression: when ``scheduler_block_size`` is aligned to ``lcm_block_size``
     (instead of the raw-block-size LCM), ``SlidingWindowManager.reachable_block_mask``

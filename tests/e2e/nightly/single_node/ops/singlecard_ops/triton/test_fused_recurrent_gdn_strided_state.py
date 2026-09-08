@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Padded-state regressions for vLLM's Triton GDN decode operators."""
+"""Padded-state regressions for the Ascend Triton GDN decode path."""
 
 import pytest
 import torch
 import torch_npu
 from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
-    fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
 )
 
@@ -28,6 +27,7 @@ from tests.e2e.nightly.single_node.ops.singlecard_ops.test_recurrent_gated_delta
     _golden_recurrent_gated_delta_rule,
     _make_padded_state,
 )
+from vllm_ascend.ops.triton.fla.fused_recurrent import fused_recurrent_gated_delta_rule
 
 _SEED = 73
 _NUM_KEY_HEADS = 4
@@ -196,12 +196,13 @@ def test_packed_decode_honors_padded_state_stride_and_storage_offset():
 
 
 @pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("sequence_width", [1, 3, 16], ids=["single-token", "three-tokens", "max-mtp-width"])
 @torch.inference_mode()
-def test_generic_spec_decode_honors_padded_state_and_2d_state_table():
+def test_generic_spec_decode_honors_padded_state_and_2d_state_table(sequence_width: int):
     """MTP/spec Decode must preserve its request-by-token state table."""
     torch.manual_seed(_SEED + 1)
-    num_states = 7
-    sequence_lengths = [3, 3, 0]
+    num_states = 2 * sequence_width + 1
+    sequence_lengths = [sequence_width, sequence_width, 0]
     total_tokens = sum(sequence_lengths)
     state_cpu, state_npu, backing_npu, leading_stride = _make_padded_state(
         num_states,
@@ -213,11 +214,15 @@ def test_generic_spec_decode_honors_padded_state_and_2d_state_table():
     # The third request is graph padding: repeated cu_seqlens make it a
     # zero-token sequence and its state-table row must remain untouched.
     state_table = torch.tensor(
-        [[1, 2, 3], [4, 5, num_states - 1], [0, 0, 0]],
+        [
+            list(range(1, sequence_width + 1)),
+            list(range(sequence_width + 1, num_states)),
+            [0] * sequence_width,
+        ],
         dtype=torch.int32,
     )
-    accepted_tokens = torch.tensor([2, 3, 1], dtype=torch.int32)
-    cu_seqlens = torch.tensor([0, 3, 6, 6], dtype=torch.int32)
+    accepted_tokens = torch.tensor([min(2, sequence_width), sequence_width, 1], dtype=torch.int32)
+    cu_seqlens = torch.tensor([0, sequence_width, total_tokens, total_tokens], dtype=torch.int32)
 
     query = (torch.randn(1, total_tokens, _NUM_KEY_HEADS, _KEY_DIM) * 0.1).to(torch.bfloat16)
     key = (torch.randn(1, total_tokens, _NUM_KEY_HEADS, _KEY_DIM) * 0.1).to(torch.bfloat16)

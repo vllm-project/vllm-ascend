@@ -111,7 +111,10 @@ def _golden_recurrent_gated_delta_rule(
         if num_accepted_tokens is not None:
             initial_token_offset = int(num_accepted_tokens[seq_id]) - 1
         initial_state_id = int(state_indices[seq_start + initial_token_offset])
-        recurrent_state = updated_state[initial_state_id].float()
+        # The accepted-token page can also hold an intermediate output state.
+        # Keep recurrence scratch independent so later steps do not overwrite
+        # that checkpoint through a float32 view alias.
+        recurrent_state = updated_state[initial_state_id].float().clone()
 
         for token_id in range(seq_start, seq_start + seq_length):
             for value_head in range(num_value_heads):
@@ -131,6 +134,32 @@ def _golden_recurrent_gated_delta_rule(
         seq_start += seq_length
 
     return output.to(value.dtype), updated_state
+
+
+def test_reference_preserves_intermediate_checkpoint_when_initial_page_is_reused():
+    """A scalar recurrence has exact, independently known checkpoint values."""
+    state = torch.arange(4, dtype=torch.float32).view(4, 1, 1, 1)
+    state_before = state.clone()
+    values = torch.tensor([11.0, 22.0, 33.0]).view(3, 1, 1)
+    output, updated_state = _golden_recurrent_gated_delta_rule(
+        query=torch.ones_like(values),
+        key=torch.ones_like(values),
+        value=values,
+        g=torch.zeros(3, 1),
+        beta=torch.ones(3, 1),
+        state=state,
+        actual_seq_lengths=[3],
+        state_indices=torch.tensor([1, 2, 3], dtype=torch.int32),
+        num_accepted_tokens=torch.tensor([2], dtype=torch.int32),
+    )
+    torch.testing.assert_close(output, values, rtol=0, atol=0)
+    torch.testing.assert_close(
+        updated_state.flatten(),
+        torch.tensor([0.0, 11.0, 22.0, 33.0]),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(state, state_before, rtol=0, atol=0)
 
 
 def _assert_padding_canary(

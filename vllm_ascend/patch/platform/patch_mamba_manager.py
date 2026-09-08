@@ -57,10 +57,15 @@ class AscendMambaManager(MambaManager):
         num_tokens_main_model: int | None = None,
         apply_admission_cap: bool = False,
     ) -> int:
+        local_computed_tokens = num_local_computed_tokens
         if num_tokens_main_model is None:
             assert num_local_computed_tokens is not None
             num_tokens_main_model = num_local_computed_tokens
-        local_hit_tokens = len(new_computed_blocks) * self.block_size
+            # The legacy fifth positional argument is the main-model token
+            # count, not the amount of locally computed KV.
+            local_computed_tokens = None
+        if local_computed_tokens is None:
+            local_computed_tokens = len(new_computed_blocks) * self.block_size
         num_new_blocks = super().get_num_blocks_to_allocate(
             request_id,
             num_tokens,
@@ -75,9 +80,10 @@ class AscendMambaManager(MambaManager):
         # extra block to hold the external cache content. Account
         # for it here so the free-capacity check is accurate.
         # (External tokens exist when total_computed_tokens exceeds
-        # what local prefix-cache hits cover; sync loading when
+        # all locally computed KV, including earlier chunks of a running
+        # request; sync loading when
         # num_tokens_main_model exceeds total_computed_tokens.)
-        has_external_tokens = total_computed_tokens > local_hit_tokens
+        has_external_tokens = total_computed_tokens > local_computed_tokens
         has_new_scheduled_tokens = num_tokens_main_model > total_computed_tokens
         if has_external_tokens and has_new_scheduled_tokens:
             # one more block for external computed tokens

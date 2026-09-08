@@ -62,9 +62,10 @@ _GDN_DECODE_BACKEND = _get_gdn_decode_backend()
 if _GDN_DECODE_BACKEND == "triton-strided":
     try:
         from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
-            fused_recurrent_gated_delta_rule,
             fused_recurrent_gated_delta_rule_packed_decode,
         )
+
+        from vllm_ascend.ops.triton.fla.fused_recurrent import fused_recurrent_gated_delta_rule
     except ImportError as exc:
         raise RuntimeError(
             "The selected Triton GDN decode backend requires vLLM's "
