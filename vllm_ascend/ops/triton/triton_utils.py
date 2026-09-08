@@ -14,6 +14,15 @@ _extension_module = None
 # Used when device properties do not expose UB size and no env override is set.
 DEFAULT_UB_SIZE_BYTES = 192 * 1024
 
+# Minimum plausible UB size in bytes. Some Ascend driver versions return
+# invalid values (e.g., 1) for UB-related device properties when the real
+# information is unavailable. Any detected value below this threshold is
+# treated as invalid and falls back to DEFAULT_UB_SIZE_BYTES. The smallest
+# real UB on any shipping Ascend NPU is 128 KB (older 310P), so 4 KB is a
+# conservative floor that rejects sentinel/error values while accepting any
+# genuine UB report.
+_MIN_UB_SIZE_BYTES = 4 * 1024
+
 # Candidate keys that Triton Ascend driver may use to report UB size.
 _UB_SIZE_PROPERTY_KEYS = (
     "ub_size",
@@ -70,12 +79,15 @@ def init_device_properties_triton():
         assert _NUM_AICORE > 0 and _NUM_VECTORCORE > 0, "Failed to detect device properties."
 
         # Detect UB size: try each candidate key from device properties.
+        # Reject values below _MIN_UB_SIZE_BYTES: some driver versions return
+        # sentinels (e.g., 1) when UB info is unavailable, which would produce
+        # absurdly small tiles and kernel compilation failures.
         for key in _UB_SIZE_PROPERTY_KEYS:
             value = device_properties.get(key)
-            if isinstance(value, (int, float)) and value > 0:
+            if isinstance(value, (int, float)) and value >= _MIN_UB_SIZE_BYTES:
                 _UB_SIZE_BYTES = int(value)
                 break
-        # Fall back to safe default if not found.
+        # Fall back to safe default if not found or invalid.
         if _UB_SIZE_BYTES <= 0:
             _UB_SIZE_BYTES = DEFAULT_UB_SIZE_BYTES
 

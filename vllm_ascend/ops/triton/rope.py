@@ -45,34 +45,42 @@ _ROPE_MIN_BLOCK_SIZE = 1
 # Used to compute UB footprint: bytes = num_live_tensors * half_dim * 4 * BLOCK
 # These values are tightly coupled to the kernel implementation.
 #
-# NeoX path (4 tensors) - see _triton_rope lines 207-218:
-#   line 207: q_tile_1 = tl.load(...)       # input half 1
-#   line 212: q_tile_2 = tl.load(...)       # input half 2
-#   line 215: new_q_tile_1 = q_tile_1 * cos - q_tile_2 * sin  # output half 1
-#   line 218: new_q_tile_2 stored
-#   -> At line 216 (storing new_q_tile_1): q_tile_1, q_tile_2,
-#      new_q_tile_1 are live. new_q_tile_2 is computed at line 217.
-#   -> Peak live count = 4 (both inputs + both outputs) right before
-#      the final store at line 218.
+# NeoX path (8 tensors) - the user-visible IR undercounts because the Triton
+# Ascend compiler materializes intermediate high-level IR (HLIR) tensors
+# that are not present in the Python source. Analysis of the generated IR
+# for the NeoX hot loop (see _triton_rope lines 207-218) shows the compiler
+# keeps the following float32 tensors alive simultaneously at the peak:
+#   - q_tile_1, q_tile_2                   # input halves (BLOCK, rope_dim/2)
+#   - new_q_tile_1, new_q_tile_2           # output halves (BLOCK, rope_dim/2)
+#   - cos_row_broadcast (x2)               # cos broadcast to (BLOCK, half)
+#   - sin_row_broadcast (x2)               # sin broadcast to (BLOCK, half)
+#   -> Peak live count = 8.
+#   -> Verified empirically on Ascend 910B: with the original count of 4 and
+#      BLOCK_SIZE_HEAD=64 on head_dim=128/rope_dim=128, the kernel triggers
+#      "ub overflow, requires 1839104 bits while 1572864 bits available!".
+#      Raising to 8 yields BLOCK_SIZE_HEAD=32, which compiles and runs cleanly.
 #
-# Non-NeoX path (6 tensors, due to 3-D pair layout) - see lines 228-233:
-#   line 228: q_tile = tl.load(...)         # 3D (BLOCK, half, 2), counts as 2
-#   line 229: q_tile_1, q_tile_2 = tl.split(q_tile)
-#   line 230: new_q_tile_1 = ...            # output half 1
-#   line 231: new_q_tile_2 = ...            # output half 2
-#   line 232: q_tile_out = tl.join(...)     # 3D (BLOCK, half, 2), counts as 2
-#   line 233: tl.store(q_tile_out, ...)
-#   -> At line 233 (storing q_tile_out): q_tile_1, q_tile_2,
-#      new_q_tile_1, new_q_tile_2, q_tile_out (x2) all live.
-#   -> Peak live count = 6 (q_tile x2 + new_q_tile_1 + new_q_tile_2 +
-#      q_tile_out x2).
+# Non-NeoX path (10 tensors) - same compiler-materialed-broadcast effect, but
+# on the 3-D pair layout (BLOCK, rope_dim/2, 2) the source already counts 6
+# live tensors; the compiler adds 4 more for cos/sin broadcasts (x2 each):
+#   - q_tile (x2)                          # 3D input, counts as 2
+#   - q_tile_1, q_tile_2                   # split halves
+#   - new_q_tile_1, new_q_tile_2           # output halves
+#   - q_tile_out (x2)                       # 3D join output, counts as 2
+#   - cos_row_broadcast (x2)               # compiler-materialized
+#   - sin_row_broadcast (x2)               # compiler-materialized
+#   -> Peak live count = 10.
 #
 # MAINTENANCE NOTE: If the kernel's hot loop is modified (e.g., adding
 # intermediate buffers, changing load/store order, or introducing streaming
 # writes), update these counts to reflect the new peak live-tensor count.
-# Overestimating is safe (just smaller tiles); underestimating risks UB overflow.
-_ROPE_NUM_LIVE_TENSORS_NEOX = 4
-_ROPE_NUM_LIVE_TENSORS_NON_NEOX = 6
+# The counts must include both source-visible tensors AND any tensors the
+# Triton Ascend compiler materializes from broadcasts/fusions. When in doubt,
+# inspect the generated IR (dump via MLIR_ARGS=... or by running the kernel
+# with a small input and checking for "ub overflow" errors). Overestimating
+# is safe (just smaller tiles); underestimating risks UB overflow.
+_ROPE_NUM_LIVE_TENSORS_NEOX = 8
+_ROPE_NUM_LIVE_TENSORS_NON_NEOX = 10
 
 
 def _fp8_rope_head_block(n_heads: int, cap: int = 16) -> int:
