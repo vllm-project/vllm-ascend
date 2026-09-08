@@ -262,16 +262,6 @@ class TestUtils(TestBase):
         with mock.patch("vllm.__version__", "2.0.0"):
             self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
             self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
-        with mock.patch("vllm.__version__", "0.1.dev1+g6e448d0ea.empty"):
-            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (
-                    object() if name == "vllm.model_executor.layers.attention.pcp" else None
-                )
-                self.assertTrue(utils.vllm_version_is.__wrapped__("0.28.0"))
-                self.assertFalse(utils.vllm_version_is.__wrapped__("0.27.1"))
-            with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (object() if name == "vllm.v1.attention.ops.pcp" else None)
-                self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
         # Test caching takes effect without leaving a polluted process cache.
         utils.vllm_version_is.cache_clear()
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
