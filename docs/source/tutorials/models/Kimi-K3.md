@@ -414,6 +414,24 @@ general tuning methods.
 
 ## 10 FAQ
 
+### Can I reduce routed experts for a low-memory functional smoke test?
+
+Set `VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS` before constructing the model.
+The default `0` preserves all checkpoint experts. For example, `16` keeps
+routed experts `[0, 16)` in every MoE layer, slices router and correction-bias
+rows consistently, and skips loading the remaining routed-expert weights.
+The requested count must be at least the routing top-k, no larger than the
+checkpoint expert count, and divisible by the expert-parallel world size.
+For example, `16` is not valid for EP64.
+
+This is a functional debugging option, not an accuracy-preserving model
+compression method. It changes routing and generated output. Reduced-expert
+GSM8K scores or draft acceptance rates do not qualify the full-expert model.
+Target layers, shared experts, checkpoint files and the original configuration
+remain unchanged; only the runtime model configuration is copied and capped.
+Keep the option unset for full-model validation and production runs. This
+option is independent of the MRV2/DSpark adaptation and does not require it.
+
 For common environment, installation, and general parameter issues, refer to
 the [Public FAQ](../../faqs.md). This section covers Kimi-K3-specific questions.
 

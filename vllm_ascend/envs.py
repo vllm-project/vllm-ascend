@@ -71,6 +71,11 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
+    # Number of Kimi K3 routed experts to instantiate and load for functional
+    # debugging only; not sensitive. 0 (default) loads every checkpoint expert.
+    # Nonzero values must be >= routing top-k, <= checkpoint expert count,
+    # and divisible by the expert parallel world size.
+    "VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS": lambda: os.getenv("VLLM_ASCEND_KIMI_K3_MAX_LOADED_EXPERTS", "0"),
 }
 
 # end-env-vars-definition
