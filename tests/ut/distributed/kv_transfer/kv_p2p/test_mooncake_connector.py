@@ -102,11 +102,9 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
 
 
 def make_kv_cache_tensor(size, layers, *, block_stride, **kwargs):
-    """Use the installed dependency's real type, including release-wheel APIs."""
-    if "layers" in KVCacheTensor.__dataclass_fields__:
-        kwargs.setdefault("layer_stride", size)
-        return KVCacheTensor(size=size, layers=layers, block_stride=block_stride, **kwargs)
-    return KVCacheTensor(size=size, shared_by=layers, block_stride=block_stride, **kwargs)
+    """Construct the real upstream-main placement contract; no release fallback."""
+    kwargs.setdefault("layer_stride", size)
+    return KVCacheTensor(size=size, layers=layers, block_stride=block_stride, **kwargs)
 
 
 def make_exact_aligned_cpu_buffer(size):
@@ -167,11 +165,11 @@ def test_k3_shared_base_recovery_distinguishes_private_and_ambiguous_storage(inv
     "registration", ["_get_registered_kv_tensor_buffers", "_get_registered_kv_tensor_buffers_hybrid"]
 )
 def test_placement_schema_registers_shared_backing_allocation_once(registration):
-    """Forward-schema unit test; installed-API tests separately use KVCacheTensor.
+    """Real upstream placement descriptors can alias one backing allocation.
 
     Two non-zero layer offsets alias one aligned allocation. A placement's size
     describes that allocation, so registering (logical_view_ptr, size) overruns.
-    This synthetic schema tests the adapter, not compatibility of a vLLM wheel.
+    The descriptor type is deliberately not replaced by a synthetic schema.
     """
     alignment = 2 * 1024 * 1024
     size = 2 * alignment
@@ -181,8 +179,8 @@ def test_placement_schema_registers_shared_backing_allocation_once(registration)
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.kv_cache_config = types.SimpleNamespace(
         kv_cache_tensors=[
-            types.SimpleNamespace(size=size, layers=["attention"], offset=128, block_stride=256, layer_stride=256),
-            types.SimpleNamespace(size=size, layers=["indexer"], offset=512, block_stride=128, layer_stride=128),
+            KVCacheTensor(size=size, layers=["attention"], offset=128, block_stride=256, layer_stride=256),
+            KVCacheTensor(size=size, layers=["indexer"], offset=512, block_stride=128, layer_stride=128),
         ]
     )
     regions = getattr(worker, registration)({"attention": allocation[128:], "indexer": allocation[512:]})
@@ -4312,7 +4310,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(local_ids, [([70, 71, 72, 73], [80, 81, 82, 83])])
         self.assertEqual(remote_ids, [([50, 51, 52, 53], [60, 61, 62, 63])])
 
-    def test_issue_13934_dcp_split_transfer_groups_use_kv_cache_group_id(self):
+    def test_dcp_split_transfer_groups_use_kv_cache_group_id(self):
         """DCP metadata is cache-group indexed, not transfer-group indexed."""
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
         worker._is_hma_required = True
@@ -4747,21 +4745,35 @@ def test_head_reformat_preserves_token_head_order_at_scatter_boundary(monkeypatc
     assert captured[0]["cache_mode"] == "Norm"
 
 
-@pytest.mark.parametrize("layout", ["empty", "aligned", "unaligned"])
-def test_legacy_hybrid_registration_checks_actual_base(layout):
-    allocation = make_exact_aligned_cpu_buffer(128)
-    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-    worker.kv_cache_config = types.SimpleNamespace(
-        kv_cache_tensors=[types.SimpleNamespace(size=128, shared_by=["layer"])]
+@pytest.mark.parametrize(
+    "registration", ["_get_registered_kv_tensor_buffers", "_get_registered_kv_tensor_buffers_hybrid"]
+)
+@pytest.mark.parametrize("layout", ["layer-outermost", "block-outermost"])
+@pytest.mark.parametrize("offset", [0, 64])
+def test_main_placement_layout_registers_backing_storage_not_logical_views(registration, layout, offset):
+    """Both main layouts describe size bytes of storage, not size bytes per view."""
+    size = 2 * 1024 * 1024
+    allocation = make_exact_aligned_cpu_buffer(size)
+    page, blocks = 32, 3
+    layer_stride = page * blocks if layout == "layer-outermost" else page
+    block_stride = page if layout == "layer-outermost" else 2 * page
+    placement = KVCacheTensor(
+        size=size,
+        layers=["attention", "indexer"],
+        offset=offset,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
     )
-    caches = {"layer": () if layout == "empty" else (allocation[1:] if layout == "unaligned" else allocation)}
-    if layout == "unaligned":
-        with pytest.raises(RuntimeError, match="not aligned to 2 MiB"):
-            worker._get_registered_kv_tensor_buffers_hybrid(caches)
-    else:
-        assert worker._get_registered_kv_tensor_buffers_hybrid(caches) == (
-            ([], []) if layout == "empty" else ([allocation.data_ptr()], [128])
-        )
+    views = {
+        name: allocation.as_strided((blocks, page), (block_stride, 1), offset + index * layer_stride)
+        for index, name in enumerate(placement.layers)
+    }
+    for index, name in enumerate(placement.layers):
+        assert views[name].data_ptr() == allocation.data_ptr() + offset + index * layer_stride
+        assert views[name].stride() == (block_stride, 1)
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(kv_cache_tensors=[placement])
+    assert getattr(worker, registration)(views) == ([allocation.data_ptr()], [size])
 
 
 if __name__ == "__main__":
