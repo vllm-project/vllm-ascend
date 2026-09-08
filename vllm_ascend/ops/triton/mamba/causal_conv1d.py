@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 
 import torch
 from vllm.logger import init_logger
@@ -294,10 +293,6 @@ def causal_conv1d_update_npu(
     # Fast path: plain decode (one token per sequence) — the hottest call
     # site; a handful of broadcast multiply-adds.
     if query_start_loc is None and x.dim() == 2:
-        import time as _time
-
-        _timing = os.environ.get("GLM53_TIME_CONV") == "1"
-        _t0 = _time.perf_counter() if _timing else 0.0
         B, D = x.shape
         rows = (
             conv_state_indices.to(device)
@@ -329,23 +324,6 @@ def causal_conv1d_update_npu(
         conv_state[safe_rows] = torch.where(valid_rows, new_state, st).to(
             conv_state.dtype
         )
-        if _timing:
-            global _CONV_N, _CONV_T
-            try:
-                _CONV_N += 1
-                _CONV_T += _time.perf_counter() - _t0
-            except NameError:
-                _CONV_N, _CONV_T = 1, _time.perf_counter() - _t0
-            if _CONV_N % 340 == 0:
-                import sys as _sys
-
-                print(
-                    f"[conv-time] n={_CONV_N} avg={_CONV_T/_CONV_N*1000:.3f}ms "
-                    f"B={B} D={D}",
-                    file=_sys.stderr,
-                    flush=True,
-                )
-                _CONV_N = _CONV_T = 0
         return acc.to(orig_dtype)
 
     # General varlen path (spec verify / multi-token decode).

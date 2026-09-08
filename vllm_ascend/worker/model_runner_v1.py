@@ -131,8 +131,6 @@ from vllm_ascend.attention.utils import (
 # yapf: disable
 from vllm_ascend.compilation.acl_graph import (
     ACLGraphWrapper,
-    acc_graph_timing,
-    graph_timing_enabled,
     set_draft_graph_params,
     set_graph_params,
     update_full_graph_params,
@@ -2164,14 +2162,6 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                 )
-                if os.environ.get("GLM53_SYNC_PREP_END") == "1":
-                    # Bisect knob: drain the default stream before the forward
-                    # starts. If the device fault disappears with this on, the
-                    # bad work was enqueued during input prep (a bad H2D
-                    # destination or a bad prep-side kernel), not in the model
-                    # forward of a previous step.
-                    torch.npu.synchronize()
-
                 self._sanitize_placeholder_input_ids_for_forward(
                     scheduler_output,
                     num_tokens_padded,
@@ -2730,8 +2720,6 @@ class NPUModelRunner(GPUModelRunner):
             if self.enable_enpu:
                 torch.npu.current_stream().synchronize()
 
-            if graph_timing_enabled():
-                _t_upd = time.perf_counter()
             update_full_graph_params(
                 self.attn_backend,
                 self.update_stream,
@@ -2740,8 +2728,6 @@ class NPUModelRunner(GPUModelRunner):
                 self.vllm_config,
                 self.speculative_config,
             )
-            if graph_timing_enabled():
-                acc_graph_timing("update_host", time.perf_counter() - _t_upd)
 
     def _model_forward(
         self,

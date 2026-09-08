@@ -17,7 +17,6 @@
 # ruff: noqa: E501
 # mypy: ignore-errors
 
-import os
 
 import torch
 from vllm.logger import init_logger
@@ -1570,37 +1569,6 @@ def fused_recurrent_kda_ascendc(
                 num_accepted_tokens, out, sigmoid_beta, a_log, g_bias,
                 compute_gate, lower_bound, **kwargs,
             )
-        if os.environ.get("GLM53_KDA_TRACE") == "1" and indices is not None and indices.dim() == 2:
-            # Diagnostics: per-spec-call, log nacc + the norm of EVERY table
-            # column's recurrent state. A stale column (from a previous
-            # request whose slot was freed and reused) shows a wildly
-            # different norm from the columns this request has written.
-            _n = globals().get("_KDA_TRACE_N", 0)
-            if _n < 400:
-                globals()["_KDA_TRACE_N"] = _n + 1
-                try:
-                    import sys as _sys
-
-                    _na = num_accepted_tokens.reshape(-1)[: indices.size(0)].tolist()
-                    _tabs = indices.tolist()
-                    _lines = []
-                    for _r, _row in enumerate(_tabs):
-                        _norms = [
-                            f"{initial_state[int(_c)].float().abs().max():.3f}"
-                            if 0 <= int(_c) < initial_state.size(0) else "oor"
-                            for _c in _row
-                        ]
-                        _lines.append(
-                            f"r{_r} nacc={_na[_r] if _r < len(_na) else '?'} "
-                            f"slots={_row} norms={_norms}"
-                        )
-                    print(
-                        f"[kda-trace #{_n}] T={q.shape[-3] if q.dim() == 4 else q.shape[0]} "
-                        + " | ".join(_lines[:4]),
-                        flush=True, file=_sys.stderr,
-                    )
-                except Exception as _e:
-                    pass
         result = torch.ops._C_ascend.recurrent_kda(
             q.squeeze(0).contiguous() if squeeze_b else q.contiguous(),
             k.squeeze(0).contiguous() if k.dim() == 4 else k.contiguous(),
@@ -1627,7 +1595,6 @@ def fused_recurrent_kda_ascendc(
     except Exception as op_err:
         if _KDA_ASCENDC_AVAILABLE is True:
             raise
-        import sys as _sys
 
         logger.warning(
             "[kda-ascendc] op failed, falling back to triton: %.600r "
