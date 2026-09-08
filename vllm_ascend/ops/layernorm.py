@@ -52,6 +52,11 @@ def _enable_a5_add_rms_norm_bias(x: torch.Tensor) -> bool:
     return True
 
 
+def _add_bias_with_axpy(x: torch.Tensor, negative_bias: torch.Tensor) -> torch.Tensor:
+    """Add bias through aclnnAdd's Axpy lowering without changing numerics."""
+    return x.add_(negative_bias, alpha=-1.0)
+
+
 class AscendRMSNorm(RMSNorm):
     def __init__(
         self,
@@ -65,6 +70,7 @@ class AscendRMSNorm(RMSNorm):
         vllm_config = get_current_vllm_config()
         self.bias = None
         self.bias_loaded = False
+        self.register_buffer("_negative_bias", None, persistent=False)
 
         # quantization with anti_method m4 will generate none-zero norm bias
         quant_description = getattr(vllm_config.quant_config, "quant_description", None) or {}
@@ -84,6 +90,10 @@ class AscendRMSNorm(RMSNorm):
             )
 
             param.data.copy_(loaded_weight)
+        # CANN lowers aclnnAdd with alpha=-1 to Axpy. Cache the negation at
+        # weight-load time so the forward path remains exactly x + bias and
+        # does not introduce a runtime Neg kernel.
+        self._negative_bias = -param.data
         self.bias_loaded = True
 
     def forward_oot(
@@ -101,12 +111,14 @@ class AscendRMSNorm(RMSNorm):
             else:
                 x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight, self.variance_epsilon)
                 if self.bias is not None:
-                    x.add_(self.bias)
+                    assert self._negative_bias is not None
+                    _add_bias_with_axpy(x, self._negative_bias)
             return x, residual
 
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias_loaded:
-            x.add_(self.bias)
+            assert self._negative_bias is not None
+            _add_bias_with_axpy(x, self._negative_bias)
 
         return x
 

@@ -7,7 +7,12 @@ from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
 
-from vllm_ascend.ops.layernorm import AscendFusedRMSNormGated, _enable_a5_add_rms_norm_bias
+from vllm_ascend.ops.layernorm import (
+    AscendFusedRMSNormGated,
+    AscendRMSNorm,
+    _add_bias_with_axpy,
+    _enable_a5_add_rms_norm_bias,
+)
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op
 from vllm_ascend.utils import is_310p as is_310p_hw
 
@@ -83,6 +88,29 @@ def mock_add_rms_norm_bias(x, residual, weight, bias, eps):
         return 2 * x, None, 2 * residual
     else:
         return 2 * x + bias, None, 2 * residual
+
+
+def test_add_bias_with_axpy_is_exact_and_uses_negative_alpha():
+    x = torch.randn(4, 8, dtype=torch.float16)
+    bias = torch.randn(8, dtype=torch.float16)
+    torch.testing.assert_close(_add_bias_with_axpy(x.clone(), -bias), x + bias, atol=0, rtol=0)
+
+    target = MagicMock()
+    negative_bias = MagicMock()
+    _add_bias_with_axpy(target, negative_bias)
+    target.add_.assert_called_once_with(negative_bias, alpha=-1.0)
+
+
+def test_bias_weight_loader_caches_negative_bias():
+    layer = MagicMock()
+    param = torch.nn.Parameter(torch.zeros(8), requires_grad=False)
+    loaded_weight = torch.randn(8)
+
+    AscendRMSNorm._bias_weight_loader(layer, param, loaded_weight)
+
+    torch.testing.assert_close(param, loaded_weight)
+    torch.testing.assert_close(layer._negative_bias, -loaded_weight)
+    assert layer.bias_loaded is True
 
 
 @pytest.fixture(autouse=True)
