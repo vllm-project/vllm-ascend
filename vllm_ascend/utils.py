@@ -590,6 +590,7 @@ def setup_ascend_local_comm_res(local_rank: int, kv_transfer_config: Any | None)
     os.environ["ASCEND_LOCAL_COMM_RES"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
+@torch._dynamo.disable
 def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
     """Map untagged empty-device installs onto the matching release lane.
 
@@ -598,6 +599,9 @@ def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
     ``0.1.dev1+gSHA.empty`` instead of the tagged ``0.28.0``. Distinguish
     v0.28.0 from main by where PCP lives: model_executor on 0.28.0, v1 ops
     after the move on main.
+
+    Disabled under Dynamo: ``importlib.util.find_spec`` is marked skipped and
+    must not be traced when version gates run during torch.compile.
     """
     if target_vllm_version != "0.28.0":
         return False
@@ -607,6 +611,7 @@ def _vllm_empty_device_matches_release(target_vllm_version: str) -> bool:
 
 
 @functools.cache
+@torch._dynamo.disable
 def vllm_version_is(target_vllm_version: str):
     if envs_ascend.VLLM_VERSION is not None:
         vllm_version = envs_ascend.VLLM_VERSION
