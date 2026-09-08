@@ -10,12 +10,17 @@ import pytest
 import torch
 from vllm.config import VllmConfig
 
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import clear_ascend_config, init_ascend_config
 from vllm_ascend.ops.triton.bincount import get_token_bin_counts_and_mask_triton
 from vllm_ascend.ops.triton.triton_utils import init_device_properties_triton
 
-# TODO(realliujiaxu): delete this after `enable_reduce_sample` is removed
-init_ascend_config(VllmConfig())
+
+@pytest.fixture(autouse=True)
+def _init_ascend_config():
+    init_ascend_config(VllmConfig())
+    yield
+    clear_ascend_config()
+
 
 # Qwen-style vocab and profiler / penalties-path shapes.
 # (num_seqs, seq_len, vocab_size, token_mode)
@@ -92,8 +97,7 @@ def test_token_bin_counts_and_mask_kernel(num_seqs, seq_len, vocab_size, token_m
     assert bin_counts.dtype == torch.int32
     assert mask.dtype == torch.bool
     assert torch.equal(bin_counts, ref_counts), (
-        f"bin_counts differs from scatter_add_ reference. "
-        f"Max abs diff: {(bin_counts - ref_counts).abs().max().item()}"
+        f"bin_counts differs from scatter_add_ reference. Max abs diff: {(bin_counts - ref_counts).abs().max().item()}"
     )
     assert torch.equal(mask, ref_mask), "mask differs from (bin_counts > 0) reference"
     gc.collect()
