@@ -23,7 +23,7 @@ from __future__ import annotations
 import torch
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.cumpute_causal_conv1d_metadata_310 import (
     compute_causal_conv1d_metadata,
@@ -128,7 +128,9 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
             non_blocking=True,
         )
         attn_metadata.spec_state_indices_tensor = self.spec_state_indices_tensor[:graph_batch_size]
-        attn_metadata.spec_state_indices_tensor[num_spec_decodes:].fill_(NULL_BLOCK_ID)
+        # Match PAD_SLOT_ID expected by npu_causal_conv1d_310; NULL_BLOCK_ID(=0)
+        # would write padding rows into mamba block 0 under FULL graph replay.
+        attn_metadata.spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
 
         self.spec_sequence_masks[:num_spec_decodes].copy_(
             spec_sequence_masks[:num_spec_decodes],
@@ -169,7 +171,9 @@ class GDNAttentionMetadataBuilder310(AscendGDNAttentionMetadataBuilder):
             non_blocking=True,
         )
         attn_metadata.num_accepted_tokens = self.num_accepted_tokens[:graph_batch_size]
-        attn_metadata.num_accepted_tokens[num_spec_decodes:].fill_(0)
+        # Match Ascend mainline / Mamba neutral value (1), not 0. Padding with 0
+        # makes accepted-1=-1 and corrupts GDN recurrent init for real rows.
+        attn_metadata.num_accepted_tokens[num_spec_decodes:].fill_(1)
         self._attach_spec_decode_metadata(attn_metadata)
 
     def _pad_decode_metadata(

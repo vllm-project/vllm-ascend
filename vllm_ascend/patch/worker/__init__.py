@@ -36,6 +36,7 @@ if get_current_hardware_profile().supports(HardwareCapability.STANDARD_WORKER_PA
     import vllm_ascend.patch.worker.patch_qwen3vl  # noqa
 else:
     import vllm_ascend.patch.worker.patch_idex_310  # noqa
+    import vllm_ascend.patch.worker.patch_v2.patch_spec_decode_310  # noqa
 import vllm_ascend.patch.worker.patch_rejection_sampler  # noqa
 
 import vllm_ascend.patch.worker.patch_kimi_k25  # noqa
