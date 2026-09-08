@@ -16,6 +16,7 @@ import zmq
 pytest.importorskip("torch")
 pytest.importorskip("vllm")
 
+import torch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 
 from vllm_ascend.distributed.kv_transfer import register_connector
@@ -115,6 +116,100 @@ def test_consumer_metadata_preserves_every_cache_group():
     block_ids[0].append(3)
 
     assert metadata.requests[0].block_ids_by_group == [[1, 2], [10], [20, 21, 22]]
+
+
+@pytest.mark.parametrize(
+    "sparse_enabled,tp_rank,keep_device_kv_cache",
+    [(True, 0, False), (True, 1, False), (True, 0, True), (False, 0, False)],
+)
+def test_destination_registration_with_optional_sparse_offload(sparse_enabled, tp_rank, keep_device_kv_cache):
+    main_name = "model.layers.0.self_attn.attn"
+    indexer_name = "model.layers.0.self_attn.indexer"
+    num_blocks, block_size = 4, 16
+    main_tensors = tuple(torch.empty(num_blocks, block_size, 1, dim, dtype=torch.bfloat16) for dim in (8, 4))
+    # Top-k rows are not cache blocks, and need not divide num_blocks.
+    topk_tensors = tuple(torch.empty(3, 32, 1, dim, dtype=torch.bfloat16) for dim in (8, 4))
+    indexer_tensors = (
+        torch.empty(num_blocks, block_size, 1, 8, dtype=torch.int8),
+        torch.empty(num_blocks, block_size, 1, 1, dtype=torch.float16),
+    )
+    kv_cache_config = SimpleNamespace(
+        num_blocks=num_blocks,
+        kv_cache_groups=[
+            SimpleNamespace(layer_names=[main_name, indexer_name], kv_cache_spec=SimpleNamespace(block_size=block_size))
+        ],
+    )
+    expected_main, expected_indexer = LayerwisePullConsumerWorker._build_hbm_layouts(
+        kv_cache_config, {main_name: main_tensors, indexer_name: indexer_tensors}, 1
+    )[0]
+    k_base = 100000
+    v_base = k_base + expected_main.block_lengths[0] * num_blocks
+    manager = SimpleNamespace(
+        offload_layer_names=[main_name],
+        block_size=block_size,
+        topk_buffers_k=[topk_tensors[0]],
+        topk_buffers_v=[topk_tensors[1]],
+        gvas_k_bases=[k_base],
+        gvas_v_bases=[v_base],
+        cpu_block_lens=[expected_main.block_lengths],
+    )
+    worker = LayerwisePullConsumerWorker.__new__(LayerwisePullConsumerWorker)
+    worker.kv_cache_config = kv_cache_config
+    worker.total_base_layers = 1
+    worker.tp_rank = tp_rank
+    worker.tp_size = 2
+    worker.side_channel_port = 1234
+    worker._backend_name = "memfabric"
+    worker._dest_blocks_by_req = {}
+    worker._dest_blocks_condition = threading.Condition()
+    worker._ensure_engine = MagicMock(return_value=(None, MagicMock()))
+    sparse_caches = {
+        main_name: (
+            *(main_tensors if keep_device_kv_cache else (None, None)),
+            *(main_tensors if tp_rank == 0 else (None, None)),
+            *topk_tensors,
+        ),
+        indexer_name: indexer_tensors,
+    }
+    get_manager = MagicMock(return_value=manager)
+    with (
+        patch("vllm_ascend.ascend_config.get_ascend_config") as config,
+        patch.dict(
+            "sys.modules",
+            {
+                "vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager": SimpleNamespace(
+                    get_sparse_kv_offload_manager=get_manager
+                )
+            },
+        ),
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker.global_memfabric_te") as engine,
+        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker.LayerwisePullReadThread") as reader,
+    ):
+        config.return_value.sparse_kv_offload_config.enabled = sparse_enabled
+        reader.return_value.startup_error = None
+        worker.register_kv_caches(
+            sparse_caches if sparse_enabled else {main_name: main_tensors, indexer_name: indexer_tensors}
+        )
+
+    assert worker.layer_layouts[0] == (
+        replace(expected_main, base_addrs=(k_base, v_base)) if sparse_enabled else expected_main,
+        expected_indexer,
+    )
+    if sparse_enabled:
+        main_ptrs = [k_base]
+        main_lengths = [sum(expected_main.block_lengths) * num_blocks]
+    else:
+        get_manager.assert_not_called()
+        main_ptrs = [tensor.data_ptr() for tensor in main_tensors]
+        main_lengths = [tensor.numel() * tensor.element_size() for tensor in main_tensors]
+    engine.register_buffer.assert_called_once_with(
+        [*main_ptrs, *(tensor.data_ptr() for tensor in indexer_tensors)],
+        [*main_lengths, *(tensor.numel() * tensor.element_size() for tensor in indexer_tensors)],
+    )
+    assert reader.call_args.kwargs["state"].tp_shared_components == (
+        frozenset({main_name}) if sparse_enabled else frozenset()
+    )
+    reader.return_value.start.assert_called_once()
 
 
 @pytest.fixture

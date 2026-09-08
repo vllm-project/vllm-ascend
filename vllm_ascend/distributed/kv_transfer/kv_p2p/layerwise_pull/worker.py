@@ -194,24 +194,28 @@ class LayerwisePullConsumerWorker:
         return layouts
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
-        layouts = self._build_hbm_layouts(self.kv_cache_config, kv_caches, self.total_base_layers)
         tp_shared_components: set[str] = set()
-        registration = collect_storage_merged_register_regions(kv_caches)
 
-        # Sparse offload replaces each main HBM component with the manager's
-        # TP-shared CPU K/V allocation. Extra components remain ordinary HBM
-        # layouts and the generic reader treats both the same way.
+        # Sparse main caches contain optional HBM/CPU tensors and top-k buffers,
+        # not an ordinary HBM component. Only register their TP-shared CPU K/V.
         from vllm_ascend.ascend_config import get_ascend_config
 
+        main_names: set[str] = set()
+        hbm_destinations = kv_caches
         if get_ascend_config().sparse_kv_offload_config.enabled:
             from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
                 get_sparse_kv_offload_manager,
             )
 
             self.offload_manager = get_sparse_kv_offload_manager()
-            main_names = list(getattr(self.offload_manager, "offload_layer_names", ()))
+            main_names = set(getattr(self.offload_manager, "offload_layer_names", ()))
             if not main_names:
                 raise RuntimeError("SparseKVOffloadManager.register_kv_caches must run before LayerwisePullConnector")
+            hbm_destinations = {name: value for name, value in kv_caches.items() if name not in main_names}
+
+        layouts = self._build_hbm_layouts(self.kv_cache_config, hbm_destinations, self.total_base_layers)
+        registration = collect_storage_merged_register_regions(hbm_destinations)
+        if main_names:
             layer_to_group = {
                 layer_name: group_idx
                 for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
@@ -219,31 +223,35 @@ class LayerwisePullConsumerWorker:
             }
             main_ptrs: list[int] = []
             main_lengths: list[int] = []
-            for pool_idx, layer_name in enumerate(main_names):
+            for pool_idx, layer_name in enumerate(self.offload_manager.offload_layer_names):
                 group_idx = layer_to_group[layer_name]
                 k_base = self.offload_manager.gvas_k_bases[pool_idx]
                 v_base = self.offload_manager.gvas_v_bases[pool_idx]
                 k_len, v_len = self.offload_manager.cpu_block_lens[pool_idx]
                 layer_idx = get_layerwise_physical_layer_index(layer_name, self.total_base_layers)
-                source_view = next(
-                    (item for item in layouts.get(layer_idx, ()) if item.name == layer_name),
-                    None,
+                # Top-k tensors exist on every TP rank. Their head dimensions
+                # and dtype match the CPU cache, but their row size does not.
+                topk_tensors = (
+                    self.offload_manager.topk_buffers_k[pool_idx],
+                    self.offload_manager.topk_buffers_v[pool_idx],
                 )
-                if source_view is None or len(source_view.base_addrs) < 2:
-                    raise RuntimeError(f"Sparse KV offload main K/V layout is missing for {layer_name}")
+                block_shapes = tuple((self.offload_manager.block_size, *tensor.shape[2:]) for tensor in topk_tensors)
+                block_size_scales = tuple(
+                    length // (tensor.element_size() * math.prod(shape))
+                    for length, tensor, shape in zip((k_len, v_len), topk_tensors, block_shapes, strict=True)
+                )
                 component = ComponentLayout(
                     name=layer_name,
                     group_index=group_idx,
                     block_size=self.kv_cache_config.kv_cache_groups[group_idx].kv_cache_spec.block_size,
-                    dtypes=source_view.dtypes[:2],
+                    dtypes=tuple(str(tensor.dtype) for tensor in topk_tensors),
                     base_addrs=(k_base, v_base),
                     block_strides=(k_len, v_len),
                     block_lengths=(k_len, v_len),
-                    block_shapes=source_view.block_shapes[:2],
-                    block_size_scales=source_view.block_size_scales[:2],
+                    block_shapes=block_shapes,
+                    block_size_scales=block_size_scales,
                 )
-                existing = [item for item in layouts.get(layer_idx, []) if item.name != layer_name]
-                layouts[layer_idx] = [component, *existing]
+                layouts.setdefault(layer_idx, []).insert(0, component)
                 tp_shared_components.add(layer_name)
 
                 num_blocks = self.kv_cache_config.num_blocks
@@ -252,13 +260,11 @@ class LayerwisePullConsumerWorker:
                 main_ptrs.append(start)
                 main_lengths.append(end - start)
 
-            hbm_destinations = {name: value for name, value in kv_caches.items() if name not in set(main_names)}
-            hbm_regions = collect_storage_merged_register_regions(hbm_destinations)
             registration = RegisterRegions(
-                ptrs=main_ptrs + hbm_regions.ptrs,
-                lengths=main_lengths + hbm_regions.lengths,
-                logical_tensor_count=len(main_ptrs) + (hbm_regions.logical_tensor_count or 0),
-                logical_total_bytes=sum(main_lengths) + (hbm_regions.logical_total_bytes or 0),
+                ptrs=main_ptrs + registration.ptrs,
+                lengths=main_lengths + registration.lengths,
+                logical_tensor_count=len(main_ptrs) + (registration.logical_tensor_count or 0),
+                logical_total_bytes=sum(main_lengths) + (registration.logical_total_bytes or 0),
             )
 
         self.layer_layouts = {layer_idx: tuple(components) for layer_idx, components in layouts.items()}
