@@ -16,14 +16,14 @@ from vllm_ascend.ops.triton.triton_utils import (
 )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _apply_attn_res_kernel(
     block_residual_ptr,
     prefix_sum_ptr,
     norm_w_ptr,
     proj_w_ptr,
     out_ptr,
-    N: tl.constexpr,
+    N,
     H: tl.constexpr,
     B: tl.constexpr,
     BLOCK_CAPACITY: tl.constexpr,
