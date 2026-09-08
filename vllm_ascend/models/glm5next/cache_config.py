@@ -530,11 +530,16 @@ def get_glm5_max_memory_usage(
     layout = _get_glm5_cache_layout(groups)
     if layout is None:
         raise ValueError("Expected GLM-Next cache groups.")
-    # All physical slots are indexed by the same global block-id range. The
-    # combined full-attention group defines its required width; summing every
-    # scheduler group would count that range repeatedly and overestimate the
-    # cache requirement for long contexts.
-    blocks = layout.full_group.kv_cache_spec.max_memory_usage_pages(
-        vllm_config
+    # Scheduler groups allocate disjoint IDs from the shared global BlockPool.
+    # One request therefore needs enough IDs for every group even though one
+    # physical tensor slot can be reused by layers from different groups.
+    blocks = sum(
+        (
+            group.kv_cache_spec.max_memory_usage_bytes(vllm_config)
+            + group.kv_cache_spec.page_size_bytes
+            - 1
+        )
+        // group.kv_cache_spec.page_size_bytes
+        for group in groups
     )
     return blocks * get_glm5_pool_bytes_per_block(groups)

@@ -197,6 +197,7 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     alignment: int | None = None  # Default to None for no padding.
     compress_ratio: int = 1
     model_version: str | None = None
+    indexes_kv_by_block_stride: bool = False
 
     def __post_init__(self):
         pass

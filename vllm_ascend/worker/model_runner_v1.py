@@ -4304,6 +4304,16 @@ class NPUModelRunner(GPUModelRunner):
                             layer_kv_cache_spec[layer_name] = spec
         return layer_kv_cache_spec
 
+    def _uses_page_strided_kv_layout(self, kv_cache_spec: KVCacheSpec) -> bool:
+        """Whether a cache spec requires one block-strided backing tensor."""
+        return isinstance(
+            kv_cache_spec,
+            (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
+        ) and (
+            self.use_compress
+            or getattr(kv_cache_spec, "indexes_kv_by_block_stride", False)
+        )
+
     def _get_attention_kv_cache_dims(self, layer_name: str, kv_cache_spec: AttentionSpec) -> tuple[int, int]:
         if isinstance(kv_cache_spec, AscendMLAAttentionSpec):
             attn_layers = get_layers_from_vllm_config(
@@ -4561,10 +4571,7 @@ class NPUModelRunner(GPUModelRunner):
                 layer_spec = layer_kv_cache_spec[layer_name]
                 if isinstance(layer_spec, MambaSpec):
                     use_mamba = True
-                if self.use_compress and isinstance(
-                    layer_spec,
-                    (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec),
-                ):
+                if self._uses_page_strided_kv_layout(layer_spec):
                     use_compressed_cache = True
             for idx in range(len(shared_layers)):
                 layer_name = shared_layers[idx]
@@ -4891,15 +4898,14 @@ class NPUModelRunner(GPUModelRunner):
 
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
-                if self.use_compress and isinstance(current_kv_cache_spec,
-                                                    (AscendMLAAttentionSpec, AscendSlidingWindowMLASpec)):
+                if self._uses_page_strided_kv_layout(current_kv_cache_spec):
                     kv_tensor = kv_cache_raw_tensors[layer_name]
                     sum_page_size_bytes = kv_tensor.numel()
                     num_blocks = sum_page_size_bytes // current_kv_cache_spec.page_size_bytes
                     assert num_blocks == kv_cache_config.num_blocks, \
                         f"num_blocks: {num_blocks} should be equal to " \
                         f"kv_cache_config.num_blocks: {kv_cache_config.num_blocks}"
-                    kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
                         num_blocks, current_kv_cache_spec.storage_block_size,
                         current_kv_cache_spec.num_kv_heads,
                         current_kv_cache_spec.head_size)
@@ -4909,13 +4915,13 @@ class NPUModelRunner(GPUModelRunner):
 
                     if hasattr(current_kv_cache_spec, "scale_dim") and current_kv_cache_spec.scale_dim != 0:
                         indexer_k_shape = kv_cache_shape
-                        indexer_scale_shape = self.attn_backend.get_kv_cache_shape(
+                        indexer_scale_shape = attn_backend.get_kv_cache_shape(
                                                 num_blocks, current_kv_cache_spec.storage_block_size,
                                                 current_kv_cache_spec.num_kv_heads,
                                                 current_kv_cache_spec.scale_dim
                                                 )
                         if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
-                            indexer_full_shape = self.attn_backend.get_kv_cache_shape(
+                            indexer_full_shape = attn_backend.get_kv_cache_shape(
                                 num_blocks, current_kv_cache_spec.storage_block_size,
                                 current_kv_cache_spec.num_kv_heads,
                                 current_kv_cache_spec.head_size

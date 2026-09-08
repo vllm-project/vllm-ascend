@@ -34,6 +34,17 @@ def test_state_uses_sliding_pages_and_full_precision():
     assert spec.page_size_bytes == 4096
     assert KVCacheSpecRegistry.get_manager_class(spec) is SlidingWindowManager
     assert spec.max_admission_blocks_per_request(16, 1024) > 1
+    context_parallel_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=1024),
+        parallel_config=SimpleNamespace(
+            decode_context_parallel_size=2,
+            prefill_context_parallel_size=2,
+        ),
+    )
+    assert (
+        spec.max_memory_usage_bytes(context_parallel_config)
+        == spec.page_size_bytes
+    )
 
 
 @pytest.mark.parametrize(
@@ -107,6 +118,7 @@ def test_model_cache_layers_publish_source_compatible_specs():
     assert state_spec.block_size == state_spec.sliding_window == 16
     assert state_spec.head_size == 256
     assert state_spec.dtype == torch.float32
+    assert state_spec.indexes_kv_by_block_stride
     assert set(current_config.compilation_config.static_forward_context) == {
         indexer.prefix,
         state.prefix,

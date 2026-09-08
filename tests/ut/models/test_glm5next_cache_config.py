@@ -132,8 +132,16 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
         layout.state_names[0],
     }
 
-    # The full group defines the width of the shared global block-id range.
-    required_blocks = groups[0].kv_cache_spec.max_memory_usage_pages(config)
+    # Scheduler groups consume disjoint IDs from the shared global BlockPool.
+    required_blocks = sum(
+        (
+            group.kv_cache_spec.max_memory_usage_bytes(config)
+            + group.kv_cache_spec.page_size_bytes
+            - 1
+        )
+        // group.kv_cache_spec.page_size_bytes
+        for group in groups
+    )
     assert get_glm5_pool_bytes_per_block(groups) == bytes_per_block
     assert (
         get_glm5_max_memory_usage(config, groups)

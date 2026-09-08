@@ -116,7 +116,9 @@ def _make_runner(config):
     runner.shared_kv_cache_layers = {}
     runner.kv_caches = []
     runner.use_sparse = False
-    runner.use_compress = True
+    # GLM-Next exposes its layout through KV specs and does not define the
+    # legacy ``compress_ratios`` config used to derive this runner flag.
+    runner.use_compress = False
     runner.use_hybrid_blocks = True
     runner.sparse_kv_offload_enabled = False
     runner.sparse_kv_offload_config = SimpleNamespace(enabled=False)

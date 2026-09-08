@@ -28,6 +28,7 @@ class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
 
     cache_role: str = "indexer_state"
     model_version: str = "glm5_next"
+    indexes_kv_by_block_stride: bool = True
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -47,6 +48,13 @@ class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
             "have the same layout and cache role."
         )
         return copy.deepcopy(specs[0])
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        del vllm_config
+        # The state group keeps only the current incomplete pool. Since its
+        # sliding window and block size are identical, one page per request is
+        # sufficient on every context-parallel rank.
+        return self.page_size_bytes
 
 
 def format_indexer_kpool_slot_mapping(
