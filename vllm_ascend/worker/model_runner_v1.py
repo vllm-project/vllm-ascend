@@ -1424,6 +1424,12 @@ class NPUModelRunner(GPUModelRunner):
         without adding any per-step device sync.
         """
         pinned = torch.from_numpy(np_arr).pin_memory()
+        if self.prepare_inputs_event is None:
+            # No event protocol armed (sync scheduling): nothing clears
+            # _pinned_keepalive in that mode, so the async form would leak
+            # one staging buffer per call. A blocking copy completes before
+            # return and needs no keepalive.
+            return pinned.to(self.device)
         dev = pinned.to(self.device, non_blocking=True)
         self._pinned_keepalive.append(pinned)
         return dev
