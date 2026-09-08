@@ -1,6 +1,6 @@
 # Diagnostic A-B-A sequence for a controlled client-concurrency comparison.
 # All measurements share one four-node allocation and one service lifetime.
-test_name: "ryk-DeepSeek-V4-Pro-w4a8-prefix-cache-PD-concurrency-aba"
+test_name: "ryk-dsv4pro-w4a8-pc-pd-aba"
 model: "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp"
 num_nodes: 4
 npu_per_node: 16

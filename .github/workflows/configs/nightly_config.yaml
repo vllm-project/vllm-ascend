@@ -106,8 +106,8 @@ a3:
         config_file_path: DeepSeek-V4-Pro-w4a8-prefix-cache-PD.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
-      - name: ryk-DeepSeek-V4-Pro-w4a8-prefix-cache-PD-concurrency-aba
-        config_file_path: ryk-DeepSeek-V4-Pro-w4a8-prefix-cache-PD-concurrency-aba.yaml
+      - name: ryk-dsv4pro-w4a8-pc-pd-aba
+        config_file_path: ryk-dsv4pro-w4a8-pc-pd-aba.yaml
         config_base_path: tests/e2e/nightly/multi_node/external_dp/config
         size: 4
       - name: GLM-5.1-w8a8c8-128k-1k-90-50-PD
