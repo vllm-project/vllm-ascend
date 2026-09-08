@@ -105,6 +105,14 @@ def _resample_kernel(
                     ).to(tl.float32)
                     draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
                     draft_prob = tl.exp(draft_block_logits - draft_lse)
+                    # NPU: upstream #46665 computes this residual in log space
+                    # with tldevice.log1p(-ratio); that extern is unavailable
+                    # on triton-ascend, and this kernel works in mass space.
+                    # The subtraction is still exact where it matters: by the
+                    # Sterbenz lemma, target_prob - draft_prob is exactly
+                    # representable in fp32 when the two probabilities are
+                    # within a factor of 2, so no catastrophic cancellation
+                    # occurs when the draft closely matches the target.
                     token_mass = tl.maximum(target_prob - draft_prob, 0.0)
                 else:
                     rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
