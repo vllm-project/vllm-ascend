@@ -479,22 +479,6 @@ class TestSetPerGroupAttnMetadata(_DSparkProposerTestBase):
         assert proposer._per_group_slot_mappings[gid] is new_slot_mapping
         assert proposer._per_group_block_tables[gid] is not old_block_table
 
-    def test_rejects_block_table_over_request_capacity(self):
-        num_reqs, block_size, max_num_tokens = 2, 5, 256
-        proposer = self._make_proposer(
-            max_num_tokens=max_num_tokens, num_reqs=num_reqs, block_size=block_size
-        )
-
-        with pytest.raises(ValueError, match="exceeds the configured request capacity"):
-            proposer.set_per_group_attn_metadata(
-                7,
-                torch.zeros((num_reqs + 1, 16), dtype=torch.int32),
-                torch.zeros(max_num_tokens, dtype=torch.int32),
-            )
-
-        assert 7 not in proposer._per_group_block_tables
-        assert 7 not in proposer._per_group_slot_mappings
-
 
 class TestPadQueryStartLocForGraph:
     @staticmethod
@@ -535,19 +519,6 @@ class TestPadQueryStartLocForGraph:
         assert query_start_loc.np[: num_metadata_reqs + 1].tolist() == expected
         assert query_start_loc.np[: num_metadata_reqs + 1].max() <= num_input_tokens
         query_start_loc.copy_to_gpu.assert_called_once_with()
-
-    def test_rejects_missing_tail_capacity(self) -> None:
-        proposer = AscendDSparkProposer.__new__(AscendDSparkProposer)
-        proposer.num_query_per_req = 7
-        query_start_loc = self._make_query_start_loc([0, 7], capacity=3)
-
-        with pytest.raises(ValueError, match="no room for the graph-padding tail"):
-            proposer.pad_query_start_loc_for_graph(
-                query_start_loc,
-                num_input_tokens=16,
-                real_num_reqs=1,
-                graph_num_reqs=2,
-            )
 
 
 class TestDSparkGraphDispatch:
@@ -1204,60 +1175,6 @@ class TestInitializeAttnBackendErrors(_DSparkProposerTestBase):
             == 384
         )
 # fmt: on
-
-
-class TestFinalizePendingReject:
-    """``AscendMLAImpl._finalize_pending_reject`` is shared by the eager FIA
-    entry and the FULL-graph replay update path. It must subtract the pending
-    reject counts exactly once per metadata object."""
-
-    @staticmethod
-    def _make_metadata(seq_lens_list, reject, num_reqs, with_event=True):
-        from vllm_ascend.attention.mla_v1 import AscendMLAImpl  # noqa: F401
-
-        return SimpleNamespace(
-            pending_reject_event=(MagicMock() if with_event else None),
-            pending_reject_cpu=torch.tensor(reject, dtype=torch.int32),
-            pending_reject_num_reqs=num_reqs,
-            reject_finalized=False,
-            decode=SimpleNamespace(seq_lens_list=list(seq_lens_list)),
-        )
-
-    def test_subtracts_reject_counts_once(self):
-        from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-
-        # parallel = (L_t + rejected_t) + N; finalize must yield L_t + N.
-        lt, n = 100, 7
-        rejected = [2, 5]
-        seq_lens_list = [lt + rejected[0] + n, lt + rejected[1] + n, 0]
-        metadata = self._make_metadata(seq_lens_list, rejected, num_reqs=2)
-
-        AscendMLAImpl._finalize_pending_reject(metadata)
-
-        assert metadata.decode.seq_lens_list == [lt + n, lt + n, 0]
-        assert metadata.reject_finalized is True
-        metadata.pending_reject_event.synchronize.assert_called_once_with()
-
-    def test_reentry_is_guarded(self):
-        from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-
-        metadata = self._make_metadata([109, 209], [2, 2], num_reqs=2)
-
-        AscendMLAImpl._finalize_pending_reject(metadata)
-        AscendMLAImpl._finalize_pending_reject(metadata)
-
-        assert metadata.decode.seq_lens_list == [107, 207]
-        metadata.pending_reject_event.synchronize.assert_called_once_with()
-
-    def test_no_event_is_noop(self):
-        from vllm_ascend.attention.mla_v1 import AscendMLAImpl
-
-        metadata = self._make_metadata([109, 209], [2, 2], num_reqs=2, with_event=False)
-
-        AscendMLAImpl._finalize_pending_reject(metadata)
-
-        assert metadata.decode.seq_lens_list == [109, 209]
-        assert metadata.reject_finalized is False
 
 
 class TestPrepareParallelDraftSeqLensCPU:

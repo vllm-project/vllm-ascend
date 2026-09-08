@@ -1092,9 +1092,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 # eager mode and must keep the generic dispatch.
                 graph_dispatch_tokens = batch_size * (1 + self.num_speculative_tokens)
             _, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
-                num_tokens=graph_dispatch_tokens,
-                uniform_decode=uniform_decode,
-                has_lora=has_lora,
+                num_tokens=graph_dispatch_tokens, uniform_decode=uniform_decode, has_lora=has_lora
             )
             num_input_tokens = batch_descriptor.num_tokens
         else:
@@ -1363,17 +1361,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             if self.enable_enpu:
                 self._update_full_graph_params_if_needed(
-                    forward_context,
-                    graph_param_num_tokens,
-                    multi_steps_attn_metadata,
+                    forward_context, graph_param_num_tokens, multi_steps_attn_metadata
                 )
                 draft_token_ids = run_draft()
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(
-                    forward_context,
-                    graph_param_num_tokens,
-                    multi_steps_attn_metadata,
+                    forward_context, graph_param_num_tokens, multi_steps_attn_metadata
                 )
         return draft_token_ids
 

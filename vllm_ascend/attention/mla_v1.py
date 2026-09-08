@@ -989,44 +989,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_layers = len(attn_keys)
         if num_layers == 0:
             return
-        if graph_params is None:
-            raise RuntimeError("MLA graph parameters were not initialized before graph replay.")
-
-        captured_attn_params = graph_params.attn_params.get(num_tokens)
-        captured_handles = graph_params.handles.get(num_tokens)
-        captured_events = graph_params.events.get(num_tokens)
-        if not captured_attn_params or not captured_handles or not captured_events:
-            populated_sizes = sorted(
-                size for size, params in graph_params.attn_params.items() if params
-            )
-            raise RuntimeError(
-                "No captured MLA graph parameters for the requested Query T: "
-                f"{num_tokens=}, populated_sizes={populated_sizes}. The graph "
-                "update key must match the Query T used during capture."
-            )
-        if not (
-            len(captured_attn_params) == len(captured_handles) == len(captured_events)
-        ):
-            raise RuntimeError(
-                "Incomplete captured MLA graph parameters for "
-                f"{num_tokens=}: attn_params={len(captured_attn_params)}, "
-                f"handles={len(captured_handles)}, events={len(captured_events)}."
-            )
         if _EXTRA_CTX.is_draft_model:
-            if len(captured_attn_params) % num_layers != 0:
-                raise RuntimeError(
-                    "Captured MLA draft attention count is not aligned with "
-                    f"the runtime layer count for {num_tokens=}: "
-                    f"captured={len(captured_attn_params)}, layers={num_layers}."
-                )
-            attn_keys = attn_keys * (len(captured_attn_params) // num_layers)
+            attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
         attn_count = 0
         with torch.npu.stream(update_stream):
             for key, param, handle, event in zip(
                 attn_keys,
-                captured_attn_params,
-                captured_handles,
-                captured_events,
+                graph_params.attn_params[num_tokens],
+                graph_params.handles[num_tokens],
+                graph_params.events[num_tokens],
             ):
                 (
                     q_nope,
@@ -1062,17 +1033,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     attn_metadata_current = attn_metadata
 
                 seq_lens_list = attn_metadata_current[key].decode.seq_lens_list
-                # The draft FULL-graph update deliberately consumes the
-                # optimistic host length (L_t + rejected_t + N) as a safe upper
-                # bound, WITHOUT the pending-reject finalize. The rejected_t
-                # over-read only attends to stale draft KV slots that the next
-                # step overwrites; it slightly degrades draft quality but can
-                # never affect the target-verified output. Subtracting the
-                # reject counts here would require a per-step host wait on the
-                # side-stream D2H event, which measurably costs TPOT
-                # (~2-3ms/step on K3 DSpark), so the graph path skips the
-                # finalize. The eager path still finalizes exactly at
-                # ``_forward_decode`` and yields L_t + N there.
                 if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = attn_metadata_current[key].decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
@@ -1707,26 +1667,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
-    @staticmethod
-    def _finalize_pending_reject(attn_metadata) -> None:
-        """Subtract the pending reject counts from ``decode.seq_lens_list`` once.
-
-        Shared by the eager ``_forward_decode`` entry and the FULL-graph
-        replay update path (``update_graph_params``). The side-stream D2H of
-        the reject counts was launched right after prepare_inputs_padded, so
-        by the time either consumer runs the copy is typically complete and
-        the event synchronize is effectively a no-op. ``reject_finalized``
-        guards re-entry across draft layers sharing one metadata object.
-        """
-        if attn_metadata.pending_reject_event is None or attn_metadata.reject_finalized:
-            return
-        attn_metadata.pending_reject_event.synchronize()
-        reject = attn_metadata.pending_reject_cpu[: attn_metadata.pending_reject_num_reqs].tolist()
-        seq_lens_list = attn_metadata.decode.seq_lens_list
-        for i in range(attn_metadata.pending_reject_num_reqs):
-            seq_lens_list[i] -= reject[i]
-        attn_metadata.reject_finalized = True
-
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -1746,7 +1686,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         # object; layers sharing this metadata skip via reject_finalized. The
         # D2H was launched right after prepare_inputs_padded, so by the first
         # attention layer the copy is typically already complete (sync no-op).
-        self._finalize_pending_reject(attn_metadata)
+        if attn_metadata.pending_reject_event is not None and not attn_metadata.reject_finalized:
+            attn_metadata.pending_reject_event.synchronize()
+            reject = attn_metadata.pending_reject_cpu[: attn_metadata.pending_reject_num_reqs].tolist()
+            seq_lens_list = decode_meta.seq_lens_list
+            for i in range(attn_metadata.pending_reject_num_reqs):
+                seq_lens_list[i] -= reject[i]
+            attn_metadata.reject_finalized = True
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.

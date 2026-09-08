@@ -222,11 +222,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             and issubclass(attn_group.backend, AscendDSABackend)
             for attn_group in self.draft_attn_groups
         )
-        if self._draft_uses_mla_backend and self._draft_uses_dsa_backend:
-            raise RuntimeError(
-                "DSpark does not support mixing MLA and DSA draft attention "
-                "backends because their host sequence-length contracts differ."
-            )
 
         self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
         self.kernel_block_size = self._per_group_kernel_block_sizes[self.kv_cache_gid]
@@ -272,11 +267,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         slot_mapping: torch.Tensor,
     ) -> None:
         num_rows = block_table.shape[0]
-        if num_rows > self.max_batch_size:
-            raise ValueError(
-                "DSpark block table exceeds the configured request capacity: "
-                f"{num_rows=} > max_batch_size={self.max_batch_size}."
-            )
         self._per_group_block_tables[gid] = block_table
         self._per_group_slot_mappings[gid] = slot_mapping
         buffer = self._per_group_block_table_buffers.get(gid)
@@ -512,36 +502,10 @@ class AscendDSparkProposer(AscendDflashProposer):
         ``num_query_tokens``.  Other DSpark backends keep using the target
         width because their captured attention query includes graph padding.
         """
-        if real_num_reqs < 0 or graph_num_reqs < real_num_reqs:
-            raise ValueError(
-                "DSpark graph metadata requires "
-                f"0 <= real_num_reqs <= graph_num_reqs, got "
-                f"{real_num_reqs=} and {graph_num_reqs=}."
-            )
-
         if num_query_tokens is None:
             num_query_tokens = num_input_tokens
-        if not 0 <= num_query_tokens <= num_input_tokens:
-            raise ValueError(
-                "DSpark graph Query T must fit in the target graph token "
-                f"budget, got {num_query_tokens=} and {num_input_tokens=}."
-            )
-
-        capacity = query_start_loc.np.shape[0]
-        if graph_num_reqs + 1 > capacity:
-            raise ValueError(
-                "DSpark query_start_loc buffer is too small for graph "
-                f"metadata: need at least {graph_num_reqs + 1} entries, "
-                f"got {capacity}."
-            )
 
         last_loc = int(query_start_loc.np[real_num_reqs])
-        if not 0 <= last_loc <= num_query_tokens:
-            raise ValueError(
-                "DSpark query_start_loc is inconsistent with the captured "
-                f"attention Query T: last real offset {last_loc}, "
-                f"{num_query_tokens=}."
-            )
         num_metadata_reqs = real_num_reqs
 
         for req_idx in range(real_num_reqs, graph_num_reqs):
@@ -550,12 +514,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_metadata_reqs += 1
 
         if last_loc < num_query_tokens:
-            if num_metadata_reqs + 1 >= capacity:
-                raise ValueError(
-                    "DSpark query_start_loc buffer has no room for the "
-                    f"graph-padding tail: need {num_metadata_reqs + 2} "
-                    f"entries, got {capacity}."
-                )
             query_start_loc.np[num_metadata_reqs + 1] = num_query_tokens
             num_metadata_reqs += 1
 
@@ -571,15 +529,7 @@ class AscendDSparkProposer(AscendDflashProposer):
         if not isinstance(self.draft_model_config.hf_config, K3DSparkConfig):
             return num_input_tokens
 
-        if graph_num_reqs < 0:
-            raise ValueError(f"DSpark graph request count must be non-negative, got {graph_num_reqs=}.")
-        num_query_tokens = graph_num_reqs * self.num_query_per_req
-        if num_query_tokens > num_input_tokens:
-            raise ValueError(
-                "K3 DSpark MLA Query T exceeds its target graph bucket: "
-                f"{num_query_tokens=} > {num_input_tokens=}."
-            )
-        return num_query_tokens
+        return graph_num_reqs * self.num_query_per_req
 
     @torch.inference_mode()
     def dummy_run(
@@ -594,19 +544,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         **kwargs,
     ) -> None:
         num_query_total = num_reqs * self.num_query_per_req
-        if num_reqs > 0 and num_query_total > self.max_query_tokens:
-            raise ValueError(
-                "DSpark graph capture exceeds the allocated query capacity: "
-                f"{num_query_total=} > max_query_tokens={self.max_query_tokens}."
-            )
         num_query_tokens = num_query_total if num_reqs > 0 else num_tokens
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and batch_descriptor is not None:
             num_query_tokens = batch_descriptor.num_tokens
-        if num_reqs > 0 and num_query_tokens > self.max_query_tokens:
-            raise ValueError(
-                "DSpark graph bucket exceeds the allocated query capacity: "
-                f"{num_query_tokens=} > max_query_tokens={self.max_query_tokens}."
-            )
         num_query_tokens = min(num_query_tokens, self.max_query_tokens)
 
         (
@@ -614,13 +554,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
-
-        if not num_query_total <= num_input_tokens <= self.max_query_tokens:
-            raise ValueError(
-                "DSpark synchronized token budget is outside the allocated "
-                f"query range: {num_query_total=} <= {num_input_tokens=} <= "
-                f"max_query_tokens={self.max_query_tokens} is required."
-            )
 
         graph_query_tokens = self.get_graph_query_num_tokens(
             num_input_tokens,
