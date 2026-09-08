@@ -77,6 +77,39 @@ def test_execute_model_disables_profiling_timer_and_clears_stale_time():
     mock_perf_counter.assert_not_called()
 
 
+def test_execute_model_uses_post_norm_hidden_state_for_pard2_final_layer():
+    runner = _make_runner(need_timing=False)
+    runner._uses_pard2 = True
+    runner.speculative_config = SimpleNamespace(
+        draft_model_config=SimpleNamespace(
+            hf_config=SimpleNamespace(
+                eagle_aux_hidden_state_layer_ids=[4, 8],
+            )
+        )
+    )
+    runner.model_config = SimpleNamespace(hf_text_config=SimpleNamespace(num_hidden_layers=8))
+
+    post_norm = torch.randn(2, 3)
+    first_aux = torch.randn(2, 3)
+    pre_norm_final = torch.randn(2, 3)
+    state = Mock(
+        hidden_states=post_norm,
+        aux_hidden_states=[first_aux, pre_norm_final],
+    )
+    updated_state = object()
+    state._replace.return_value = updated_state
+    runner.execute_model_state = state
+
+    with patch.object(GPUModelRunner, "execute_model", return_value=None):
+        runner.execute_model(SimpleNamespace(disable_profiling_timing=True))
+
+    state._replace.assert_called_once()
+    updated_aux = state._replace.call_args.kwargs["aux_hidden_states"]
+    assert updated_aux[0] is first_aux
+    assert updated_aux[1] is post_norm
+    assert runner.execute_model_state is updated_state
+
+
 def test_full_decode_only_keeps_graph_descriptor_request_count():
     runner = _make_runner()
     runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)

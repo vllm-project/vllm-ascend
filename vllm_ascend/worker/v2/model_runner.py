@@ -102,6 +102,13 @@ class NPUModelRunner(GPUModelRunner):
             if pp_disabled:
                 restore_pp_after_upstream_init(self, vllm_config)
         self.use_spec_pp = spec_pp_support is not None
+        self._uses_pard2 = self.speculative_config is not None and self.speculative_config.method == "pard2"
+        if self._uses_pard2:
+            if self.use_pp:
+                raise ValueError(
+                    "PARD-2 with pipeline parallelism is not supported by the initial Ascend MRV2 implementation."
+                )
+            self.use_aux_hidden_state_outputs = True
         # These draft heads consume target aux states collected across PP ranks.
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
@@ -186,6 +193,31 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_tokens_capacity(vllm_config, self.max_num_reqs, self.decode_query_len)
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
+
+    def _replace_pard2_final_aux_hidden_state(self) -> None:
+        """Use the target's post-norm output for PARD-2's final aux layer."""
+        if not getattr(self, "_uses_pard2", False) or self.execute_model_state is None:
+            return
+
+        state = self.execute_model_state
+        aux_hidden_states = state.aux_hidden_states
+        hidden_states = state.hidden_states
+        if not aux_hidden_states or hidden_states is None:
+            return
+
+        draft_config = self.speculative_config.draft_model_config.hf_config
+        aux_layer_ids = getattr(
+            draft_config,
+            "eagle_aux_hidden_state_layer_ids",
+            (),
+        )
+        final_layer_id = self.model_config.hf_text_config.num_hidden_layers
+        if final_layer_id not in aux_layer_ids:
+            return
+
+        updated_aux_hidden_states = list(aux_hidden_states)
+        updated_aux_hidden_states[-1] = hidden_states
+        self.execute_model_state = state._replace(aux_hidden_states=updated_aux_hidden_states)
 
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
@@ -276,6 +308,8 @@ class NPUModelRunner(GPUModelRunner):
             is_profile=is_profile,
             context_len=context_len,
         )
+
+        self._replace_pard2_final_aux_hidden_state()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,

@@ -29,6 +29,12 @@ def init_speculator(
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.method == "pard2":
+        from vllm_ascend.worker.v2.spec_decode.eagle.speculator import (
+            AscendPard2Speculator,
+        )
+
+        return AscendPard2Speculator(vllm_config, device)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,
