@@ -31,6 +31,10 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.utils import CpuGpuBuffer
 
 from vllm_ascend.ascend_config import SparseKVOffloadConfig, get_ascend_config
+from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.mooncake_host_pool import (
+    HostPoolTopology,
+    MooncakeHostPool,
+)
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
 # Main BF16 cache:
@@ -51,7 +55,7 @@ class HostKVAllocator(typing.Protocol):
         self,
         sizes: list[int],
         alignment: int,
-    ) -> list[torch.Tensor]: ...
+    ) -> list[torch.Tensor | None]: ...
 
     def close(self) -> None: ...
 
@@ -206,6 +210,33 @@ def empty_aligned_int8_cpu_tensors(
         allocate_tensors.append(raw_tensor[base_offset : base_offset + size])
         base_offset += chunk_num * alignment
     return allocate_tensors
+
+
+class MemFabricHostKVAllocator:
+    """HostKVAllocator implementation over the legacy MemFabric backend.
+
+    The MemFabric pool is prepared once by `offload.initialize` in
+    prepare_host_kv_allocation and only tp_rank 0 allocates per-layer
+    tensors; other ranks receive None and rely on the tp0 pointer
+    broadcast in register_kv_caches.
+    """
+
+    def __init__(self, tp_rank: int) -> None:
+        self._tp_rank = tp_rank
+
+    def allocate_tensors(
+        self,
+        sizes: list[int],
+        alignment: int,
+    ) -> list[torch.Tensor | None]:
+        if self._tp_rank == 0:
+            return empty_aligned_int8_cpu_tensors(sizes, alignment)
+        return [None for _ in sizes]
+
+    def close(self) -> None:
+        # MemFabric pool is process-scoped and owned by the offload
+        # runtime; there is nothing per-allocator to release.
+        return None
 
 
 @dataclass(frozen=True)
@@ -508,6 +539,7 @@ class SparseKVOffloadManager:
         self.topk_buffer_size = sparse_kv_offload_config.topk_buffer_size
         self.topk = sparse_kv_offload_config.topk
         self.use_fused_overlap = sparse_kv_offload_config.use_fused_overlap
+        self.host_backend = sparse_kv_offload_config.host_backend
 
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -576,19 +608,45 @@ class SparseKVOffloadManager:
         if self._host_allocation_prepared:
             return
 
-        # dp_rank is part of the backend-neutral contract. The existing
-        # MemFabric allocator does not need it.
-        del dp_rank
-        config = offload.OffloadConfig()
-        config.device_id = device_id
-        config.reserve_size = self.host_pool_size_bytes
-        config.alloc_size = self.host_pool_size_bytes if self.tp_rank == 0 else 0
-        config.world_size = self.tp_size
-        config.rank_id = self.tp_rank
-        config.scene = offload.Scene.SHARED
-        assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
-        self.tp_group.barrier()
-        self._host_allocation_prepared = True
+        if self.host_backend == "mooncake":
+            topology = HostPoolTopology(
+                tp_rank=self.tp_rank,
+                tp_size=self.tp_size,
+                owner_rank=0,
+                device_id=device_id,
+                dp_rank=dp_rank,
+                tp_group=self.tp_group,
+            )
+            self._host_kv_allocator = MooncakeHostPool.allocate(
+                size_bytes=self.host_pool_size_bytes,
+                alignment=_CPU_CACHE_ALIGNMENT,
+                topology=topology,
+            )
+            self._host_allocation_prepared = True
+            logger.info(
+                "Sparse KV offload selected Mooncake Host backend: pool=%.2f GiB, tp=%s/%s, dp=%s, owner=%s.",
+                self.host_pool_size_bytes / (1 << 30),
+                self.tp_rank,
+                self.tp_size,
+                dp_rank,
+                topology.owner_rank,
+            )
+        elif self.host_backend == "memfabric":
+            # MemFabric: process-wide pool prepared here; dp_rank is part of
+            # the backend-neutral contract but unused by this backend.
+            config = offload.OffloadConfig()
+            config.device_id = device_id
+            config.reserve_size = self.host_pool_size_bytes
+            config.alloc_size = self.host_pool_size_bytes if self.tp_rank == 0 else 0
+            config.world_size = self.tp_size
+            config.rank_id = self.tp_rank
+            config.scene = offload.Scene.SHARED
+            assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
+            self.tp_group.barrier()
+            self._host_kv_allocator = MemFabricHostKVAllocator(self.tp_rank)
+            self._host_allocation_prepared = True
+        else:
+            raise ValueError(f"Unsupported sparse KV offload Host backend: {self.host_backend!r}")
 
     def allocate_host_kv_tensors(
         self,
@@ -596,13 +654,10 @@ class SparseKVOffloadManager:
         alignment: int,
     ) -> list[torch.Tensor | None]:
         """Allocate one layer's Host K/V through the prepared allocator."""
-        if not self._host_allocation_prepared:
+        allocator = self._host_kv_allocator
+        if allocator is None:
             raise RuntimeError("prepare_host_kv_allocation must run before Host KV allocation")
-        if self._host_kv_allocator is not None:
-            return self._host_kv_allocator.allocate_tensors(sizes, alignment)
-        if self.tp_rank == 0:
-            return empty_aligned_int8_cpu_tensors(sizes, alignment)
-        return [None for _ in sizes]
+        return allocator.allocate_tensors(sizes, alignment)
 
     def close(self) -> None:
         """Release backend-owned Host KV resources."""
@@ -788,9 +843,8 @@ class SparseKVOffloadManager:
     ):
         self._register_offload_layers(kv_caches)
 
-        # HostKVAllocator-backed pools give every TP rank local Host KV views,
-        # while the legacy MemFabric path only allocates on tp_rank == 0.
-        uses_host_allocator = self._host_kv_allocator is not None
+        # Mooncake hands every TP rank local Host KV views; MemFabric uses tp0 allocation + pointer broadcast.
+        uses_local_views = self.host_backend == "mooncake"
 
         # register topk_buffer and cpu kv_cache
         self.topk_buffers_k: list[torch.Tensor] = []
@@ -807,7 +861,7 @@ class SparseKVOffloadManager:
                 )
             self.topk_buffers_k.append(cache_or_caches[OFFLOAD_TOPK_BUFFER_K_INDEX])
             self.topk_buffers_v.append(cache_or_caches[OFFLOAD_TOPK_BUFFER_V_INDEX])
-            if uses_host_allocator or self.tp_rank == 0:
+            if uses_local_views or self.tp_rank == 0:
                 self.k_caches_cpu.append(cache_or_caches[OFFLOAD_K_CACHE_CPU_INDEX])
                 self.v_caches_cpu.append(cache_or_caches[OFFLOAD_V_CACHE_CPU_INDEX])
 
@@ -876,7 +930,7 @@ class SparseKVOffloadManager:
         self.gvas_k_bases: list[int] = []
         self.gvas_v_bases: list[int] = []
         self.cpu_block_lens: list[tuple[int, int]] = []
-        if uses_host_allocator:
+        if uses_local_views:
             # HostKVAllocator gave every rank local Host KV views: use them
             # directly instead of broadcasting the tp0 pointers.
             for layer_id in range(self.num_layers):

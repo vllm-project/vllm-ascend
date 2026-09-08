@@ -738,6 +738,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 "dram_size_per_dp_GB": "64",
                 "keep_device_kv_cache": "false",
                 "use_fused_overlap": "true",
+                "host_backend": "mooncake",
             },
         )
 
@@ -746,6 +747,72 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertEqual(config.dram_size_per_dp_GB, 64)
         self.assertFalse(config.keep_device_kv_cache)
         self.assertTrue(config.use_fused_overlap)
+        self.assertEqual(config.host_backend, "mooncake")
+
+    def test_sparse_kv_host_backend_defaults_to_memfabric(self):
+        config = SparseKVOffloadConfig.from_additional_config(
+            SimpleNamespace(),
+            {"enabled": "false"},
+        )
+        self.assertEqual(config.host_backend, "memfabric")
+
+    def test_invalid_sparse_kv_host_backend_is_rejected(self):
+        with self.assertRaises(ValueError):
+            SparseKVOffloadConfig.from_additional_config(
+                SimpleNamespace(),
+                {"enabled": "false", "host_backend": "unknown"},
+            )
+
+    def test_mooncake_host_backend_requires_fused_overlap(self):
+        with self.assertRaisesRegex(ValueError, "requires use_fused_overlap"):
+            SparseKVOffloadConfig.from_additional_config(
+                SimpleNamespace(),
+                {"enabled": "true", "host_backend": "mooncake"},
+            )
+
+    def test_mooncake_host_backend_rejects_colocate_staging(self):
+        with self.assertRaisesRegex(ValueError, "keep_device_kv_cache"):
+            SparseKVOffloadConfig.from_additional_config(
+                SimpleNamespace(),
+                {
+                    "enabled": "true",
+                    "host_backend": "mooncake",
+                    "use_fused_overlap": "true",
+                    "keep_device_kv_cache": "true",
+                },
+            )
+
+    def test_mooncake_host_backend_valid_config_passes_validation(self):
+        vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=128)),
+            parallel_config=SimpleNamespace(
+                prefill_context_parallel_size=1,
+                decode_context_parallel_size=1,
+                pipeline_parallel_size=1,
+            ),
+            kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+            use_v2_model_runner=False,
+        )
+
+        config = SparseKVOffloadConfig.from_additional_config(
+            vllm_config,
+            {
+                "enabled": "true",
+                "host_backend": "mooncake",
+                "use_fused_overlap": "true",
+                "keep_device_kv_cache": "false",
+            },
+        )
+
+        self.assertEqual(config.host_backend, "mooncake")
+
+    def test_mooncake_validation_skipped_when_disabled(self):
+        config = SparseKVOffloadConfig.from_additional_config(
+            SimpleNamespace(),
+            {"enabled": "false", "host_backend": "mooncake"},
+        )
+
+        self.assertEqual(config.host_backend, "mooncake")
 
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):

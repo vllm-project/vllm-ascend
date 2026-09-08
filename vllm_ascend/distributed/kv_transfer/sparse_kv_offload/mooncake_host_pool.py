@@ -46,7 +46,6 @@ class HostMemoryRegion:
 
     tensor: torch.Tensor
     handle: Any = None
-    register_location: str | None = None
     release_callback: Callable[[Any], None] | None = None
     _released: bool = field(default=False, init=False)
 
@@ -68,8 +67,6 @@ def _select_shared_segment_mode() -> tuple[bool, bool]:
             "Mooncake shared_segment support is required for sparse KV offload with the Mooncake Host backend"
         ) from exc
 
-    if shared_segment_supported(mmap=False):
-        return False, False
     if shared_segment_supported(mmap=True, host_register=True):
         return True, True
     raise RuntimeError("Mooncake shared_segment cannot expose an NPU-addressable address")
@@ -147,7 +144,6 @@ def allocate_mooncake_host_region(
     return HostMemoryRegion(
         tensor=aligned,
         handle=segment,
-        register_location=f"npu:{topology.device_id}",
     )
 
 
@@ -166,7 +162,6 @@ class MooncakeHostPool:
         self.region = region
         self.topology = topology
         self._offset = 0
-        self._registered_engine: Any = None
         self._closed = False
 
     @classmethod
@@ -196,10 +191,6 @@ class MooncakeHostPool:
     def nbytes(self) -> int:
         return self.region.tensor.numel()
 
-    @property
-    def is_owner(self) -> bool:
-        return self.topology.tp_rank == self.topology.owner_rank
-
     def allocate_tensors(
         self,
         sizes: list[int],
@@ -221,64 +212,8 @@ class MooncakeHostPool:
             self._offset = end
         return tensors
 
-    def register(self, engine: Any) -> None:
-        if self._closed:
-            raise RuntimeError("cannot register a closed Mooncake Host pool")
-        if not self.is_owner:
-            raise RuntimeError(
-                "only the owner rank may register the Mooncake Host pool: "
-                f"rank={self.topology.tp_rank}, owner={self.topology.owner_rank}"
-            )
-        if self._registered_engine is engine:
-            return
-        if self._registered_engine is not None:
-            raise RuntimeError("Mooncake Host pool is already registered")
-        location = self.region.register_location
-        if location is None:
-            result = engine.register_memory(self.data_ptr, self.nbytes)
-        else:
-            try:
-                result = engine.register_memory(
-                    self.data_ptr,
-                    self.nbytes,
-                    location=location,
-                )
-            except TypeError:
-                result = engine.register_memory(
-                    self.data_ptr,
-                    self.nbytes,
-                    location,
-                )
-        if result not in (0, None):
-            raise RuntimeError(
-                "Mooncake register_memory failed for sparse KV Host pool: "
-                f"result={result}, ptr=0x{self.data_ptr:x}, size={self.nbytes}"
-            )
-        self._registered_engine = engine
-
-    def unregister(self) -> None:
-        if self._registered_engine is None:
-            return
-        unregister_memory = getattr(
-            self._registered_engine,
-            "unregister_memory",
-            None,
-        )
-        if unregister_memory is None:
-            raise RuntimeError("Mooncake engine must unregister the Host pool before release")
-        try:
-            result = unregister_memory(self.data_ptr)
-        except TypeError:
-            result = unregister_memory(self.data_ptr, self.nbytes)
-        if result not in (0, None):
-            raise RuntimeError(
-                f"Mooncake unregister_memory failed for sparse KV Host pool: result={result}, ptr=0x{self.data_ptr:x}"
-            )
-        self._registered_engine = None
-
     def close(self) -> None:
         if self._closed:
             return
-        self.unregister()
         self.region.release()
         self._closed = True
