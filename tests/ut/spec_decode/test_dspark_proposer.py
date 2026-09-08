@@ -42,6 +42,39 @@ from vllm_ascend.worker.device_metadata import DeviceMetadataStage, DeviceMetada
 # 0 = single-DP (no padding); >0 = multi-DP where num_input_tokens >
 # num_query_total, the out-of-bounds regime.
 MULTI_DP_PADDING_SIZES = [0, 8, 32]
+
+
+@pytest.mark.parametrize("replicated", [False, True])
+def test_draft_config_keeps_pd_connector_owned_by_target(replicated):
+    proposer = object.__new__(AscendDSparkProposer)
+    connector = SimpleNamespace(prefill_dp_size=2)
+    base = SimpleNamespace(kv_transfer_config=connector)
+    parallel = SimpleNamespace(rank=0, decode_context_parallel_size=2)
+    proposer.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(rank=3))
+    proposer.speculative_config = SimpleNamespace(
+        draft_parallel_config=parallel, draft_model_config=object()
+    )
+    with (
+        patch.object(AscendSpecDecodeBaseProposer, "_create_draft_vllm_config", return_value=base),
+        patch.object(AscendDSparkProposer, "_uses_dcp_replicated_draft_kv", return_value=replicated),
+        patch("vllm_ascend.spec_decode.dspark_proposer.replace") as replace_config,
+    ):
+        result = proposer._create_draft_vllm_config()
+    if replicated:
+        assert result is replace_config.return_value
+        overrides = replace_config.call_args.kwargs
+        assert overrides["kv_transfer_config"] is None
+        assert overrides["parallel_config"].decode_context_parallel_size == 1
+        assert overrides["parallel_config"].rank == 3
+    else:
+        assert result is base
+        replace_config.assert_not_called()
+    assert base.kv_transfer_config is connector
+    assert connector.prefill_dp_size == 2
+    assert parallel.decode_context_parallel_size == 2
+    assert parallel.rank == 0
+
+
 _NUM_SPECULATIVE_TOKENS = 3
 _MAX_BATCH_SIZE = 2
 _MAX_NUM_TOKENS = 8

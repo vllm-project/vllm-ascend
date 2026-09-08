@@ -185,6 +185,10 @@ class AscendDSparkProposer(AscendDflashProposer):
             base,
             model_config=spec_config.draft_model_config,
             parallel_config=draft_parallel_config,
+            # The target runner owns the PD connector and transfers all cache
+            # groups. The model-only draft config must not validate that
+            # connector's target topology against its local DP/DCP settings.
+            kv_transfer_config=None,
         )
 
     def _build_replicated_block_table(
