@@ -37,7 +37,7 @@ public:
     __aicore__ inline void CopyInDataR(LocalTensor<R> &xUb, GlobalTensor<R> &xGm, int64_t blockCout, int64_t blockLen, int64_t gmOffset, int64_t ubOffset);
     __aicore__ inline void SetGatherSrcOffset(LocalTensor<int32_t> &idsUb, int64_t count);
     __aicore__ inline void ComputeMul(LocalTensor<float> &dtsUb, LocalTensor<float> & src0Ub, LocalTensor<float> &src1Ub, int64_t onceA, int64_t numHead,int64_t headDim);
-    __aicore__ inline void  InterleavedInversion(int64_t count,LocalTensor<float> &ub);
+    __aicore__ inline void  InterleavedInversion(int64_t count,LocalTensor<float> &ub, bool negateSin = false);
     __aicore__ inline void DataCopyOut(LocalTensor<T> &yUb, GlobalTensor<T> &xGm, int64_t blockCout, int64_t blockLen, int64_t gmOffset, int64_t ubOffset);
 private:
     TPipe* pipe_;
@@ -195,15 +195,17 @@ __aicore__ inline void InplacePartialRotaryMulABA<T, isBrc, R>::ComputeMul(Local
     PipeBarrier<PIPE_V>();
 }
 template <typename T, bool isBrc, typename R>
-__aicore__ inline void InplacePartialRotaryMulABA<T, isBrc, R>::InterleavedInversion(int64_t count,LocalTensor<float> &ub)
+__aicore__ inline void InplacePartialRotaryMulABA<T, isBrc, R>::InterleavedInversion(int64_t count,LocalTensor<float> &ub, bool negateSin)
 {
-    // 做奇数位的*-1
+    // Negate the odd positions by default; when negateSin is set, negate the
+    // even positions instead (complement of the default 0x5555 mask), which is
+    // equivalent to negating sin up front as in the legacy Python-side path
     SetMaskNorm();
     int64_t fp32Mask = 64;
     int64_t repeatTimes = count / 64;
     int64_t remain = count % 64;
-    uint64_t fullMask = 0x5555555555555555; //0101010101010101
-    uint64_t tailMask = 0x55;
+    uint64_t fullMask = negateSin ? 0xAAAAAAAAAAAAAAAA : 0x5555555555555555; //0101010101010101
+    uint64_t tailMask = negateSin ? 0xAA : 0x55;
     SetVectorMask<float, MaskMode::NORMAL>(0, fullMask);
     Muls<float, false>(ub, ub, -1.0f, MASK_PLACEHOLDER, repeatTimes, {1,1,8,8});
     if (remain != 0) {
@@ -283,7 +285,7 @@ __aicore__ inline void InplacePartialRotaryMulABA<T, isBrc, R>::Process()
         ComputeMul(xUbFp32 , xUbFp32, r2UbFp32, ubSize, numHead_,headDim_);
         r1Que_.FreeTensor(r1Ub);
         r2Que_.FreeTensor(r2Ub);
-        InterleavedInversion(xtotalNum, xUbFp32);
+        InterleavedInversion(xtotalNum, xUbFp32, tiling_->negateSin != 0);
         // 做最后的Add
         Add(yUbFp32, yUbFp32, xUbFp32, xtotalNum);
         xQue_.FreeTensor(xUb);
