@@ -47,7 +47,7 @@ def _enable_a5_add_rms_norm_bias(x: torch.Tensor) -> bool:
     bootstrap_custom_op_env(include_vendor_lib=True)
     # Explicit opt-in must report a missing build instead of silently benchmarking
     # the baseline. Keep the global custom-op enablement unchanged on A5.
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
+    import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401
 
     return True
 
