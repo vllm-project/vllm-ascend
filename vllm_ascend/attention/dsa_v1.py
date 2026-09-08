@@ -25,6 +25,7 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
     get_dsa_attn_kv_plan,
     is_a5_bf16_kv_enabled,
 )
+from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     enable_pcp,
@@ -36,7 +37,7 @@ from vllm_ascend.attention.utils import (
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
-from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
@@ -194,6 +195,17 @@ def _is_w8a8_dynamic(linear) -> bool:
 
 def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
+
+
+# The explicit sparse SWA template uses indices to express draft visibility.
+_DRAFT_SPARSE_FLASH_MLA_KWARGS = dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=3, ori_win_left=0, ori_win_right=0)
+
+
+def _draft_uses_sparse_flash_mla(vllm_config: VllmConfig) -> bool:
+    return (
+        get_dsa_attn_kv_plan(vllm_config).uses_sparse_flash_mla
+        or get_current_hardware_profile().device_adaptor_family == DeviceAdaptorFamily.STANDARD
+    )
 
 
 def _dsa_layout_kv(vllm_config: VllmConfig) -> str:
@@ -357,6 +369,8 @@ class AscendDSAReqMetadata:
     ori_win_left: int | None = None
     ori_win_right: int | None = None
     dspark_swa_indices: torch.Tensor | None = None
+    dspark_swa_topk_lengths: torch.Tensor | None = None
+    use_sparse_flash_mla_for_draft: bool = False
     vision_swa_indices: torch.Tensor | None = None
 
 
@@ -424,11 +438,16 @@ def build_dspark_swa_indices(
     index_width: int | None = None,
     indices_output: torch.Tensor | None = None,
     buffer: torch.Tensor | None = None,
+    logical_indices: bool = False,
+    lengths_output: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build DSpark non-causal visible slot ids for a paged SWA cache.
 
     Each token in a draft block sees the trailing context window plus the
     whole current draft block. Invalid/padded rows get lens=0 and -1 slots.
+    ``logical_indices=True`` returns logical positions and [T, 1] lengths
+    for SparseFlashMla; the default preserves physical slots and [T] lengths.
+    ``lengths_output`` optionally supplies the active persistent length view.
 
     When ``buffer`` is given, the per-token slots are copied into its leading
     rows and the returned tensor is a slice view of ``buffer``. This keeps the
@@ -456,13 +475,17 @@ def build_dspark_swa_indices(
     cols = torch.arange(index_width, device=start_pos.device)
     col_mask = cols[None, :] < visible_lens[:, None]
     pos = start_pos[:, None] + cols[None, :]
-    block_nums = pos // block_size
-    # Clamp to valid block-table columns so gather never goes OOB on the
-    # out-of-range columns (their results are discarded by col_mask anyway).
-    safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
-    block_offsets = pos % block_size
-    block_ids = torch.gather(block_table, 1, safe_nums)
-    slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
+    if logical_indices:
+        # SparseFlashMla resolves positions through ori_block_table itself.
+        slot_ids = pos.to(torch.int32)
+    else:
+        block_nums = pos // block_size
+        # Clamp to valid block-table columns so gather never goes OOB on the
+        # out-of-range columns (their results are discarded by col_mask anyway).
+        safe_nums = block_nums.clamp(min=0, max=int(block_table.shape[1]) - 1)
+        block_offsets = pos % block_size
+        block_ids = torch.gather(block_table, 1, safe_nums)
+        slot_ids = (block_ids * block_size + block_offsets).to(torch.int32)
     slot_ids = slot_ids.where(col_mask, torch.full_like(slot_ids, -1))
 
     per_token_slots = torch.repeat_interleave(slot_ids, query_lens, dim=0, output_size=num_decode_tokens).unsqueeze(1)
@@ -488,6 +511,14 @@ def build_dspark_swa_indices(
         )
         buffer[:num_rows].copy_(per_token_slots)
         per_token_slots = buffer[:num_rows]
+
+    if logical_indices:
+        per_token_lens = per_token_lens.unsqueeze(1)
+        if lengths_output is not None:
+            if lengths_output.shape != per_token_lens.shape:
+                raise ValueError("DSpark topk lengths output must have shape [num_tokens, 1]")
+            lengths_output.copy_(per_token_lens)
+            per_token_lens = lengths_output
 
     return per_token_slots, per_token_lens
 
@@ -606,6 +637,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.decode_threshold = 1
         self.spec_slot_mapping = None
         self.dspark_swa_indices_buffer: torch.Tensor | None = None
+        self.dspark_swa_topk_lengths_buffer: torch.Tensor | None = None
         if get_current_hardware_profile().supports(HardwareCapability.FP8_ATTENTION) and not is_a5_bf16_kv_enabled(
             vllm_config
         ):
@@ -640,6 +672,10 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 dtype=torch.int32,
                 device=self.device,
             )
+            if _draft_uses_sparse_flash_mla(self.vllm_config):
+                self.dspark_swa_topk_lengths_buffer = torch.zeros(
+                    (max_dspark_rows, 1), dtype=torch.int32, device=self.device
+                )
             self.decode_threshold += spec_token_num
             assert self.decode_threshold <= 16, (
                 f"decode_threshold exceeded \
@@ -1014,6 +1050,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             device=self.device,
         )
 
+        if _draft_uses_sparse_flash_mla(self.vllm_config):
+            self.dspark_swa_topk_lengths_buffer = torch.empty(
+                (max_num_tokens, 1), dtype=torch.int32, device=self.device
+            )
+
     def take_device_metadata_tasks(self) -> tuple[DeviceMetadataTask, ...]:
         tasks = self._device_metadata_tasks
         self._device_metadata_tasks = ()
@@ -1314,11 +1355,20 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         has_prefill = self.num_prefills > 0
 
         dspark_swa_indices = None
+        dspark_swa_topk_lengths = None
+        use_sparse_flash = (
+            not common_attn_metadata.causal
+            and self.compressor_ratio <= 1
+            and _draft_uses_sparse_flash_mla(self.vllm_config)
+        )
         build_dspark_swa = None
         ori_win_left = self.model_config.hf_config.sliding_window - 1
         ori_win_right = 0
         if not common_attn_metadata.causal:
             assert self.speculative_config is not None
+            if use_sparse_flash:
+                assert self.dspark_swa_topk_lengths_buffer is not None
+                dspark_swa_topk_lengths = self.dspark_swa_topk_lengths_buffer[: self.num_actual_tokens]
             dspark_swa_args = (
                 self.block_table[:num_reqs],
                 self.speculative_config.num_speculative_tokens,
@@ -1342,38 +1392,55 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 build_dspark_swa = lambda: build_dspark_swa_indices(
                     *dspark_swa_args,
                     indices_output=dspark_swa_indices,
+                    logical_indices=use_sparse_flash,
+                    lengths_output=dspark_swa_topk_lengths,
                 )
             else:
-                dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
+                dspark_swa_indices, _ = build_dspark_swa_indices(
+                    *dspark_swa_args,
+                    buffer=self.dspark_swa_indices_buffer if use_sparse_flash else None,
+                    logical_indices=use_sparse_flash,
+                    lengths_output=dspark_swa_topk_lengths,
+                )
                 dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 
-        cu_seqlens_ori_kv = (
-            query_start_loc
-            if has_prefill
-            else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
-                None,
-                "draft_cu_seqlens_ori_kv",
-                seq_lens,
-                num_reqs,
-                self._zero_i32,
-                self.cu_seqlens_ori_kv,
+        cu_seqlens_ori_kv = None
+        cu_seqlens_cmp_kv = None
+        if not use_sparse_flash:
+            cu_seqlens_ori_kv = (
+                query_start_loc
+                if has_prefill
+                else DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
+                    None,
+                    "draft_cu_seqlens_ori_kv",
+                    seq_lens,
+                    num_reqs,
+                    self._zero_i32,
+                    self.cu_seqlens_ori_kv,
+                )
             )
-        )
-        cu_seqlens_cmp_kv = (
-            None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
-        )
+            cu_seqlens_cmp_kv = (
+                None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
+            )
         kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
         metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
         metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+        if use_sparse_flash:
+            assert dspark_swa_indices is not None
+            metadata_op = sparse_flash_mla_metadata
+            metadata_kwargs.update(_DRAFT_SPARSE_FLASH_MLA_KWARGS)
+            metadata_kwargs.update(
+                ori_topk_length=dspark_swa_topk_lengths,
+                ori_topk=dspark_swa_indices.shape[-1],
+            )
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
 
         def build_attention_metadata() -> torch.Tensor:
             if build_dspark_swa is not None:
                 build_dspark_swa()
-            result = metadata_op(
-                **metadata_kwargs,
+            call_kwargs = dict(
                 num_heads_q=n_local_heads,
                 num_heads_kv=1,
                 head_dim=self.model_config.get_head_size(),
@@ -1395,6 +1462,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 has_ori_kv=True,
                 has_cmp_kv=False,
             )
+            call_kwargs.update(metadata_kwargs)
+            result = metadata_op(**call_kwargs)
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
                 self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
@@ -1437,6 +1506,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            dspark_swa_topk_lengths=dspark_swa_topk_lengths,
+            use_sparse_flash_mla_for_draft=use_sparse_flash,
         )
 
     def build_for_graph_capture(
@@ -2209,7 +2280,17 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             attn_kwargs["ori_sparse_indices"] = swa_req_metadata.vision_swa_indices
 
         if self.compress_ratio <= 1:
-            if swa_req_metadata.dspark_swa_indices is not None:
+            if common_metadata.use_sparse_flash_mla_for_draft:
+                assert common_metadata.dspark_swa_indices is not None
+                assert common_metadata.dspark_swa_topk_lengths is not None
+                attn_op = sparse_flash_mla
+                attn_kwargs.update(_DRAFT_SPARSE_FLASH_MLA_KWARGS)
+                attn_kwargs.update(
+                    ori_sparse_indices=common_metadata.dspark_swa_indices,
+                    ori_topk_length=common_metadata.dspark_swa_topk_lengths,
+                    topk_value_mode=1,
+                )
+            elif swa_req_metadata.dspark_swa_indices is not None:
                 attn_kwargs["ori_sparse_indices"] = swa_req_metadata.dspark_swa_indices
         else:
             assert compressor_metadata is not None
