@@ -49,7 +49,7 @@ RUN ARCH=${TARGETPLATFORM:-$(uname -m)}; \
     rm -f /tmp/cann-A3-ops-transformer.run && \
     wget --quiet "$OPS_TRANSFORMER_EXP_URL" -O /tmp/cann-ops-transformer-experimental_910_93.run && \
     chmod +x /tmp/cann-ops-transformer-experimental_910_93.run && \
-    /tmp/cann-ops-transformer-experimental_910_93.run --full --quiet --install-for-all && \
+    /tmp/cann-ops-transformer-experimental_910_93.run --quiet --install-for-all --force && \
     rm -f /tmp/cann-ops-transformer-experimental_910_93.run
 
 # Install clang-15 (for triton-ascend) and Mooncake
