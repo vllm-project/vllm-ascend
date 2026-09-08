@@ -103,6 +103,14 @@ class WorkerSentinel(GPUWorkerSentinel):
         super().retry(ft_request)
         self.worker_faulted = False
 
+    def init_num_local_experts(self) -> None:
+        """Record the per-rank physical expert slot count after model load."""
+        if self.worker.model_runner.eplb_state is None:
+            return
+        eplb_model_state = self._eplb_model_state()
+        num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
+        get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
+
     def scale_down(self, ft_request: FaultToleranceRequest):
         """Scale down over the surviving DP ranks, reusing the upstream flow.
 
@@ -112,12 +120,6 @@ class WorkerSentinel(GPUWorkerSentinel):
         and a dummy-batch runnability check on top.
         """
         self._validate_scale_down_preconditions()
-        # Set the per-rank physical slot count before super().scale_down so
-        # elastic_info rebuilds derive the shrunk expert width from it.
-        eplb_model_state = self._eplb_model_state()
-        num_local_experts = eplb_model_state.physical_to_logical_map.shape[1] // get_ep_group().world_size
-        get_ep_all2all_manager().set_num_local_physical_experts(num_local_experts)
-
         super().scale_down(ft_request)
 
         # Verify the redistributed model is runnable before reporting healthy.
