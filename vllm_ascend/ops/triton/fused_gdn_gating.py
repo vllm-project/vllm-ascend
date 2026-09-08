@@ -10,8 +10,8 @@ from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 UNIFIED_BUFFER_SIZE = 1572864
 
 
-@triton.jit(do_not_specialize=["seq_len", "NUM_HEADS", "NUM_BATCHES", "beta", "threshold", "ROW_ITER"])
-def fused_gdn_gating_kernel(
+@triton.jit
+def _gdn_gating_rows(
     g,
     beta_output,
     A_log,
@@ -26,8 +26,17 @@ def fused_gdn_gating_kernel(
     BLK_HEADS: tl.constexpr,
     BLK_BATCHES: tl.constexpr,
     ROW_ITER,
+    i_b,
+    i_s,
 ):
-    i_b, i_s = tl.program_id(0), tl.program_id(1)
+    """Gating body for the rows owned by ``i_b`` (and sequence position ``i_s``).
+
+    Factored out of ``fused_gdn_gating_kernel`` so that a kernel fusing several
+    stages can run it within a single launch. The computation is elementwise over
+    tokens - only A_log/dt_bias are indexed by head, and nothing reduces across
+    tokens - so evaluating a sub-range of rows is bit-identical to evaluating the
+    full range and slicing it.
+    """
     COL_ITER = tl.cdiv(NUM_HEADS, BLK_HEADS)
 
     for row_idx in range(0, ROW_ITER):
@@ -54,6 +63,43 @@ def fused_gdn_gating_kernel(
             # compute beta_output = sigmoid(b)
             blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
             tl.store(beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask)
+
+
+@triton.jit(do_not_specialize=["seq_len", "NUM_HEADS", "NUM_BATCHES", "beta", "threshold", "ROW_ITER"])
+def fused_gdn_gating_kernel(
+    g,
+    beta_output,
+    A_log,
+    a,
+    b,
+    dt_bias,
+    seq_len,
+    NUM_HEADS,
+    NUM_BATCHES,
+    beta,
+    threshold,
+    BLK_HEADS: tl.constexpr,
+    BLK_BATCHES: tl.constexpr,
+    ROW_ITER,
+):
+    _gdn_gating_rows(
+        g,
+        beta_output,
+        A_log,
+        a,
+        b,
+        dt_bias,
+        seq_len,
+        NUM_HEADS,
+        NUM_BATCHES,
+        beta,
+        threshold,
+        BLK_HEADS,
+        BLK_BATCHES,
+        ROW_ITER,
+        tl.program_id(0),
+        tl.program_id(1),
+    )
 
 
 def fused_gdn_gating_patch(

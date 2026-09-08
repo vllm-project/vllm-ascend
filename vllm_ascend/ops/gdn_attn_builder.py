@@ -91,6 +91,10 @@ class GDNChunkedPrefillMetadata:
     num_decodes: int = 0
     cu_seqlens_kern: tuple[int, ...] | None = None
     keep_meta: torch.Tensor | None = None
+    # Per-sequence query lengths for npu_chunk_gated_delta_rule. Built once per
+    # step here instead of once per GDN layer: it only depends on cu_seqlens, so
+    # deriving it in the layer costs one redundant launch per layer.
+    actual_seq_lengths: torch.Tensor | None = None
 
 
 @dataclass
@@ -197,6 +201,10 @@ def _build_non_spec_chunked_prefill_metadata(
     )
     block_indices_cumsum = prepare_chunk_indices(cu_seqlens_cpu, cumsum_chunk_size)
 
+    # Diff on the host (the tensor is a handful of ints) so the per-layer
+    # torch.diff on the device disappears; one H2D per step replaces it.
+    actual_seq_lengths = torch.diff(cu_seqlens_cpu.reshape(-1)).to(torch.int32).to(device, non_blocking=True)
+
     cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist())
     # Pre-compute compact cu_seqlens for AscendC kernels so each layer
     # can reuse them instead of calling _compact_empty_segments again.
@@ -217,6 +225,7 @@ def _build_non_spec_chunked_prefill_metadata(
         block_indices_cumsum=block_indices_cumsum.to(device=device, non_blocking=True),
         cu_seqlens_kern=cu_seqlens_kern,
         keep_meta=keep_meta,
+        actual_seq_lengths=actual_seq_lengths,
     )
 
 
@@ -758,6 +767,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
+            # Normalize once per step rather than once per GDN layer. Slicing above
+            # can leave these non-contiguous, and gating_gather_clear_l2norm_qk needs
+            # them int32/bool and contiguous; doing it here saves ~35 aten dispatches
+            # per step (2 tensors x ~3 calls x 30 layers, all no-ops after the first).
+            if prefill_state_indices is not None:
+                if prefill_state_indices.dtype != torch.int32:
+                    prefill_state_indices = prefill_state_indices.to(torch.int32)
+                prefill_state_indices = prefill_state_indices.reshape(-1).contiguous()
+            if prefill_has_initial_state is not None:
+                if prefill_has_initial_state.dtype != torch.bool:
+                    prefill_has_initial_state = prefill_has_initial_state.to(torch.bool)
+                prefill_has_initial_state = prefill_has_initial_state.reshape(-1).contiguous()
         else:
             has_initial_state = None
 

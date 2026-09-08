@@ -14,9 +14,14 @@ from vllm.triton_utils import tl, triton
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
 
 
-@triton.jit(do_not_specialize=["eps", "M", "NUM_CHUNKS"])
-def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS):
-    base_row = tl.program_id(0) * (NUM_CHUNKS * MBLOCK)
+@triton.jit
+def _l2norm_rows(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS, core_id):
+    """Row-wise l2norm over the rows owned by ``core_id``.
+
+    Factored out of ``l2norm_fwd_kernel2_loop`` so that a kernel fusing several
+    stages can run it over more than one operand within a single launch.
+    """
+    base_row = core_id * (NUM_CHUNKS * MBLOCK)
     rindex = tl.arange(0, N)[None, :]
 
     for chunk in range(NUM_CHUNKS):
@@ -29,6 +34,11 @@ def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr,
         rsqrt = tl.rsqrt(square_sum + eps)
 
         tl.store(Y + (rindex + N * row_idx), xs * rsqrt, xmask)
+
+
+@triton.jit(do_not_specialize=["eps", "M", "NUM_CHUNKS"])
+def l2norm_fwd_kernel2_loop(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr, NUM_CHUNKS):
+    _l2norm_rows(X, Y, eps, M, N, MBLOCK, NUM_CHUNKS, tl.program_id(0))
 
 
 def l2norm_fwd(x: torch.Tensor, eps: float = 1e-6, output_dtype: torch.dtype | None = None):
