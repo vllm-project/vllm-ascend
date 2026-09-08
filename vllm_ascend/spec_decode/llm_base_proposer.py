@@ -42,6 +42,7 @@ from vllm.v1.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
+from vllm_ascend import utils as ascend_utils
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -64,7 +65,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_dsa_cp, enable_sp, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -1290,7 +1291,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     draft_model,
                     token_indices_to_sample,
                     num_input_tokens,
-                    tp_group=get_tp_group() if enable_dsa_cp() else None,
+                    tp_group=get_tp_group() if ascend_utils.enable_dsa_cp() else None,
                 )
 
         if self.method != "dflash":

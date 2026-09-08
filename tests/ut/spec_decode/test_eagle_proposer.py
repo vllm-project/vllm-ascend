@@ -4290,7 +4290,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer.model.model = predictor
         with (
             patch.object(llm_base_proposer, "lmhead_tp_enable", return_value=False),
-            patch.object(llm_base_proposer, "enable_dsa_cp", return_value=dsa_cp),
+            patch.object(llm_base_proposer.ascend_utils, "enable_dsa_cp", return_value=dsa_cp),
             patch.object(llm_base_proposer, "get_tp_group", return_value=group),
             patch.object(
                 llm_base_proposer, "get_ascend_config", return_value=SimpleNamespace(enable_reduce_sample=True)
