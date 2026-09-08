@@ -163,8 +163,7 @@ class TestComputeBlockSizeHead:
         actual = _compute_rope_block_size_head(head_dim, rope_dim, is_neox)
         expected = _expected_block(head_dim, rope_dim, is_neox, DEFAULT_UB_BYTES)
         assert actual == expected, (
-            f"{desc}: got {actual}, expected {expected} "
-            f"(head_dim={head_dim}, rope_dim={rope_dim}, neox={is_neox})"
+             f"{desc}: got {actual}, expected {expected} (head_dim={head_dim}, rope_dim={rope_dim}, neox={is_neox})"
         )
 
     @pytest.mark.parametrize(
@@ -200,8 +199,7 @@ class TestComputeBlockSizeHead:
         footprint = _ub_footprint_bytes(result, rope_dim, is_neox)
         budget = int(DEFAULT_UB_BYTES * _ROPE_UB_SAFETY_FACTOR)
         assert footprint <= budget, (
-            f"{desc}: footprint={footprint} > budget={budget} "
-            f"(block={result}, rope_dim={rope_dim}, neox={is_neox})"
+            f"{desc}: footprint={footprint} > budget={budget} (block={result}, rope_dim={rope_dim}, neox={is_neox})"
         )
 
 
@@ -227,8 +225,7 @@ class TestBlockSizeWithinBudget:
         footprint_doubled = _ub_footprint_bytes(doubled, rope_dim, is_neox)
         budget = int(DEFAULT_UB_BYTES * _ROPE_UB_SAFETY_FACTOR)
         assert footprint_doubled > budget, (
-            f"{desc}: doubled block {doubled} fits ({footprint_doubled} <= "
-            f"{budget}) but function returned {result}"
+            f"{desc}: doubled block {doubled} fits ({footprint_doubled} <= {budget}) but function returned {result}"
         )
 
 
@@ -242,8 +239,7 @@ class TestRopeDimFallback:
         result_unknown = _compute_rope_block_size_head(head_dim, -1, is_neox)
         result_full = _compute_rope_block_size_head(head_dim, head_dim, is_neox)
         assert result_unknown == result_full, (
-            f"head_dim={head_dim}, neox={is_neox}: "
-            f"rope_dim=-1 gave {result_unknown}, full gave {result_full}"
+            f"head_dim={head_dim}, neox={is_neox}: rope_dim=-1 gave {result_unknown}, full gave {result_full}"
         )
 
 
