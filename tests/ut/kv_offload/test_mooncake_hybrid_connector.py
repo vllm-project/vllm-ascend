@@ -282,7 +282,12 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
             for layer_name in (indexer_layer, state_layer)
         ]
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
-        worker.vllm_config = types.SimpleNamespace(model_config=types.SimpleNamespace(is_deepseek_mla=True))
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=True,
+                hf_text_config=types.SimpleNamespace(),
+            )
+        )
         worker.kv_cache_config = types.SimpleNamespace(
             num_blocks=num_blocks,
             kv_cache_groups=[
@@ -330,8 +335,8 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
         aligned_offset = (-raw_tensor.data_ptr()) % alignment
         backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
         kv_caches = {
-            layer_names[0]: backing[: 2 * alignment],
-            layer_names[1]: backing[alignment : 3 * alignment],
+            layer_names[0]: backing[: 2 * alignment].view(1, -1),
+            layer_names[1]: backing[alignment : 3 * alignment].view(1, -1),
         }
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
@@ -349,8 +354,11 @@ class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
                     size=backing_size,
                     layers=[layer_name],
                     shared_by=[layer_name],
+                    layer_stride=backing_size,
+                    block_stride=2 * alignment,
+                    offset=layer_idx * alignment,
                 )
-                for layer_name in layer_names
+                for layer_idx, layer_name in enumerate(layer_names)
             ],
         )
         worker.use_hybrid = True
