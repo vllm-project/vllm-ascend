@@ -1425,11 +1425,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             cache[idx // block_size, idx % block_size] = token.view(-1, *cache.shape[2:])
         if is_prefill:
             return k_pe, k_nope
-        # No physical RoPE cache is needed when its head dimension is zero.
-        # Keep the decode interface uniform without requiring the allocator to
-        # materialize a second, empty cache tensor.
-        cached_k_pe = cache.new_empty((*cache.shape[:-1], 0))
-        return cached_k_pe, cache
+        return kv_cache[1], kv_cache[0]
 
     def exec_kv_decode(
         self,
@@ -1439,6 +1435,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: tuple,
         slots: torch.Tensor,
     ):
+        if not self.use_mla_rope:
+            self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
+            return kv_cache[1], kv_cache[0]
+
         assert self.kv_a_layernorm is not None
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
@@ -1447,9 +1447,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_no_split = kv_no_split.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         if self.qk_rope_head_dim == 0:
             return self._exec_kv_mla_nope(kv_no_split, kv_cache, slots, is_prefill=False)
-        if not self.use_mla_rope:
-            self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
-            return kv_cache[1], kv_cache[0]
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         c_kv_scale = None
         if self.support_fp8_attention and self.fa_quant_layer:
@@ -1478,7 +1475,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         *,
         attn_metadata: AscendMLAMetadata | None = None,
     ):
-        if not self.use_mla_rope and self.qk_rope_head_dim != 0:
+        if not self.use_mla_rope:
             return self._exec_kv_no_rope(kv_no_split, kv_cache, slots)
 
         pcp_prefill_range = None
