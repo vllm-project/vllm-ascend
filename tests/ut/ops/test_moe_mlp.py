@@ -228,8 +228,9 @@ class TestW4A8SituGmmFusion(unittest.TestCase):
                         return_value=down_out,
                     ) as mock_gmm2,
                     patch.object(moe_mlp_module, "dispose_tensor") as mock_dispose,
-                    patch(
-                        "torch.npu.current_stream",
+                    patch.object(
+                        moe_mlp_module.torch.npu,
+                        "current_stream",
                         return_value=MagicMock(record_event=MagicMock(return_value=event)),
                     ),
                 ):
