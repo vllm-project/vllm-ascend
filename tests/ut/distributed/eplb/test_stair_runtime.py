@@ -43,6 +43,7 @@ def test_rank_zero_plans_for_existing_async_worker(monkeypatch):
         communicator=communicator,
     )
     state = SimpleNamespace(
+        _stair_node_by_rank=(0, 0),
         _stair_config=StairConfig(
             hysteresis_enabled=False,
             p95_regression_tolerance=1.0,

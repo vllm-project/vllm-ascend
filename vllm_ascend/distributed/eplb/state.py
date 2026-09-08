@@ -4,15 +4,15 @@
 """Ascend-owned extensions for the upstream EPLB state."""
 
 import inspect
+import socket
 from dataclasses import fields
 from typing import Any
 
 import numpy as np
 import torch
-from torch.distributed import all_reduce
-from vllm.distributed import get_ep_group
+from torch.distributed import all_gather_object, all_reduce
+from vllm.distributed import get_ep_group, get_eplb_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
-from vllm.distributed.parallel_state import get_node_count
 
 from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
@@ -114,6 +114,12 @@ class AscendEplbState(_eplb_state.EplbState):
 
     def _initialize_stair_model(self, model_state: Any) -> None:
         model = model_state.model
+        if not hasattr(self, "_stair_node_by_rank"):
+            group = get_eplb_group()
+            hostnames = [socket.gethostname()] * group.world_size
+            all_gather_object(hostnames, socket.gethostname(), group=group.cpu_group)
+            node_ids = {name: index for index, name in enumerate(dict.fromkeys(hostnames))}
+            self._stair_node_by_rank = tuple(node_ids[name] for name in hostnames)
         mapping = model_state.physical_to_logical_map
         num_ranks = get_ep_group().world_size
         if mapping.ndim != 2 or mapping.shape[1] % num_ranks:
@@ -188,9 +194,7 @@ class AscendEplbState(_eplb_state.EplbState):
     def _rearrange_stair(self) -> None:
         ep_group = get_ep_group().device_group
         num_ranks = ep_group.size()
-        num_nodes = get_node_count()
-        if num_ranks % num_nodes:
-            num_nodes = 1
+        num_nodes = len(set(self._stair_node_by_rank))
         for model_state in self.model_states.values():
             logical_load = torch.roll(
                 model_state._stair_load_window,

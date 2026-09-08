@@ -41,6 +41,16 @@ def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
 
 def test_stair_initialization_rejects_rank_local_duplicates(monkeypatch):
     monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(world_size=2))
+    monkeypatch.setattr(
+        eplb_state,
+        "get_eplb_group",
+        lambda: SimpleNamespace(world_size=2, cpu_group=object()),
+    )
+    monkeypatch.setattr(
+        eplb_state,
+        "all_gather_object",
+        lambda values, *_args, **_kwargs: values.__setitem__(slice(None), ["a", "b"]),
+    )
     state = AscendEplbState.__new__(AscendEplbState)
     state.device = torch.device("cpu")
     state.expert_load_window_size = 4
@@ -55,11 +65,12 @@ def test_stair_initialization_rejects_rank_local_duplicates(monkeypatch):
     with pytest.raises(ValueError, match="rank-local duplicates"):
         state._initialize_stair_model(model_state)
 
+    assert state._stair_node_by_rank == (0, 1)
+
 
 def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
     device_group = SimpleNamespace(size=lambda: 2)
     monkeypatch.setattr(eplb_state, "get_ep_group", lambda: SimpleNamespace(device_group=device_group))
-    monkeypatch.setattr(eplb_state, "get_node_count", lambda: 1)
     reduce = MagicMock()
     monkeypatch.setattr(eplb_state, "all_reduce", reduce)
     model_state = SimpleNamespace(
@@ -69,6 +80,7 @@ def test_stair_rearrange_publishes_temporal_stats(monkeypatch):
     )
     state = AscendEplbState.__new__(AscendEplbState)
     state.model_states = {"model": model_state}
+    state._stair_node_by_rank = (0, 0)
     state.expert_load_window_step = 1
     state.rearrange_event = MagicMock()
 

@@ -32,10 +32,9 @@ def run_stair_planner(
     coordinator = get_eplb_group()
     rank = coordinator.device_group.rank()
     num_ranks = coordinator.device_group.size()
-    if num_ranks % stats.num_nodes:
-        raise RuntimeError("STAIR requires ranks to divide evenly across nodes")
-    ranks_per_node = num_ranks // stats.num_nodes
-    node_by_rank = tuple(rank // ranks_per_node for rank in range(num_ranks))
+    node_by_rank = state._stair_node_by_rank
+    if len(node_by_rank) != num_ranks:
+        raise RuntimeError("STAIR topology does not match the EPLB group")
     slots_per_rank = old_mapping.shape[1] // num_ranks
     shape = (old_mapping.shape[0], num_ranks, slots_per_rank)
 
