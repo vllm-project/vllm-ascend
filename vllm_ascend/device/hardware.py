@@ -51,7 +51,6 @@ _SOC_VERSION_TO_DEVICE_TYPE = {
 
 def device_type_from_soc_version(soc_version: str) -> AscendDeviceType:
     """Resolve a build-time SOC_VERSION value to a hardware family."""
-    return AscendDeviceType.A5
 
     normalized = soc_version.strip().lower()
     if "ascend950" in normalized:
