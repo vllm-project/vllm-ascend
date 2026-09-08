@@ -15,21 +15,25 @@ class RecurrentKda : public OpDef {
 public:
     explicit RecurrentKda(const char *name) : OpDef(name)
     {
-        const std::initializer_list<ge::DataType> qkvTypes = {ge::DT_BF16, ge::DT_BF16};
-        const std::initializer_list<ge::DataType> floatTypes = {ge::DT_FLOAT, ge::DT_FLOAT};
+        const std::initializer_list<ge::DataType> qkvTypes = {ge::DT_BF16};
+        const std::initializer_list<ge::DataType> floatTypes = {ge::DT_FLOAT};
         const std::initializer_list<ge::DataType> stateTypes = {ge::DT_BF16, ge::DT_FLOAT};
+        const std::initializer_list<ge::Format> formats = {ge::FORMAT_ND};
 
-        this->Input("query").ParamType(REQUIRED).DataType(qkvTypes).FormatList({ge::FORMAT_ND});
-        this->Input("key").ParamType(REQUIRED).DataType(qkvTypes).FormatList({ge::FORMAT_ND});
-        this->Input("value").ParamType(REQUIRED).DataType(qkvTypes).FormatList({ge::FORMAT_ND});
+        this->Input("query").ParamType(REQUIRED).DataTypeList(qkvTypes).FormatList(formats)
+            .IgnoreContiguous();
+        this->Input("key").ParamType(REQUIRED).DataTypeList(qkvTypes).FormatList(formats)
+            .IgnoreContiguous();
+        this->Input("value").ParamType(REQUIRED).DataTypeList(qkvTypes).FormatList(formats)
+            .IgnoreContiguous();
         this->Input("gate").ParamType(REQUIRED)
             .DataTypeList({ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND});
         this->Input("beta").ParamType(REQUIRED)
             .DataTypeList({ge::DT_FLOAT, ge::DT_BF16, ge::DT_FLOAT16}).FormatList({ge::FORMAT_ND});
         this->Input("initial_state")
             .ParamType(REQUIRED)
-            .DataType(stateTypes)
-            .FormatList({ge::FORMAT_ND})
+            .DataTypeList(stateTypes)
+            .FormatList(formats)
             .IgnoreContiguous();
         this->Input("cu_seqlens")
             .ParamType(OPTIONAL)
@@ -39,22 +43,22 @@ public:
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND});
-        this->Input("A_log").ParamType(OPTIONAL).DataType(floatTypes).FormatList({ge::FORMAT_ND});
-        this->Input("dt_bias").ParamType(OPTIONAL).DataType(floatTypes).FormatList({ge::FORMAT_ND});
+        this->Input("A_log").ParamType(OPTIONAL).DataTypeList(floatTypes).FormatList(formats);
+        this->Input("dt_bias").ParamType(OPTIONAL).DataTypeList(floatTypes).FormatList(formats);
         this->Input("num_accepted_tokens")
             .ParamType(OPTIONAL)
             .DataTypeList({ge::DT_INT32, ge::DT_INT64})
             .FormatList({ge::FORMAT_ND});
-        this->Output("attn_out").ParamType(REQUIRED).DataType(qkvTypes).FormatList({ge::FORMAT_ND});
+        this->Output("attn_out").ParamType(REQUIRED).DataTypeList(qkvTypes).FormatList(formats);
         this->Output("initial_state")
             .ParamType(REQUIRED)
-            .DataType(stateTypes)
-            .FormatList({ge::FORMAT_ND})
+            .DataTypeList(stateTypes)
+            .FormatList(formats)
             .IgnoreContiguous();
         this->Output("final_state")
             .ParamType(REQUIRED)
-            .DataType(stateTypes)
-            .FormatList({ge::FORMAT_ND})
+            .DataTypeList(stateTypes)
+            .FormatList(formats)
             .IgnoreContiguous();
 
         this->Attr("layout").AttrType(OPTIONAL).String("BSND");
