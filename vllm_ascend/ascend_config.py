@@ -333,6 +333,7 @@ class AscendConfig:
             "enable_transpose_kv_cache_by_block": true,
             "weight_nz_mode": 1,
             "enable_shared_expert_dp": false,
+            "enable_sfa_fia_shared_prefill": false,
             "enable_sparse_sfa_c8": false,
             "enable_sparse_li_c8": false,
             "ascend_compilation_config": {
@@ -453,6 +454,9 @@ class AscendConfig:
     enable_mc2_hierarchy_comm: bool = False  # deprecated, will be replaced by mc2_comm_alg = "hierarchy"
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
+    # Experimental post-TopK shared consumer: exactly 2048 dense rows plus a sparse tail.
+    # Default off; supports only the guarded eager split-RoPE FIA configuration.
+    enable_sfa_fia_shared_prefill: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
     draft_window_size: int | None = None
