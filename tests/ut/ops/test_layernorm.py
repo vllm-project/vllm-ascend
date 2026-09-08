@@ -52,6 +52,18 @@ def test_a5_add_rms_norm_bias_keeps_existing_path(enabled, device, invariant, wi
         bootstrap.assert_not_called()
 
 
+def test_a5_add_rms_norm_bias_keeps_existing_path_for_scalar():
+    tensor = MagicMock(shape=())
+    with (
+        patch("vllm_ascend.envs.VLLM_ASCEND_ENABLE_ADD_RMS_NORM_BIAS", True),
+        patch("vllm_ascend.ops.layernorm.get_ascend_device_type", return_value=AscendDeviceType.A5),
+        patch("vllm.envs.VLLM_BATCH_INVARIANT", False),
+        patch("vllm_ascend.ops.layernorm.bootstrap_custom_op_env") as bootstrap,
+    ):
+        assert not _enable_a5_add_rms_norm_bias(tensor)
+        bootstrap.assert_not_called()
+
+
 def test_a5_add_rms_norm_bias_reports_missing_extension():
     tensor = MagicMock(shape=(3, 6144))
     with (

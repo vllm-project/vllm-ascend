@@ -42,7 +42,7 @@ def _enable_a5_add_rms_norm_bias(x: torch.Tensor) -> bool:
 
     if vllm_envs.VLLM_BATCH_INVARIANT:
         return False
-    if x.shape[-1] == 0 or x.shape[-1] > 6144 or x.shape[-1] % 16:
+    if not x.shape or x.shape[-1] == 0 or x.shape[-1] > 6144 or x.shape[-1] % 16:
         return False
     bootstrap_custom_op_env(include_vendor_lib=True)
     # Explicit opt-in must report a missing build instead of silently benchmarking
