@@ -175,9 +175,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
         call for call in partition_calls if not any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
     )
     assert unpadded_call is not None
-    padded_num_tokens = next(
-        keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens"
-    )
+    padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
     assert isinstance(padded_num_tokens, ast.Attribute)
     assert padded_num_tokens.attr == "num_tokens"
     assert isinstance(padded_num_tokens.value, ast.Name)
