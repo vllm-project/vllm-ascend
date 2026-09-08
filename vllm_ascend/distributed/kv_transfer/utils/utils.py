@@ -23,7 +23,7 @@ QOS_MAX = 4
 def inject_qos(qos: int) -> None:
     """Merge P/D QoS before engine initialization, preserving all other fields."""
     if type(qos) is not int or not 0 <= qos <= QOS_MAX:
-        raise ValueError("kv_connector_extra_config.qos must be an integer in [0, 4]")
+        raise ValueError("kv_connector_extra_config.qos_priority must be an integer in [0, 4]")
     raw = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG", "")
     try:
         config = json.loads(raw) if raw else {}

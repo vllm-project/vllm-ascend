@@ -1619,7 +1619,7 @@ class MooncakeConnectorWorker:
         device_index = self.pp_rank * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
-        inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos", PD_QOS_DEFAULT))
+        inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
         self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 

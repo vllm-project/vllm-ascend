@@ -141,9 +141,10 @@ def make_hit_check_keys(
 def _inject_device_ub_qos() -> None:
     """Inject the QoS from kv_connector_extra_config into MF_DEVICE_UB_QOS.
 
-    The QoS is read from the current vLLM config instead of an ``__init__``
-    parameter; the call is a no-op when no qos is configured. An explicit
-    extra-config value overrides a value already present in the environment.
+    The QoS is read from the current vLLM config (``qos_priority`` field)
+    instead of an ``__init__`` parameter; the call is a no-op when no QoS is
+    configured. An explicit extra-config value overrides a value already
+    present in the environment.
     """
     qos = fetch_qos_from_current_config()
     if qos is None:

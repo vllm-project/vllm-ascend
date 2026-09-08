@@ -33,6 +33,7 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | `use_layerwise` | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the `memcache` backend. The default value is false. |
 | `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
 | `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
+| `qos_priority` | Transfer QoS priority for KV pool, an integer in `[0, 4]` (a larger value means a higher priority).
 
 ### Environment Variable Configuration
 
@@ -1610,25 +1611,25 @@ into the backend-specific configuration automatically before the store is
 initialized:
 
 ```json
-"kv_connector_extra_config": {
-    "qos": 1
-}
+    --kv-transfer-config \
+    '{
+    "kv_connector": "AscendStoreConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+        "qos_priority": 1,
+        "lookup_rpc_port": "1",
+        "backend": "mooncake",
+        "use_layerwise": false
+    }
 ```
-
-| Backend | Configuration Method | Example |
-| :--- | :--- | :--- |
-| Mooncake | `qos` field in `kv_connector_extra_config` (injected into `store.comm_resource_config.qos` of `ASCEND_GLOBAL_RESOURCE_CONFIG`) | `"kv_connector_extra_config": {"qos": 1}` |
-| Memcache | `qos` field in `kv_connector_extra_config` (injected into the `MF_DEVICE_UB_QOS` environment variable) | `"kv_connector_extra_config": {"qos": 1}` |
-| Mooncake | `store.comm_resource_config.qos` field in `ASCEND_GLOBAL_RESOURCE_CONFIG` | `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"store":{"comm_resource_config":{"qos":3}}}'` |
-| Memcache | `MF_DEVICE_UB_QOS` environment variable | `export MF_DEVICE_UB_QOS=3` |
 
 Notes:
 
 * The `kv_connector_extra_config` value takes precedence over values already
   set in the environment; a warning is logged when it overrides a different
   existing value.
-* For Mooncake, the `qos` field is merged into an existing
+* For Mooncake, the `qos_priority` field is merged into an existing
   `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields such as `protocol_desc` are
   preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring
-  `qos` creates it, which also selects the store-independent transfer engine
-  path (see [5.6](#56-ascend_global_resource_config)).
+  `qos_priority` creates it, which also selects the store-independent transfer
+  engine path (see [5.6](#56-ascend_global_resource_config)).

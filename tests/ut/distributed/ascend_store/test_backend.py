@@ -609,7 +609,7 @@ class TestExtraConfigQos(unittest.TestCase):
         self.assertIsNone(parse_qos_from_extra_config({"backend": "mooncake"}))
         for qos in (0, 1, 2, 3, 4):
             with self.subTest(qos=qos):
-                self.assertEqual(parse_qos_from_extra_config({"qos": qos}), qos)
+                self.assertEqual(parse_qos_from_extra_config({"qos_priority": qos}), qos)
 
     def test_parse_qos_from_extra_config_rejects_invalid(self):
         for qos in (5, -1, "3", 2.5, True, None, [3]):
@@ -617,7 +617,7 @@ class TestExtraConfigQos(unittest.TestCase):
                 self.subTest(qos=qos),
                 self.assertRaisesRegex(ValueError, "kv_connector_extra_config"),
             ):
-                parse_qos_from_extra_config({"qos": qos})
+                parse_qos_from_extra_config({"qos_priority": qos})
 
     def test_fetch_qos_from_current_config(self):
         from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
@@ -633,7 +633,7 @@ class TestExtraConfigQos(unittest.TestCase):
         def _fetch(cfg):
             return patch.object(sys.modules["vllm.config"], "get_current_vllm_config", Mock(return_value=cfg))
 
-        with _fetch(_cfg({"qos": 2})):
+        with _fetch(_cfg({"qos_priority": 2})):
             self.assertEqual(fetch_qos_from_current_config(), 2)
         with _fetch(_cfg({})):
             self.assertIsNone(fetch_qos_from_current_config())
@@ -642,7 +642,7 @@ class TestExtraConfigQos(unittest.TestCase):
         with patch.object(sys.modules["vllm.config"], "get_current_vllm_config", Mock(side_effect=AssertionError)):
             self.assertIsNone(fetch_qos_from_current_config())
         with (
-            _fetch(_cfg({"qos": 9})),
+            _fetch(_cfg({"qos_priority": 9})),
             self.assertRaisesRegex(ValueError, "kv_connector_extra_config"),
         ):
             fetch_qos_from_current_config()

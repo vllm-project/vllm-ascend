@@ -127,7 +127,8 @@ def _inject_store_qos() -> None:
             ) from e
         if not isinstance(config, dict):
             raise ValueError(
-                "ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object when qos is set in kv_connector_extra_config."
+                "ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object when qos_priority "
+                "is set in kv_connector_extra_config."
             )
     store_config = config.setdefault("store", {})
     if not isinstance(store_config, dict):

@@ -218,7 +218,7 @@ We can run the following scripts to launch a server on the prefiller/decoder nod
 
 ### QoS Configuration
 
-Set `qos` in the transfer initiator's `kv_connector_extra_config`.
+Set `qos_priority` in the transfer initiator's `kv_connector_extra_config`.
 This option is supported by `MooncakeConnectorV1`, `MooncakeHybridConnector`,
 and `MooncakeLayerwiseConnector`. The default P/D QoS is **1**; accepted values
 are integers in **[0, 4]** (booleans are not accepted).
@@ -229,22 +229,22 @@ that received value:
 
 | Transfer mode | Initiator | Operation | QoS configuration used |
 | :--- | :--- | :--- | :--- |
-| Pull | Decoder (D) | READ KV from the prefiller | D-side `qos` |
-| Push | Prefiller (P) | WRITE KV to the decoder | P-side `qos` |
+| Pull | Decoder (D) | READ KV from the prefiller | D-side `qos_priority` |
+| Push | Prefiller (P) | WRITE KV to the decoder | P-side `qos_priority` |
 
 Although KV data flows from P to D in both modes, pull uses D's QoS and push
 uses P's QoS. Configuring only the passive endpoint does not override the
 initiator's channel QoS. Both endpoints support the option, but the effective
 value for a connection comes from its initiator.
 
-For example, add `"qos": 1` alongside your existing parallelism settings:
+For example, add `"qos_priority": 1` alongside your existing parallelism settings:
 
 ```json
 {
   "kv_connector": "MooncakeConnectorV1",
   "kv_role": "kv_consumer",
   "kv_connector_extra_config": {
-    "qos": 1,
+    "qos_priority": 1,
     "prefill": {"dp_size": 1, "tp_size": 2},
     "decode": {"dp_size": 1, "tp_size": 2}
   }
@@ -269,7 +269,7 @@ P-side HIXL server may not print a local QoS parsing log; in push mode, the
 same applies to the passive D side. Check the initiator's configuration and
 HIXL channel logs to verify the channel QoS.
 
-With `MultiConnector`, set `qos` in the Mooncake P/D child connector's
+With `MultiConnector`, set `qos_priority` in the Mooncake P/D child connector's
 `kv_connector_extra_config`. P/D injection only updates the top-level QoS key;
 it does not configure or validate pooling backends or modify their `store`
 settings. Restart the serving processes after changing P/D QoS.
