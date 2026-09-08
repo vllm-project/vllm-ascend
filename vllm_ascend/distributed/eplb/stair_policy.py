@@ -132,7 +132,7 @@ def capped_min_max(
 def _nearby_budgets(center: int, lower: int, upper: int, width: int) -> list[int]:
     values = []
     for distance in range(width + 1):
-        for value in ((center,) if distance == 0 else (center + distance, center - distance)):
+        for value in (center,) if distance == 0 else (center + distance, center - distance):
             if lower <= value <= upper and value not in values:
                 values.append(value)
     return values
@@ -358,7 +358,9 @@ def unconstrained_lpt(
     slots_per_rank = total_slots // num_ranks
     ranks = [set() for _ in range(num_ranks)]
     for expert in _ordered_copies(mean, moments, replicas, z_score):
-        candidates = [rank for rank in range(num_ranks) if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]]
+        candidates = [
+            rank for rank in range(num_ranks) if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]
+        ]
         if not candidates:
             raise ValueError("STAIR replica vector has no duplicate-free placement")
         rank = min(
@@ -393,8 +395,12 @@ def constrained_lpt(
         if index == len(copies):
             return assign_sources(old, ranks, node_by_rank, pair_cap)
         expert = copies[index]
-        candidates = [rank for rank in range(old.shape[0]) if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]]
-        candidates.sort(key=lambda rank: (_post_insert_risk(ranks[rank], expert, mean, moments, replicas, z_score), rank))
+        candidates = [
+            rank for rank in range(old.shape[0]) if len(ranks[rank]) < old.shape[1] and expert not in ranks[rank]
+        ]
+        candidates.sort(
+            key=lambda rank: (_post_insert_risk(ranks[rank], expert, mean, moments, replicas, z_score), rank)
+        )
         for rank in candidates:
             ranks[rank].add(expert)
             feasible = assign_sources(old, ranks, node_by_rank, pair_cap) is not None

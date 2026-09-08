@@ -14,11 +14,11 @@ from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
 
 from vllm_ascend.distributed.eplb.communicator import AscendGlooEplbCommunicator
+from vllm_ascend.distributed.eplb.stair_worker import run_stair_planner, transfer_stair_layer
 from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     refresh_model_routing_tables,
 )
-from vllm_ascend.distributed.eplb.stair_worker import run_stair_planner, transfer_stair_layer
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 

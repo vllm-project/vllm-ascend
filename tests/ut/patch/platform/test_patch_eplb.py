@@ -208,7 +208,18 @@ def test_worker_planner_wrapper_preserves_default_path(monkeypatch):
 
 
 def test_worker_transfer_wrapper_selects_explicit_source(monkeypatch):
-    def original(old, new, weights, buffers, group, communicator, is_profile=False, cuda_stream=None, rank_mapping=None, layer_idx=0):
+    def original(
+        old,
+        new,
+        weights,
+        buffers,
+        group,
+        communicator,
+        is_profile=False,
+        cuda_stream=None,
+        rank_mapping=None,
+        layer_idx=0,
+    ):
         return "default"
 
     stair = MagicMock(return_value="stair")

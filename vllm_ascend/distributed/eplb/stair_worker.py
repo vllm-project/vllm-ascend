@@ -46,9 +46,7 @@ def run_stair_planner(
             node_by_rank,
             state._stair_config,
         )
-        packed = torch.from_numpy(
-            np.stack((plan.placement, plan.source_rank, plan.source_slot))
-        )
+        packed = torch.from_numpy(np.stack((plan.placement, plan.source_rank, plan.source_slot)))
         scores = torch.from_numpy(plan.accepted_scores)
     else:
         packed = torch.empty((3, *shape), dtype=torch.int64)

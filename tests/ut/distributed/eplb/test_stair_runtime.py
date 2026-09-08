@@ -48,7 +48,7 @@ def test_rank_zero_plans_for_existing_async_worker(monkeypatch):
             hysteresis_enabled=False,
             p95_regression_tolerance=1.0,
             lpt_max_backtracks=64,
-        )
+        ),
     )
     old = torch.tensor([[0, 1, 2, 3, 0, 1]])
 
