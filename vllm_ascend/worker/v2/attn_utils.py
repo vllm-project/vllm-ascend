@@ -926,36 +926,6 @@ def allocate_kv_cache_main(
     )
 
 
-def _hidden_state_cache_shape(
-    backend: type[AttentionBackend],
-    kv_cache_spec: AttentionSpec,
-    num_blocks: int,
-    cache_dtype: str,
-) -> tuple[int, ...]:
-    """Logical shape of one ``extract_hidden_states`` cache-only layer.
-
-    ``CacheOnlyAttentionLayer.basic_cache`` writes
-    ``kv_cache[block, :, offset]`` on the #51718 ``[B, H, N, C]`` layout.
-    ``CacheOnlyAttentionBackend`` no longer publishes ``get_kv_cache_shape``;
-    the spec properties already fold in head packing and multi-token states.
-    """
-    get_kv_cache_shape = getattr(backend, "get_kv_cache_shape", None)
-    if get_kv_cache_shape is not None:
-        return get_kv_cache_shape(
-            num_blocks,
-            kv_cache_spec.block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype,
-        )
-    return (
-        num_blocks,
-        kv_cache_spec.num_heads,
-        kv_cache_spec.num_states,
-        kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
-    )
-
-
 def _reshape_mamba_kv_cache(
     raw_cache: torch.Tensor,
     kv_cache_spec: MambaSpec,
@@ -1071,11 +1041,14 @@ def _reshape_kv_cache_v2(
                 num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
-                kv_cache_shape = _hidden_state_cache_shape(
-                    group.backend,
-                    kv_cache_spec,
+                # CacheOnlyAttentionBackend dropped get_kv_cache_shape in #51718.
+                # Spec properties already give the [B, H, N, C] layout that
+                # basic_cache writes as kv_cache[block, :, offset].
+                kv_cache_shape = (
                     num_blocks,
-                    cache_dtype,
+                    kv_cache_spec.num_heads,
+                    kv_cache_spec.num_states,
+                    kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
                 )
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)
                 page_size_padded = getattr(kv_cache_spec, "page_size_padded", None)
