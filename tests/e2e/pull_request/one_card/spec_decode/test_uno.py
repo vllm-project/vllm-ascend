@@ -19,7 +19,7 @@ PARITY_TOKENS = 32
 class UnoGraphParity:
     def enable_uno_graph_parity(self):
         drafter = self.model_runner.drafter
-        assert drafter._draft_graph_batch_sizes == {1, 2}
+        assert drafter._draft_graph_batch_sizes == set(range(1, 10))
         original = drafter._forward
         self._uno_graph_parity_stats = {"calls": 0, "values": 0, "request_counts": []}
 
@@ -61,30 +61,31 @@ def test_uno_full_decode_graph_matches_eager_logits_across_batch_changes(method:
     computation without relaxing tolerance or truncating generated outputs.
     """
     prompts = ["The capital of France is", "List the first five prime numbers:"]
-    params = SamplingParams(temperature=0, max_tokens=32, logprobs=5)
+    prompts += [f"Count from {start} to {start + 20}:" for start in range(7)]
+    params = SamplingParams(temperature=0, max_tokens=32, logprobs=5, ignore_eos=True)
     with VllmRunner(
         UNO[method]["main"],
         seed=0,
         max_model_len=512,
-        max_num_seqs=2,
+        max_num_seqs=9,
         max_num_batched_tokens=1024,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.6,
         enable_prefix_caching=False,
         disable_log_stats=False,
-        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [9, 18]},
+        compilation_config={"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [9, 18, 36, 72, 81]},
         speculative_config={"method": "uno", "model": UNO[method]["adapter"], "num_speculative_tokens": FORWARD_WIDTH},
         worker_extension_cls="tests.e2e.pull_request.one_card.spec_decode.test_uno.UnoGraphParity",
     ) as llm:
         # String RPC uses the default serializer; no callable/pickle fallback.
         llm.model.collective_rpc("enable_uno_graph_parity")
-        for batch in (prompts, prompts[:1], prompts):
-            outputs = llm.model.generate(batch, params)
+        for count in (9, 5, 3, 1, 2, 9):
+            outputs = llm.model.generate(prompts[:count], params)
             assert all(len(output.outputs[0].token_ids) == 32 for output in outputs)
         metrics = llm.model.get_metrics()
         (stats,) = llm.model.collective_rpc("get_uno_graph_parity")
     assert stats["calls"] == len(stats["request_counts"]) > 0
-    assert stats["values"] > 0 and set(stats["request_counts"]) == {1, 2}
+    assert stats["values"] > 0 and {1, 2, 3, 5, 9} <= set(stats["request_counts"])
     assert any(left == 1 and right == 2 for left, right in zip(stats["request_counts"], stats["request_counts"][1:]))
     acceptance = calculate_acceptance_per_pos(metrics, FORWARD_WIDTH, Counter, Vector)
     assert acceptance[0] > 0.95

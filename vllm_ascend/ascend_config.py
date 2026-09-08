@@ -423,6 +423,9 @@ class AscendConfig:
     msmonitor_use_daemon: bool = False
     enable_transpose_kv_cache_by_block: bool = True
     weight_nz_mode: int = 1
+    # UNO tree proposal width and candidate count; its node budget lives in
+    # speculative_config.num_speculative_tokens. None selects Linear UNO.
+    uno_tree: dict[str, int] | None = None
 
     # ---- sub-configs (no vllm_config dep): pydantic dict→dataclass coercion ----
     ascend_compilation_config: AscendCompilationConfig = dataclasses.field(default_factory=AscendCompilationConfig)

@@ -1549,6 +1549,9 @@ class NPUModelRunner(GPUModelRunner):
             self.num_decode_draft_tokens.copy_to_gpu()
         self.logits_indices = logits_indices
 
+        if isinstance(getattr(self, "drafter", None), AscendUnoProposer) and self.drafter.tree_mode:
+            self.drafter.prepare_tree_verify_inputs(self.positions, spec_decode_metadata)
+
         # Hot-Swap lora model
         if self.lora_config:
             assert np.sum(num_sampled_tokens) <= self.vllm_config.scheduler_config.max_num_batched_tokens
@@ -2813,6 +2816,8 @@ class NPUModelRunner(GPUModelRunner):
 
         if lmhead_tp_enable() and logits is not None:
             logits = logits[: len(spec_decode_metadata.logits_indices)]
+        if isinstance(self.drafter, AscendUnoProposer) and self.drafter.tree_mode:
+            return self.drafter.sample_tree(logits, spec_decode_metadata, sampling_metadata)
         if self.input_batch.sampling_metadata.top_k is not None and get_ascend_config().enable_reduce_sample:
             max_topk = self.input_batch.top_k_cpu[self.input_batch.top_k_cpu < logits.shape[1]].max()
             self.rejection_sampler.prepare_sampling(max_topk)
@@ -3549,6 +3554,11 @@ class NPUModelRunner(GPUModelRunner):
                     cm,
                     common_ratio_to_sas_metadata,
                 )
+        if (isinstance(getattr(self, "drafter", None), AscendUnoProposer) and self.drafter.tree_mode
+                and (use_spec_decode or 16 < max_query_len <= self.drafter.verify_width + 1)):
+            self.drafter.attach_tree_verify_metadata(
+                attn_metadata, spec_decode_common_attn_metadata, capture=for_cudagraph_capture or not use_spec_decode
+            )
         if req_doc_ranges is not None:
             if isinstance(attn_metadata, list):
                 for ub_metadata in attn_metadata:

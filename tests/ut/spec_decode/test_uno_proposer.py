@@ -141,12 +141,63 @@ def _make_proposer(forward_width: int = FORWARD_WIDTH, max_num_reqs: int = 8) ->
     return proposer
 
 
+@pytest.mark.parametrize("accept_root", [True, False])
+def test_tree_root_rejection_and_kv_compaction(accept_root):
+    from vllm_ascend.spec_decode.uno_tree import UnoTreeProposal
+
+    proposer = _make_proposer(forward_width=3, max_num_reqs=1)
+    proposer._tree_proposal = UnoTreeProposal(
+        tokens=torch.tensor([[0, 1, 2, 3]]),
+        parents=torch.tensor([[-1, 0, 0, 2]]),
+        depths=torch.tensor([[0, 1, 1, 2]]),
+        allowed_attention=torch.empty(1, 4, 4),
+    )
+    proposer._tree_clean_probs = torch.tensor([[0.9, 0.1, 0.0, 0.0, 0.0]])
+    proposer._tree_verify_metadata = SimpleNamespace(slot_mapping=torch.arange(5, dtype=torch.int32))
+    cache = torch.arange(8).reshape(2, 4, 1, 1).clone()
+    proposer.runner = SimpleNamespace(kv_caches=[(cache, cache)])
+    metadata = SimpleNamespace(generators={})
+    probabilities = torch.tensor([[0.1, 0.9, 0.0, 0.0, 0.0]]).expand(5, -1)
+    with (
+        patch.object(proposer, "_validate_tree_sampling"),
+        patch.object(proposer, "_sample_tree_logits", return_value=(torch.tensor([1, 2, 4, 3, 4]), probabilities)),
+        patch.object(torch, "rand", return_value=torch.tensor([[0.0 if accept_root else 0.99]])),
+    ):
+        result = proposer.sample_tree(torch.empty(5, 5), SimpleNamespace(num_draft_tokens=[4]), metadata)
+    if accept_root:
+        assert result.sampled_token_ids.tolist() == [[0, 2, 3, 4]]
+        assert cache.flatten().tolist() == [0, 1, 3, 4, 4, 5, 6, 7]
+    else:
+        assert result.sampled_token_ids.tolist() == [[1, -1, -1, -1]]
+        assert cache.flatten().tolist() == list(range(8))
+
+
 @pytest.mark.parametrize("mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY])
 def test_draft_graph_buckets_use_exact_request_counts(mode):
     proposer = _make_proposer(max_num_reqs=4)
     proposer.vllm_config = SimpleNamespace(compilation_config=SimpleNamespace(cudagraph_mode=mode))
     sizes = proposer.graph_capture_sizes([0, 1, 4, 5, 10, 15, 20, 25])
     assert sizes == ([4, 8, 12, 16] if mode == CUDAGraphMode.FULL_DECODE_ONLY else [])
+
+
+@pytest.mark.parametrize(
+    "verify_sizes,limit", [([9, 18, 36, 72, 144, 288, 576], 64), ([9, 72], 8), ([], 0), ([1, 8], 0)]
+)
+def test_sparse_verifier_buckets_cover_every_draining_draft_batch(verify_sizes, limit):
+    proposer = _make_proposer(forward_width=8, max_num_reqs=64)
+    proposer.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    )
+    assert proposer.graph_capture_sizes(verify_sizes) == [8 * n for n in range(1, limit + 1)]
+
+
+def test_tree_draft_graph_uses_verify_width_and_request_capacity():
+    proposer = _make_proposer(forward_width=16, max_num_reqs=1)
+    proposer.verify_width = 32
+    proposer.vllm_config = SimpleNamespace(
+        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY)
+    )
+    assert proposer.graph_capture_sizes([1, 33, 66]) == [16]
 
 
 def test_explicit_eager_draft_disables_its_graph_buckets():
@@ -459,14 +510,18 @@ def test_uno_acceptance_matches_sglangs_arithmetic():
 
 
 def test_forward_width_must_leave_at_least_one_noise_row():
-    speculative_config = SimpleNamespace(num_speculative_tokens=1, model="x", rejection_sample_method="standard")
+    speculative_config = SimpleNamespace(
+        method="uno", num_speculative_tokens=1, model="x", rejection_sample_method="standard"
+    )
     vllm_config = SimpleNamespace(speculative_config=speculative_config)
     with pytest.raises(ValueError, match="num_speculative_tokens >= 2"):
         AscendUnoProposer(vllm_config, torch.device("cpu"), runner=None)
 
 
 def test_forward_width_is_capped_by_the_fia_query_row_limit():
-    speculative_config = SimpleNamespace(num_speculative_tokens=16, model="x", rejection_sample_method="standard")
+    speculative_config = SimpleNamespace(
+        method="uno", num_speculative_tokens=16, model="x", rejection_sample_method="standard"
+    )
     vllm_config = SimpleNamespace(speculative_config=speculative_config)
     with pytest.raises(ValueError, match=r"at most\s+16"):
         AscendUnoProposer(vllm_config, torch.device("cpu"), runner=None)

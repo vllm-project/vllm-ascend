@@ -73,6 +73,34 @@ def test_uno_requires_the_adapter_path():
 _ASCEND_CONFIG = SimpleNamespace(enable_reduce_sample=False)
 
 
+def test_ascend_additional_config_accepts_tree_options():
+    from vllm_ascend.ascend_config import AscendConfig
+
+    options = {"draft_width": 16, "candidate_top_k": 32}
+    config = AscendConfig(uno_tree=options, sparse_kv_offload_config=SimpleNamespace(enabled=False))
+    assert config.uno_tree == options
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"draft_width": True, "candidate_top_k": 32},
+        {"draft_width": 17, "candidate_top_k": 32},
+        {"draft_width": 16, "candidate_top_k": 1},
+        {"draft_width": 16, "candidate_topk": 32},
+    ],
+)
+def test_tree_options_reject_invalid_width_rank_or_keys(options):
+    from vllm_ascend.uno_config import get_uno_tree_options
+
+    config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="uno", num_speculative_tokens=32),
+        additional_config={"uno_tree": options},
+    )
+    with pytest.raises(ValueError):
+        get_uno_tree_options(config)
+
+
 def _vllm_config(lora_config=None, **parallel):
     parallel_defaults = {
         "pipeline_parallel_size": 1,
@@ -106,6 +134,51 @@ def test_lora_config_is_synthesised_for_uno():
     # rank-128 LoRA op over the whole vocabulary on every forward for a delta
     # that is identically zero.
     assert set(config.lora_config.target_modules) == set(UNO_LORA_TARGET_MODULES)
+
+
+def _tree_config():
+    config = _vllm_config(tensor_parallel_size=1)
+    config.additional_config = {"uno_tree": {"draft_width": 16, "candidate_top_k": 32}}
+    config.speculative_config.num_speculative_tokens = 32
+    config.speculative_config.rejection_sample_method = "standard"
+    config.scheduler_config.max_num_seqs = 1
+    config.scheduler_config.max_num_batched_tokens = 16
+    config.scheduler_config.async_scheduling = True
+    config.model_config.hf_config = SimpleNamespace(architectures=["Qwen3ForCausalLM"])
+    config.cache_config = SimpleNamespace(enable_prefix_caching=False, cache_dtype="auto", sliding_window=None)
+    return config
+
+
+def test_tree_uses_draft_width_for_lora_capacity_and_disables_async():
+    config = _tree_config()
+    _validate_and_update_uno_config(config, _ASCEND_CONFIG)
+    assert config.lora_config is not None
+    assert config.scheduler_config.async_scheduling is False
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value", "message"),
+    [
+        ("scheduler_config", "max_num_seqs", 2, "max_num_seqs=1"),
+        ("parallel_config", "tensor_parallel_size", 2, "tensor_parallel_size=1"),
+        ("cache_config", "enable_prefix_caching", True, "enable_prefix_caching=False"),
+        ("cache_config", "cache_dtype", "fp8", "quantized KV"),
+        ("cache_config", "sliding_window", 4096, "sliding-window"),
+        ("speculative_config", "rejection_sample_method", "synthetic", "standard target sampling"),
+    ],
+)
+def test_tree_rejects_unsupported_execution_modes(section, field, value, message):
+    config = _tree_config()
+    setattr(getattr(config, section), field, value)
+    with pytest.raises((ValueError, NotImplementedError), match=message):
+        _validate_and_update_uno_config(config, _ASCEND_CONFIG)
+
+
+def test_tree_rejects_non_qwen3_architectures():
+    config = _tree_config()
+    config.model_config.hf_config.architectures = ["DeepseekV3ForCausalLM"]
+    with pytest.raises(NotImplementedError, match="Qwen3ForCausalLM"):
+        _validate_and_update_uno_config(config, _ASCEND_CONFIG)
 
 
 def test_the_hook_is_idempotent():

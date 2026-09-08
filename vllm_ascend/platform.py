@@ -1616,11 +1616,31 @@ def _validate_and_update_uno_config(vllm_config: VllmConfig, ascend_config) -> N
     # `PunicaWrapperBase.__init__`). A draft batch wider than that buffer makes
     # `_update_base_metadata`'s `copy_` fail mid-decode; say so at startup.
     scheduler_config = vllm_config.scheduler_config
-    draft_rows = scheduler_config.max_num_seqs * speculative_config.num_speculative_tokens
+    from vllm_ascend.uno_config import get_uno_tree_options
+
+    tree_options = get_uno_tree_options(vllm_config)
+    if tree_options is not None:
+        if scheduler_config.max_num_seqs != 1:
+            raise ValueError("UNO tree currently supports max_num_seqs=1, matching the SGLang tree evaluation.")
+        if parallel_config.tensor_parallel_size != 1:
+            raise NotImplementedError("UNO tree currently requires tensor_parallel_size=1.")
+        if vllm_config.cache_config.enable_prefix_caching:
+            raise NotImplementedError("UNO tree currently requires enable_prefix_caching=False.")
+        if vllm_config.model_config.hf_config.architectures != ["Qwen3ForCausalLM"]:
+            raise NotImplementedError("UNO tree currently supports Qwen3ForCausalLM, including the SDAR alias.")
+        if vllm_config.cache_config.cache_dtype not in ("auto", "bfloat16", "float16"):
+            raise NotImplementedError("UNO tree does not support quantized KV caches.")
+        if vllm_config.cache_config.sliding_window is not None:
+            raise NotImplementedError("UNO tree does not support sliding-window attention.")
+        if speculative_config.rejection_sample_method != "standard":
+            raise NotImplementedError("UNO tree requires standard target sampling, not synthetic acceptance.")
+        scheduler_config.async_scheduling = False
+    draft_width = tree_options["draft_width"] if tree_options else speculative_config.num_speculative_tokens
+    draft_rows = scheduler_config.max_num_seqs * draft_width
     if scheduler_config.max_num_batched_tokens < draft_rows:
         raise ValueError(
-            "UNO's draft forward runs max_num_seqs * num_speculative_tokens = "
-            f"{scheduler_config.max_num_seqs} * {speculative_config.num_speculative_tokens} = "
+            "UNO's draft forward runs max_num_seqs * draft_width = "
+            f"{scheduler_config.max_num_seqs} * {draft_width} = "
             f"{draft_rows} rows through the LoRA layers, but the per-token LoRA index "
             f"buffers are sized by max_num_batched_tokens ({scheduler_config.max_num_batched_tokens}). "
             f"Raise --max-num-batched-tokens to at least {draft_rows}, or lower "

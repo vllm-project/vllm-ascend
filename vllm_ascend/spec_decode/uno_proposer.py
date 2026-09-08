@@ -74,6 +74,7 @@ from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.transformers_utils.repo_utils import hf_api
 from vllm.utils.torch_utils import PIN_MEMORY
+from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.llm_base_proposer import empty_exponential_noise_like
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -85,6 +86,14 @@ from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.compilation.acl_graph import ACLGraphWrapper, update_full_graph_params
 from vllm_ascend.sample.rejection_sampler import apply_sampling_constraints
 from vllm_ascend.spec_decode.llm_base_proposer import AscendSpecDecodeBaseProposer
+from vllm_ascend.spec_decode.uno_tree import (
+    UnoTreeKVCompactor,
+    UnoTreeProposal,
+    build_uno_tree,
+    fill_uno_tree_mask,
+    traverse_uno_tree,
+)
+from vllm_ascend.uno_config import get_uno_tree_options
 
 if TYPE_CHECKING:
     from vllm.v1.sample.metadata import SamplingMetadata
@@ -191,7 +200,16 @@ class AscendUnoProposer:
         # noise. The FIA TND layout caps a request's query rows at 16 and the
         # verify window is F+1 wide, which is asserted in the attention metadata
         # builder; validate here so the message names UNO.
-        self.forward_width = int(self.speculative_config.num_speculative_tokens)
+        tree_options = get_uno_tree_options(vllm_config)
+        self.tree_mode = tree_options is not None
+        self.verify_width = int(self.speculative_config.num_speculative_tokens)
+        self.forward_width = tree_options["draft_width"] if tree_options else self.verify_width
+        self.tree_top_k = tree_options["candidate_top_k"] if tree_options else 1
+        self._tree_proposal = None
+        self._tree_clean_probs = None
+        self._tree_req_ids = None
+        self._tree_verify_metadata = None
+        self._tree_kv_compactor = None
         if self.forward_width < MIN_UNO_FORWARD_WIDTH:
             # F == 1 leaves no noise rows, so the adapter is never applied and
             # the whole cycle degenerates to two AR forwards emitting two
@@ -202,7 +220,7 @@ class AscendUnoProposer:
                 "(the draft block is one seed row plus F-1 noise rows); "
                 f"got {self.forward_width}."
             )
-        if self.forward_width > MAX_UNO_FORWARD_WIDTH:
+        if self.forward_width > (MAX_FIA_QUERY_ROWS_PER_REQUEST if self.tree_mode else MAX_UNO_FORWARD_WIDTH):
             raise ValueError(
                 "UNO's verify window is num_speculative_tokens + 1 query rows, and the "
                 f"NPU fused-infer-attention TND layout supports at most "
@@ -285,8 +303,23 @@ class AscendUnoProposer:
         self._draft_graph: ACLGraphWrapper | None = None
         self._draft_graph_batch_sizes: set[int] = set()
 
+        if self.tree_mode:
+            # One allocation spans every page-table address; only contents change
+            # between graph replays. The node mask excludes sibling branches.
+            mask_width = ((self.max_model_len + 127) // 128) * 128
+            self._tree_mask = torch.ones((1, 1, self.verify_width + 1, mask_width), dtype=torch.bool, device=device)
+            self._tree_key_positions = torch.arange(mask_width, device=device)
+            self._tree_full_allowed = torch.ones(
+                (self.verify_width + 1, self.verify_width + 1), dtype=torch.bool, device=device
+            ).tril_()
+
     def graph_capture_sizes(self, verify_capture_sizes: list[int]) -> list[int]:
-        """Separate F-row draft buckets from the runner's F+1-row verifier."""
+        """Capture every exact draft batch up to the verifier's capture limit.
+
+        The target can pad to a larger graph bucket. The shared-KV draft does
+        not pad requests, so retaining only those buckets would run eager as
+        soon as a batch drains to an intermediate request count.
+        """
         if self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.FULL_DECODE_ONLY:
             return []
         if self.speculative_config.enforce_eager:
@@ -295,13 +328,12 @@ class AscendUnoProposer:
             raise ValueError(
                 "UNO FULL_DECODE_ONLY requires VLLM_BATCH_INVARIANT=0; use PIECEWISE for batch invariance."
             )
-        return sorted(
-            {
-                size // (self.forward_width + 1) * self.forward_width
-                for size in verify_capture_sizes
-                if size % (self.forward_width + 1) == 0 and 0 < size // (self.forward_width + 1) <= self.max_num_reqs
-            }
+        verify_rows = getattr(self, "verify_width", self.forward_width) + 1
+        max_captured_reqs = max(
+            (size // verify_rows for size in verify_capture_sizes if size > 0 and size % verify_rows == 0),
+            default=0,
         )
+        return [self.forward_width * n for n in range(1, min(max_captured_reqs, self.max_num_reqs) + 1)]
 
     @torch.inference_mode()
     def capture_model(self) -> None:
@@ -445,6 +477,128 @@ class AscendUnoProposer:
     def take_last_draft_probs(self) -> torch.Tensor | None:
         probs, self._last_draft_probs = self._last_draft_probs, None
         return probs
+
+    def _validate_tree_sampling(self, metadata):
+        if metadata is None:
+            raise ValueError("UNO tree requires sampling metadata.")
+        holder = metadata.thinking_budget_state_holder
+        if holder is not None and holder.has_tracked_requests():
+            raise NotImplementedError("UNO tree does not yet support thinking-budget logits processing.")
+        if (
+            not metadata.no_penalties
+            or metadata.max_num_logprobs is not None
+            or metadata.allowed_token_ids_mask is not None
+            or metadata.bad_words_token_ids
+            or metadata.logprob_token_ids
+        ):
+            raise NotImplementedError(
+                "UNO tree currently supports temperature/top-k/top-p without penalties or logprobs."
+            )
+        for req_id in self.runner.input_batch.req_ids:
+            params = self.runner.requests[req_id].sampling_params
+            if (
+                params.min_tokens
+                or params.min_p
+                or params.logit_bias
+                or params.allowed_token_ids
+                or params.bad_words
+                or params.structured_outputs
+                or params.prompt_logprobs is not None
+            ):
+                raise NotImplementedError("UNO tree does not yet support history-dependent logits processors.")
+
+    def _sample_tree_logits(self, logits, metadata):
+        if metadata.all_greedy:
+            return logits.argmax(dim=-1), None
+        processed = apply_sampling_constraints(
+            logits, torch.full((1,), logits.shape[0], dtype=torch.int32, device=self.device), metadata, None
+        )
+        if isinstance(processed, tuple):
+            processed = processed[0]
+        probs = processed.softmax(dim=-1, dtype=torch.float32)
+        noise = torch.empty_like(probs).exponential_(generator=metadata.generators.get(0))
+        return (probs / noise).argmax(dim=-1), probs
+
+    def prepare_tree_verify_inputs(self, positions, spec_metadata):
+        """Run after slot mapping: physical cache rows stay contiguous."""
+        if spec_metadata is None:
+            self._tree_verify_metadata = None
+            return
+        if self._tree_proposal is None or tuple(self.runner.input_batch.req_ids) != self._tree_req_ids:
+            raise RuntimeError("UNO tree proposals do not belong to the scheduled request.")
+        nodes = spec_metadata.num_draft_tokens[0]
+        if not 1 <= nodes <= self.verify_width:
+            raise RuntimeError("UNO tree verifier received an invalid node count.")
+        frontier = positions[0].clone()
+        positions[1 : nodes + 1].copy_(frontier + 1 + self._tree_proposal.depths[0, :nodes])
+        self._tree_full_allowed.zero_()
+        self._tree_full_allowed[:, 0] = True
+        self._tree_full_allowed[1:, 1:].copy_(self._tree_proposal.allowed_attention[0])
+        fill_uno_tree_mask(
+            self._tree_mask[:, :, : nodes + 1],
+            self._tree_key_positions,
+            frontier,
+            self._tree_full_allowed[: nodes + 1, : nodes + 1],
+        )
+
+    def attach_tree_verify_metadata(self, metadata, common, *, capture):
+        rows = common.num_actual_tokens
+        if capture:
+            # Dummy tree is a chain; real replay updates the same mask buffer.
+            self._tree_full_allowed.fill_(True).tril_()
+            fill_uno_tree_mask(
+                self._tree_mask[:, :, :rows],
+                self._tree_key_positions,
+                common.seq_lens[0] - rows,
+                self._tree_full_allowed[:rows, :rows],
+            )
+        if common.num_reqs != 1 or rows > self.verify_width + 1:
+            raise ValueError("UNO tree attention requires one request and a bounded verification tree.")
+        for layer in metadata.values():
+            layer.uno_tree_mask = self._tree_mask[:, :, :rows]
+        self._tree_verify_metadata = common
+
+    def sample_tree(self, logits, spec_metadata, sampling_metadata):
+        """Sample from base-model conditionals, then compact only the accepted path."""
+        self._validate_tree_sampling(sampling_metadata)
+        nodes = spec_metadata.num_draft_tokens[0]
+        tree = self._tree_proposal
+        proposal = UnoTreeProposal(
+            tree.tokens[:, :nodes],
+            tree.parents[:, :nodes],
+            tree.depths[:, :nodes],
+            tree.allowed_attention[:, :nodes, :nodes],
+        )
+        target, probs = self._sample_tree_logits(logits, sampling_metadata)
+        root = proposal.tokens[:, 0]
+        if probs is None:
+            accepted_root = target[:1] == root
+            recovered = target[:1]
+        else:
+            p, q = probs[:1], self._tree_clean_probs
+            if q is None:
+                raise RuntimeError("UNO tree lost the clean proposal distribution.")
+            uniform = torch.rand((1, 1), device=self.device, generator=sampling_metadata.generators.get(0))
+            accepted_root = (uniform * q.gather(1, root[:, None]) < p.gather(1, root[:, None])).view(-1)
+            residual = (p - q).clamp_min_(0)
+            noise = torch.empty_like(residual).exponential_(generator=sampling_metadata.generators.get(0))
+            recovered = (residual / noise).argmax(dim=-1)
+        output, accepted_rows = traverse_uno_tree(
+            proposal, target[1:].view(1, nodes), min(self.forward_width + 1, nodes + 1)
+        )
+        output = torch.where(accepted_root[:, None], output, -1)
+        output[:, 0] = torch.where(accepted_root, root, recovered)
+        accepted_rows = torch.where(accepted_root[:, None], accepted_rows, -1)
+        physical_slots = self._tree_verify_metadata.slot_mapping[: nodes + 1]
+        caches = []
+        for pair in self.runner.kv_caches:
+            caches.extend(pair)
+        addresses = tuple(dict.fromkeys(cache.data_ptr() for cache in caches))
+        compactor = getattr(self, "_tree_kv_compactor", None)
+        if compactor is None or compactor.addresses != addresses:
+            compactor = self._tree_kv_compactor = UnoTreeKVCompactor(caches)
+        compactor.compact(physical_slots, accepted_rows[0, :-1])
+        return SamplerOutput(sampled_token_ids=output.to(torch.int32), logprobs_tensors=None)
 
     def dummy_run(self, num_tokens: int, num_reqs: int = 0, **kwargs) -> None:
         """Profile-run stand-in.
@@ -785,20 +939,20 @@ class AscendUnoProposer:
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> torch.Tensor:
         """Return ``[num_reqs, F]`` proposals for the next verify forward."""
-        if num_speculative_tokens != self.forward_width:
+        if num_speculative_tokens != getattr(self, "verify_width", self.forward_width):
             # UNO's forward width is baked into the LoRA row routing and the
             # verify window; a per-step K would silently change the meaning of
             # the gated rows.
             raise ValueError(
                 "UNO does not support dynamic speculative lengths: "
                 f"got num_speculative_tokens={num_speculative_tokens}, "
-                f"expected {self.forward_width}."
+                f"expected {getattr(self, 'verify_width', self.forward_width)}."
             )
 
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = num_reqs * self.forward_width
         if num_reqs == 0:
-            return torch.empty((0, self.forward_width), dtype=torch.int64, device=self.device)
+            return torch.empty((0, num_speculative_tokens), dtype=torch.int64, device=self.device)
         self._require_single_kv_cache_group()
 
         seed_token_ids, valid_sampled_tokens_count = self.prepare_next_token_ids_padded(
@@ -867,6 +1021,26 @@ class AscendUnoProposer:
             # even if the draft forward raised.
             self._clear_lora_routing(num_tokens)
 
+        if getattr(self, "tree_mode", False):
+            self._validate_tree_sampling(sampling_metadata)
+            # Process only the clean row. Proposal ranking needs untruncated
+            # full-vocabulary log mass from the original noised logits.
+            clean_logits = logits[:1].clone()
+            clean_tokens, clean_probs = self._sample_tree_logits(clean_logits, sampling_metadata)
+            self._tree_clean_probs = clean_probs
+            temperature = sampling_metadata.temperature
+            if temperature is None:
+                temperature = torch.ones(1, device=self.device)
+            self._tree_proposal = build_uno_tree(
+                clean_tokens,
+                logits.view(num_reqs, self.forward_width, -1)[:, 1:],
+                max_nodes=self.verify_width,
+                candidate_top_k=self.tree_top_k,
+                temperature=temperature,
+            )
+            self._tree_req_ids = tuple(self.runner.input_batch.req_ids)
+            self._last_draft_probs = None
+            return self._tree_proposal.tokens
         draft_token_ids, draft_probs = self._sample_draft_tokens(logits, sampling_metadata, num_reqs)
         self._last_draft_probs = None if draft_probs is None else draft_probs.view(num_reqs, self.forward_width, -1)
         return draft_token_ids.view(num_reqs, self.forward_width)

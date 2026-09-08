@@ -42,6 +42,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
+from vllm_ascend.attention.uno_tree_attention import forward_uno_tree_attention, update_uno_tree_attention_graph
 from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
@@ -63,6 +64,7 @@ from vllm_ascend.compilation.acl_graph import (
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
+from vllm_ascend.uno_config import get_uno_tree_options
 from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
 
 if vllm_version_is("0.27.1"):
@@ -250,7 +252,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         if self.speculative_config:
             spec_token_num = self.speculative_config.num_speculative_tokens
             self.decode_threshold += spec_token_num
-            assert self.decode_threshold <= 16, (
+            assert self.decode_threshold <= 16 or get_uno_tree_options(vllm_config) is not None, (
                 f"decode_threshold exceeded \
                 npu_fused_infer_attention_score TND layout's limit of 16, \
                 got {self.decode_threshold}"
@@ -527,6 +529,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
+        if update_uno_tree_attention_graph(update_stream, forward_context, num_tokens):
+            return
         use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
@@ -1724,6 +1728,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ):
         record_attention_compute_start()
         num_tokens = query.shape[0]
+
+        if getattr(attn_metadata, "uno_tree_mask", None) is not None:
+            return forward_uno_tree_attention(self, query, key, value, attn_metadata, output)
 
         if (
             attn_metadata.attn_state == AscendAttentionState.DecodeOnly
