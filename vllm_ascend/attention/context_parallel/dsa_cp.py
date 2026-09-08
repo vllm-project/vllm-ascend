@@ -1689,11 +1689,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         }
         if need_gather_q_kv and self.tp_size > 1 and not is_decode and not self.enable_dsa_cp_full_o_proj:
             raise RuntimeError("DSA-CP sequence-parallel prefill requires full o_proj weight gathering.")
-        full_gather_wo_a_enabled = (
-            self.tp_size > 1
-            and self.enable_dsa_cp_full_o_proj
-            and not is_decode
-        )
+        full_gather_wo_a_enabled = self.tp_size > 1 and self.enable_dsa_cp_full_o_proj and not is_decode
         local_attn_output = self._forward(
             layer_name,
             hidden_states,

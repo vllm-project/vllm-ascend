@@ -30,8 +30,8 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     assert x.ndim == 2
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-x.shape[0]) % tp_size
-    if sp_pad > 0:
-        x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
+    pad_shape = [sp_pad, x.shape[1]]
+    x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
     output = _custom_collective("custom_reduce_scatter", x)
     if output is not None:
         return output
@@ -42,9 +42,9 @@ def sp_shard(x: torch.Tensor) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
     tp_rank = get_tensor_model_parallel_rank()
     sp_pad = (-x.shape[0]) % tp_size
-    if sp_pad > 0:
-        pad = (0, 0) * (x.ndim - 1) + (0, sp_pad)
-        x = torch.nn.functional.pad(x, pad)
+    pad_shape = list(x.shape)
+    pad_shape[0] = sp_pad
+    x = torch.cat([x, x.new_zeros(pad_shape)], dim=0)
     chunk = x.shape[0] // tp_size
     return x[tp_rank * chunk : (tp_rank + 1) * chunk]
 
@@ -60,8 +60,7 @@ def sp_padding_mask(
 
     tp_size = get_tensor_model_parallel_world_size()
     sp_pad = (-num_tokens) % tp_size
-    if sp_pad > 0:
-        is_padding = torch.nn.functional.pad(is_padding, (0, sp_pad), value=True)
+    is_padding = torch.cat([is_padding, is_padding.new_ones((sp_pad,))], dim=0)
     chunk = is_padding.shape[0] // tp_size
     tp_rank = get_tensor_model_parallel_rank()
     return is_padding[tp_rank * chunk : (tp_rank + 1) * chunk]
