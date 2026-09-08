@@ -263,4 +263,7 @@ For multi-node deployment, advertise reachable addresses instead of
 - Context parallelism has not been validated with Layerwise Prefill Offload.
 - Sparse Decode Offload supports DP and TP; CP and PP are not supported.
 - `LayerwisePullConnector` supports `memfabric` and `mooncake` through
-  `kv_connector_extra_config.transfer_backend`.
+  `kv_connector_extra_config.transfer_backend` when Sparse Decode Offload is
+  disabled. When Sparse Decode Offload is enabled, `transfer_backend` must be
+  `"memfabric"`; selecting `"mooncake"` raises an error before cache registration
+  because the current MemFabric offload memory pool is not supported by Mooncake.

@@ -119,10 +119,19 @@ def test_consumer_metadata_preserves_every_cache_group():
 
 
 @pytest.mark.parametrize(
-    "sparse_enabled,tp_rank,keep_device_kv_cache",
-    [(True, 0, False), (True, 1, False), (True, 0, True), (False, 0, False)],
+    "sparse_enabled,tp_rank,keep_device_kv_cache,backend_name",
+    [
+        (True, 0, False, "memfabric"),
+        (True, 1, False, "memfabric"),
+        (True, 0, True, "memfabric"),
+        (False, 0, False, "memfabric"),
+        (False, 0, False, "mooncake"),
+        (True, 0, False, "mooncake"),
+    ],
 )
-def test_destination_registration_with_optional_sparse_offload(sparse_enabled, tp_rank, keep_device_kv_cache):
+def test_destination_registration_with_optional_sparse_offload(
+    sparse_enabled, tp_rank, keep_device_kv_cache, backend_name
+):
     main_name = "model.layers.0.self_attn.attn"
     indexer_name = "model.layers.0.self_attn.indexer"
     num_blocks, block_size = 4, 16
@@ -159,7 +168,7 @@ def test_destination_registration_with_optional_sparse_offload(sparse_enabled, t
     worker.tp_rank = tp_rank
     worker.tp_size = 2
     worker.side_channel_port = 1234
-    worker._backend_name = "memfabric"
+    worker._backend_name = backend_name
     worker._dest_blocks_by_req = {}
     worker._dest_blocks_condition = threading.Condition()
     worker._ensure_engine = MagicMock(return_value=(None, MagicMock()))
@@ -172,6 +181,7 @@ def test_destination_registration_with_optional_sparse_offload(sparse_enabled, t
         indexer_name: indexer_tensors,
     }
     get_manager = MagicMock(return_value=manager)
+    engine_name = "global_memfabric_te" if backend_name == "memfabric" else "global_te"
     with (
         patch("vllm_ascend.ascend_config.get_ascend_config") as config,
         patch.dict(
@@ -182,11 +192,19 @@ def test_destination_registration_with_optional_sparse_offload(sparse_enabled, t
                 )
             },
         ),
-        patch("vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker.global_memfabric_te") as engine,
+        patch(f"vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker.{engine_name}") as engine,
         patch("vllm_ascend.distributed.kv_transfer.kv_p2p.layerwise_pull.worker.LayerwisePullReadThread") as reader,
     ):
         config.return_value.sparse_kv_offload_config.enabled = sparse_enabled
         reader.return_value.startup_error = None
+        if sparse_enabled and backend_name == "mooncake":
+            with pytest.raises(ValueError, match='sparse decode offload requires .*"memfabric"'):
+                worker.register_kv_caches(sparse_caches)
+            get_manager.assert_not_called()
+            worker._ensure_engine.assert_not_called()
+            engine.register_buffer.assert_not_called()
+            reader.assert_not_called()
+            return
         worker.register_kv_caches(
             sparse_caches if sparse_enabled else {main_name: main_tensors, indexer_name: indexer_tensors}
         )
@@ -196,8 +214,10 @@ def test_destination_registration_with_optional_sparse_offload(sparse_enabled, t
         expected_indexer,
     )
     if sparse_enabled:
-        main_ptrs = [k_base]
-        main_lengths = [sum(expected_main.block_lengths) * num_blocks]
+        # MemFabric reads directly into offload GVA; it must not register it
+        # as ordinary HBM.
+        main_ptrs = []
+        main_lengths = []
     else:
         get_manager.assert_not_called()
         main_ptrs = [tensor.data_ptr() for tensor in main_tensors]

@@ -45,7 +45,6 @@ from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import (
     global_te,
 )
 from vllm_ascend.distributed.kv_transfer.utils.utils import (
-    RegisterRegions,
     collect_storage_merged_register_regions,
     get_transfer_timeout_value,
     validate_register_region_count,
@@ -197,12 +196,19 @@ class LayerwisePullConsumerWorker:
         tp_shared_components: set[str] = set()
 
         # Sparse main caches contain optional HBM/CPU tensors and top-k buffers,
-        # not an ordinary HBM component. Only register their TP-shared CPU K/V.
+        # not an ordinary HBM component. Their destination is TP-shared CPU K/V.
         from vllm_ascend.ascend_config import get_ascend_config
 
         main_names: set[str] = set()
         hbm_destinations = kv_caches
         if get_ascend_config().sparse_kv_offload_config.enabled:
+            if self._backend_name != BACKEND_MEMFABRIC:
+                raise ValueError(
+                    "LayerwisePullConnector with sparse decode offload requires "
+                    'kv_connector_extra_config["transfer_backend"]="memfabric"; '
+                    "Mooncake cannot currently use the MemFabric offload memory pool."
+                )
+
             from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_manager import (
                 get_sparse_kv_offload_manager,
             )
@@ -221,8 +227,6 @@ class LayerwisePullConsumerWorker:
                 for group_idx, group in enumerate(self.kv_cache_config.kv_cache_groups)
                 for layer_name in group.layer_names
             }
-            main_ptrs: list[int] = []
-            main_lengths: list[int] = []
             for pool_idx, layer_name in enumerate(self.offload_manager.offload_layer_names):
                 group_idx = layer_to_group[layer_name]
                 k_base = self.offload_manager.gvas_k_bases[pool_idx]
@@ -254,18 +258,8 @@ class LayerwisePullConsumerWorker:
                 layouts.setdefault(layer_idx, []).insert(0, component)
                 tp_shared_components.add(layer_name)
 
-                num_blocks = self.kv_cache_config.num_blocks
-                start = min(k_base, v_base)
-                end = max(k_base + k_len * num_blocks, v_base + v_len * num_blocks)
-                main_ptrs.append(start)
-                main_lengths.append(end - start)
-
-            registration = RegisterRegions(
-                ptrs=main_ptrs + registration.ptrs,
-                lengths=main_lengths + registration.lengths,
-                logical_tensor_count=len(main_ptrs) + (registration.logical_tensor_count or 0),
-                logical_total_bytes=sum(main_lengths) + (registration.logical_total_bytes or 0),
-            )
+            # MemFabric reads directly into the offload pool's GVA without
+            # registering it through the HBM-only TRANS registration path.
 
         self.layer_layouts = {layer_idx: tuple(components) for layer_idx, components in layouts.items()}
         validate_register_region_count(registration)

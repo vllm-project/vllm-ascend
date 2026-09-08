@@ -320,6 +320,10 @@ reader 集合为空时设置完成 event。
 
 配置只选择 backend，不配置传输方向：
 
+当前开启 sparse decode offload 时，`transfer_backend` 必须为 `"memfabric"`。
+现有 offload 内存池由 MemFabric 分配，尚不支持通过 Mooncake 使用；D 端会在注册缓存前拒绝该组合。
+未开启 sparse decode offload 时，仍支持 `"memfabric"` 和 `"mooncake"`。
+
 ```json
 {
   "kv_connector": "LayerwisePullConnector",

@@ -270,5 +270,8 @@ treated as a terminal state, so Prefill may continue waiting.
 - Joint deployment requires Prefill TP to be greater than or equal to, and
   divisible by, Decode TP.
 - `LayerwisePullConnector` supports MemFabric and Mooncake with the same
-  per-buffer completion gate.
+  per-buffer completion gate when Sparse Decode Offload is disabled. Sparse
+  Decode Offload currently requires `kv_connector_extra_config.transfer_backend`
+  to be `"memfabric"`. The consumer rejects Mooncake before cache registration
+  because it cannot currently use the MemFabric offload memory pool.
 - Connector-level data-read retry is not implemented.
