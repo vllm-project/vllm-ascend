@@ -34,6 +34,12 @@ public:
         this->Attr("epsilon").AttrType(OPTIONAL).Float(1e-6f);
         this->AICore().AddConfig("ascend910b");
         this->AICore().AddConfig("ascend910_93");
+        OpAICoreConfig regbase_config;
+        regbase_config.DynamicCompileStaticFlag(true)
+            .DynamicRankSupportFlag(true)
+            .DynamicShapeSupportFlag(true)
+            .ExtendCfgInfo("opFile.value", "rms_norm_cast");
+        this->AICore().AddConfig("ascend950", regbase_config);
     }
 };
 OP_ADD(RmsNormCast);
