@@ -21,6 +21,9 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         self.scheme = AscendW8A8MXFP8DynamicLinearMethod()
+        nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
+        self.addCleanup(nz_config.stop)
+        nz_config.start()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
@@ -78,7 +81,9 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.shape, original_scale_shape)
         self.assertFalse(layer._mxfp8_transformed)
 
-    def test_transform_buffer_data_ptr_stable_across_reloads(self):
+    @patch("vllm_ascend.utils._should_trans_nz", return_value=True)
+    @patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone())
+    def test_transform_buffer_data_ptr_stable_across_reloads(self, mock_cast, mock_should_trans_nz):
         # The transformed buffer is what the ACL graph captures and replays.
         # It must keep a stable data_ptr across RL weight reloads so graph
         # replay never reads stale/freed memory and produces garbled output.
@@ -114,6 +119,21 @@ class TestAscendW8A8MXFP8LinearMethod(TestBase):
             self.assertTrue(layer._mxfp8_scale_buf.is_contiguous())
             self.assertTrue(layer.weight.data.is_contiguous())
             self.assertTrue(layer.weight_scale.data.is_contiguous())
+            torch.testing.assert_close(layer.weight.float(), new_w.T.float(), rtol=0, atol=0)
+            torch.testing.assert_close(layer.weight_scale, new_s.reshape(128, 4, 2).transpose(0, 1))
+        mock_cast.assert_called_once()
+        self.assertEqual(mock_cast.call_args.kwargs["customize_dtype"], torch.float8_e4m3fn)
+
+    @patch("torch_npu.npu_format_cast")
+    def test_fused_preprocess_owns_nz_conversion(self, mock_cast):
+        layer = nn.Module()
+        layer.weight = nn.Parameter(torch.randn(128, 256).to(torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale = nn.Parameter(torch.ones(128, 8, dtype=torch.uint8), requires_grad=False)
+        layer._fused_preprocess_managed = True
+        self.scheme.process_weights_after_loading(layer)
+        self.assertEqual(layer.weight.shape, (256, 128))
+        self.assertEqual(layer.weight_scale.shape, (4, 128, 2))
+        mock_cast.assert_not_called()
 
     @patch("vllm_ascend.quantization.methods.w8a8.w8a8_mxfp8.torch_npu")
     def test_apply(self, mock_torch_npu):
@@ -149,6 +169,9 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
         self.scheme = AscendW8A8MXFP8DynamicFusedMoEMethod()
+        nz_config = patch("vllm_ascend.utils.get_ascend_config", return_value=SimpleNamespace(weight_nz_mode=1))
+        self.addCleanup(nz_config.stop)
+        nz_config.start()
 
     def test_modelopt_config_defaults_group_size(self):
         vllm_config = create_mock_vllm_config()
@@ -216,6 +239,45 @@ class TestAscendW8A8MXFP8MoEMethod(TestBase):
             self.assertTrue(weight_view.is_contiguous())
             self.assertEqual(weight_view.shape[0], self.num_experts)
             self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
+
+    def test_moe_buffer_data_ptr_stable_across_reloads(self):
+        for nz_enabled in (False, True):
+            with (
+                self.subTest(nz_enabled=nz_enabled),
+                patch("vllm_ascend.utils._should_trans_nz", return_value=nz_enabled),
+                patch("torch_npu.npu_format_cast", side_effect=lambda weight, fmt, **kwargs: weight.clone()) as cast,
+            ):
+                layer = create_mxfp_moe_layer(
+                    num_experts=self.num_experts, hidden_size=self.hidden_size, intermediate_size=self.intermediate_size
+                )
+                names = ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale")
+                loaded = {name: getattr(layer, name).data.clone() for name in names}
+                self.scheme.process_weights_after_loading(layer)
+                # Keep the tensors captured by the graph alive, including scales.
+                captured = {name: getattr(layer, name).data for name in names}
+                pointers = {name: tensor.data_ptr() for name, tensor in captured.items()}
+                for _ in range(3):
+                    self.scheme.restore_weights_for_rl_loading(layer)
+                    for name in names:
+                        torch.testing.assert_close(getattr(layer, name).float(), loaded[name].float(), rtol=0, atol=0)
+                    loaded = {}
+                    for name in names:
+                        parameter = getattr(layer, name)
+                        loaded[name] = torch.randint(0, 16, parameter.shape, dtype=torch.uint8).to(parameter.dtype)
+                        parameter.data.copy_(loaded[name])
+                    self.scheme.process_weights_after_loading(layer)
+                    for name in names:
+                        parameter = getattr(layer, name)
+                        self.assertEqual(parameter.data_ptr(), pointers[name], name)
+                        self.assertEqual(parameter.is_contiguous(), nz_enabled, name)
+                        expected = loaded[name]
+                        if name.endswith("_scale"):
+                            groups, channels, scale_size = expected.shape
+                            expected = expected.reshape(groups, channels, scale_size // 2, 2)
+                        expected = expected.transpose(1, 2)
+                        torch.testing.assert_close(parameter.float(), expected.float(), rtol=0, atol=0)
+                        torch.testing.assert_close(captured[name].float(), expected.float(), rtol=0, atol=0)
+                self.assertEqual(cast.call_count, 2 if nz_enabled else 0)
 
     def test_restore_weights_for_rl_loading(self):
         layer = create_mxfp_moe_layer(

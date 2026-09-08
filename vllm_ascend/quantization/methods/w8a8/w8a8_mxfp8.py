@@ -165,6 +165,8 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
         if not hasattr(layer, "_mxfp8_weight_buf"):
             # First call: allocate the persistent transformed buffers.
             layer._mxfp8_weight_buf = layer.weight.data.transpose(0, 1).contiguous()
+            if not getattr(layer, "_fused_preprocess_managed", False):
+                layer._mxfp8_weight_buf = maybe_trans_nz(layer._mxfp8_weight_buf, customize_dtype=torch.float8_e4m3fn)
             layer._mxfp8_scale_buf = target_scale.contiguous()
         else:
             # Subsequent calls (RL reload path): copy in place to keep data_ptr stable.
@@ -173,8 +175,6 @@ class AscendW8A8MXFP8DynamicLinearMethod(AscendLinearScheme):
 
         layer.weight.data = layer._mxfp8_weight_buf
         layer.weight_scale.data = layer._mxfp8_scale_buf
-        if not getattr(layer, "_fused_preprocess_managed", False):
-            layer.weight.data = maybe_trans_nz(layer.weight.data, customize_dtype=torch.float8_e4m3fn)
 
         # Mark as transformed
         layer._mxfp8_transformed = True
@@ -343,22 +343,27 @@ class AscendW8A8MXFP8DynamicFusedMoEMethod(AscendMoEScheme):
                 "w2_weight_scale": tuple(layer.w2_weight_scale.data.shape),
             }
 
-        g_num, n_size, k_size = layer.w13_weight_scale.shape
-        layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        g_num, n_size, k_size = layer.w2_weight_scale.shape
-        layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
-        layer.w13_weight.data, layer.w13_weight_scale.data = maybe_trans_nz_with_scale(
-            layer.w13_weight.data,
-            layer.w13_weight_scale.data,
-            transpose_dims=(1, 2),
-            customize_dtype=torch.float8_e4m3fn,
-        )
-        layer.w2_weight.data, layer.w2_weight_scale.data = maybe_trans_nz_with_scale(
-            layer.w2_weight.data,
-            layer.w2_weight_scale.data,
-            transpose_dims=(1, 2),
-            customize_dtype=torch.float8_e4m3fn,
-        )
+        if not hasattr(layer, "_mxfp8_moe_buffers"):
+            layer._mxfp8_moe_buffers = {}
+        for weight_name in ("w13_weight", "w2_weight"):
+            weight = getattr(layer, weight_name)
+            scale = getattr(layer, f"{weight_name}_scale")
+            g_num, n_size, k_size = scale.shape
+            target_scale = scale.data.reshape(g_num, n_size, k_size // 2, 2)
+            if weight_name not in layer._mxfp8_moe_buffers:
+                layer._mxfp8_moe_buffers[weight_name] = maybe_trans_nz_with_scale(
+                    weight.data,
+                    target_scale,
+                    transpose_dims=(1, 2),
+                    customize_dtype=torch.float8_e4m3fn,
+                )
+            else:
+                # ACL graphs retain both weight and scale addresses across RL reloads.
+                # Materialize sources before copying because restored views can alias.
+                weight_buffer, scale_buffer = layer._mxfp8_moe_buffers[weight_name]
+                weight_buffer.copy_(weight.data.transpose(1, 2).contiguous())
+                scale_buffer.copy_(target_scale.transpose(1, 2).contiguous())
+            weight.data, scale.data = layer._mxfp8_moe_buffers[weight_name]
 
         # Mark as transformed
         layer._mxfp8_transformed = True
