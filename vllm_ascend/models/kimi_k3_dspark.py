@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi K3 MLA DSpark draft model for Ascend."""
 
+import json
 from collections.abc import Iterable
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -33,6 +35,10 @@ from vllm.models.kimi_k3.nvidia.dspark_mla import (
     K3DSparkModel as UpstreamK3DSparkModel,
 )
 
+from vllm_ascend.models.dspark_aux import (
+    DSparkAuxHiddenContract,
+    build_k3_mla_aux_hidden_contract,
+)
 from vllm_ascend.models.kimi_k3 import (
     AscendKimiMLAAttention,
 )
@@ -54,6 +60,26 @@ def _uses_causal_draft_attention(config) -> bool:
     if isinstance(dflash_config, dict) and "causal" in dflash_config:
         return bool(dflash_config["causal"])
     return bool(getattr(config, "full_attention_causal", False))
+
+
+def _get_target_rotation_path(vllm_config: VllmConfig) -> Path | None:
+    rotation_path = get_rotation_path(vllm_config)
+    if rotation_path is not None:
+        return rotation_path
+
+    # MRV2 replaces vllm_config.quant_config with the draft model's quant
+    # config before constructing the DSpark model. A non-quantized draft then
+    # loses the target model's QuaRot metadata even though model_config still
+    # points at the target checkpoint. Recover that target-only metadata.
+    target_model_path = Path(vllm_config.model_config.model)
+    description_path = target_model_path / "quant_model_description.json"
+    try:
+        with description_path.open(encoding="utf-8") as description_file:
+            description = json.load(description_file)
+        relative_path = description["optional"]["quarot"]["rotation_map"]["global_rotation"]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+    return target_model_path / relative_path
 
 
 class AscendK3DSparkDecoderLayer(UpstreamK3DSparkDecoderLayer):
@@ -245,6 +271,10 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         self.draft_model_config = vllm_config.speculative_config.draft_model_config
         assert self.draft_model_config is not None
         self.config = self.draft_model_config.hf_config
+        self._aux_hidden_contract = build_k3_mla_aux_hidden_contract(
+            self.config,
+            vllm_config.model_config.dtype,
+        )
         target_layer_num = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.model = AscendK3DSparkModel(
             vllm_config=vllm_config,
@@ -256,7 +286,7 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
             self.config.draft_vocab_size,
             scale=getattr(self.config, "logit_scale", 1.0),
         )
-        self.rotation_path = get_rotation_path(vllm_config)
+        self.rotation_path = _get_target_rotation_path(vllm_config)
         self.target_model_path = vllm_config.model_config.model
         if self.rotation_path is not None:
             target_config = vllm_config.model_config.hf_text_config
@@ -275,6 +305,11 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
     def get_draft_attn_causal(self) -> list[bool]:
         causal = _uses_causal_draft_attention(self.config)
         return [causal] * len(self.model.layers)
+
+    def get_required_dspark_aux_hidden_state_contract(
+        self,
+    ) -> DSparkAuxHiddenContract:
+        return self._aux_hidden_contract
 
     def load_weights(
         self,

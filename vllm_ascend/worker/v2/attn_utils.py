@@ -69,6 +69,73 @@ if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
 
 
+def normalize_mamba_kv_cache_config(kv_cache_config: KVCacheConfig) -> KVCacheConfig:
+    """Expose identical Mamba specs to upstream MRV2 sizing and state handling."""
+    groups = []
+    for group in kv_cache_config.kv_cache_groups:
+        spec = group.kv_cache_spec
+        if isinstance(spec, UniformTypeKVCacheSpecs):
+            inner_specs = list(spec.kv_cache_specs.values())
+            if (
+                inner_specs
+                and isinstance(inner_specs[0], MambaSpec)
+                and all(inner == inner_specs[0] for inner in inner_specs)
+            ):
+                group = replace(group, kv_cache_spec=inner_specs[0])
+        groups.append(group)
+    # Preserve per-layer attention layouts and the caller's worker config.
+    return replace(kv_cache_config, kv_cache_groups=groups)
+
+
+def validate_kv_cache_tensor_layouts(kv_cache_config: KVCacheConfig) -> None:
+    """Validate main's per-layer views without rejecting hybrid group aliases.
+
+    Descriptors use offset, layer_stride and block_stride into a shared byte
+    backing. Different cache groups may intentionally overlay the same bytes;
+    layers within a group must have disjoint storage.
+    """
+    if kv_cache_config.num_blocks <= 0:
+        raise ValueError("KV cache num_blocks must be positive")
+
+    specs_by_layer: dict[str, KVCacheSpec] = {}
+    groups_by_layer: dict[str, int] = {}
+    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+        spec = group.kv_cache_spec
+        for name in group.layer_names:
+            specs_by_layer[name] = spec.kv_cache_specs[name] if isinstance(spec, UniformTypeKVCacheSpecs) else spec
+            groups_by_layer[name] = group_id
+
+    owners: set[str] = set()
+    regions: dict[int, list[tuple[int, int, str]]] = {}
+    for tensor_idx, tensor in enumerate(kv_cache_config.kv_cache_tensors):
+        label = f"KV cache tensor {tensor_idx}"
+        if tensor.size <= 0:
+            raise ValueError(f"{label} size must be positive")
+        layers = get_kv_cache_tensor_layers(tensor)
+        if not layers:
+            raise ValueError(f"{label} must own at least one layer")
+        if tensor.offset < 0 or tensor.layer_stride < 0:
+            raise ValueError(f"{label} offset and layer stride must be nonnegative")
+        for layer_idx, name in enumerate(layers):
+            if name in owners:
+                raise ValueError(f"KV cache layer {name} has multiple storage owners")
+            owners.add(name)
+            if name not in specs_by_layer:
+                raise ValueError(f"{label} references unknown layer {name!r}")
+            page_size = specs_by_layer[name].page_size_bytes
+            if tensor.block_stride < page_size:
+                raise ValueError(f"{label} block stride is smaller than page size")
+            start = tensor.offset + layer_idx * tensor.layer_stride
+            end = start + (kv_cache_config.num_blocks - 1) * tensor.block_stride + page_size
+            if end > tensor.size:
+                raise ValueError(f"{label} layer {name} exceeds the backing allocation")
+            group_regions = regions.setdefault(groups_by_layer[name], [])
+            for other_start, other_end, other_name in group_regions:
+                if start < other_end and other_start < end:
+                    raise ValueError(f"{label} layer {name} overlaps {other_name} within one cache group")
+            group_regions.append((start, end, name))
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -1077,11 +1144,13 @@ def build_attn_metadata_wrapper():
 
 @contextmanager
 def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
-    """Wrap build_attn_metadata to forward rotary positions for the draft block.
+    """Wrap build_attn_metadata with Ascend draft-model context.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
     DSA/MLA ``build_decode_metadata`` for cos/sin, but the flat upstream
-    speculator path does not forward them. Must run inside
+    speculator path does not forward them or the Ascend attention state. The
+    latter must be ``SpecDecoding`` so MLA uses the token-major speculative
+    path instead of treating draft tokens as independent requests. Must run inside
     ``build_attn_metadata_wrapper()``.
     """
     raw = _BUILD_ATTN_METADATA_MODULE.build_attn_metadata  # cache
@@ -1089,6 +1158,7 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        kwargs["attn_state"] = AscendAttentionState.SpecDecoding
         return raw(*args, **kwargs)
 
     try:
