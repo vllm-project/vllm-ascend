@@ -478,13 +478,7 @@ def test_select_moe_comm_method_310p_uses_allgather(monkeypatch):
     assert afc.select_moe_comm_method(128, _make_vllm_config()) == MoECommType.ALLGATHER
 
 
-@pytest.mark.parametrize(
-    ("num_prefills", "num_decodes", "expected_pure_prefill"),
-    [(1, 0, True), (1, 1, False), (0, 1, False), (0, 0, False)],
-)
-def test_set_ascend_forward_context_pins_current_vllm_config(
-    monkeypatch, num_prefills, num_decodes, expected_pure_prefill
-):
+def test_set_ascend_forward_context_pins_current_vllm_config(monkeypatch):
     vllm_config = _make_vllm_config()
     seen: dict[str, object] = {"config": None, "inside": False}
 
@@ -519,10 +513,9 @@ def test_set_ascend_forward_context_pins_current_vllm_config(
     else:
         monkeypatch.setitem(sys.modules, moe_mod_name, SimpleNamespace(get_moe_comm_method=lambda _t: None))
 
-    metadata = {"layer": SimpleNamespace(num_prefills=num_prefills, num_decodes=num_decodes)}
-    with afc.set_ascend_forward_context(metadata, vllm_config, num_tokens=4):
+    with afc.set_ascend_forward_context(None, vllm_config, num_tokens=4):
         assert seen["inside"] is True
         assert seen["config"] is vllm_config
 
     assert seen["inside"] is False
-    selector.assert_called_once_with(4, vllm_config, model_instance=None, is_pure_prefill=expected_pure_prefill)
+    selector.assert_called_once_with(4, vllm_config, model_instance=None)

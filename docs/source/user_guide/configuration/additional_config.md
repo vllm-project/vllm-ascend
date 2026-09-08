@@ -90,9 +90,10 @@ CANN MegaMoe; configuration initialization normalizes it to `1` while keeping
 the MegaMoe runtime gate enabled. On A5 the MegaMoe path is
 selected from the instantiated MoE layer capabilities instead of checkpoint
 metadata; unsupported layer layouts keep the decomposed MC2/AllToAll path.
-On A5, only pure prefill batches select MegaMoe. This branch is not gated by
-the decode MC2 token capacity; decode and mixed batches retain the existing
-MC2/AllGather/AllToAll selection.
+On A5, supported models select MegaMoe for prefill, decode, mixed and idle
+dummy batches. Selection is independent of local attention metadata and the
+decode MC2 token capacity, so all DP ranks sharing an EP group use the same
+communication path. Configure the same switch and model on every EP rank.
 
 | Item | A2 / A3 | A5 (Ascend 950PR / 950DT) |
 | ---- | ------- | ------------------------- |

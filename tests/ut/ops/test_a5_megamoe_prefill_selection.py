@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -18,22 +19,19 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 
 @pytest.mark.parametrize(
-    ("tokens", "pure_prefill", "supported", "switch", "enabled", "expected"),
+    ("tokens", "supported", "switch", "enabled", "expected"),
     [
-        (1, True, True, 1, True, afc.MoECommType.FUSED_MC2),
-        (8192, True, True, 1, True, afc.MoECommType.FUSED_MC2),
-        (1, False, True, 1, True, afc.MoECommType.MC2),
-        (8, False, True, 1, True, afc.MoECommType.MC2),
-        (8192, False, True, 1, True, afc.MoECommType.ALLTOALL),
-        (1, True, False, 1, True, afc.MoECommType.MC2),
-        (8192, True, True, 0, False, afc.MoECommType.ALLTOALL),
-        (8192, True, True, 1, False, afc.MoECommType.ALLTOALL),
-        (8192, True, True, 0, True, afc.MoECommType.ALLTOALL),
+        (1, True, 1, True, afc.MoECommType.FUSED_MC2),
+        (8, True, 1, True, afc.MoECommType.FUSED_MC2),
+        (8192, True, 1, True, afc.MoECommType.FUSED_MC2),
+        (1, False, 1, True, afc.MoECommType.MC2),
+        (8192, False, 1, True, afc.MoECommType.ALLTOALL),
+        (8192, True, 0, False, afc.MoECommType.ALLTOALL),
+        (8192, True, 1, False, afc.MoECommType.ALLTOALL),
+        (8192, True, 0, True, afc.MoECommType.ALLTOALL),
     ],
 )
-def test_a5_pure_prefill_only_without_capacity_gate(
-    monkeypatch, tokens, pure_prefill, supported, switch, enabled, expected
-):
+def test_a5_capability_selection_without_capacity_gate(monkeypatch, tokens, supported, switch, enabled, expected):
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(top_k_experts=1)),
         parallel_config=SimpleNamespace(enable_expert_parallel=True, world_size_across_dp=8),
@@ -45,10 +43,36 @@ def test_a5_pure_prefill_only_without_capacity_gate(
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=8))
     monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=switch))
     monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: enabled)
-    assert (
-        afc.select_moe_comm_method(tokens, config, is_pure_prefill=pure_prefill, cann_mega_moe_supported=supported)
-        == expected
+    assert afc.select_moe_comm_method(tokens, config, cann_mega_moe_supported=supported) == expected
+
+
+@pytest.mark.parametrize("counts", [(2, 0), None, (0, 1), (1, 1), (0, 0)])
+def test_a5_dp_ranks_keep_same_comm_method_with_different_metadata(monkeypatch, counts):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(hf_text_config=SimpleNamespace(top_k_experts=8)),
+        parallel_config=SimpleNamespace(enable_expert_parallel=True, world_size_across_dp=32),
+        lora_config=None,
     )
+    context = SimpleNamespace(dp_metadata=None)
+    capability = CannMegaMoeLayerCapability(True, "", QuantType.W4A8MXFP)
+    monkeypatch.setattr(afc, "set_current_vllm_config", lambda _: nullcontext())
+    monkeypatch.setattr(afc, "set_forward_context", lambda **kwargs: nullcontext())
+    monkeypatch.setattr(afc, "get_forward_context", lambda: context)
+    monkeypatch.setattr(afc, "get_tensor_model_parallel_world_size", lambda: 8)
+    monkeypatch.setattr(afc, "get_dp_group", lambda: SimpleNamespace(world_size=4))
+    monkeypatch.setattr(afc, "has_layer_idx", lambda _: False)
+    monkeypatch.setattr(afc, "get_mc2_mask", lambda: None)
+    monkeypatch.setattr(afc, "get_model_cann_mega_moe_capability", lambda _: capability)
+    monkeypatch.setattr(afc, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: 128)
+    monkeypatch.setattr(afc, "get_ascend_device_type", lambda: afc.AscendDeviceType.A5)
+    monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=32))
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1))
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: True)
+    monkeypatch.setattr(comm, "get_moe_comm_method", lambda kind: kind)
+    metadata = None if counts is None else {"layer": SimpleNamespace(num_prefills=counts[0], num_decodes=counts[1])}
+    with afc.set_ascend_forward_context(metadata, config, num_tokens=16128):
+        assert context.moe_comm_type == afc.MoECommType.FUSED_MC2
 
 
 def _request():

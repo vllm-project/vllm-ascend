@@ -142,14 +142,10 @@ def set_ascend_forward_context(
         from vllm_ascend.ops.fused_moe.moe_comm_method import get_moe_comm_method
 
         max_num_tokens = int(num_tokens_across_dp.max().item()) if num_tokens_across_dp is not None else num_tokens
-        is_pure_prefill = bool(attn_metadata) and all(
-            meta.num_prefills > 0 and meta.num_decodes == 0 for meta in attn_metadata.values()
-        )
         moe_comm_type = select_moe_comm_method(
             max_num_tokens,
             vllm_config,
             model_instance=model_instance,
-            is_pure_prefill=is_pure_prefill,
         )
 
         forward_context.moe_comm_type = moe_comm_type
@@ -324,17 +320,11 @@ def _select_a5_moe_comm_method(
     mc2_tokens_capacity: int,
     model_instance: torch.nn.Module | None = None,
     cann_mega_moe_supported: bool | None = None,
-    is_pure_prefill: bool = False,
 ) -> MoECommType:
     hf_text_config = vllm_config.model_config.hf_text_config
     if cann_mega_moe_supported is None:
         cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
-    if (
-        is_pure_prefill
-        and get_ascend_config().enable_fused_mc2 == 1
-        and is_mega_moe_supported()
-        and cann_mega_moe_supported
-    ):
+    if get_ascend_config().enable_fused_mc2 == 1 and is_mega_moe_supported() and cann_mega_moe_supported:
         return MoECommType.FUSED_MC2
 
     num_experts_per_tok = getattr(
@@ -356,7 +346,6 @@ def select_moe_comm_method(
     *,
     model_instance: torch.nn.Module | None = None,
     cann_mega_moe_supported: bool | None = None,
-    is_pure_prefill: bool = False,
 ) -> MoECommType | None:
     """Select the MoE communication method according to parallel settings,
     device generation, and token count.
@@ -369,15 +358,15 @@ def select_moe_comm_method(
        group size is small enough; otherwise use MC2 within capacity or
        all-to-all.
     5. On 310P, always use all-gather.
-    6. On A5 with expert parallel, use MC2 when tokens fit the MC2 capacity
-       and the EP size is large enough; otherwise use all-gather when
-       EP size is smaller than num of topK experts or all-to-all.
+    6. On A5 with expert parallel, prefer CANN MegaMoe when explicitly
+       enabled and supported by the model. This must not depend on local
+       batch metadata: active and idle DP ranks share the same EP group.
+       Otherwise use MC2 within capacity, all-gather for small EP groups,
+       or all-to-all.
 
     Args:
         num_tokens (int): The number of tokens in the current batch.
         vllm_config (VllmConfig): Runtime configuration for the model.
-        is_pure_prefill (bool): Select A5 MegaMoe only for pure prefill;
-            decode and mixed batches retain the original MC2 selection.
         model_instance (torch.nn.Module | None): Loaded model used to aggregate
             registered MegaMoe layer capabilities.
         cann_mega_moe_supported (bool | None): Optional already-aggregated
@@ -418,7 +407,6 @@ def select_moe_comm_method(
             mc2_tokens_capacity,
             model_instance,
             cann_mega_moe_supported,
-            is_pure_prefill=is_pure_prefill,
         )
     elif soc_version == AscendDeviceType._310P:
         moe_comm_type = MoECommType.ALLGATHER
