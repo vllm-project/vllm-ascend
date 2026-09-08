@@ -51,6 +51,12 @@ The operator supports:
 
 5. **Greedy non-bonus rejection**: does not overwrite the target argmax already written by the verification kernel; it only advances `num_sampled`.
 
+6. **Block-verification residual** (`use_block_verification=True`, full-draft branch only; Sun et al. 2024, vllm#46781): the rejection kernel first picks the rejected position by comparing a uniform draw against a threshold built from the *joint* probability \(p_\tau=\prod_{i\le\tau}q(x_i)\) of the drafted prefix, and the residual becomes
+   \[
+   m_i = \max(p_\tau\,p_i-q_i,\,0),
+   \]
+   where `p_tau` is read from `cumulative_log_p[row - 1]` (`p_0 = 1` skips the load). A trailing `-1` placeholder truncates the block and resamples from the full target distribution. In the one-hot branch the constant `p_tau` cancels under normalization, so the plain token-wise residual is kept.
+
 Individual `-inf` vocabulary entries are valid and contribute zero probability mass.
 
 ### Two-stage categorical flow
@@ -117,6 +123,8 @@ def resample(
     seed: torch.Tensor,
     pos: torch.Tensor,
     has_draft_logits: bool | None = None,
+    cumulative_log_p: torch.Tensor | None = None,
+    use_block_verification: bool = False,
 ) -> None:
 ```
 
@@ -135,6 +143,8 @@ def resample(
 | `seed` | Input | `[max_num_reqs]` | int64 request-state seed. |
 | `pos` | Input | `[num_logits]` | int64 logical position; currently cast to int32 by the NPU random path. |
 | `has_draft_logits` | Attribute | scalar | If `None`, inferred from `draft_logits is not None`. Pass `False` when an upper layer replaced `None` with a dummy tensor. |
+| `cumulative_log_p` | Input | `[num_logits]` or `None` | fp32 log joint-acceptance ratio of the drafted prefix, `cumulative_log_p[start + i] = log(p_{i+1})`, as produced by the upstream `_compute_cumulative_log_p_kernel`. Required when `use_block_verification=True`; unread otherwise. |
+| `use_block_verification` | Attribute | scalar | Selects block verification (Sun et al. 2024, vllm#46781): the residual becomes `max(p_tau * p(x) - q(x), 0) / Z` with `p_tau` the accepted prefix's joint ratio read from `cumulative_log_p[row - 1]` (`p_0 = 1`, so the `step == 0` case skips the load). `False` keeps the token-wise residual. |
 
 `temperature` is used here to distinguish greedy and random rows. The surrounding rejection path owns the logits/LSE preprocessing contract.
 
