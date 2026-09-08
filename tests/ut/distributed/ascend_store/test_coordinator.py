@@ -77,7 +77,7 @@ class _FakeCompressedManager:
         **kwargs,
     ):
         computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
-        logical_block_size = kv_cache_spec.block_size * kv_cache_spec.compress_ratio
+        logical_block_size = kv_cache_spec.block_size
         if logical_block_size != block_pool.hash_block_size:
             scale_factor = logical_block_size // block_pool.hash_block_size
             block_hashes = [
@@ -99,10 +99,10 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         block_hashes = _hashes(128)
         grouped_hash = get_block_hashes(block_hashes, group_block_size=128 * 128, hash_block_size=128)[0]
         coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], _full_spec(128))],
+            [KVCacheGroupSpec(["layer.0"], _full_spec(128 * 128))],
             scheduler_block_size=128 * 128,
             hash_block_size=128,
-            group_block_sizes=[128],
+            group_block_sizes=[128 * 128],
             group_cache_families=["c128"],
         )
 
@@ -123,10 +123,18 @@ class TestAscendStoreCoordinator(unittest.TestCase):
             return_value=_FakeCompressedManager,
         ):
             coord = AscendStoreCoordinator(
-                [KVCacheGroupSpec(["layer.0"], _FakeCompressedSpec(block_size=128, compress_ratio=128))],
+                [
+                    KVCacheGroupSpec(
+                        ["layer.0"],
+                        _FakeCompressedSpec(
+                            block_size=128 * 128,
+                            compress_ratio=128,
+                        ),
+                    )
+                ],
                 scheduler_block_size=128 * 128,
                 hash_block_size=128,
-                group_block_sizes=[128],
+                group_block_sizes=[128 * 128],
                 group_cache_families=["c128"],
             )
 
@@ -136,7 +144,7 @@ class TestAscendStoreCoordinator(unittest.TestCase):
                 ExternalCachedBlockPool(128, {(0, bytes(grouped_hash))}),
             )
 
-        self.assertEqual(coord.group_effective_specs[0].compress_ratio, 1)
+        self.assertEqual(coord.group_effective_specs[0].compress_ratio, 128)
         self.assertEqual(hit_length, 128 * 128)
 
     def test_missing_required_group_returns_zero(self):
@@ -145,11 +153,11 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         coord = AscendStoreCoordinator(
             [
                 KVCacheGroupSpec(["layer.0"], _full_spec(128)),
-                KVCacheGroupSpec(["layer.1"], _full_spec(128)),
+                KVCacheGroupSpec(["layer.1"], _full_spec(128 * 128)),
             ],
             scheduler_block_size=128 * 128,
             hash_block_size=128,
-            group_block_sizes=[128, 128],
+            group_block_sizes=[128, 128 * 128],
             group_cache_families=["c1", "c128"],
         )
 
@@ -224,22 +232,29 @@ class TestAscendStoreCoordinator(unittest.TestCase):
         self.assertEqual(calls, [True, True])
         self.assertEqual(masks, ([True, False, True, False], [True, False, True, False]))
 
-    def test_compressed_masks_stay_unmasked(self):
+    def test_compressed_masks_use_full_attention_reachability(self):
         coord = AscendStoreCoordinator(
-            [KVCacheGroupSpec(["layer.0"], _sliding_spec(block_size=128, sliding_window=512))],
+            [KVCacheGroupSpec(["layer.0"], _full_spec(block_size=512))],
             scheduler_block_size=2048,
             hash_block_size=128,
-            group_block_sizes=[128],
+            group_block_sizes=[512],
             group_cache_families=["c4"],
         )
 
-        self.assertEqual(coord.store_mask(2048, num_prompt_tokens=2048), ([True] * 4,))
+        self.assertEqual(
+            coord.store_mask(2048, num_prompt_tokens=2048),
+            ([True, True, True, True],),
+        )
+        cached_mask = [True, True, False, False]
         with patch.object(
             coord,
             "find_longest_cache_hit",
-            return_value=(([False, False, False, True],), 2048),
+            return_value=((cached_mask,), 1024),
         ):
-            self.assertEqual(coord.load_mask(_hashes(16), 2048), ([True] * 4,))
+            self.assertEqual(
+                coord.load_mask(_hashes(16), 2048),
+                (cached_mask,),
+            )
 
 
 if __name__ == "__main__":

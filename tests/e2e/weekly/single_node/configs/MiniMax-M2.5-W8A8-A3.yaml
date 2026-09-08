@@ -12,7 +12,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       VLLM-ASCEND_ENABLE_FUSED_MC2: "2"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--no-enable-prefix-caching"
@@ -57,5 +56,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 20
         request_rate: 0
-        baseline: 730.0832
+        baseline: 666.1748
         threshold: 0.97

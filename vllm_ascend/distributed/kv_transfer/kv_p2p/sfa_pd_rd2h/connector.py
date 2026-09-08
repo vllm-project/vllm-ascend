@@ -51,6 +51,8 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
       indexer/main split registration.
     """
 
+    supports_layerwise_buffer_reuse = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -236,3 +238,6 @@ class SfaRemoteD2HConnector(KVConnectorBase_V1, SupportsHMA):
         if worker is None or not hasattr(worker, "wait_for_layer_send"):
             return
         worker.wait_for_layer_send(layer_idx)
+
+    def wait_for_layer_reuse(self, layer_idx: int) -> None:
+        self.wait_for_layer_send(layer_idx)

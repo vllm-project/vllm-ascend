@@ -36,37 +36,82 @@ extern "C" __global__ __aicore__ void sparse_attention_score(
 
 #if (__CCE_AICORE__ == 310)
         TILING_KEY_IS(SASA_FP8_D128_TILING);
+        TILING_KEY_IS(SASA_FP8_D128_BF16_TILING);
         TILING_KEY_IS(SASA_FP16_D128_TILING);
         TILING_KEY_IS(SASA_BF16_D128_TILING);
+        TILING_KEY_IS(SASA_FP16_D128_ARCH35_FD_TILING);
+        TILING_KEY_IS(SASA_BF16_D128_ARCH35_FD_TILING);
+        TILING_KEY_IS(SASA_FP8_D128_ARCH35_FD_TILING);
+        TILING_KEY_IS(SASA_FP8_D128_BF16_ARCH35_FD_TILING);
 
-#if TILING_KEY_VAR == SASA_FP8_D128_TILING  // gitleaks:allow
-        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND>(
+#if TILING_KEY_VAR == SASA_FP8_D128_TILING
+        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND, false>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
             qDequantScale, kDequantScale, vDequantScale,
             attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_FP16_D128_TILING  // gitleaks:allow
-        SasaInferIntfRegular<half, half, float, SasaKernelArch35::Format::TND>(
+#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_TILING
+        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::TND, false>(
+            query, key, value, selectIdx, blockTable, selectNumIdx,
+            actualSeqLengths, actualSeqLengthsKv,
+            qDequantScale, kDequantScale, vDequantScale,
+            attentionOut, softmaxLse, user, tiling);
+#elif TILING_KEY_VAR == SASA_FP16_D128_TILING
+        SasaInferIntfRegular<half, half, float, SasaKernelArch35::Format::TND, false>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
             attentionOut, softmaxLse, user, tiling);
-#elif TILING_KEY_VAR == SASA_BF16_D128_TILING  // gitleaks:allow
-        SasaInferIntfRegular<bfloat16_t, bfloat16_t, float, SasaKernelArch35::Format::TND>(
+#elif TILING_KEY_VAR == SASA_BF16_D128_TILING
+        SasaInferIntfRegular<bfloat16_t, bfloat16_t, float, SasaKernelArch35::Format::TND, false>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
+            attentionOut, softmaxLse, user, tiling);
+#elif TILING_KEY_VAR == SASA_FP16_D128_ARCH35_FD_TILING
+        SasaInferIntfRegular<half, half, float, SasaKernelArch35::Format::TND, true>(
+            query, key, value, selectIdx, blockTable, selectNumIdx,
+            actualSeqLengths, actualSeqLengthsKv,
+            attentionOut, softmaxLse, user, tiling);
+#elif TILING_KEY_VAR == SASA_BF16_D128_ARCH35_FD_TILING
+        SasaInferIntfRegular<bfloat16_t, bfloat16_t, float, SasaKernelArch35::Format::TND, true>(
+            query, key, value, selectIdx, blockTable, selectNumIdx,
+            actualSeqLengths, actualSeqLengthsKv,
+            attentionOut, softmaxLse, user, tiling);
+#elif TILING_KEY_VAR == SASA_FP8_D128_ARCH35_FD_TILING
+        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, half, float, SasaKernelArch35::Format::TND, true>(
+            query, key, value, selectIdx, blockTable, selectNumIdx,
+            actualSeqLengths, actualSeqLengthsKv,
+            qDequantScale, kDequantScale, vDequantScale,
+            attentionOut, softmaxLse, user, tiling);
+#elif TILING_KEY_VAR == SASA_FP8_D128_BF16_ARCH35_FD_TILING
+        SasaInferInterfaceFullQuant<fp8_e4m3fn_t, bfloat16_t, float, SasaKernelArch35::Format::TND, true>(
+            query, key, value, selectIdx, blockTable, selectNumIdx,
+            actualSeqLengths, actualSeqLengthsKv,
+            qDequantScale, kDequantScale, vDequantScale,
             attentionOut, softmaxLse, user, tiling);
 #endif
 #elif (__CCE_AICORE__ == 220)
         TILING_KEY_IS(SASA_FP16_D128_ARCH22_TILING);
         TILING_KEY_IS(SASA_BF16_D128_ARCH22_TILING);
+        TILING_KEY_IS(SASA_FP16_D128_ARCH22_FD_TILING);
+        TILING_KEY_IS(SASA_BF16_D128_ARCH22_FD_TILING);
 
 #if TILING_KEY_VAR == SASA_FP16_D128_ARCH22_TILING
-        SasaInferIntfRegularArch22<half, float>(
+        SasaInferIntfRegularArch22<half, float, false>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
             attentionOut, softmaxLse, user, tiling);
 #elif TILING_KEY_VAR == SASA_BF16_D128_ARCH22_TILING
-        SasaInferIntfRegularArch22<bfloat16_t, float>(
+        SasaInferIntfRegularArch22<bfloat16_t, float, false>(
+            query, key, value, selectIdx, blockTable, selectNumIdx,
+            actualSeqLengths, actualSeqLengthsKv,
+            attentionOut, softmaxLse, user, tiling);
+#elif TILING_KEY_VAR == SASA_FP16_D128_ARCH22_FD_TILING
+        SasaInferIntfRegularArch22<half, float, true>(
+            query, key, value, selectIdx, blockTable, selectNumIdx,
+            actualSeqLengths, actualSeqLengthsKv,
+            attentionOut, softmaxLse, user, tiling);
+#elif TILING_KEY_VAR == SASA_BF16_D128_ARCH22_FD_TILING
+        SasaInferIntfRegularArch22<bfloat16_t, float, true>(
             query, key, value, selectIdx, blockTable, selectNumIdx,
             actualSeqLengths, actualSeqLengthsKv,
             attentionOut, softmaxLse, user, tiling);

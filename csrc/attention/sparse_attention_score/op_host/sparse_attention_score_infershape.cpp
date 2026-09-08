@@ -90,10 +90,11 @@ ge::graphStatus InferDataTypeSparseAttentionScore(gert::InferDataTypeContext *co
     }
     auto dtype = context->GetInputDataType(QUERY_INDEX);
     if (dtype == ge::DT_FLOAT8_E4M3FN) {
-        context->SetOutputDataType(ATTENTION_OUT_INDEX, ge::DT_FLOAT16);
-    } else {
-        context->SetOutputDataType(ATTENTION_OUT_INDEX, dtype);
+        // FP8 input: derive output dtype from user-provided attentionOut tensor
+        // (same approach as BlockSparseAttention).
+        dtype = context->GetOutputDataType(ATTENTION_OUT_INDEX);
     }
+    context->SetOutputDataType(ATTENTION_OUT_INDEX, dtype);
     context->SetOutputDataType(SOFTMAX_LSE_INDEX, ge::DT_FLOAT);
     return ge::GRAPH_SUCCESS;
 }

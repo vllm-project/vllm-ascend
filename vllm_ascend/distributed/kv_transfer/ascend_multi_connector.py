@@ -6,6 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.v1.worker import mamba_utils
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -26,36 +27,76 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager or self._all_support_hma, (
             "HMA should not be enabled unless all sub-connectors support it"
         )
-        self._configure_layerwise_pd_completion()
-
-    def _configure_layerwise_pd_completion(self) -> None:
-        self._pd_completion_connector = next(
-            (
-                connector
-                for connector in self._connectors
-                if getattr(connector, "is_producer", False)
-                and getattr(connector, "connector_worker", None) is not None
-                and callable(getattr(connector, "wait_for_layer_send", None))
-            ),
-            None,
+        self._configure_layerwise_reuse_completion()
+        self._mamba_copy_bufs = None
+        self.requires_mamba_state_copy_after_layer_load = any(
+            getattr(
+                connector,
+                "requires_mamba_state_copy_after_layer_load",
+                False,
+            )
+            for connector in self._connectors
         )
-        if self._pd_completion_connector is not None:
-            for connector in self._connectors:
-                set_waiter = getattr(connector, "set_layerwise_pd_transfer_waiter", None)
-                if callable(set_waiter):
-                    set_waiter(self._pd_completion_connector.wait_for_layer_send)
 
-    def _pd_connector_first(self):
-        provider = getattr(self, "_pd_completion_connector", None)
-        if provider is not None:
-            yield provider
-        yield from (connector for connector in self._connectors if connector is not provider)
+    def _configure_layerwise_reuse_completion(self) -> None:
+        # Producers that report when a shared physical KV slot is safe to reuse.
+        self._layerwise_slot_release_providers = [
+            connector
+            for connector in self._connectors
+            if getattr(connector, "is_producer", False)
+            and getattr(connector, "connector_worker", None) is not None
+            and getattr(connector, "supports_layerwise_buffer_reuse", False)
+            and callable(getattr(connector, "wait_for_layer_reuse", None))
+        ]
+        # All remaining connectors, which run after the slot-release providers.
+        self._non_slot_release_connectors = [
+            connector
+            for connector in self._connectors
+            if all(connector is not provider for provider in self._layerwise_slot_release_providers)
+        ]
+        self._external_slot_release_sink_configured = False
+        if not self._layerwise_slot_release_providers:
+            return
+        for connector in self._connectors:
+            set_waiter = getattr(connector, "set_external_slot_release_waiter", None)
+            if callable(set_waiter) and set_waiter(self._wait_for_external_slot_release) is not False:
+                self._external_slot_release_sink_configured = True
+
+    def _wait_for_external_slot_release(self, layer_idx: int) -> None:
+        for provider in self._layerwise_slot_release_providers:
+            provider.wait_for_layer_reuse(layer_idx)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        # Close the PD-reuse gate before a sibling connector can issue an H2D
-        # load into the shared buffer, regardless of connector config order.
-        for connector in self._pd_connector_first():
+        if getattr(self, "_external_slot_release_sink_configured", False):
+            # AscendStore owns the layer-entry reuse wait after accepting the
+            # composite waiter, so provider layer-entry waits are redundant.
+            connectors = self._non_slot_release_connectors
+        else:
+            # Without a sink, preserve the original protection by waiting on
+            # providers before any sibling connector can write shared slots.
+            connectors = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
+        for connector in connectors:
             connector.wait_for_layer_load(layer_name)
+        if (copy_bufs := getattr(self, "_mamba_copy_bufs", None)) is not None:
+            mamba_utils.do_mamba_copy_block_for_layer(
+                copy_bufs,
+                layer_name,
+            )
+
+    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+        if not self.requires_mamba_state_copy_after_layer_load:
+            return False
+        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
+        self._mamba_copy_bufs = copy_bufs
+        return True
+
+    def finish_mamba_state_copy(self) -> None:
+        if self._mamba_copy_bufs is None:
+            return
+        try:
+            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+        finally:
+            self._mamba_copy_bufs = None
 
     def save_kv_layer(
         self,
@@ -64,16 +105,21 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         attn_metadata: Any,
         **kwargs,
     ) -> None:
-        # The producer clears the slot completion gate before AscendStore
-        # queues its asynchronous save, eliminating a publish/wait race.
-        for connector in self._pd_connector_first():
+        # Phase 1: providers must close any new slot gate before returning.
+        for connector in self._layerwise_slot_release_providers:
+            connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
+        # Phase 2: siblings may now publish work that can enable slot reuse.
+        for connector in self._non_slot_release_connectors:
             connector.save_kv_layer(layer_name, kv_layer, attn_metadata, **kwargs)
 
     def on_kv_cache_written(self, layer_name: str = "") -> None:
-        # PD-first ordering mirrors save_kv_layer: the PD hook clears the
-        # per-slot send-done gate before the AscendStore hook enqueues a save
-        # whose send thread later waits on that same gate.
-        for connector in self._pd_connector_first():
+        # Phase 1: providers close their gates at the earliest cache-write hook.
+        for connector in self._layerwise_slot_release_providers:
+            hook = getattr(connector, "on_kv_cache_written", None)
+            if callable(hook):
+                hook(layer_name)
+        # Phase 2: only then may sibling hooks publish reuse-enabling work.
+        for connector in self._non_slot_release_connectors:
             hook = getattr(connector, "on_kv_cache_written", None)
             if callable(hook):
                 hook(layer_name)

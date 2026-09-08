@@ -16,6 +16,7 @@
 #
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.math_utils import next_power_of_2
 
 from vllm_ascend.ops.triton.triton_utils import get_element, get_vectorcore_num
 
@@ -27,11 +28,11 @@ def cal_grid_and_block_size(batch_size: int):
         block_size = 1
     else:
         grid = vectorcore_num
-        block_size = triton.next_power_of_2(triton.cdiv(batch_size, grid))
+        block_size = next_power_of_2(triton.cdiv(batch_size, grid))
     return grid, block_size
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(do_not_specialize=["vec_len"])
 def rejection_greedy_sample_spec_len_1_triton(
     output_token_ids_ptr,  # [batch_size, 2]
     draft_token_ids_ptr,  # [num_tokens]
@@ -162,7 +163,12 @@ def rejection_greedy_sample_triton(
             )
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(
+    do_not_specialize=[
+        "max_spec_len",
+        "vec_len",
+    ]
+)
 def rejection_random_sample_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]
@@ -567,7 +573,12 @@ def expand_triton(batch_size, expanded_x, x, cu_num_tokens, replace_from, replac
     )
 
 
-@triton.jit(do_not_specialize=["max_spec_len"])
+@triton.jit(
+    do_not_specialize=[
+        "max_spec_len",
+        "vec_len",
+    ]
+)
 def rejection_random_sample_block_verify_kernel(
     output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
     cu_num_draft_tokens_ptr,  # [batch_size]

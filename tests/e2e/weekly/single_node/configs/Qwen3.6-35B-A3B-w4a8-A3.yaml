@@ -4,7 +4,7 @@
 
 test_cases:
   - name: "Qwen3.6-35B-A3B-in16k-out1k-0-128-32"
-    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w4a8"
     envs:
       HCCL_OP_EXPANSION_MODE: "AIV"
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
@@ -12,9 +12,6 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1024"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -44,7 +41,7 @@ test_cases:
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true}}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"
@@ -64,14 +61,13 @@ test_cases:
         baseline: 548.2128
         threshold: 0.97
   - name: "Qwen3.6-35B-A3B-in984k-out1k-0-4-2"
-    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w4a8"
     envs:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       HCCL_OP_EXPANSION_MODE: "AIV"
       HCCL_BUFFSIZE: "200"
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       VLLM_ASCEND_GDN_FAST_PATH: "1"
       VLLM_ASCEND_GDN_MAX_PADDING_RATIO: "2.0"
       VLLM_ASCEND_GDN_MAX_H_OVERALLOC_RATIO: "2.0"
@@ -107,7 +103,7 @@ test_cases:
       - "--mm-processor-cache-gb"
       - "0"
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1}'
     benchmarks:
       perf:
         case_type: performance
@@ -121,7 +117,7 @@ test_cases:
         baseline: 2.2225
         threshold: 0.97
   - name: "Qwen3.6-35B-A3B-in128k-out1k-90-60-15"
-    model: "Eco-Tech/Qwen3.6-35B-A3B-w8a8"
+    model: "Eco-Tech/Qwen3.6-35B-A3B-w4a8"
     envs:
       PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
       HCCL_OP_EXPANSION_MODE: "AIV"
@@ -129,10 +125,7 @@ test_cases:
       OMP_NUM_THREADS: "1"
       TASK_QUEUE_ENABLE: "1"
       HCCL_BUFFSIZE: "1024"
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-      VLLM_ASCEND_BALANCE_SCHEDULING: "1"
       VLLM_DISABLE_COMPILE_CACHE: "1"
-      VLLM_ASCEND_ENABLE_FUSED_MC2: "1"
       SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--quantization"
@@ -162,7 +155,7 @@ test_cases:
       - "--speculative-config"
       - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
       - "--additional-config"
-      - '{"enable_cpu_binding":true}'
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":1,"scheduler_config":{"enable_balance_scheduling":true}}'
       - "--profiler-config"
       - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
       - "--mm-processor-cache-gb"
@@ -172,7 +165,7 @@ test_cases:
     benchmarks:
       perf:
         case_type: performance
-        dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
+        dataset_path: vllm-ascend/GSM8K-in1007616-bs16-prefix0-qwen
         request_conf: vllm_api_stream_chat
         dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
         num_prompts: 60

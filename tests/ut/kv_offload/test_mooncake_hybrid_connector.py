@@ -20,6 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector import
     MAX_REQUESTS_PER_PEER_HANDLER,
     KVCacheRecvingThread,
     MooncakeConnectorScheduler,
+    MooncakeConnectorWorker,
 )
 
 
@@ -55,12 +56,16 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         return thread
 
     def test_executor_workers_bind_kv_cache_device_before_handling_requests(self):
-        expected_device = torch.device("npu:5")
-        kv_cache = MagicMock(device=expected_device)
+        expected_device_index = 5
+        kv_cache = MagicMock(device=expected_device_index)
         model_config = types.SimpleNamespace(
             is_deepseek_mla=False,
             hf_config=types.SimpleNamespace(compress_ratios=[1]),
-            hf_text_config=types.SimpleNamespace(num_hidden_layers=1),
+            hf_text_config=types.SimpleNamespace(
+                num_hidden_layers=1,
+                head_dim=64,
+                num_key_value_heads=8,
+            ),
         )
         vllm_config = types.SimpleNamespace(
             model_config=model_config,
@@ -78,7 +83,10 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
                 worker_events[threading.get_ident()].append(("set_device", device_index))
 
         with (
-            patch("torch.npu.set_device", side_effect=record_set_device),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.torch.npu.set_device",
+                side_effect=record_set_device,
+            ),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.is_vl_model",
                 return_value=False,
@@ -135,7 +143,7 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         handled_worker_events = [events for events in worker_events.values() if any(e == "handle" for e, _ in events)]
         self.assertEqual(len(handled_worker_events), 2)
         for events in handled_worker_events:
-            self.assertEqual(events[0], ("set_device", expected_device.index))
+            self.assertEqual(events[0], ("set_device", expected_device_index))
             self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
@@ -234,14 +242,71 @@ class TestHybridKVCacheRecvingThreadDispatch(unittest.TestCase):
         thread.executor.submit.assert_called_once_with(thread._handle_peer_requests, peer_key)
 
 
+class TestMooncakeHybridConnectorRegistration(unittest.TestCase):
+    def test_hybrid_registration_uses_actual_merged_tensor_ranges(self):
+        alignment = 2 * 1024 * 1024
+        backing_size = 4 * alignment
+        layer_names = [
+            "model.layers.0.self_attn",
+            "model.layers.1.self_attn",
+        ]
+        raw_tensor = torch.empty(backing_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + backing_size]
+        kv_caches = {
+            layer_names[0]: backing[: 2 * alignment],
+            layer_names[1]: backing[alignment : 3 * alignment],
+        }
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.vllm_config = types.SimpleNamespace(
+            model_config=types.SimpleNamespace(
+                is_deepseek_mla=False,
+                hf_text_config=types.SimpleNamespace(),
+            )
+        )
+        worker.kv_cache_config = types.SimpleNamespace(
+            num_blocks=1,
+            kv_cache_groups=[types.SimpleNamespace(layer_names=layer_names)],
+            kv_cache_tensors=[
+                types.SimpleNamespace(
+                    size=backing_size,
+                    layers=[layer_name],
+                    shared_by=[layer_name],
+                )
+                for layer_name in layer_names
+            ],
+        )
+        worker.use_hybrid = True
+        worker.use_mamba = False
+        worker.use_compress = True
+
+        class RegistrationCaptured(Exception):
+            pass
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_hybrid_connector.global_te.register_buffer",
+                side_effect=RegistrationCaptured,
+            ) as register_buffer,
+            self.assertRaises(RegistrationCaptured),
+        ):
+            worker.register_kv_caches(kv_caches)
+
+        register_buffer.assert_called_once_with(
+            [backing.data_ptr()],
+            [3 * alignment],
+        )
+
+
 class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
     def _make_scheduler(self):
         scheduler = object.__new__(MooncakeConnectorScheduler)
         scheduler.use_hybrid = True
         scheduler.use_compress = True
         scheduler.num_swa_blocks = [0, 2]
-        scheduler.group_block_size = [128, 128]
-        scheduler.group_compress_ratio = [4, 1]
+        # C4 exposes a 512-token logical block backed by one 128-token page.
+        scheduler.group_block_size = [512, 128]
         scheduler._reqs_need_send = {}
         scheduler.block_size = 128
         scheduler.engine_id = "engine"
@@ -258,6 +323,29 @@ class TestMooncakeHybridConnectorScheduler(unittest.TestCase):
         transfer_block_ids = scheduler._compute_transfer_block_ids(block_ids, prompt_len=129)
 
         self.assertEqual(transfer_block_ids, ([0], [100, 101]))
+
+    def test_request_finished_trims_logical_compressed_group_spans(self):
+        scheduler = self._make_scheduler()
+        scheduler.group_block_size = [512, 16384]
+        scheduler.num_swa_blocks = [0, 0]
+        request = MockRequest(
+            "req-compressed",
+            prompt_token_ids=list(range(513)),
+            kv_transfer_params={"do_remote_decode": True},
+            status=RequestStatus.FINISHED_LENGTH_CAPPED,
+        )
+
+        delay_free, params = scheduler.request_finished_all_groups(
+            request,
+            ([10, 11, 12], [20, 21]),
+        )
+
+        self.assertTrue(delay_free)
+        self.assertIsNotNone(params)
+        assert params is not None
+        self.assertEqual(params["remote_block_ids"], ([10, 11], [20]))
+        # This unused compatibility field remains in the legacy physical-block unit.
+        self.assertEqual(params["num_prompt_blocks"], 5)
 
     def test_request_finished_trims_before_swa_clip(self):
         scheduler = self._make_scheduler()

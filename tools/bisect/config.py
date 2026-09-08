@@ -164,6 +164,7 @@ class BisectOptions:
     """Tunables that change how the search runs (not what it searches)."""
 
     repo_dir: Path = REPO_ROOT
+    vllm_dir: Path = field(default_factory=lambda: Path("/vllm-workspace/vllm"))
     work_dir: str = DEFAULT_WORK_DIR
     coord_dir: str = DEFAULT_COORD_DIR
     good_table_path: str = DEFAULT_GOOD_TABLE

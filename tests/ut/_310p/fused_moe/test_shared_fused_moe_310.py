@@ -98,6 +98,7 @@ def test_runner_310_installs_specialized_comm():
     runner = _build_runner()
     moe_config = MagicMock()
     runner.moe_config = moe_config
+    runner.gate = None
     routed_experts = SimpleNamespace(quant_config=None, quant_method=None)
     runner.ascend_shared_experts = SimpleNamespace(multistream_overlap=True)
     comm_method = object()
@@ -204,18 +205,17 @@ class _Gate(nn.Module):
 @pytest.mark.parametrize("with_gate", [False, True])
 def test_shared_experts_part2_310_applies_optional_gate(with_gate):
     shared_experts_layer = SimpleNamespace(
-        act_fn=nn.Identity(),
         down_proj=_Projection(),
         expert_gate=_Gate() if with_gate else None,
     )
     shared_experts = AscendSharedExperts.__new__(AscendSharedExperts)
     shared_experts.layer = shared_experts_layer
     hidden_states = torch.randn(3, 4)
-    shared_gate_up = torch.randn(3, 4)
+    shared_act = torch.randn(3, 4)
 
-    output = shared_experts.part2(hidden_states, shared_gate_up)
+    output = shared_experts.part2(hidden_states, shared_act)
 
-    expected = shared_gate_up * 2.0 + 1.0
+    expected = shared_act * 2.0 + 1.0
     if with_gate:
         expected = expected * 0.5
     torch.testing.assert_close(output, expected)
@@ -228,7 +228,10 @@ def test_forward_impl_310_returns_current_runner_contract(monkeypatch, has_share
     router_logits = torch.randn(2, 3)
     routed_out = torch.randn(2, 4)
     shared_out = torch.randn(2, 4)
-    ascend_shared_experts = SimpleNamespace(forward=MagicMock(return_value=shared_out))
+    ascend_shared_experts = SimpleNamespace(
+        prepare_input_before_routed_experts=MagicMock(return_value=(hidden_states, None)),
+        forward=MagicMock(return_value=shared_out),
+    )
     routed_events = FusedMoEEvents(
         before_routed_experts=None,
         after_routed_experts=None,

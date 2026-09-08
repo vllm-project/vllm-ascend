@@ -15,14 +15,14 @@ UI_STRINGS = {
     "en": {
         "banner_preview": "You are viewing the latest developer preview docs.",
         "banner_link": "Click here",
-        "banner_suffix": "to view docs for the latest stable release (v0.18.0).",
+        "banner_suffix": "to view docs for the latest stable release ({version}).",
         "btn_report": "report issue",
         "aria_report": "Report a documentation issue",
     },
     "zh": {
         "banner_preview": "您正在查看最新的开发者预览版文档。",
         "banner_link": "点击此处",
-        "banner_suffix": "查看最新稳定版（v0.18.0）的文档。",
+        "banner_suffix": "查看最新稳定版（{version}）的文档。",
         "btn_report": "反馈问题",
         "aria_report": "报告文档问题",
     },
@@ -45,18 +45,8 @@ def define_env(env):
     if tag_path.exists():
         main_vllm_tag = tag_path.read_text(encoding="utf-8").strip()
 
-    # Declare variables (these are also in mkdocs.yml 'extra' section)
-    env.variables["vllm_version"] = env.variables.get("vllm_version", "v0.22.1")
-    env.variables["vllm_ascend_version"] = env.variables.get("vllm_ascend_version", "v0.22.1rc1")
-    env.variables["pip_vllm_ascend_version"] = env.variables.get("pip_vllm_ascend_version", "0.22.1rc1")
-    env.variables["pip_vllm_version"] = env.variables.get("pip_vllm_version", "0.22.1")
-    env.variables["cann_image_tag"] = env.variables.get("cann_image_tag", "9.1.0-910b-ubuntu22.04-py3.12")
-    env.variables["main_python_version"] = env.variables.get("main_python_version", ">= 3.10, < 3.13")
-    env.variables["main_cann_version"] = env.variables.get("main_cann_version", "9.1.0")
-    env.variables["main_pytorch_torch_npu_version"] = env.variables.get(
-        "main_pytorch_torch_npu_version", "2.10.0 / 2.10.0.post4"
-    )
-    env.variables["main_triton_ascend_version"] = env.variables.get("main_triton_ascend_version", "3.2.2")
+    # Static release/main stack variables come exclusively from mkdocs.yml so
+    # maintainers have one place to update dependency versions.
     env.variables["main_vllm_commit"] = main_vllm_commit
     env.variables["main_vllm_tag"] = main_vllm_tag
 
@@ -64,7 +54,14 @@ def define_env(env):
     # to config.extra. See module docstring for the rationale.
     config = env.variables.get("config")
     if config is not None:
-        config.extra["i18n"] = UI_STRINGS
+        stable_version = env.variables["stable_vllm_ascend_version"]
+        config.extra["i18n"] = {
+            language: {
+                **strings,
+                "banner_suffix": strings["banner_suffix"].format(version=stable_version),
+            }
+            for language, strings in UI_STRINGS.items()
+        }
 
     @env.macro
     def include_code(file_path, start_after=None, end_before=None, language="python"):

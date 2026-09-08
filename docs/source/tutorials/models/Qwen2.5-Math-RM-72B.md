@@ -10,9 +10,9 @@ The `Qwen2.5-Math-RM-72B` model is supported since `vllm-ascend:v0.9.0`.
 
 ## Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## Environment Preparation
 
@@ -31,7 +31,7 @@ You can use our official docker image to run `Qwen2.5-Math-RM-72B` directly.
 
 These versions support multi-NPU deployment, allowing the model to utilize all available NPU devices (e.g., 4 NPUs) for improved performance.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
 export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}

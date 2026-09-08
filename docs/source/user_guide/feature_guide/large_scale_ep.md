@@ -320,7 +320,7 @@ python load_balance_proxy_server_example.py \
   --decoder-ports  \
     9000 9000 9000 9000 \
   --decoder-ports-inc \
-    16 16 16 16 \
+    16 16 16 16
 ```
 
 |Parameter  | meaning |

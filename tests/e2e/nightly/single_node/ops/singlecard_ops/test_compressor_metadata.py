@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 import pytest
@@ -11,6 +12,12 @@ from vllm_ascend.utils import bootstrap_custom_op_env
 
 bootstrap_custom_op_env(include_vendor_lib=True)
 import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped] # noqa: E402,F401
+
+from vllm_ascend.worker.device_metadata import (  # noqa: E402
+    DeviceMetadataExecutor,
+    DeviceMetadataStage,
+    DeviceMetadataTask,
+)
 
 KV_BLOCK_SIZE = 128
 SLOT_MAPPING_FLAT = 1
@@ -199,6 +206,22 @@ DSV4_FLASH_CASES = [
         block_table=((7,), (8,)),
         expected_slot_mapping=((7, 1),) + _invalid_block_offset_rows(1),
     ),
+    CompressorMetadataCase(
+        name="dsv4_flash_c4_logical_table_crosses_512_raw_tokens",
+        compress_ratio=4,
+        query_start_loc=(0, 8),
+        start_pos=(508,),
+        block_table=((10, 11),),
+        expected_slot_mapping=((10, 127), (11, 0)),
+    ),
+    CompressorMetadataCase(
+        name="dsv4_flash_c128_logical_table_crosses_16384_raw_tokens",
+        compress_ratio=128,
+        query_start_loc=(0, 256),
+        start_pos=(16256,),
+        block_table=((20, 21),),
+        expected_slot_mapping=((20, 127), (21, 0)),
+    ),
     *(
         _case_with_format(case["name"], slot_mapping_format, **{k: v for k, v in case.items() if k != "name"})
         for case in DSV4_FLASH_MIXED_CASES
@@ -207,8 +230,12 @@ DSV4_FLASH_CASES = [
 ]
 
 
-def _make_rope() -> tuple[torch.Tensor, torch.Tensor]:
-    values = torch.arange(ROPE_ROWS * ROPE_DIM, dtype=torch.float32).reshape(ROPE_ROWS, ROPE_DIM)
+def _make_rope(case: CompressorMetadataCase) -> tuple[torch.Tensor, torch.Tensor]:
+    max_position = max(
+        start + case.query_start_loc[idx + 1] - case.query_start_loc[idx] for idx, start in enumerate(case.start_pos)
+    )
+    rope_rows = max(ROPE_ROWS, max_position + 1)
+    values = torch.arange(rope_rows * ROPE_DIM, dtype=torch.float32).reshape(rope_rows, ROPE_DIM)
     return values.to(torch.bfloat16), (values * 0.25).to(torch.bfloat16)
 
 
@@ -283,7 +310,7 @@ def _reference_outputs(
 @pytest.mark.parametrize("case", DSV4_FLASH_CASES, ids=[case.name for case in DSV4_FLASH_CASES])
 def test_compressor_metadata_dsv4_flash_real_metadata(case: CompressorMetadataCase):
     torch.npu.set_device(0)
-    rope_cos, rope_sin = _make_rope()
+    rope_cos, rope_sin = _make_rope(case)
     expected_cos, expected_sin, reference_slot = _reference_outputs(case, rope_cos, rope_sin)
     if case.expected_slot_mapping is None:
         expected_slot = reference_slot
@@ -335,3 +362,89 @@ def test_compressor_metadata_dsv4_flash_real_metadata(case: CompressorMetadataCa
     assert torch.equal(out_slot.cpu(), expected_slot)
     assert torch.equal(out_cos.cpu(), expected_cos)
     assert torch.equal(out_sin.cpu(), expected_sin)
+
+
+def test_compressor_metadata_out_cross_stream_buffer_reuse():
+    torch.npu.set_device(0)
+    cases_by_name = {case.name: case for case in DSV4_FLASH_CASES}
+    cases = [
+        CompressorMetadataCase(
+            name="cross_stream_c4_first",
+            compress_ratio=4,
+            query_start_loc=(0, 131),
+            start_pos=(1,),
+            block_table=((1,),),
+            num_rows=33,
+        ),
+        cases_by_name["dsv4_flash_c128_two_request_prefill_padded_127"],
+        CompressorMetadataCase(
+            name="cross_stream_c4_rewrite",
+            compress_ratio=4,
+            query_start_loc=(0, 131),
+            start_pos=(129,),
+            block_table=((9,),),
+            num_rows=33,
+        ),
+    ]
+    prepared = []
+    for case in cases:
+        rope_cos, rope_sin = _make_rope(case)
+        rope_cos = rope_cos.float()
+        rope_sin = rope_sin.float()
+        expected = _reference_outputs(case, rope_cos, rope_sin)
+        prepared.append(
+            (
+                case,
+                rope_cos.npu(),
+                rope_sin.npu(),
+                torch.tensor(case.query_start_loc, dtype=torch.int32, device="npu"),
+                torch.tensor(case.start_pos, dtype=torch.int32, device="npu"),
+                torch.tensor(case.block_table, dtype=torch.int32, device="npu"),
+                expected,
+            )
+        )
+
+    max_rows = max(expected[2].shape[0] for *_, expected in prepared)
+    out_cos = torch.empty((max_rows, 1, 1, ROPE_DIM), dtype=prepared[0][1].dtype, device="npu")
+    out_sin = torch.empty_like(out_cos)
+    out_slot = torch.empty((max_rows, 2), dtype=torch.int32, device="npu")
+    executor = DeviceMetadataExecutor()
+    snapshots = []
+
+    for case, rope_cos, rope_sin, query_start_loc, start_pos, block_table, expected in prepared:
+        num_rows = expected[2].shape[0]
+        build_metadata = partial(
+            torch.ops._C_ascend.compressor_metadata_out,
+            rope_cos,
+            rope_sin,
+            query_start_loc,
+            start_pos,
+            block_table,
+            KV_BLOCK_SIZE,
+            case.slot_mapping_format,
+            case.compress_ratio,
+            len(case.start_pos),
+            out_cos[:num_rows],
+            out_sin[:num_rows],
+            out_slot[:num_rows],
+        )
+
+        group_id = id(out_cos)
+        executor.submit((DeviceMetadataTask(DeviceMetadataStage.COMPRESSOR, build_metadata, group_id),))
+        executor.wait(DeviceMetadataStage.COMPRESSOR, group_id)
+        snapshots.append(
+            (
+                out_cos[:num_rows].clone(),
+                out_sin[:num_rows].clone(),
+                out_slot[:num_rows].clone(),
+                expected,
+            )
+        )
+        executor.release()
+
+    torch.npu.synchronize()
+    for actual_cos, actual_sin, actual_slot, expected in snapshots:
+        expected_cos, expected_sin, expected_slot = expected
+        assert torch.equal(actual_cos.cpu(), expected_cos)
+        assert torch.equal(actual_sin.cpu(), expected_sin)
+        assert torch.equal(actual_slot.cpu(), expected_slot)

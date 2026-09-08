@@ -82,7 +82,7 @@ permissions:
 
 jobs:
   selected-tests:
-    name: ${{ matrix.group.npu_type }}-${{ matrix.group.num_npus }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
+    name: ${{ matrix.group.partition_name }} card-${{ matrix.group.partition && format('(part {0})', matrix.group.partition) || '' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     strategy:
       fail-fast: false
@@ -499,4 +499,70 @@ jobs:
                     print(f'Uploaded: {local_path} -> {obs_path}')
                 else:
                     raise Exception(f'Failed to upload {local_path}: {resp.errorMessage}')
+            EOF
+
+        - name: Prune extra tests already present in coverage
+          id: prune-extra
+          continue-on-error: true
+          run: |
+            set +e
+            echo "pruned=false" >> "$GITHUB_OUTPUT"
+            OBS_URL="https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/ci/precision-test/extra_recommended_tests.yaml"
+            if ! pip install pyyaml --quiet; then
+              echo "::warning::Failed to install pyyaml; skip prune"
+              exit 0
+            fi
+            http_code=$(curl -sSL --retry 3 -o extra_recommended_tests.yaml -w "%{http_code}" "${OBS_URL}" || echo "000")
+            if [ "${http_code}" != "200" ] || [ ! -s extra_recommended_tests.yaml ]; then
+              echo "No extra_recommended_tests.yaml on OBS (HTTP ${http_code}); skip prune"
+              exit 0
+            fi
+            python3 .github/workflows/scripts/merge_extra_recommended_tests.py \
+              --prune-covered \
+              --extra-yaml extra_recommended_tests.yaml \
+              --map-file test_case_map.json \
+              --coverage-dir "coverage/vllm-ascend/${TASK_NAME}" \
+              --output-yaml extra_recommended_tests.yaml \
+              | tee prune.out
+            prune_status=${PIPESTATUS[0]}
+            if [ "${prune_status}" -ne 0 ]; then
+              echo "::warning::Prune extra tests failed"
+              exit 0
+            fi
+            if [ -f prune.out ] && grep -q "^Removed " prune.out; then
+              echo "pruned=true" >> "$GITHUB_OUTPUT"
+              echo "Pruned extra yaml:"
+              cat extra_recommended_tests.yaml
+            fi
+            exit 0
+
+        - name: Upload pruned extra_recommended_tests.yaml to OBS
+          if: ${{ success() && steps.prune-extra.outputs.pruned == 'true' }}
+          continue-on-error: true
+          run: |
+            set -euo pipefail
+            if [ -z "${OBS_ACCESS_KEY}" ] || [ -z "${OBS_SECRET_KEY}" ]; then
+              echo "::warning::OBS credentials are missing; skip extra yaml upload"
+              exit 0
+            fi
+            if [ ! -s extra_recommended_tests.yaml ]; then
+              echo "No pruned extra_recommended_tests.yaml to upload"
+              exit 0
+            fi
+            pip install esdk-obs-python --quiet
+            python3 - <<'EOF'
+            import os
+            from obs import ObsClient
+
+            obs_path = 'ci/precision-test/extra_recommended_tests.yaml'
+            client = ObsClient(
+                access_key_id=os.environ['OBS_ACCESS_KEY'],
+                secret_access_key=os.environ['OBS_SECRET_KEY'],
+                server='https://obs.cn-north-4.myhuaweicloud.com',
+            )
+            resp = client.putFile('vllm-ascend', obs_path, 'extra_recommended_tests.yaml')
+            if resp.status >= 300:
+                raise Exception(f'Failed to upload {obs_path}: {resp.errorMessage}')
+            print(f'Uploaded extra_recommended_tests.yaml -> {obs_path}')
+            print('https://vllm-ascend.obs.cn-north-4.myhuaweicloud.com/' + obs_path)
             EOF

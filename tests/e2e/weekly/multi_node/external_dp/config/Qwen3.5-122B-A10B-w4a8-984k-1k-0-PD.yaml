@@ -1,0 +1,176 @@
+test_name: "Qwen3.5-122B-A10B-w4a8-984k-1k-0-PD"
+model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
+num_nodes: 2
+npu_per_node: 16
+
+routing:
+  type: "disaggregated_prefill"
+  groups:
+    prefiller: [ 0 ]
+    decoder: [ 1 ]
+
+config:
+  - node_index: 0
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 2
+    dp_address: "${NODE_0_IP}"
+
+  - node_index: 1
+    port_start: 7100
+    dp_rpc_port: 12321
+    dp_size: 8
+    dp_size_local: 8
+    dp_rank_start: 0
+    tp_size: 2
+    dp_address: "${NODE_1_IP}"
+
+env_common: &env_common
+  SERVER_PORT: "${PORT}"
+  VLLM_RPC_TIMEOUT: "3600000"
+  VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
+  HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+  OMP_PROC_BIND: "false"
+  OMP_NUM_THREADS: "1"
+  TASK_QUEUE_ENABLE: "1"
+  HCCL_BUFFSIZE: "1024"
+  VLLM_USE_V1: "1"
+  ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  VLLM_USE_MODELSCOPE: "true"
+env_prefill: &env_prefill
+  <<: *env_common
+  ASCEND_BUFFER_POOL: "4:8"
+  VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
+
+env_decode: &env_decode
+  <<: *env_common
+  VLLM_ASCEND_SKIP_LOW_BLOCKS: "0"
+
+templates:
+  - node_index: 0
+    envs:
+      <<: *env_prefill
+    server_cmd_template:
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --max-num-seqs
+      - "32"
+      - --max-model-len
+      - "1010000"
+      - --hf-overrides
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - --max-num-batched-tokens
+      - "16384"
+      - --gpu-memory-utilization
+      - "0.8"
+      - --seed
+      - "1024"
+      - --no-enable-prefix-caching
+      - --async-scheduling
+      - --enforce-eager
+      - --speculative-config
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
+      - --additional-config
+      - '{"enable_cpu_binding": true,"enable_fused_mc2":0}'
+      - --profiler-config
+      - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-disable-hybrid-kv-cache-manager
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1","kv_buffer_device": "npu","kv_role": "kv_producer","kv_port": "58010","engine_id": "0","kv_connector_extra_config": {"prefill": {"dp_size": 8,"tp_size": 2},"decode": {"dp_size": 8,"tp_size": 2}}}'
+  - node_index: 1
+    envs:
+      <<: *env_decode
+    server_cmd_template:
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --data-parallel-size
+      - ${DP_SIZE}
+      - --data-parallel-rank
+      - ${DP_RANK}
+      - --data-parallel-address
+      - ${DP_ADDRESS}
+      - --data-parallel-rpc-port
+      - ${DP_RPC_PORT}
+      - --tensor-parallel-size
+      - ${TP_SIZE}
+      - --enable-expert-parallel
+      - --host
+      - "0.0.0.0"
+      - --port
+      - $SERVER_PORT
+      - --hf-overrides
+      - '{"text_config": {"rope_parameters": {"mrope_interleaved": true, "mrope_section": [11, 11, 10], "rope_type": "yarn", "rope_theta": 10000000, "partial_rotary_factor": 0.25, "factor": 4.0, "original_max_position_embeddings": 262144}}}'
+      - --max-num-seqs
+      - "32"
+      - --max-model-len
+      - "1010000"
+      - --max-num-batched-tokens
+      - "16384"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --seed
+      - "1024"
+      - --no-enable-prefix-caching
+      - --async-scheduling
+      - --compilation-config
+      - '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,96,100,104,108,112,116,120,124,128], "cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - --speculative-config
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
+      - --additional-config
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding":true,"enable_fused_mc2":0}'
+      - --profiler-config
+      - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
+      - --mm-processor-cache-gb
+      - "0"
+      - --mm-encoder-tp-mode
+      - "data"
+      - --distributed-executor-backend
+      - "mp"
+      - --no-disable-hybrid-kv-cache-manager
+      - --kv-transfer-config
+      - '{"kv_connector": "MooncakeConnectorV1", "kv_buffer_device": "npu", "kv_role": "kv_consumer", "kv_port": "58010", "engine_id": "1", "kv_connector_extra_config": {"prefill":{"dp_size": 8,"tp_size": 2},"decode":{"dp_size": 8,"tp_size": 2}}}'
+
+benchmarks:
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in1007616-bs16-prefix0-qwen
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    trust_remote_code: true
+    num_prompts: 4
+    max_out_len: 1024
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97

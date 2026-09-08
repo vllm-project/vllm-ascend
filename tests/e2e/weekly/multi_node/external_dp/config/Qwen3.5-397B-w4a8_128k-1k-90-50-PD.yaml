@@ -49,7 +49,6 @@ env_common: &env_common
   TASK_QUEUE_ENABLE: "1"
   HCCL_BUFFSIZE: "1024"
   VLLM_USE_V1: "1"
-  VLLM_ASCEND_ENABLE_FUSED_MC2: "0"
 templates:
   - node_index: 0
     envs:
@@ -70,6 +69,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "24"
       - --max-model-len
@@ -86,7 +91,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true}'
+      - '{"enable_cpu_binding": true,"enable_fused_mc2":0}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -133,6 +138,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "24"
       - --max-model-len
@@ -149,7 +160,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3, "enforce_eager": true}'
       - --additional-config
-      - '{"enable_cpu_binding": true}'
+      - '{"enable_cpu_binding": true,"enable_fused_mc2":0}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -196,6 +207,12 @@ templates:
       - ${DP_RPC_PORT}
       - --tensor-parallel-size
       - ${TP_SIZE}
+      - --quantization
+      - "ascend"
+      - --allowed-local-media-path
+      - "/"
+      - --trust-remote-code
+      - --enable-expert-parallel
       - --max-num-seqs
       - "24"
       - --max-model-len
@@ -213,7 +230,7 @@ templates:
       - --speculative-config
       - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
       - --additional-config
-      - '{"recompute_scheduler_enable": true, "enable_cpu_binding": true}'
+      - '{"recompute_scheduler_enable":true,"enable_cpu_binding":true,"enable_fused_mc2":0}'
       - --profiler-config
       - '{"profiler": "torch", "torch_profiler_dir": "./profiling", "torch_profiler_with_stack": false}'
       - --mm-processor-cache-gb
@@ -248,7 +265,7 @@ benchmarks:
       dataset_path: vllm-ascend/aime2025
       request_conf: vllm_api_general_chat
       dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-      max_out_len: 32768
+      max_out_len: 65536
       batch_size: 32
       baseline: 90
       threshold: 10
@@ -258,14 +275,25 @@ benchmarks:
       min_p: 0.0
       presence_penalty: 0.0
       repetition_penalty: 1.0
+    perf_warm_up:
+      case_type: performance
+      dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
+      request_conf: vllm_api_stream_chat
+      dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+      num_prompts: 4
+      max_out_len: 1024
+      batch_size: 1
+      request_rate: 0
+      baseline: 0
+      threshold: 0.97
     perf:
       case_type: performance
-      dataset_path_local: vllm-ascend/GSM8K_prefix90_in131072_bs100_qwen
+      dataset_path: vllm-ascend/GSM8K_prefix90_in131072_bs1000_kimi
       request_conf: vllm_api_stream_chat
       dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
       num_prompts: 256
       max_out_len: 1024
       batch_size: 64
       request_rate: 0
-      baseline: 657.0699
+      baseline: 1
       threshold: 0.97

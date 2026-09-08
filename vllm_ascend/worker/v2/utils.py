@@ -1,9 +1,11 @@
 from contextlib import contextmanager
 
 import torch
+from vllm.compilation import breakable_cudagraph
 from vllm.logger import logger
 
 from vllm_ascend.compilation.acl_graph import get_draft_graph_params, get_graph_params, weak_ref_workspaces
+from vllm_ascend.utils import weak_ref_tensor, weak_ref_tensors
 
 
 @contextmanager
@@ -21,6 +23,8 @@ def torch_cuda_wrapper():
         torch.cuda.set_stream = torch.npu.set_stream
         torch.cuda.current_device = torch.npu.current_device
         torch.cuda.mem_get_info = torch.npu.mem_get_info
+        breakable_cudagraph.weak_ref_tensor = weak_ref_tensor
+        breakable_cudagraph.weak_ref_tensors = weak_ref_tensors
         logger.info_once("Wrapping torch.cuda with torch.npu.")
         yield
     finally:

@@ -49,3 +49,19 @@ def test_wait_all_ready_rejects_split_commit(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="expected abcdef123456"):
         coord.wait_all_ready(1, "abcdef1234567890", timeout_s=0.1)
+
+
+def test_wait_start_releases_worker_after_master_publishes_start(tmp_path: Path):
+    coord = Coordinator(str(tmp_path), num_nodes=1, node_index=0)
+
+    coord.publish_start(1)
+
+    assert coord.wait_start(1, timeout_s=0.1) is True
+
+
+def test_wait_start_aborts_worker_when_master_publishes_verdict(tmp_path: Path):
+    coord = Coordinator(str(tmp_path), num_nodes=1, node_index=0)
+
+    coord.publish_verdict(1, "SKIP")
+
+    assert coord.wait_start(1, timeout_s=0.1) is False

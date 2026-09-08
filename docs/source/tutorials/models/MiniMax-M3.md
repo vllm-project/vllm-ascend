@@ -10,9 +10,9 @@ This document is written based on the latest vLLM-Ascend version. This model is 
 
 ## 2 Supported Features
 
-Refer to [supported models](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the model support matrix.
 
-Refer to the [feature guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
+Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration instructions.
 
 ## 3 Prerequisites
 
@@ -24,20 +24,22 @@ It is recommended to place the model weight in a shared cache directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 - Step 1: Download the latest Docker image
+
   ```bash
   docker pull quay.io/ascend/vllm-ascend:{tag}
   ```
 
 - Step 2: Start Docker container
+
   ```bash
   # Set the vLLM Ascend image name.
   export IMAGE=quay.io/ascend/vllm-ascend:{tag}
@@ -80,6 +82,7 @@ You can use the official all-in-one Docker image. For the available image tags a
   ```
 
 - Step 3: compile Rust frontend
+
   ```bash
   cd /vllm-workspace/vllm
 
@@ -104,7 +107,7 @@ You can use the official all-in-one Docker image. For the available image tags a
 
   Expected result: The version information is displayed, matching the pulled image version.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 Start the online serving service with the following command:
 
@@ -117,9 +120,9 @@ Single-node deployment completes both Prefill and Decode within the same node. B
 === "BF16 Deployment"
 
   ```bash
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
   export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --served-model-name minimax-m3 \
@@ -131,7 +134,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     --distributed_executor_backend "mp" \
     --gpu-memory-utilization 0.92 \
     --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{
         "enable_cpu_binding": true,
@@ -150,9 +153,9 @@ Single-node deployment completes both Prefill and Decode within the same node. B
 === "W8A8 Deployment"
 
   ```bash
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
   export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
   --served-model-name minimax-m3 \
@@ -167,7 +170,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
   --distributed_executor_backend "mp" \
   --gpu-memory-utilization 0.92 \
   --reasoning-parser minimax_m3 \
-  --limit-mm-per-prompt '{"image":1}' \
+  --limit-mm-per-prompt '{"image":1,"video":0}' \
   --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
   --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
   --additional-config '{
@@ -187,7 +190,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
 
 **Note**: In the script above, `max-num-seqs` is set to 16, which represents the maximum number of sequences the scheduler can process in a single iteration. Adjust the `max-num-seqs` parameter dynamically based on actual business.
 
-For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2}'` for two-image requests, and use `--limit-mm-per-prompt '{"video":1}'` for one-video requests.
+For text-only deployment, `--limit-mm-per-prompt` can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use `--limit-mm-per-prompt '{"image":2,"video":0}'` for two-image requests, and use `--limit-mm-per-prompt '{"image":0,"video":1}'` for one-video requests.
 
 ### 5.2 Multi-Node Deployment
 
@@ -203,19 +206,12 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export TASK_QUEUE_ENABLE=1
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -232,7 +228,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     --distributed_executor_backend "mp" \
     --gpu-memory-utilization 0.94 \
     --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
     --port 11223 > ${LOG_PATH} 2>&1 &
@@ -246,19 +242,12 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-  export HCCL_OP_EXPANSION_MODE="AIV"
-  export TASK_QUEUE_ENABLE=1
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -276,7 +265,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     --distributed_executor_backend "mp" \
     --gpu-memory-utilization 0.94 \
     --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": true, "weight_nz_mode": 2}' \
     --port 11223 > ${LOG_PATH} 2>&1 &
@@ -292,19 +281,12 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-  export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -321,7 +303,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     --distributed_executor_backend "mp" \
     --gpu-memory-utilization 0.92 \
     --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
     --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
@@ -336,19 +318,13 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
   export HCCL_IF_IP=$local_ip
   export IFNAME="${NETWORK_INTERFACE}"
-  export GLOO_SOCKET_IFNAME="$IFNAME"
-  export TP_SOCKET_IFNAME="$IFNAME"
+  export HCCL_OP_EXPANSION_MODE="AIV"
   export HCCL_SOCKET_IFNAME="$IFNAME"
   export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-  export VLLM_ENGINE_READY_TIMEOUT_S=3600
-  export HCCL_CONNECT_TIMEOUT=7200
-  export ASCEND_CONNECT_TIMEOUT=10000
-  export ASCEND_TRANSFER_TIMEOUT=10000
-  export VLLM_RPC_TIMEOUT=1800000
-  export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=30000
-  export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-  export HCCL_OP_EXPANSION_MODE="AIV"
   export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD
+  export GLOO_SOCKET_IFNAME="$IFNAME"
+  export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+
 
   vllm serve ${WEIGHT_PATH} \
     --host 0.0.0.0 \
@@ -366,7 +342,7 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
     --distributed_executor_backend "mp" \
     --gpu-memory-utilization 0.92 \
     --reasoning-parser minimax_m3 \
-    --limit-mm-per-prompt '{"image":1}' \
+    --limit-mm-per-prompt '{"image":1,"video":0}' \
     --speculative-config '{"model":"${EAGLE3_WEIGHT_PATH}", "method":"eagle3", "num_speculative_tokens":3}' \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --additional-config '{"enable_cpu_binding":true, "ascend_compilation_config":{"fuse_norm_quant":false}, "multistream_overlap_shared_expert": false, "weight_nz_mode": 2, "enable_flashcomm1": true}' \
@@ -375,7 +351,9 @@ Deploying the float model on Ascend A2 servers requires at least two nodes. Mult
 
 ### 5.3 Multimodal and ViT DP (Optional)
 
-MiniMax-M3 supports image and video inputs on Ascend. The deployment examples above keep `--limit-mm-per-prompt '{"image":1}'` as the default multimodal capacity assumption because the other serving parameters are tuned for the single-image path.
+MiniMax-M3 supports image and video inputs on Ascend. The deployment examples above keep `--limit-mm-per-prompt '{"image":1,"video":0}'` as the default multimodal capacity assumption because the other serving parameters are tuned for the single-image path.
+
+MiniMax-M3 image and video inputs share the same Vision Tower. If a service only needs one modality, explicitly set the unused modality to `0`; for example, use `{"image":1,"video":0}` for image-only serving and `{"image":0,"video":1}` for video-only serving. As long as either image or video remains enabled, the shared Vision Tower is retained. Setting an unused modality to `0` is clearer than omitting it, because omitted modalities may still participate in multimodal capacity and profiling planning.
 
 For the ViT / multimodal encoder part, data parallel execution is supported and can be enabled with:
 
@@ -389,10 +367,10 @@ For video or mixed image-video requests, adjust the multimodal limit according t
 
 ```bash
 # one video
---limit-mm-per-prompt '{"video":1}'
+--limit-mm-per-prompt '{"image":0,"video":1}'
 
 # one image and one video
---limit-mm-per-prompt '{"image":1, "video":1}'
+--limit-mm-per-prompt '{"image":1,"video":1}'
 ```
 
 When using local media paths in requests, such as `file:///path/to/video.mp4`, add an explicit allowlist path:
@@ -594,7 +572,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
 ### 7.2 Single Image
 
-  Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
+  Start the service with image input enabled, for example `--limit-mm-per-prompt '{"image":1,"video":0}'`. Replace `${IMAGE_PATH}` with a local image path on the client side.
 
   ```bash
   IMAGE_PATH=/path/to/image.jpg
@@ -622,7 +600,7 @@ curl http://{ip}:{port}/v1/chat/completions \
 
 ### 7.3 Single Video
 
-  Start the service with video input enabled, for example `--limit-mm-per-prompt '{"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
+  Start the service with video input enabled, for example `--limit-mm-per-prompt '{"image":0,"video":1}'`. If the request uses `file://` local video paths, also add `--allowed-local-media-path /` or a narrower allowed directory. If `media_io_kwargs.video.num_frames` is not specified, vLLM samples 32 frames by default.
 
   ```bash
   curl http://{ip}:{port}/v1/chat/completions \
@@ -704,7 +682,7 @@ The Video-MME results below are measured on chunk1 and chunk2, not the full data
 
 For Video-MME evaluation, run the vLLM OpenAI-compatible service with video input enabled and use AISBench to send the Video-MME requests. The official AISBench guide may not list Video-MME as a built-in example, so the key MiniMax-M3 settings used here are:
 
-- serve with `--limit-mm-per-prompt '{"video":1}'`;
+- serve with `--limit-mm-per-prompt '{"image":0,"video":1}'`;
 - do not set `media_io_kwargs.video.num_frames`, so vLLM uses the default 32 sampled frames;
 - use `max-model-len=90112` and `max_out_len=8192`;
 - evaluate Video-MME chunk1 and chunk2, not the full dataset.
@@ -724,10 +702,10 @@ ais_bench \
 
 | Dataset | Modality | Tool | Hardware | ViT DP | max-model-len | max_out_len | Input Config | generation_kwargs | Score |
 |---------|----------|------|----------|--------|---------------|-------------|--------------|-------------------|-------|
-| TextVQA | Image | AISBench | GPU | disabled | 65536 | 512 | `--limit-mm-per-prompt '{"image":1}'` | temperature=1.0, top_p=0.95 | 70.82 |
-| TextVQA | Image | AISBench | NPU | disabled | 65536 | 512 | `--limit-mm-per-prompt '{"image":1}'` | temperature=1.0, top_p=0.95 | 72.75 |
-| Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
-| Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
+| TextVQA | Image | AISBench | GPU | disabled | 65536 | 512 | `--limit-mm-per-prompt '{"image":1,"video":0}'` | temperature=1.0, top_p=0.95 | 70.82 |
+| TextVQA | Image | AISBench | NPU | disabled | 65536 | 512 | `--limit-mm-per-prompt '{"image":1,"video":0}'` | temperature=1.0, top_p=0.95 | 72.75 |
+| Video-MME chunk1+chunk2 | Video | AISBench | GPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 73.41 |
+| Video-MME chunk1+chunk2 | Video | AISBench | NPU | - | 90112 | 8192 | `--limit-mm-per-prompt '{"image":0,"video":1}'`, default 32 frames | temperature=1.0, top_p=0.95 | 74.21 |
 
 ## 9 Performance Tuning
 
@@ -743,7 +721,7 @@ The recommended configurations are the same as those specified in Chapter 5, “
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 

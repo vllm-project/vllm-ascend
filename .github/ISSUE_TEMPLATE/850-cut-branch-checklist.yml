@@ -1,0 +1,74 @@
+name: Cut Branch Checklist
+description: Generate a cut branch checklist issue when cutting a new release branch.(Used for release team)
+title: "[Cut Branch]: Cut branch checklist for releases/v"
+
+body:
+- type: textarea
+  attributes:
+    description: >
+      Brief info for the new branch cut.
+    label: Cut Branch Info
+    value: >
+      **Upstream vLLM Version**: 
+
+      **Release Branch**: 
+
+      **Target Release Version**: 
+
+      **Target Date**: 
+
+      **Release Manager**: 
+
+      **Prepared Head Commit**: 
+
+- type: textarea
+  attributes:
+    description: >
+      Ensure main branch readiness before cutting branch.
+    label: Pre-Branch Cut Preparation
+    value: >
+      - [ ] P0/P1 PR Clearance: Ensure all blocking PRs and critical updates targeting the matched vLLM version are merged into main
+
+      - [ ] Main Branch Health Check: Verify that the latest main nightly CI run is GREEN
+
+      - [ ] Freeze Notification: Announce branch-cut timing and code freeze in the community channel
+
+- type: textarea
+  attributes:
+    description: >
+      Git operations to cut the branch.
+    label: Git Branch Operations
+    value: >
+      - [ ] Cut branch from main at the prepared commit point
+
+        ```bash
+        git checkout main && git pull origin main
+        git checkout -b releases/<release_branch_name> <git_commit_hash>
+        git push origin releases/<release_branch_name>
+        ```
+
+- type: textarea
+  attributes:
+    description: >
+      CI/CD configuration changes on the release branch.
+    label: Release Branch CI Updates (on release branch)
+    value: >
+      - [ ] pr_test.yaml: Remove main_commit from run-selected-tests and run-selected-tests-upstream job matrices (keep release_tag only)
+
+      - [ ] pr_e2e_command.yml: Remove main_commit from trigger-selected-tests job matrix (keep release_tag only)
+
+      - [ ] Version Bump: Update internal version strings in setup files or vllm_ascend/__init__.py
+
+- type: textarea
+  attributes:
+    description: >
+      CI/CD configuration changes on the main branch.
+    label: Main Branch CI Updates (on main)
+    value: >
+      - [ ] schedule_release_code_and_wheel.yml: Append new version option
+
+      - [ ] nightly_image_build.yaml: Append new branch option to releases/<release_branch_name>
+
+      - [ ] schedule_image_build_and_push.yaml: Append new tag and branch options
+
+      - [ ] labeled_doctest.yaml: Append the new branch/version to doc_versions list

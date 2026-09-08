@@ -161,8 +161,6 @@ jobs:
             run: |
               VLLM_TARGET_DEVICE=empty uv pip install -e .
               pip uninstall -y triton
-              pip install -e tests/plugins/bge_m3_sparse_plugin
-              pip install -e tests/plugins/prithvi_io_processor_plugin
               sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
 
           - name: Get csrc hash
@@ -235,10 +233,6 @@ jobs:
               VLLM_WORKER_MULTIPROC_METHOD: spawn
               TORCH_DEVICE_BACKEND_AUTOLOAD: 0
             run: |
-              mkdir -p tiktoken_encodings
-              curl -L -o tiktoken_encodings/o200k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
-              curl -L -o tiktoken_encodings/cl100k_base.tiktoken "https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
-              export TIKTOKEN_ENCODINGS_BASE=${PWD}/tiktoken_encodings
               python3 ../.github/workflows/scripts/run_suite.py \
                 --suite e2e-upstream_pr \
                 --auto-partition-id "${{ matrix.part }}" \

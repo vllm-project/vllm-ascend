@@ -22,8 +22,9 @@ sentinel so workers know whether to continue or exit.
 
 Protocol files under ``<coord_dir>/round_<N>/``::
 
-    command.json                {round, commit, rebuild}
+    command.json                {round, commit, rebuild, action, version_targets, version_checks}
     ready_<idx>.json            {node, head}
+    start.json                  {}                                  (master, after the barrier)
     verdict.json                {verdict}            (master, after the trial)
     <coord_dir>/DONE            sentinel -> workers exit
 """
@@ -77,17 +78,34 @@ class Coordinator:
         return self.root / "DONE"
 
     # ------------------------------------------------------- master writes
-    def publish_command(self, rnd: int, commit: str, rebuild: bool, action: str = "RUN") -> None:
+    def publish_command(
+        self,
+        rnd: int,
+        commit: str,
+        rebuild: bool,
+        action: str = "RUN",
+        version_targets: dict[str, str] | None = None,
+        version_checks: tuple[str, ...] | list[str] | None = None,
+    ) -> None:
         """Publish the per-round command. ``action`` is "RUN" (deploy + run the
         distributed test) or "SKIP" (this commit is pre-skipped, e.g. vLLM
         mismatch -- workers consume the command but do not deploy/run, keeping
         leader/worker rounds in lockstep)."""
+        command = {"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}
+        if version_targets is not None:
+            command["version_targets"] = version_targets
+        if version_checks is not None:
+            command["version_checks"] = list(version_checks)
         path = self._round_dir(rnd) / "command.json"
-        path.write_text(json.dumps({"round": rnd, "commit": commit, "rebuild": rebuild, "action": action}))
+        path.write_text(json.dumps(command))
         logger.info("[coord] published command round=%d commit=%s action=%s", rnd, commit[:12], action)
 
     def publish_verdict(self, rnd: int, verdict: str) -> None:
         (self._round_dir(rnd) / "verdict.json").write_text(json.dumps({"verdict": verdict}))
+
+    def publish_start(self, rnd: int) -> None:
+        (self._round_dir(rnd) / "start.json").write_text("{}")
+        logger.info("[coord] released round %d for test execution", rnd)
 
     def publish_done(self) -> None:
         self._done_flag.write_text("done")
@@ -177,6 +195,19 @@ class Coordinator:
                 return None
             time.sleep(_POLL_INTERVAL_S)
         raise TimeoutError(f"Timed out waiting for verdict of round {rnd}")
+
+    def wait_start(self, rnd: int, timeout_s: float) -> bool:
+        """Worker: wait until the master releases the test or aborts the round."""
+        start = self._round_dir(rnd) / "start.json"
+        verdict = self._round_dir(rnd) / "verdict.json"
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if start.exists():
+                return True
+            if verdict.exists() or self.is_done():
+                return False
+            time.sleep(_POLL_INTERVAL_S)
+        raise TimeoutError(f"Timed out waiting for start of round {rnd}")
 
     def _assert_consistent(self, readies: list[Path], expected_commit: str) -> None:
         for r in readies:

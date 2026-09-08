@@ -56,9 +56,8 @@ class AscendStoreCoordinator:
     """Hybrid cache-hit/mask coordinator for AscendStore external KV Pool.
 
     This mirrors vLLM MooncakeStoreCoordinator but uses AscendStore's external
-    key granularity. For DSV4 compressed groups, keys are generated over the
-    raw-token span ``group_block_size * compress_ratio`` while transfer
-    addresses remain in cache-domain blocks.
+    key granularity. Compressed specs already expose raw-token block sizes,
+    while transfer addresses remain in cache-domain blocks.
     """
 
     def __init__(
@@ -84,10 +83,7 @@ class AscendStoreCoordinator:
         self.retention_interval = retention_interval
         self.group_block_sizes = group_block_sizes
         self.group_cache_families = group_cache_families
-        self.group_effective_block_sizes = [
-            _cache_family_granularity(block_size, family)
-            for block_size, family in zip(group_block_sizes, group_cache_families, strict=True)
-        ]
+        self.group_effective_block_sizes = list(group_block_sizes)
         for effective_block_size in self.group_effective_block_sizes:
             assert effective_block_size % hash_block_size == 0, "block_size must be divisible by hash_block_size"
             assert scheduler_block_size % effective_block_size == 0, (
@@ -107,14 +103,6 @@ class AscendStoreCoordinator:
         for group_id, group in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(group.kv_cache_spec)
             effective_spec = _copy_spec_with_block_size(spec, self.group_effective_block_sizes[group_id])
-            if (
-                not _uses_reachable_mask(self.group_cache_families[group_id])
-                and getattr(effective_spec, "compress_ratio", 1) > 1
-            ):
-                # The cache family already folds the compression ratio into
-                # the external key granularity. Avoid applying it again inside
-                # CompressAttentionManager.find_longest_cache_hit().
-                effective_spec = replace(effective_spec, compress_ratio=1)
             self.group_effective_specs.append(effective_spec)
             manager_cls = _get_manager_class(spec)
 
@@ -169,12 +157,7 @@ class AscendStoreCoordinator:
             ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
-        return tuple(
-            [True] * _num_chunks(token_len, self.group_effective_block_sizes[group_id])
-            if not _uses_reachable_mask(self.group_cache_families[group_id])
-            else mask
-            for group_id, mask in enumerate(masks)
-        )
+        return masks
 
     def _reachable_masks(
         self,
@@ -341,20 +324,6 @@ def _get_manager_class_cache() -> dict[str, Any]:
 
 def _get_manager_class(spec: KVCacheSpec) -> type[SingleTypeKVCacheManager]:
     cache = _get_manager_class_cache()
-    compress_ratio = getattr(spec, "compress_ratio", None)
-    if compress_ratio is not None and compress_ratio > 1:
-        compress_manager = cache.get("compress_manager", _CACHE_MISSING)
-        if compress_manager is _CACHE_MISSING:
-            try:
-                from vllm_ascend.core.single_type_kv_cache_manager import CompressAttentionManager
-            except ImportError:
-                compress_manager = None
-            else:
-                compress_manager = CompressAttentionManager
-            cache["compress_manager"] = compress_manager
-        if compress_manager is not None:
-            return cast(type[SingleTypeKVCacheManager], compress_manager)
-
     registry = cache.get("registry", _CACHE_MISSING)
     if registry is _CACHE_MISSING:
         try:
@@ -417,16 +386,5 @@ def _reachable_block_mask(
         return reachable_block_mask(**kwargs)
 
 
-def _cache_family_granularity(block_size: int, cache_family: str | None) -> int:
-    if not cache_family or not cache_family.startswith("c"):
-        return block_size
-    ratio = cache_family[1:]
-    return block_size * int(ratio) if ratio.isdigit() else block_size
-
-
 def _uses_reachable_mask(cache_family: str | None) -> bool:
     return cache_family in (None, "default", "c1")
-
-
-def _num_chunks(token_len: int, block_size: int) -> int:
-    return (token_len + block_size - 1) // block_size

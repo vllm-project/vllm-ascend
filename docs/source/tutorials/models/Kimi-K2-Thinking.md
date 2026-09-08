@@ -10,15 +10,15 @@ This document is validated and written based on **vLLM-Ascend v0.9.0rc1**. The c
 
 ## 2 Supported Features
 
-Refer to [supported features](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
+Refer to [Supported Features List](../../user_guide/support_matrix/supported_models.md) to get the model's supported feature matrix.
 
-Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
+Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the feature's configuration.
 
 ## 3 Prerequisites
 
 ### 3.1 Model Weight
 
-- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64G × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
+- `Kimi-K2-Thinking` (bfloat16): requires 1 Atlas 800 A3 (64GB × 16) node. [Download model weight](https://huggingface.co/moonshotai/Kimi-K2-Thinking).
 
 It is recommended to download the model weight to the shared directory, such as `/mnt/sfs_turbo/.cache/`.
 
@@ -63,7 +63,7 @@ Your model files should look like:
 
 You can use the official Docker image to run `Kimi-K2-Thinking` directly.
 
-Select an image based on your machine type and start the Docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the Docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
    # Update the vllm-ascend image according to your environment.
@@ -176,7 +176,7 @@ Expected Status:
 
 Single-node deployment completes both Prefill and Decode within the same node, suitable for online inference scenarios with moderate concurrency requirements.
 
-For an Atlas 800 A3 (64G × 16) node, `tensor-parallel-size` should be at least 16.
+For an Atlas 800 A3 (64GB × 16) node, `tensor-parallel-size` should be at least 16.
 
 Run the following script to start the vLLM server:
 
@@ -208,7 +208,7 @@ The following table covers the generated `model`, all `envs`, and all `server_cm
 | `--enable-expert-parallel` | enabled | Model-specific / Performance | Enables expert parallelism for Kimi-K2-Thinking MoE layers so experts can be distributed across NPUs. This document validates it as enabled; disabling it is not validated in this tutorial. |
 | `--no-enable-prefix-caching` | enabled | Performance | Disables prefix caching for the validated baseline and random-prompt benchmarks. Prefix caching is not validated in this tutorial. |
 
-**Common Issues Tip:** For common environment, installation, and general parameter issues during deployment, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). If the service runs under high concurrency, verify NPU health and HCCL status before increasing the request rate.
+**Common Issues Tip:** For common environment, installation, and general parameter issues during deployment, please refer to the [Public FAQs](../../faqs.md). If the service runs under high concurrency, verify NPU health and HCCL status before increasing the request rate.
 
 **Service Verification:**
 
@@ -269,7 +269,7 @@ lm_eval \
 
 Reference configuration: `gsm8k` (5-shot), `--apply_chat_template`, `--fewshot_as_multiturn`, greedy decoding (`temperature=0.0`, `top_p=1.0`), max 2048 output tokens, batch size 1.
 
-Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by `vllm-ascend:v0.20.2rc1`, evaluated on one Atlas 800 A3 node (64G × 16).
+Below are reference `gsm8k` results for `Kimi-K2-Thinking` powered by `vllm-ascend:v0.20.2rc1`, evaluated on one Atlas 800 A3 node (64GB × 16).
 
 | task | version | filter | n-shot | metric | value | stderr |
 | --- | ---: | --- | ---: | --- | ---: | ---: |
@@ -296,7 +296,7 @@ vllm bench serve \
 
 After the benchmark completes, you can get the performance result, including request throughput, output token throughput, TTFT, TPOT, and ITL.
 
-The following reference results are obtained with `vllm-ascend:v0.20.2rc1` on one Atlas 800 A3 node (64G × 16), using OpenAI chat serving, random input/output lengths, 10 prompts, and `--request-rate 1`:
+The following reference results are obtained with `vllm-ascend:v0.20.2rc1` on one Atlas 800 A3 node (64GB × 16), using OpenAI chat serving, random input/output lengths, 10 prompts, and `--request-rate 1`:
 
 | random input len | random output len | success | duration (s) | request throughput (req/s) | output throughput (tok/s) | total throughput (tok/s) | mean TTFT (ms) | mean TPOT (ms) | mean ITL (ms) |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -348,9 +348,9 @@ Reference results for 1024 input tokens and 1024 output tokens are:
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|------------|----------------|---------------------|
-| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2K input / 2K output in Chapter 8. |
+| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2k input / 2k output in Chapter 8. |
 | Low Latency | Single-node | 16 (A3) | bfloat16 | Reduce `--max-num-seqs` and `--max-num-batched-tokens` from the validated baseline (`12` and `8192`) to reduce queueing delay. In the Chapter 8 concurrency sweep, concurrency 1-4 kept mean TTFT below 1s; validate TTFT, TPOT, and tail latency against the target latency SLO. |
-| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1K/1K concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
+| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1k/1k concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
 
 ### 9.2 Tuning Guidelines
 
@@ -358,11 +358,11 @@ Reference results for 1024 input tokens and 1024 output tokens are:
 
 Please refer to the [Public Performance Tuning Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md) for general tuning methods.
 
-Please refer to the [Feature Guide](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
+Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed feature descriptions.
 
 ## 10 FAQ
 
-> For common environment, installation, and general parameter issues, please refer to the [Public FAQ](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+> For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: API returns `{"error":"Model not found"}` or `404` when requesting with `model: "Kimi-K2-Thinking"`?**
 

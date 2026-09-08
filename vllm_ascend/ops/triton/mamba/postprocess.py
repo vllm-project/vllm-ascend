@@ -49,14 +49,20 @@ def postprocess_mamba_fused_kernel(
     # PRECOMPUTED_NEW_COMPUTED: when True, num_computed_tokens_ptr already holds
     # the post-step new_num_computed value (V2 supplies the advanced count).
     PRECOMPUTED_NEW_COMPUTED: tl.constexpr = False,
+    # TEMPORAL_TILES: when > 1, the temporal copy body is partitioned across
+    # TEMPORAL_TILES CTAs along the u64 inner range. Callers must launch a
+    # 3D grid (num_reqs, total_states, TEMPORAL_TILES). Default 1 preserves
+    # the existing 2D-grid contract.
+    TEMPORAL_TILES: tl.constexpr = 1,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
     mamba state copies without any CPU-GPU synchronization.
 
-    Grid: (num_reqs, num_layers * num_state_types)
-    - program_id(0) = request index
+    Grid: (num_reqs, num_layers * num_state_types [, TEMPORAL_TILES])
+    - program_id(0) = request/batch index
     - program_id(1) = state_idx (flattened index into layer/state_type metadata)
+    - program_id(2) = temporal-copy tile index (0 when TEMPORAL_TILES == 1)
 
     Note: num_layers and num_state_types are not passed as kernel parameters
     because the kernel indexes directly into pre-flattened metadata arrays
@@ -64,6 +70,7 @@ def postprocess_mamba_fused_kernel(
     """
     batch_idx = tl.program_id(0)
     state_idx = tl.program_id(1)
+    tile_idx = tl.program_id(2)
 
     # Bounds check: num_reqs is the number of active batch rows. With
     # HAS_IDX_MAPPING, req_idx is a (possibly sparse) request-state slot, so it
@@ -84,10 +91,6 @@ def postprocess_mamba_fused_kernel(
     src_block_idx = tl.load(mamba_state_idx_ptr + req_idx)
 
     if PRECOMPUTED_NEW_COMPUTED:
-        # num_computed_tokens_ptr already holds the post-step new_num_computed
-        # value (V2 supplies the advanced count). num_scheduled/num_draft are
-        # unused on this path and are passed as None, so they must not be
-        # loaded here.
         new_num_computed = tl.load(num_computed_tokens_ptr + req_idx)
         num_tokens_running_state = new_num_computed - num_accepted + 1
     else:
@@ -147,63 +150,34 @@ def postprocess_mamba_fused_kernel(
         src_offset = accept_token_bias.to(tl.int64) * state_inner_size * state_elem_size
         src_addr = state_base_addr + src_block_id * state_block_stride + src_offset
         dst_addr = state_base_addr + dest_block_id * state_block_stride
-        # Number of elements to copy:
-        # (conv_width - accept_token_bias) * inner_size
         if CONV_STATE_DIM_FIRST:
-            # DS conv layout: state[block, dim, state_len]. state_len is the
-            # slide axis, so copy per dim row (dim_row_count rows of
-            # (conv_width - accept_token_bias) * elem_size bytes each, advancing
-            # by dim_row_stride per row).
             copy_size = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
         else:
             num_elems_to_copy = (conv_width - accept_token_bias).to(tl.int64) * state_inner_size
             copy_size = num_elems_to_copy * state_elem_size
     else:
-        # Temporal state: copy
-        #   state[block_table[req_idx, src_block_idx + accept_token_bias]]
-        # to
-        #   state[block_table[req_idx, dest_block_idx]]
         actual_src_block_idx = src_block_idx + accept_token_bias
         actual_src_block_id = tl.load(block_table_base + actual_src_block_idx).to(tl.int64)
         src_addr = state_base_addr + actual_src_block_id * state_block_stride
         dst_addr = state_base_addr + dest_block_id * state_block_stride
-        # Use natural block data size (inner_size * elem_size), NOT
-        # state_block_stride which is the page stride and can exceed the
-        # actual data when the state tensor uses as_strided page padding.
         copy_size = state_inner_size * state_elem_size
 
     # Mirror postprocess_mamba's trailing
-    #     if src_block_idx == dest_block_idx: num_accepted_tokens_cpu[i] = 1
-    # This runs whether or not the copy below is skipped (it's per-request, so
-    # only state_idx == 0 writes). The write target depends on the caller:
-    # main (after vLLM #50432) passes a non-null output buffer and reads from a
-    # snapshot; v0.26.0 passes None for the output and updates the input buffer
-    # in place under HAS_IDX_MAPPING. Distinguish by whether an output buffer
-    # was provided, since both lanes use HAS_IDX_MAPPING=True on the V2 path.
+    # Guard on tile_idx == 0 so tiles > 0 (when TEMPORAL_TILES > 1) do not
+    # duplicate the store. Note: triton-ascend rejects a chained `A and B and C`
+    # boolean expression, so the conditions are split into nested ifs.
     if src_block_idx == dest_block_idx and state_idx == 0:
-        if num_accepted_tokens_out_ptr is None:
-            tl.store(num_accepted_tokens_ptr + req_idx, 1)
-        else:
-            tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
+        if tile_idx == 0:
+            if num_accepted_tokens_out_ptr is None:
+                tl.store(num_accepted_tokens_ptr + req_idx, 1)
+            else:
+                tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
 
-    # Mirror collect_mamba_copy_meta's early return: src==dst with no token
-    # bias means source and destination ranges coincide, so the copy is a
-    # no-op.
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
-    # Hoist the pointer-type cast out of the copy loop. triton-ascend's
-    # PtrOffsetInfo::AxisInfo analysis aborts on `(addr + i + offsets).to(...)`
-    # inside the loop (SmallVector assertion `idx < size()`); casting once
-    # here and doing plain pointer arithmetic inside the loop is the same fix
-    # vllm-ascend applies to batch_memcpy_kernel.
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
     if CONV_STATE_DIM_FIRST and is_conv_state:
-        # DS conv layout: state[block, dim, state_len]. state_len is the slide
-        # axis, so copy per dim row: dim_row_count rows, each of
-        # (conv_width - accept_token_bias) * elem_size bytes, advancing both
-        # src and dst by dim_row_stride per row. Load the row metadata here
-        # (not earlier) so it stays in the same scope as the copy loop.
         dim_row_count = tl.load(state_dim_row_count_ptr + state_idx)
         dim_row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
         for row in range(dim_row_count):
@@ -214,10 +188,24 @@ def postprocess_mamba_fused_kernel(
                 data = tl.load(row_src + i + offsets, mask=mask)
                 tl.store(row_dst + i + offsets, data, mask=mask)
     else:
-        # SD conv / temporal: single contiguous region.
+        # SD conv (single CTA) / temporal (tiled across TEMPORAL_TILES).
         src_ptr = src_addr.to(tl.pointer_type(tl.uint8))
         dst_ptr = dst_addr.to(tl.pointer_type(tl.uint8))
-        for i in range(0, copy_size, COPY_BLOCK_SIZE):
-            mask = (i + offsets) < copy_size
-            data = tl.load(src_ptr + i + offsets, mask=mask)
-            tl.store(dst_ptr + i + offsets, data, mask=mask)
+        if is_conv_state:
+            # SD conv is small; only tile 0 does the copy.
+            if tile_idx == 0:
+                for i in range(0, copy_size, COPY_BLOCK_SIZE):
+                    mask = (i + offsets) < copy_size
+                    data = tl.load(src_ptr + i + offsets, mask=mask)
+                    tl.store(dst_ptr + i + offsets, data, mask=mask)
+        else:
+            # Temporal state: partition the copy range across TEMPORAL_TILES
+            # CTAs along the u64 inner range to keep SMs filled at small batch.
+            per_tile = tl.cdiv(copy_size, TEMPORAL_TILES)
+            per_tile = tl.cdiv(per_tile, COPY_BLOCK_SIZE) * COPY_BLOCK_SIZE
+            start = tile_idx * per_tile
+            end = tl.minimum(start + per_tile, copy_size)
+            for i in range(start, end, COPY_BLOCK_SIZE):
+                mask = (i + offsets) < end
+                data = tl.load(src_ptr + i + offsets, mask=mask)
+                tl.store(dst_ptr + i + offsets, data, mask=mask)

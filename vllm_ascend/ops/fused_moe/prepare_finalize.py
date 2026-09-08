@@ -27,12 +27,13 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.model_executor.models.utils import sequence_parallel_chunk
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.lora.fused_moe import prepare_lora_indices
 from vllm_ascend.ops.fused_moe.dataclass.prepare_finalize import MoEPrepareOutput
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import enable_sp, enable_sp_by_pass
+from vllm_ascend.quantization.utils import get_dynamic_mx_quant_scale_alg
 
 
 class PrepareAndFinalize(ABC):
@@ -50,6 +51,7 @@ class PrepareAndFinalize(ABC):
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
         self.lora_context = None
+        self.dynamic_mx_quant_scale_alg = get_dynamic_mx_quant_scale_alg()
 
     def set_lora_context(self, lora_context) -> None:
         self.lora_context = lora_context
@@ -59,7 +61,6 @@ class PrepareAndFinalize(ABC):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type: QuantType = QuantType.NONE,
     ) -> MoEPrepareOutput:
@@ -72,7 +73,6 @@ class PrepareAndFinalize(ABC):
         Args:
             hidden_states (torch.Tensor): Input features, shape [num_tokens, hidden_size]
             router_logits (torch.Tensor): Router outputs, shape [num_tokens, num_experts]
-            enable_shared_expert_dp (bool): Skip DP communication for shared experts
             replace_allreduce (bool): Bypass default all-reduce behavior
             quant_type: none, w8a8, w4a8, mxfp8, or mxfp4
 
@@ -129,7 +129,6 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
     ) -> MoEPrepareOutput:
@@ -139,16 +138,15 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
           2. If TP > 1, split along token dim and select current TP rank's slice.
           3. Save splits for later all-gather in finalize.
 
-        Skips if `enable_shared_expert_dp` or `replace_allreduce` is True.
+        Skips if `replace_allreduce` is True.
 
         Returns:
             MoEPrepareOutput where `mc2_mask` is None for All2All path.
         """
         self.replace_allreduce = replace_allreduce
-        self.enable_shared_expert_dp = enable_shared_expert_dp
 
         padded_hidden_states_shape = hidden_states.shape
-        if not (self.replace_allreduce or self.enable_shared_expert_dp):
+        if not self.replace_allreduce:
             self.num_tokens, _ = hidden_states.shape
             pad_size = self.tp_size - self.num_tokens  # Pad to TP size (cyclic)
             if self.lora_context is not None:
@@ -184,7 +182,7 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
         self,
         input_ids,
     ):
-        if not (self.replace_allreduce or self.enable_shared_expert_dp):
+        if not self.replace_allreduce:
             pad_size = self.tp_size - self.num_tokens
             if pad_size > 0:
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
@@ -206,10 +204,10 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
           2. Unpad to original token count.
           3. Return [original_num_tokens, hidden_size] tensor.
 
-        Skips if `enable_shared_expert_dp` or `replace_allreduce` is True.
+        Skips if `replace_allreduce` is True.
         """
 
-        if not (self.enable_shared_expert_dp or self.replace_allreduce):
+        if not self.replace_allreduce:
             if self.tp_size > 1:
                 assert padded_hidden_states_shape is not None
                 # Cannot reuse `split_hidden_states` from prepare phase as it
@@ -231,8 +229,8 @@ class PrepareAndFinalizeWithAll2All(PrepareAndFinalize):
 
 class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
     """
-    MoE communication strategy using MC2, which is based on All2All. Hence, it inherits
-    All2All and share the same finalize method.
+    MoE communication strategy using MC2, based on All2All with additional
+    DP-wide padding and unpadding for sequence-parallel inputs.
     Designed for Ascend or environments requiring explicit padding and slicing control.
     Relies on `mc2_mask` and `padded_num_tokens` from forward_context for alignment.
     """
@@ -254,7 +252,6 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
     ) -> MoEPrepareOutput:
@@ -265,15 +262,26 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
           3. If TP > 1, split tensors along token dimension and select current TP rank's slice.
           4. Split and return corresponding `mc2_mask`.
 
-        Skips padding/slicing if `enable_shared_expert_dp` or `replace_allreduce` is True.
+        With `replace_allreduce`, inputs are already TP-sharded. Pad only the
+        local shard to the DP-wide MC2 length, preserving its original mask.
 
         Returns:
             MoEPrepareOutput, possibly sliced/padded.
         """
         self.replace_allreduce = replace_allreduce
-        self.enable_shared_expert_dp = enable_shared_expert_dp
         mc2_mask = _EXTRA_CTX.mc2_mask
-        if self.tp_size > 1:
+        if self.replace_allreduce:
+            # SP shards use the local token count, not the largest DP batch.
+            # Select valid bits before adding padding for uniform MC2 batches.
+            self.num_tokens = hidden_states.shape[0]
+            start = self.tp_rank * self.num_tokens
+            mc2_mask = mc2_mask[start : start + self.num_tokens]
+            pad_size = _EXTRA_CTX.padded_num_tokens // self.tp_size - self.num_tokens
+            if pad_size > 0:
+                hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
+                router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
+                mc2_mask = nn.functional.pad(mc2_mask, (0, pad_size), value=False)
+        elif self.tp_size > 1:
             # Also slice mc2_mask
             split_mc2_mask = torch.tensor_split(mc2_mask, self.tp_size, dim=0)
             mc2_mask = split_mc2_mask[self.tp_rank]
@@ -284,14 +292,13 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
 
-            # Pad if necessary (unless shared expert DP is enabled)
-            if pad_size > 0 and not self.enable_shared_expert_dp:
+            if pad_size > 0:
                 hidden_states = nn.functional.pad(hidden_states, (0, 0, 0, pad_size))
                 router_logits = nn.functional.pad(router_logits, (0, 0, 0, pad_size))
                 padded_hidden_states_shape = hidden_states.shape
 
             # Slice across TP ranks
-            if self.tp_size > 1 and not self.enable_shared_expert_dp:
+            if self.tp_size > 1:
                 split_hidden_states = torch.tensor_split(hidden_states, self.tp_size, dim=0)
                 split_router_logits = torch.tensor_split(router_logits, self.tp_size, dim=0)
                 hidden_states = split_hidden_states[self.tp_rank]
@@ -305,17 +312,36 @@ class PrepareAndFinalizeWithMC2(PrepareAndFinalizeWithAll2All):
             pertoken_scale=None,
         )
 
+    def finalize(
+        self,
+        hidden_states: torch.Tensor,
+        reduce_results: bool,
+        padded_hidden_states_shape: torch.Size | None = None,
+    ) -> torch.Tensor:
+        if self.replace_allreduce:
+            # Return the original SP shard to the residual/shared-expert path.
+            return hidden_states[: self.num_tokens]
+        return super().finalize(hidden_states, reduce_results, padded_hidden_states_shape)
+
     def pad_and_split_input_ids(
         self,
         input_ids,
     ):
-        if not self.replace_allreduce:
+        if self.replace_allreduce:
+            # MoE-only SP retains full token IDs, while model-level SP may
+            # already shard them. Align to the local hidden states first.
+            if input_ids.numel() != self.num_tokens:
+                input_ids = sequence_parallel_chunk(input_ids.reshape(-1, 1)).reshape(-1)
+            pad_size = _EXTRA_CTX.padded_num_tokens // self.tp_size - self.num_tokens
+            if pad_size > 0:
+                input_ids = nn.functional.pad(input_ids, (0, pad_size))
+        else:
             target_pad_length = _EXTRA_CTX.padded_num_tokens
             pad_size = target_pad_length - self.num_tokens
-            if pad_size > 0 and not self.enable_shared_expert_dp:
+            if pad_size > 0:
                 input_ids = nn.functional.pad(input_ids, (0, pad_size))
 
-            if self.tp_size > 1 and not self.enable_shared_expert_dp:
+            if self.tp_size > 1:
                 input_ids = torch.tensor_split(input_ids, self.tp_size, dim=0)
                 input_ids = input_ids[self.tp_rank]
         return input_ids
@@ -346,19 +372,16 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
     def _use_ep_sequence_parallel(self) -> bool:
         """Whether MoE itself must use the EP sequence-parallel path.
 
-        ``enable_sp_by_pass`` enables the compilation pass, which already
-        inserts a TP reduce-scatter/all-gather pair around RMSNorm.  It does
-        not mean that the MoE configuration owns sequence-parallel tokens.
-        When the MoE config has ``sp_size == 1``, selecting the EP path here
-        would gather the tokens a second time before routing.
+        The MoE configuration owns sequence-parallel tokens.  Selecting the
+        EP path from any other flag would gather tokens a second time before
+        routing.
         """
-        return enable_sp() or (enable_sp_by_pass() and self.moe_config.is_sequence_parallel)
+        return self.moe_config.is_sequence_parallel
 
     def prepare(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
     ) -> MoEPrepareOutput:
@@ -372,7 +395,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         if self._use_ep_sequence_parallel():
             return self._prepare_with_ep_group(hidden_states, router_logits, quant_type)
 
-        return self._prepare_with_dp_group(hidden_states, router_logits, enable_shared_expert_dp, replace_allreduce)
+        return self._prepare_with_dp_group(hidden_states, router_logits, replace_allreduce)
 
     def _prepare_with_ep_group(
         self, hidden_states: torch.Tensor, router_logits: torch.Tensor, quant_type=QuantType.NONE
@@ -384,6 +407,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
                 hidden_states,
                 dst_type=torch.float8_e4m3fn,
+                scale_alg=self.dynamic_mx_quant_scale_alg,
             )
         elif quant_type == QuantType.W4A4MXFP:
             hidden_states, pertoken_scale = torch_npu.npu_dynamic_mx_quant(
@@ -392,15 +416,13 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
                 round_mode="round",
             )
 
-        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states, True, True)
-        router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits, True, True)
+        hidden_states = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(hidden_states)
+        router_logits = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(router_logits)
 
-        # TODO(fuzhihong): To adapt to self.num_token in the all_gather_input_id_with_dp_group method,
-        #  when flashcomm1 is used and dp = N(N >=2).
         self.num_tokens = hidden_states.shape[0]
 
         if pertoken_scale is not None:
-            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale, True, True)
+            pertoken_scale = torch.ops.vllm.maybe_all_gather_and_maybe_unpad(pertoken_scale)
 
         if self.moe_config.pcp_size > 1:
             max_tokens_across_pcp = _EXTRA_CTX.max_tokens_across_pcp
@@ -434,7 +456,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
-        enable_shared_expert_dp: bool = False,
         replace_allreduce: bool = False,
         quant_type=QuantType.NONE,
     ) -> MoEPrepareOutput:
@@ -447,7 +468,6 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
         Returns:
             MoEPrepareOutput with global tensors.
         """
-        self.enable_shared_expert_dp = enable_shared_expert_dp
         if self.moe_config.dp_size > 1:
             max_tokens_across_dp = _EXTRA_CTX.max_tokens_across_dp
 
@@ -529,7 +549,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
             hidden_states = hidden_states[: self.num_tokens_pcp]
 
-        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states, True)
+        hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
 
         return hidden_states
 
@@ -547,7 +567,7 @@ class PrepareAndFinalizeWithAllGather(PrepareAndFinalize):
             hidden_states = get_pcp_group().reduce_scatter(hidden_states, dim=0)
             hidden_states = hidden_states[: self.num_tokens_pcp]
 
-        if self.moe_config.dp_size > 1 and not self.enable_shared_expert_dp:
+        if self.moe_config.dp_size > 1:
             hidden_states = get_dp_group().reduce_scatter(hidden_states, 0)
             hidden_states = hidden_states[: self.num_tokens]
         return hidden_states

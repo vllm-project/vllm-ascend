@@ -37,6 +37,7 @@ class TestAscendSpecDecodeBaseProposer310(TestBase):
             multi_steps_attn_metadata,
             num_tokens,
             is_prefill=None,
+            sampling_metadata=None,
         ):
             flag_states.append(AscendRotaryEmbedding310._is_drafting_update_enabled)
             return torch.zeros(num_tokens, dtype=torch.long)

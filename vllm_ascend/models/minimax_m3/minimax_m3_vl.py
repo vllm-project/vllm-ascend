@@ -22,11 +22,16 @@ import torch
 import vllm
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_reduce_scatter,
+)
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.models.interfaces import (
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsLoRA,
@@ -39,7 +44,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import import_from_path
 
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.models.minimax_m3.minimax_m3 import MiniMaxM3SparseForCausalLM
+from vllm_ascend.utils import is_vl_model
 
 
 def _load_vllm_minimax_m3_common_module(module_name: str):
@@ -83,7 +90,21 @@ def _install_fused_allreduce_norm_fallback() -> None:
         norm: GemmaRMSNorm,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if get_tensor_model_parallel_world_size() > 1:
-            hidden_states = torch.ops.vllm.maybe_pad_and_reduce(hidden_states)
+            # The config context may be unset (e.g. profiling/dummy runs);
+            # fall back to the plain all-reduce path in that case.
+            try:
+                sp_enabled = get_current_vllm_config().parallel_config.use_sequence_parallel_moe
+            except AssertionError:
+                sp_enabled = False
+            if sp_enabled and not (_EXTRA_CTX.is_draft_model and is_vl_model()):
+                padding = (-hidden_states.shape[0]) % get_tensor_model_parallel_world_size()
+                if padding:
+                    hidden_states = torch.nn.functional.pad(
+                        hidden_states, (0, 0) * (hidden_states.ndim - 1) + (0, padding)
+                    )
+                hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
+            else:
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return norm(hidden_states, residual)
 
     cast(Any, fallback_module).fused_allreduce_gemma_rms_norm = fused_allreduce_gemma_rms_norm
@@ -145,7 +166,14 @@ class MiniMaxM3VLModel(nn.Module):
     info=MiniMaxM3VLProcessingInfo,
     dummy_inputs=MiniMaxM3VLDummyInputsBuilder,
 )
-class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsEagle3):
+class MiniMaxM3SparseForConditionalGeneration(
+    nn.Module,
+    SupportsMultiModal,
+    SupportsLoRA,
+    SupportsPP,
+    SupportsEagle3,
+    MixtureOfExperts,
+):
     supports_encoder_tp_data = True
 
     packed_modules_mapping = {
@@ -189,10 +217,16 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
             self.multimodal_config is not None and self.multimodal_config.mm_encoder_tp_mode == "data"
         )
 
-        with self._mark_composite_model(
-            vllm_config,
-            language_targets=MiniMaxM3SparseForCausalLM,
-            tower_targets={"image": MiniMaxVLVisionModel, "video": MiniMaxVLVisionModel},
+        with (
+            self._mark_language_model(
+                vllm_config,
+                targets=MiniMaxM3SparseForCausalLM,
+            ),
+            self._mark_tower_model(
+                vllm_config,
+                {"image", "video"},
+                targets=MiniMaxVLVisionModel,
+            ),
         ):
             self.model = MiniMaxM3VLModel(
                 vllm_config=vllm_config,
@@ -202,6 +236,32 @@ class MiniMaxM3SparseForConditionalGeneration(nn.Module, SupportsMultiModal, Sup
         self.vision_tower = self.model.vision_tower
         self.language_model = self.model.language_model
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
+        self._sync_moe_parameters()
+
+    def _sync_moe_parameters(self) -> None:
+        language_model = self.language_model
+        self.expert_weights = language_model.expert_weights
+        self.num_expert_groups = language_model.num_expert_groups
+        self.moe_layers = language_model.moe_layers
+        self.moe_mlp_layers = language_model.moe_mlp_layers
+        self.num_moe_layers = language_model.num_moe_layers
+        self.num_logical_experts = language_model.num_logical_experts
+        self.num_physical_experts = language_model.num_physical_experts
+        self.num_local_physical_experts = language_model.num_local_physical_experts
+        self.num_routed_experts = language_model.num_routed_experts
+        self.num_shared_experts = language_model.num_shared_experts
+        self.num_redundant_experts = language_model.num_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts,
+            num_local_physical_experts,
+        )
+        self._sync_moe_parameters()
 
     @property
     def lm_head(self) -> nn.Module:

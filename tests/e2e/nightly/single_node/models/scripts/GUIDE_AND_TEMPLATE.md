@@ -146,6 +146,7 @@ pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
 | `benchmarks`     | map        | No      | `{}`             | Configuration for `aisbench` performance verification               |
 | `epd_server_cmds`| list[list] | Cond.   | `[]`             | (EPD Only) Command arrays for starting dual Encode/Decode processes |
 | `epd_proxy_args` | list       | Cond.   | `[]`             | (EPD Only) Startup arguments for the EPD routing gateway            |
+| `kv_pool`        | map        | No      | -                | Managed `mooncake` or `memcache` KV pool service                    |
 
 **Notes / Behaviors**
 
@@ -164,6 +165,13 @@ pytest -sv tests/e2e/nightly/single_node/models/scripts/test_single_node.py
 * Extra fields:
     * Any non-standard fields in a case are stored in `config.extra_config`.
     * This is how extension configs are passed through without changing the dataclass.
+
+* `kv_pool`:
+    * The framework starts the pool before vLLM and stops it after all vLLM
+      and proxy processes exit.
+    * Pool ports are user-configured and must be available on the local host.
+    * `--kv-transfer-config` remains in `server_cmd` or `epd_server_cmds`; the
+      framework does not parse or modify it.
 
 ### 3.3 YAML Examples
 
@@ -272,6 +280,41 @@ test_cases:
 
     test_content:
       - "chat_completion"
+```
+
+#### Managed KV Pool
+
+Mooncake:
+
+```yaml
+kv_pool:
+  type: mooncake
+  master_port: 50088
+  metrics_port: 50089
+  config:
+    metadata_server: P2PHANDSHAKE
+    protocol: ascend
+    device_name: ""
+    global_segment_size: 1GB
+    preferred_segment: false
+    prefer_alloc_in_same_node: true
+```
+
+Memcache:
+
+```yaml
+kv_pool:
+  type: memcache
+  meta_service_port: 5000
+  config_store_port: 6000
+  config:
+    meta:
+      ock.mmc.log_level: error
+    local:
+      ock.mmc.log_level: error
+      ock.mmc.local_service.world_size: 256
+      ock.mmc.local_service.protocol: device_sdma
+      ock.mmc.local_service.dram.size: 1GB
 ```
 
 ## 4. How to Add Custom Tests (Extension)

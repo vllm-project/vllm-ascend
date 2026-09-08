@@ -126,7 +126,6 @@ def _mock_npu_env():
     _mock = _MockTPGroup()
     mock_cfg = MagicMock()
     mock_cfg.enable_context_parallel = False
-    mock_cfg.enable_flashcomm1 = False
     mock_cfg.weight_nz_mode = 1
     mock_cfg.enable_mlapo = True
     mock_cfg.enable_fused_mc2 = 0
@@ -155,9 +154,8 @@ def _mock_npu_env():
             side_effect=_cpu_add_rms_norm_bias,
             create=True,
         ),
-        # DCP routing reads decode_context_parallel_size. On MagicMock this
-        # field can yield TypeError on Python 3.12, so short-circuit each
-        # backend's routing check.
+        # These tests do not exercise context parallelism. Short-circuit the
+        # backend routing checks so their mocked config stays scoped to VWN.
         patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",

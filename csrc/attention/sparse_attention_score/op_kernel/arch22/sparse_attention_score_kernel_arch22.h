@@ -13,6 +13,7 @@
 
 #include "../kernel_common.hpp"
 #include "kernel_utils.hpp"
+#include "sparse_attention_score_fd_combine_arch22.h"
 
 using namespace NpuArch;
 
@@ -22,7 +23,8 @@ template <
     class BlockMmadQK,
     class EpilogueOnlineSoftmax,
     class BlockMmadPV,
-    class EpilogueRescaleO>
+    class EpilogueRescaleO,
+    bool IS_FD = false>
 class SasaRegularKernelArch22 {
 public:
     using ArchTag = typename BlockMmadPV::ArchTag;
@@ -82,10 +84,16 @@ public:
         gO.SetGlobalBuffer((__gm__ ElementO *)params.o);
         AscendC::GlobalTensor<float> gLse;
         gLse.SetGlobalBuffer((__gm__ float *)params.softmaxLse);
+        AscendC::GlobalTensor<float> gPartialLse;
+        AscendC::GlobalTensor<float> gPartialO;
+        if constexpr (IS_FD) {
+            gPartialLse.SetGlobalBuffer((__gm__ float *)(params.workSpace + fdPartialLseOffset_));
+            gPartialO.SetGlobalBuffer((__gm__ float *)(params.workSpace + fdPartialOOffset_));
+        }
 
         // Init identity tensor for paged attention (same as arch35 approach)
         AscendC::GlobalTensor<int32_t> gIdentityIdx;
-        gIdentityIdx.SetGlobalBuffer((__gm__ int32_t *)params.workSpace);
+        gIdentityIdx.SetGlobalBuffer((__gm__ int32_t *)(params.workSpace + fdIdentityOffset_));
 
         // Init workspace global tensors for 4 pipeline stages
         uint64_t identityIdxSize = static_cast<uint64_t>(topK_) * sizeof(int32_t);
@@ -168,7 +176,36 @@ public:
         uint32_t embedRound = RoundUp(embed_, 16);
         uint32_t rowNumRound = RoundUp(groupSize, 16);
 
-        for (uint32_t taskIdx = coreIdx; taskIdx < totalTaskNum_; taskIdx += coreNum) {
+        uint32_t taskLoopStart = coreIdx;
+        uint32_t taskLoopEnd = totalTaskNum_;
+        uint32_t taskLoopStep = coreNum;
+        uint32_t fdFlatTaskStart = 0;
+        uint32_t fdFlatTaskEnd = 0;
+        if constexpr (IS_FD) {
+            fdFlatTaskStart = tilingData->fdCoreTaskStart[coreIdx];
+            fdFlatTaskEnd = tilingData->fdCoreTaskEnd[coreIdx];
+            taskLoopStart = fdFlatTaskStart / topK_;
+            taskLoopEnd = CeilDiv(fdFlatTaskEnd, topK_);
+            taskLoopStep = 1;
+        }
+        for (uint32_t taskLoopIdx = taskLoopStart; taskLoopIdx < taskLoopEnd; taskLoopIdx += taskLoopStep) {
+            uint32_t taskIdx = taskLoopIdx;
+            uint32_t rawBegin = 0;
+            uint32_t rawEnd = topK_;
+            uint32_t fdPartialTaskId = 0;
+            bool isFdPartial = false;
+            if constexpr (IS_FD) {
+                const uint32_t taskFlatStart = taskIdx * topK_;
+                rawBegin = fdFlatTaskStart > taskFlatStart ? fdFlatTaskStart - taskFlatStart : 0;
+                const uint32_t remainingFlatTasks = fdFlatTaskEnd - taskFlatStart;
+                rawEnd = remainingFlatTasks < topK_ ? remainingFlatTasks : topK_;
+                const uint32_t splitCount = tilingData->fdPartialCountByBase[taskIdx];
+                isFdPartial = splitCount > 1;
+                if (isFdPartial) {
+                    const uint32_t firstCore = taskFlatStart / tilingData->fdCorePerCoreTaskNum;
+                    fdPartialTaskId = tilingData->fdPartialStartByBase[taskIdx] + coreIdx - firstCore;
+                }
+            }
             uint32_t qToken = taskIdx / kvHeads_;
             uint32_t kvHeadIdx = taskIdx % kvHeads_;
             uint32_t qHeadStart = kvHeadIdx * groupSize;
@@ -198,19 +235,25 @@ public:
                 int64_t selectNumOffset = static_cast<int64_t>(kvHeadIdx) * maxQSeqlen_ + qToken;
                 validTopK = static_cast<uint32_t>(gSelectNumIdx.GetValue(selectNumOffset));
             }
-            if (validTopK == 0) continue;
+            if constexpr (!IS_FD) {
+                if (validTopK == 0) continue;
+                rawEnd = validTopK;
+            } else {
+                rawBegin = rawBegin < validTopK ? rawBegin : validTopK;
+                rawEnd = rawEnd < validTopK ? rawEnd : validTopK;
+            }
 
             uint32_t kvSeqlen = static_cast<uint32_t>(gActualKvseqlen.GetValue(batchIdx));
             uint32_t qSeqlen = static_cast<uint32_t>(gActualQseqlen.GetValue(batchIdx));
             uint32_t historyLen = kvSeqlen - qSeqlen;
             uint32_t lastBlockTileSize = (historyLen + qTokenInBatch) % blockSize_ + 1;
 
-            uint32_t kvSLoopNum = validTopK;
+            uint32_t kvSLoopNum = rawEnd - rawBegin;
             int32_t validPhysicalIds[16];
             uint32_t validTileSize[16];
             uint32_t lastLogicalBlockId = (historyLen + qTokenInBatch) / blockSize_;
             uint32_t actualLoopNum = 0;
-            for (uint32_t i = 0; i < kvSLoopNum && i < topK_; i++) {
+            for (uint32_t i = rawBegin; i < rawEnd && i < topK_; i++) {
                 int32_t logicalId = gSelectIdx.GetValue(selectIdxBase + i);
                 if (logicalId < 0) continue;
                 int64_t btOffset = static_cast<int64_t>(batchIdx) * maxBlocksPerBatch_ + logicalId;
@@ -222,8 +265,19 @@ public:
             }
             kvSLoopNum = actualLoopNum;
 
+#ifdef __DAV_C220_VEC__
+            if constexpr (IS_FD) {
+                if (isFdPartial && kvSLoopNum == 0) {
+                    epilogueRescaleO.WriteNeutralPartial(
+                        gPartialO, gPartialLse, fdPartialTaskId, groupSize, embed_, fdLseSubStride_);
+                }
+            }
+#endif
+            if (kvSLoopNum == 0) {
+                continue;
+            }
+
             uint32_t rowNum = groupSize;
-            uint32_t kvYBlockNum = (kvSeqlen + blockSize_ - 1) / blockSize_;
             int64_t blockTOffset = static_cast<int64_t>(batchIdx) * maxBlocksPerBatch_;
 
 #ifdef __DAV_C220_CUBE__
@@ -323,13 +377,34 @@ public:
 
                     NpuArch::Arch::CrossCoreWaitFlag(pvReady_);
 
-                    epilogueRescaleO(gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate],
-                        gLse[static_cast<int64_t>(qToken) * qHeads_ + qHeadStart],
-                        gmOLayout, ubOTmpLayout, ubUpdateLayout, gmLseLayout,
-                        actualBlockShapePV,
-                        1, groupSize,
-                        (kvBlockIdxDe == 0), (kvBlockIdxDe == kvSLoopNum - 1),
-                        stageId);
+                    if constexpr (IS_FD) {
+                        if (isFdPartial) {
+                            epilogueRescaleO.ProcessPartial(
+                                gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate],
+                                gLse[static_cast<int64_t>(qToken) * qHeads_ + qHeadStart],
+                                gmOLayout, ubOTmpLayout, ubUpdateLayout, gmLseLayout,
+                                actualBlockShapePV,
+                                1, groupSize,
+                                (kvBlockIdxDe == 0), (kvBlockIdxDe == kvSLoopNum - 1),
+                                stageId, gPartialO, gPartialLse, fdPartialTaskId, fdLseSubStride_);
+                        } else {
+                            epilogueRescaleO(gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate],
+                                gLse[static_cast<int64_t>(qToken) * qHeads_ + qHeadStart],
+                                gmOLayout, ubOTmpLayout, ubUpdateLayout, gmLseLayout,
+                                actualBlockShapePV,
+                                1, groupSize,
+                                (kvBlockIdxDe == 0), (kvBlockIdxDe == kvSLoopNum - 1),
+                                stageId);
+                        }
+                    } else {
+                        epilogueRescaleO(gO[gmOffsetO], gOTmp[gmOffsetOTmp], gOUpdate[gmOffsetUpdate],
+                            gLse[static_cast<int64_t>(qToken) * qHeads_ + qHeadStart],
+                            gmOLayout, ubOTmpLayout, ubUpdateLayout, gmLseLayout,
+                            actualBlockShapePV,
+                            1, groupSize,
+                            (kvBlockIdxDe == 0), (kvBlockIdxDe == kvSLoopNum - 1),
+                            stageId);
+                    }
 #endif
                 }
             }
@@ -375,6 +450,13 @@ public:
         AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3);
 #endif
         AscendC::PipeBarrier<PIPE_ALL>();
+        if constexpr (IS_FD) {
+            AscendC::SyncAll<false>();
+#ifdef __DAV_C220_VEC__
+            SparseAttentionScoreFdCombineArch22<ElementO, Arch::Resource<ArchTag>> combine(resource);
+            combine(tilingData, gPartialLse, gPartialO, gO);
+#endif
+        }
     }
 
 private:
@@ -389,16 +471,16 @@ private:
         topK_ = tilingData->topK;
         maxBlocksPerBatch_ = tilingData->maxBlocksPerBatch;
         totalTaskNum_ = tilingData->totalTaskNum;
-        firstBatchTaskNum_ = tilingData->firstBatchTaskNum;
         scaleValue_ = tilingData->scaleValue;
         maxQSeqlen_ = tilingData->maxQSeqlen;
         groupSize_ = tilingData->groupSize;
-        qBaseTile_ = tilingData->qBaseTile;
-        kvBaseTile_ = tilingData->kvBaseTile;
+        fdIdentityOffset_ = IS_FD ? tilingData->fdIdentityOffset : 0;
+        fdLseSubStride_ = tilingData->fdLseSubStride;
+        fdPartialLseOffset_ = tilingData->fdPartialLseOffset;
+        fdPartialOOffset_ = tilingData->fdPartialOOffset;
         mm1OutSize_ = tilingData->mm1OutSize;
         smOnlineOutSize_ = tilingData->smOnlineOutSize;
         mm2OutSize_ = tilingData->mm2OutSize;
-        updateSize_ = tilingData->updateSize;
         actSeqAval_ = true;
     }
 
@@ -443,19 +525,18 @@ private:
     uint32_t topK_;
     uint32_t maxBlocksPerBatch_;
     uint32_t totalTaskNum_;
-    uint32_t firstBatchTaskNum_;
     float scaleValue_;
     uint32_t maxQSeqlen_;
     uint32_t groupSize_;
+    uint32_t fdLseSubStride_;
+    uint64_t fdIdentityOffset_;
+    uint64_t fdPartialLseOffset_;
+    uint64_t fdPartialOOffset_;
     uint32_t actSeqAval_;
-    // base tile info
-    uint32_t qBaseTile_;
-    uint32_t kvBaseTile_;
     // workspace partition sizes
     uint64_t mm1OutSize_;
     uint64_t smOnlineOutSize_;
     uint64_t mm2OutSize_;
-    uint64_t updateSize_;
 };
 
 }  // namespace SasaKernelArch22

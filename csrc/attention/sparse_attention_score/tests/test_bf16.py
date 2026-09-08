@@ -566,10 +566,10 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
     def make_case(
         self, q_seqlen=1, kv_seqlen=128, q_heads=1, kv_heads=1, head_dim=128, block_size=128, top_k=1, seed=42
     ):
+        batch = 1
         group_size = q_heads // kv_heads
         total_blocks = ceil(kv_seqlen / block_size)
         max_blocks_per_batch = total_blocks
-        batch = 1
         actual_seq_lengths = torch.tensor([q_seqlen] * batch, dtype=torch.int32)
         actual_seq_lengths_kv = torch.tensor([kv_seqlen] * batch, dtype=torch.int32)
 
@@ -752,6 +752,7 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         npu_out_cpu = npu_out.cpu()
+        print(f"[bf16-multi-batch] npu_out dtype: {npu_out_cpu.dtype}")
         diff = (npu_out_cpu.float() - cpu_out.float()).abs()
         max_diff = diff.max().item()
         mean_diff = diff.mean().item()
@@ -760,6 +761,18 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         dual_golden_l1norm(npu_out_cpu, cpu_out_fp32, cpu_out, "NPU vs dual-golden")
 
         self.assertRtolEqual(cpu_out.float().numpy(), npu_out_cpu.float().numpy(), prec=7e-3)
+
+    def test_bf16_flash_decoding_topk16_single_base_task(self):
+        """Arch35 FD: one (qToken, kvHead) task is split across 16 selected blocks."""
+        print("[FD-COVERAGE] expected tiling key=10006, base_tasks=1, selected_positions=16")
+        self._run_bf16_case(
+            q_seqlen=1,
+            kv_seqlen=2048,
+            q_heads=16,
+            kv_heads=1,
+            top_k=16,
+            seed=2026,
+        )
 
     # --- Multi-batch tests ---
     def test_bf16_mb_2batch_same_seqlen(self):
@@ -903,6 +916,7 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
             inner_precise=4,
         )
         p_npu_cpu = p_npu_out.cpu()
+        print(f"[bf16-prefill] npu_out dtype: {p_npu_cpu.dtype}")
 
         p_diff = (p_npu_cpu.float() - p_cpu_bf16.float()).abs()
         print(f"  [Prefill] max_diff={p_diff.max().item():.6f}, mean_diff={p_diff.mean().item():.6f}")
@@ -967,6 +981,7 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
             inner_precise=4,
         )
         d_npu_cpu = d_npu_out.cpu()
+        print(f"[bf16-decode] npu_out dtype: {d_npu_cpu.dtype}")
 
         d_diff = (d_npu_cpu.float() - d_cpu_bf16.float()).abs()
         print(f"  [Decode] max_diff={d_diff.max().item():.6f}, mean_diff={d_diff.mean().item():.6f}")
@@ -1058,6 +1073,7 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
             inner_precise=4,
         )
         p_npu_cpu = p_npu_out.cpu()
+        print(f"[bf16-prefill] npu_out dtype: {p_npu_cpu.dtype}")
 
         # --- Decode ---
         d_q_seqlen = 1
@@ -1113,6 +1129,7 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
             inner_precise=4,
         )
         d_npu_cpu = d_npu_out.cpu()
+        print(f"[bf16-decode] npu_out dtype: {d_npu_cpu.dtype}")
 
         # Report
         p_diff = (p_npu_cpu.float() - p_cpu_bf16.float()).abs()
@@ -1209,6 +1226,7 @@ class TestNpuSparseAttentionScoreBf16(TestCase):
         )
 
         npu_out_cpu = npu_out.cpu()
+        print(f"[bf16] npu_out dtype: {npu_out_cpu.dtype}")
         diff = (npu_out_cpu.float() - cpu_out.float()).abs()
         max_diff = diff.max().item()
         mean_diff = diff.mean().item()
@@ -1754,6 +1772,7 @@ def _test_bf16_q64_kv4_seqlen132_topk16(self):
     )
 
     npu_out_cpu = npu_out.cpu()
+    print(f"[bf16] npu_out dtype: {npu_out_cpu.dtype}")
     diff = (npu_out_cpu.float() - cpu_out.float()).abs()
     max_diff = diff.max().item()
     mean_diff = diff.mean().item()

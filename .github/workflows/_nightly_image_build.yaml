@@ -42,8 +42,13 @@ on:
       cann_version:
         required: false
         type: string
-        default: '2026.08.03'
+        default: '9.1.0_20260731131545'
         description: "CANN version for base image tag"
+      base_image_date:
+        required: false
+        type: string
+        default: 'auto'
+        description: "Base image date (YYYYMMDD). 'auto' to auto-detect latest available, or specify a custom date."
     secrets:
       HW_USERNAME:
         required: false
@@ -86,6 +91,7 @@ jobs:
       full_tag: ${{ steps.build.outputs.full_tag }}
       build_type: ${{ steps.build.outputs.build_type }}
       swr_logged_in: ${{ steps.build.outputs.swr_logged_in }}
+      date: ${{ steps.build.outputs.date }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -139,13 +145,34 @@ jobs:
           fi
 
           CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-          DATE=$(date +'%Y%m%d')
           TAG_SUFFIX=""
           OS_MARK=""
           if [ "${{ matrix.os }}" = "openeuler" ]; then
             OS_MARK="-openeuler"
           fi
           if [ "${{ inputs.build_type }}" = "daily" ]; then
+            # Resolve the base image date: 'auto' backtracks day-by-day from today to find
+            # the latest date for which the quay base image exists; otherwise use the
+            # user-supplied date (YYYYMMDD).
+            if [ "${{ inputs.base_image_date }}" = "auto" ] || [ -z "${{ inputs.base_image_date }}" ]; then
+              DATE=""
+              for i in $(seq 0 30); do
+                CANDIDATE_DATE=$(date -d "$i days ago" +'%Y%m%d')
+                CANDIDATE_TAG="nightly-${BRANCH_TAG}${OS_MARK}-cann${CANN_VERSION_LOWER}-${CANDIDATE_DATE}"
+                if docker manifest inspect "quay.io/atlas_inference/vllm-ascend:${CANDIDATE_TAG}" > /dev/null 2>&1; then
+                  DATE="$CANDIDATE_DATE"
+                  echo "Found base image date: $DATE (tag: $CANDIDATE_TAG)"
+                  break
+                fi
+                echo "Tag $CANDIDATE_TAG not found, trying previous day..."
+              done
+              if [ -z "$DATE" ]; then
+                echo "ERROR: No base image found in the last 30 days"
+                exit 1
+              fi
+            else
+              DATE="${{ inputs.base_image_date }}"
+            fi
             TAG_SUFFIX="-cann${CANN_VERSION_LOWER}-${DATE}"
           fi
 
@@ -186,6 +213,7 @@ jobs:
           echo "tag_prefix=${TAG_PREFIX}"
           echo "full_tag=${FULL_TAG}"
           echo "build_type=${{ inputs.build_type }}"
+          echo "date=${DATE}"
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             echo "push_registry=${SWR_TEMP_REGISTRY}"
           else
@@ -251,7 +279,7 @@ jobs:
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
           CANN_VERSION_LOWER=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-          DATE=$(date +'%Y%m%d')
+          DATE="${{ needs.build.outputs.date }}"
           # Daily tag pattern: daily-<branch>-<target>[-openeuler]-cann<ver>-<date>
           # The OS_MARK ("-openeuler") goes between the target and the cann suffix, matching
           # how the build step composes FULL_TAG: daily-<branch>-<target>${OS_MARK}${TAG_SUFFIX}.
