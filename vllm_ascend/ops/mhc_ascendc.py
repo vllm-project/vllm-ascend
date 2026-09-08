@@ -483,8 +483,24 @@ def hc_post_ascendc(
     """
     global _POST_AVAILABLE
 
+    # mhc_post_torch (the fallback) requires the keepdim gate layout
+    # [..., hc, 1] and the stream residual layout [..., hc, d]; the fused op
+    # accepts the squeezed/packed variants. Normalize before falling back and
+    # restore the caller's packed output shape afterwards.
+    out_shape = tuple(residual.shape)
+    if post_layer_mix.dim() >= 2 and post_layer_mix.shape[-1] != 1:
+        post_layer_mix = post_layer_mix.unsqueeze(-1)
+    if (
+        residual.dim() >= 2
+        and residual.shape[-1] % HC_PRE_HC_LIMIT == 0
+        and (residual.dim() < 3 or residual.shape[-2] != HC_PRE_HC_LIMIT)
+    ):
+        # packed [..., hc * d] -> [..., hc, d]
+        d = residual.shape[-1] // HC_PRE_HC_LIMIT
+        residual = residual.reshape(*residual.shape[:-1], HC_PRE_HC_LIMIT, d)
+
     if _POST_AVAILABLE is False or not _ensure_ops_registered():
-        return _post_torch(x, residual, post_layer_mix, comb_res_mix)
+        return _post_torch(x, residual, post_layer_mix, comb_res_mix).reshape(out_shape)
 
     try:
         out = _run_hc_post(x, residual, post_layer_mix, comb_res_mix)
@@ -499,7 +515,7 @@ def hc_post_ascendc(
             file=sys.stderr,
         )
         _POST_AVAILABLE = False
-        return _post_torch(x, residual, post_layer_mix, comb_res_mix)
+        return _post_torch(x, residual, post_layer_mix, comb_res_mix).reshape(out_shape)
 
     if _POST_AVAILABLE is None:
         print(f"{_LOG_PREFIX} hc_post active (first call ok)", flush=True, file=sys.stderr)
