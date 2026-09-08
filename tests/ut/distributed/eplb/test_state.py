@@ -34,9 +34,7 @@ def test_add_model_keeps_upstream_policy_by_default(monkeypatch):
     monkeypatch.setattr(
         eplb_state,
         "get_ascend_config",
-        lambda: SimpleNamespace(
-            eplb_config=SimpleNamespace(v2_policy="default")
-        ),
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(v2_policy="default")),
     )
     state = AscendEplbState.__new__(AscendEplbState)
 
@@ -60,11 +58,7 @@ def test_add_model_selects_and_reuses_ascend_v2_policy(monkeypatch):
     monkeypatch.setattr(
         eplb_state,
         "get_ascend_config",
-        lambda: SimpleNamespace(
-            eplb_config=SimpleNamespace(
-                v2_policy="policy_swift_balancer"
-            )
-        ),
+        lambda: SimpleNamespace(eplb_config=SimpleNamespace(v2_policy="policy_swift_balancer")),
     )
     monkeypatch.setattr(eplb_state, "AscendV2EplbPolicy", policy_factory)
     state = AscendEplbState.__new__(AscendEplbState)
