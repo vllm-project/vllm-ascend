@@ -7,11 +7,13 @@ import inspect
 from dataclasses import fields
 from typing import Any
 
+import numpy as np
 import torch
 from torch.distributed import all_reduce
 from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
 
+from vllm_ascend.ascend_config import StairConfig
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
 ASYNC_EPLB_CYCLE_COMMITTED_LOG = "Ascend async EPLB cycle committed"
@@ -95,11 +97,55 @@ class AscendEplbState(_eplb_state.EplbState):
 
     cuda_device_index: int | None
 
-    def __init__(self, parallel_config, device: torch.device) -> None:
+    def __init__(
+        self,
+        parallel_config,
+        device: torch.device,
+        stair_config: StairConfig | None = None,
+    ) -> None:
         super().__init__(parallel_config, device)
         self._has_fresh_recorded_load = False
+        self._stair_config = stair_config
         if self.cuda_device_index is None:
             self.cuda_device_index = torch.accelerator.current_device_index()
+
+    def _initialize_stair_model(self, model_state: Any) -> None:
+        model = model_state.model
+        model_state._stair_load_window = torch.zeros(
+            self.expert_load_window_size,
+            model.num_moe_layers,
+            model.num_logical_experts,
+            dtype=torch.int64,
+            device=self.device,
+        )
+        model_state._stair_accepted_scores = np.full(model.num_moe_layers, np.nan)
+
+    def add_model(self, model, model_config) -> None:
+        super().add_model(model, model_config)
+        if self._stair_config is not None:
+            self._initialize_stair_model(self.model_states[model_config.compute_hash()])
+
+    def step(
+        self,
+        is_dummy: bool = False,
+        is_profile: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        if (
+            self._stair_config is not None
+            and not is_dummy
+            and not is_profile
+            and self._should_record_current_step(log_stats=log_stats)
+        ):
+            for model_state in self.model_states.values():
+                target = model_state._stair_load_window[self.expert_load_window_step]
+                target.zero_()
+                target.scatter_add_(
+                    1,
+                    model_state.physical_to_logical_map.long(),
+                    model_state.expert_load_pass.to(torch.int64),
+                )
+        super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
 
     def _has_global_fresh_recorded_load(self) -> bool:
         """Synchronize whether any EP rank recorded load since rearranging."""

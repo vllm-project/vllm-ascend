@@ -15,9 +15,28 @@ from vllm_ascend.distributed.eplb.state import (
 )
 
 
-def test_uses_upstream_policy_and_async_worker_lifecycle():
-    assert AscendEplbState.add_model is upstream_eplb_state.EplbState.add_model
+def test_uses_upstream_async_worker_lifecycle():
     assert AscendEplbState.start_async_loop is upstream_eplb_state.EplbState.start_async_loop
+
+
+def test_stair_step_records_logical_load_with_current_mapping(monkeypatch):
+    upstream_step = MagicMock()
+    monkeypatch.setattr(upstream_eplb_state.EplbState, "step", upstream_step)
+    state = AscendEplbState.__new__(AscendEplbState)
+    state._stair_config = object()
+    state.expert_load_window_step = 0
+    state._should_record_current_step = lambda log_stats=False: True
+    model_state = SimpleNamespace(
+        _stair_load_window=torch.zeros((1, 1, 3), dtype=torch.int64),
+        physical_to_logical_map=torch.tensor([[0, 1, 0, 2]]),
+        expert_load_pass=torch.tensor([[2, 3, 5, 7]]),
+    )
+    state.model_states = {"model": model_state}
+
+    state.step()
+
+    torch.testing.assert_close(model_state._stair_load_window[0], torch.tensor([[7, 3, 7]]))
+    upstream_step.assert_called_once_with(is_dummy=False, is_profile=False, log_stats=False)
 
 
 def test_layer_state_builds_routing_table_and_preserves_captured_tensor(
