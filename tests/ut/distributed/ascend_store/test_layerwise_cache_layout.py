@@ -384,9 +384,7 @@ def test_multi_main_spec_layer_selects_attn_as_main():
 
     layer_specs = layout.layer_cache_specs[0]
     assert layer_specs.main.layer_name == "model.layers.0.self_attn.attn"
-    assert [s.layer_name for s in layer_specs.extra_main_specs] == [
-        "model.layers.0.self_attn.other_cache"
-    ]
+    assert [s.layer_name for s in layer_specs.extra_main_specs] == ["model.layers.0.self_attn.other_cache"]
 
 
 def test_multi_group_sfa_descriptors_are_merged_by_main_component():
