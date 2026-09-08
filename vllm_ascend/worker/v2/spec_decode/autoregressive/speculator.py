@@ -16,7 +16,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-import logging
 from contextlib import contextmanager
 from copy import copy
 from typing import TYPE_CHECKING, Any
@@ -29,7 +28,6 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import AutoRegressiveSpeculator
@@ -51,8 +49,6 @@ from vllm_ascend.worker.v2.spec_decode.pcp_utils import disable_target_pcp_for_r
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
-
-logger = logging.getLogger(__name__)
 
 
 def _prepare_replicated_pcp_config(
@@ -78,11 +74,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     GQA, MLA, DSA, and SFA draft decode state share one path. The current MTP path
     uses the draft attention backend recorded by ``set_attn``.
 
-    MLA's per-step state lives in ``.decode`` (cloned per step, written via an
-    alias), GQA's is top-level. MLA also rebuilds the base (live ``.decode`` is
-    None/wrong-batch) and forwards rotary ``positions`` into
-    build_attn_metadata. DSA and SFA manage their draft state in their metadata
-    builders and skip the generic MLA/GQA init and update logic.
+    Fused decode delegates step-dependent attention state to each metadata
+    builder's ``update_draft_decode_metadata`` hook. GQA and MLA update their
+    host-tiling fields in place; sparse backends emit device-side operations
+    that overwrite the persistent metadata buffers already referenced by their
+    attention nodes. Graph replay refreshes runtime inputs through the existing
+    ACL graph task-update path.
     """
 
     model_state: "AscendModelState"
@@ -314,48 +311,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             raise ValueError(f"Unsupported attention backend: {self.attn_backend}")
 
     def capture(self) -> None:
-        logger.info("Capturing model for speculator...")
-        # Reset indices to zeros to prevent stale values from prior
-        # dummy runs to cause out-of-bounds indexing during capture.
-        self.last_token_indices.zero_()
-
-        # Capture the prefill routine (model forward + compute_logits +
-        # sample).
-        # For FULL graphs, the entire routine is recorded as one graph.
-        # For PIECEWISE, only the model's compiled regions are captured
-        # and the rest (compute_logits, gumbel_sample) runs eagerly.
-        assert self.prefill_cudagraph_manager is not None
-        if self.prefill_cudagraph_manager.use_breakable_cg:
-            self.prefill_cudagraph_manager.init_breakable_cg_runner(self.model)
-        with disable_target_pcp_for_replicated_draft(self):
-            self.prefill_cudagraph_manager.capture(
-                self._prefill,
-                self.model_state,
-                self.target_input_buffers,
-                self.block_tables,
-                self.draft_prefill_attn_groups,
-                self.kv_cache_config,
-                progress_bar_desc="Capturing prefill CUDA graphs",
-            )
-
-        if self.num_speculative_steps == 1:
-            return
-
-        # Capture all decode draft generation steps as a single graph.
-        assert self.decode_cudagraph_manager is not None
+        """Capture through vLLM's fused autoregressive graph path."""
         with (
             disable_target_pcp_for_replicated_draft(self),
             build_attn_metadata_wrapper(),
         ):
-            self.decode_cudagraph_manager.capture(
-                self._multi_step_decode,
-                self.model_state,
-                self.input_buffers,
-                self.block_tables,
-                self.attn_groups,
-                self.kv_cache_config,
-                progress_bar_desc="Capturing decode CUDA graphs",
-            )
+            super().capture()
 
     @torch.inference_mode()
     def _run_model(
@@ -377,51 +338,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             mm_inputs,
         )
         return last_hidden_states, hidden_states
-
-    def _generate_draft(
-        self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> None:
-        """Thin override: delegate to upstream single-step ``_generate_draft``,
-        then apply Ascend-specific attention-metadata updates required by the
-        FIA operator."""
-        super()._generate_draft(
-            num_reqs,
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
-        if attn_metadata is not None:
-            self._update_decode_attn_metadata(attn_metadata, 1, num_reqs)
-
-    def _multi_step_decode(  # type: ignore[misc]
-        self,
-        num_reqs: int,
-        skip_attn: bool,
-        batch_desc: BatchExecutionDescriptor,
-        num_tokens_across_dp: torch.Tensor | None,
-        seq_lens_cpu_upper_bound: torch.Tensor | None = None,
-    ) -> None:
-        """Minimal override to handle the merged multi-step graph in FULL mode.
-
-        In FULL mode the captured graph already contains all speculative
-        steps, so ``run_fullgraph`` is called once instead of once per
-        step.  For PIECEWISE / NONE modes we delegate to the upstream
-        ``_multi_step_decode`` which iterates over steps and calls
-        ``_generate_draft`` per step.
-        """
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            assert self.decode_cudagraph_manager is not None
-            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-            return
-        super()._multi_step_decode(num_reqs, skip_attn, batch_desc, num_tokens_across_dp, seq_lens_cpu_upper_bound)
 
     def _prefill(
         self,

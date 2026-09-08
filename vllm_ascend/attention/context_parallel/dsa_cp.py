@@ -116,6 +116,11 @@ class AscendDSAReqMetadata:
     storage_block_size: int
     query_start_loc: torch.Tensor
     cp_metadata: DSACPMetadata
+    raw_slot_mapping: torch.Tensor | None = None
+    # Python launch bounds computed by the original builder. Keep them with
+    # the metadata so fused draft updates never reduce an NPU tensor to host.
+    max_local_query_len: int | None = None
+    max_local_seq_len: int | None = None
     num_compressed_tokens: int | None = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
@@ -210,6 +215,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
+        self.supports_draft_decode_metadata_update = True
         self.logical_block_size = kv_cache_spec.block_size
         self.storage_block_size = kv_cache_spec.storage_block_size
         scheduler_config = vllm_config.scheduler_config
@@ -323,6 +329,73 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # Explicit override in case the underlying builder specialized this getter.
         # @override omitted only because of mypy limitation due to type variable.
         return AttentionCGSupport.UNIFORM_BATCH
+
+    def update_draft_decode_metadata(self, metadata: AscendDSAMetadata) -> None:
+        """Refresh DSA-CP device metadata from the live fused-draft inputs."""
+        req_metadata = metadata.req_metadata
+        assert req_metadata is not None
+        assert req_metadata.raw_slot_mapping is not None
+
+        get_cos_and_sin_dsa(req_metadata.input_positions, use_cache=True)
+        if self.compressor_ratio <= 1:
+            assert req_metadata.slot_mapping is not None
+            formatted_slot_mapping = get_dsa_attn_kv_plan(
+                self.vllm_config
+            ).format_dsa_slot_mapping(
+                req_metadata.raw_slot_mapping,
+                self.storage_block_size,
+            )
+            req_metadata.slot_mapping.copy_(formatted_slot_mapping)
+
+        cp_metadata = req_metadata.cp_metadata
+        is_noncausal = req_metadata.dspark_swa_indices is not None
+        self._build_local_token_metadata(
+            num_reqs=req_metadata.seq_lens.shape[0],
+            num_input_tokens=metadata.num_input_tokens,
+            query_start_loc=req_metadata.query_start_loc,
+            seq_lens=req_metadata.seq_lens,
+            local_query_start_loc=cp_metadata.local_query_start_loc,
+            local_seq_lens=cp_metadata.local_seq_lens,
+            start_pos_out=req_metadata.start_pos,
+            is_noncausal=is_noncausal,
+        )
+
+        assert req_metadata.max_local_query_len is not None
+        assert req_metadata.max_local_seq_len is not None
+        cmp_ratio = self.compressor_ratio if self.compressor_ratio > 1 else 1
+        cache_key = f"cp_sas_c{cmp_ratio}"
+        assert self.common_ratio_to_sas_metadata is not None
+        self.common_ratio_to_sas_metadata.pop(cache_key, None)
+        self.common_ratio_to_sas_metadata.pop(
+            f"{cache_key}_cu_seqlens_ori_kv",
+            None,
+        )
+        self._build_sas_metadata(
+            num_heads=self.model_config.hf_config.num_attention_heads,
+            query_start_loc=cp_metadata.local_query_start_loc,
+            seq_lens=cp_metadata.local_seq_lens,
+            max_query_len=req_metadata.max_local_query_len,
+            max_seq_lens=req_metadata.max_local_seq_len,
+            index_topk=self.model_config.hf_config.index_topk,
+            num_reqs=req_metadata.seq_lens.shape[0],
+            has_prefill=False,
+            cu_cmp_seqlen_list=req_metadata.cu_cmp_seqlen_list,
+        )
+        if self.compressor_ratio == 4:
+            self._build_qli_metadata(
+                query_start_loc=cp_metadata.local_query_start_loc,
+                seq_lens=cp_metadata.local_seq_lens,
+                num_reqs=req_metadata.seq_lens.shape[0],
+                max_seqlen_q=req_metadata.max_local_query_len,
+                max_seqlen_k=req_metadata.max_local_seq_len,
+            )
+        if req_metadata.compressor_metadata is not None:
+            dsa_v1.build_compressor_metadata_out(
+                req_metadata,
+                self.compressor_ratio,
+                req_metadata.compressor_metadata,
+                self.vllm_config,
+            )
 
     def build(
         self,
@@ -722,6 +795,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
+            raw_slot_mapping=(
+                common_attn_metadata.slot_mapping[: self.num_actual_tokens]
+                if getattr(common_attn_metadata, "slot_mapping", None) is not None
+                else None
+            ),
+            max_local_query_len=max_local_query_len,
+            max_local_seq_len=max_local_seq_lens,
             sin=sin,
             cos=cos,
             start_pos=start_pos,
@@ -1021,6 +1101,13 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             seq_lens=self.seq_lens[:num_reqs],
             query_start_loc=query_start_loc,
             cp_metadata=cp_metadata,
+            raw_slot_mapping=(
+                common_attn_metadata.slot_mapping[: self.num_actual_tokens]
+                if getattr(common_attn_metadata, "slot_mapping", None) is not None
+                else None
+            ),
+            max_local_query_len=max_local_query_len,
+            max_local_seq_len=max_local_seq_lens,
             sin=sin,
             cos=cos,
             full_compress_sin=full_compress_sin,

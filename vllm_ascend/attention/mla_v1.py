@@ -262,6 +262,8 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         if self.pcp_enabled:
             self.pcp_rank = get_pcp_group().rank_in_group
 
+        self.supports_draft_decode_metadata_update = True
+
         scheduler_config = vllm_config.scheduler_config
 
         self.block_size = vllm_config.cache_config.block_size
@@ -370,6 +372,18 @@ class AscendMLAMetadataBuilder(MLACommonMetadataBuilder[AscendMLAMetadata]):
         # TODO(lucas): this is a bit of a hack, we should probably have a
         # better way of doing this
         return modified_batch
+
+    def update_draft_decode_metadata(self, metadata: AscendMLAMetadata) -> None:
+        seq_lens_cpu = metadata.seq_lens_cpu
+        seq_lens_cpu.add_(seq_lens_cpu.ne(0).to(seq_lens_cpu.dtype))
+        seq_lens_cpu.clamp_(max=self.model_config.max_model_len)
+        metadata.seq_lens = seq_lens_cpu
+
+        decode_metadata = metadata.decode
+        if decode_metadata is not None:
+            decode_metadata.seq_lens = seq_lens_cpu[: metadata.num_decodes]
+            decode_metadata.seq_lens_list = decode_metadata.seq_lens.tolist()
+            decode_metadata.max_seq_lens = int(decode_metadata.seq_lens.max().item())
 
     def pad_actual_seq_len_q_mtp_enable_pad(
         self, num_reqs_pad_size, num_reqs, actual_seq_lengths_q, common_attn_metadata
