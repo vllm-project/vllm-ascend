@@ -77,11 +77,19 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     @staticmethod
     def get_eplb_weight_views(layer) -> list[torch.Tensor]:
-        weights = [layer.w13_weight, layer.w2_weight]
-        if layer.w13_bias is not None:
-            weights.append(layer.w13_bias)
-        if layer.w2_bias is not None:
-            weights.append(layer.w2_bias)
+        w13 = getattr(layer, "w13_weight_list", None) or getattr(layer, "w13_weight", None)
+        w2 = getattr(layer, "w2_weight_list", None) or getattr(layer, "w2_weight", None)
+        weights = []
+        if w13 is not None:
+            weights.append(w13)
+        if w2 is not None:
+            weights.append(w2)
+        w13_bias = getattr(layer, "w13_bias", None)
+        w2_bias = getattr(layer, "w2_bias", None)
+        if w13_bias is not None:
+            weights.append(w13_bias)
+        if w2_bias is not None:
+            weights.append(w2_bias)
         return weights
 
     def supports_fused_activation(self, activation) -> bool:

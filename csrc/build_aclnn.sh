@@ -114,6 +114,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "compressor_metadata"
         "vllm_quant_lightning_indexer"
         "vllm_quant_lightning_indexer_metadata"
+        "quant_lightning_indexer_v2"
+        "quant_lightning_indexer_v2_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -136,6 +138,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910b ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "fused_sparse_attention_overlap"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
@@ -168,6 +171,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "compressor_metadata"
         "vllm_quant_lightning_indexer"
         "vllm_quant_lightning_indexer_metadata"
+        "quant_lightning_indexer_v2"
+        "quant_lightning_indexer_v2_metadata"
         "sparse_attn_sharedkv"
         "sparse_attn_sharedkv_metadata"
         "hc_pre"
@@ -190,6 +195,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "sparse_attention_score"
         "k2q_csr"
         "msa_index_score"
+        "fused_sparse_attention_overlap"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend910_93"
@@ -207,6 +213,8 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "compressor_metadata"
         "vllm_quant_lightning_indexer"
         "vllm_quant_lightning_indexer_metadata"
+        "quant_lightning_indexer_v2"
+        "quant_lightning_indexer_v2_metadata"
         "kv_quant_sparse_attn_sharedkv"
         "kv_quant_sparse_attn_sharedkv_metadata"
         "hc_post"
@@ -227,6 +235,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend950 ]]; then
         "k2q_csr"
         "sparse_attention_score"
         "mla_prolog_v3"
+        "rms_norm_cast"
     )
 
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")

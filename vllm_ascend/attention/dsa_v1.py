@@ -48,7 +48,6 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
-    olora_tp_enable,
     oproj_tp_enable,
 )
 from vllm_ascend.worker.device_metadata import (
@@ -348,6 +347,9 @@ class AscendDSAReqMetadata:
     cache_group_key: str = ""
     sas_metadata: torch.Tensor = None
     qli_metadata: torch.Tensor = None
+    qli_cu_seqlens_q: torch.Tensor = None
+    qli_seqused_k: torch.Tensor = None
+    qli_cmp_residual_k: torch.Tensor = None
     compressor_metadata: CompressorMetadataOutput | None = None
     compressor_metadata_group_id: int | None = None
     attn_mask: torch.Tensor | None = None
@@ -653,7 +655,12 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.common_ratio_to_sas_metadata: dict | None = None
         self.seq_lens: torch.Tensor = None
 
-        self.compressor_ratio = getattr(kv_cache_spec, "compress_ratio", 0)
+        # vLLM #51718 renamed ``compress_ratio`` to ``tokens_per_state``.
+        self.compressor_ratio = getattr(
+            kv_cache_spec,
+            "compress_ratio",
+            getattr(kv_cache_spec, "tokens_per_state", 0),
+        )
         if not layer_names:
             raise ValueError("DSV4 compressor metadata builder requires at least one layer name")
         # vLLM assigns the builder result to every layer in an attention group.
@@ -669,6 +676,18 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.qli_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
+        # QLI v2 PA_BBND reads the compressed K length plus the residual from
+        # the original length. Persistent buffers keep their addresses stable
+        # during graph replay. Full-decode graphs pad the request count beyond
+        # max_num_seqs (cudagraph capture sizes plus the FIA dummy request), so
+        # size the per-request buffers for the graph-mode maximum.
+        max_qli_reqs = scheduler_config.max_num_seqs
+        compilation_config = self.vllm_config.compilation_config
+        if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and compilation_config.cudagraph_capture_sizes:
+            max_qli_reqs = max(max_qli_reqs, compilation_config.max_cudagraph_capture_size)
+        # +1 holds the FIA dummy request inserted by mixed-batch padding.
+        self.qli_seqused_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
+        self.qli_cmp_residual_k: torch.Tensor = torch.zeros(max_qli_reqs + 1, dtype=torch.int32, device=self.device)
         self._device_metadata_enabled = False
         self._device_metadata_tasks: tuple[DeviceMetadataTask, ...] = ()
         self.cu_seqlens_ori_kv = torch.tensor([], device=self.device)
@@ -932,23 +951,36 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     ) -> torch.Tensor:
         qli_metadata = metadata_cache.get("qli")
         if qli_metadata is None:
-            qli_metadata = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer_metadata(
-                actual_seq_lengths_query=query_start_loc[1:].clone(),
-                actual_seq_lengths_key=seq_lens.clone(),
+            # QLI v2 PA_BBND reads the compressed K length plus the residual
+            # from the original length. Write both into persistent builder
+            # buffers so their addresses remain stable during graph replay.
+            seq_lens_i32 = seq_lens
+            if seq_lens_i32.dtype != torch.int32:
+                seq_lens_i32 = seq_lens_i32.to(torch.int32)
+            num_reqs = seq_lens_i32.shape[0]
+            qli_seqused_k = self.qli_seqused_k[:num_reqs]
+            qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+            torch.div(seq_lens_i32, 4, rounding_mode="floor", out=qli_seqused_k)
+            torch.remainder(
+                seq_lens_i32,
+                4,
+                out=qli_cmp_residual_k,
+            )
+            qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
                 num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,  # 128
-                query_quant_mode=0,
-                key_quant_mode=0,
+                topk=self.model_config.hf_config.index_topk,
+                quant_mode=2,
+                cu_seqlens_q=query_start_loc,
+                seqused_k=qli_seqused_k,
+                cmp_residual_k=qli_cmp_residual_k,
                 batch_size=len(seq_lens),
                 max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_kv,
-                layout_query="TND",
-                layout_key="PA_BSND",
-                sparse_count=self.model_config.hf_config.index_topk,  # 512
-                sparse_mode=3,
-                pre_tokens=(1 << 63) - 1,
-                next_tokens=(1 << 63) - 1,
+                max_seqlen_k=max_seqlen_kv // 4,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
                 cmp_ratio=4,
                 device=str(self.seqused_q.device),
             )
@@ -1150,6 +1182,17 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             num_compressed_tokens = self.num_actual_tokens
             slot_mapping = self.slot_mapping[: self.num_actual_tokens]
 
+        qli_cu_seqlens_q = None
+        qli_seqused_k = None
+        qli_cmp_residual_k = None
+        if self.compressor_ratio == 4:
+            # QLI v2 PA_BBND reads the compressed K length plus the residual
+            # from the original length; the persistent builder buffers are
+            # refreshed in _build_qli_metadata.
+            qli_cu_seqlens_q = query_start_loc
+            qli_seqused_k = self.qli_seqused_k[:num_reqs]
+            qli_cmp_residual_k = self.qli_cmp_residual_k[:num_reqs]
+
         req_metadata = AscendDSAReqMetadata(
             block_table=self.block_table[:num_reqs, ...],
             seq_lens=seq_lens,
@@ -1166,6 +1209,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cache_group_key=self.cache_group_key,
             sas_metadata=sas_metadata,
             qli_metadata=qli_metadata,
+            qli_cu_seqlens_q=qli_cu_seqlens_q,
+            qli_seqused_k=qli_seqused_k,
+            qli_cmp_residual_k=qli_cmp_residual_k,
             attn_mask=None,
             cu_cmp_seqlen_list=cu_seqlens_cmp_kv,
             ori_win_left=ori_win_left,
@@ -1543,7 +1589,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP / olora_tp paths below, so it must win first.
+        # orthogonal to the OTP path below, so it must win first.
         use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
         if use_a5_quant_o_proj:
             o = o_proj_input
@@ -1629,9 +1675,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 )
             dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
             output[...] = self._oproj_rs_out_buf[:num_tokens]
-        elif olora_tp_enable():
-            o_proj_input = self.wo_a(o_proj_input)
-            output[...] = self.wo_b(o_proj_input)
         else:
             # A5 BF16 wo_a is reshaped to [groups, hidden, rank] at load time,
             # matching the A3 layout expected by npu_transpose_batchmatmul.

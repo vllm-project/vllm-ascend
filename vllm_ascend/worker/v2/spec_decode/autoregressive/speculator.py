@@ -79,8 +79,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     uses the draft attention backend recorded by ``set_attn``.
 
     MLA's per-step state lives in ``.decode`` (cloned per step, written via an
-    alias), GQA's is top-level. MLA also rebuilds the base (live ``.decode`` is
-    None/wrong-batch) and forwards rotary ``positions`` into
+    alias), GQA's is top-level. Both rebuild the base metadata for the padded
+    draft batch. MLA also forwards rotary ``positions`` into
     build_attn_metadata. DSA and SFA manage their draft state in their metadata
     builders and skip the generic MLA/GQA init and update logic.
     """
@@ -135,6 +135,29 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             parallel_config=parallel_config,
         )
 
+    # TODO: Remove this method once vllm-project/vllm#53458 or an
+    # equivalent upstream fix is merged.
+    def _maybe_remove_d2t(self, draft_model: torch.nn.Module) -> None:
+        """Drop the identity d2t mapping of a full-vocab EAGLE3 draft."""
+        if self.method != "eagle3":
+            return
+        target_vocab_size = self.draft_model_config.get_vocab_size()
+        draft_vocab_size = draft_model.config.draft_vocab_size
+        if draft_vocab_size == target_vocab_size:
+            draft_model.draft_id_to_target_id = None
+
+    def load_draft_model(
+        self,
+        target_model: torch.nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> torch.nn.Module:
+        draft_model = super().load_draft_model(
+            target_model,
+            target_attn_layer_names,
+        )
+        self._maybe_remove_d2t(draft_model)
+        return draft_model
+
     @property
     def draft_prefill_attn_groups(self) -> list[list[AttentionGroup]]:
         if self.replicated_pcp:
@@ -185,6 +208,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         return attn_metadata, slot_mappings
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph managers are patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
@@ -220,6 +245,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: Any = None,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ):
         """Override GPU EagleSpeculator.propose for Ascend NPUs,
         because npu attention metadata needs more information,
@@ -227,6 +254,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
+        sync_state = dp_sync
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
@@ -246,7 +274,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
@@ -507,7 +535,10 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # TODO: _build_draft_attn_metadata pulls data (seq_lens, block_table,
         # ...) from input_buffers internally; future may pass these as CPU
         # params directly to build_attn_metadata, decoupling from input_buffers.
-        if self.attn_architecture == "MLA":
+        # Target metadata can contain fewer block-table rows than the draft
+        # decode graph requires. Rebuild GQA metadata too, so its block tables
+        # and query layout describe the same padded batch as the sequence lengths.
+        if self.attn_architecture in ("GQA", "MLA"):
             assert self.input_batch is not None
             attn_metadata = self._build_draft_attn_metadata(  # type: ignore[call-arg]
                 num_reqs=self.input_batch.num_reqs,

@@ -422,6 +422,35 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> npu_kv_quant_sparse_flash_attenti
     return std::tuple<at::Tensor, at::Tensor, at::Tensor>(output, softmax_max, softmax_sum);
 }
 
+at::Tensor npu_fused_sparse_attention_overlap_meta(
+    const at::Tensor &query,
+    const at::Tensor &selection_k_rope,
+    const at::Tensor &selection_kv_cache,
+    const at::Tensor &selection_kv_block_table,
+    const at::Tensor &selection_kv_block_status,
+    const at::Tensor &selection_membership_map,
+    const at::Tensor &selection_topk_indices,
+    const at::Tensor &full_k_rope,
+    const at::Tensor &full_kv_cache,
+    const at::Tensor &full_kv_block_table,
+    const at::Tensor &full_kv_actual_seq,
+    const at::Tensor &full_q_actual_seq,
+    double scale_value,
+    int64_t sparse_block_size,
+    int64_t selection_topk_block_size,
+    c10::string_view layout_query,
+    c10::string_view layout_kv,
+    int64_t sparse_mode)
+{
+    // The real op returns the nope-width output (query_nope.sizes), i.e. the
+    // last dim is full_kv_cache's last dim, not query's. Keep the meta in sync
+    // or graph capture allocates/strides the output at the wrong width.
+    auto kv_cache_dim = full_kv_cache.sym_size(full_kv_cache.dim() - 1);
+    auto out_sizes = c10::SymDimVector(query.sym_sizes().begin(), query.sym_sizes().end());
+    out_sizes[query.dim() - 1] = kv_cache_dim;
+    return at::empty_symint(out_sizes, query.options().dtype(query.dtype()));
+}
+
 std::tuple<at::Tensor,at::Tensor, at::Tensor> moe_gating_top_k_meta(
     const at::Tensor& x,
     int64_t k,
@@ -886,6 +915,32 @@ std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_output_tens
     return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
 }
 
+std::tuple<at::Tensor, at::Tensor> construct_quant_lightning_indexer_v2_output_tensor(const at::Tensor& query, const at::Tensor& key,
+                                                           int64_t sparse_count, std::string query_layout_str,
+                                                           std::string key_layout_str, int64_t return_value)
+{
+    constexpr int64_t DIM_0 = 0;
+    constexpr int64_t DIM_1 = 1;
+    constexpr int64_t DIM_2 = 2;
+    c10::SymDimVector output_size;
+    TORCH_CHECK(sparse_count > 0, "sparse count should be greater than 0, but now is ", sparse_count);
+    c10::SymInt keyHeadNum = (key_layout_str == "TND") ? key.sym_size(DIM_1) : key.sym_size(DIM_2);
+    if (query_layout_str == "BSND") {
+        output_size = {query.sym_size(DIM_0), query.sym_size(DIM_1), keyHeadNum, c10::SymInt(sparse_count)};
+    } else {
+        output_size = {query.sym_size(DIM_0), keyHeadNum, c10::SymInt(sparse_count)};
+    }
+    at::Tensor sparse_indices_out = at::empty_symint(output_size, query.options().dtype(at::kInt));
+    at::Tensor sparse_values_out;
+    if (return_value) {
+        sparse_values_out = at::empty_symint(output_size, query.options().dtype(at::kBFloat16));
+    } else {
+        sparse_values_out = at::empty_symint(c10::SymDimVector{c10::SymInt(0)}, query.options().dtype(at::kBFloat16));
+    }
+
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
 std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_meta(
     const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
     const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
@@ -901,6 +956,31 @@ std::tuple<at::Tensor, at::Tensor> npu_vllm_quant_lightning_indexer_meta(
     std::string key_layout_str = std::string(layout_key);
     std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_output = construct_quant_lightning_indexer_output_tensor(
             query, key, sparse_count, query_layout_str, key_layout_str, return_value);
+    at::Tensor sparse_indices_out = std::get<0>(quant_lightning_indexer_output);
+    at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
+
+    return std::tuple<at::Tensor, at::Tensor>(sparse_indices_out, sparse_values_out);
+}
+
+std::tuple<at::Tensor, at::Tensor> npu_quant_lightning_indexer_v2_meta(
+    const at::Tensor &query, const at::Tensor &key, const at::Tensor &weights,
+    const at::Tensor &query_dequant_scale, const at::Tensor &key_dequant_scale,
+    int64_t topk, int64_t quant_mode,
+    const c10::optional<at::Tensor> &cu_seqlens_q,
+    const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q,
+    const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k,
+    const c10::optional<at::Tensor> &block_table,
+    const c10::optional<at::Tensor> &output_idx_offset,
+    const c10::optional<at::Tensor> &metadata,
+    int64_t max_seqlen_q, c10::string_view layout_q, c10::string_view layout_k,
+    int64_t mask_mode, int64_t cmp_ratio, int64_t return_value)
+{
+    std::string query_layout_str = std::string(layout_q);
+    std::string key_layout_str = std::string(layout_k);
+    std::tuple<at::Tensor, at::Tensor> quant_lightning_indexer_output = construct_quant_lightning_indexer_v2_output_tensor(
+            query, key, topk, query_layout_str, key_layout_str, return_value);
     at::Tensor sparse_indices_out = std::get<0>(quant_lightning_indexer_output);
     at::Tensor sparse_values_out = std::get<1>(quant_lightning_indexer_output);
 
@@ -1015,6 +1095,47 @@ at::Tensor npu_vllm_quant_lightning_indexer_metadata_meta(
         output = at::empty_symint(
             c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
             torch::dtype(torch::kInt32).device(actual_seq_lengths_key.value().device()));
+    } else {
+        auto deviceOri = at::Device(std::string(device));
+        std::string device_str = "meta";
+        if (deviceOri.has_index()) {
+            device_str += ":";
+            device_str += std::to_string(deviceOri.index());
+        }
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(at::Device(device_str)));
+    }
+
+    return output;
+}
+
+at::Tensor npu_quant_lightning_indexer_v2_metadata_meta(
+    int64_t num_heads_q, int64_t num_heads_k, int64_t head_dim, int64_t topk, int64_t quant_mode,
+    const c10::optional<at::Tensor> &cu_seqlens_q, const c10::optional<at::Tensor> &cu_seqlens_k,
+    const c10::optional<at::Tensor> &seqused_q, const c10::optional<at::Tensor> &seqused_k,
+    const c10::optional<at::Tensor> &cmp_residual_k, int64_t batch_size, int64_t max_seqlen_q, int64_t max_seqlen_k,
+    const c10::string_view layout_q, c10::string_view layout_k, int64_t mask_mode, int64_t cmp_ratio,
+    const c10::string_view device)
+{
+    constexpr int64_t OUTPUT_SIZE = 1024;
+    at::Tensor output;
+    if (cu_seqlens_q.has_value()) {
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_q.value().device()));
+    } else if (seqused_k.has_value()) {
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(seqused_k.value().device()));
+    } else if (cu_seqlens_k.has_value()) {
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(cu_seqlens_k.value().device()));
+    } else if (seqused_q.has_value()) {
+        output = at::empty_symint(
+            c10::SymDimVector{c10::SymInt(OUTPUT_SIZE)},
+            torch::dtype(torch::kInt32).device(seqused_q.value().device()));
     } else {
         auto deviceOri = at::Device(std::string(device));
         std::string device_str = "meta";
@@ -1991,6 +2112,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("npu_msa_index_score", &vllm_ascend::meta::npu_msa_index_score_meta);
     ops.impl("npu_kv_quant_sparse_flash_attention",
              &vllm_ascend::meta::npu_kv_quant_sparse_flash_attention_meta);
+    // Fused sparse attention overlap
+    ops.impl("npu_fused_sparse_attention_overlap", &vllm_ascend::meta::npu_fused_sparse_attention_overlap_meta);
     // MoE dispatch-ffn-combine
     ops.impl("dispatch_ffn_combine", &vllm_ascend::meta::dispatch_ffn_combine_meta);
     // Moe_gating_top_k
@@ -2013,6 +2136,8 @@ TORCH_LIBRARY_IMPL_EXPAND(CONCAT(_C, _ascend), Meta, ops) {
     ops.impl("compressor_metadata", &vllm_ascend::meta::compressor_metadata_meta);
     ops.impl("npu_vllm_quant_lightning_indexer", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_meta);
     ops.impl("npu_vllm_quant_lightning_indexer_metadata", &vllm_ascend::meta::npu_vllm_quant_lightning_indexer_metadata_meta);
+    ops.impl("npu_quant_lightning_indexer_v2", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_meta);
+    ops.impl("npu_quant_lightning_indexer_v2_metadata", &vllm_ascend::meta::npu_quant_lightning_indexer_v2_metadata_meta);
     ops.impl("npu_sparse_attn_sharedkv", &vllm_ascend::meta::npu_sparse_attn_sharedkv_meta);
     ops.impl("npu_sparse_attn_sharedkv_metadata", &vllm_ascend::meta::npu_sparse_attn_sharedkv_metadata_meta);
     ops.impl("npu_hc_post", &vllm_ascend::meta::npu_hc_post_meta);

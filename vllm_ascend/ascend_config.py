@@ -258,12 +258,12 @@ class AscendConfig:
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
             "enable_force_eplb": false,
+            "enable_pcp_o_proj_weight_sharding": false,
             "draft_window_size": null,
             "mix_placement": false,
             "pa_shape_list": [],
             "mega_moe_max_tokens": 65536,
             "ascend_log_path": "~/ascend/log/vllm_ascend",
-            "c8_enable_reshape_optim": false,
             "enable_fused_mc2": 0,
             "enable_mlapo": true,
             "mlapo_keep_prefill_weights": false,
@@ -314,8 +314,7 @@ class AscendConfig:
                 "oproj_tensor_parallel_size": 0,
                 "lmhead_tensor_parallel_size": 0,
                 "embedding_tensor_parallel_size": 0,
-                "mlp_tensor_parallel_size": 0,
-                "olora_tensor_parallel_size": 0
+                "mlp_tensor_parallel_size": 0
             },
             "scheduler_config": {
                 "enable_balance_scheduling": false,
@@ -393,8 +392,13 @@ class AscendConfig:
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     enable_force_eplb: bool = False
+    enable_pcp_o_proj_weight_sharding: bool = False
     draft_window_size: int | None = None
     mix_placement: bool = False
+    # When non-zero, force the MC2 combine stage's comm quant_mode to this
+    # value (e.g. 4 = MXFP float8_e4m3 communication quantization) regardless of the
+    # model's quant_type, 0 means disabled (use the model's own quant).
+    combine_quant_mode: Literal[0, 2, 3, 4] = 0
     pa_shape_list: list[Any] = dataclasses.field(default_factory=list)
     # Per-rank token capacity after dispatch in the fused MC2/MegaMoe path.
     # The same value is passed as dispatch_ffn_combine's max_output_size
@@ -408,7 +412,6 @@ class AscendConfig:
         default_factory=lambda: os.path.join(os.path.expanduser("~"), "ascend", "log", "vllm_ascend")
     )
     dump_config_path: str | None = None
-    c8_enable_reshape_optim: bool = False
     mc2_comm_alg: Literal["", "fullmesh", "hierarchy", "fullmesh_v2"] = ""
 
     # ---- A-family (envs fallback): default = envs module value, before-validator injects ----
@@ -453,6 +456,7 @@ class AscendConfig:
     _sparse_li_c8_layer_ids: set[int] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_names: set[str] = dataclasses.field(default_factory=set, init=False, repr=False)
     _sparse_li_c8_layer_filter_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
+    _c8_reshape_optim_enabled: bool = dataclasses.field(default=False, init=False, repr=False)
 
     @model_validator(mode="after")
     def _validate_user_input_ranges(self):
@@ -525,6 +529,32 @@ class AscendConfig:
             and vc.parallel_config.enable_expert_parallel
             and vc.parallel_config.tensor_parallel_size > 1
         )
+
+        if self.enable_dsa_cp:
+            tp_size = vc.parallel_config.tensor_parallel_size
+            pcp_size = vc.parallel_config.prefill_context_parallel_size
+            if pcp_size > 1:
+                migration = (
+                    "Prefill context parallelism is already enabled; remove enable_dsa_cp from additional_config."
+                )
+            elif tp_size > 1:
+                migration = (
+                    "Consider trying prefill context parallelism with "
+                    f"--tensor-parallel-size 1 --prefill-context-parallel-size {tp_size} "
+                    "to preserve the current world size. Remove enable_dsa_cp from "
+                    "additional_config when enabling PCP."
+                )
+            else:
+                migration = (
+                    "Consider trying prefill context parallelism with "
+                    "--prefill-context-parallel-size greater than 1 (requires additional ranks). "
+                    "Remove enable_dsa_cp from additional_config when enabling PCP."
+                )
+            logger.warning_once(
+                "enable_dsa_cp will be fully deprecated once PCP is ready. %s "
+                "Check PCP support for your model and deployment configuration.",
+                migration,
+            )
 
         # DSA CP is only applicable to models with an indexer (for example,
         # DeepSeek V3.2/V4). Resolve this while vllm_config is explicitly
@@ -632,15 +662,22 @@ class AscendConfig:
                     "enable_kv_nz is only supported in pd scenario and can only be used in D node."
                 )
 
-        # sparse c8 + reshape optim derivation
+        # Sparse C8 derivation. The StoreKVBlock optimization is internal and
+        # enabled only for SFA + Lightning Indexer C8 on PD prefill nodes.
         from vllm_ascend.utils import model_uses_sfa_sparse
 
         use_sparse = model_uses_sfa_sparse(vc.model_config)
         self.enable_sparse_sfa_c8 = self.enable_sparse_sfa_c8 and use_sparse
         self.enable_sparse_li_c8 = self.enable_sparse_li_c8 and use_sparse
-        # c8_enable_reshape_optim is a user input field now; keep the original
-        # semantics: only meaningful when enable_sparse_li_c8 is true.
-        self.c8_enable_reshape_optim = self.enable_sparse_li_c8 and self.c8_enable_reshape_optim
+        kv_transfer_config = vc.kv_transfer_config
+        is_prefill_node = kv_transfer_config is not None and (
+            getattr(kv_transfer_config, "kv_role", None) == "kv_producer"
+            or (
+                bool(getattr(kv_transfer_config, "is_kv_producer", False))
+                and not bool(getattr(kv_transfer_config, "is_kv_consumer", False))
+            )
+        )
+        self._c8_reshape_optim_enabled = self.enable_sparse_li_c8 and is_prefill_node
         quant_config = getattr(vc, "quant_config", None)
         (
             self._sparse_li_c8_layer_ids,
@@ -870,6 +907,11 @@ class AscendConfig:
         layer_ids = {extract_layer_index(normalized_layer_name)}
         return any(layer_id in self._sparse_li_c8_layer_ids for layer_id in layer_ids)
 
+    @property
+    def c8_reshape_optim_enabled(self) -> bool:
+        """Whether SFA should use StoreKVBlock for LI C8 cache writes."""
+        return self._c8_reshape_optim_enabled
+
     @staticmethod
     def _get_compile_ranges(compilation_config):
         return compilation_config.compile_ranges_endpoints or []
@@ -925,7 +967,7 @@ class DynamicSpecConfig:
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). 5 int fields get lax coercion
+    Migrated to ``@config`` (pydantic dataclass). 4 int fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
     data_parallel divisibility) are validated in ``_validate_preconditions()``,
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
@@ -937,7 +979,6 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 0
     embedding_tensor_parallel_size: int = 0
     mlp_tensor_parallel_size: int = 0
-    olora_tensor_parallel_size: int = 0
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -946,12 +987,14 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
-            "olora_tensor_parallel_size",
         )
+        self.max_finegrained_tp_size = 1
         for field_name in size_fields:
             value = getattr(self, field_name)
             if value < 0:
                 raise ValueError(f"finegrained_tp_config.{field_name} must be non-negative, got {value}")
+            self.max_finegrained_tp_size = max(self.max_finegrained_tp_size, value)
+
         return self
 
     def _validate_preconditions(self, vllm_config: Any):
@@ -981,16 +1024,6 @@ class FinegrainedTPConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
-        if self.olora_tensor_parallel_size > 0:
-            enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,
-            # so the o_lora tp split can only be used in graph mode.
-            if vc.model_config and vc.model_config.enforce_eager:
-                raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
-            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
-                raise AssertionError(
-                    "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
-                )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
@@ -1002,7 +1035,6 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
-            self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,
@@ -1267,6 +1299,7 @@ class SparseKVOffloadConfig:
     dram_size_per_dp_GB: int = 128
     keep_device_kv_cache: bool = False
     topk: int = dataclasses.field(default=0, init=False)
+    use_fused_overlap: bool = False
 
     @model_validator(mode="after")
     def _validate_values(self):
@@ -1397,10 +1430,10 @@ def init_ascend_config(vllm_config):
         "dump_config",
         "dump_config_path",
         # pure-derived fields (derive_and_validate computes them; user input would residualize)
-        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8/
-        # c8_enable_reshape_optim are NOT here — they are user-input fields that
-        # derive_and_validate *augments* (self.x = self.x and condition), so the user
-        # must be able to pass them. Only pure-derived fields (no user input) are stripped.
+        # NOTE: enable_shared_expert_dp/enable_sparse_sfa_c8/enable_sparse_li_c8
+        # are NOT here — they are user-input fields that derive_and_validate
+        # augments (self.x = self.x and condition), so the user must be able to
+        # pass them. Only pure-derived fields (no user input) are stripped.
         "enable_sp_by_pass",
         "pd_tp_ratio",
         "pd_head_ratio",

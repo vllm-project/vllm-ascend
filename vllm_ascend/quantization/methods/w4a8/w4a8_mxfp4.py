@@ -35,7 +35,7 @@ from ..base import (
     AscendLinearScheme,
     AscendMoEScheme,
     QuantType,
-    TPWeightGatherSpec,
+    WeightSwitchGatherSpec,
 )
 from ..registry import register_scheme
 
@@ -47,15 +47,15 @@ SITU_MX_DST_TYPE_E4M3FN = 36
 class AscendW4A8MXFPDynamicLinearMethod(AscendLinearScheme):
     """Linear method for Ascend W4A8_MXFP (Microscaling) quantization."""
 
-    tp_weight_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight", gather_dim=1),
-        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=1),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
-    supports_tp_weight_switch = True
+    supports_weight_switch = True
 
     def __init__(self):
         vllm_config = get_current_vllm_config()

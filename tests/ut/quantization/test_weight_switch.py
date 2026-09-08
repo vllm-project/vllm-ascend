@@ -6,23 +6,39 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm_ascend.quantization.tp_weight_switch import (
-    TPWeightGatherSpec,
-    TPWeightRepeatSpec,
-    TPWeightSwitchMixin,
+from vllm_ascend.weight_switch import (
+    WeightLoadPartition,
+    WeightSwitchConfig,
+    WeightSwitchGatherSpec,
+    WeightSwitchMixin,
+    WeightSwitchRepeatSpec,
 )
 
 
-class _TestLinearMethod(TPWeightSwitchMixin):
-    supports_tp_weight_switch = True
-    tp_weight_gather_specs = (
-        TPWeightGatherSpec("weight"),
-        TPWeightGatherSpec("weight_scale"),
+def _weight_switch_config() -> WeightSwitchConfig:
+    return WeightSwitchConfig(group=object(), world_size=2, rank=0)
+
+
+def test_weight_switch_config_uses_the_caller_selected_parallel_group() -> None:
+    group = SimpleNamespace(world_size=4, rank_in_group=2)
+
+    config = WeightSwitchConfig.from_group(group)
+
+    assert config.group is group
+    assert config.world_size == 4
+    assert config.rank == 2
+
+
+class _TestLinearMethod(WeightSwitchMixin):
+    supports_weight_switch = True
+    weight_switch_gather_specs = (
+        WeightSwitchGatherSpec("weight"),
+        WeightSwitchGatherSpec("weight_scale"),
     )
-    tp_weight_repeat_specs = (TPWeightRepeatSpec("input_scale"),)
-    tp_weight_output_gather_specs = (
-        TPWeightGatherSpec("weight", gather_dim=1),
-        TPWeightGatherSpec("weight_scale", gather_dim=1),
+    weight_switch_repeat_specs = (WeightSwitchRepeatSpec("input_scale"),)
+    weight_switch_output_gather_specs = (
+        WeightSwitchGatherSpec("weight", gather_dim=1),
+        WeightSwitchGatherSpec("weight_scale", gather_dim=1),
     )
 
 
@@ -50,46 +66,86 @@ def _output_sharded_layer() -> SimpleNamespace:
     )
 
 
-def test_split_tensor_for_tp_supports_nonzero_and_negative_dims() -> None:
+def test_split_tensor_for_parallel_supports_nonzero_and_negative_dims() -> None:
     tensor = torch.arange(24).reshape(4, 6)
 
-    shard = TPWeightSwitchMixin.split_tensor_for_tp(tensor, tp_size=3, tp_rank=1, dim=-1)
+    shard = WeightSwitchMixin.split_tensor_for_parallel(tensor, world_size=3, rank=1, dim=-1)
 
     torch.testing.assert_close(shard, tensor[:, 2:4])
     assert shard.is_contiguous()
 
 
-def test_split_tensor_for_tp_rejects_non_divisible_dimension() -> None:
+def test_split_tensor_for_parallel_rejects_non_divisible_dimension() -> None:
     with pytest.raises(RuntimeError, match="not divisible"):
-        TPWeightSwitchMixin.split_tensor_for_tp(torch.empty(3, 5), tp_size=2, tp_rank=0, dim=1)
+        WeightSwitchMixin.split_tensor_for_parallel(torch.empty(3, 5), world_size=2, rank=0, dim=1)
 
 
 def test_enable_input_sharded_state_builds_gather_and_repeat_tensors() -> None:
     layer = _input_sharded_layer()
     method = _TestLinearMethod()
 
-    state = method.enable_tp_weight_switch(layer, tp_size=2)
+    state = method.enable_weight_switch(layer, _weight_switch_config())
 
     assert set(state.gather_parts) == {"weight", "weight_scale"}
     assert state.gather_parts["weight"].full_tensor.shape == (8, 3)
     assert state.gather_parts["weight_scale"].full_tensor.shape == (4, 3)
-    assert state.gather_parts["weight"].tp_tensor.data_ptr() == layer.weight.data_ptr()
+    assert state.gather_parts["weight"].local_tensor.data_ptr() == layer.weight.data_ptr()
     torch.testing.assert_close(state.repeat_parts["input_scale"].full_tensor, torch.tensor([2.0, 2.0]))
+
+
+def test_prepare_layer_for_parallel_weight_load_uses_one_composed_checkpoint_slice() -> None:
+    class _LoadLayer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input_size = 8
+            self.input_size_per_partition = 4
+            self.output_size = 3
+            self.output_size_per_partition = 3
+            self.weight = torch.nn.Parameter(torch.empty(3, 4), requires_grad=False)
+            self.weight.input_dim = 1
+
+            def tp_weight_loader(*args, **kwargs):
+                raise AssertionError("direct loading must not call the original TP loader")
+
+            self.weight.weight_loader = tp_weight_loader
+
+    class _LoadMethod(WeightSwitchMixin):
+        supports_weight_switch = True
+        weight_switch_gather_specs = (WeightSwitchGatherSpec("weight", gather_dim=1),)
+
+    layer = _LoadLayer()
+    method = _LoadMethod()
+    config = WeightSwitchConfig(group=object(), world_size=2, rank=1)
+
+    load_state = method.prepare_layer_for_parallel_weight_load(
+        layer,
+        config,
+        WeightLoadPartition(world_size=4, rank=1),
+    )
+    layer.weight.weight_loader(layer.weight, torch.arange(24, dtype=torch.float32).reshape(3, 8))
+
+    assert load_state.input_size_per_partition_before == 4
+    assert load_state.input_size_per_partition_after == 2
+    assert layer.input_size_per_partition == 2
+    torch.testing.assert_close(layer.weight, torch.tensor([[2.0, 3.0], [10.0, 11.0], [18.0, 19.0]]))
+
+    state = method.enable_weight_switch(layer, config)
+    assert state.gather_parts["weight"].full_tensor.shape == (3, 4)
 
 
 def test_enable_output_sharded_state_moves_gather_dim_and_reuses_pool() -> None:
     method = _TestLinearMethod()
     pool: dict[object, torch.Tensor] = {}
 
-    first = method.enable_tp_weight_switch(
+    first = method.enable_weight_switch(
         _output_sharded_layer(),
-        tp_size=2,
+        _weight_switch_config(),
         pool=pool,
         pool_key_prefix="shared",
     )
-    second = method.enable_tp_weight_switch(
+    second = method.enable_weight_switch(
         _output_sharded_layer(),
-        tp_size=2,
+        _weight_switch_config(),
         pool=pool,
         pool_key_prefix="shared",
     )
@@ -104,10 +160,11 @@ def test_enable_output_sharded_state_moves_gather_dim_and_reuses_pool() -> None:
     assert second.gather_parts["weight_scale"].gather_output.data_ptr() == scale_part.gather_output.data_ptr()
 
 
-def test_all_gather_wait_and_switch_restore_tp_storage() -> None:
+def test_all_gather_wait_and_switch_restore_local_storage() -> None:
     layer = _input_sharded_layer()
     method = _TestLinearMethod()
-    state = method.enable_tp_weight_switch(layer, tp_size=2)
+    config = _weight_switch_config()
+    state = method.enable_weight_switch(layer, config)
     original_ptrs = {name: getattr(layer, name).data_ptr() for name in ("weight", "weight_scale", "input_scale")}
     handles: list[MagicMock] = []
 
@@ -123,20 +180,20 @@ def test_all_gather_wait_and_switch_restore_tp_storage() -> None:
         "vllm_ascend.distributed.utils.all_gather_async",
         side_effect=fake_all_gather_async,
     ):
-        method.all_gather_tp_weight(state, group=object())
+        method.all_gather_weight(state, config)
 
     assert state.handles == handles
-    method.wait_tp_weight_all_gather(state)
+    method.wait_weight_all_gather(state)
     assert not state.handles
     for handle in handles:
         handle.wait.assert_called_once_with()
 
-    method.switch_tp_weight(layer, state, use_full_weight=True)
+    method.switch_weight(layer, state, use_full_weight=True)
     assert layer.weight.data_ptr() == state.gather_parts["weight"].full_tensor.data_ptr()
     assert layer.weight_scale.data_ptr() == state.gather_parts["weight_scale"].full_tensor.data_ptr()
     assert layer.input_scale.data_ptr() == state.repeat_parts["input_scale"].full_tensor.data_ptr()
 
-    method.switch_tp_weight(layer, state, use_full_weight=False)
+    method.switch_weight(layer, state, use_full_weight=False)
     for name, ptr in original_ptrs.items():
         assert getattr(layer, name).data_ptr() == ptr
 
@@ -151,7 +208,7 @@ def test_all_gather_wait_and_switch_restore_tp_storage() -> None:
                 output_size=3,
                 output_size_per_partition=3,
             ),
-            "exactly one TP-sharded axis",
+            "shard_axis",
         ),
         (
             SimpleNamespace(
@@ -160,28 +217,29 @@ def test_all_gather_wait_and_switch_restore_tp_storage() -> None:
                 output_size=6,
                 output_size_per_partition=3,
             ),
-            "exactly one TP-sharded axis",
+            "at most one pre-existing sharded axis",
         ),
     ],
 )
 def test_enable_rejects_zero_or_two_sharded_axes(layer: SimpleNamespace, message: str) -> None:
     with pytest.raises(RuntimeError, match=message):
-        _TestLinearMethod().enable_tp_weight_switch(layer, tp_size=2)
+        _TestLinearMethod().enable_weight_switch(layer, _weight_switch_config())
 
 
 def test_enable_rejects_unsupported_method_and_missing_attribute() -> None:
     with pytest.raises(RuntimeError, match="does not support"):
-        TPWeightSwitchMixin().enable_tp_weight_switch(_input_sharded_layer(), tp_size=2)
+        WeightSwitchMixin().enable_weight_switch(_input_sharded_layer(), _weight_switch_config())
 
     layer = _input_sharded_layer()
     del layer.weight_scale
     with pytest.raises(RuntimeError, match="weight_scale"):
-        _TestLinearMethod().enable_tp_weight_switch(layer, tp_size=2)
+        _TestLinearMethod().enable_weight_switch(layer, _weight_switch_config())
 
 
 def test_all_gather_rejects_a_second_launch_while_pending() -> None:
-    state = _TestLinearMethod().enable_tp_weight_switch(_input_sharded_layer(), tp_size=2)
+    config = _weight_switch_config()
+    state = _TestLinearMethod().enable_weight_switch(_input_sharded_layer(), config)
     state.handles.append(MagicMock())
 
     with pytest.raises(RuntimeError, match="still pending"):
-        _TestLinearMethod().all_gather_tp_weight(state, group=object())
+        _TestLinearMethod().all_gather_weight(state, config)

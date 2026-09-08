@@ -63,7 +63,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -658,10 +658,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         is_profile=False,
     ):
         (
-            num_tokens,
+            _,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_tokens = int(num_tokens_across_dp[self.dp_rank].item())
         dcp_manager = getattr(self.runner, "dcp_manager", None)
 
         multi_steps_attn_metadata = []
@@ -931,10 +933,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_input_tokens = num_tokens
 
         (
-            num_input_tokens,
+            _,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
@@ -1784,16 +1788,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            if vllm_version_is("0.27.1"):
-                return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
-            else:
-                return bool(
-                    {
-                        "DeepSeekMTPModel",
-                        "DeepseekV32MTPModel",
-                        "KimiK3MTPModel",
-                    }.intersection(architectures)
-                )
+            return bool(
+                {
+                    "DeepSeekMTPModel",
+                    "DeepseekV32MTPModel",
+                    "KimiK3MTPModel",
+                }.intersection(architectures)
+            )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(

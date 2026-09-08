@@ -386,6 +386,9 @@ class TestIndexerOps:
             seq_lens=torch.tensor([4], dtype=torch.int32),
             block_table=torch.tensor([[0]], dtype=torch.int32),
             qli_metadata=torch.empty(0, dtype=torch.int32),
+            qli_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([1], dtype=torch.int32),
+            qli_cmp_residual_k=torch.tensor([0], dtype=torch.int32),
         )
 
         with (
@@ -411,7 +414,7 @@ class TestIndexerOps:
             ),
             patch.object(
                 torch.ops._C_ascend,
-                "npu_vllm_quant_lightning_indexer",
+                "npu_quant_lightning_indexer_v2",
                 create=True,
                 return_value=(topk_indices, None),
             ) as qli,
@@ -440,10 +443,14 @@ class TestIndexerOps:
         assert qli_kwargs["query"] is quantized_query
         assert qli_kwargs["key"] is key_cache
         assert qli_kwargs["key_dequant_scale"] is scale_cache
-        assert torch.equal(
-            qli_kwargs["actual_seq_lengths_query"],
-            metadata.query_start_loc[1:],
-        )
-        assert qli_kwargs["actual_seq_lengths_key"] is metadata.seq_lens
+        assert qli_kwargs["cu_seqlens_q"] is metadata.qli_cu_seqlens_q
+        assert qli_kwargs["seqused_k"] is metadata.qli_seqused_k
+        assert qli_kwargs["cmp_residual_k"] is metadata.qli_cmp_residual_k
         assert qli_kwargs["block_table"] is metadata.block_table
         assert qli_kwargs["metadata"] is metadata.qli_metadata
+        assert qli_kwargs["topk"] == 3
+        assert qli_kwargs["quant_mode"] == 2
+        assert qli_kwargs["layout_q"] == "TND"
+        assert qli_kwargs["layout_k"] == "PA_BBND"
+        assert qli_kwargs["mask_mode"] == 3
+        assert qli_kwargs["cmp_ratio"] == 4

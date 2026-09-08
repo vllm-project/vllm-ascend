@@ -59,13 +59,14 @@ def _make_full_manager(
     compress_ratio: int = 4,
 ) -> tuple[AscendMLAAttentionSpec, BlockPool, FullAttentionManager]:
     logical_block_size = physical_block_size * compress_ratio
+    ratio_kwargs = {"tokens_per_state": compress_ratio}
     spec = AscendMLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        compress_ratio=compress_ratio,
         model_version="deepseek_v4",
+        **ratio_kwargs,
     )
     block_pool = BlockPool(
         num_gpu_blocks=8,
@@ -233,13 +234,14 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     request_a = _make_request("a", request_a_tokens, physical_block_size)
     request_b = _make_request("b", request_b_tokens, physical_block_size)
+    ratio_kwargs = {"tokens_per_state": 4}
     compressed_spec = MLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
-        compress_ratio=4,
         model_version="deepseek_v4",
+        **ratio_kwargs,
     )
     full_spec = FullAttentionSpec(
         block_size=physical_block_size,
