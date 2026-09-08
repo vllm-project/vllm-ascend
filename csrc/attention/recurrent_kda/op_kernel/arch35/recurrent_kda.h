@@ -75,6 +75,12 @@ public:
         stateOutStride1_ = tilingData->stateOutStride1;
         stateOutStride2_ = tilingData->stateOutStride2;
         stateOutStride3_ = tilingData->stateOutStride3;
+        queryTokenStride_ = tilingData->queryTokenStride;
+        queryHeadStride_ = tilingData->queryHeadStride;
+        keyTokenStride_ = tilingData->keyTokenStride;
+        keyHeadStride_ = tilingData->keyHeadStride;
+        valueTokenStride_ = tilingData->valueTokenStride;
+        valueHeadStride_ = tilingData->valueHeadStride;
         scale_ = tilingData->scale;
         lowerBound_ = tilingData->lowerBound;
         hasCuSeqlens_ = (tilingData->hasCuSeqlens == 1);
@@ -497,22 +503,24 @@ private:
         PipeBarrier<PIPE_V>();
     }
 
-    __aicore__ inline void CopyInQKVGate(uint64_t vOffset, uint64_t qkOffset, uint64_t gateOffset, int32_t seqLen,
-                                         uint64_t head)
+    __aicore__ inline void CopyInQKVGate(uint64_t qOffset, uint64_t kOffset, uint64_t vOffset,
+                                         uint64_t gateOffset, int32_t seqLen, uint64_t head)
     {
         LocalTensor<inType> qLocal = qInQueue_.AllocTensor<inType>();
         LocalTensor<inType> kLocal = kInQueue_.AllocTensor<inType>();
         LocalTensor<inType> vLocal = vInQueue_.AllocTensor<inType>();
 
-        DataCopyExtParams qkInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
-                                     static_cast<uint32_t>((NK_ - 1) * realK_ * sizeof(inType)), 0, 0};
+        DataCopyExtParams qInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
+                                    static_cast<uint32_t>((queryTokenStride_ - realK_) * sizeof(inType)), 0, 0};
+        DataCopyExtParams kInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realK_ * sizeof(inType)),
+                                    static_cast<uint32_t>((keyTokenStride_ - realK_) * sizeof(inType)), 0, 0};
         DataCopyExtParams vInParams{static_cast<uint16_t>(seqLen), static_cast<uint32_t>(realV_ * sizeof(inType)),
-                                    static_cast<uint32_t>((NV_ - 1) * realV_ * sizeof(inType)), 0, 0};
+                                    static_cast<uint32_t>((valueTokenStride_ - realV_) * sizeof(inType)), 0, 0};
         DataCopyPadExtParams<inType> qkPadParams{true, 0, static_cast<uint8_t>(alignK_ - realK_), 0};
         DataCopyPadExtParams<inType> vPadParams{true, 0, static_cast<uint8_t>(alignV_ - realV_), 0};
 
-        DataCopyPad(qLocal, queryGm_[qkOffset], qkInParams, qkPadParams);
-        DataCopyPad(kLocal, keyGm_[qkOffset], qkInParams, qkPadParams);
+        DataCopyPad(qLocal, queryGm_[qOffset], qInParams, qkPadParams);
+        DataCopyPad(kLocal, keyGm_[kOffset], kInParams, qkPadParams);
         DataCopyPad(vLocal, valueGm_[vOffset], vInParams, vPadParams);
         qInQueue_.EnQue<inType>(qLocal);
         kInQueue_.EnQue<inType>(kLocal);
@@ -846,10 +854,12 @@ private:
     __aicore__ inline void ProcessHead(uint64_t batchIdx, int64_t seq0, int64_t seq1,
                                       uint64_t head_i, uint64_t stateSlot)
     {
-        uint64_t vOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realV_;
-        uint64_t qkOffset = (static_cast<uint64_t>(seq0) * NK_ + head_i / (NV_ / NK_)) * realK_;
+        uint64_t qkHead = head_i / (NV_ / NK_);
+        uint64_t qOffset = static_cast<uint64_t>(seq0) * queryTokenStride_ + qkHead * queryHeadStride_;
+        uint64_t kOffset = static_cast<uint64_t>(seq0) * keyTokenStride_ + qkHead * keyHeadStride_;
+        uint64_t vOffset = static_cast<uint64_t>(seq0) * valueTokenStride_ + head_i * valueHeadStride_;
         uint64_t gateOffset = (static_cast<uint64_t>(seq0) * NV_ + head_i) * realK_;
-        CopyInQKVGate(vOffset, qkOffset, gateOffset, static_cast<int32_t>(seq1 - seq0), head_i);
+        CopyInQKVGate(qOffset, kOffset, vOffset, gateOffset, static_cast<int32_t>(seq1 - seq0), head_i);
         if (realV_ == 0) {
             return;
         }
@@ -965,6 +975,12 @@ private:
     uint32_t realV_;
     uint32_t stateCapacity_;
     uint32_t ssmStateStride_;
+    uint64_t queryTokenStride_;
+    uint64_t queryHeadStride_;
+    uint64_t keyTokenStride_;
+    uint64_t keyHeadStride_;
+    uint64_t valueTokenStride_;
+    uint64_t valueHeadStride_;
     uint64_t stateInStride0_;
     uint64_t stateInStride1_;
     uint64_t stateInStride2_;
