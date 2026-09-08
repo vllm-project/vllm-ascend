@@ -127,7 +127,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/model_runner_v2/test_qwen3_8B.py: 80
   tests/e2e/pull_request/one_card/pooling/test_classification.py: 270
   tests/e2e/pull_request/one_card/pooling/test_embedding.py: 580
-  tests/e2e/pull_request/one_card/pooling/test_scoring.py: 740
+  tests/e2e/pull_request/one_card/pooling/test_scoring.py: 300
   tests/e2e/pull_request/one_card/spec_decode/test_dflash.py: 510
   tests/e2e/pull_request/one_card/spec_decode/test_dspark.py: 410
   tests/e2e/pull_request/one_card/spec_decode/test_dynamic.py: 420
@@ -143,7 +143,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_completion_with_prompt_embeds.py: 170
   tests/e2e/pull_request/one_card/test_cpu_offloading.py: 30
   tests/e2e/pull_request/one_card/test_cpu_weight_offload.py: 420
-  tests/e2e/pull_request/one_card/test_guided_decoding.py: 670
+  tests/e2e/pull_request/one_card/test_guided_decoding.py: 420
   tests/e2e/pull_request/one_card/test_minicpm.py: 300
   tests/e2e/pull_request/one_card/test_minimax_m3_sparse_attn.py: 440
   tests/e2e/pull_request/one_card/test_multi_instance.py: 160
@@ -154,7 +154,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_qwen3_8b_w8a8.py: 400
   tests/e2e/pull_request/one_card/test_qwen3_embedding_0_6b.py: 210
   tests/e2e/pull_request/one_card/rlhf/state_transitions/test_pause_resume.py: 250
-  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 740
+  tests/e2e/pull_request/one_card/rlhf/state_transitions/test_sleep_wake.py: 240
   tests/e2e/pull_request/one_card/test_sampler.py: 190
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 220
   tests/e2e/pull_request/one_card/test_vlm.py: 890
