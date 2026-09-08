@@ -156,6 +156,7 @@ class AscendSFAMetadata:
     # |-------------------- seq_len ---------------------|
     #                                   |-- query_len ---|
     num_actual_tokens: int  # Number of tokens excluding padding.
+    # Cache-write layout: full PCP ranks, or input tokens with DSA-CP padding.
     slot_mapping: torch.Tensor
     seq_lens: torch.Tensor
     seq_lens_cpu: torch.Tensor
@@ -166,7 +167,6 @@ class AscendSFAMetadata:
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
-    pcp_slot_mapping: torch.Tensor | None = None
     # The dimension of the attention heads
     head_dim: int | None = None
     attn_mask: torch.Tensor = None
@@ -328,8 +328,11 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_input_tokens = common_attn_metadata.num_input_tokens
         block_table = common_attn_metadata.block_table_tensor[:num_reqs]
-        pcp_slot_mapping = common_attn_metadata.slot_mapping
-        slot_mapping = pcp_slot_mapping[:num_input_tokens]
+        # PCP cache writes gather prefill tokens and need the full rank layout.
+        # Other paths may receive an oversized persistent buffer from MTP.
+        slot_mapping = common_attn_metadata.slot_mapping
+        if not self.pcp_enabled:
+            slot_mapping = slot_mapping[:num_input_tokens]
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
 
         block_size = self.kernel_block_size
@@ -374,7 +377,6 @@ class AscendSFAMetadataBuilder(MLACommonMetadataBuilder[AscendSFAMetadata]):
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens_cpu,
             slot_mapping=slot_mapping,
-            pcp_slot_mapping=pcp_slot_mapping,
             head_dim=self.model_config.get_head_size(),
             attn_mask=self.attn_mask_builder.get_attention_mask(common_attn_metadata.causal, self.model_config),
             attn_state=common_attn_metadata.attn_state,
@@ -1638,15 +1640,10 @@ class AscendSFAImpl(MLAAttentionImpl):
 
         if self.has_indexer:
             assert k_li is not None
-            if self.vllm_config.parallel_config.prefill_context_parallel_size > 1:
-                assert attn_metadata.pcp_slot_mapping is not None
-                indexer_cache_slot_mapping = attn_metadata.pcp_slot_mapping
-            else:
-                indexer_cache_slot_mapping = slot_mapping_li
             self._write_indexer_cache(
                 k_li,
                 k_li_scale,
-                indexer_cache_slot_mapping,
+                slot_mapping_li,
                 kv_cache,
                 attn_metadata,
             )

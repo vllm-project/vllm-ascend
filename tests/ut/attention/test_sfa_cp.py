@@ -4,6 +4,7 @@ from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -142,6 +143,57 @@ def test_sfa_pcp_resolution_for_mrv2_config() -> None:
         ),
     ):
         assert resolve_sfa_impl(vllm_config) is AscendSFAPCPImpl
+
+
+@pytest.mark.parametrize("pcp_enabled", [False, True])
+@pytest.mark.parametrize("c8_reshape_optim_enabled", [False, True])
+def test_sfa_builder_cache_slot_layout(pcp_enabled: bool, c8_reshape_optim_enabled: bool) -> None:
+    builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
+    builder.pcp_enabled = pcp_enabled
+    builder.kernel_block_size = 128
+    builder.model_config = MagicMock()
+    builder.model_config.get_head_size.return_value = 64
+    builder.attn_mask_builder = MagicMock()
+    builder.metadata_cls = AscendSFAMetadata
+    # The same oversized buffer represents PCP ranks or MTP buffer capacity.
+    slots = torch.tensor([4, 5, 8, 9], dtype=torch.int64)
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=2,
+        num_input_tokens=2,
+        block_table_tensor=torch.zeros((1, 1), dtype=torch.int32),
+        slot_mapping=slots,
+        positions=torch.arange(2),
+        query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+        seq_lens=torch.tensor([2], dtype=torch.int32),
+        _seq_lens_cpu=torch.tensor([2], dtype=torch.int32),
+        attn_state=AscendAttentionState.ChunkedPrefill,
+        causal=True,
+        group_len=torch.empty(1, dtype=torch.int32),
+        group_key_idx=torch.empty(1, dtype=torch.int32),
+        group_key_cache_idx=torch.empty(1, dtype=torch.int32),
+    )
+    with (
+        patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla", return_value=(torch.ones(2), torch.ones(2))),
+        patch(
+            "vllm_ascend.attention.sfa_v1.get_ascend_config",
+            return_value=SimpleNamespace(c8_reshape_optim_enabled=c8_reshape_optim_enabled),
+        ),
+        patch("torch.ops._C_ascend.store_kv_block_metadata", create=True) as store_metadata,
+    ):
+        metadata = builder.build(0, common)
+
+    expected_slots = slots if pcp_enabled else slots[:2]
+    torch.testing.assert_close(metadata.slot_mapping, expected_slots)
+    torch.testing.assert_close(common.slot_mapping, slots)
+    assert metadata.num_input_tokens == 2
+    if c8_reshape_optim_enabled:
+        torch.testing.assert_close(store_metadata.call_args.args[0], expected_slots)
+    else:
+        store_metadata.assert_not_called()
+    impl_cls = AscendSFAPCPImpl if pcp_enabled else AscendSFAImpl
+    impl = impl_cls.__new__(impl_cls)
+    assert impl._get_sfa_kv_slot_mapping(metadata) is metadata.slot_mapping
 
 
 def test_sfa_pcp_gathers_main_kv_before_base_cache_write() -> None:
