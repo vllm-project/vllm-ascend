@@ -151,6 +151,7 @@ from vllm_ascend.utils import (
     AscendDeviceType,
     calc_split_factor,
     check_gdn_layer,
+    configure_fxrt_prefill_decompose,
     embedding_tp_enable,
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
@@ -268,6 +269,9 @@ class ExecuteModelState(NamedTuple):
 
 class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # Resolve this before model construction. PD launch environments may be
+        # shared, but only the P process may decompose DSV4 for FXRT.
+        configure_fxrt_prefill_decompose(vllm_config)
         # TODO(qcs): These manual pad and unpad for GPUModelRunner are
         # used to expand some buffers, which need to be reverted after
         # the following PR is merged:
@@ -2852,7 +2856,15 @@ class NPUModelRunner(GPUModelRunner):
             "inputs_embeds": inputs_embeds,
             **model_kwargs,
         }
-        run_model = partial(self.model, **model_inputs)
+        model_forward = self.model
+        if (
+            self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE
+            and getattr(self, "with_prefill", False)
+        ):
+            stock_compiled_call = getattr(self, "_stock_compiled_call", None)
+            if stock_compiled_call is not None:
+                model_forward = stock_compiled_call
+        run_model = partial(model_forward, **model_inputs)
 
         if self.enable_enpu:
             # The soft segmentation scenario requires event.record first, then event.wait
@@ -3818,7 +3830,16 @@ class NPUModelRunner(GPUModelRunner):
                     backend, debug_dump_path / "fx_graphs", "model"
                 )
             compilation_counter.stock_torch_compile_count += 1
-            self.model.compile(fullgraph=True, backend=backend)
+            # Keep an explicit compiled prefill entry point instead of
+            # replacing Module.__call__ globally. Decode-only/spec-decode
+            # batches must stay eager; their request metadata is intentionally
+            # different from the decomposed prefill graph.
+            self._stock_compiled_call = torch.compile(
+                self.model._call_impl,
+                fullgraph=True,
+                dynamic=True,
+                backend=backend,
+            )
 
         # wrap the model with full graph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():

@@ -532,18 +532,23 @@ class NPUPlatform(Platform):
 
         compilation_config.cudagraph_num_of_warmups = 1
 
-        # debug_dump_path keeps direct Dynamo modes enabled for FX graph
-        # collection. vLLM wraps the configured backend and may delegate the
-        # captured graph to an external FX backend such as InferRT.
+        # A configured dump path keeps direct Dynamo modes enabled for FX graph
+        # collection.  VLLM_DEBUG_DUMP_PATH overrides the config field later in
+        # VllmConfig.compile_debug_dump_path(), so account for it here before
+        # the Ascend compatibility pass has a chance to erase the compile mode.
         direct_fx_backend_modes = (
             CompilationMode.STOCK_TORCH_COMPILE,
             CompilationMode.DYNAMO_TRACE_ONCE,
+        )
+        has_debug_dump_path = (
+            compilation_config.debug_dump_path is not None
+            or bool(os.getenv("VLLM_DEBUG_DUMP_PATH"))
         )
         dump_external_fx = (
             compilation_config.mode in direct_fx_backend_modes
             and compilation_config.backend == "inductor"
             and compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-            and compilation_config.debug_dump_path is not None
+            and has_debug_dump_path
         )
         if not dump_external_fx and compilation_config.mode not in [
             CompilationMode.NONE,

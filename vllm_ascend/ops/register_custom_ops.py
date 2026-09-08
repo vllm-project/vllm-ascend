@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn.functional as F
 import torch_npu
@@ -96,11 +98,24 @@ def _maybe_pad_and_reduce_impl(x: torch.Tensor, is_ep_comm: bool = False) -> tor
         dp_size = get_dp_group().world_size
         num_tokens_across_dp_cpu = get_forward_context().dp_metadata.num_tokens_across_dp_cpu
         padded_x = torch.empty((dp_size, _EXTRA_CTX.padded_length, *x.shape[1:]), device=x.device, dtype=x.dtype)
-        offset = 0
-        for idx in range(dp_size):
-            num_tokens_dp = num_tokens_across_dp_cpu[idx]
-            padded_x[idx, :num_tokens_dp] = x[offset : offset + num_tokens_dp]
-            offset += num_tokens_dp
+        total_tokens = int(num_tokens_across_dp_cpu.sum())
+        if (
+            os.getenv("VLLM_ASCEND_FXRT_DUMMY_QUANT") == "1"
+            and x.shape[0] != total_tokens
+        ):
+            # Reduced dummy prefill keeps routed-expert output local to each
+            # DP rank, whereas the production path supplies the concatenated
+            # DP result here. Materialize the same padded DP layout from the
+            # local segment; reduce_scatter then combines all ranks normally.
+            padded_x.zero_()
+            dp_rank = get_dp_group().rank_in_group
+            padded_x[dp_rank, : x.shape[0]] = x
+        else:
+            offset = 0
+            for idx in range(dp_size):
+                num_tokens_dp = num_tokens_across_dp_cpu[idx]
+                padded_x[idx, :num_tokens_dp] = x[offset : offset + num_tokens_dp]
+                offset += num_tokens_dp
 
         return get_ep_group().reduce_scatter(padded_x.view(-1, *x.shape[1:]), 0)
 

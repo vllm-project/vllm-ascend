@@ -67,6 +67,58 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 _DEFAULT_BUFFER_SIZE = 200
 _MIN_DP_BUFFER_SIZE = 50
 _DYNAMIC_EPLB_BUFFER_SIZE = 100
+_FXRT_PREFILL_DECOMPOSE_ACTIVE: bool | None = None
+
+
+def configure_fxrt_prefill_decompose(vllm_config: VllmConfig) -> bool:
+    """Resolve the FXRT decomposition switch for this engine process.
+
+    The environment variable is commonly inherited by both sides of a PD
+    deployment. Only a prefill-only direct-FX engine may expose the prefill
+    implementation; Decode and combined P/D engines must retain the opaque
+    custom operators used by ACL graph capture.
+    """
+    global _FXRT_PREFILL_DECOMPOSE_ACTIVE
+
+    requested = os.getenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "0") == "1"
+    kv_config = vllm_config.kv_transfer_config
+    is_prefill_only = kv_config is None or (
+        kv_config.is_kv_producer and not kv_config.is_kv_consumer
+    )
+    compilation_config = vllm_config.compilation_config
+    mode = compilation_config.mode
+    cudagraph_mode = compilation_config.cudagraph_mode
+    is_direct_fx_mode = getattr(mode, "name", None) in {
+        "STOCK_TORCH_COMPILE",
+        "DYNAMO_TRACE_ONCE",
+    } or mode in {1, 2}
+    has_no_cudagraph = (
+        getattr(cudagraph_mode, "name", None) == "NONE"
+        or cudagraph_mode == 0
+    )
+    _FXRT_PREFILL_DECOMPOSE_ACTIVE = (
+        requested and is_prefill_only and is_direct_fx_mode and has_no_cudagraph
+    )
+    if requested and not _FXRT_PREFILL_DECOMPOSE_ACTIVE:
+        logger.info(
+            "Ignoring VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL because this "
+            "engine is not a prefill-only direct-FX process"
+        )
+    return _FXRT_PREFILL_DECOMPOSE_ACTIVE
+
+
+def fxrt_prefill_decompose_enabled() -> bool:
+    """Whether P workers should expose DSV4 internals to the FXRT backend.
+
+    The environment switch is resolved against the engine's PD role before
+    model construction. Decode workers rely on opaque custom ops for ACL graph
+    capture even when they inherit the switch from a shared launch environment.
+    """
+    if _FXRT_PREFILL_DECOMPOSE_ACTIVE is not None:
+        return _FXRT_PREFILL_DECOMPOSE_ACTIVE
+    return os.getenv("VLLM_ASCEND_FXRT_DECOMPOSE_DSV4_PREFILL", "0") == "1"
+
+
 _IS_MOE_MODEL = None
 _IS_DRAFTER_MOE_MODEL = None
 _IS_VL_MODEL = None
@@ -684,6 +736,12 @@ def update_cudagraph_capture_sizes(vllm_config: VllmConfig, cudagraph_capture_si
 
 # TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
+    # set_ is an eager-only lifetime hint.  When captured into the decomposed
+    # FXRT graph it mutates the producer tensor's metadata before the consumer
+    # custom call executes, turning e.g. routed MoE activations into shape [0].
+    # FXRT owns graph-buffer liveness, so the hint is unnecessary there.
+    if fxrt_prefill_decompose_enabled():
+        return
     x.set_(torch.empty((0,), device=x.device, dtype=x.dtype))
 
 
