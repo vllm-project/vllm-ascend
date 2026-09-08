@@ -17,9 +17,11 @@ from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    QOS_VALUE_MAX,
+    QOS_VALUE_MIN,
     Backend,
 )
-from vllm_ascend.distributed.kv_transfer.utils.ascend_resource_config import QOS_KEY, QOS_MAX
+from vllm_ascend.distributed.kv_transfer.utils.ascend_resource_config import QOS_KEY
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -69,7 +71,7 @@ def _validate_store_qos() -> None:
     KV pool transfers go through the Mooncake store, whose HIXL QoS comes from
     the ``store.comm_resource_config.qos`` field. The top-level
     ``comm_resource_config.qos`` belongs to other HIXL users and is not
-    validated here. Only integers in [0, QOS_MAX] are
+    validated here. Only integers in [QOS_VALUE_MIN, QOS_VALUE_MAX] are
     supported; an invalid value fails fast with a clear error instead of an
     obscure failure inside the transfer engine.
     """
@@ -91,11 +93,11 @@ def _validate_store_qos() -> None:
     if QOS_KEY not in store_config:
         return
     qos = store_config[QOS_KEY]
-    if isinstance(qos, bool) or not isinstance(qos, int) or not (0 <= qos <= QOS_MAX):
+    if isinstance(qos, bool) or not isinstance(qos, int) or not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
         raise ValueError(
             f"Invalid store QoS {qos!r} in ASCEND_GLOBAL_RESOURCE_CONFIG "
             f"(store.comm_resource_config.qos): QoS must be an integer in "
-            f"[0, {QOS_MAX}]."
+            f"[{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
         )
 
 

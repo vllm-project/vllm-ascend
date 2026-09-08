@@ -31,7 +31,7 @@ ASCEND_GLOBAL_RESOURCE_CONFIG_ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
 
 env_variables: dict[str, Callable[[], Any]] = {
     # External Mooncake/HIXL JSON resource configuration, not sensitive.
-    # Empty by default; connector QoS accepts integers [0, 7].
+    # Empty by default; connector QoS accepts integers [0, 4].
     "ASCEND_GLOBAL_RESOURCE_CONFIG": lambda: os.getenv(ASCEND_GLOBAL_RESOURCE_CONFIG_ENV, ""),
     # max compile thread number for package building. Usually, it is set to
     # the number of CPU cores. If not set, the default value is None, which

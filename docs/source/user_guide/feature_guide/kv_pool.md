@@ -1591,7 +1591,7 @@ For the temporary DSv4 known issue, see:
 | :--- | :--- |
 | `comm_resource_config.protocol_desc` | Protocol descriptor for the top-level Mooncake transfer engine. In PD disaggregation, this controls the `MooncakeConnectorV1` PD transfer path. Example values include `["hccs:device"]` and `["roce:device"]`. |
 | `store.comm_resource_config.protocol_desc` | Protocol descriptor for Mooncake Store traffic used by `AscendStoreConnector`. On A3, this can be set to `["roce:device"]` while PD transfer uses HCCS. |
-| `store.comm_resource_config.qos` | Transfer QoS for Mooncake Store traffic used by `AscendStoreConnector`. The valid range is **0-7 (integers only)**; the **default value is 0**, and a larger value means a higher transfer priority. Invalid values cause startup to fail fast with a validation error. See [QoS Configuration](#57-qos-configuration). |
+| `store.comm_resource_config.qos` | Transfer QoS for Mooncake Store traffic used by `AscendStoreConnector`. The valid range is **0-4 (integers only)**; the **default value is 0**, and a larger value means a higher transfer priority. Invalid values cause startup to fail fast with a validation error. See [QoS Configuration](#561-qos-configuration). |
 | `comm_resource_config.listen_port` | One-sided communication listen port. The HIXL default is `16666`; use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients. |
 | `fabric_memory.max_capacity` | Fabric memory quota in GB per process. Use it only when the fabric memory budget is too small; see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1). |
 
@@ -1599,43 +1599,36 @@ Store/PD traffic separation requires **CANN >= 9.1.0**. It is intended for A3 an
 
 #### 5.7. QoS Configuration
 
-For the Mooncake backend, set `qos` in each connector's
-`kv_connector_extra_config`. No QoS environment variable needs to be exported.
-Mooncake P/D connectors default to **1**; `AscendStoreConnector` defaults to **0**.
-Values must be integers in **[0, 7]** (booleans are not accepted).
+Both the Mooncake and Memcache backends support configuring the transfer
+QoS. The valid range is **0-4 (integers only)**, and the **default value is 0**
+when not configured. A larger value means a higher transfer priority. Invalid
+values (non-integer, out of range) cause startup to fail fast with a
+validation error.
+
+QoS can be configured through `kv_connector_extra_config`, which is injected
+into the backend-specific configuration automatically before the store is
+initialized:
 
 ```json
-{"kv_connector": "AscendStoreConnector", "kv_role": "kv_both",
- "kv_connector_extra_config": {"backend": "mooncake", "qos": 0}}
+"kv_connector_extra_config": {
+    "qos": 1
+}
 ```
 
-For P/D, set `"qos": 1` in the extra config of `MooncakeConnectorV1`,
-`MooncakeHybridConnector`, or `MooncakeLayerwiseConnector`. With MultiConnector,
-set `qos` independently in each child connector's extra config.
-
-| Deployment | P/D QoS location (internal) | Pool QoS location (internal) |
+| Backend | Configuration Method | Example |
 | :--- | :--- | :--- |
-| P/D only | Top-level, default 1 | Unchanged |
-| Pool only | Unchanged | Store object, default 0 |
-| P/D + pool | Top-level, default 1 | Store object, default 0 |
+| Mooncake | `qos` field in `kv_connector_extra_config` (injected into `store.comm_resource_config.qos` of `ASCEND_GLOBAL_RESOURCE_CONFIG`) | `"kv_connector_extra_config": {"qos": 1}` |
+| Memcache | `qos` field in `kv_connector_extra_config` (injected into the `MF_DEVICE_UB_QOS` environment variable) | `"kv_connector_extra_config": {"qos": 1}` |
+| Mooncake | `store.comm_resource_config.qos` field in `ASCEND_GLOBAL_RESOURCE_CONFIG` | `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"store":{"comm_resource_config":{"qos":3}}}'` |
+| Memcache | `MF_DEVICE_UB_QOS` environment variable | `export MF_DEVICE_UB_QOS=3` |
 
-Before engine initialization, each connector merges its configured QoS (or
-its default) into `ASCEND_GLOBAL_RESOURCE_CONFIG`. P/D writes the literal key
-`"comm_resource_config.qos"`; Pool writes
-`"store": {"comm_resource_config.qos": 0}`. Other fields and the opposite
-role's QoS are preserved. These dotted names are literal JSON keys, not nested
-`comm_resource_config` objects. Invalid JSON is rejected without overwriting it.
-When adding a previously absent `store` object, existing top-level settings
-are copied into it to preserve the Store's legacy inherited settings; then
-only its QoS is replaced.
+Notes:
 
-The injected environment variable selects the existing Store-independent
-TransferEngine path, including when no environment variable was exported. Either connector can initialize first. Mooncake v0.3.12 or later
-with Store-specific resource configuration support is required. For pool-only
-deployments, Mooncake can read the top-level config when `store` is absent;
-the connector consistently creates `store` to isolate its configuration.
-Restart serving processes after changing QoS.
-
-The Memcache backend supports `kv_connector_extra_config.qos` in **[0, 4]**,
-injected into `MF_DEVICE_UB_QOS`. With no extra-config value, its existing
-environment configuration is preserved.
+* The `kv_connector_extra_config` value takes precedence over values already
+  set in the environment; a warning is logged when it overrides a different
+  existing value.
+* For Mooncake, the `qos` field is merged into an existing
+  `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields such as `protocol_desc` are
+  preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring
+  `qos` creates it, which also selects the store-independent transfer engine
+  path (see [5.6](#56-ascend_global_resource_config)).

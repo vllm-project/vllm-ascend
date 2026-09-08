@@ -554,16 +554,16 @@ class TestMooncakeStoreQosValidation(unittest.TestCase):
             _validate_store_qos()
 
     def test_valid_qos_values_pass(self):
-        for qos in range(8):
+        for qos in (0, 1, 2, 3, 4):
             with self.subTest(qos=qos), patch.dict(os.environ, self._store_qos_env(qos)):
                 _validate_store_qos()
 
     def test_out_of_range_qos_rejected(self):
-        for qos in (8, 100, -1):
+        for qos in (5, 6, 7, -1):
             with (
                 self.subTest(qos=qos),
                 patch.dict(os.environ, self._store_qos_env(qos)),
-                self.assertRaisesRegex(ValueError, r"\[0, 7\]"),
+                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
             ):
                 _validate_store_qos()
 
@@ -601,12 +601,12 @@ class TestMooncakeStoreQosValidation(unittest.TestCase):
         try:
             env = {
                 "MOONCAKE_CONFIG_PATH": path,
-                "ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config.qos": 8}}),
+                "ASCEND_GLOBAL_RESOURCE_CONFIG": json.dumps({"store": {"comm_resource_config.qos": 6}}),
             }
             with (
                 patch.dict(os.environ, env),
                 patch.object(MooncakeBackend, "_setup_store"),
-                self.assertRaisesRegex(ValueError, r"\[0, 7\]"),
+                self.assertRaisesRegex(ValueError, r"\[0, 4\]"),
             ):
                 MooncakeBackend(MagicMock())
         finally:

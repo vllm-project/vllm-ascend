@@ -8,7 +8,7 @@ from vllm_ascend import envs
 QOS_KEY = "comm_resource_config.qos"
 PD_QOS_DEFAULT = 1
 STORE_QOS_DEFAULT = 0
-QOS_MAX = 7
+QOS_MAX = 4
 
 
 def inject_qos(qos: int, *, store: bool = False) -> None:
@@ -18,7 +18,7 @@ def inject_qos(qos: int, *, store: bool = False) -> None:
     config. Preserve legacy inherited settings when creating that override.
     """
     if type(qos) is not int or not 0 <= qos <= QOS_MAX:
-        raise ValueError("kv_connector_extra_config.qos must be an integer in [0, 7]")
+        raise ValueError("kv_connector_extra_config.qos must be an integer in [0, 4]")
     raw = envs.ASCEND_GLOBAL_RESOURCE_CONFIG
     try:
         config = json.loads(raw) if raw else {}

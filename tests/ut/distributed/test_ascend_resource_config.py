@@ -28,7 +28,7 @@ class TestAscendResourceConfig(unittest.TestCase):
 
     def test_both_initialization_orders(self):
         for order in ((False, True), (True, False)):
-            for pd_qos, store_qos in ((1, 0), (0, 7), (6, 2)):
+            for pd_qos, store_qos in ((1, 0), (0, 4), (3, 2)):
                 with self.subTest(order=order, pd=pd_qos, pool=store_qos), patch.dict(os.environ, {}, clear=True):
                     for store in order:
                         inject_qos(store_qos if store else pd_qos, store=store)
@@ -44,13 +44,13 @@ class TestAscendResourceConfig(unittest.TestCase):
                 self.assertEqual(json.loads(os.environ[ENV]), expected)
 
     def test_store_preserves_legacy_inherited_settings(self):
-        initial = {QOS_KEY: 5, "comm_resource_config.protocol_desc": ["roce:device"]}
+        initial = {QOS_KEY: 3, "comm_resource_config.protocol_desc": ["roce:device"]}
         with patch.dict(os.environ, {ENV: json.dumps(initial)}):
             inject_qos(0, store=True)
             self.assertEqual(json.loads(os.environ[ENV]), {**initial, "store": {**initial, QOS_KEY: 0}})
 
     def test_invalid_inputs_leave_environment_unchanged(self):
-        for qos in (True, False, "1", 1.5, None, -1, 8):
+        for qos in (True, False, "1", 1.5, None, -1, 5, 6, 7, 8):
             with self.subTest(qos=qos), patch.dict(os.environ, {ENV: "{}"}):
                 with self.assertRaises(ValueError):
                     inject_qos(qos)
