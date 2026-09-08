@@ -22,7 +22,7 @@
 # in the next daily run -- no workflow edit needed.
 # -----------------------------------------------------------------------
 
-# daily:
+daily:
   # --- A2: nightly high‑freq subset (pytest‑driven, runs on a2b3‑1) ---
   a2_nightly_hf:
     - name: Qwen3.5-27B-w8a8-A2
