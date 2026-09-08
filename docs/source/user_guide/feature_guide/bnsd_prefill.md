@@ -53,10 +53,12 @@ optimization does not change the KV-cache layout.
 
 ## Reference benchmark
 
-The following reference measurements were collected on Atlas A2 with an
-experimental prototype based on vLLM Ascend commit `f4a08bddd` and CANN
-9.0.1. An operator benchmark compared an approximately 7680-token prefill
-query attending to a 100000-token paged KV cache:
+The following reference measurements were collected with Qwen3.8-27B on
+Atlas A2 using tensor parallel size 2 and an experimental prototype based on
+vLLM Ascend commit `f4a08bddd` and CANN 9.0.1. The profiled attention shape
+had 12 query heads, 2 KV heads, and a head dimension of 256. An operator
+benchmark compared an approximately 7680-token prefill query attending to a
+100000-token paged KV cache:
 
 | Path | Median latency |
 | --- | ---: |
