@@ -11,6 +11,49 @@ QOS_VALUE_MIN = 0
 QOS_VALUE_MAX = 4
 
 
+def parse_qos_from_extra_config(extra_config: dict[str, Any] | None) -> int | None:
+    """Parse and validate the ``qos`` field of kv_connector_extra_config.
+
+    Returns None when the field is absent; otherwise the QoS integer in
+    [QOS_VALUE_MIN, QOS_VALUE_MAX]. Only integers are supported; an invalid
+    value fails fast with a clear error instead of an obscure failure inside
+    the store backends.
+    """
+    if not extra_config or "qos" not in extra_config:
+        return None
+    qos = extra_config["qos"]
+    if isinstance(qos, bool) or not isinstance(qos, int) or not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
+        raise ValueError(
+            f"Invalid qos {qos!r} in kv_connector_extra_config: "
+            f"QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
+    return qos
+
+
+def fetch_qos_from_current_config() -> int | None:
+    """Fetch the ``qos`` field of kv_connector_extra_config from the current
+    vLLM config.
+
+    The store backends call this inside their QoS injection helpers so no QoS
+    needs to be passed through ``__init__``. Returns None when no current
+    config is available in this process (e.g. standalone store usage) or when
+    the field is absent; an invalid value still fails fast via
+    ``parse_qos_from_extra_config``.
+    """
+    from vllm.config import get_current_vllm_config
+
+    try:
+        vllm_config = get_current_vllm_config()
+    except AssertionError:
+        # vLLM >= 0.27.1 (main) raises when no config has been set in this
+        # process (e.g. stores used outside the vLLM engine).
+        vllm_config = None
+    if vllm_config is None:
+        return None
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    return parse_qos_from_extra_config(extra_config)
+
+
 class Backend(ABC):
     store: Any | None = None
     # Whether the connector must filter existing keys before calling put().

@@ -14,6 +14,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
+    fetch_qos_from_current_config,
 )
 
 
@@ -137,6 +138,27 @@ def make_hit_check_keys(
         return [f"{model_name}@{block_hash_hex}@{h}" for h in range(num_ranks)]
 
 
+def _inject_device_ub_qos() -> None:
+    """Inject the QoS from kv_connector_extra_config into MF_DEVICE_UB_QOS.
+
+    The QoS is read from the current vLLM config instead of an ``__init__``
+    parameter; the call is a no-op when no qos is configured. An explicit
+    extra-config value overrides a value already present in the environment.
+    """
+    qos = fetch_qos_from_current_config()
+    if qos is None:
+        return
+    current = os.getenv("MF_DEVICE_UB_QOS")
+    if current is not None and current.strip() and current.strip() != str(qos):
+        logger.warning(
+            "Overriding MF_DEVICE_UB_QOS=%s with qos=%s from kv_connector_extra_config.",
+            current.strip(),
+            qos,
+        )
+    os.environ["MF_DEVICE_UB_QOS"] = str(qos)
+    logger.info("Injected MF_DEVICE_UB_QOS=%d from kv_connector_extra_config.", qos)
+
+
 class MemcacheBackend(Backend):
     def __init__(
         self,
@@ -145,6 +167,7 @@ class MemcacheBackend(Backend):
         init_bm: bool = True,
         lazy_init: bool = False,
     ):
+        _inject_device_ub_qos()
         _validate_device_ub_qos()
         self.local_rank = local_rank if local_rank is not None else get_world_group().local_rank
         self._init_bm = init_bm

@@ -1605,7 +1605,30 @@ when not configured. A larger value means a higher transfer priority. Invalid
 values (non-integer, out of range) cause startup to fail fast with a
 validation error.
 
+QoS can be configured through `kv_connector_extra_config`, which is injected
+into the backend-specific configuration automatically before the store is
+initialized:
+
+```json
+"kv_connector_extra_config": {
+    "qos": 1
+}
+```
+
 | Backend | Configuration Method | Example |
 | :--- | :--- | :--- |
+| Mooncake | `qos` field in `kv_connector_extra_config` (injected into `store.comm_resource_config.qos` of `ASCEND_GLOBAL_RESOURCE_CONFIG`) | `"kv_connector_extra_config": {"qos": 1}` |
+| Memcache | `qos` field in `kv_connector_extra_config` (injected into the `MF_DEVICE_UB_QOS` environment variable) | `"kv_connector_extra_config": {"qos": 1}` |
 | Mooncake | `store.comm_resource_config.qos` field in `ASCEND_GLOBAL_RESOURCE_CONFIG` | `export ASCEND_GLOBAL_RESOURCE_CONFIG='{"store":{"comm_resource_config":{"qos":3}}}'` |
 | Memcache | `MF_DEVICE_UB_QOS` environment variable | `export MF_DEVICE_UB_QOS=3` |
+
+Notes:
+
+* The `kv_connector_extra_config` value takes precedence over values already
+  set in the environment; a warning is logged when it overrides a different
+  existing value.
+* For Mooncake, the `qos` field is merged into an existing
+  `ASCEND_GLOBAL_RESOURCE_CONFIG` (other fields such as `protocol_desc` are
+  preserved). When `ASCEND_GLOBAL_RESOURCE_CONFIG` was not set, configuring
+  `qos` creates it, which also selects the store-independent transfer engine
+  path (see [5.6](#56-ascend_global_resource_config)).
