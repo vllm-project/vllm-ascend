@@ -953,6 +953,9 @@ class NPUWorker(WorkerBase):
         if getattr(self, "use_v2_model_runner", False) and has_ec_transfer():
             get_ec_transfer().start_worker_services()
 
+        if self.worker_sentinel is not None and self.use_v2_model_runner:
+            self.worker_sentinel.init_num_local_experts()
+
         if self.vllm_config.weight_transfer_config is not None:
             from vllm.distributed.weight_transfer.factory import (
                 WeightTransferEngineFactory,
