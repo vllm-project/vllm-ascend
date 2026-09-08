@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 
 from tests.ut.quantization.conftest_quantization import COMPRESSED_TENSORS_W8A8_CONFIG
@@ -24,9 +25,13 @@ class _MockTPGroup:
 @pytest.fixture(autouse=True)
 def _mock_tp_group():
     """ReplicatedLinear/ParallelLMHead query the TP group during __init__,
-    but parallel state is not initialized on CPU test runners."""
+    and CustomOp construction requires a current vllm config; neither is
+    initialized on CPU test runners."""
     mock = _MockTPGroup()
+    mock_config = MagicMock()
+    mock_config.compilation_config.custom_ops = ["all"]
     with (
+        set_current_vllm_config(mock_config),
         patch("vllm_ascend.ops.linear_op.get_tp_group", return_value=mock),
         patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock),
         patch("vllm_ascend.ops.vocab_parallel_embedding.get_tp_group", return_value=mock),
