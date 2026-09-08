@@ -4,6 +4,7 @@ from dataclasses import fields
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -266,6 +267,70 @@ def test_sfa_cp_query_gather_axis_follows_composed_layout() -> None:
     combined_impl = AscendSFADSADCPImpl.__new__(AscendSFADSADCPImpl)
     assert dcp_impl._parallel_query_gather_dim() == 1
     assert combined_impl._parallel_query_gather_dim() == 0
+
+
+@pytest.mark.parametrize("sfa_c8", [False, True])
+@pytest.mark.parametrize("li_c8", [False, True])
+@pytest.mark.parametrize("is_mtp", [False, True])
+def test_dsa_cp_indexer_cache_follows_runtime_ownership(sfa_c8, li_c8, is_mtp):
+    impl = AscendSFADSACPImpl.__new__(AscendSFADSACPImpl)
+    impl.has_indexer = True
+    impl._is_mtp_layer = is_mtp
+    impl.skip_topk = True
+    impl.enable_sparse_sfa_c8 = sfa_c8
+    impl.enable_sparse_li_c8 = li_c8
+    impl.qk_rope_head_dim = 2
+    impl.kv_lora_rank = 4
+    impl.head_dim = 3
+    k_pe = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    k_nope = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+    scale = torch.ones(2, 1)
+    k_li = torch.arange(6, dtype=torch.float32).reshape(2, 3) if is_mtp else None
+    k_li_scale = scale if is_mtp and li_c8 else None
+
+    with (
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group"),
+        patch(
+            "vllm_ascend.attention.context_parallel.sfa_cp.all_gather_async",
+            side_effect=lambda tensor, group, async_op: (tensor.clone(), None),
+        ) as gather,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.torch_npu.npu_scatter_nd_update_") as scatter,
+        patch("vllm_ascend.attention.context_parallel.sfa_cp.DeviceOperator.reshape_and_cache") as store,
+    ):
+        indexer, indexer_scale, fused_kv, handles = impl._prepare_kv_for_parallel(
+            k_pe, k_nope, scale, k_li, k_li_scale, False
+        )
+        expected_parts = [k_nope, k_pe, scale] if sfa_c8 else [k_pe, k_nope]
+        if is_mtp and not (sfa_c8 or li_c8):
+            expected_parts.append(k_li)
+        torch.testing.assert_close(fused_kv, torch.cat(expected_parts, dim=1))
+        assert gather.call_count == 1 + int(is_mtp and (sfa_c8 or li_c8)) + int(is_mtp and li_c8)
+        cache = (torch.empty_like(fused_kv),) if sfa_c8 else (torch.empty_like(k_nope), torch.empty_like(k_pe))
+        _, _, stored_indexer = impl._store_parallel_kv(
+            k_pe,
+            k_nope,
+            scale,
+            indexer,
+            fused_kv,
+            handles,
+            cache,
+            torch.tensor([0, 1]),
+            SimpleNamespace(num_actual_tokens=2),
+            False,
+        )
+        if sfa_c8:
+            scatter.assert_called_once()
+        else:
+            store.assert_called_once()
+            torch.testing.assert_close(store.call_args.kwargs["key"], k_nope[:, None, :])
+            torch.testing.assert_close(store.call_args.kwargs["value"], k_pe[:, None, :])
+        if is_mtp:
+            torch.testing.assert_close(stored_indexer, k_li)
+        else:
+            assert stored_indexer is None and indexer_scale is None
+    if is_mtp:
+        impl.skip_topk = False
+        assert impl.runtime_has_indexer
 
 
 def test_sfa_dsa_cp_builder_shards_tokens_and_sequence_lengths() -> None:
