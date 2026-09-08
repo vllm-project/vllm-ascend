@@ -165,7 +165,7 @@ jobs:
     name: build
     runs-on: ${{ matrix.runner_info.runner }}
     container:
-      image: ${{ format('{0}:{1}-{2}-{3}-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc, inputs.base_os) }}
+      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
       env:
         SOC: ${{ inputs.soc }}
     permissions:
@@ -223,7 +223,7 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.vllm_ascend_commit != '' }}
       with:
-        submodules: false
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.vllm_ascend_commit }}
@@ -231,7 +231,7 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name != 'workflow_dispatch' }}
       with:
-        submodules: false
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
@@ -239,7 +239,7 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' }}
       with:
-        submodules: false
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.workflow_dispatch_tag }}
@@ -247,20 +247,10 @@ jobs:
     - uses: actions/checkout@v7
       if: ${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' && inputs.vllm_ascend_commit == '' }}
       with:
-        submodules: false
+        submodules: recursive
         fetch-depth: 0
         persist-credentials: false
         ref: ${{ inputs.branch_ref }}
-
-    - name: Checkout git submodules
-      run: |
-        set -euo pipefail
-        # gitcode.com presents a chain rooted at the TrustAsia TLS RSA Root CA.
-        # The runner job container already trusts this CA via the squid-ca-cert
-        # ConfigMap (GIT_SSL_CAINFO / SSL_CERT_FILE point to the merged bundle),
-        # so no repository-bundled cert is needed here.
-        git config --global --add safe.directory "$(pwd)"
-        git submodule update --init --recursive
 
     - name: Compute cache tag
       id: cache-tag
@@ -310,19 +300,11 @@ jobs:
 
     - name: Install csrc cache dependencies
       run: |
-        if [ -f /etc/apt/sources.list ]; then
-          if [ -n "$APTMIRROR" ]; then
-            sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
-          fi
-          apt-get update -y
-          apt-get install -y zstd
-        elif command -v dnf &>/dev/null; then
-          if ! command -v zstd &>/dev/null; then
-            # Replace yum repos with the internal mirror (same logic as _build_csrc_cache.yaml)
-            sed -Ei 's@https?://[^/]+/(openeuler|centos|fedora)@http://cache-service.nginx-pypi-cache.svc.cluster.local:8081/\1@g' /etc/yum.repos.d/*.repo
-            dnf install -y zstd || echo "warning: failed to install zstd via dnf"
-          fi
+        if [ -n "$APTMIRROR" ]; then
+          sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
         fi
+        apt-get update -y
+        apt-get install -y zstd
 
     - name: Restore vllm-ascend csrc cache
       id: cache-csrc
