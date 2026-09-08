@@ -75,8 +75,9 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
 
     with (
         patch(f"{QUANT_MOE}._EXTRA_CTX") as extra_ctx,
-        patch(
-            f"{QUANT_MOE}.DeviceOperator.npu_dynamic_quant",
+        patch.object(
+            DeviceOperator,
+            "npu_dynamic_quant",
             side_effect=[(quantized_input, input_scale), (quantized_activated, activated_scale)],
         ) as dynamic_quant,
         patch(
@@ -90,7 +91,7 @@ def test_dynamic_int8_lora_injects_at_float_boundaries(comm_type, mlp_input) -> 
         patch(f"{QUANT_MOE}._recover_moe_lora_routing_all2all", return_value=routing) as recover_all2all,
         patch(f"{QUANT_MOE}.moe_lora_apply_w13") as apply_w13,
         patch(f"{QUANT_MOE}.moe_lora_apply_w2") as apply_w2,
-        patch("torch.npu.current_stream", return_value=stream),
+        patch(f"{QUANT_MOE}.torch.npu.current_stream", return_value=stream),
     ):
         extra_ctx.moe_comm_type = comm_type
         output, output_event = quant_apply_mlp_with_moe_lora(mlp_compute_input=mlp_input)

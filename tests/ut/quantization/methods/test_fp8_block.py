@@ -23,13 +23,13 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_vllm_config
-from vllm_ascend.quantization.methods.fp8_block import (
+from vllm_ascend.quantization.methods.w8a8.fp8_block import (
     AscendFp8BlockFusedMoEMethod,
     AscendFp8BlockLinearMethod,
     resolve_block_scales,
 )
 
-MODULE = "vllm_ascend.quantization.methods.fp8_block"
+MODULE = "vllm_ascend.quantization.methods.w8a8.fp8_block"
 
 # Elements per shared exponent produced by npu_dynamic_mx_quant.
 MX_GROUP_SIZE = 32
@@ -116,11 +116,12 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         params = scheme.get_pergroup_param(512, 256, torch.bfloat16)
         self.assertEqual(params["weight_scale_inv"].shape, (2, 8))
         self.assertEqual(params["weight_scale_inv"].dtype, torch.float32)
-        # A merged column-parallel loader offsets in weight elements, so it needs
-        # the block_n packing factor; a row-parallel loader needs the input dim.
-        self.assertEqual(params["_packed_dim"], 0)
-        self.assertEqual(params["_packed_factor"], 128)
-        self.assertEqual(params["_input_dim"], 1)
+        # Loaders offset shards in weight elements and convert to scale entries,
+        # so they need the block size to round that conversion up.
+        self.assertEqual(params["_block_quant_scale"], (128, 64))
+        # The bit-packing hints must stay absent: they make the loaders truncate.
+        self.assertNotIn("_packed_dim", params)
+        self.assertNotIn("_packed_factor", params)
 
     def test_pergroup_param_rounds_up_partial_blocks(self):
         scheme = self.build_scheme()
@@ -150,8 +151,10 @@ class TestAscendFp8BlockLinearMethod(TestBase):
     def test_requantizes_to_mxfp8_on_950(self):
         scheme = self.build_scheme(is_950=True, block_size=(4, 32))
         layer, _, _ = self._make_layer()
+        num_groups = 64 // MX_GROUP_SIZE
         quantized = torch.zeros(8, 64).to(torch.float8_e4m3fn)
-        mx_scale = torch.zeros(8, 64 // MX_GROUP_SIZE, dtype=torch.uint8)
+        # npu_dynamic_mx_quant hands back the group axis split in two.
+        mx_scale = torch.zeros(8, num_groups // 2, 2, dtype=torch.uint8)
 
         with patch(f"{MODULE}.torch_npu") as mock_npu:
             mock_npu.npu_dynamic_mx_quant.return_value = (quantized, mx_scale)
@@ -160,8 +163,29 @@ class TestAscendFp8BlockLinearMethod(TestBase):
         mock_npu.npu_dynamic_mx_quant.assert_called_once()
         self.assertEqual(layer.weight.dtype, torch.float8_e4m3fn)
         self.assertEqual(layer.weight_scale.dtype, torch.uint8)
+        # The schemes consume one entry per group, not the split the operator emits.
+        self.assertEqual(layer.weight_scale.shape, (8, num_groups))
         self.assertFalse(hasattr(layer, "weight_scale_inv"))
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)
+
+    def test_kv_b_proj_is_left_dense_for_the_attention_backend(self):
+        # SFA splits kv_b_proj into W_UK/W_UV and disposes of the layer, so it
+        # never runs a matmul. Requantizing it would only destroy the dense
+        # matrix the attention backend has to absorb.
+        scheme = self.build_scheme(is_950=True, block_size=(4, 32))
+        layer, weight, scale_inv = self._make_layer()
+        layer.prefix = "model.layers.0.self_attn.kv_b_proj"
+
+        with (
+            patch(f"{MODULE}.maybe_trans_nz", side_effect=lambda tensor: tensor),
+            patch(f"{MODULE}.torch_npu") as mock_npu,
+        ):
+            scheme.process_weights_after_loading(layer)
+
+        mock_npu.npu_dynamic_mx_quant.assert_not_called()
+        self.assertEqual(layer.weight.dtype, torch.bfloat16)
+        expected = reference_resolve(weight, scale_inv, 4, 32, torch.bfloat16)
+        self.assertTrue(torch.equal(layer.weight.data, expected))
 
     def test_falls_back_when_reduction_dim_is_not_mx_aligned(self):
         scheme = self.build_scheme(is_950=True, block_size=(4, 32))
@@ -274,14 +298,17 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
 
     def test_requantizes_every_expert_on_950(self):
         scheme = self.build_scheme(is_950=True)
-        layer = self._make_moe_layer(intermediate=32)
+        # Both weights need an even group count so the operator's split layout
+        # is representable for each of them.
+        layer = self._make_moe_layer(intermediate=64)
         num_experts = layer.w13_weight.shape[0]
 
         def fake_mx_quant(tensor, **kwargs):
             rows, cols = tensor.shape
+            num_groups = cols // MX_GROUP_SIZE
             return (
                 torch.zeros(rows, cols).to(torch.float8_e4m3fn),
-                torch.zeros(rows, cols // MX_GROUP_SIZE, dtype=torch.uint8),
+                torch.zeros(rows, num_groups // 2, 2, dtype=torch.uint8),
             )
 
         with patch(f"{MODULE}.torch_npu") as mock_npu:
@@ -290,7 +317,7 @@ class TestAscendFp8BlockFusedMoEMethod(TestBase):
 
         self.assertEqual(mock_npu.npu_dynamic_mx_quant.call_count, 2 * num_experts)
         self.assertEqual(layer.w13_weight.dtype, torch.float8_e4m3fn)
-        self.assertEqual(layer.w13_weight_scale.shape, (num_experts, 64, 64 // MX_GROUP_SIZE))
+        self.assertEqual(layer.w13_weight_scale.shape, (num_experts, 128, 64 // MX_GROUP_SIZE))
         self.assertEqual(layer.w13_weight_scale.dtype, torch.uint8)
         self.assertFalse(hasattr(layer, "w13_weight_scale_inv"))
         scheme.mxfp8_method.process_weights_after_loading.assert_called_once_with(layer)

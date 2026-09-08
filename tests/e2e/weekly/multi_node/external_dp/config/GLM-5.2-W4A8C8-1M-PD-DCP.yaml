@@ -50,7 +50,6 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
-  VLLM_ASCEND_ENABLE_NZ: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "20"
@@ -109,7 +108,7 @@ templates:
       - "128"
       - --enforce-eager
       - --additional-config
-      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}'
+      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization
@@ -165,7 +164,7 @@ templates:
       - "128"
       - --enforce-eager
       - --additional-config
-      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true}'
+      - '{"enable_flashcomm1": true, "enable_dsa_cp": true, "ascend_compilation_config": {"enable_npugraph_ex": true}, "multistream_overlap_shared_expert": true, "enable_sparse_li_c8": true, "enable_cpu_binding": true, "recompute_scheduler_enable": true, "weight_nz_mode": 1}'
       - --speculative-config
       - '{"num_speculative_tokens": 1, "method": "deepseek_mtp", "enforce_eager": true}'
       - --quantization

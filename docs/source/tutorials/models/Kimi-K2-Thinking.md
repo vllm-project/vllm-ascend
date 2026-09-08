@@ -63,7 +63,7 @@ Your model files should look like:
 
 You can use the official Docker image to run `Kimi-K2-Thinking` directly.
 
-Select an image based on your machine type and start the Docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the Docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
    # Update the vllm-ascend image according to your environment.

@@ -75,7 +75,7 @@ BATCH_INVARIANT_WHL_FILE="batch_invariant-torch_ops_extension-1.0.0.zip"
 
 log "Downloading batch_invariant whl package..."
 if curl --max-time 3 -sS -k -O "${BATCH_INVARIANT_WHL_URL}" >/dev/null 2>&1 && [[ -f "${BATCH_INVARIANT_WHL_FILE}" ]]; then
-    if unzip -o "${BATCH_INVARIANT_WHL_FILE}" >/dev/null 2>&1; then
+    if python -m zipfile -e "${BATCH_INVARIANT_WHL_FILE}" . >/dev/null 2>&1; then
         if [[ -d "torch_ops_extension/batch_invariant_ops" ]]; then
             cd torch_ops_extension/batch_invariant_ops
             log "Building and installing batch_invariant whl package..."

@@ -5,14 +5,14 @@ import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_mock_ascend_config, create_mock_vllm_config
-from vllm_ascend.quantization.methods.w4a4_mxfp4 import (
+from vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4 import (
     AscendW4A4MXFP4DynamicFusedMoEMethod,
     AscendW4A4MXFP4DynamicLinearMethod,
 )
 
 
 class TestAscendW4A4MXFP4LinearMethod(TestBase):
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
     def setUp(self, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         self.scheme = AscendW4A4MXFP4DynamicLinearMethod()
@@ -39,7 +39,7 @@ class TestAscendW4A4MXFP4LinearMethod(TestBase):
         self.assertEqual(layer.weight.shape, (128, 128))
         self.assertEqual(layer.weight_scale.shape[0], 4)
 
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
     def test_apply_3d_input(self, mock_npu):
         mock_npu.npu_dynamic_mx_quant.return_value = (
             torch.randint(0, 255, (32, 128), dtype=torch.uint8),
@@ -60,8 +60,8 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
     hidden_size = 128
     intermediate_size = 256
 
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_current_vllm_config")
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.get_ascend_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_current_vllm_config")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.get_ascend_config")
     def setUp(self, mock_ascend, mock_vllm):
         mock_vllm.return_value = create_mock_vllm_config()
         mock_ascend.return_value = create_mock_ascend_config()
@@ -110,8 +110,8 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(weight_view.shape[0], self.num_experts)
             self.assertEqual(weight_view.untyped_storage().data_ptr(), source.untyped_storage().data_ptr())
 
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4.torch_npu")
-    @patch("vllm_ascend.quantization.methods.w4a4_mxfp4._EXTRA_CTX")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4.torch_npu")
+    @patch("vllm_ascend.quantization.methods.w4a4.w4a4_mxfp4._EXTRA_CTX")
     def test_apply_full_params(self, mock_ctx, mock_npu):
         tokens = 4
         layer = nn.Module()

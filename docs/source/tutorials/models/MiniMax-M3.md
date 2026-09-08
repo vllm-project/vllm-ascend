@@ -24,13 +24,13 @@ It is recommended to place the model weight in a shared cache directory.
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../installation.md#verify-multi-node-communication).
+For multi-node deployment, verify the communication environment by following [Verify Multi-node Communication Environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 - Step 1: Download the latest Docker image
 

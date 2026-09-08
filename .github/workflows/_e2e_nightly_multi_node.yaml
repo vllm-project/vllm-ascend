@@ -10,7 +10,7 @@ on:
       runner:
         required: false
         type: string
-        default: linux-aarch64-a3-0
+        default: linux-aarch64-a3-800t-0
       image:
         required: false
         type: string

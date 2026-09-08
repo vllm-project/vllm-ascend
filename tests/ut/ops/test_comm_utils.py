@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe.moe_utils import (
 class TestDistributedCommunication(PytestBase):
     @pytest.fixture(autouse=True)
     def context(self, mocker: MockerFixture):
+        mocker.patch("vllm_ascend.ops.fused_moe.moe_utils.torch.npu.current_device", return_value="cpu")
         mocker.patch("torch.npu.current_device", return_value="cpu")
         mocker.patch("torch.distributed.get_world_size", return_value=4)
 

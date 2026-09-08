@@ -5,11 +5,11 @@ from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import CustomRoutingRouter
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.fused_moe.router.fused_topk_router import (
     AscendFusedTopKRouter as AscendFusedMoERouter,
 )
 from vllm_ascend.ops.fused_moe.router.grouped_topk_router import AscendGroupedTopKRouter
-from vllm_ascend.utils import is_310p
 
 
 def check_npu_moe_gating_top_k(
@@ -59,7 +59,7 @@ def create_ascend_fused_moe_router(
             custom_routing_function=custom_routing_function,
             renormalize=renormalize,
         )
-    if is_310p():
+    if get_current_hardware_profile().supports(HardwareCapability.FUSED_MOE_COMPATIBILITY):
         from vllm_ascend._310p.fused_moe.grouped_topk_router import AscendGroupedTopKRouter310
 
         return AscendGroupedTopKRouter310(

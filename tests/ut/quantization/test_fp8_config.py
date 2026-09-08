@@ -8,7 +8,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmb
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
-from vllm_ascend.quantization.fp8_config import AscendDeepseekV4FP8Config, AscendFp8Config
+from vllm_ascend.quantization.configs.fp8_config import AscendDeepseekV4FP8Config, AscendFp8Config
 
 
 class TestAscendDeepseekV4FP8Config(TestBase):
@@ -25,7 +25,7 @@ class TestAscendDeepseekV4FP8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ),
             patch(
@@ -52,7 +52,7 @@ class TestAscendDeepseekV4FP8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ),
             patch(
@@ -79,7 +79,7 @@ class TestAscendDeepseekV4FP8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ),
             patch(
@@ -138,7 +138,7 @@ class TestAscendFp8Config(TestBase):
         quantized_prefix = "model.layers.0.mlp.gate_proj"
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=MagicMock(),
             ),
             patch(
@@ -150,6 +150,14 @@ class TestAscendFp8Config(TestBase):
                 config.get_quant_method(MagicMock(spec=LinearBase), quantized_prefix),
                 "block-fp8",
             )
+
+    def test_glm53_flash_kda_layer_stays_unquantized(self):
+        # Official zai-org/GLM-5.3-Flash lists KDA projections in
+        # modules_to_not_convert; they have no weight_scale_inv.
+        kda_name = "model.layers.0.self_attn.q_proj"
+        config = self.build_config(ignored_layers=[kda_name])
+        method = config.get_quant_method(MagicMock(spec=LinearBase), kda_name)
+        self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
     def test_ignored_moe_falls_back_to_unquantized(self):
         config = self.build_config(ignored_layers=["model.layers.0.mlp.experts"])
@@ -173,7 +181,7 @@ class TestAscendFp8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ) as mock_get_scheme,
             patch(
@@ -197,7 +205,7 @@ class TestAscendFp8Config(TestBase):
 
         with (
             patch(
-                "vllm_ascend.quantization.fp8_config.get_scheme_class",
+                "vllm_ascend.quantization.configs.fp8_config.get_scheme_class",
                 return_value=mock_scheme_class,
             ) as mock_get_scheme,
             patch(
@@ -239,9 +247,9 @@ class TestAscendFp8Config(TestBase):
 
         config = self.build_config()
         with (
-            patch("vllm_ascend.quantization.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
-            patch("vllm_ascend.quantization.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
-            patch("vllm_ascend.quantization.fp8_config.get_scheme_class", return_value=MagicMock()),
+            patch("vllm_ascend.quantization.configs.fp8_config._IS_LAYER_SKIPPED_SUPPORTS_MATCH_MODE", False),
+            patch("vllm_ascend.quantization.configs.fp8_config.is_layer_skipped", side_effect=old_is_layer_skipped),
+            patch("vllm_ascend.quantization.configs.fp8_config.get_scheme_class", return_value=MagicMock()),
             patch(
                 "vllm_ascend.quantization.method_adapters.AscendLinearMethod",
                 return_value="block-fp8",

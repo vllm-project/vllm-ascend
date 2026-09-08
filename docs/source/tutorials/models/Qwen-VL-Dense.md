@@ -44,7 +44,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 4.1 Docker Image Installation
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "Ascend950DT series"
 
@@ -197,7 +197,7 @@ Expected result: The version information for both packages is displayed, confirm
 
     If deploying a multi-node environment, set up the environment on each node.
 
-For more details, please refer to the [Installation Guide](../../installation.md).
+For more details, please refer to the [Installation Guide](../../getting_started/installation.md).
 
 ## 5 Online Service Deployment {: #5-online-service-deployment }
 
@@ -209,11 +209,8 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
       --host 0.0.0.0 \
@@ -237,11 +234,8 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --host 0.0.0.0 \
@@ -266,11 +260,8 @@ Run docker container to start the vLLM server on single-NPU:
 
     ```bash
     export HCCL_OP_EXPANSION_MODE="AIV"
-    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export OMP_PROC_BIND=false
-    export OMP_NUM_THREADS=1
-    export TASK_QUEUE_ENABLE=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve Qwen/Qwen3-VL-8B-Instruct \
     --dtype float16 \

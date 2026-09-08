@@ -13,6 +13,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_block_hash,
     get_request_block_hasher,
     init_none_hash,
+    is_kv_cache_spec_uniform,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
@@ -22,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
     MLAAttentionSpec,
 )
 from vllm.v1.request import Request
@@ -78,6 +80,22 @@ def _make_full_manager(
         scheduler_block_size=logical_block_size,
     )
     return spec, block_pool, manager
+
+
+def test_ascend_mla_spec_is_not_uniform_with_mamba() -> None:
+    mla_spec, _, _ = _make_full_manager()
+    mamba_spec = MambaSpec(
+        block_size=1,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+    )
+
+    assert not is_kv_cache_spec_uniform(
+        {
+            "mla": mla_spec,
+            "mamba": mamba_spec,
+        }
+    )
 
 
 @pytest.mark.parametrize("physical_block_size", [32, 64, 128])
@@ -273,3 +291,87 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     assert hit_length == 0
     assert hit_blocks == ([], [])
+
+
+def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
+    hash_block_size = 2
+    block_size = 2 * hash_block_size
+    coordinator = AscendHybridKVCacheCoordinator(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=32,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["full_a"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["full_b"],
+                    FullAttentionSpec(
+                        block_size=2 * block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["mamba"],
+                    MambaSpec(
+                        block_size=block_size,
+                        shapes=((1,),),
+                        dtypes=(torch.float32,),
+                        mamba_cache_mode="align",
+                    ),
+                ),
+            ],
+        ),
+        max_model_len=8192,
+        use_eagle=False,
+        enable_caching=True,
+        enable_kv_cache_events=False,
+        dcp_world_size=1,
+        pcp_world_size=1,
+        hash_block_size=hash_block_size,
+        scheduler_block_size=block_size,
+        max_num_batched_tokens=8192,
+    )
+    request = _make_request(
+        "a",
+        [index // hash_block_size for index in range(24)],
+        hash_block_size,
+    )
+
+    for group_id in (0, 1):
+        group_block_size = block_size * (1 + group_id)
+        num_full_blocks = len(request.prompt_token_ids) // group_block_size
+        blocks = coordinator.block_pool.get_new_blocks(num_full_blocks)
+        coordinator.block_pool.cache_full_blocks(
+            request=request,
+            blocks=blocks,
+            num_cached_blocks=0,
+            num_full_blocks=num_full_blocks,
+            block_size=group_block_size,
+            kv_cache_group_id=group_id,
+        )
+
+    mamba_block = coordinator.block_pool.get_new_blocks(1)[0]
+    coordinator.block_pool.cache_partial_block(
+        request=request,
+        block=mamba_block,
+        num_tokens=6,
+        kv_cache_group_id=2,
+        block_size=block_size,
+    )
+
+    hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(
+        request.block_hashes,
+        max_cache_hit_length=len(request.prompt_token_ids),
+    )
+
+    assert hit_length == 6
+    assert [len(blocks) for blocks in hit_blocks] == [2, 1, 2]
