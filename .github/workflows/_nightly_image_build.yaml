@@ -49,6 +49,11 @@ on:
         type: string
         default: 'auto'
         description: "Base image date (YYYYMMDD). 'auto' to auto-detect latest available, or specify a custom date."
+      should_push:
+        required: false
+        type: boolean
+        default: false
+        description: "If true, login to SWR and push built images. Set to false for PR verification builds."
     secrets:
       SWR_USERNAME:
         required: false
@@ -94,6 +99,7 @@ jobs:
 
       - name: Login to SWR
         id: login-swr
+        if: ${{ inputs.should_push }}
         env:
           SWR_USERNAME: ${{ secrets.SWR_USERNAME }}
           SWR_PASSWORD: ${{ secrets.SWR_PASSWORD }}
@@ -204,7 +210,7 @@ jobs:
           fi
 
       - name: Push image to SWR
-        if: ${{ github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
+        if: ${{ inputs.should_push && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
           PUSH_REGISTRY="${{ steps.build.outputs.push_registry }}"
           FULL_TAG="${{ steps.build.outputs.full_tag }}"
@@ -219,7 +225,7 @@ jobs:
           fi
 
       - name: Push ubuntu arm64 image to release SWR (no arch tag)
-        if: ${{ inputs.build_type == 'daily' && matrix.os == 'ubuntu' && matrix.arch_name == 'arm64' && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
+        if: ${{ inputs.should_push && inputs.build_type == 'daily' && matrix.os == 'ubuntu' && matrix.arch_name == 'arm64' && github.repository_owner == 'vllm-project' && steps.login-swr.conclusion == 'success' }}
         run: |
           BRANCH_TAG="${{ inputs.vllm_ascend_branch }}"
           BRANCH_TAG="${BRANCH_TAG//\//-}"
@@ -237,7 +243,7 @@ jobs:
     needs: build
     # Run even if some matrix instances failed. Each OS variant is merged independently,
     # only when BOTH arch images exist. Owner gate keeps it disabled in upstream forks.
-    if: ${{ always() && github.repository_owner == 'vllm-project' && inputs.build_type == 'daily' }}
+    if: ${{ inputs.should_push && always() && github.repository_owner == 'vllm-project' && inputs.build_type == 'daily' }}
     steps:
       - name: Login to SWR
         env:
