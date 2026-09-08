@@ -575,6 +575,7 @@ def test_chunk_kda_fwd_padded_workspace_matches_reference(seq_count, fixed_lengt
             output_final_state=True,
         )
         _assert_close(f"sequence {seq} output", actual[0][:, start:end], reference.o, rtol=5e-2, atol=5e-4)
+        assert reference.final_state is not None
         _assert_close(
             f"sequence {seq} final state",
             actual[1][seq : seq + 1],
