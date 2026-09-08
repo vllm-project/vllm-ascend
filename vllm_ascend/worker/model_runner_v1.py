@@ -5267,28 +5267,24 @@ class NPUModelRunner(GPUModelRunner):
                         (num_blocks, *shape)
                         for shape in current_kv_cache_spec.shapes
                     ]
-                    if current_kv_cache_spec.page_size_padded is not None:
-                        # A padded Mamba allocation is block-major: every
-                        # physical page contains all states followed by page
-                        # padding. Reuse the standard page metadata to expose
-                        # each state with the physical page stride.
-                        state_tensors = self._adjust_kv_layout(
-                            raw_tensor,
-                            target_shapes,
-                            list(current_kv_cache_spec.dtypes),
-                            current_kv_cache_spec.page_size_bytes,
+                    # Mamba kernels address each state as one contiguous tensor
+                    # across all blocks. Padding belongs at the end of the shared
+                    # backing allocation; interleaving it into every block via a
+                    # larger dim-0 stride corrupts recurrent state reads.
+                    state_tensors = []
+                    target_idx = 0
+                    start_idx = 0
+                    for target_shape, dtype in zip(
+                        target_shapes, current_kv_cache_spec.dtypes
+                    ):
+                        target_idx += math.prod(target_shape) * get_dtype_size(
+                            dtype
                         )
-                    else:
-                        state_tensors = []
-                        target_idx = 0
-                        start_idx = 0
-                        for target_shape, dtype in zip(
-                            target_shapes, current_kv_cache_spec.dtypes
-                        ):
-                            target_idx += math.prod(target_shape) * get_dtype_size(dtype)
-                            tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
-                            start_idx = target_idx
-                            state_tensors.append(tensor)
+                        tensor = raw_tensor[start_idx:target_idx].view(
+                            dtype
+                        ).view(target_shape)
+                        start_idx = target_idx
+                        state_tensors.append(tensor)
                     kv_caches[layer_name] = state_tensors
                 else:
                     raise ValueError("Unknown KV cache spec type.")

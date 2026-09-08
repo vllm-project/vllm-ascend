@@ -206,15 +206,19 @@ def test_glm5_runner_allocates_contiguous_slot_backings():
         page_size = descriptors[name].size // plan.num_blocks
         assert cache.stride(0) * cache.element_size() == page_size
         assert cache.data_ptr() == raw_caches[name].data_ptr()
-    for cache in caches[MAMBA]:
-        page_size = descriptors[MAMBA].size // plan.num_blocks
-        assert cache.stride(0) * cache.element_size() == page_size
+    assert all(cache.is_contiguous() for cache in caches[MAMBA])
 
-    mamba_second_offset = caches[MAMBA][0][0].numel() * caches[MAMBA][0].element_size()
+    mamba_second_offset = (
+        caches[MAMBA][0].numel() * caches[MAMBA][0].element_size()
+    )
     assert (
         caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr()
         == mamba_second_offset
     )
+    mamba_payload_size = sum(
+        cache.numel() * cache.element_size() for cache in caches[MAMBA]
+    )
+    assert mamba_payload_size < descriptors[MAMBA].size
 
     state_cache[2].fill_(7)
     state_payload_size = state_cache[0].numel() * state_cache.element_size()
