@@ -7,7 +7,6 @@ from unittest.mock import MagicMock
 
 import pytest
 import torch
-import vllm.v1.core.kv_cache_utils as vllm_kv_cache_utils
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import generate_scheduler_kv_cache_config
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -26,18 +25,16 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-from vllm_ascend.core.kv_cache_interface import is_deepseek_v4_kv_cache_spec
-import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa: F401  (installs monkey-patches)
+import vllm_ascend.worker.kv_cache_config_builder as kv_cache_builder
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, is_deepseek_v4_kv_cache_spec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
     get_kv_cache_coordinator,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import _ascend_resolve_kv_cache_block_sizes
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
+    _ascend_resolve_kv_cache_block_sizes,
     _get_kimi_k3_dspark_mixed_kv_cache_groups,
-    _get_kv_cache_config_deepseek_v4_main,
-    group_and_unify_kv_cache_specs,
 )
 from vllm_ascend.patch.platform.patch_mamba_manager import AscendMambaManager
 from vllm_ascend.worker.kv_cache_config_builder import (
@@ -427,9 +424,9 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     )
 
     planner = MagicMock(return_value=(7, [planned_tensor]))
-    monkeypatch.setattr(kv_cache_utils_patch, "_get_kv_cache_config_deepseek_v4_main", planner)
+    monkeypatch.setattr(kv_cache_builder, "_get_kv_cache_config_deepseek_v4_main", planner)
 
-    result = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+    result = kv_cache_builder._ascend_get_kv_cache_config_from_groups(
         vllm_config,
         kv_cache_config.kv_cache_groups,
         available_memory=1 << 30,
@@ -439,7 +436,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert result.num_blocks == 7
     assert result.kv_cache_tensors == [planned_tensor]
 
-    needed_memory = kv_cache_utils_patch._ascend_max_memory_usage_bytes_from_groups(
+    needed_memory = kv_cache_builder._ascend_max_memory_usage_bytes_from_groups(
         vllm_config,
         kv_cache_config.kv_cache_groups,
     )
@@ -473,11 +470,11 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
     expected_num_blocks = 7
     available_memory = page_size * expected_num_blocks
     monkeypatch.setattr(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm.v1.core.kv_cache_planning._may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
     )
 
-    num_blocks, tensors = _get_kv_cache_config_deepseek_v4_main(
+    num_blocks, tensors = kv_cache_builder._get_kv_cache_config_deepseek_v4_main(
         SimpleNamespace(),
         groups,
         available_memory,
@@ -530,13 +527,14 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
         )
     )
 
-    ascend_bytes_per_block = kv_cache_utils_patch._ascend_pool_bytes_per_block(kv_cache_groups)
-    upstream_bytes_per_block = kv_cache_utils_patch._orig_pool_bytes_per_block(kv_cache_groups)
-    assert ascend_bytes_per_block != upstream_bytes_per_block
-    assert vllm_kv_cache_utils._pool_bytes_per_block is kv_cache_utils_patch._ascend_pool_bytes_per_block
+    # Ascend shared-tuple divisor = layer_tuple_bytes * num_layer_tuples.
+    ascend_bytes_per_block = kv_cache_builder._ascend_pool_bytes_per_block(kv_cache_groups)
+    assert ascend_bytes_per_block == (
+        small_page_spec.page_size_bytes + large_page_spec.page_size_bytes
+    ) * 2
 
     expected_num_blocks = 7
-    replanned_config = kv_cache_utils_patch._ascend_get_kv_cache_config_from_groups(
+    replanned_config = kv_cache_builder._ascend_get_kv_cache_config_from_groups(
         vllm_config,
         kv_cache_groups,
         expected_num_blocks * ascend_bytes_per_block,

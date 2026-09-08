@@ -135,10 +135,10 @@ def _ascend_get_kv_cache_groups_uniform_groups(
     # Possibly padding layer tuples for this.
     # Additionally, we also pad KV blocks in each SWA layer, to align the page size
     # with the corresponding layer in the full-MLA group.
-    all_page_sizes = full_mla_spec.get_page_sizes()
+    all_page_sizes = _page_sizes(full_mla_spec)
     swa_mla_groups: list[KVCacheGroupSpec] = []
     for sm_spec in swa_mla_specs:
-        sm_page_sizes = sm_spec.get_page_sizes()
+        sm_page_sizes = _page_sizes(sm_spec)
         layers_per_size: dict[int, list[str]] = defaultdict(list)
         assert max(sm_page_sizes) <= max(all_page_sizes)
 
@@ -179,31 +179,36 @@ def _ascend_get_kv_cache_groups_uniform_groups(
 # ---------------------------------------------------------------------------
 # Ascend DeepSeekV4 layout (ported from _get_kv_cache_config_deepseek_v4)
 # ---------------------------------------------------------------------------
-def _ascend_get_kv_cache_config_deepseek_v4(
-    vllm_config: VllmConfig,
+def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
+    """Distinct page sizes across a group's cache specs.
+
+    vLLM #51718 removed ``UniformTypeKVCacheSpecs.get_page_sizes()`` on main;
+    the underlying ``kv_cache_specs``/``page_size_bytes`` are unchanged, so
+    compute it inline to work on both lanes.
+    """
+    return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
+
+
+def _get_deepseek_v4_cache_layout(
     kv_cache_groups: list[KVCacheGroupSpec],
-    available_memory: int,
-) -> KVCacheConfig:
-    """DeepseekV4 KV cache tensor layout planning.
+) -> tuple[list[int], list[dict[int, list[str]]], list[str], int, int]:
+    """Return the geometry shared by DSV4 planning and rank normalization.
 
     Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
     define the canonical bucket set. Non-full-MLA groups must have been
     page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
     every layer's page_size matches one of the full-MLA bucket sizes.
 
-    For each group, bucket its layers by page_size_bytes and place each
-    layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
-    per (tuple_idx, bucket) whose shared_by is the union of per-group
-    layers at that slot.
+    For each group, bucket its layers by page_size_bytes and place each layer
+    at tuple_idx = position-within-bucket.
     """
     full_mla_spec = kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
-    layer_tuple_page_bytes = sum(page_sizes)
+    page_sizes = sorted(_page_sizes(full_mla_spec))
 
     # Pre-bucket each group's layers by page_size (registration order within
     # bucket). bucketed[g_idx][page_size] = [layer_name, ...].
-    mtp_layer_names: list[str] = []
+    mtp_layer_names = []
     mtp_page_size = 0
     bucketed: list[dict[int, list[str]]] = []
     for group in kv_cache_groups:
@@ -224,21 +229,141 @@ def _ascend_get_kv_cache_config_deepseek_v4(
     # this equals the sub-group size (each has a single page_size).
     num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values()) + len(mtp_layer_names)
 
-    num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples)
+    return page_sizes, bucketed, mtp_layer_names, mtp_page_size, num_layer_tuples
+
+
+def _get_kv_cache_config_deepseek_v4_main(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    (
+        page_sizes,
+        bucketed,
+        mtp_layer_names,
+        mtp_page_size,
+        num_tuple_slots,
+    ) = _get_deepseek_v4_cache_layout(kv_cache_groups)
+
+    bytes_per_tuple = sum(page_sizes)
+    num_blocks = available_memory // (bytes_per_tuple * num_tuple_slots)
     num_blocks = kv_cache_planning._may_override_num_blocks(vllm_config, num_blocks)
 
-    kv_cache_tensors: list[KVCacheTensor] = []
-    for tuple_idx in range(num_layer_tuples - len(mtp_layer_names)):
-        for ps in page_sizes:
-            shared_by: list[str] = []
-            for b in bucketed:
-                bucket = b.get(ps)
-                if bucket is not None and tuple_idx < len(bucket):
-                    shared_by.append(bucket[tuple_idx])
-            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=shared_by))
-    for i in range(len(mtp_layer_names)):
-        kv_cache_tensors.append(KVCacheTensor(size=mtp_page_size * num_blocks, shared_by=[mtp_layer_names[i]]))
+    tuple_stride = bytes_per_tuple * num_blocks
+    backing_size = tuple_stride * num_tuple_slots
 
+    # Within every tuple slot, page-size buckets are placed consecutively.
+    page_offsets: dict[int, int] = {}
+    page_prefix = 0
+    for page_size in page_sizes:
+        page_offsets[page_size] = page_prefix * num_blocks
+        page_prefix += page_size
+
+    tensors: list[KVCacheTensor] = []
+
+    # Keep each descriptor inside one cache group. Descriptors from different
+    # groups alias corresponding tuple slots by using identical geometry.
+    for group_buckets in bucketed:
+        for page_size in page_sizes:
+            layer_names = group_buckets.get(page_size)
+            if not layer_names:
+                continue
+
+            tensors.append(
+                KVCacheTensor(
+                    size=backing_size,
+                    layers=list(layer_names),
+                    offset=page_offsets[page_size],
+                    layer_stride=tuple_stride,
+                    block_stride=page_size,
+                )
+            )
+
+    # MTP layers receive trailing tuple slots. Unused page buckets remain
+    # padding so num_blocks and memory accounting retain the existing contract.
+    normal_tuple_slots = num_tuple_slots - len(mtp_layer_names)
+    for index, layer_name in enumerate(mtp_layer_names):
+        slot = normal_tuple_slots + index
+        tensors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=[layer_name],
+                offset=slot * tuple_stride + page_offsets[mtp_page_size],
+                layer_stride=0,
+                block_stride=mtp_page_size,
+            )
+        )
+
+    return num_blocks, tensors
+
+
+def _is_deepseek_v4_groups(kv_cache_groups: list[KVCacheGroupSpec]) -> bool:
+    """Whether the resolved groups carry a DeepSeekV4 shared-tuple layout."""
+    if not kv_cache_groups or not all(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups
+    ):
+        return False
+    for group in kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        assert isinstance(group_spec, UniformTypeKVCacheSpecs)
+        specs = group_spec.kv_cache_specs.values()
+        if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
+            return True
+    return False
+
+
+def _ascend_pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
+    """Use the same DSV4 divisor as Ascend's shared-tuple planner.
+
+    The #53558 standard per-group layout has a different divisor from Ascend's
+    DSV4 shared-tuple layout, so using the upstream value during the re-plan
+    would change ``num_blocks`` and leave ranks inconsistent.
+    """
+    if not _is_deepseek_v4_groups(kv_cache_groups):
+        return kv_cache_planning._pool_bytes_per_block(kv_cache_groups)
+
+    page_sizes, _, _, _, num_layer_tuples = _get_deepseek_v4_cache_layout(kv_cache_groups)
+    return sum(page_sizes) * num_layer_tuples
+
+
+def _ascend_max_memory_usage_bytes_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> int:
+    """Keep the DSV4 admission formula for Ascend's shared tuples."""
+    if not _is_deepseek_v4_groups(kv_cache_groups):
+        return kv_cache_planning._max_memory_usage_bytes_from_groups(vllm_config, kv_cache_groups)
+
+    assert all(isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs) for group in kv_cache_groups)
+    full_mla_spec = kv_cache_groups[0].kv_cache_spec
+    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
+    layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
+    num_layer_tuples = max(
+        group.kv_cache_spec.get_num_layer_tuples()
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    )
+    return sum(
+        num_layer_tuples * group.kv_cache_spec.max_memory_usage_pages(vllm_config) * layer_tuple_bytes
+        for group in kv_cache_groups
+        if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+    )
+
+
+def _ascend_get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> KVCacheConfig:
+    """Ascend DSV4 shared-tuple planner for the per-worker config step."""
+    if not _is_deepseek_v4_groups(kv_cache_groups):
+        return kv_cache_planning.get_kv_cache_config_from_groups(vllm_config, kv_cache_groups, available_memory)
+
+    num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4_main(
+        vllm_config,
+        kv_cache_groups,
+        available_memory,
+    )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
@@ -307,13 +432,13 @@ class AscendKVCacheConfigBuilder(KVCacheConfigBuilder):
                 if not groups:
                     adjusted_memory.append(avail_mem)
                     continue
-                bytes_per_block = kv_cache_planning._pool_bytes_per_block(groups)
+                bytes_per_block = _ascend_pool_bytes_per_block(groups)
                 adjusted_memory.append(override * bytes_per_block)
             available_memory = adjusted_memory
 
         # --- reserve the null block BlockPool permanently holds back ---
         check_memory = [
-            avail_mem - kv_cache_planning._pool_bytes_per_block(groups) if groups else avail_mem
+            avail_mem - _ascend_pool_bytes_per_block(groups) if groups else avail_mem
             for groups, avail_mem in zip(projected_groups_per_worker, available_memory)
         ]
 
@@ -327,16 +452,18 @@ class AscendKVCacheConfigBuilder(KVCacheConfigBuilder):
                 continue
             kv_cache_planning._check_enough_kv_cache_memory(
                 avail_mem,
-                partial(kv_cache_planning._max_memory_usage_bytes_from_groups, vllm_config, groups),
+                partial(_ascend_max_memory_usage_bytes_from_groups, vllm_config, groups),
                 vllm_config.model_config.max_model_len,
                 partial(kv_cache_planning._estimate_max_model_len_from_groups, vllm_config, groups),
             )
 
-        # --- per-worker config with Ascend non-packed layout ---
+        # --- per-worker config with Ascend DSV4 shared-tuple layout ---
         kv_cache_configs: list[KVCacheConfig] = []
         for projected_groups, available_memory_one_worker in zip(projected_groups_per_worker, available_memory):
             kv_cache_configs.append(
-                _ascend_get_kv_cache_config_deepseek_v4(vllm_config, projected_groups, available_memory_one_worker)
+                _ascend_get_kv_cache_config_from_groups(
+                    vllm_config, projected_groups, available_memory_one_worker
+                )
             )
 
         # --- shrink each rank to the smallest num_blocks across ranks ---
@@ -345,7 +472,7 @@ class AscendKVCacheConfigBuilder(KVCacheConfigBuilder):
             if kv_cache_config.num_blocks == min_num_blocks:
                 continue
             groups = kv_cache_config.kv_cache_groups
-            kv_cache_configs[i] = _ascend_get_kv_cache_config_deepseek_v4(
-                vllm_config, groups, min_num_blocks * kv_cache_planning._pool_bytes_per_block(groups)
+            kv_cache_configs[i] = _ascend_get_kv_cache_config_from_groups(
+                vllm_config, groups, min_num_blocks * _ascend_pool_bytes_per_block(groups)
             )
         return kv_cache_configs

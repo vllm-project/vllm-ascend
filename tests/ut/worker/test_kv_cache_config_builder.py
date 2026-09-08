@@ -23,7 +23,7 @@ from vllm.v1.kv_cache_interface import (
 
 from vllm_ascend.worker.kv_cache_config_builder import (
     AscendKVCacheConfigBuilder,
-    _ascend_get_kv_cache_config_deepseek_v4,
+    _ascend_get_kv_cache_config_from_groups,
     _ascend_get_kv_cache_groups_uniform_groups,
     _ascend_group_and_unify_kv_cache_specs,
     _has_deepseek_v4,
@@ -108,7 +108,7 @@ def _monkeypatch_approximate_gcd(monkeypatch, value: int | None = None) -> None:
 
 def _collect_covered_layers(cfg) -> set[str]:
     """Layers covered by at least one emitted KV cache tensor."""
-    return {name for tensor in cfg.kv_cache_tensors for name in tensor.shared_by}
+    return {name for tensor in cfg.kv_cache_tensors for name in tensor.layers}
 
 
 # ---------------------------------------------------------------------------
@@ -183,9 +183,9 @@ def test_ascend_get_kv_cache_groups_uniform_groups_splits_swa(monkeypatch) -> No
 
 
 # ---------------------------------------------------------------------------
-# _ascend_get_kv_cache_config_deepseek_v4
+# _ascend_get_kv_cache_config_from_groups
 # ---------------------------------------------------------------------------
-def test_ascend_get_kv_cache_config_deepseek_v4_layout(monkeypatch) -> None:
+def test_ascend_get_kv_cache_config_from_groups_layout(monkeypatch) -> None:
     specs = _make_deepseek_v4_specs(n_c4=2, n_c128=2, n_swa=2)
     grouped = _ascend_group_and_unify_kv_cache_specs(specs)
     assert grouped is not None
@@ -193,24 +193,29 @@ def test_ascend_get_kv_cache_config_deepseek_v4_layout(monkeypatch) -> None:
     groups = _ascend_get_kv_cache_groups_uniform_groups(grouped)
 
     available_memory = 1 << 30  # 1 GiB
-    cfg = _ascend_get_kv_cache_config_deepseek_v4(_make_vllm_config(), groups, available_memory)
+    cfg = _ascend_get_kv_cache_config_from_groups(_make_vllm_config(), groups, available_memory)
 
     assert cfg.num_blocks > 0
-    # One non-packed tensor per (tuple_idx, page_size) bucket; every layer covered.
+    # Shared-tuple layout: every layer covered, and all tensors alias one backing buffer.
     assert _collect_covered_layers(cfg) == {name for group in groups for name in group.layer_names}
-    # num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples),
-    # with num_layer_tuples == 2 for the 2-layer-per-group fixture.
-    page_sizes = sorted(groups[0].kv_cache_spec.get_page_sizes())
+    # num_blocks = available_memory // (layer_tuple_bytes * num_layer_tuples), where
+    # layer_tuple_bytes is the sum of the full-MLA group's page sizes and
+    # num_layer_tuples == 2 for the 2-layer-per-group fixture.
+    full_mla_spec = groups[0].kv_cache_spec
+    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
+    page_sizes = sorted({s.page_size_bytes for s in full_mla_spec.kv_cache_specs.values()})
     assert cfg.num_blocks == available_memory // (sum(page_sizes) * 2)
-    # Tensor size is page_size * num_blocks.
+    # Every tensor shares one backing buffer of layer_tuple_bytes * num_layer_tuples * num_blocks.
+    backing_size = sum(page_sizes) * 2 * cfg.num_blocks
     for tensor in cfg.kv_cache_tensors:
-        assert tensor.size % cfg.num_blocks == 0
+        assert tensor.size == backing_size
+        assert tensor.block_stride in page_sizes
     # Config identity is preserved.
     assert [group.layer_names for group in cfg.kv_cache_groups] == [group.layer_names for group in groups]
     assert cfg.prefix_cache_retention_interval is None
 
 
-def test_ascend_get_kv_cache_config_deepseek_v4_mtp_gets_own_tensor() -> None:
+def test_ascend_get_kv_cache_config_from_groups_mtp_gets_own_tensor() -> None:
     c4 = _make_c4_spec()
     mtp = _make_c4_spec()
     c4_group = KVCacheGroupSpec(
@@ -223,23 +228,31 @@ def test_ascend_get_kv_cache_config_deepseek_v4_mtp_gets_own_tensor() -> None:
     )
 
     available_memory = 1 << 30
-    cfg = _ascend_get_kv_cache_config_deepseek_v4(
+    cfg = _ascend_get_kv_cache_config_from_groups(
         _make_vllm_config(), [c4_group, mtp_group], available_memory
     )
 
-    mtp_tensors = [tensor for tensor in cfg.kv_cache_tensors if tensor.shared_by == ["model.layers.0.mtp"]]
+    # The MTP layer occupies its own trailing tuple slot, aliasing the shared buffer.
+    mtp_tensors = [tensor for tensor in cfg.kv_cache_tensors if tensor.layers == ["model.layers.0.mtp"]]
     assert len(mtp_tensors) == 1
-    assert mtp_tensors[0].size == mtp.page_size_bytes * cfg.num_blocks
+    page_size = c4.page_size_bytes
+    num_tuple_slots = 2  # one c4 layer tuple + one MTP tuple
+    tuple_stride = page_size * cfg.num_blocks
+    assert cfg.num_blocks == available_memory // (page_size * num_tuple_slots)
+    assert mtp_tensors[0].size == tuple_stride * num_tuple_slots
+    assert mtp_tensors[0].offset == tuple_stride
+    assert mtp_tensors[0].layer_stride == 0
+    assert mtp_tensors[0].block_stride == page_size
     assert _collect_covered_layers(cfg) == {"c4_0", "model.layers.0.mtp"}
 
 
-def test_ascend_get_kv_cache_config_deepseek_v4_num_gpu_blocks_override(monkeypatch) -> None:
+def test_ascend_get_kv_cache_config_from_groups_num_gpu_blocks_override(monkeypatch) -> None:
     grouped = _ascend_group_and_unify_kv_cache_specs(_make_deepseek_v4_specs())
     assert grouped is not None
     _monkeypatch_approximate_gcd(monkeypatch, value=2)
     groups = _ascend_get_kv_cache_groups_uniform_groups(grouped)
 
-    cfg = _ascend_get_kv_cache_config_deepseek_v4(
+    cfg = _ascend_get_kv_cache_config_from_groups(
         _make_vllm_config(num_gpu_blocks_override=42), groups, 1 << 30
     )
 
