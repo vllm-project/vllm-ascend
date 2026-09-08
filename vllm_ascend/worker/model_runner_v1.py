@@ -4470,6 +4470,34 @@ class NPUModelRunner(GPUModelRunner):
             or kv_connector == "ExampleHiddenStatesConnector"
         )
 
+        # A zero layer stride explicitly aliases every listed layer to the
+        # same block-strided backing. GLM-Next uses this for layers belonging
+        # to independent scheduler groups that intentionally reuse a physical
+        # cache slot.
+        explicit_shared_descriptors = []
+        if not use_legacy_shared_by_layout:
+            explicit_shared_descriptors = [
+                descriptor
+                for descriptor in kv_cache_config.kv_cache_tensors
+                if descriptor.layer_stride == 0
+                and descriptor.block_stride > 0
+                and len(get_kv_cache_tensor_layers(descriptor)) > 1
+            ]
+            for descriptor in explicit_shared_descriptors:
+                if descriptor.size != (
+                    kv_cache_config.num_blocks * descriptor.block_stride
+                ):
+                    raise ValueError(
+                        "Shared KV cache descriptor size does not match its "
+                        "block-strided backing."
+                    )
+                backing = self._allocate_int8_cache_tensor(
+                    descriptor.size,
+                    alignment,
+                )
+                for layer_name in get_kv_cache_tensor_layers(descriptor):
+                    kv_cache_raw_tensors[layer_name] = backing
+
         # The restored DSV4 planner on main emits multiple descriptors into a
         # single shared-tuple backing. Its memory budget is computed for that
         # one backing, so allocating ``descriptor.size`` for every descriptor
@@ -4539,6 +4567,7 @@ class NPUModelRunner(GPUModelRunner):
             and supports_shared_backing_with_kv_transfer
             and not self.use_sparse
             and not self.use_compress
+            and not explicit_shared_descriptors
             and kv_cache_config.kv_cache_tensors
         ):
             layout = self.vllm_config.cache_config.get_resolved_kv_cache_layout()

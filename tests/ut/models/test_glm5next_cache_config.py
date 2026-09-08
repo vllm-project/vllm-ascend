@@ -121,7 +121,12 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
         20 * layout.main_page_size,
         20 * layout.small_page_size,
     }
-    assert all(tensor.block_stride == 0 for tensor in plan.kv_cache_tensors)
+    expected_strides = (
+        {0}
+        if vllm_version_is("0.28.0")
+        else {layout.main_page_size, layout.small_page_size}
+    )
+    assert {tensor.block_stride for tensor in plan.kv_cache_tensors} == expected_strides
 
     placements = {
         layer_name: tensor

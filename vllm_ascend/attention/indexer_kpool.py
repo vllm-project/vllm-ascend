@@ -19,6 +19,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     get_kv_cache_compression_ratio,
+    get_storage_block_size,
 )
 from vllm_ascend.models.glm5next.kv_cache import (
     format_indexer_kpool_slot_mapping,
@@ -120,7 +121,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             raise ValueError(f"Invalid Indexer KPool cache layer names: {layer_names}.")
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.logical_block_size = kv_cache_spec.block_size
-        self.storage_block_size = kv_cache_spec.storage_block_size
+        self.storage_block_size = get_storage_block_size(kv_cache_spec)
         self.compress_ratio = compress_ratio
         if self.logical_block_size % GLM5_SFA_KERNEL_BLOCK_SIZE:
             raise ValueError(
