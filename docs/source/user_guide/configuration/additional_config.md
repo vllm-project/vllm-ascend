@@ -71,7 +71,7 @@ The following table lists additional configuration options available in vLLM Asc
 | `enable_mlapo`                      | bool | `True`  | Whether to enable MLAPO (Model Layer-wise Adaptive Parallel Optimization). The legacy `VLLM_ASCEND_ENABLE_MLAPO` environment variable is no longer supported. |
 | `mlapo_keep_prefill_weights`        | bool | `False` | When True, keep MLAPO prefill weights on NPU instead of freeing them on kv_consumer (decode-only D) nodes. D nodes have normal local-prefill paths (recompute / fallback / preempt) that crash when the weights are freed (issue #11882). Enable this to trade NPU memory for stability. |
 | `weight_nz_mode`                    | int  | `1`     | Weight NZ mode. `0` disables NZ, `1` enables NZ only for quantized weights, and `2` also enables NZ for BF16/FP16 weights when supported. The legacy `VLLM_ASCEND_ENABLE_NZ` environment variable is no longer supported. |
-| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. With `1`, MegaMoe is selected from instantiated layer capabilities: A2/A3 support BF16/W8A8/W4A8, and A5 supports W4A8 MXFP with `group_size=32`. Unsupported layouts keep the non-MegaMoe path. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
+| `enable_fused_mc2`                  | int  | `0`     | Fused MC2 configuration. With `2`, CANN MegaMoe is selected from instantiated layer capabilities: A2/A3 support BF16/W8A8/W4A8, and A5 supports W4A8 MXFP with `group_size=32`. Unsupported layouts keep the non-MegaMoe path. The legacy `VLLM_ASCEND_ENABLE_FUSED_MC2` environment variable is no longer supported. |
 | `enable_transpose_kv_cache_by_block`| bool | `True`  | Whether to enable transpose KV cache by block. The legacy `VLLM_ASCEND_FUSION_OP_TRANSPOSE_KV_CACHE_BY_BLOCK` environment variable is no longer supported. |
 | `enable_dsa_cp`                     | bool | `False` | Whether to enable dsa_cp for DeepSeek V3.2, DeepSeek V4, and other models with the same architecture. This feature requires sequence parallelism to be enabled.|
 | `rejection_sampler_config`          | dict | `{}`    | Configuration options for rejection sampler (block verify and entropy verify). |
@@ -84,8 +84,10 @@ The details of each configuration option are as follows:
 
 **enable_fused_mc2 (CANN MegaMoe / dispatch_ffn_combine)**
 
-When `enable_fused_mc2=1`, MoE communication may be replaced by the fused
-`dispatch_ffn_combine` or `mega_moe` operator. On A5 the MegaMoe path is
+`enable_fused_mc2=0` disables the fused path. `1` retains the legacy fused
+path where supported and does not enable CANN MegaMoe. `2` explicitly enables
+CANN MegaMoe; configuration initialization normalizes it to `1` while keeping
+the MegaMoe runtime gate enabled. On A5 the MegaMoe path is
 selected from the instantiated MoE layer capabilities instead of checkpoint
 metadata; unsupported layer layouts keep the decomposed MC2/AllToAll path.
 On A5, only pure prefill batches select MegaMoe. This branch is not gated by
@@ -117,12 +119,12 @@ Notes for A5:
   (`max_recv_token_num=0`); `mega_moe_max_tokens` is not used on A5.
 - The MegaMoe path is mutually exclusive with
   `multistream_overlap_shared_expert`; the latter is force-disabled when
-  `enable_fused_mc2=1`.
+  `enable_fused_mc2=2`.
 
 ```bash
 vllm serve <model> \
     --tensor-parallel-size 8 --enable-expert-parallel \
-    --additional-config '{"enable_fused_mc2": 1}'
+    --additional-config '{"enable_fused_mc2": 2}'
 ```
 
 **xlite_graph_config**

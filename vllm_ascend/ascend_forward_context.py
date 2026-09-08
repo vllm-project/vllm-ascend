@@ -329,7 +329,12 @@ def _select_a5_moe_comm_method(
     hf_text_config = vllm_config.model_config.hf_text_config
     if cann_mega_moe_supported is None:
         cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
-    if is_pure_prefill and get_ascend_config().enable_fused_mc2 == 1 and cann_mega_moe_supported:
+    if (
+        is_pure_prefill
+        and get_ascend_config().enable_fused_mc2 == 1
+        and is_mega_moe_supported()
+        and cann_mega_moe_supported
+    ):
         return MoECommType.FUSED_MC2
 
     num_experts_per_tok = getattr(

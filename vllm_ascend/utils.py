@@ -38,7 +38,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -1148,10 +1148,11 @@ def should_skip_allreduce_across_dp_group(
     from vllm_ascend.ops.fused_moe.mega_moe_adapter import get_model_cann_mega_moe_capability
     from vllm_ascend.ops.fused_moe.moe_comm_method import MoECommType
 
-    if cann_mega_moe_supported is None and model_instance is not None:
-        cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
-    if use_cann_megamoe(vllm_config) or cann_mega_moe_supported:
-        return False
+    if ascend_config.enable_fused_mc2 == 1 and is_mega_moe_supported():
+        if cann_mega_moe_supported is None and model_instance is not None:
+            cann_mega_moe_supported = get_model_cann_mega_moe_capability(model_instance).supported
+        if use_cann_megamoe(vllm_config) or cann_mega_moe_supported:
+            return False
 
     def needs_mc2(n: int) -> bool:
         return select_moe_comm_method(

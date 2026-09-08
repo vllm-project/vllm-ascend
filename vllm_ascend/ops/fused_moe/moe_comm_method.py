@@ -284,7 +284,7 @@ class FusedMC2CommImpl(MoECommMethod):
         self.mega_moe_symm_buffer = None
         self.get_symm_buffer_for_mega_moe = None
         self.mega_moe = None
-        if self.enable_fused_mc2 == 1 and self.cann_mega_moe_capability.supported:
+        if self.enable_fused_mc2 == 1 and is_mega_moe_supported() and self.cann_mega_moe_capability.supported:
             self.get_symm_buffer_for_mega_moe, self.mega_moe = moe_utils.load_cann_mega_moe_ops(
                 preload_comm_context=self.token_dispatcher.a5_need_extra_args,
             )
@@ -531,7 +531,8 @@ class FusedMC2CommImpl(MoECommMethod):
             situ_linear_beta=getattr(self.moe_config, "activation_situ_linear_beta", None),
         )
         use_cann_mega_moe = (
-            self.cann_mega_moe_capability.supported
+            is_mega_moe_supported()
+            and self.cann_mega_moe_capability.supported
             and self.mega_moe is not None
             and fused_experts_input.quant.quant_type == self.cann_mega_moe_capability.quant_type
             and runtime_activation == self.cann_mega_moe_capability.activation

@@ -5,7 +5,9 @@ import pytest
 import torch
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
+from vllm_ascend import ascend_config as config_module
 from vllm_ascend import ascend_forward_context as afc
+from vllm_ascend import utils
 from vllm_ascend.ops.fused_moe import moe_comm_method as comm
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import build_fused_experts_input
 from vllm_ascend.ops.fused_moe.mega_moe_adapter import (
@@ -16,17 +18,22 @@ from vllm_ascend.quantization.quant_type import QuantType
 
 
 @pytest.mark.parametrize(
-    ("tokens", "pure_prefill", "supported", "expected"),
+    ("tokens", "pure_prefill", "supported", "switch", "enabled", "expected"),
     [
-        (1, True, True, afc.MoECommType.FUSED_MC2),
-        (8192, True, True, afc.MoECommType.FUSED_MC2),
-        (1, False, True, afc.MoECommType.MC2),
-        (8, False, True, afc.MoECommType.MC2),
-        (8192, False, True, afc.MoECommType.ALLTOALL),
-        (1, True, False, afc.MoECommType.MC2),
+        (1, True, True, 1, True, afc.MoECommType.FUSED_MC2),
+        (8192, True, True, 1, True, afc.MoECommType.FUSED_MC2),
+        (1, False, True, 1, True, afc.MoECommType.MC2),
+        (8, False, True, 1, True, afc.MoECommType.MC2),
+        (8192, False, True, 1, True, afc.MoECommType.ALLTOALL),
+        (1, True, False, 1, True, afc.MoECommType.MC2),
+        (8192, True, True, 0, False, afc.MoECommType.ALLTOALL),
+        (8192, True, True, 1, False, afc.MoECommType.ALLTOALL),
+        (8192, True, True, 0, True, afc.MoECommType.ALLTOALL),
     ],
 )
-def test_a5_pure_prefill_only_without_capacity_gate(monkeypatch, tokens, pure_prefill, supported, expected):
+def test_a5_pure_prefill_only_without_capacity_gate(
+    monkeypatch, tokens, pure_prefill, supported, switch, enabled, expected
+):
     config = SimpleNamespace(
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(top_k_experts=1)),
         parallel_config=SimpleNamespace(enable_expert_parallel=True, world_size_across_dp=8),
@@ -36,7 +43,8 @@ def test_a5_pure_prefill_only_without_capacity_gate(monkeypatch, tokens, pure_pr
     monkeypatch.setattr(afc, "get_mc2_tokens_capacity", lambda: 8)
     monkeypatch.setattr(afc, "get_ascend_device_type", lambda: afc.AscendDeviceType.A5)
     monkeypatch.setattr(afc, "get_ep_group", lambda: SimpleNamespace(world_size=8))
-    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=1))
+    monkeypatch.setattr(afc, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=switch))
+    monkeypatch.setattr(afc, "is_mega_moe_supported", lambda: enabled)
     assert (
         afc.select_moe_comm_method(tokens, config, is_pure_prefill=pure_prefill, cann_mega_moe_supported=supported)
         == expected
@@ -96,3 +104,53 @@ def test_fused_mc2_routes_supported_situ_to_mega_moe():
     assert args[3][0].is_contiguous()
     assert kwargs["l1_weights_sf"][0].is_contiguous()
     assert result.routed_out is impl.mega_moe.return_value[0]
+
+
+@pytest.mark.parametrize("value, normalized, enabled", [(0, 0, False), (1, 1, False), (2, 1, True)])
+def test_fused_mc2_input_controls_mega_moe(monkeypatch, value, normalized, enabled):
+    monkeypatch.setattr(config_module, "_MEGA_MOE_SUPPORTED", None)
+    monkeypatch.setattr(config_module.importlib.util, "find_spec", lambda _: object())
+    config = SimpleNamespace(weight_nz_mode=1, enable_mc2_hierarchy_comm=False, enable_fused_mc2=value)
+    config_module.AscendConfig._validate_user_input_ranges(config)
+    assert config.enable_fused_mc2 == normalized
+    assert config_module.is_mega_moe_supported() is enabled
+
+
+@pytest.mark.parametrize("switch, enabled, loads", [(0, False, False), (1, False, False), (1, True, True)])
+def test_fused_mc2_load_respects_mega_moe_switch(monkeypatch, switch, enabled, loads):
+    def initialize_base(self, config):
+        self.moe_config = config
+        self.token_dispatcher = SimpleNamespace(a5_need_extra_args=True)
+
+    monkeypatch.setattr(comm.MoECommMethod, "__init__", initialize_base)
+    monkeypatch.setattr(comm, "get_ascend_config", lambda: SimpleNamespace(enable_fused_mc2=switch))
+    monkeypatch.setattr(comm, "is_mega_moe_supported", lambda: enabled)
+    monkeypatch.setattr(comm.torch, "zeros", lambda *args, **kwargs: None)
+    loader = MagicMock(return_value=(MagicMock(), MagicMock()))
+    monkeypatch.setattr(comm.moe_utils, "load_cann_mega_moe_ops", loader)
+    config = SimpleNamespace(num_local_experts=2, swiglu_limit=None, swiglu_alpha=None, swiglu_beta=None)
+    capability = CannMegaMoeLayerCapability(True, "", QuantType.W4A8MXFP)
+    instance = comm.FusedMC2CommImpl(config, cann_mega_moe_capability=capability)
+    assert loader.called is loads
+    assert (instance.mega_moe is not None) is loads
+
+
+@pytest.mark.parametrize("switch, enabled, skip", [(0, False, True), (1, False, True), (1, True, False)])
+def test_disabled_capability_does_not_force_dp_allreduce(monkeypatch, switch, enabled, skip):
+    config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=8192),
+        compilation_config=SimpleNamespace(cudagraph_mode=SimpleNamespace(separate_routine=lambda: False)),
+    )
+    ascend = SimpleNamespace(
+        enable_fused_mc2=switch,
+        get_mc2_comm_alg=lambda: "",
+        scheduler_config=SimpleNamespace(recompute_scheduler_enable=True),
+    )
+    monkeypatch.setattr(utils, "get_ascend_config", lambda: ascend)
+    monkeypatch.setattr(utils, "is_mega_moe_supported", lambda: enabled)
+    monkeypatch.setattr(utils, "is_moe_model", lambda _: True)
+    monkeypatch.setattr(utils, "get_potential_max_tokens", lambda: 8)
+    monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
+    monkeypatch.setattr(afc, "select_moe_comm_method", lambda *args, **kwargs: afc.MoECommType.MC2)
+    assert utils.should_skip_allreduce_across_dp_group(config, cann_mega_moe_supported=True) is skip
