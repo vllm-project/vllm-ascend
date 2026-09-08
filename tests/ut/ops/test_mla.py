@@ -398,9 +398,12 @@ class TestAscendMultiHeadLatentAttention(TestBase):
             self.assertEqual(attn.tp_size, 2)
             self.assertIsNotNone(attn.mla_attn)
 
+    @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.get_current_vllm_config")
     @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size")
-    def test_marks_layers_only_when_fused_preprocess_type_resolved(self, mock_tp_size, mock_get_vllm_config):
+    def test_marks_layers_only_when_fused_preprocess_type_resolved(
+        self, mock_tp_size, mock_get_vllm_config, mock_indexer_cls
+    ):
         for resolved_type, should_mark in ((PreprocessType.MLAPO, True), (None, False)):
             with self.subTest(resolved_type=resolved_type):
                 fused_qkv_a_proj = SimpleNamespace()
