@@ -376,8 +376,7 @@ jobs:
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
-    #   all         - ready-all or main2main forced, or the PR touches the CI
-    #                 pipeline itself
+    #   all         - ready-all or main2main forced
     #   none        - ready-precise on a PR whose diff recommends no tests
     if: >-
       ${{
@@ -469,11 +468,6 @@ jobs:
             # recommendation cannot be used: select the whole suite instead.
             MODE="all"
           elif [ "${HAS_READY_ALL}" = "true" ]; then
-            MODE="all"
-          elif [ "${CI_PIPELINE}" = "true" ]; then
-            # The PR changes the test selection/execution pipeline itself,
-            # so the precise recommendation can no longer be trusted even
-            # though ready-precise was set. Escalate to the full suite.
             MODE="all"
           elif [ "${HAS_READY_PRECISE}" = "true" ]; then
             if [ "${RECOMMEND_RESULT}" != "success" ]; then
