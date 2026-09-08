@@ -1,6 +1,12 @@
 import numpy as np
 
-from vllm_ascend.distributed.eplb.stair_policy import compress_samples, placement_score, weighted_moments
+from vllm_ascend.distributed.eplb.stair_policy import (
+    capped_min_max,
+    compress_samples,
+    placement_score,
+    replica_candidates,
+    weighted_moments,
+)
 
 
 def test_compression_preserves_every_step_as_weighted_bins():
@@ -33,3 +39,20 @@ def test_score_uses_mean_and_weighted_nearest_rank_p95():
 
     assert score.mean == 1.05
     assert score.p95 == 1.0
+
+
+def test_capped_min_max_respects_one_copy_per_rank():
+    replicas = capped_min_max(np.array([8.0, 3.0]), np.ones(2, dtype=np.int64), 4, 3)
+
+    np.testing.assert_array_equal(replicas, [3, 3])
+
+
+def test_flash_tree_candidates_are_bounded_and_deterministic():
+    kwargs = dict(depth=3, width=2, limit=4, score=lambda value: float(np.square(value - 2).sum()))
+
+    first = replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 2, **kwargs)
+    second = replica_candidates(np.array([8.0, 4.0, 2.0]), 6, 2, **kwargs)
+
+    assert len(first) <= 4
+    assert [item.tolist() for item in first] == [item.tolist() for item in second]
+    assert all(item.sum() == 6 and np.all(item <= 2) for item in first)

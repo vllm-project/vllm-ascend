@@ -3,6 +3,7 @@
 
 """Pure NumPy implementation of the STAIR placement policy."""
 
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import numpy as np
@@ -95,3 +96,90 @@ def placement_score(samples: np.ndarray, weights: np.ndarray, placement: np.ndar
     p95 = imbalance[order[np.searchsorted(cumulative, nearest_rank, side="left")]]
     mean = np.sum(imbalance * sample_weights, dtype=np.float64) / sample_weights.sum()
     return BalanceScore(float(mean), float(p95))
+
+
+def capped_min_max(
+    risk: np.ndarray,
+    replicas: np.ndarray,
+    slots: int,
+    num_ranks: int,
+    experts: Iterable[int] | None = None,
+) -> np.ndarray | None:
+    """Allocate slots to the largest risk-per-replica expert."""
+    weights = np.asarray(risk, dtype=np.float64)
+    result = np.asarray(replicas, dtype=np.int64).copy()
+    allowed = tuple(range(weights.size)) if experts is None else tuple(experts)
+    if (
+        weights.shape != result.shape
+        or not np.all(np.isfinite(weights))
+        or np.any(result < 1)
+        or np.any(result > num_ranks)
+        or slots < 0
+    ):
+        raise ValueError("Invalid STAIR replica allocation input")
+    for _ in range(slots):
+        candidates = [expert for expert in allowed if result[expert] < num_ranks]
+        if not candidates:
+            return None
+        expert = min(candidates, key=lambda item: (-weights[item] / result[item], item))
+        result[expert] += 1
+    return result
+
+
+def _nearby_budgets(center: int, lower: int, upper: int, width: int) -> list[int]:
+    values = []
+    for distance in range(width + 1):
+        for value in ((center,) if distance == 0 else (center + distance, center - distance)):
+            if lower <= value <= upper and value not in values:
+                values.append(value)
+    return values
+
+
+def replica_candidates(
+    risk: np.ndarray,
+    total_slots: int,
+    num_ranks: int,
+    *,
+    depth: int,
+    width: int,
+    limit: int,
+    score: Callable[[np.ndarray], float],
+) -> list[np.ndarray]:
+    """Return a bounded FlashTree-style replica-vector beam."""
+    weights = np.asarray(risk, dtype=np.float64)
+    num_experts = weights.size
+    if num_experts == 0 or total_slots < num_experts or total_slots > num_experts * num_ranks:
+        raise ValueError("STAIR requires E <= physical slots <= E * ranks")
+    order = sorted(range(num_experts), key=lambda expert: (-weights[expert], expert))
+    group_size = (num_experts + min(depth, num_experts) - 1) // min(depth, num_experts)
+    groups = [tuple(order[start : start + group_size]) for start in range(0, num_experts, group_size)]
+    beam = [(np.ones(num_experts, dtype=np.int64), total_slots - num_experts)]
+
+    for group_index, group in enumerate(groups[:-1]):
+        later = tuple(expert for remaining in groups[group_index + 1 :] for expert in remaining)
+        expanded = []
+        for replicas, remaining in beam:
+            baseline = capped_min_max(weights, replicas, remaining, num_ranks, (*group, *later))
+            if baseline is None:
+                continue
+            center = int(np.sum(baseline[list(group)] - replicas[list(group)]))
+            current_capacity = sum(num_ranks - replicas[expert] for expert in group)
+            later_capacity = sum(num_ranks - replicas[expert] for expert in later)
+            lower, upper = max(0, remaining - later_capacity), min(remaining, current_capacity)
+            for budget in _nearby_budgets(center, lower, upper, width):
+                partial = capped_min_max(weights, replicas, budget, num_ranks, group)
+                if partial is None:
+                    continue
+                full = capped_min_max(weights, partial, remaining - budget, num_ranks, later)
+                if full is not None:
+                    expanded.append((partial, remaining - budget, full))
+        unique = {partial.astype("<i4").tobytes(): (partial, remaining, full) for partial, remaining, full in expanded}
+        ranked = sorted(unique.values(), key=lambda item: (score(item[2]), tuple(item[2]), tuple(item[0])))
+        beam = [(partial, remaining) for partial, remaining, _ in ranked[:limit]]
+
+    complete = {}
+    for replicas, remaining in beam:
+        candidate = capped_min_max(weights, replicas, remaining, num_ranks, groups[-1])
+        if candidate is not None:
+            complete[candidate.astype("<i4").tobytes()] = candidate
+    return sorted(complete.values(), key=lambda item: (score(item), tuple(item)))[:limit]
