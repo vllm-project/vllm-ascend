@@ -632,6 +632,16 @@ ASCENDC_EXTERN_C ge::graphStatus TilingQBM(gert::TilingContext* context) {
     // K-tail by the caller's ND->ZN conversion. (Grouped quant already
     // requires K % (Q*32) == 0 above, which implies kTail == 0 for Q>1.)
     uint32_t kTail = K % 32U;
+
+    // The partial K-fractal MTE2 in WeightMte2 reads the compact
+    // [N1, N0, K_tail] GM section with a per-N0 stride of CUBE_N0 * kTail
+    // bytes, which must land on a 32-byte block boundary. CUBE_N0 is 16, so
+    // that holds only for even kTail; an odd kTail silently mis-strides the
+    // weight reads. Reject it here rather than corrupt results.
+    if (kTail % 2U != 0U) {
+        return ge::GRAPH_FAILED;
+    }
+
     uint32_t K_padded = (kTail != 0) ? (K + (32U - kTail)) : K;
 
     // Reserve UB for the persistent ubBias_ buffer (N int32 + bank pad)

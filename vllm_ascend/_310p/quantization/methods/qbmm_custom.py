@@ -53,6 +53,15 @@ _ENV = "VLLM_CUSTOM_QBMM"
 _MAX_DIM = 32768
 
 
+def _kernel_supports(weight_t: torch.Tensor) -> bool:
+    # weight_t is [K, N]. Tiling rejects K/N past _MAX_DIM, and an odd
+    # K % 32 tail (the partial K-fractal MTE2 stride is only block-aligned
+    # for an even tail). Both are hard tiling failures in the op, so screen
+    # them here and let the builtin take those shapes.
+    k, n = weight_t.shape[0], weight_t.shape[-1]
+    return k <= _MAX_DIM and n <= _MAX_DIM and (k % 32) % 2 == 0
+
+
 def _qbmm_v3x(
     x: torch.Tensor,
     weight_t: torch.Tensor,
@@ -62,7 +71,7 @@ def _qbmm_v3x(
 ) -> torch.Tensor:
     # weight_t is the serving-layout [K, N] NZ.T view; transpose back to the
     # plain-NZ [N, K] tensor the kernel requires, and flag transpose_x2.
-    if weight_t.shape[0] > _MAX_DIM or weight_t.shape[-1] > _MAX_DIM:
+    if not _kernel_supports(weight_t):
         return torch_npu.npu_quant_matmul(
             x,
             weight_t,
