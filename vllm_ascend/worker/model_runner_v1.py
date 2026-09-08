@@ -299,18 +299,6 @@ class ExecuteModelState(NamedTuple):
     batch_desc: BatchDescriptor
 
 
-def _is_ec_producer_only() -> bool:
-    """Return whether this worker only produces external encoder caches.
-
-    An ``ec_both`` connector is also a producer, but it still needs the
-    normal model execution path after loading or computing encoder outputs.
-    Only a connector without the consumer role should take the encoder-only
-    early-return path and skip KV-cache allocation.
-    """
-    # ec_both still needs the full model path because it is also a consumer.
-    return has_ec_transfer() and not get_ec_transfer().is_consumer
-
-
 class NPUModelRunner(GPUModelRunner):
     # vLLM #51718 describes compatible KV cache groups as views over one
     # standardized backing allocation. The default runner preserves that
@@ -2176,10 +2164,8 @@ class NPUModelRunner(GPUModelRunner):
                     scheduler_output
                 )
 
-                if _is_ec_producer_only():
-                    self._start_dump_data(
-                        scheduled_tokens=scheduler_output.num_scheduled_tokens
-                    )
+                if has_ec_transfer() and not get_ec_transfer().is_consumer:
+                    self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
                     with self.maybe_get_ec_connector_output(
                         scheduler_output,
                         encoder_cache=self.encoder_cache,
@@ -2200,14 +2186,10 @@ class NPUModelRunner(GPUModelRunner):
                         # dummy run to ensure coordinate_batch_across_dp
                         # is called into to avoid out of sync issues.
                         self._dummy_run(1, skip_gdn_state_update=True)
-                    output = EMPTY_MODEL_RUNNER_OUTPUT
-                    if has_kv_transfer_group():
-                        output = self.kv_connector_no_forward(
-                            scheduler_output, self.vllm_config
-                        )
-                    return self.ec_connector_no_forward(
-                        scheduler_output, self.encoder_cache, output
-                    )
+                    if not has_kv_transfer_group():
+                        # Return empty ModelRunnerOutput if no work to do.
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
                 if self.cache_config.kv_sharing_fast_prefill:
                     assert not self.num_prompt_logprobs, (
                         "--kv-sharing-fast-prefill produces incorrect "
@@ -2220,14 +2202,9 @@ class NPUModelRunner(GPUModelRunner):
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                 if (scheduler_output.total_num_scheduled_tokens <= 0
                         or not tokens or sum(tokens) == 0):
-                    output = EMPTY_MODEL_RUNNER_OUTPUT
-                    if has_kv_transfer_group():
-                        output = self.kv_connector_no_forward(
-                            scheduler_output, self.vllm_config
-                        )
-                    return self.ec_connector_no_forward(
-                        scheduler_output, self.encoder_cache, output
-                    )
+                    if not has_kv_transfer_group():
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
                 self._start_dump_data(scheduled_tokens = scheduler_output.num_scheduled_tokens)
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
@@ -5383,7 +5360,7 @@ class NPUModelRunner(GPUModelRunner):
             format. Layers that do not need KV cache are not included.
         """
 
-        if _is_ec_producer_only():
+        if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
 
         kv_cache_spec: dict[str, KVCacheSpec] = {}
