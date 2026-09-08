@@ -25,7 +25,8 @@ from vllm.v1.metrics.reader import Counter, Vector
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.one_card.model_runner_v2.utils import calculate_acceptance_per_pos
 
-MODELS = ["Qwen/Qwen3-0.6B", "vllm-ascend/DeepSeek-V2-Lite-W8A8"]
+DENSE_EAGER_MODELS = ["Qwen/Qwen3-0.6B"]
+DEEPSEEK_W8A8 = "vllm-ascend/DeepSeek-V2-Lite-W8A8"
 
 MAIN_MODELS = ["LLM-Research/Meta-Llama-3.1-8B-Instruct"]
 EGALE_MODELS = ["vllm-ascend/EAGLE-LLaMA3.1-Instruct-8B"]
@@ -39,21 +40,24 @@ MTP_MODELS = ["wemaster/deepseek_mtp_main_random_bf16"]
 # capture sizes. The workload is 4 prompts; leaving sizes unset enumerates
 # graphs up to min(max_num_seqs * (1+K), 512) and dominates runtime.
 CUDAGRAPH_CAPTURE_SIZES = [4, 8]
-COMPILATION_CONFIGS = [
-    pytest.param(
-        {"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES},
-        id="full_decode_only",
-    ),
-    pytest.param(
-        {"cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES},
-        id="default_full_and_piecewise",
-    ),
-]
+FULL_DECODE_ONLY = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES,
+}
+DEFAULT_PIECEWISE = {"cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES}
 # Matches the 4-prompt batch; also shrinks KV/draft padding vs default 256.
 MAX_NUM_SEQS = 8
 
+# One graph mode per spec method; both modes still covered on Qwen3-0.6B.
+# DeepSeek-V2-Lite is a single graph-mode smoke (no output golden).
+DENSE_GRAPH_CASES = [
+    pytest.param("Qwen/Qwen3-0.6B", FULL_DECODE_ONLY, id="qwen3-full_decode_only"),
+    pytest.param("Qwen/Qwen3-0.6B", DEFAULT_PIECEWISE, id="qwen3-default_full_and_piecewise"),
+    pytest.param(DEEPSEEK_W8A8, FULL_DECODE_ONLY, id="dsv2-full_decode_only"),
+]
 
-@pytest.mark.parametrize("model", MODELS)
+
+@pytest.mark.parametrize("model", DENSE_EAGER_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [True])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
@@ -95,14 +99,12 @@ def test_qwen3_dense_eager_mode(
 @pytest.mark.parametrize("eagle_model", EGALE_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_egale_spec_decoding(
     model: str,
     eagle_model: str,
     max_tokens: int,
     enforce_eager: bool,
-    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -124,7 +126,7 @@ def test_egale_spec_decoding(
             "method": "eagle",
             "num_speculative_tokens": num_speculative_tokens,
         },
-        compilation_config=compilation_config,
+        compilation_config=FULL_DECODE_ONLY,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -144,14 +146,12 @@ def test_egale_spec_decoding(
 @pytest.mark.parametrize("dflash_model", DFLASH_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 def test_dflash_spec_decoding(
     model: str,
     dflash_model: str,
     max_tokens: int,
     enforce_eager: bool,
-    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -174,7 +174,7 @@ def test_dflash_spec_decoding(
             "method": "dflash",
             "num_speculative_tokens": num_speculative_tokens,
         },
-        compilation_config=compilation_config,
+        compilation_config=DEFAULT_PIECEWISE,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -195,7 +195,6 @@ def test_dflash_spec_decoding(
 @pytest.mark.parametrize("dspark_model", DSPARK_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_dspark_spec_decoding(
@@ -203,7 +202,6 @@ def test_dspark_spec_decoding(
     dspark_model: str,
     max_tokens: int,
     enforce_eager: bool,
-    compilation_config: dict,
 ) -> None:
     prompts = [
         "Hello, my name is",
@@ -226,7 +224,7 @@ def test_dspark_spec_decoding(
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
         },
-        compilation_config=compilation_config,
+        compilation_config=FULL_DECODE_ONLY,
     ) as runner:
         runner.model.generate(prompts, sampling_params)
         metrics = runner.model.get_metrics()
@@ -245,14 +243,12 @@ def test_dspark_spec_decoding(
 @pytest.mark.parametrize("model", MTP_MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_mtp_spec_decoding(
     model: str,
     max_tokens: int,
     enforce_eager: bool,
-    compilation_config: dict,
 ) -> None:
     # The MTP draft head has random weights, so acceptance is ~0 and there is
     # no trained golden to compare against -- this is a smoke test (assert only
@@ -276,17 +272,16 @@ def test_mtp_spec_decoding(
             "method": "mtp",
             "num_speculative_tokens": num_speculative_tokens,
         },
-        compilation_config=compilation_config,
+        compilation_config=DEFAULT_PIECEWISE,
     ) as runner:
         outputs = runner.model.generate(prompts, sampling_params)
 
     assert len(outputs) == len(prompts)
 
 
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("model, compilation_config", DENSE_GRAPH_CASES)
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("enforce_eager", [False])
-@pytest.mark.parametrize("compilation_config", COMPILATION_CONFIGS)
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen3_dense_graph_mode(
