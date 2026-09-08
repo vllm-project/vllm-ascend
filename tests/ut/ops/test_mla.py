@@ -323,7 +323,7 @@ class TestIndexerWrapper(TestBase):
         vllm_indexer = MagicMock(name="vllm_indexer")
         wrapper = IndexerWrapper(vllm_indexer, qk_rope_head_dim=64)
 
-        mock_backend_cls.assert_called_once_with(vllm_indexer, 64)
+        mock_backend_cls.assert_called_once_with(vllm_indexer, 64, allow_short_prefill_indexer_scoring_skip=False)
         self.assertIs(wrapper.impl, mock_backend_cls.return_value)
         self.assertIs(wrapper.k_cache, wrapper.impl.k_cache)
 
@@ -332,6 +332,12 @@ class TestIndexerWrapper(TestBase):
 
         wrapper.process_weights_after_loading()
         wrapper.impl.process_weights_after_loading.assert_called_once_with()
+
+    @patch("vllm_ascend.ops.mla.AscendSFAIndexerBackend")
+    def test_bypass_permission_reaches_backend(self, mock_backend):
+        indexer = MagicMock()
+        IndexerWrapper(indexer, 64, allow_short_prefill_indexer_scoring_skip=True)
+        mock_backend.assert_called_once_with(indexer, 64, allow_short_prefill_indexer_scoring_skip=True)
 
 
 class TestAscendMultiHeadLatentAttention(TestBase):
@@ -394,8 +400,38 @@ class TestAscendMultiHeadLatentAttention(TestBase):
                 prefix=self.prefix,
             )
 
+            mock_indexer_cls.assert_called_once_with(
+                self.mock_mla_modules.indexer,
+                self.qk_rope_head_dim,
+                allow_short_prefill_indexer_scoring_skip=False,
+            )
             self.assertEqual(attn.tp_size, 2)
             self.assertIsNotNone(attn.mla_attn)
+
+    @patch("vllm_ascend.ops.mla.MLAAttention")
+    @patch("vllm_ascend.ops.mla.IndexerWrapper")
+    @patch("vllm_ascend.ops.mla.get_current_vllm_config")
+    @patch("vllm_ascend.ops.mla.get_tensor_model_parallel_world_size", return_value=1)
+    def test_bypass_permission_reaches_indexer(self, mock_tp, mock_config, mock_indexer, mock_attention):
+        AscendMultiHeadLatentAttention(
+            self.hidden_size,
+            self.num_heads,
+            self.scale,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.v_head_dim,
+            self.q_lora_rank,
+            self.kv_lora_rank,
+            self.mock_mla_modules,
+            prefix=self.prefix,
+            allow_short_prefill_indexer_scoring_skip=True,
+        )
+        mock_indexer.assert_called_once_with(
+            self.mock_mla_modules.indexer,
+            self.qk_rope_head_dim,
+            allow_short_prefill_indexer_scoring_skip=True,
+        )
+        self.assertNotIn("allow_short_prefill_indexer_scoring_skip", mock_attention.call_args.kwargs)
 
     @patch("vllm_ascend.ops.mla.IndexerWrapper")
     @patch("vllm_ascend.ops.mla.torch.ops.vllm.mla_forward")
