@@ -296,7 +296,7 @@ def update_full_graph_params(
             draft_attn_metadatas=draft_attn_metadatas,
         )
     else:
-        # vLLM >= 0.28.0 (main) makes get_current_vllm_config() raise
+        # vLLM main makes get_current_vllm_config() raise
         # AssertionError outside set_current_vllm_config(); the SFA backend
         # resolution in get_impl_cls() needs the config.
         from vllm.config import set_current_vllm_config
