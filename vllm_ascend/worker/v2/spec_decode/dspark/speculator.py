@@ -184,6 +184,8 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             # Profiling runs the draft with its own query token count, which
             # can differ from the target batch. Let forward_context coordinate
             # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
             sync_state = None
         with (
             build_attn_metadata_wrapper(),
