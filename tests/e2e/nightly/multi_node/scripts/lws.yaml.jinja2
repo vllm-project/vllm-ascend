@@ -47,6 +47,12 @@ spec:
                 value: {{ vllm_ascend_ref | default("main") }}
               - name: AOP_MULTI_ENABLED
                 value: "{{ aop_multi_enabled | default("false") }}"
+{% if profile_enabled | default("false") | lower == "true" %}
+              - name: VLLM_ASCEND_FORCE_PROFILE
+                value: "true"
+              - name: VLLM_ASCEND_PROFILE_DIR
+                value: "/root/.cache/profile_output/{{ benchmark_job_name | default("") }}"
+{% endif %}
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
               - name: BISECT_GOOD_COMMIT
@@ -148,6 +154,12 @@ spec:
                 value: {{ runner | default("linux-aarch64-a3-800t-0") }}
               - name: AOP_MULTI_ENABLED
                 value: "{{ aop_multi_enabled | default("false") }}"
+{% if profile_enabled | default("false") | lower == "true" %}
+              - name: VLLM_ASCEND_FORCE_PROFILE
+                value: "true"
+              - name: VLLM_ASCEND_PROFILE_DIR
+                value: "/root/.cache/profile_output/{{ benchmark_job_name | default("") }}"
+{% endif %}
               - name: GOOD_TABLE
                 value: "{{ good_table | default("/root/.cache/vllm-ascend/nightly/good_table.csv") }}"
               - name: BISECT_GOOD_COMMIT

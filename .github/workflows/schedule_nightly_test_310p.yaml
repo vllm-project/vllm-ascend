@@ -53,6 +53,11 @@ on:
         required: false
         default: false
         type: boolean
+      profile_enabled:
+        description: 'Enable torch profiler and export profiling artifacts'
+        required: false
+        default: false
+        type: boolean
       build_type:
         description: 'Build type: daily or release.'
         required: false
@@ -226,6 +231,7 @@ jobs:
       request_id: ${{ inputs.request_id || '' }}
       vllm_ascend_ref: ${{ inputs.vllm_ascend_ref || '' }}
       aop_single_enabled: ${{ inputs.aop_enabled }}
+      profile_enabled: ${{ inputs.profile_enabled }}
 
 
   merge-benchmark-artifacts:

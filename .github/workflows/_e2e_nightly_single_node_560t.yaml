@@ -78,6 +78,11 @@ on:
         type: boolean
         default: false
         description: enable AOP hooks (capture / classify / skip-or-process)
+      profile_enabled:
+        required: false
+        type: boolean
+        default: false
+        description: force-enable the torch profiler and export profiling artifacts
       bisect_good_commit:
         required: false
         type: string
@@ -280,6 +285,19 @@ jobs:
             exit 1
           fi
 
+      - name: Enable profiling
+        if: ${{ inputs.profile_enabled }}
+        env:
+          BENCHMARK_JOB_NAME: ${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}
+        run: |
+          PROFILE_DIR="/vllm-workspace/vllm-ascend/profile_output/${BENCHMARK_JOB_NAME}"
+          {
+            echo "VLLM_ASCEND_FORCE_PROFILE=true"
+            echo "VLLM_ASCEND_PROFILE_DIR=${PROFILE_DIR}"
+            echo "VLLM_TORCH_PROFILER_WITH_STACK=1"
+          } >> "$GITHUB_ENV"
+          echo "Profiling enabled, profile output dir: ${PROFILE_DIR}"
+
       - name: Run Pytest (py-driven)
         id: pytest-driven
         if: ${{ inputs.tests != '' }}
@@ -479,3 +497,42 @@ jobs:
           if-no-files-found: warn
           retention-days: 90
           compression-level: 0
+
+      - name: Set profiling artifact timestamp
+        if: ${{ always() && inputs.profile_enabled }}
+        id: profile_ts
+        run: echo "artifact_ts=$(date -u +%Y%m%dT%H%M%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Package profiling output
+        if: ${{ always() && inputs.profile_enabled }}
+        run: |
+          PROFILE_DIR="/vllm-workspace/vllm-ascend/profile_output"
+          if [ -d "$PROFILE_DIR" ] && [ "$(ls -A "$PROFILE_DIR" 2>/dev/null)" ]; then
+            tar -czf /tmp/profile-output.tar.gz -C "$PROFILE_DIR" .
+            echo "Profiling output packaged:"
+            du -sh /tmp/profile-output.tar.gz
+          else
+            echo "Warning: No profiling output found in $PROFILE_DIR"
+          fi
+
+      - name: Upload profiling artifacts (OBS)
+        if: ${{ always() && inputs.profile_enabled }}
+        continue-on-error: true
+        uses: ascend-gha-runners/artifact/upload@v0.3
+        with:
+          access_key: ${{ secrets.OBS_ACCESS_KEY_ID }}
+          secret_key: ${{ secrets.OBS_SECRET_ACCESS_KEY }}
+          name: nightly-test-profiling-${{ inputs.name }}-${{ steps.profile_ts.outputs.artifact_ts }}
+          path: /tmp/profile-output.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload profiling artifacts (GitHub Artifacts)
+        if: ${{ always() && inputs.profile_enabled }}
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-test-profiling-${{ inputs.vllm_ascend_branch }}-${{ inputs.name }}-${{ steps.profile_ts.outputs.artifact_ts }}
+          path: /tmp/profile-output.tar.gz
+          if-no-files-found: warn
+          retention-days: 14
