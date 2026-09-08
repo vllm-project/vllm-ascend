@@ -49,6 +49,10 @@ const size_t DIM_1 = 1;
 const size_t DIM_2 = 2;
 const size_t DIM_3 = 3;
 
+const size_t ATTR_STATE_STRIDE_0 = 1;
+const size_t ATTR_STATE_STRIDE_1 = 2;
+const size_t ATTR_STATE_STRIDE_2 = 3;
+
 const size_t MAX_MTP = 16;
 
 template <typename T1, typename T2>
@@ -100,6 +104,9 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::GetShapeAttrsInfo()
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(GetScale() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid GetScale."),
+                return ge::GRAPH_FAILED);
+
+    OP_CHECK_IF(GetStateStrides() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid GetStateStrides."),
                 return ge::GRAPH_FAILED);
 
     OP_CHECK_IF(GetOptionalInput() != ge::GRAPH_SUCCESS, OP_LOGE(inputParams_.opName, "Invalid GetOptionalInput."),
@@ -468,6 +475,49 @@ ge::graphStatus RecurrentGatedDeltaRuleTiling::GetScale()
     return ge::GRAPH_SUCCESS;
 }
 
+ge::graphStatus RecurrentGatedDeltaRuleTiling::GetStateStrides()
+{
+    auto attrs = context_->GetAttrs();
+    OP_CHECK_IF(attrs == nullptr, OP_LOGE(context_->GetNodeName(), "attrs is null"), return ge::GRAPH_FAILED);
+
+    const int64_t *stride0Ptr = attrs->GetAttrPointer<int64_t>(ATTR_STATE_STRIDE_0);
+    const int64_t *stride1Ptr = attrs->GetAttrPointer<int64_t>(ATTR_STATE_STRIDE_1);
+    const int64_t *stride2Ptr = attrs->GetAttrPointer<int64_t>(ATTR_STATE_STRIDE_2);
+    OP_CHECK_IF(stride0Ptr == nullptr || stride1Ptr == nullptr || stride2Ptr == nullptr,
+                OP_LOGE(context_->GetNodeName(), "state stride attrs must not be null"), return ge::GRAPH_FAILED);
+    OP_CHECK_IF(*stride0Ptr <= 0 || *stride1Ptr <= 0 || *stride2Ptr <= 0,
+                OP_LOGE(context_->GetNodeName(), "state strides must be positive, but got [%lld, %lld, %lld]",
+                        static_cast<long long>(*stride0Ptr), static_cast<long long>(*stride1Ptr),
+                        static_cast<long long>(*stride2Ptr)),
+                return ge::GRAPH_FAILED);
+
+    const uint64_t stride0 = static_cast<uint64_t>(*stride0Ptr);
+    const uint64_t stride1 = static_cast<uint64_t>(*stride1Ptr);
+    const uint64_t stride2 = static_cast<uint64_t>(*stride2Ptr);
+    OP_CHECK_IF(stride2 != tilingData_.dk,
+                OP_LOGE(context_->GetNodeName(),
+                        "state must be contiguous across its last two dimensions: expected stride2=%u, got %llu",
+                        tilingData_.dk, static_cast<unsigned long long>(stride2)),
+                return ge::GRAPH_FAILED);
+
+    const uint64_t headSpan = static_cast<uint64_t>(tilingData_.dv) * stride2;
+    OP_CHECK_IF(stride1 < headSpan,
+                OP_LOGE(context_->GetNodeName(), "state heads overlap: stride1=%llu, required span=%llu",
+                        static_cast<unsigned long long>(stride1), static_cast<unsigned long long>(headSpan)),
+                return ge::GRAPH_FAILED);
+    OP_CHECK_IF(stride0 < headSpan ||
+                    (tilingData_.nv > 1 && stride1 > (stride0 - headSpan) / (tilingData_.nv - 1)),
+                OP_LOGE(context_->GetNodeName(), "state blocks overlap: stride0=%llu, stride1=%llu, nv=%u",
+                        static_cast<unsigned long long>(stride0), static_cast<unsigned long long>(stride1),
+                        tilingData_.nv),
+                return ge::GRAPH_FAILED);
+
+    tilingData_.stateStride0 = stride0;
+    tilingData_.stateStride1 = stride1;
+    tilingData_.stateStride2 = stride2;
+    return ge::GRAPH_SUCCESS;
+}
+
 ge::graphStatus RecurrentGatedDeltaRuleTiling::GetOptionalInput()
 {
     if (context_->GetOptionalInputDesc(G_INDEX) == nullptr) {
@@ -508,6 +558,12 @@ void RecurrentGatedDeltaRuleTiling::PrintTilingData()
     OP_LOGD(context_->GetNodeName(), "hasGama: [%u]", tilingData_.hasGama);
     OP_LOGD(context_->GetNodeName(), "hasGamaK: [%u]", tilingData_.hasGamaK);
     OP_LOGD(context_->GetNodeName(), "hasAcceptedTokens: [%u]", tilingData_.hasAcceptedTokens);
+    OP_LOGD(context_->GetNodeName(), "stateStride0: [%llu]",
+            static_cast<unsigned long long>(tilingData_.stateStride0));
+    OP_LOGD(context_->GetNodeName(), "stateStride1: [%llu]",
+            static_cast<unsigned long long>(tilingData_.stateStride1));
+    OP_LOGD(context_->GetNodeName(), "stateStride2: [%llu]",
+            static_cast<unsigned long long>(tilingData_.stateStride2));
 }
 
 int64_t RecurrentGatedDeltaRuleTiling::CalcFixedUbBytes(int64_t aNv, int64_t aDv, int64_t aDk) const

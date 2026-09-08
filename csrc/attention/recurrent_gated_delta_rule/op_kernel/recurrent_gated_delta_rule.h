@@ -62,6 +62,9 @@ public:
         NV_ = tilingData->nv;
         realV_ = tilingData->dv;
         scale_ = tilingData->scale;
+        stateStride0_ = tilingData->stateStride0;
+        stateStride1_ = tilingData->stateStride1;
+        stateStride2_ = tilingData->stateStride2;
         hasAcceptedTokens_ = (tilingData->hasAcceptedTokens == 1);
         hasGama_ = (tilingData->hasGama == 1);
         hasGamaK_ = (tilingData->hasGamaK == 1);
@@ -452,7 +455,7 @@ private:
         }
         uint64_t nextVOffset = 0;
         uint32_t nextSingleV = realV_ > vStep_ ? vStep_ : realV_;
-        uint64_t nextStateOffset = ((stateOffset * NV_ + head_i) * realV_) * realK_;
+        uint64_t nextStateOffset = stateOffset * stateStride0_ + head_i * stateStride1_;
         PrefetchState(nextStateOffset, nextSingleV);
         for (uint64_t v_i = 0; v_i < realV_; v_i += vStep_) {
             uint32_t curSingleV = v_i + vStep_ > realV_ ? realV_ - v_i : vStep_;
@@ -460,7 +463,8 @@ private:
             nextVOffset = v_i + vStep_;
             if (nextVOffset < realV_) {
                 nextSingleV = nextVOffset + vStep_ > realV_ ? realV_ - nextVOffset : vStep_;
-                nextStateOffset = ((stateOffset * NV_ + head_i) * realV_ + nextVOffset) * realK_;
+                nextStateOffset =
+                    stateOffset * stateStride0_ + head_i * stateStride1_ + nextVOffset * stateStride2_;
                 PrefetchState(nextStateOffset, nextSingleV);
             }
             uint64_t pendingAttnOffset = 0;
@@ -473,7 +477,8 @@ private:
                 uint64_t curVOffset = (seq_i - seq0) * alignV_ + v_i;
                 uint64_t attnOffset = (seq_i * NV_ + head_i) * realV_ + v_i;
                 uint64_t curStateOutOffset =
-                    ((ssmStateIndicesGm_.GetValue(seq_i) * NV_ + head_i) * realV_ + v_i) * realK_;
+                    static_cast<uint64_t>(ssmStateIndicesGm_.GetValue(seq_i)) * stateStride0_ +
+                    head_i * stateStride1_ + v_i * stateStride2_;
                 gama_ = hasGama_ ? gamaInUb.GetValue(gbOffset) : 1;
                 beta_ = betaInUb.GetValue(gbOffset);
                 Compute(curSingleV, curQKOffset, curVOffset);
@@ -576,6 +581,9 @@ private:
     float beta_;
     float scale_;
     uint64_t blockIdx;
+    uint64_t stateStride0_;
+    uint64_t stateStride1_;
+    uint64_t stateStride2_;
 };
 } // namespace RecurrentGatedDeltaRule
 #endif

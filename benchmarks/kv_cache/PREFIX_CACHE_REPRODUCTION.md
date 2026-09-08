@@ -22,7 +22,7 @@ cache-group/layer-type policy semantics for attention and recurrent state:
   caches;
 - scheduler chunk clipping at the next configured checkpoint boundary; this is
   a required precondition for state materialization, not proof that the current
-  NPU kernel writes the correct state there;
+  NPU build writes the correct state there;
 - intersection of all groups' legal prefixes before a request resumes;
 - small-page states `EMPTY`, `EVICTABLE`, and `USED`;
 - request-associated placement and the five allocation tiers, in order;
@@ -46,7 +46,8 @@ free lists by object identity, and removes upstream hash entries whenever the
 policy evicts a page. The scheduler path clips a prefill at each effective
 recurrent checkpoint boundary; without that stop, metadata at an intermediate
 slot could falsely imply a state checkpoint. Correct NPU state materialization
-is still unverified because of the GDN stride blocker described below. Failed
+is still unverified; stride-aware Triton and AscendC implementations are now in
+the source tree, but have not yet passed the device gates described below. Failed
 multi-group operations release touched/consumed references and restore manager
 bookkeeping; cache entries already evicted while preparing the failed operation
 remain evicted. The mode is default-off and uses an exact-LCM physical large
@@ -114,9 +115,11 @@ been reproduced. In particular:
   not published because it contains environment-derived metadata;
 - the address-table allocator remains the practical 27B experiment, but it
   does not yet carry this exact all-children large-page eviction policy;
-- the current custom GDN decode operator does not consume the leading state
-  stride used by the heterogeneous view, so end-to-end NPU correctness and
-  serving performance remain blocked;
+- the AscendC GDN source now consumes the state view's element strides through
+  Torch, ACLNN/L0, tiling, and both kernel variants, and a `triton-strided`
+  fallback is available; end-to-end NPU correctness and serving performance
+  remain unverified until the rebuilt operator passes padded-stride canary and
+  exact-token tests;
 - no Jenga paper utilization or throughput figure is reused as a result of
   this project.
 
@@ -125,7 +128,7 @@ subset plus an experimental whole-page runtime and scheduler integration. It
 is not a reproduction of every model path or every feature in the Jenga
 artifact. The dependency-free policy/runtime tests do not import torch or
 vLLM; the real coordinator integration test requires the repository's pinned
-vLLM/torch environment. A formal NPU result requires a stride-aware GDN
-kernel, a geometry that can hold the exact-LCM layout (or a separately
-validated address-table adaptation), and a fresh correctness-first serving
-benchmark.
+vLLM/torch environment. A formal NPU result requires rebuilding and validating
+the stride-aware GDN implementation, a geometry that can hold the exact-LCM
+layout (or a separately validated address-table adaptation), and a fresh
+correctness-first serving benchmark.

@@ -27,12 +27,13 @@ See [PREFIX_CACHE_REPRODUCTION.md](PREFIX_CACHE_REPRODUCTION.md) for commands
 and the precise evidence boundary.
 
 The framework-side allocator and address-translation tests pass, and offline
-trace replay shows workload-dependent capacity potential.  End-to-end serving
-performance is **not** a validated result: a correctness gate found that the
-custom GDN decode operator treats a page-strided recurrent-state view as dense.
-Until that operator accepts and applies the leading state stride, throughput,
-TTFT, TPOT, and generated-text comparisons from this prototype are diagnostic
-only.
+trace replay shows workload-dependent capacity potential.  The source tree now
+contains two remedies for the GDN leading-stride blocker: a selectable
+`triton-strided` decode backend for early correctness work and stride plumbing
+through the AscendC Torch adapter, ACLNN/L0 interface, tiling data, and both
+generic and arch35 kernels.  End-to-end NPU serving performance is **still not
+a validated result** until the device-side tests and exact-token gates below
+have been run on the rebuilt custom operator.
 
 Generated datasets, prompts, model outputs, server logs, profiles, plots, and
 result archives must be written under `benchmarks/kv_cache/datasets/` or
@@ -125,11 +126,26 @@ The normal path is unchanged unless the experiment is explicitly enabled:
 ```shell
 export VLLM_ASCEND_ENABLE_TYPED_KV_CACHE=1
 export VLLM_ASCEND_TYPED_KV_CACHE_MODE=address_table
+export VLLM_ASCEND_GDN_DECODE_BACKEND=triton-strided
 ```
 
-Use `static_partition` for the fixed-region comparison.  The MVP rejects
-prefix caching, cache events, speculative decoding, KV transfer/offload,
-DCP/PCP/PP, packed KV tensors, and cross attention.
+`VLLM_ASCEND_GDN_DECODE_BACKEND` accepts `ascendc` (the default) and
+`triton-strided`.  Ordinary decode uses the packed Triton decode kernel under
+`triton-strided`; MTP/speculative and mixed decode use the general fused
+recurrent kernel.  Select the Triton backend first for eager correctness
+validation.  Rebuild the custom operators and select `ascendc` for the formal
+performance run.
+
+Use `static_partition` for the fixed-region comparison.  These two no-prefix
+modes admit one fail-closed speculative subset for device validation: serial,
+fixed-width Qwen3-Next or Qwen3.5 MTP with matching target/draft families,
+`mamba_cache_mode=none`, and
+`1 <= num_speculative_tokens <= 15`.  Every
+Mamba group must reserve exactly `num_speculative_tokens` additional state
+pages.  Parallel drafting, dynamic speculative widths, other speculative
+methods/models, and `align`/`all` Mamba modes remain rejected.  The MVP also
+rejects cache events, KV transfer/offload, DCP/PCP/PP, packed KV tensors, and
+cross attention.
 
 To exercise the experimental exact-LCM prefix path instead, enable vLLM prefix
 caching and select:
@@ -163,3 +179,69 @@ Do not publish serving performance unless all of the following pass:
 Raw experiment artifacts belong under `benchmarks/kv_cache/results/`; source
 datasets belong under `benchmarks/kv_cache/datasets/`.  Both locations are
 ignored so that code review cannot accidentally publish logs or prompt data.
+
+## 7. GDN stride validation sequence
+
+Run both direct-kernel regressions after rebuilding vLLM Ascend in an NPU
+environment.  They use a nonzero storage offset, a padded leading stride, low
+and high nonzero state indices, graph-padding rows, and canaries around every
+state page.  Both ordinary decode and MTP-style state-table cases are covered:
+
+```shell
+pytest -sv \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/triton/test_fused_recurrent_gdn_strided_state.py
+
+pytest -sv \
+  tests/e2e/nightly/single_node/ops/singlecard_ops/test_recurrent_gated_delta_rule_strided.py
+```
+
+Then run the deterministic eager gate once per allocation mode with the
+stride-aware Triton backend.  `precision.json` records the selected backend and
+the generated token IDs, and `analyze_jenga_precision.py` reports the first
+mismatching token rather than comparing only final text:
+
+```shell
+MODE=static_partition RUN_LABEL=static-triton-a \
+MODEL_PATH=/path/to/model WORKLOAD_DIR=/path/to/workloads \
+GDN_DECODE_BACKEND=triton-strided \
+  bash benchmarks/kv_cache/run_jenga_precision.sh
+
+MODE=static_partition RUN_LABEL=static-triton-b \
+MODEL_PATH=/path/to/model WORKLOAD_DIR=/path/to/workloads \
+GDN_DECODE_BACKEND=triton-strided \
+  bash benchmarks/kv_cache/run_jenga_precision.sh
+
+MODE=address_table RUN_LABEL=address-triton-a \
+MODEL_PATH=/path/to/model WORKLOAD_DIR=/path/to/workloads \
+GDN_DECODE_BACKEND=triton-strided \
+  bash benchmarks/kv_cache/run_jenga_precision.sh
+
+python benchmarks/kv_cache/analyze_jenga_precision.py \
+  --static-a benchmarks/kv_cache/results/jenga-precision/static-triton-a/precision.json \
+  --static-b benchmarks/kv_cache/results/jenga-precision/static-triton-b/precision.json \
+  --address benchmarks/kv_cache/results/jenga-precision/address-triton-a/precision.json \
+  --output benchmarks/kv_cache/results/jenga-precision/triton-comparison.json
+```
+
+Run a separate three-run comparison for MTP by supplying the same speculative
+configuration to every invocation (do not mix ordinary and MTP JSON files in
+one analysis):
+
+```shell
+SPECULATIVE_CONFIG='{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
+MODE=address_table RUN_LABEL=address-triton-mtp-a \
+MODEL_PATH=/path/to/model WORKLOAD_DIR=/path/to/workloads \
+GDN_DECODE_BACKEND=triton-strided \
+  bash benchmarks/kv_cache/run_jenga_precision.sh
+```
+
+Repeat that command for `static_partition` twice and `address_table` once, then
+pass those three `precision.json` files to the same analyzer.  The script
+records the speculative configuration, and the analyzer rejects comparisons
+whose backend, seed, output length, or speculative configuration differs.
+
+If ACL Graph capture is unstable, keep this gate in eager mode as the script
+does by default.  Once exact token IDs match, rebuild and repeat it with
+`GDN_DECODE_BACKEND=ascendc`.  Only after that AscendC gate passes should
+`run_jenga_paper_style.sh` be used for reportable performance measurements; its
+GDN backend defaults explicitly to `ascendc`.

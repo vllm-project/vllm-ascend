@@ -11,6 +11,17 @@ def load(path: Path) -> dict:
 
 
 def compare(reference: dict, candidate: dict) -> dict:
+    for field in (
+        "seed",
+        "output_tokens",
+        "gdn_decode_backend",
+        "speculative_config",
+    ):
+        if reference.get(field) != candidate.get(field):
+            raise ValueError(
+                f"precision runs use different {field}: {reference.get(field)!r} != {candidate.get(field)!r}"
+            )
+
     reference_cases = {item["case"]: item for item in reference["results"]}
     candidate_cases = {item["case"]: item for item in candidate["results"]}
     if reference_cases.keys() != candidate_cases.keys():

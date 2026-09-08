@@ -1,10 +1,11 @@
 # Runtime MVP design: typed KV cache pages on Ascend
 
-> **Status note (2026-09-02):** This is a design-history document.  The first
+> **Status note (2026-09-08):** This is a design-history document.  The first
 > checkpoint used exact-LCM superpages; the current runtime mode uses a shared
 > byte arena with group-specific address tables.  Framework-side allocation
-> and translation tests pass, but formal serving performance remains blocked
-> by the GDN leading-stride correctness issue described at the end.
+> and translation tests pass.  Two GDN stride-aware implementations are now in
+> the source tree, but formal serving performance remains gated on rebuilt NPU
+> operator tests and exact-token comparisons described at the end.
 
 The end-to-end experiment is gated by
 `VLLM_ASCEND_ENABLE_TYPED_KV_CACHE=1` and remains disabled by default. The
@@ -24,9 +25,9 @@ the typed allocator switch differs.
 The baseline is vLLM-Ascend PR #14340, not the older fully contiguous layout.
 PR #14340 provides the framework-side layout prerequisite for non-contiguous
 Attention and Mamba views. Every device operator must still honor that layout;
-the current GDN decode kernel is a known exception. The allocator experiment
-asks whether the scheduler can stop charging every group the same physical
-page size once that kernel contract is satisfied.
+the original GDN decode kernel was the exception that exposed the blocker. The
+allocator experiment asks whether the scheduler can stop charging every group
+the same physical page size once that kernel contract is validated on device.
 
 The target result is a reproducible improvement in useful KV cache capacity or
 maximum concurrency without a material latency/throughput regression.
@@ -177,10 +178,13 @@ The initial performance guardrail is no more than 2% throughput/TPOT regression
 and no more than 3% TTFT regression. If bounded superpages beat exact LCM, keep
 the bounded design; matching the paper's allocator literally is not the goal.
 
-## Later phases
+## Later phases (original roadmap, updated status)
 
-1. Add prefix-cache hash ownership and type-aware eviction.
-2. Add speculative decoding and Mamba external-cache loading.
+1. Prefix-cache hash ownership and type-aware eviction now have an
+   exact-LCM whole-page experimental implementation; partial-block COW and
+   production validation remain.
+2. Fixed-width serial Qwen3-Next/Qwen3.5 MTP now has a no-prefix validation
+   path; broader speculative decoding and Mamba external-cache loading remain.
 3. Add KV offload/connector address metadata.
 4. Validate DCP/PCP and multi-rank deterministic allocation.
 5. Decide whether the abstraction belongs upstream in vLLM or remains an
@@ -243,7 +247,7 @@ post-#14340 custom-op build plus per-decode state canaries at the Attention
 slot mapping and all three Mamba state indices. Full QPS and maximum-concurrency
 runs remain blocked until deterministic token IDs match.
 
-## Address-table checkpoint and correctness blocker (2026-09-02)
+## Address-table checkpoint and GDN stride remediation (2026-09-08)
 
 The Qwen3.5-27B cache geometry makes an exact-LCM superpage impractical:
 410,517,504 bytes (391.5 MiB) exceeds the 392,691,712-byte (374.5 MiB) managed
@@ -259,7 +263,17 @@ elements; the 15,360-element (61,440-byte) difference is page padding. The
 custom kernel receives no leading-stride parameter and advances by the dense
 size, so nonzero physical state indices access the wrong bytes.
 
-The required fix is to pass `state_stride_0` through host validation and tiling
-and use it for both state reads and writes. Until padded-stride kernel tests and
-cross-mode exact-token checks pass, all end-to-end throughput, TTFT, TPOT,
-E2EL, and accuracy observations are diagnostic rather than performance claims.
+The implementation now passes the state view's first three element strides
+from the Torch adapter through ACLNN/L0 and tiling, and both generic and arch35
+kernels use them for state reads and writes.  A separate `triton-strided`
+backend provides a correctness-first path: packed recurrent decode for ordinary
+decode and the general fused recurrent operator for MTP/speculative decode.
+Typed-cache MTP is deliberately limited to matching target/draft families for
+fixed-width serial Qwen3-Next and Qwen3.5 MTP
+(`1 <= num_speculative_tokens <= 15`) in no-prefix
+`address_table`/`static_partition` mode with `mamba_cache_mode=none`;
+Prefix/Jenga, aligned-state copying, dynamic widths,
+and other speculative methods remain rejected.
+Until padded-stride kernel tests and cross-mode exact-token checks pass on NPU,
+all end-to-end throughput, TTFT, TPOT, E2EL, and accuracy observations remain
+diagnostic rather than performance claims.

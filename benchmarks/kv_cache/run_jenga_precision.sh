@@ -16,6 +16,8 @@ PORT=${PORT:-18085}
 SEED=${SEED:-20260901}
 OUTPUT_TOKENS=${OUTPUT_TOKENS:-8}
 CASES=${CASES:-"512 2048 8192 32760"}
+GDN_DECODE_BACKEND=${GDN_DECODE_BACKEND:-triton-strided}
+SPECULATIVE_CONFIG=${SPECULATIVE_CONFIG:-}
 
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
 
@@ -31,8 +33,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+speculative_args=()
+if [[ -n "${SPECULATIVE_CONFIG}" ]]; then
+  speculative_args+=(--speculative-config "${SPECULATIVE_CONFIG}")
+fi
+
 VLLM_ASCEND_ENABLE_TYPED_KV_CACHE=1 \
 VLLM_ASCEND_TYPED_KV_CACHE_MODE="${MODE}" \
+VLLM_ASCEND_GDN_DECODE_BACKEND="${GDN_DECODE_BACKEND}" \
 VLLM_BATCH_INVARIANT=1 \
 VLLM_ENABLE_V1_MULTIPROCESSING=0 \
   vllm serve "${MODEL_PATH}" \
@@ -48,6 +56,7 @@ VLLM_ENABLE_V1_MULTIPROCESSING=0 \
     --skip-mm-profiling \
     --no-enable-prefix-caching \
     --enforce-eager \
+    "${speculative_args[@]}" \
     >"${RUN_DIR}/server.log" 2>&1 &
 server_pid=$!
 
@@ -63,7 +72,8 @@ done
 curl --fail --silent "http://127.0.0.1:${PORT}/health" >/dev/null
 
 python - "${WORKLOAD_DIR}" "${RUN_DIR}/precision.json" \
-  "${PORT}" "${SEED}" "${OUTPUT_TOKENS}" "${MODE}" "${RUN_LABEL}" "${CASES}" <<'PY'
+  "${PORT}" "${SEED}" "${OUTPUT_TOKENS}" "${MODE}" "${RUN_LABEL}" "${CASES}" \
+  "${GDN_DECODE_BACKEND}" "${SPECULATIVE_CONFIG}" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -80,6 +90,8 @@ output_tokens = int(sys.argv[5])
 mode = sys.argv[6]
 run_label = sys.argv[7]
 selected_cases = set(sys.argv[8].split())
+gdn_decode_backend = sys.argv[9]
+speculative_config = sys.argv[10] or None
 
 cases = (
     ("512", "longbench-512.jsonl"),
@@ -141,6 +153,8 @@ for label, filename in cases:
             {
                 "mode": mode,
                 "run_label": run_label,
+                "gdn_decode_backend": gdn_decode_backend,
+                "speculative_config": speculative_config,
                 "seed": seed,
                 "output_tokens": output_tokens,
                 "results": results,

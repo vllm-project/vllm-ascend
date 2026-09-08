@@ -80,6 +80,9 @@ env_variables: dict[str, Callable[[], Any]] = {
     # ``jenga_lcm_prefix`` enables the exact-LCM two-level layout used by the
     # experimental cache-group prefix-policy subset.
     "VLLM_ASCEND_TYPED_KV_CACHE_MODE": lambda: os.getenv("VLLM_ASCEND_TYPED_KV_CACHE_MODE", "address_table"),
+    # GDN recurrent decode implementation. ``ascendc`` keeps the optimized
+    # custom operator; ``triton-strided`` uses vLLM's stride-aware kernels.
+    "VLLM_ASCEND_GDN_DECODE_BACKEND": lambda: os.getenv("VLLM_ASCEND_GDN_DECODE_BACKEND", "ascendc"),
     # Whether to enable msMonitor tool to monitor the performance of vllm-ascend.
     "MSMONITOR_USE_DAEMON": lambda: bool(int(os.getenv("MSMONITOR_USE_DAEMON", "0"))),
     # Whether to enable MLAPO optimization for DeepSeek W8A8 series models.

@@ -34,11 +34,12 @@ extern "C" {
  * @param [out] executor: 返回op执行器，包含了算子计算流程。
  * @return aclnnStatus: 返回状态码
  */
+// stateStride0/1/2 are state view strides measured in elements.
 __attribute__((visibility("default"))) aclnnStatus aclnnRecurrentGatedDeltaRuleGetWorkspaceSize(
     const aclTensor *query, const aclTensor *key, const aclTensor *value, const aclTensor *beta, aclTensor *stateRef,
     const aclTensor *actualSeqLengths, const aclTensor *ssmStateIndices, const aclTensor *g, const aclTensor *gk,
-    const aclTensor *numAcceptedTokens, float scaleValue, aclTensor *out, uint64_t *workspaceSize,
-    aclOpExecutor **executor);
+    const aclTensor *numAcceptedTokens, float scaleValue, int64_t stateStride0, int64_t stateStride1,
+    int64_t stateStride2, aclTensor *out, uint64_t *workspaceSize, aclOpExecutor **executor);
 
 /**
  * @brief 

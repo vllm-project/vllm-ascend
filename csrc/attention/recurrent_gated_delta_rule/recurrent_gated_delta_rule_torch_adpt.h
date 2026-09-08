@@ -32,6 +32,32 @@ at::Tensor npu_recurrent_gated_delta_rule(
     const c10::optional<at::Tensor>& gk)
 {
     TORCH_CHECK(scale.has_value(), "scale cannot be empty.");
+    constexpr int64_t stateDimNum = 4;
+    TORCH_CHECK(state.dim() == stateDimNum, "state must be a 4D tensor, but got ", state.dim(), " dimensions.");
+    for (int64_t dim = 0; dim < stateDimNum; ++dim) {
+        TORCH_CHECK(state.size(dim) > 0, "state dimension ", dim, " must be positive, but got ", state.size(dim), ".");
+    }
+
+    const int64_t stateStride0 = state.stride(0);
+    const int64_t stateStride1 = state.stride(1);
+    const int64_t stateStride2 = state.stride(2);
+    const int64_t stateStride3 = state.stride(3);
+    TORCH_CHECK(stateStride0 > 0 && stateStride1 > 0 && stateStride2 > 0 && stateStride3 > 0,
+                "state strides must be positive, but got [", stateStride0, ", ", stateStride1, ", ", stateStride2,
+                ", ", stateStride3, "].");
+    TORCH_CHECK(stateStride3 == 1, "state must be contiguous in its last dimension, but got stride(3)=",
+                stateStride3, ".");
+    TORCH_CHECK(stateStride2 == state.size(3),
+                "state must be contiguous across its last two dimensions; expected stride(2)=", state.size(3),
+                ", but got ", stateStride2, ".");
+    TORCH_CHECK(stateStride2 <= stateStride1 / state.size(2),
+                "state heads must not overlap; stride(1)=", stateStride1, ", stride(2)=", stateStride2,
+                ", size(2)=", state.size(2), ".");
+    const int64_t stateHeadSpan = state.size(2) * stateStride2;
+    TORCH_CHECK(stateStride0 >= stateHeadSpan &&
+                    (state.size(1) == 1 || stateStride1 <= (stateStride0 - stateHeadSpan) / (state.size(1) - 1)),
+                "state blocks must not overlap; stride(0)=", stateStride0, ", stride(1)=", stateStride1,
+                ", size(1)=", state.size(1), ".");
 
     auto options = value.options().dtype(at::ScalarType::BFloat16);
     at::Tensor output = at::empty(value.sizes(), options);
@@ -48,6 +74,9 @@ at::Tensor npu_recurrent_gated_delta_rule(
                  gk,
                  num_accepted_tokens,
                  scale_real,
+                 stateStride0,
+                 stateStride1,
+                 stateStride2,
                  output);
     return output;
 }

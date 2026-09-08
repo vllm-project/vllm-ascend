@@ -94,6 +94,7 @@ protected:
     ge::graphStatus AnalyzeShapes();
     ge::graphStatus CalUbSize();
     ge::graphStatus GetScale();
+    ge::graphStatus GetStateStrides();
     ge::graphStatus GetOptionalInput();
     ge::graphStatus AnalyzeFormat();
     //Host tiling refactor helpers: split shape validation/fill and UB calculation.

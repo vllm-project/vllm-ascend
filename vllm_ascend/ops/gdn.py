@@ -23,11 +23,12 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
-from vllm.triton_utils import triton
+from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
@@ -35,6 +36,132 @@ from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
+
+
+def _get_gdn_decode_backend() -> str:
+    backend = envs_ascend.VLLM_ASCEND_GDN_DECODE_BACKEND.strip().lower()
+    if backend == "triton":
+        # Backward-compatible spelling used by early experiments.
+        backend = "triton-strided"
+    if backend not in {"ascendc", "triton-strided"}:
+        raise ValueError(
+            f"VLLM_ASCEND_GDN_DECODE_BACKEND must be one of 'ascendc' or 'triton-strided', got {backend!r}."
+        )
+    if backend == "triton-strided" and not HAS_TRITON:
+        raise RuntimeError(
+            "VLLM_ASCEND_GDN_DECODE_BACKEND='triton-strided' requires an active "
+            "Triton backend, but vllm.triton_utils.HAS_TRITON is False."
+        )
+    return backend
+
+
+# Backend selection is process-wide and fixed before graph capture. Do not read
+# the environment from the recurrent decode hot path.
+_GDN_DECODE_BACKEND = _get_gdn_decode_backend()
+
+if _GDN_DECODE_BACKEND == "triton-strided":
+    try:
+        from vllm.third_party.flash_linear_attention.ops.fused_recurrent import (
+            fused_recurrent_gated_delta_rule,
+            fused_recurrent_gated_delta_rule_packed_decode,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            "The selected Triton GDN decode backend requires vLLM's "
+            "fused_recurrent_gated_delta_rule and "
+            "fused_recurrent_gated_delta_rule_packed_decode operators."
+        ) from exc
+else:
+    fused_recurrent_gated_delta_rule = None
+    fused_recurrent_gated_delta_rule_packed_decode = None
+
+
+def _validate_triton_state_layout(state: torch.Tensor) -> None:
+    """Reject layouts that the pinned Triton kernels cannot address safely."""
+    if state.ndim != 4:
+        raise ValueError(f"GDN recurrent state must be 4D, got {state.ndim} dimensions.")
+
+    num_value_heads, value_dim, key_dim = state.shape[1:]
+    expected_inner_strides = (value_dim * key_dim, key_dim, 1)
+    if state.stride()[1:] != expected_inner_strides:
+        raise ValueError(
+            "The triton-strided GDN backend supports a padded leading stride "
+            "only; expected dense inner state strides "
+            f"{expected_inner_strides}, got {state.stride()[1:]}."
+        )
+
+    dense_state_elements = num_value_heads * value_dim * key_dim
+    if state.stride(0) < dense_state_elements:
+        raise ValueError(
+            "GDN recurrent state pages must not overlap; expected stride(0) "
+            f">= {dense_state_elements}, got {state.stride(0)}."
+        )
+
+
+def _run_triton_recurrent(
+    *,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    state: torch.Tensor,
+    scale: float,
+    cu_seqlens: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Run the stride-aware Triton recurrent kernel with fused Q/K norm."""
+    if fused_recurrent_gated_delta_rule is None:
+        raise RuntimeError("The Triton GDN recurrent operator was not loaded.")
+    _validate_triton_state_layout(state)
+    recurrent_out, _ = fused_recurrent_gated_delta_rule(
+        q=query,
+        k=key,
+        v=value,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=state,
+        inplace_final_state=True,
+        cu_seqlens=cu_seqlens,
+        ssm_state_indices=ssm_state_indices,
+        num_accepted_tokens=num_accepted_tokens,
+        use_qk_l2norm_in_kernel=True,
+    )
+    return recurrent_out
+
+
+def _run_triton_packed_decode(
+    *,
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    state: torch.Tensor,
+    scale: float,
+    ssm_state_indices: torch.Tensor,
+    out: torch.Tensor,
+) -> torch.Tensor:
+    """Run one-token-per-request decode without materializing Q/K/V/g/beta."""
+    if fused_recurrent_gated_delta_rule_packed_decode is None:
+        raise RuntimeError("The Triton GDN packed-decode operator was not loaded.")
+    _validate_triton_state_layout(state)
+    packed_out, _ = fused_recurrent_gated_delta_rule_packed_decode(
+        mixed_qkv=mixed_qkv,
+        a=a,
+        b=b,
+        A_log=A_log,
+        dt_bias=dt_bias,
+        scale=scale,
+        initial_state=state,
+        out=out,
+        ssm_state_indices=ssm_state_indices,
+        use_qk_l2norm_in_kernel=True,
+    )
+    # The rest of Ascend GDN uses the flattened varlen layout [1, T, HV, V].
+    return packed_out.transpose(0, 1)
 
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
@@ -418,27 +545,43 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
-
         # 2. Recurrent attention
-        g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
-        if spec_sequence_masks is not None:
-            if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
-                g_spec = g
-                beta_spec = beta
-                g_non_spec = None
-                beta_non_spec = None
-            else:
-                g_spec = g.index_select(1, spec_token_indx)
-                beta_spec = beta.index_select(1, spec_token_indx)
-                g_non_spec = g.index_select(1, non_spec_token_indx)
-                beta_non_spec = beta.index_select(1, non_spec_token_indx)
+        # A pure non-spec decode has one token per request, so vLLM's packed
+        # Triton kernel can consume the post-convolution projection and raw
+        # gates directly. Speculative and mixed batches need the general
+        # stride-aware recurrent kernel instead.
+        use_packed_triton_decode = (
+            _GDN_DECODE_BACKEND == "triton-strided"
+            and spec_sequence_masks is None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes > 0
+        )
+        packed_decode_wrote_output = False
+
+        if use_packed_triton_decode:
+            query_spec = key_spec = value_spec = None
+            query_non_spec = key_non_spec = value_non_spec = None
+            g_spec = beta_spec = g_non_spec = beta_non_spec = None
         else:
-            g_spec = None
-            beta_spec = None
-            g_non_spec = g
-            beta_non_spec = beta
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
+            g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
+            if spec_sequence_masks is not None:
+                if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
+                    g_spec = g
+                    beta_spec = beta
+                    g_non_spec = None
+                    beta_non_spec = None
+                else:
+                    g_spec = g.index_select(1, spec_token_indx)
+                    beta_spec = beta.index_select(1, spec_token_indx)
+                    g_non_spec = g.index_select(1, non_spec_token_indx)
+                    beta_non_spec = beta.index_select(1, non_spec_token_indx)
+            else:
+                g_spec = None
+                beta_spec = None
+                g_non_spec = g
+                beta_non_spec = beta
 
         split_non_spec = (
             spec_sequence_masks is None and attn_metadata.num_prefills > 0 and attn_metadata.num_decodes > 0
@@ -447,25 +590,50 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
-            query_spec = l2norm_fwd(query_spec)
-            key_spec = l2norm_fwd(key_spec)
-            # Dispatches to the vllm-ascend AscendC custom operator
-            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-            # The custom op extends dtype support (e.g. float32 state) and is
-            # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
-            core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
-                query=query_spec.squeeze(0),
-                key=key_spec.squeeze(0),
-                value=value_spec.squeeze(0),
-                g=g_spec.squeeze(0),
-                beta=beta_spec.squeeze(0),
-                state=ssm_state,
-                scale=key_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=spec_state_indices_tensor.flatten(),
-                num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32),
-            ).unsqueeze(0)
+            assert query_spec is not None
+            assert key_spec is not None
+            assert value_spec is not None
+            assert g_spec is not None
+            assert beta_spec is not None
+            assert spec_state_indices_tensor is not None
+            num_accepted_tokens = spec_causal_conv1d_meta.num_accepted_tokens.to(torch.int32)
+            if _GDN_DECODE_BACKEND == "triton-strided":
+                spec_query_start_loc = attn_metadata.spec_query_start_loc
+                assert spec_query_start_loc is not None
+                core_attn_out_spec = _run_triton_recurrent(
+                    query=query_spec,
+                    key=key_spec,
+                    value=value_spec,
+                    g=g_spec,
+                    beta=beta_spec,
+                    state=ssm_state,
+                    scale=key_spec.shape[-1] ** -0.5,
+                    cu_seqlens=spec_query_start_loc,
+                    # Keep request/token strides: speculative decoding uses one
+                    # physical state slot per candidate token.
+                    ssm_state_indices=spec_state_indices_tensor,
+                    num_accepted_tokens=num_accepted_tokens,
+                )
+            else:
+                query_spec = l2norm_fwd(query_spec)
+                key_spec = l2norm_fwd(key_spec)
+                actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
+                # Dispatches to the vllm-ascend AscendC custom operator
+                # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+                # The custom op extends dtype support (e.g. float32 state) and is
+                # loaded at runtime via ASCEND_CUSTOM_OPP_PATH.
+                core_attn_out_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                    query=query_spec.squeeze(0),
+                    key=key_spec.squeeze(0),
+                    value=value_spec.squeeze(0),
+                    g=g_spec.squeeze(0),
+                    beta=beta_spec.squeeze(0),
+                    state=ssm_state,
+                    scale=key_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=spec_state_indices_tensor.flatten(),
+                    num_accepted_tokens=num_accepted_tokens,
+                ).unsqueeze(0)
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
@@ -475,20 +643,36 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert g_non_spec is not None
             assert beta_non_spec is not None
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(mixed_qkv_non_spec[:num_decode_tokens])
-            actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_decode = l2norm_fwd(query_decode)
-            key_decode = l2norm_fwd(key_decode)
-            core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
-                query=query_decode.squeeze(0),
-                key=key_decode.squeeze(0),
-                value=value_decode.squeeze(0),
-                g=g_non_spec[:, :num_decode_tokens].squeeze(0),
-                beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
-                state=ssm_state,
-                scale=key_decode.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor[: attn_metadata.num_decodes],
-            ).unsqueeze(0)
+            decode_state_indices = non_spec_state_indices_tensor[: attn_metadata.num_decodes]
+            if _GDN_DECODE_BACKEND == "triton-strided":
+                non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+                assert non_spec_query_start_loc is not None
+                core_attn_out_decode = _run_triton_recurrent(
+                    query=query_decode,
+                    key=key_decode,
+                    value=value_decode,
+                    g=g_non_spec[:, :num_decode_tokens],
+                    beta=beta_non_spec[:, :num_decode_tokens],
+                    state=ssm_state,
+                    scale=key_decode.shape[-1] ** -0.5,
+                    cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
+                    ssm_state_indices=decode_state_indices,
+                )
+            else:
+                query_decode = l2norm_fwd(query_decode)
+                key_decode = l2norm_fwd(key_decode)
+                actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
+                core_attn_out_decode = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                    query=query_decode.squeeze(0),
+                    key=key_decode.squeeze(0),
+                    value=value_decode.squeeze(0),
+                    g=g_non_spec[:, :num_decode_tokens].squeeze(0),
+                    beta=beta_non_spec[:, :num_decode_tokens].squeeze(0),
+                    state=ssm_state,
+                    scale=key_decode.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=decode_state_indices,
+                ).unsqueeze(0)
         else:
             core_attn_out_decode = None
 
@@ -557,22 +741,57 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     dim=1,
                 )
         elif attn_metadata.num_decodes > 0:
-            actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
-            query_non_spec = l2norm_fwd(query_non_spec)
-            key_non_spec = l2norm_fwd(key_non_spec)
-            # Dispatches to the vllm-ascend AscendC custom operator
-            # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
-            core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
-                query=query_non_spec.squeeze(0),
-                key=key_non_spec.squeeze(0),
-                value=value_non_spec.squeeze(0),
-                g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
-                beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
-                state=ssm_state,
-                scale=key_non_spec.shape[-1] ** -0.5,
-                actual_seq_lengths=actual_seq_lengths,
-                ssm_state_indices=non_spec_state_indices_tensor,
-            ).unsqueeze(0)
+            assert mixed_qkv_non_spec is not None
+            assert non_spec_state_indices_tensor is not None
+            if use_packed_triton_decode:
+                num_packed_tokens = mixed_qkv_non_spec.shape[0]
+                num_state_indices = non_spec_state_indices_tensor.shape[0]
+                if num_state_indices < num_packed_tokens:
+                    raise RuntimeError(
+                        "Packed Triton GDN decode requires at least one state "
+                        "index per token/request, including graph-padding rows; "
+                        f"got {num_packed_tokens} tokens and "
+                        f"{num_state_indices} indices."
+                    )
+                # A metadata buffer may be request-padded beyond the packed
+                # token buffer. Keep every index consumed by this launch while
+                # ignoring only the unused suffix, matching pinned vLLM.
+                packed_state_indices = non_spec_state_indices_tensor
+                if num_state_indices > num_packed_tokens:
+                    packed_state_indices = packed_state_indices[:num_packed_tokens]
+                packed_out = core_attn_out[:num_packed_tokens].unsqueeze(1)
+                core_attn_out_non_spec = _run_triton_packed_decode(
+                    mixed_qkv=mixed_qkv_non_spec,
+                    a=a,
+                    b=b,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    state=ssm_state,
+                    scale=ssm_state.shape[-1] ** -0.5,
+                    ssm_state_indices=packed_state_indices,
+                    out=packed_out,
+                )
+                packed_decode_wrote_output = True
+            else:
+                assert query_non_spec is not None
+                assert key_non_spec is not None
+                assert value_non_spec is not None
+                query_non_spec = l2norm_fwd(query_non_spec)
+                key_non_spec = l2norm_fwd(key_non_spec)
+                actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
+                # Dispatches to the vllm-ascend AscendC custom operator
+                # (csrc/recurrent_gated_delta_rule), NOT the built-in CANN operator.
+                core_attn_out_non_spec = torch.ops._C_ascend.npu_recurrent_gated_delta_rule(
+                    query=query_non_spec.squeeze(0),
+                    key=key_non_spec.squeeze(0),
+                    value=value_non_spec.squeeze(0),
+                    g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
+                    beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,
+                    state=ssm_state,
+                    scale=key_non_spec.shape[-1] ** -0.5,
+                    actual_seq_lengths=actual_seq_lengths,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                ).unsqueeze(0)
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
@@ -588,6 +807,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
             core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
-        else:
+        elif not packed_decode_wrote_output:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
         maybe_save_kv_layer_to_connector("", [])

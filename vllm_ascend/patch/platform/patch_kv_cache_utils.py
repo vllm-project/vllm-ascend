@@ -3,9 +3,11 @@
 import math
 from collections import defaultdict
 from dataclasses import replace
+from typing import get_args
 
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
+from vllm.config.speculative import MTPModelTypes
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
@@ -34,6 +36,28 @@ from vllm_ascend.device.device_config import is_310p
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_configs = vllm.v1.core.kv_cache_utils.get_kv_cache_configs
 _orig_update_kv_cache_capacity = vllm.v1.core.kv_cache_utils.update_kv_cache_capacity
+
+_MTP_METHODS = frozenset(get_args(MTPModelTypes))
+_TYPED_QWEN_MTP_MODEL_TYPES = frozenset(
+    {
+        "qwen3_next_mtp",
+        "qwen3_5_mtp",
+    }
+)
+_TYPED_QWEN_MTP_TARGET_MODEL_TYPES = {
+    "qwen3_next_mtp": frozenset({"qwen3_next"}),
+    "qwen3_5_mtp": frozenset(
+        {
+            "qwen3_5",
+            "qwen3_5_text",
+            "qwen3_5_moe",
+            "qwen3_5_moe_text",
+        }
+    ),
+}
+# The recurrent AscendC kernel accepts at most MAX_MTP=16 validation tokens.
+# One slot is the target token, leaving at most 15 draft tokens.
+_MAX_TYPED_QWEN_MTP_SPECULATIVE_TOKENS = 15
 
 
 def _typed_base_spec(spec: KVCacheSpec) -> KVCacheSpec:
@@ -71,6 +95,69 @@ def _without_uniform_page_padding(
     raise ValueError(f"typed KV cache MVP only supports AttentionSpec and MambaSpec, got {type(spec).__name__}")
 
 
+def _validate_typed_speculative_decoding(
+    vllm_config: VllmConfig,
+    mode: str,
+    base_specs: list[KVCacheSpec],
+) -> None:
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None:
+        return
+
+    cache_config = vllm_config.cache_config
+    if mode not in {"address_table", "static_partition"} or cache_config.enable_prefix_caching:
+        raise ValueError(
+            "typed KV cache speculative decoding only supports address_table "
+            "or static_partition with prefix caching disabled"
+        )
+
+    mamba_specs = [spec for spec in base_specs if isinstance(spec, MambaSpec)]
+    if cache_config.mamba_cache_mode != "none" or any(spec.mamba_cache_mode != "none" for spec in mamba_specs):
+        raise ValueError("typed KV cache speculative decoding requires Mamba cache mode 'none'")
+
+    method = getattr(speculative_config, "method", None)
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    draft_hf_config = getattr(draft_model_config, "hf_config", None)
+    draft_model_type = getattr(draft_hf_config, "model_type", None)
+    target_hf_text_config = getattr(vllm_config.model_config, "hf_text_config", None)
+    target_model_type = getattr(target_hf_text_config, "model_type", None)
+    is_qwen_mtp_method = method == "mtp" or method in _TYPED_QWEN_MTP_MODEL_TYPES
+    if (
+        method not in _MTP_METHODS
+        or not is_qwen_mtp_method
+        or draft_model_type not in _TYPED_QWEN_MTP_MODEL_TYPES
+        or (method in _TYPED_QWEN_MTP_MODEL_TYPES and method != draft_model_type)
+    ):
+        raise ValueError("typed KV cache speculative decoding only supports Qwen3-Next/Qwen3.5 MTP")
+    if target_model_type not in _TYPED_QWEN_MTP_TARGET_MODEL_TYPES[draft_model_type]:
+        raise ValueError(
+            "typed KV cache Qwen MTP draft and target model families must match; "
+            f"got draft {draft_model_type!r} and target {target_model_type!r}"
+        )
+
+    if getattr(speculative_config, "parallel_drafting", False):
+        raise ValueError("typed KV cache speculative decoding does not support parallel drafting")
+    if getattr(speculative_config, "num_speculative_tokens_per_batch_size", None) is not None:
+        raise ValueError("typed KV cache speculative decoding does not support dynamic speculative-token counts")
+
+    num_speculative_tokens = getattr(speculative_config, "num_speculative_tokens", None)
+    if (
+        isinstance(num_speculative_tokens, bool)
+        or not isinstance(num_speculative_tokens, int)
+        or num_speculative_tokens <= 0
+        or num_speculative_tokens > _MAX_TYPED_QWEN_MTP_SPECULATIVE_TOKENS
+    ):
+        raise ValueError(
+            "typed KV cache speculative decoding requires a fixed "
+            f"num_speculative_tokens between 1 and {_MAX_TYPED_QWEN_MTP_SPECULATIVE_TOKENS}"
+        )
+    if any(spec.num_speculative_blocks != num_speculative_tokens for spec in mamba_specs):
+        raise ValueError(
+            "typed KV cache speculative decoding requires every MambaSpec "
+            "num_speculative_blocks to equal num_speculative_tokens"
+        )
+
+
 def _validate_typed_kv_cache_mode(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
@@ -102,8 +189,6 @@ def _validate_typed_kv_cache_mode(
         )
     if cache_config.num_gpu_blocks_override is not None:
         raise ValueError("typed KV cache MVP does not support num_gpu_blocks_override")
-    if vllm_config.speculative_config is not None:
-        raise ValueError("typed KV cache MVP does not support speculative decoding")
     if vllm_config.kv_transfer_config is not None:
         raise ValueError("typed KV cache MVP does not support KV transfer/offload")
     if parallel_config.decode_context_parallel_size != 1:
@@ -120,6 +205,7 @@ def _validate_typed_kv_cache_mode(
         isinstance(spec, MambaSpec) for spec in base_specs
     ):
         raise ValueError("typed KV cache MVP requires a hybrid Attention/Mamba model")
+    _validate_typed_speculative_decoding(vllm_config, mode, base_specs)
 
     group_layers = [set(group.layer_names) for group in kv_cache_config.kv_cache_groups]
     for tensor in kv_cache_config.kv_cache_tensors:
