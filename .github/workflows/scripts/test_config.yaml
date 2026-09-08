@@ -159,7 +159,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_simple_cpu_offload.py: 220
   tests/e2e/pull_request/one_card/test_vlm.py: 890
   tests/e2e/pull_request/one_card/test_xlite.py: 400
-  tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 810
+  tests/e2e/pull_request/one_card/test_batch_job_aware_scheduler_e2e.py: 480
   tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py: 20
   tests/e2e/pull_request/two_card/lora/test_ilama_lora_tp2.py: 190
   tests/e2e/pull_request/two_card/lora/test_llama32_lora_tp2.py: 430
