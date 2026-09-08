@@ -16,7 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
-from vllm_ascend.core.typed_kv_cache import TypedAddressPool, get_typed_kv_cache_plan
+from vllm_ascend.core.typed_kv_cache import TypedAddressPool, TypedWorkerKVCacheSpecs, get_typed_kv_cache_plan
 from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _enable_typed_kv_cache_config,
 )
@@ -506,3 +506,28 @@ def test_static_partition_is_a_fixed_baseline_typed_plan(monkeypatch) -> None:
             data_intervals.append((offset, offset + spec.page_size_bytes))
     data_intervals.sort()
     assert all(left[1] <= right[0] for left, right in zip(data_intervals, data_intervals[1:]))
+
+
+@pytest.mark.parametrize("mode", ["address_table", "static_partition"])
+def test_typed_config_uses_rpc_native_size_without_engine_worker_state(monkeypatch, mode) -> None:
+    from vllm_ascend.patch.platform import patch_kv_cache_utils as patch
+
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_TYPED_KV_CACHE", "1")
+    monkeypatch.setenv("VLLM_ASCEND_TYPED_KV_CACHE_MODE", mode)
+    config = _make_vllm_config()
+    del config.cache_config._ascend_typed_attention_block_size
+    config.cache_config.block_size = 896
+    configs = [_make_uniform_qwen35_config() for _ in range(4)]
+    worker_specs = pickle.loads(
+        pickle.dumps(
+            [TypedWorkerKVCacheSpecs({"attention": configs[i].kv_cache_groups[0].kv_cache_spec}, 128) for i in range(4)]
+        )
+    )
+    monkeypatch.setattr(patch, "_orig_get_kv_cache_configs", lambda *_: configs)
+    result = patch._ascend_get_kv_cache_configs(config, worker_specs, [4 * 1024**3] * 4)
+    assert len(result) == 4
+    for item in result:
+        plan = get_typed_kv_cache_plan(item)
+        assert plan is not None
+        assert plan.specs[0].block_size_tokens == 128
+    assert not hasattr(config.cache_config, "_ascend_typed_attention_block_size")

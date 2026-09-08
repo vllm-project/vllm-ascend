@@ -58,6 +58,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.typed_kv_cache import TypedWorkerKVCacheSpecs
 from vllm_ascend.cpu_binding import bind_cpus
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.device_allocator.sleep_mem_optimized import SleepWakeupManager
@@ -940,6 +941,11 @@ class NPUWorker(WorkerBase):
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
+        if envs_ascend.VLLM_ASCEND_ENABLE_TYPED_KV_CACHE and kv_cache_spec:
+            kv_cache_spec = TypedWorkerKVCacheSpecs(
+                kv_cache_spec,
+                getattr(self.vllm_config.cache_config, "_ascend_typed_attention_block_size", None),
+            )
         extra_config = get_gva_layerwise_config(self.vllm_config.kv_transfer_config)
         if extra_config is not None:
             self._gva_layerwise_memory_info = self._get_layerwise_kv_cache_memory_info(

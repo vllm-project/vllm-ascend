@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import pickle
 import sys
 from pathlib import Path
 
@@ -218,3 +219,28 @@ def test_addressed_kernel_and_block_views_share_the_raw_arena() -> None:
     assert make_group_byte_view(raw, plan, 0).shape == (7, 12)
     assert make_group_byte_view(raw, plan, 1).shape == (12, 8)
     assert torch.equal(make_block_byte_view(raw, plan, 0, 2), raw[48:60])
+
+
+def test_worker_native_block_size_survives_rpc_pickle() -> None:
+    worker = typed_kv_cache.TypedWorkerKVCacheSpecs({"attention": {"block_size": 896}}, 128)
+    copies = pickle.loads(pickle.dumps([worker] * 4))
+    assert copies[0] == {"attention": {"block_size": 896}}
+    assert typed_kv_cache.get_typed_worker_attention_block_size(copies) == 128
+
+
+@pytest.mark.parametrize("size", [None, 0, -1, True])
+def test_worker_native_block_size_rejects_invalid_metadata(size) -> None:
+    with pytest.raises(ValueError, match="positive native attention block size"):
+        typed_kv_cache.TypedWorkerKVCacheSpecs({"attention": object()}, size)
+
+
+def test_worker_native_block_size_rejects_missing_rank_metadata() -> None:
+    worker = typed_kv_cache.TypedWorkerKVCacheSpecs({"attention": object()}, 128)
+    with pytest.raises(ValueError, match="metadata from every worker"):
+        typed_kv_cache.get_typed_worker_attention_block_size([worker, {"attention": object()}])
+
+
+def test_worker_native_block_size_rejects_disagreeing_ranks() -> None:
+    workers = [typed_kv_cache.TypedWorkerKVCacheSpecs({"attention": object()}, n) for n in (128, 256)]
+    with pytest.raises(ValueError, match="consistent native attention block size"):
+        typed_kv_cache.get_typed_worker_attention_block_size(workers)

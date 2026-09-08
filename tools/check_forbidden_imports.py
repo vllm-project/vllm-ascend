@@ -43,6 +43,9 @@ CHECK_IMPORTS = {
             "vllm_ascend/distributed/kv_transfer/kv_pool/cpu_offload/metadata.py",
             "vllm_ascend/distributed/weight_transfer/npu_ipc_engine.py",
             "tests/ut/distributed/test_hccl_weight_transfer.py",
+            # Round-trip locally constructed cache metadata through worker RPC serialization.
+            "tests/ut/core/test_typed_kv_cache.py",
+            "tests/ut/core/test_typed_kv_cache_config.py",
         },
     ),
     "re": ForbiddenImport(

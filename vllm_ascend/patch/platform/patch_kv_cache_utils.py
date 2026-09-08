@@ -29,6 +29,7 @@ from vllm_ascend.core.typed_kv_cache import (
     TypedKVCachePlan,
     TypedPageSpec,
     get_typed_kv_cache_plan,
+    get_typed_worker_attention_block_size,
     set_typed_kv_cache_plan,
 )
 from vllm_ascend.device.device_config import is_310p
@@ -217,13 +218,16 @@ def _validate_typed_kv_cache_mode(
 def _enable_typed_kv_cache_config(
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
+    *,
+    attention_block_size: int | None = None,
 ) -> None:
     _validate_typed_kv_cache_mode(vllm_config, kv_cache_config)
-    attention_block_size = getattr(
-        vllm_config.cache_config,
-        "_ascend_typed_attention_block_size",
-        None,
-    )
+    if attention_block_size is None:
+        attention_block_size = getattr(
+            vllm_config.cache_config,
+            "_ascend_typed_attention_block_size",
+            None,
+        )
     if attention_block_size is None:
         raise ValueError(
             "typed KV cache requires the native attention kernel block size "
@@ -364,14 +368,16 @@ def _ascend_get_kv_cache_configs(
     kv_cache_specs: list[dict[str, KVCacheSpec]],
     available_memory: list[int],
 ) -> list[KVCacheConfig]:
+    typed_enabled = envs_ascend.VLLM_ASCEND_ENABLE_TYPED_KV_CACHE
+    attention_block_size = get_typed_worker_attention_block_size(kv_cache_specs) if typed_enabled else None
     configs = _orig_get_kv_cache_configs(
         vllm_config,
         kv_cache_specs,
         available_memory,
     )
-    if envs_ascend.VLLM_ASCEND_ENABLE_TYPED_KV_CACHE:
+    if typed_enabled:
         for config in configs:
-            _enable_typed_kv_cache_config(vllm_config, config)
+            _enable_typed_kv_cache_config(vllm_config, config, attention_block_size=attention_block_size)
     return configs
 
 

@@ -21,6 +21,36 @@ from dataclasses import dataclass
 TYPED_KV_CACHE_PLAN_ATTR = "_ascend_typed_kv_cache_plan"
 
 
+class TypedWorkerKVCacheSpecs(dict):
+    """Carry the worker-selected native block size through the cache-spec RPC.
+
+    A worker's VllmConfig is private when using a multiprocessing executor.
+    The engine therefore needs this metadata alongside the returned specs,
+    before upstream groups and rewrites their padded block sizes.
+    """
+
+    def __init__(self, specs: Mapping, native_attention_block_size: int) -> None:
+        if type(native_attention_block_size) is not int or native_attention_block_size <= 0:
+            raise ValueError("typed worker cache specs require a positive native attention block size")
+        super().__init__(specs)
+        self.native_attention_block_size = native_attention_block_size
+
+
+def get_typed_worker_attention_block_size(worker_specs: Iterable[Mapping]) -> int:
+    """Require every nonempty worker result to agree on the native block size."""
+    sizes = set()
+    for specs in worker_specs:
+        if not specs:
+            continue
+        size = getattr(specs, "native_attention_block_size", None)
+        if type(size) is not int or size <= 0:
+            raise ValueError("typed KV cache requires native attention block metadata from every worker")
+        sizes.add(size)
+    if len(sizes) != 1:
+        raise ValueError("typed KV cache requires one consistent native attention block size across workers")
+    return sizes.pop()
+
+
 @dataclass(frozen=True, slots=True)
 class TypedPageSpec:
     """Physical page and token granularity for one KV cache group."""
