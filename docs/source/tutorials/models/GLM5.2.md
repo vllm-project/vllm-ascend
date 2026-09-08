@@ -16,8 +16,8 @@ Refer to [feature guide](../../user_guide/feature_guide/index.md) to get the fea
 
 ### 3.1 Model Weight
 
-- `GLM-5.2-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8).
-- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8).
+- `GLM-5.2-w8a8c8`: requires 2 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.2-w8a8c8). The weights have been verified on Atlas 800 A3 and are recommended for use.
+- `GLM-5.2-w4a8c8` (experimental): requires 1 Atlas 800 A3 (128GB × 8) node or 2 Atlas 800 A2 (64GB × 8) node. This experimental feature has known accuracy issues in Prefill-Decode (PD) disaggregation scenarios. [Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.2-w4a8c8). The weights have been verified on Atlas 800 A2 and are recommended for use.
 - You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to quantize the model directly.
 
 It is recommended to download the model weight to the shared directory of multiple nodes, such as `/root/.cache/`
