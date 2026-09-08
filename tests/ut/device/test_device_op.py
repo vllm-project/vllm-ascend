@@ -47,7 +47,7 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
 
     assert not context_seq_len_npu.is_contiguous()
 
-    with mock.patch("vllm_ascend.device.device_op.torch_npu.npu_gather_pa_kv_cache") as mock_gather:
+    with mock.patch.object(torch.ops._C_ascend, "gather_pa_kv_cache", create=True) as mock_gather:
         BaseDeviceAdaptor.kv_cache_load(
             cache_kv_c,
             cache_k_pe,
@@ -66,9 +66,9 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert call_args[3] is not context_seq_len_npu
     assert call_args[3].is_contiguous()
     torch.testing.assert_close(call_args[3], context_seq_len_npu)
+    assert call_args[4] is key
+    assert call_args[5] is value
     assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
-    assert mock_gather.call_args.kwargs["key"] is key
-    assert mock_gather.call_args.kwargs["value"] is value
 
 
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():

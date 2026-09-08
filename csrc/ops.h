@@ -131,4 +131,17 @@ namespace vllm_ascend {
         void* gm_tiling_data,
         const uint32_t block_dim
     );
+
+    extern void gather_pa_kv_cache_impl(
+        void* stream,
+        void* key_cache,
+        void* value_cache,
+        void* block_tables,
+        void* seq_lens,
+        void* seq_offset,
+        void* key,
+        void* value,
+        void* tiling,
+        const uint32_t block_dim
+    );
 }
