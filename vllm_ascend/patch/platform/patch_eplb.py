@@ -7,6 +7,7 @@ from functools import wraps
 from inspect import signature
 
 from vllm.config import parallel as _parallel_config
+from vllm.distributed.eplb import async_worker as _async_worker
 from vllm.distributed.eplb import eplb_communicator as _eplb_communicator
 from vllm.distributed.eplb import eplb_state as _eplb_state
 from vllm.logger import logger
@@ -16,6 +17,7 @@ from vllm_ascend.distributed.eplb.state import (
     ASYNC_EPLB_CYCLE_COMMITTED_LOG,
     refresh_model_routing_tables,
 )
+from vllm_ascend.distributed.eplb.stair_worker import run_stair_planner, transfer_stair_layer
 
 _PATCH_MARKER = "_vllm_ascend_eplb_patch"
 
@@ -133,6 +135,39 @@ def _patch_async_move_to_workspace() -> None:
         _eplb_state._move_to_workspace = _wrap_move_to_workspace(original_move)
 
 
+def _wrap_worker_planner(original):
+    @wraps(original)
+    def _run(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream):
+        if getattr(eplb_state, "_stair_config", None) is None:
+            return original(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream)
+        return run_stair_planner(model_state, eplb_state, physical_to_logical_map_cpu, cuda_stream)
+
+    setattr(_run, _PATCH_MARKER, True)
+    return _run
+
+
+def _wrap_worker_transfer(original):
+    @wraps(original)
+    def _transfer(*args, **kwargs):
+        bound = signature(original).bind(*args, **kwargs)
+        bound.apply_defaults()
+        communicator = bound.arguments["communicator"]
+        if hasattr(communicator, "_stair_source_rank") and not bound.arguments["is_profile"]:
+            return transfer_stair_layer(*bound.args, **bound.kwargs)
+        return original(*bound.args, **bound.kwargs)
+
+    setattr(_transfer, _PATCH_MARKER, True)
+    return _transfer
+
+
+def _patch_async_worker() -> None:
+    if not getattr(_async_worker.run_rebalance_experts, _PATCH_MARKER, False):
+        _async_worker.run_rebalance_experts = _wrap_worker_planner(_async_worker.run_rebalance_experts)
+    if not getattr(_async_worker.transfer_layer, _PATCH_MARKER, False):
+        _async_worker.transfer_layer = _wrap_worker_transfer(_async_worker.transfer_layer)
+
+
 _patch_parallel_config()
 _patch_communicator_factory()
 _patch_async_move_to_workspace()
+_patch_async_worker()

@@ -171,3 +171,28 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
         "model",
     )
     assert call_order == ["move", "refresh", "ack"]
+
+
+def test_worker_planner_wrapper_preserves_default_path(monkeypatch):
+    original = MagicMock(return_value="default")
+    stair = MagicMock()
+    monkeypatch.setattr(patch_eplb, "run_stair_planner", stair)
+    wrapped = patch_eplb._wrap_worker_planner(original)
+    state = SimpleNamespace(_stair_config=None)
+
+    assert wrapped("model", state, "mapping", "stream") == "default"
+    original.assert_called_once_with("model", state, "mapping", "stream")
+    stair.assert_not_called()
+
+
+def test_worker_transfer_wrapper_selects_explicit_source(monkeypatch):
+    def original(old, new, weights, buffers, group, communicator, is_profile=False, cuda_stream=None, rank_mapping=None, layer_idx=0):
+        return "default"
+
+    stair = MagicMock(return_value="stair")
+    monkeypatch.setattr(patch_eplb, "transfer_stair_layer", stair)
+    wrapped = patch_eplb._wrap_worker_transfer(original)
+    communicator = SimpleNamespace(_stair_source_rank=object())
+
+    assert wrapped(1, 2, 3, 4, 5, communicator, layer_idx=6) == "stair"
+    stair.assert_called_once()
