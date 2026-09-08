@@ -171,12 +171,19 @@ def gumbel_sample(
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
-    output_processed_logits: torch.Tensor | None = None,
-    output_processed_logits_col: torch.Tensor | None = None,
+    is_drafting: bool,
+    logits_cache: torch.Tensor | None = None,  # [max_num_reqs, num_cols, vocab_size]
+    logits_cache_col: torch.Tensor | None = None,  # scalar or [num_tokens]
     use_fp64: bool = False,
 ) -> torch.Tensor:
     if use_fp64:
         raise NotImplementedError("FP64 Gumbel sampling is not supported on NPU.")
+    # Enforce contiguity on non-strided input tensors, mirroring upstream.
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    pos = pos.contiguous()
+    # The draft logits cache lets upstream skip recomputing already-accepted
+    # spec-token logits. Ascend always produces the full per-step logits, so
+    # sample over them directly (same gumbel-max result) and ignore the cache.
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
@@ -192,15 +199,14 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
-    per_token_col = output_processed_logits_col is not None and output_processed_logits_col.dim() > 0
     _gumbel_sample_kernel[(num_tokens,)](
         local_argmax,
         local_argmax.stride(0),
         local_max,
         local_max.stride(0),
-        output_processed_logits,
-        output_processed_logits.stride(0) if output_processed_logits is not None else 0,
-        output_processed_logits_col,
+        None,
+        0,
+        None,
         logits,
         logits.stride(0),
         expanded_idx_mapping,
@@ -211,7 +217,7 @@ def gumbel_sample(
         num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
-        PER_TOKEN_COL=per_token_col,
+        PER_TOKEN_COL=False,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

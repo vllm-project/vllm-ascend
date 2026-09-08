@@ -20,7 +20,12 @@ def install_spec_pp_token_broadcast(pp_handler, req_states) -> None:
     original_broadcast = pp_handler.broadcast
     pending_send = None
 
-    def get_prev_sampled_outputs():
+    def get_prev_sampled_outputs(draft_tokens_to_update=None):
+        # Upstream now carries draft proposals over the PP slot and refreshes
+        # ``req_states.draft_tokens`` from them; Ascend relays the next-step
+        # draft tokens inside its own sampled-token payload instead, so the
+        # optional argument is accepted for signature parity and ignored.
+        del draft_tokens_to_update
         slot = pp_handler.queue[0] if pp_handler.queue else None
         outputs = original_get_prev_sampled_outputs()
         if outputs is None:

@@ -10,8 +10,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
-    MambaSpec,
-    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
@@ -33,31 +31,6 @@ mamba_utils._TEMPORAL_TILES = 1
 
 def _can_launch_triton_batch_memcpy() -> bool:
     return get_current_hardware_profile().supports(HardwareCapability.TRITON_BATCH_MEMCPY)
-
-
-def _get_mamba_groups(
-    kv_cache_config: KVCacheConfig,
-) -> tuple[list[int], MambaSpec]:
-    """Find Mamba groups, including uniform worker-side group wrappers."""
-    mamba_group_ids: list[int] = []
-    mamba_specs: list[MambaSpec] = []
-    for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
-        group_spec = group.kv_cache_spec
-        if isinstance(group_spec, MambaSpec):
-            mamba_group_ids.append(group_id)
-            mamba_specs.append(group_spec)
-            continue
-        if not isinstance(group_spec, UniformTypeKVCacheSpecs):
-            continue
-
-        inner_specs = list(group_spec.kv_cache_specs.values())
-        if inner_specs and all(isinstance(spec, MambaSpec) for spec in inner_specs):
-            mamba_group_ids.append(group_id)
-            mamba_specs.append(inner_specs[0])
-
-    assert mamba_group_ids, "no mamba layers in the model"
-    assert all(mamba_specs[0] == spec for spec in mamba_specs)
-    return mamba_group_ids, mamba_specs[0]
 
 
 def _batch_memcpy_triton(src_ptrs, dst_ptrs, sizes):
@@ -393,11 +366,6 @@ else:
     mamba_utils.collect_mamba_copy_meta = _collect_mamba_copy_meta_torch
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_torch
     mamba_utils.postprocess_mamba_align_gpu = _postprocess_mamba_align_gpu_cpu_fallback
-
-# Worker KV configs retain UniformTypeKVCacheSpecs so per-layer physical page
-# layouts are available while the scheduler receives unwrapped representative
-# specs. Teach all upstream Mamba buffer/context helpers to see those groups.
-mamba_utils.get_mamba_groups = _get_mamba_groups
 
 # Ascend NPU does not support DT_UINT64 in aclnnInplaceZero.
 # MambaCopyBuffers.create() uses torch.uint64 for src_ptrs/dst_ptrs,

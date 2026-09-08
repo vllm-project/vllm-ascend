@@ -1,3 +1,5 @@
+from typing import Any
+
 import torch
 import vllm.v1.worker.utils as utils
 from vllm.model_executor.layers.attention import Attention
@@ -11,6 +13,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    kv_cache_groups: Any | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so

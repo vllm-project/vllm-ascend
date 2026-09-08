@@ -26,8 +26,12 @@ from vllm_ascend.patch.platform.patch_mamba_block_aligned_split import (
 def _scheduler(*, is_kv_consumer: bool | None):
     kv_transfer_config = None if is_kv_consumer is None else SimpleNamespace(is_kv_consumer=is_kv_consumer)
     # vLLM main added `mamba_has_prefill_checkpoint_blocks` (gated by
-    # MambaSpec.num_prefill_checkpoint_blocks) to the boundary split.
-    scheduler_kwargs: dict = {"mamba_has_prefill_checkpoint_blocks": False}
+    # MambaSpec.num_prefill_checkpoint_blocks) and `use_eagle_block_drop`
+    # (gated by SpeculativeConfig.use_eagle_block_drop) to the boundary split.
+    scheduler_kwargs: dict = {
+        "mamba_has_prefill_checkpoint_blocks": False,
+        "use_eagle_block_drop": False,
+    }
     return SimpleNamespace(
         vllm_config=SimpleNamespace(kv_transfer_config=kv_transfer_config),
         cache_config=SimpleNamespace(block_size=384),

@@ -882,6 +882,17 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self.cache_config.mamba_cache_mode == "align":
+            # vLLM main dispatches Mamba state copy funcs by mamba type
+            # (MambaStateCopyFuncsByType). Ascend hybrid models expose a single
+            # flat tuple via get_mamba_state_copy_func(); key it by the model's
+            # mamba type(s) resolved from the KV cache groups.
+            mamba_state_copy_funcs: dict[Any, Any] = {}
+            if getattr(self.kv_cache_config, "kv_cache_groups", None) is not None:
+                _copy_funcs = self.model.get_mamba_state_copy_func()
+                mamba_state_copy_funcs = {
+                    spec.mamba_type: _copy_funcs
+                    for spec in mamba_utils.get_mamba_groups(self.kv_cache_config)
+                }
             mamba_utils.postprocess_mamba_align_gpu(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
@@ -890,7 +901,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
-                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                mamba_state_copy_funcs=mamba_state_copy_funcs,
             )
         else:
             self.num_accepted_tokens.copy_to_cpu(num_reqs)

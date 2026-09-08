@@ -19,15 +19,20 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 
+def _get_storage_block_size_of(spec: KVCacheSpec) -> int:
+    storage_block_size = getattr(spec, "storage_block_size", None)
+    if storage_block_size is None:
+        storage_block_size = spec.block_size
+    return storage_block_size
+
+
 def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     """Return the physical token rows represented by one scheduler block."""
     if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-        storage_block_sizes = {
-            getattr(spec, "storage_block_size", spec.block_size) for spec in kv_cache_spec.kv_cache_specs.values()
-        }
+        storage_block_sizes = {_get_storage_block_size_of(spec) for spec in kv_cache_spec.kv_cache_specs.values()}
         assert len(storage_block_sizes) == 1, "All specs in one KV cache group must use the same storage block size."
         return storage_block_sizes.pop()
-    return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
+    return _get_storage_block_size_of(kv_cache_spec)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -47,10 +52,18 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
     cache_sparse_sfa_c8: bool = False
     store_on_host: bool = False
 
-    @property
-    def storage_block_size(self) -> int:
-        """Return the physical block size consumed by Ascend kernels."""
-        return self.block_size // self.tokens_per_state
+    def __post_init__(self):
+        # MLAAttentionSpec gained a storage_block_size dataclass field on main;
+        # back the reads with the Ascend kernel geometry instead of a same-named
+        # property (a no-setter property would break the frozen dataclass init
+        # which writes the inherited field).
+        super().__post_init__()
+        if self.storage_block_size is None:
+            object.__setattr__(
+                self,
+                "storage_block_size",
+                self.block_size // self.tokens_per_state,
+            )
 
     @property
     def real_page_size_bytes(self) -> int:
