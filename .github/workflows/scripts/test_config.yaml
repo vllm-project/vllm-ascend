@@ -72,8 +72,6 @@ skip_tests:
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   # Temporarily skipped: this test is currently broken
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
-  # The use case is unstable and temporarily taken offline
-  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
 
 # === Accuracy Tests ===
 # The accuracy tests. When at least one of these files is selected,
