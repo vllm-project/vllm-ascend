@@ -270,9 +270,7 @@ class TestUtils(TestBase):
                 self.assertTrue(utils.vllm_version_is.__wrapped__("0.27.1"))
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.28.0"))
             with mock.patch("vllm_ascend.utils.importlib.util.find_spec") as find_spec:
-                find_spec.side_effect = lambda name: (
-                    object() if name == "vllm.v1.attention.ops.pcp" else None
-                )
+                find_spec.side_effect = lambda name: (object() if name == "vllm.v1.attention.ops.pcp" else None)
                 self.assertFalse(utils.vllm_version_is.__wrapped__("0.27.1"))
         # Test caching takes effect
         utils.vllm_version_is.cache_clear()
