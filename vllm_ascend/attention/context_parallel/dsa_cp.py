@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass, replace
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
@@ -35,7 +36,9 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
@@ -1289,24 +1292,43 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         metadata = self.common_ratio_to_sas_metadata.get(cache_key)
 
         if metadata is None:
-            metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-                num_heads_q=self.model_config.hf_config.index_n_heads,
-                num_heads_k=1,
-                head_dim=self.model_config.hf_config.index_head_dim,
-                topk=self.model_config.hf_config.index_topk,
-                quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
-                cu_seqlens_q=qli_cu_seqlens_q,
-                seqused_k=qli_seqused_k,
-                cmp_residual_k=qli_cmp_residual_k,
-                batch_size=num_reqs,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k // 4,
-                layout_q="TND",
-                layout_k="PA_BBND",
-                mask_mode=3,
-                cmp_ratio=4,
-                device=str(self.seqused_q.device),
-            )
+            if get_ascend_device_type() == AscendDeviceType.A3:
+                metadata = import_module("cann_ops_transformer.ops").quant_lightning_indexer_metadata(
+                    self.model_config.hf_config.index_n_heads,
+                    1,
+                    self.model_config.hf_config.index_head_dim,
+                    self.model_config.hf_config.index_topk,
+                    2,
+                    cu_seqlens_q=qli_cu_seqlens_q,
+                    seqused_k=qli_seqused_k,
+                    cmp_residual_k=qli_cmp_residual_k,
+                    batch_size=num_reqs,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k // 4,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=4,
+                )
+            else:
+                metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                    num_heads_q=self.model_config.hf_config.index_n_heads,
+                    num_heads_k=1,
+                    head_dim=self.model_config.hf_config.index_head_dim,
+                    topk=self.model_config.hf_config.index_topk,
+                    quant_mode=2,
+                    cu_seqlens_q=qli_cu_seqlens_q,
+                    seqused_k=qli_seqused_k,
+                    cmp_residual_k=qli_cmp_residual_k,
+                    batch_size=num_reqs,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k // 4,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=4,
+                    device=str(self.seqused_q.device),
+                )
         self.common_ratio_to_sas_metadata[cache_key] = metadata
         self.req_qli_metadata[:1024] = metadata
         return self.req_qli_metadata[:1024]
@@ -2077,25 +2099,49 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         assert indexer_kv_scale_metadata.req_metadata is not None
         dsa_meta = indexer_kv_scale_metadata.req_metadata
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(dsa_meta.qli_metadata))
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
-            query=q,
-            key=indexer_k_cache,
-            weights=DeviceOperator.prepare_dsa_indexer_weights(weights),
-            query_dequant_scale=DeviceOperator.prepare_dsa_indexer_query_scale(q_scale),
-            key_dequant_scale=DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
-            topk=self.index_topk,
-            quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
-            cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
-            seqused_k=dsa_meta.qli_seqused_k,
-            cmp_residual_k=dsa_meta.qli_cmp_residual_k,
-            block_table=dsa_meta.block_table,
-            metadata=dsa_meta.qli_metadata,
-            layout_q="TND",
-            layout_k="PA_BBND",
-            mask_mode=3,
-            cmp_ratio=4,
-            return_value=0,
-        )
+        prepared_weights = DeviceOperator.prepare_dsa_indexer_weights(weights)
+        prepared_query_scale = DeviceOperator.prepare_dsa_indexer_query_scale(q_scale)
+        prepared_key_scale = DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache)
+        if get_ascend_device_type() == AscendDeviceType.A3:
+            topk_idxs, _ = import_module("cann_ops_transformer.ops").quant_lightning_indexer(
+                q,
+                indexer_k_cache,
+                prepared_weights,
+                prepared_query_scale,
+                prepared_key_scale,
+                self.index_topk,
+                2,
+                cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
+                seqused_k=dsa_meta.qli_seqused_k,
+                cmp_residual_k=dsa_meta.qli_cmp_residual_k,
+                block_table=dsa_meta.block_table,
+                metadata=dsa_meta.qli_metadata,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=4,
+                return_value=0,
+            )
+        else:
+            topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+                query=q,
+                key=indexer_k_cache,
+                weights=prepared_weights,
+                query_dequant_scale=prepared_query_scale,
+                key_dequant_scale=prepared_key_scale,
+                topk=self.index_topk,
+                quant_mode=2,
+                cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
+                seqused_k=dsa_meta.qli_seqused_k,
+                cmp_residual_k=dsa_meta.qli_cmp_residual_k,
+                block_table=dsa_meta.block_table,
+                metadata=dsa_meta.qli_metadata,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=4,
+                return_value=0,
+            )
         return topk_idxs
 
 

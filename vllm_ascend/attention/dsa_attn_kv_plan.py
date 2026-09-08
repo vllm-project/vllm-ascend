@@ -10,6 +10,8 @@ import torch
 import torch_npu
 
 from vllm_ascend.attention.sparse_flash_mla import sparse_flash_mla, sparse_flash_mla_metadata
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 _BF16_KV_CACHE_DTYPES = frozenset({"bfloat16", "bf16"})
@@ -136,8 +138,8 @@ class DsaAttnKvPlan:
 
 
 def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
-    """Return the explicit A5 BF16 or upstream-compatible FP8 DSA plan."""
-    if not _supports_dsv4_compressed_cache():
+    """Return the hardware-selected DSA attention-KV execution plan."""
+    if get_ascend_device_type() == AscendDeviceType.A2:
         return DsaAttnKvPlan(
             uses_sparse_flash_mla=False,
             uses_kv_compress_epilog=False,
@@ -146,6 +148,20 @@ def get_dsa_attn_kv_plan(vllm_config) -> DsaAttnKvPlan:
             requires_block_offset_slots=True,
             sparse_attn_op=torch.ops._C_ascend.npu_sparse_attn_sharedkv,
             sparse_attn_metadata_op=torch.ops._C_ascend.npu_sparse_attn_sharedkv_metadata,
+            sparse_attn_base_kwargs={},
+            sparse_attn_metadata_kwargs={},
+            include_metadata_device=True,
+            applies_sparse_attn_runtime_kwargs=True,
+        )
+    if not _supports_dsv4_compressed_cache():
+        return DsaAttnKvPlan(
+            uses_sparse_flash_mla=True,
+            uses_kv_compress_epilog=False,
+            layout_kv="PA_BBND",
+            compressor_slot_mapping_format=DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET,
+            requires_block_offset_slots=True,
+            sparse_attn_op=sparse_flash_mla,
+            sparse_attn_metadata_op=sparse_flash_mla_metadata,
             sparse_attn_base_kwargs={},
             sparse_attn_metadata_kwargs={},
             include_metadata_device=True,

@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
@@ -369,6 +370,75 @@ class TestIndexerForward:
 
 
 class TestIndexerOps:
+    def test_a3_select_topk_calls_cann_operator_directly(self):
+        indexer_ops = AscendIndexerOps(index_topk=3)
+        query = torch.ones((2, 2, 4), dtype=torch.int8)
+        query_scale = torch.ones((2, 2), dtype=torch.float16)
+        key_cache = torch.empty((1, 1, 1, 4), dtype=torch.int8)
+        scale_cache = torch.empty((1, 1, 1, 1), dtype=torch.float16)
+        weights = torch.ones((2, 2))
+        topk_indices = torch.tensor([[[1, 2, 3]]], dtype=torch.int32)
+        metadata = SimpleNamespace(
+            query_start_loc=torch.tensor([0, 2], dtype=torch.int32),
+            seq_lens=torch.tensor([5], dtype=torch.int32),
+            qli_cu_seqlens_q=torch.tensor([0, 2], dtype=torch.int32),
+            qli_seqused_k=torch.tensor([1], dtype=torch.int32),
+            qli_cmp_residual_k=torch.tensor([1], dtype=torch.int32),
+            block_table=torch.tensor([[0]], dtype=torch.int32),
+            qli_metadata=torch.zeros(1024, dtype=torch.int32),
+        )
+        with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.get_ascend_device_type",
+                return_value=AscendDeviceType.A3,
+            ),
+            patch.object(
+                DeviceOperator,
+                "prepare_dsa_indexer_weights",
+                side_effect=lambda value: value,
+            ),
+            patch.object(
+                DeviceOperator,
+                "prepare_dsa_indexer_query_scale",
+                side_effect=lambda value: value,
+            ),
+            patch.object(
+                DeviceOperator,
+                "prepare_dsa_indexer_key_scale",
+                side_effect=lambda value: value,
+            ),
+            patch(
+                "cann_ops_transformer.ops.quant_lightning_indexer",
+                return_value=(topk_indices, torch.empty(0)),
+            ) as qli,
+        ):
+            actual = indexer_ops.select_topk(
+                query,
+                weights,
+                query_scale,
+                key_cache,
+                scale_cache,
+                metadata,
+            )
+
+        assert actual is topk_indices
+        assert qli.call_args.args == (
+            query,
+            key_cache,
+            weights,
+            query_scale,
+            scale_cache,
+            3,
+            2,
+        )
+        qli_kwargs = qli.call_args.kwargs
+        assert qli_kwargs["cu_seqlens_q"] is metadata.qli_cu_seqlens_q
+        assert qli_kwargs["seqused_k"] is metadata.qli_seqused_k
+        assert qli_kwargs["cmp_residual_k"] is metadata.qli_cmp_residual_k
+        assert qli_kwargs["layout_k"] == "PA_BBND"
+        assert qli_kwargs["metadata"] is metadata.qli_metadata
+        assert qli_kwargs["cmp_ratio"] == 4
+
     def test_quantize_scatter_then_select_topk(self):
         indexer_ops = AscendIndexerOps(index_topk=3)
         key_cache = torch.empty((1, 1, 1, 4), dtype=torch.int8)
@@ -392,6 +462,10 @@ class TestIndexerOps:
         )
 
         with (
+            patch(
+                "vllm_ascend.models.deepseek_v4.indexer.get_ascend_device_type",
+                return_value=AscendDeviceType.A2,
+            ),
             patch.object(
                 DeviceOperator,
                 "indexer_quant_scatter",

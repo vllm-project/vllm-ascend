@@ -1,6 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib import import_module
 from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
@@ -35,7 +36,9 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
+from vllm_ascend.device.device_config import get_ascend_device_type
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.distributed.parallel_state import get_otp_group
@@ -967,24 +970,43 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 4,
                 out=qli_cmp_residual_k,
             )
-            qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
-                num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
-                num_heads_k=1,
-                head_dim=self.model_config.hf_config.index_head_dim,  # 128
-                topk=self.model_config.hf_config.index_topk,
-                quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
-                cu_seqlens_q=query_start_loc,
-                seqused_k=qli_seqused_k,
-                cmp_residual_k=qli_cmp_residual_k,
-                batch_size=len(seq_lens),
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_kv // 4,
-                layout_q="TND",
-                layout_k="PA_BBND",
-                mask_mode=3,
-                cmp_ratio=4,
-                device=str(self.seqused_q.device),
-            )
+            if get_ascend_device_type() == AscendDeviceType.A3:
+                qli_metadata = import_module("cann_ops_transformer.ops").quant_lightning_indexer_metadata(
+                    self.model_config.hf_config.index_n_heads,  # 64
+                    1,
+                    self.model_config.hf_config.index_head_dim,  # 128
+                    self.model_config.hf_config.index_topk,  # 512
+                    2,
+                    cu_seqlens_q=query_start_loc,
+                    seqused_k=qli_seqused_k,
+                    cmp_residual_k=qli_cmp_residual_k,
+                    batch_size=len(seq_lens),
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_kv // 4,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=4,
+                )
+            else:
+                qli_metadata = torch.ops._C_ascend.npu_quant_lightning_indexer_v2_metadata(
+                    num_heads_q=self.model_config.hf_config.index_n_heads,  # 64
+                    num_heads_k=1,
+                    head_dim=self.model_config.hf_config.index_head_dim,  # 128
+                    topk=self.model_config.hf_config.index_topk,
+                    quant_mode=2,
+                    cu_seqlens_q=query_start_loc,
+                    seqused_k=qli_seqused_k,
+                    cmp_residual_k=qli_cmp_residual_k,
+                    batch_size=len(seq_lens),
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_kv // 4,
+                    layout_q="TND",
+                    layout_k="PA_BBND",
+                    mask_mode=3,
+                    cmp_ratio=4,
+                    device=str(self.seqused_q.device),
+                )
             metadata_cache["qli"] = qli_metadata
 
         self.qli_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = qli_metadata

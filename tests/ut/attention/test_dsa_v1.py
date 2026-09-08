@@ -48,6 +48,7 @@ from vllm_ascend.attention.dsa_v1 import (
 )
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata
 from vllm_ascend.models.deepseek_v4.indexer import (
     AscendIndexerMetadata,
@@ -598,12 +599,18 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
     seq_lens = torch.tensor([8, 6], dtype=torch.int32)
     generated_metadata = torch.arange(1024, dtype=torch.int32)
 
-    with patch.object(
-        torch.ops._C_ascend,
-        "npu_quant_lightning_indexer_v2_metadata",
-        create=True,
-        return_value=generated_metadata,
-    ) as metadata_op:
+    with (
+        patch.object(
+            torch.ops._C_ascend,
+            "npu_quant_lightning_indexer_v2_metadata",
+            create=True,
+            return_value=generated_metadata,
+        ) as metadata_op,
+        patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_device_type",
+            return_value=AscendDeviceType.A2,
+        ),
+    ):
         builder._build_qli_metadata(
             query_start_loc=torch.tensor([0, 2, 3], dtype=torch.int32),
             seq_lens=seq_lens,
@@ -617,6 +624,74 @@ def test_dsa_cp_qli_metadata_uses_host_maxima():
     # QLI v2 derives seqused_k / cmp_residual_k on the host from seq_lens.
     assert torch.equal(builder.qli_seqused_k[:2], torch.tensor([2, 1], dtype=torch.int32))
     assert torch.equal(builder.qli_cmp_residual_k[:2], torch.tensor([0, 2], dtype=torch.int32))
+
+
+def test_dsa_qli_metadata_calls_cann_operator_directly():
+    builder = _make_builder()
+    query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
+    seq_lens = torch.tensor([8, 7], dtype=torch.int32)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    with (
+        patch(
+            "vllm_ascend.attention.dsa_v1.get_ascend_device_type",
+            return_value=AscendDeviceType.A3,
+        ),
+        patch(
+            "cann_ops_transformer.ops.quant_lightning_indexer_metadata",
+            return_value=generated_metadata,
+        ) as metadata_op,
+    ):
+        actual = builder._build_qli_metadata(
+            {},
+            query_start_loc,
+            seq_lens,
+            max_seqlen_q=2,
+            max_seqlen_kv=8,
+        )
+
+    assert torch.equal(actual, generated_metadata)
+    assert metadata_op.call_args.args == (64, 1, 128, 512, 2)
+    kwargs = metadata_op.call_args.kwargs
+    assert kwargs["cu_seqlens_q"] is query_start_loc
+    assert torch.equal(kwargs["seqused_k"], torch.tensor([2, 1], dtype=torch.int32))
+    assert torch.equal(kwargs["cmp_residual_k"], torch.tensor([0, 3], dtype=torch.int32))
+    assert kwargs["layout_k"] == "PA_BBND"
+    assert kwargs["cmp_ratio"] == 4
+    assert kwargs["max_seqlen_k"] == 2
+
+
+def test_dsa_cp_qli_metadata_calls_cann_operator_directly():
+    builder = _make_cp_builder()
+    query_start_loc = torch.tensor([0, 2, 3], dtype=torch.int32)
+    seq_lens = torch.tensor([8, 7], dtype=torch.int32)
+    generated_metadata = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    with (
+        patch(
+            "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_device_type",
+            return_value=AscendDeviceType.A3,
+        ),
+        patch(
+            "cann_ops_transformer.ops.quant_lightning_indexer_metadata",
+            return_value=generated_metadata,
+        ) as metadata_op,
+    ):
+        actual = builder._build_qli_metadata(
+            query_start_loc,
+            seq_lens,
+            num_reqs=2,
+            max_seqlen_q=2,
+            max_seqlen_k=8,
+        )
+
+    assert torch.equal(actual, generated_metadata)
+    assert metadata_op.call_args.args == (64, 1, 128, 512, 2)
+    kwargs = metadata_op.call_args.kwargs
+    assert kwargs["cu_seqlens_q"] is query_start_loc
+    assert torch.equal(kwargs["seqused_k"], torch.tensor([2, 1], dtype=torch.int32))
+    assert torch.equal(kwargs["cmp_residual_k"], torch.tensor([0, 3], dtype=torch.int32))
+    assert kwargs["layout_k"] == "PA_BBND"
+    assert kwargs["cmp_ratio"] == 4
+    assert kwargs["max_seqlen_k"] == 2
 
 
 def test_build_compressor_metadata_out_uses_fixed_outputs():
@@ -772,6 +847,10 @@ def test_dsa_cp_indexer_waits_before_qli_consumer(monkeypatch):
         monkeypatch.setattr(DeviceOperator, name, lambda value: value)
     monkeypatch.setattr(torch.ops._C_ascend, "inplace_partial_rotary_mul", lambda *_, **__: None, raising=False)
     monkeypatch.setattr(torch.ops._C_ascend, "npu_quant_lightning_indexer_v2", run_indexer, raising=False)
+    monkeypatch.setattr(
+        "vllm_ascend.attention.context_parallel.dsa_cp.get_ascend_device_type",
+        lambda: AscendDeviceType.A2,
+    )
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.rotate_activation", lambda value, _: value)
     monkeypatch.setattr("vllm_ascend.attention.context_parallel.dsa_cp.wait_for_device_metadata", record_wait)
     impl._indexer_select_topk(

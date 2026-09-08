@@ -29,6 +29,24 @@ def test_a3_uses_official_rms_norm_dynamic_quant() -> None:
     assert "rms_norm_dynamic_quant" not in a3_ops
 
 
+def test_a3_uses_official_dsv4_sparse_operators() -> None:
+    script = BUILD_ACLNN_SCRIPT.read_text()
+
+    a2_ops = _custom_ops_for_soc(script, "ascend910b")
+    a3_ops = _custom_ops_for_soc(script, "ascend910_93")
+
+    replaced_ops = {
+        "vllm_quant_lightning_indexer",
+        "vllm_quant_lightning_indexer_metadata",
+        "quant_lightning_indexer_v2",
+        "quant_lightning_indexer_v2_metadata",
+        "sparse_attn_sharedkv",
+        "sparse_attn_sharedkv_metadata",
+    }
+    assert replaced_ops <= a2_ops
+    assert replaced_ops.isdisjoint(a3_ops)
+
+
 def test_official_rms_norm_dynamic_quant_signature() -> None:
     source = TORCH_BINDING_SOURCE.read_text()
     invocation = (
