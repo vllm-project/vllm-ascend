@@ -347,3 +347,15 @@ a3-560t:
       - name: qwen3-30b-acc
         os: linux-aarch64-a3-4-cn12-001
         tests: tests/e2e/weekly/single_node/models/test_qwen3_30b_acc.py
+
+a5:
+  multi_node:
+    test_config:
+      - name: DeepSeek_V4_Flash_A5_PD
+        config_file_path: DeepSeek_V4_Flash_A5_PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
+      - name: DeepSeek_V4_Flash_A5_PD_Accuracy
+        config_file_path: DeepSeek_V4_Flash_A5_PD_Accuracy.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2

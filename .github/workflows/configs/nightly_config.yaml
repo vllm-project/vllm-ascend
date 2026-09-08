@@ -408,6 +408,14 @@ a5:
       - name: Qwen3-235B-W8A8-EPLB
         size: 2
         config_file_path: Qwen3-235B-W8A8-EPLB-mxfp0.yaml
+      - name: DeepSeek_V4_Flash_A5_PD
+        config_file_path: DeepSeek_V4_Flash_A5_PD.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
+      - name: DeepSeek_V4_Flash_A5_PD_Accuracy
+        config_file_path: DeepSeek_V4_Flash_A5_PD_Accuracy.yaml
+        config_base_path: tests/e2e/nightly/multi_node/external_dp/config
+        size: 2
 #   single_node:
 #     test_config:
 #       - name: Qwen3.5-397B-A17B-w4a8-mtp
