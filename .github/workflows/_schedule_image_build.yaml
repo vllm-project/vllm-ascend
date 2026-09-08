@@ -165,7 +165,7 @@ jobs:
     name: build
     runs-on: ${{ matrix.runner_info.runner }}
     container:
-      image: ${{ matrix.runner_info.tag == 'arm64' && 'arm64v8/ubuntu:22.04' || 'ubuntu:latest' }}
+      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
       env:
         SOC: ${{ inputs.soc }}
     permissions:
@@ -181,13 +181,13 @@ jobs:
 
     steps:
 
-    - name: Install build tools
+    - name: Install zstd
       run: |
         if [ -n "$APTMIRROR" ]; then
           sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
         fi
         apt-get update -y
-        apt-get install -y git zstd
+        apt-get install -y zstd
 
     - name: Validate inputs (workflow_dispatch only)
       if: ${{ github.event_name == 'workflow_dispatch' }}
