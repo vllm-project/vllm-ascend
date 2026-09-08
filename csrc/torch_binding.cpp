@@ -1533,8 +1533,7 @@ void inplace_partial_rotary_mul_npu(at::Tensor & x, const at::Tensor &r1, const 
     }
     auto origin_dim_num = x.dim();
     TORCH_CHECK(origin_dim_num == BSND_DIM_NUM, "Input tensor x's dim num should be 4, actual ", origin_dim_num, ".");
-    const at::Tensor &sin = negate_sin ? at::neg(r2) : r2;
-    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, sin, it->second, partial_slice);
+    EXEC_NPU_CMD(aclnnInplacePartialRotaryMul, x, r1, r2, it->second, partial_slice, negate_sin);
 }
 
 std::tuple<at::Tensor, at::Tensor> npu_rms_norm_dynamic_quant_npu(
