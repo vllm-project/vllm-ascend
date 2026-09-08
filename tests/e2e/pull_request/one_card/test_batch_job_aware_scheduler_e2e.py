@@ -5,6 +5,8 @@ This test module verifies the correctness of the BatchJobAwareScheduler
 by comparing outputs with the default scheduler.
 """
 
+from typing import Any
+
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
 
@@ -38,7 +40,7 @@ _CUSTOM_BATCH_JOB_CONFIG = {
 }
 
 
-def _batch_job_additional_config(config: dict | None = None) -> dict:
+def _batch_job_additional_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "scheduler_config": {
             "batch_job_sched_config": config or {"enabled": True},
@@ -46,7 +48,7 @@ def _batch_job_additional_config(config: dict | None = None) -> dict:
     }
 
 
-def _generate(additional_config: dict | None = None, **kwargs) -> list:
+def _generate(*, additional_config: dict[str, Any] | None = None, **kwargs: Any) -> list:
     runner_kwargs = {**_RUNNER_KWARGS, **kwargs}
     if additional_config is not None:
         runner_kwargs["additional_config"] = additional_config
@@ -96,7 +98,7 @@ def test_batch_job_aware_scheduler_matches_default() -> None:
 @wait_until_npu_memory_free()
 def test_batch_job_aware_scheduler_with_chunked_prefill() -> None:
     """Tiny max_num_batched_tokens forces chunked prefill across scheduling steps."""
-    chunked_kwargs = {
+    chunked_kwargs: dict[str, Any] = {
         "max_num_seqs": 16,
         "max_num_batched_tokens": 16,
         "enable_chunked_prefill": True,
