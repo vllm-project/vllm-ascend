@@ -50,9 +50,7 @@ def test_rebalance_converts_between_vllm_and_ascend_shapes():
         old_global_expert_indices=old_mapping,
     )
 
-    current_table, workload_table = (
-        policy._policy.rebalance_experts.call_args.args
-    )
+    current_table, workload_table = policy._policy.rebalance_experts.call_args.args
     torch.testing.assert_close(
         current_table,
         torch.tensor([[[0, 1], [0, 1]]]),

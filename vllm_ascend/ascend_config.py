@@ -164,10 +164,7 @@ class EplbConfig:
             "policy_swift_balancer",
             "policy_flashlb",
         ]:
-            raise ValueError(
-                "v2_policy must be one of default, policy_swift_balancer, "
-                "or policy_flashlb"
-            )
+            raise ValueError("v2_policy must be one of default, policy_swift_balancer, or policy_flashlb")
 
         logger.info("Dynamic EPLB is %s", self.dynamic_eplb)
         logger.info("The number of redundant experts is %s", self.num_redundant_experts)

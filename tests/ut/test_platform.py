@@ -250,9 +250,7 @@ class TestNPUPlatform(TestBase):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
-        vllm_config.additional_config = {
-            "eplb_config": {"v2_policy": "policy_swift_balancer"}
-        }
+        vllm_config.additional_config = {"eplb_config": {"v2_policy": "policy_swift_balancer"}}
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
@@ -262,9 +260,7 @@ class TestNPUPlatform(TestBase):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = False
-        vllm_config.additional_config = {
-            "eplb_config": {"v2_policy": "policy_flashlb"}
-        }
+        vllm_config.additional_config = {"eplb_config": {"v2_policy": "policy_flashlb"}}
 
         with self.assertRaisesRegex(ValueError, "v2_policy requires --enable-eplb"):
             _validate_eplb_config(vllm_config)

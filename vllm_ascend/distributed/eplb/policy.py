@@ -22,9 +22,7 @@ class AscendV2EplbPolicy:
         try:
             policy_type = ASCEND_V2_POLICY_TYPES[policy_name]
         except KeyError as exc:
-            raise ValueError(
-                f"Unsupported Ascend V2 EPLB policy: {policy_name}"
-            ) from exc
+            raise ValueError(f"Unsupported Ascend V2 EPLB policy: {policy_name}") from exc
         self.policy_name = policy_name
         self._policy: Any = PolicyFactory.generate_policy(policy_type)
 
@@ -37,17 +35,11 @@ class AscendV2EplbPolicy:
         if logical_load.ndim != 2 or physical_to_logical_map.ndim != 2:
             raise ValueError("EPLB logical load and mapping must both be 2-D")
         if logical_load.shape[0] != physical_to_logical_map.shape[0]:
-            raise ValueError(
-                "EPLB logical load and mapping layer counts must match"
-            )
+            raise ValueError("EPLB logical load and mapping layer counts must match")
         if bool((physical_to_logical_map < 0).any()):
-            raise ValueError(
-                "Ascend V2 EPLB policies do not support empty expert slots"
-            )
+            raise ValueError("Ascend V2 EPLB policies do not support empty expert slots")
         if bool((physical_to_logical_map >= logical_load.shape[1]).any()):
-            raise ValueError(
-                "EPLB mapping contains an invalid logical expert ID"
-            )
+            raise ValueError("EPLB mapping contains an invalid logical expert ID")
 
         mapping = physical_to_logical_map.long()
         load = logical_load.float()
@@ -72,18 +64,13 @@ class AscendV2EplbPolicy:
         """Return a physical-to-logical mapping in the upstream V2 format."""
         del num_groups, num_nodes
         if old_global_expert_indices is None:
-            raise ValueError(
-                "Ascend V2 EPLB policies require the current expert mapping"
-            )
+            raise ValueError("Ascend V2 EPLB policies require the current expert mapping")
         if num_ranks <= 0 or num_replicas % num_ranks != 0:
             raise ValueError("Physical experts must be divisible by EP ranks")
 
         old_mapping = old_global_expert_indices.detach().cpu()
         if old_mapping.shape[1] != num_replicas:
-            raise ValueError(
-                "Ascend V2 EPLB policies do not support changing the number "
-                "of physical expert slots"
-            )
+            raise ValueError("Ascend V2 EPLB policies do not support changing the number of physical expert slots")
 
         physical_load = self._build_physical_load(
             weight.detach().cpu(),
@@ -110,10 +97,6 @@ class AscendV2EplbPolicy:
             dtype=old_mapping.dtype,
             device="cpu",
         ).reshape(num_layers, num_replicas)
-        if bool((new_mapping < 0).any()) or bool(
-            (new_mapping >= weight.shape[1]).any()
-        ):
-            raise ValueError(
-                "Ascend V2 EPLB policy returned an invalid expert mapping"
-            )
+        if bool((new_mapping < 0).any()) or bool((new_mapping >= weight.shape[1]).any()):
+            raise ValueError("Ascend V2 EPLB policy returned an invalid expert mapping")
         return new_mapping.contiguous()

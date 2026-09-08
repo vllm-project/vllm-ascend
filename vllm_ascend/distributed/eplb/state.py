@@ -9,13 +9,13 @@ from typing import Any
 
 import torch
 from torch.distributed import all_reduce
-from vllm.distributed import get_ep_group
 from vllm.config import ModelConfig
+from vllm.distributed import get_ep_group
 from vllm.distributed.eplb import eplb_state as _eplb_state
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.eplb.policy import AscendV2EplbPolicy
-from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from vllm_ascend.ops.fused_moe import eplb as _eplb_ops
 
