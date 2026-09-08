@@ -73,7 +73,6 @@ from vllm_ascend.distributed.utils import (
 from vllm_ascend.utils import (
     enable_custom_op,
     enable_sfa_dcp_replicated_indexer,
-    get_kv_cache_tensor_layers,
     model_uses_sfa_sparse,
 )
 
@@ -1608,6 +1607,8 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
         self, vllm_config: VllmConfig, role: KVConnectorRole, kv_cache_config: KVCacheConfig | None = None
     ):
         assert vllm_config.kv_transfer_config is not None
+        if vllm_config.kv_transfer_config.kv_role not in ("kv_producer", "kv_consumer"):
+            raise ValueError("MooncakeConnectorV1 requires kv_producer or kv_consumer; kv_both is not supported.")
         self._kv_transfer_config = vllm_config.kv_transfer_config
         self.engine_id = vllm_config.kv_transfer_config.engine_id
         self._connector_metadata = MooncakeConnectorMetadata()
@@ -2438,6 +2439,18 @@ class MooncakeConnectorWorker:
         return layer_spec
 
     @staticmethod
+    def _get_kv_cache_tensor_layers(kv_cache_tensor: Any) -> list[str]:
+        """Read V1's actual allocation contract, not an exact release string.
+
+        Both the image's 0.26 allocation and the 0.27.1 release use shared_by;
+        placement allocations use layers. Keep this compatibility at the PD
+        boundary without changing the generic helper used by other modules.
+        """
+        if hasattr(kv_cache_tensor, "layers"):
+            return kv_cache_tensor.layers
+        return kv_cache_tensor.shared_by
+
+    @staticmethod
     def _recover_aligned_kv_tensor_base(
         shared_tensors: list[torch.Tensor],
         tensor_size: int,
@@ -2464,11 +2477,12 @@ class MooncakeConnectorWorker:
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
         ptrs: list[int] = []
         lengths: list[int] = []
+        registered_regions: set[tuple[int, int]] = set()
         private_layer_tensors: list[torch.Tensor] = []
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_tensors: list[torch.Tensor] = []
-            for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
+            for layer_name in self._get_kv_cache_tensor_layers(kv_cache_tensor):
                 for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
                     shared_tensors.append(single_kv_cache)
 
@@ -2494,6 +2508,10 @@ class MooncakeConnectorWorker:
                 continue
             if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
                 raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
+            region = (base_addr, kv_cache_tensor.size)
+            if region in registered_regions:
+                continue
+            registered_regions.add(region)
             ptrs.append(base_addr)
             lengths.append(kv_cache_tensor.size)
 
@@ -2534,12 +2552,16 @@ class MooncakeConnectorWorker:
     def _get_registered_kv_tensor_buffers_hybrid(
         self, kv_caches: dict[str, torch.Tensor]
     ) -> tuple[list[int], list[int]]:
+        if self.kv_cache_config.kv_cache_tensors and hasattr(self.kv_cache_config.kv_cache_tensors[0], "layers"):
+            # Multiple placements can alias one allocation, with logical views
+            # at non-zero offsets. Recover and deduplicate that backing region.
+            return self._get_registered_kv_tensor_buffers(kv_caches)
         ptrs: list[int] = []
         lengths: list[int] = []
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
             shared_addrs: list[int] = []
-            for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
+            for layer_name in self._get_kv_cache_tensor_layers(kv_cache_tensor):
                 for single_kv_cache in self._as_kv_cache_tuple(kv_caches[layer_name]):
                     shared_addrs.append(single_kv_cache.data_ptr())
 

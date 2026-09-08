@@ -1,72 +1,36 @@
+import importlib
+import inspect
 import os
 import queue
-import socket
 import sys
 import threading
-import time
 import types
 import unittest
-from collections import OrderedDict, defaultdict, deque
+from collections import defaultdict, deque
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import msgspec
+import pytest
 import torch
 import zmq
+from vllm.config import KVTransferConfig
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
+    KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import RequestStatus
+from zmq.constants import ROUTER
+from zmq.sugar.socket import Socket
 
-fake_engine = types.ModuleType("mooncake.engine")
-fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
-sys.modules["mooncake.engine"] = fake_engine
-
-# Clean up stale mock modules installed by other test files
-# (e.g., ascend_store/_mock_deps.py) that replace real kv_transfer
-# subpackages with MagicMock/fake modules, breaking our imports.
-# Save and restore so other test files (ascend_store) still see their mocks.
-_kv_xfer = "vllm_ascend.distributed.kv_transfer"
-_vllm_kv_xfer = "vllm.distributed.kv_transfer"
-_saved_modules: dict[str, types.ModuleType] = {}
-_to_remove = []
-for k in list(sys.modules):
-    if k.startswith(_kv_xfer):
-        suffix = k[len(_kv_xfer) :]
-        if suffix == "" or suffix.startswith(".utils") or suffix.startswith(".kv_p2p"):
-            _to_remove.append(k)
-    elif k.startswith(_vllm_kv_xfer):
-        _to_remove.append(k)
-for _m in _to_remove:
-    _saved_modules[_m] = sys.modules.pop(_m)
-
-_mock_ascend_config = MagicMock(enable_kv_nz=False)
-_mock_pp_group = MagicMock(rank_in_group=0, world_size=1)
-_mock_tp_group = MagicMock(rank_in_group=0, world_size=4)
-_mock_pcp_group = MagicMock(rank_in_group=0, world_size=1)
-_mock_dcp_group = MagicMock(rank_in_group=0, world_size=1)
-patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pp_group", return_value=_mock_pp_group).start()
-patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_tp_group", return_value=_mock_tp_group).start()
-patch(
-    "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_tensor_model_parallel_world_size", return_value=4
-).start()
-patch(
-    "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_tensor_model_parallel_rank", return_value=0
-).start()
-patch(
-    "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pcp_group", return_value=_mock_pcp_group
-).start()
-patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
-# Do not permanently patch torch.npu.set_device here — the executor-binding
-# tests need to install a side_effect on the live set_device callable.
-
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
+from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (
     MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
     KVCacheRecvingThread,
@@ -88,13 +52,27 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # n
     transfer_groups_need_independent_block_ids,
     zmq_ctx,
 )
-from vllm_ascend.utils import get_kv_cache_tensor_layers  # noqa: E402
-
-for _k, _v in _saved_modules.items():
-    sys.modules[_k] = _v
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
+
+
+@pytest.fixture(autouse=True)
+def _parallel_groups(monkeypatch):
+    """Scope fake distributed topology to each case; never patch at collection."""
+    module = sys.modules[KVCacheTaskTracker.__module__]
+    # Worker construction writes this environment variable. Track its original
+    # state even in legacy constructor tests, not only in the wire fixture.
+    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", os.environ.get("ASCEND_TRANSFER_TIMEOUT", "30"))
+    with (
+        patch.object(module, "get_pp_group", return_value=types.SimpleNamespace(rank_in_group=0, world_size=1)),
+        patch.object(module, "get_tp_group", return_value=types.SimpleNamespace(rank_in_group=0, world_size=4)),
+        patch.object(module, "get_tensor_model_parallel_world_size", return_value=4),
+        patch.object(module, "get_tensor_model_parallel_rank", return_value=0),
+        patch.object(module, "get_pcp_group", return_value=types.SimpleNamespace(rank_in_group=0, world_size=1)),
+        patch("vllm.distributed.parallel_state._DCP", types.SimpleNamespace(rank_in_group=0, world_size=1)),
+    ):
+        yield
 
 
 def make_mock_kv_caches() -> dict[str, Any]:
@@ -123,120 +101,175 @@ def make_agent_metadata(**overrides: Any) -> MooncakeAgentMetadata:
     return MooncakeAgentMetadata(**metadata)
 
 
-class TestKVCacheTaskTrackerInit(unittest.TestCase):
-    def test_init_basic_properties(self):
-        tracker = KVCacheTaskTracker()
-        self.assertIsInstance(tracker.done_task_lock, type(threading.Lock()))
-        self.assertIsInstance(tracker.finished_requests, set)
-        self.assertIsInstance(tracker.delayed_free_requests, OrderedDict)
+def make_kv_cache_tensor(size, layers, *, block_stride, **kwargs):
+    """Construct the real upstream-main placement contract; no release fallback."""
+    kwargs.setdefault("layer_stride", size)
+    return KVCacheTensor(size=size, layers=layers, block_stride=block_stride, **kwargs)
 
 
-class TestGetAndClearFinishedSingleRequests(unittest.TestCase):
-    def setUp(self):
-        self.tracker = KVCacheTaskTracker()
-        self.tracker.finished_requests = set()
-        self.tracker.done_task_lock = threading.Lock()
+def make_exact_aligned_cpu_buffer(size):
+    """Real CPU storage with an exact extent, independent of allocator alignment.
 
-    def test_empty_requests(self):
-        result = self.tracker.get_and_clear_finished_requests()
-        self.assertEqual(result, set())
-        self.assertEqual(len(self.tracker.finished_requests), 0)
-
-    def test_single_request(self):
-        self.tracker.finished_requests = {"req_123"}
-        result = self.tracker.get_and_clear_finished_requests()
-        self.assertEqual(result, {"req_123"})
-        self.assertEqual(len(self.tracker.finished_requests), 0)
-
-    def test_multiple_requests(self):
-        self.tracker.finished_requests = {"req_1", "req_2", "req_3"}
-        result = self.tracker.get_and_clear_finished_requests()
-        self.assertSetEqual(result, {"req_1", "req_2", "req_3"})
-        self.assertEqual(len(self.tracker.finished_requests), 0)
-
-    @patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.logger")
-    def test_concurrent_access(self, mock_logger):
-        from concurrent.futures import ThreadPoolExecutor
-
-        self.tracker.finished_requests = {"req_1", "req_2"}
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [executor.submit(self.tracker.get_and_clear_finished_requests) for _ in range(3)]
-            results = [f.result() for f in futures]
-        self.assertEqual(sum(1 for r in results if r), 1)
-        self.assertEqual(len(self.tracker.finished_requests), 0)
+    frombuffer retains the bytearray owner. Unlike slicing a tensor, it makes
+    storage.nbytes() equal to size, so a one-byte registration overrun is real.
+    """
+    alignment = 2 * 1024 * 1024
+    backing = bytearray(size + alignment)
+    start = (-torch.frombuffer(backing, dtype=torch.uint8).data_ptr()) % alignment
+    return torch.frombuffer(backing, dtype=torch.uint8, offset=start, count=size)
 
 
-class TestKVCacheSendingThreadInit(unittest.TestCase):
-    def setUp(self):
-        kv_caches: dict[str, Any] = {}
-        self.common_args: dict[str, Any] = {
-            "tp_rank": 1,
-            "prefill_tp_size": 4,
-            "local_engine_id": "engine_1",
-            "side_channel_host": "localhost",
-            "side_channel_port": 5555,
-            "metadata": MagicMock(),
-            "vllm_config": MockVllmConfig(),
-            "ready_event": threading.Event(),
-            "kv_caches": kv_caches,
-            "pcp_rank": 0,
-        }
-        self.threads = []
-
-    def tearDown(self):
-        for thread in self.threads:
-            if hasattr(thread, "task_tracker") and hasattr(thread.task_tracker, "socket"):
-                thread.task_tracker.socket.close()
-            if hasattr(thread, "is_alive") and thread.is_alive():
-                thread.join(timeout=0.1)
-
-    def test_thread_daemon_property(self):
-        thread = KVCacheSendingThread(**self.common_args)
-        self.threads.append(thread)
-        self.assertTrue(thread.daemon)
-
-    def test_thread_name_format(self):
-        thread = KVCacheSendingThread(**self.common_args)
-        self.threads.append(thread)
-        self.assertEqual(thread.name, "KVCacheSendingThread")
-
-    def test_ready_event_reference(self):
-        custom_event = threading.Event()
-        args = self.common_args.copy()
-        args["ready_event"] = custom_event
-        thread = KVCacheSendingThread(**args)
-        self.threads.append(thread)
-        self.assertIs(thread.ready_event, custom_event)
+@pytest.mark.parametrize("offset", [0, 1, 2 * 1024 * 1024 - 1, 2 * 1024 * 1024, 2 * 1024 * 1024 + 1])
+def test_k3_registration_recovers_storage_across_alignment_boundary(offset):
+    """Padding/view alignment must not change the registered allocation."""
+    size = 4 * 1024 * 1024
+    allocation = make_exact_aligned_cpu_buffer(size)
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(
+        kv_cache_tensors=[make_kv_cache_tensor(size=size, layers=["target", "state"], block_stride=1)]
+    )
+    assert allocation.untyped_storage().nbytes() == size
+    assert allocation.data_ptr() % (2 * 1024 * 1024) == 0
+    assert worker._get_registered_kv_tensor_buffers(
+        {"target": allocation[offset:], "state": (allocation[128:], allocation[512:])}
+    ) == ([allocation.data_ptr()], [size])
 
 
-class TestGetAndClearFinishedRequests(unittest.TestCase):
-    def setUp(self):
-        kv_caches: dict[str, Any] = {}
-        self.common_args: dict[str, Any] = {
-            "tp_rank": 1,
-            "prefill_tp_size": 4,
-            "local_engine_id": "engine_1",
-            "side_channel_host": "localhost",
-            "vllm_config": MockVllmConfig(),
-            "side_channel_port": 5555,
-            "metadata": {"test": "metadata"},
-            "ready_event": threading.Event(),
-            "kv_caches": kv_caches,
-            "pcp_rank": 0,
-        }
-        self.thread = KVCacheSendingThread(**self.common_args)
+@pytest.mark.parametrize("invalid", ["one-byte-overrun", "two-allocations", "view-before-aligned-base", "no-views"])
+def test_k3_shared_base_recovery_distinguishes_private_and_ambiguous_storage(invalid):
+    size = 4 * 1024 * 1024
+    allocation = make_exact_aligned_cpu_buffer(size)
+    views = [allocation[128:]]
+    if invalid == "one-byte-overrun":
+        size += 1
+    elif invalid == "two-allocations":
+        views.append(make_exact_aligned_cpu_buffer(size)[256:])
+    elif invalid == "view-before-aligned-base":
+        # Deliberately expose storage starting one byte after an aligned base.
+        # The next aligned address is after this logical view: rounding it up
+        # would omit live data, even though the remaining allocation is large.
+        views = [torch.frombuffer(allocation.numpy(), dtype=torch.uint8, offset=1)]
+        size = 128
+    else:
+        views = []
+    if invalid == "two-allocations":
+        with pytest.raises(RuntimeError, match="Unable to recover one aligned KV tensor base"):
+            MooncakeConnectorWorker._recover_aligned_kv_tensor_base(views, size)
+    else:
+        # Main supports private layer storages smaller than the group descriptor.
+        # No shared candidate selects that path; it is not itself corruption.
+        assert MooncakeConnectorWorker._recover_aligned_kv_tensor_base(views, size) is None
 
-    @patch.object(KVCacheTaskTracker, "get_and_clear_finished_requests")
-    def test_get_and_clear_finished_requests(self, mock_get_clear):
-        expected_requests = {"req1", "req2"}
-        mock_get_clear.return_value = expected_requests
-        result = self.thread.get_and_clear_finished_requests()
-        mock_get_clear.assert_called_once()
-        self.assertEqual(result, expected_requests)
+
+@pytest.mark.parametrize(
+    "registration", ["_get_registered_kv_tensor_buffers", "_get_registered_kv_tensor_buffers_hybrid"]
+)
+def test_placement_schema_registers_shared_backing_allocation_once(registration):
+    """Real upstream placement descriptors can alias one backing allocation.
+
+    Two non-zero layer offsets alias one aligned allocation. A placement's size
+    describes that allocation, so registering (logical_view_ptr, size) overruns.
+    The descriptor type is deliberately not replaced by a synthetic schema.
+    """
+    alignment = 2 * 1024 * 1024
+    size = 2 * alignment
+    storage = torch.empty(size + alignment, dtype=torch.uint8)
+    start = (-storage.data_ptr()) % alignment
+    allocation = storage[start : start + size]
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(
+        kv_cache_tensors=[
+            KVCacheTensor(size=size, layers=["attention"], offset=128, block_stride=256, layer_stride=256),
+            KVCacheTensor(size=size, layers=["indexer"], offset=512, block_stride=128, layer_stride=128),
+        ]
+    )
+    regions = getattr(worker, registration)({"attention": allocation[128:], "indexer": allocation[512:]})
+    assert regions == ([allocation.data_ptr()], [size])
+
+
+@pytest.mark.parametrize("pp_rank,pcp_rank,tp_rank,port", [(0, 0, 0, 5555), (0, 1, 1, 5560), (1, 0, 1, 5564)])
+def test_sender_endpoint_includes_pipeline_and_prefill_context_ranks(pp_rank, pcp_rank, tp_rank, port):
+    """HIST-002 boundary: rank-local endpoint and readiness before receiving."""
+    module = sys.modules[KVCacheSendingThread.__module__]
+    ready = threading.Event()
+    config = MockVllmConfig()
+    config.parallel_config.pipeline_parallel_size = 2
+    with (
+        patch.object(module, "get_pp_group", return_value=types.SimpleNamespace(rank_in_group=pp_rank, world_size=2)),
+        patch.object(module, "get_pcp_group", return_value=types.SimpleNamespace(rank_in_group=pcp_rank, world_size=2)),
+        patch.object(module, "zmq_ctx") as transport,
+    ):
+        sender = KVCacheSendingThread(
+            vllm_config=config,
+            tp_rank=tp_rank,
+            prefill_tp_size=4,
+            local_engine_id="prefill",
+            side_channel_host="127.0.0.1",
+            side_channel_port=5555,
+            metadata=make_agent_metadata(),
+            ready_event=ready,
+            kv_caches={},
+            pcp_rank=pcp_rank,
+        )
+
+        def receive(socket):
+            assert ready.is_set()
+            assert socket is transport.return_value.__enter__.return_value
+
+        # This case tests run's endpoint/readiness contract. The real wire
+        # handler is exercised separately, without starting an unbounded loop.
+        with patch.object(sender, "run_busy_loop", side_effect=receive) as receive_loop:
+            sender.run()
+        transport.assert_called_once_with(ROUTER, f"tcp://127.0.0.1:{port}")
+        receive_loop.assert_called_once()
+        transport.return_value.__exit__.assert_called_once()
+        assert not sender.is_alive()
 
 
 class TestKVCacheSendingThread(unittest.TestCase):
-    def test_run_handles_get_meta_and_done_recv_msgs(self):
+    def test_multiple_done_messages_complete_only_after_all_pulls(self):
+        """UT-IT: real sender counter gates completion; peers may finish in either order.
+
+        The current wire contract counts pull completions, not unique identities.
+        This checks normal delivery and terminal idempotence, not pre-terminal
+        deduplication of retransmitted completion messages.
+        """
+        for peers in ((b"decode-a", b"decode-b"), (b"decode-b", b"decode-a")):
+            with self.subTest(peers=peers):
+                sender = KVCacheSendingThread(
+                    vllm_config=MockVllmConfig(),
+                    tp_rank=0,
+                    prefill_tp_size=1,
+                    local_engine_id="prefill-engine",
+                    side_channel_host="127.0.0.1",
+                    side_channel_port=5555,
+                    metadata=make_agent_metadata(engine_id="prefill-engine"),
+                    ready_event=threading.Event(),
+                    kv_caches={},
+                    pcp_rank=0,
+                )
+                sender.task_tracker.add_req_to_process("request-a")
+                expected_pulls = {5555: {"num": 2, "host": "127.0.0.1"}}
+                socket = MagicMock(spec=Socket)
+                payload = msgspec.msgpack.encode((DONE_RECVING_MSG, "request-a", expected_pulls))
+                for peer, expected_finished in (
+                    (peers[0], set()),
+                    (peers[1], {"request-a"}),
+                    (peers[1], set()),
+                ):
+                    socket.recv_multipart.side_effect = [[peer, b"", payload], SystemExit]
+                    with self.assertRaises(SystemExit):
+                        sender.run_busy_loop(socket)
+                    self.assertEqual(sender.get_and_clear_finished_requests(), expected_finished)
+                    self.assertEqual(sender.get_and_clear_finished_requests(), set())
+                self.assertEqual(
+                    [call.args[0] for call in socket.send_multipart.call_args_list],
+                    [(peers[0], b"", b"ACK"), (peers[1], b"", b"ACK"), (peers[1], b"", b"ACK")],
+                )
+                self.assertFalse(sender.is_alive())
+
+    def test_metadata_and_completion_protocol_without_network(self):
+        """Real wire codec -> sender handler -> tracker; fake only the socket."""
         ready_event = threading.Event()
         metadata = make_agent_metadata(
             engine_id="engine1",
@@ -245,52 +278,42 @@ class TestKVCacheSendingThread(unittest.TestCase):
         )
         vllm_config = MockVllmConfig()
         host = "127.0.0.1"
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("", 0))
-            base_port = s.getsockname()[1]
-
         thread = KVCacheSendingThread(
             tp_rank=0,
             prefill_tp_size=1,
             local_engine_id="engine1",
             side_channel_host=host,
-            side_channel_port=base_port,
+            side_channel_port=5555,
             metadata=metadata,
             vllm_config=vllm_config,
             ready_event=ready_event,
             kv_caches={},
             pcp_rank=0,
         )
-        thread.start()
-        actual_port = base_port + (
-            thread.pp_rank * thread.tp_size + thread.tp_rank + thread.pcp_rank * thread.prefill_tp_size
-        )
-        self.assertTrue(ready_event.wait(timeout=3), "Server thread startup timeout")
-
-        context = zmq.Context()  # type: ignore
-        sock = context.socket(zmq.DEALER)  # type: ignore
-        sock.connect(f"tcp://{host}:{actual_port}")
+        sock = MagicMock(spec=Socket)
         encoder = msgspec.msgpack.Encoder()
         decoder = msgspec.msgpack.Decoder(type=MooncakeAgentMetadata)
-
-        sock.send_multipart([b"", encoder.encode((GET_META_MSG,))])
-        frames = sock.recv_multipart()
-        self.assertEqual(frames[0], b"")
-        meta = decoder.decode(frames[1])
+        req_id = "request_42"
+        thread.task_tracker.add_req_to_process(req_id)
+        sock.recv_multipart.side_effect = [
+            [b"peer", b"", encoder.encode((GET_META_MSG,))],
+            [b"peer", b"", encoder.encode((DONE_RECVING_MSG, req_id, 0))],
+            SystemExit,
+        ]
+        with self.assertRaises(SystemExit):
+            thread.run_busy_loop(sock)
+        replies = [call.args[0] for call in sock.send_multipart.call_args_list]
+        self.assertEqual(len(replies), 2)
+        self.assertEqual(replies[0][:2], (b"peer", b""))
+        meta = decoder.decode(replies[0][2])
         self.assertEqual(meta.engine_id, "engine1")
         self.assertEqual(meta.kv_caches_base_addr, [[12345678]])
         self.assertEqual(meta.num_blocks, 2)
 
-        req_id = "request_42"
-        thread.task_tracker.add_req_to_process(req_id)
-        sock.send_multipart([b"", encoder.encode((DONE_RECVING_MSG, req_id, 0))])
-        frames = sock.recv_multipart()
-        self.assertEqual(frames[0], b"")
-        self.assertEqual(frames[1], b"ACK")
-        self.assertIn(req_id, thread.task_tracker.finished_requests)
-
-        sock.close()
-        context.term()
+        self.assertEqual(replies[1], (b"peer", b"", b"ACK"))
+        self.assertEqual(thread.get_and_clear_finished_requests(), {req_id})
+        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+        self.assertFalse(thread.is_alive())
 
     def test_reformat_kv_cache_hybrid_linear_uses_cache_block_size(self):
         block_size = 4
@@ -395,23 +418,37 @@ class TestMooncakeTransferGroups(unittest.TestCase):
         )
         vllm_config = MockVllmConfig()
         vllm_config.cache_config.num_gpu_blocks_override = None
+        has_placements = "layers" in KVCacheTensor.__dataclass_fields__
+        if has_placements:
+            # This module exists only with the placement API. Import the real
+            # dependency conditionally; never synthesize a missing layout type.
+            layout_module = importlib.import_module("vllm.v1.kv_cache_layout")
+            vllm_config.cache_config.get_resolved_kv_cache_layout.return_value = layout_module.KVCacheLayout.LBHNC
         num_blocks = 10
         allocated_config = get_kv_cache_config_from_groups(
             vllm_config,
             [KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=uniform_spec)],
             available_memory=uniform_spec.page_size_bytes * num_blocks,
         )
-        allocated_sizes = {
-            get_kv_cache_tensor_layers(tensor)[0]: tensor.size for tensor in allocated_config.kv_cache_tensors
+        placements = {
+            layer: tensor
+            for tensor in allocated_config.kv_cache_tensors
+            for layer in (tensor.layers if has_placements else tensor.shared_by)
         }
         self.assertEqual(allocated_config.num_blocks, num_blocks)
-        # vLLM #51718: on main every layer tensor in a KV cache group shares
-        # one allocation sized by the group's total bytes-per-block
-        # (UniformTypeKVCacheSpecs sums the per-layer page sizes), so each
-        # tensor.size is the sum of the two page sizes times num_blocks.
-        group_bytes_per_block = main_spec.page_size_bytes + index_spec.page_size_bytes
-        self.assertEqual(allocated_sizes[main_layer], group_bytes_per_block * num_blocks)
-        self.assertEqual(allocated_sizes[index_layer], group_bytes_per_block * num_blocks)
+        self.assertEqual(set(placements), {main_layer, index_layer})
+        if has_placements:
+            # New allocator: independent placements in a shared allocation.
+            self.assertEqual(placements[main_layer].block_stride, main_spec.page_size_bytes)
+            self.assertEqual(placements[index_layer].block_stride, index_spec.page_size_bytes)
+            self.assertEqual(placements[main_layer].offset, 0)
+            self.assertEqual(placements[index_layer].offset, main_spec.page_size_bytes * num_blocks)
+            for placement in placements.values():
+                self.assertEqual(placement.size, uniform_spec.page_size_bytes * num_blocks)
+        else:
+            # Release allocator: distinct allocations, each sized for its spec.
+            self.assertEqual(placements[main_layer].size, main_spec.page_size_bytes * num_blocks)
+            self.assertEqual(placements[index_layer].size, index_spec.page_size_bytes * num_blocks)
 
         kv_cache_config = MockKVCacheConfig(
             kv_cache_groups=[
@@ -931,67 +968,58 @@ class TestKVCacheRecvingThreadBasic(unittest.TestCase):
             self.assertEqual(events[1][0], "handle")
 
     def test_submit_request_serializes_same_peer_fifo(self):
-        release_first_request = threading.Event()
-        first_request_started = threading.Event()
-        other_peer_started = threading.Event()
-        handled_requests: list[str] = []
-        active_by_peer: defaultdict[tuple[str, int], int] = defaultdict(int)
-        max_active_by_peer: defaultdict[tuple[str, int], int] = defaultdict(int)
-        state_lock = threading.Lock()
+        # Control executor scheduling, not the production peer queue/handler.
+        # This proves a fixed interleaving without relying on OS scheduling.
+        scheduled: deque[tuple[Any, tuple[Any, ...]]] = deque()
+        events = []
+        concurrent_jobs = []
+        self.thread.executor.shutdown(wait=True)
+        self.thread.executor = MagicMock()
+        self.thread.executor.submit.side_effect = lambda fn, *args: scheduled.append((fn, args))
 
-        def handle_request(req_meta: dict[str, Any]):
-            peer_key = (req_meta["remote_host"], req_meta["remote_handshake_port"])
-            with state_lock:
-                active_by_peer[peer_key] += 1
-                max_active_by_peer[peer_key] = max(max_active_by_peer[peer_key], active_by_peer[peer_key])
-                handled_requests.append(req_meta["request_id"])
+        def request(request_id, host, port):
+            return {
+                "request_id": request_id,
+                "remote_host": host,
+                "remote_handshake_port": port,
+                "all_task_done": True,
+            }
 
-            if req_meta["request_id"] == "same-peer-1":
-                first_request_started.set()
-                self.assertTrue(release_first_request.wait(timeout=2.0))
-            elif req_meta["request_id"] == "other-peer-1":
-                other_peer_started.set()
+        first = request("same-peer-1", "host-a", 6000)
+        second = request("same-peer-2", "host-a", 6000)
+        other = request("other-peer-1", "host-b", 6001)
 
-            time.sleep(0.01)
-            with state_lock:
-                active_by_peer[peer_key] -= 1
+        def handle_request(req_meta):
+            request_id = req_meta["request_id"]
+            events.append(("start", request_id))
+            if request_id == "same-peer-1":
+                self.thread._submit_request(second)
+                self.thread._submit_request(other)
+                # Only the other peer may start while the first is active.
+                concurrent_jobs.append(len(scheduled))
+                fn, args = scheduled.popleft()
+                fn(*args)
+            events.append(("finish", request_id))
 
-        self.thread._handle_request = handle_request  # type: ignore[method-assign]
-        same_peer_1 = {
-            "request_id": "same-peer-1",
-            "remote_host": "host-a",
-            "remote_handshake_port": 6000,
-            "all_task_done": False,
-        }
-        same_peer_2 = {
-            "request_id": "same-peer-2",
-            "remote_host": "host-a",
-            "remote_handshake_port": 6000,
-            "all_task_done": True,
-        }
-        other_peer = {
-            "request_id": "other-peer-1",
-            "remote_host": "host-b",
-            "remote_handshake_port": 6001,
-            "all_task_done": True,
-        }
+        self.thread._handle_request = handle_request
+        self.thread._submit_request(first)
+        self.assertEqual(len(scheduled), 1)
+        fn, args = scheduled.popleft()
+        fn(*args)
 
-        try:
-            self.thread._submit_request(same_peer_1)
-            self.assertTrue(first_request_started.wait(timeout=1.0))
-            self.thread._submit_request(same_peer_2)
-            self.thread._submit_request(other_peer)
-
-            self.assertTrue(other_peer_started.wait(timeout=1.0))
-            time.sleep(0.05)
-            self.assertNotIn("same-peer-2", handled_requests)
-        finally:
-            release_first_request.set()
-            self.thread.executor.shutdown(wait=True, cancel_futures=True)
-
-        self.assertLess(handled_requests.index("same-peer-1"), handled_requests.index("same-peer-2"))
-        self.assertEqual(max_active_by_peer[("host-a", 6000)], 1)
-        self.assertEqual(max_active_by_peer[("host-b", 6001)], 1)
+        self.assertEqual(concurrent_jobs, [1])
+        self.assertEqual(
+            events,
+            [
+                ("start", "same-peer-1"),
+                ("start", "other-peer-1"),
+                ("finish", "other-peer-1"),
+                ("finish", "same-peer-1"),
+                ("start", "same-peer-2"),
+                ("finish", "same-peer-2"),
+            ],
+        )
+        self.assertFalse(scheduled)
 
     def test_peer_handler_yields_after_batch_limit(self):
         peer_key = ("host-a", 6000)
@@ -1160,23 +1188,6 @@ class TestCoreFunctionality(unittest.TestCase):
         mock_send_done.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
         cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
         self.mock_queue.task_done.assert_called_once()
-
-    @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
-    def test_transfer_kv_cache(self, mock_get_meta):
-        with patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config") as mock_config:
-            mock_config.return_value.enable_kv_nz = False
-            self.thread.kv_caches_base_addr["remote_engine"] = {6666: [[0x3000]]}
-            self.thread.remote_block_size_scale["remote_engine"] = {6666: [[1]]}
-            self.thread._transfer_kv_cache_all_groups(self.test_req)
-        self.engine.batch_transfer_sync_read.assert_called_once()
-        call_args, call_kwargs = self.engine.batch_transfer_sync_read.call_args
-        self.assertEqual(call_args[0], "localhost:7777")
-        self.assertIsInstance(call_args[1], list)
-        self.assertIsInstance(call_args[2], list)
-        self.assertIsInstance(call_args[3], list)
-        self.assertEqual(len(call_args[1]), len(call_args[2]))
-        self.assertEqual(len(call_args[1]), len(call_args[3]))
-        mock_get_meta.assert_not_called()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
     def test_transfer_sfa_metadata_plane_uses_cache_spec_type(self, mock_get_meta):
@@ -1717,8 +1728,8 @@ class TestMainThreadLoop(unittest.TestCase):
         )
         self.thread.request_queue = queue.Queue()
 
-    @patch.object(KVCacheRecvingThread, "_handle_request")
-    def test_run_loop_normal(self, mock_handle):
+    @patch.object(KVCacheRecvingThread, "_submit_request")
+    def test_run_loop_normal(self, mock_submit):
         test_request = {
             "request_id": "req1",
             "local_block_ids": [1, 2],
@@ -1732,16 +1743,15 @@ class TestMainThreadLoop(unittest.TestCase):
             "all_task_done": False,
         }
 
-        self.thread.request_queue.put(test_request)
-        self.thread.request_queue.put(None)
-
-        self.thread.start()
-        time.sleep(0.1)
-        self.thread.join(timeout=1.0)
-
+        self.thread.request_queue = MagicMock(spec=queue.Queue)
+        self.thread.request_queue.get.side_effect = [test_request, None, SystemExit]
+        # None is an ignored queue item, not a shutdown command. Drive the
+        # loop synchronously and stop at a controlled boundary without a leak.
+        with self.assertRaises(SystemExit):
+            self.thread.run()
         self.assertTrue(self.thread.ready_event.is_set())
-        mock_handle.assert_called_once_with(test_request)
-        self.assertTrue(self.thread.request_queue.empty())
+        mock_submit.assert_called_once_with(test_request)
+        self.thread.request_queue.task_done.assert_called_once_with()
 
 
 class MockVllmConfig:
@@ -1805,70 +1815,553 @@ class MockKVCacheConfig:
         self.num_blocks = num_blocks
 
 
-class TestKVCacheTaskTracker(unittest.TestCase):
-    def setUp(self):
-        self.tracker = KVCacheTaskTracker()
+@pytest.fixture
+def wire_transfer_contract(monkeypatch, request):
+    """Real PD objects with a declared padded allocation and fake external I/O.
 
-    def test_update_done_task_count(self):
-        self.assertEqual(len(self.tracker.finished_requests), 0)
-        self.assertEqual(len(self.tracker.delayed_free_requests), 0)
-        self.assertEqual(len(self.tracker.reqs_to_process), 0)
-
-        current_time = time.time()
-        self.tracker.add_req_to_process("req_1")
-        self.tracker.add_delayed_request("req_1", current_time)
-        result = self.tracker.delayed_free_requests
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result["req_1"], current_time)
-
-        self.tracker.update_done_task_count("req_1")
-        result_finished = self.tracker.finished_requests
-        result_delayed = self.tracker.delayed_free_requests
-        self.assertEqual(result_finished, {"req_1"})
-        self.assertEqual(len(result_delayed), 0)
-        self.assertEqual(len(self.tracker.reqs_to_process), 0)
-
-        self.tracker.update_done_task_count("req_2")
-        result_finished = self.tracker.finished_requests
-        result_delayed = self.tracker.delayed_free_requests
-        self.assertEqual(result_finished, {"req_1"})
-        self.assertEqual(len(result_delayed), 0)
-        self.assertEqual(len(self.tracker.reqs_to_process), 0)
-
-    def test_updtate_add_delayed_request(self) -> None:
-        self.tracker.update_done_task_count("req2")
-        self.tracker.add_delayed_request("req2", time.time())
-        result_delayed = self.tracker.delayed_free_requests
-        self.assertEqual(len(result_delayed), 0)
-
-    def test_retrieve_expired_requests(self):
-        current_time = time.time()
-        self.tracker.add_req_to_process("req_1")
-        self.tracker.add_req_to_process("req_2")
-        self.tracker.add_delayed_request("req_1", current_time - 100000)
-        self.tracker.add_delayed_request("req_2", current_time)
-        result = self.tracker._retrieve_expired_requests()
-        self.assertEqual(
-            result,
-            {
-                "req_1",
+    Registration/thread startup is outside this contract. The fixture supplies
+    its resolved allocation geometry; it does not replace routing, serialization,
+    descriptor construction, completion tracking or error propagation.
+    """
+    module = sys.modules[MooncakeConnectorWorker.__module__]
+    config = MockVllmConfig()
+    config.parallel_config.tensor_parallel_size = 1
+    config.model_config.hf_text_config.num_key_value_heads = 1
+    config.model_config.hf_text_config.num_hidden_layers = 1
+    config.model_config.get_total_num_hidden_layers.return_value = 1
+    config.model_config.get_total_num_kv_heads.return_value = 1
+    config.kv_transfer_config.kv_role = "kv_consumer"
+    config.kv_transfer_config.get_from_extra_config.side_effect = lambda key, default: {
+        "prefill": {"tp_size": 1, "dp_size": 1},
+        "decode": {"tp_size": 1, "dp_size": 1},
+    }.get(key, default)
+    engine = MagicMock()
+    engine.get_rpc_port.return_value = 9090
+    engine.batch_transfer_sync_read.return_value = 0
+    monkeypatch.setattr(module.global_te, "get_transfer_engine", lambda *args, **kwargs: engine)
+    monkeypatch.setattr(module, "get_ip", lambda: "127.0.0.1")
+    monkeypatch.setattr(module, "get_tp_group", lambda: types.SimpleNamespace(rank_in_group=0, world_size=1))
+    monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(module, "get_decode_context_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(module, "get_ascend_config", lambda: types.SimpleNamespace(enable_kv_nz=False))
+    # Constructor writes this setting; restore it after the case.
+    monkeypatch.setenv("ASCEND_TRANSFER_TIMEOUT", "30")
+    layer_name = "model.layers.0.self_attn"
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=2, dtype=torch.float16)
+    layer_names = [layer_name]
+    local_addrs, remote_addrs = [[0x1000, 0x2000]], [[0x3000, 0x4000]]
+    lengths, local_strides, remote_strides, scales = [[64, 64]], [[80, 80]], [[96, 96]], [[1, 1]]
+    caches: dict[str, tuple[torch.Tensor, ...]] = {layer_name: (torch.empty(1), torch.empty(1))}
+    if getattr(request, "param", None) == "split-kernels":
+        # One manager group, two transfer groups, different kernel scales.
+        # This is a fixed mixed-layout schema, not a real-model accuracy test.
+        config.model_config.hf_text_config.num_hidden_layers = 2
+        config.model_config.get_total_num_hidden_layers.return_value = 2
+        second_layer = "model.layers.1.self_attn"
+        layer_names.append(second_layer)
+        spec = UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={
+                layer_name: spec,
+                second_layer: MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=2, dtype=torch.float16),
             },
         )
-        result_delay = self.tracker.delayed_free_requests
-        self.assertEqual(len(result_delay), 1)
-        self.assertIn("req_2", result_delay)
+        local_addrs.append([0x5000])
+        remote_addrs.append([0x6000])
+        lengths.append([32])
+        local_strides.append([48])
+        remote_strides.append([64])
+        scales.append([2])
+        caches[second_layer] = (torch.empty(1),)
+    cache_config = MockKVCacheConfig([KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)])
+    worker = MooncakeConnectorWorker(config, "decode-engine", cache_config)
+    worker.use_mla = worker.use_sparse = False
+    worker.enable_sfa_dcp_replicated_indexer = module.enable_sfa_dcp_replicated_indexer(config)
+    worker.kv_group2layeridx = worker._build_kv_group2layeridx()
+    worker.block_size_scale = scales
+    receiver = KVCacheRecvingThread(
+        tp_rank=0,
+        tp_size=1,
+        _prefill_pp_size=1,
+        engine=engine,
+        local_engine_id="decode-engine",
+        local_handshake_port=5000,
+        side_channel_port=5000,
+        local_kv_caches_base_addr=local_addrs,
+        block_len_per_addr=lengths,
+        block_stride_per_addr=local_strides,
+        vllm_config=config,
+        kv_caches=caches,
+        kv_group2layeridx=worker.kv_group2layeridx,
+        block_size_scale=worker.block_size_scale,
+    )
+    worker.kv_recv_thread = receiver
+    peer = make_agent_metadata(
+        engine_id="prefill-engine",
+        kv_group2layeridx=worker.kv_group2layeridx,
+        kv_caches_base_addr=remote_addrs,
+        block_size_scale=scales,
+        block_lens=lengths,
+        block_strides=remote_strides,
+        num_blocks=10,
+    )
+    socket = MagicMock()
+    # Seed only the external socket pool: real acquisition, codec and ACK path
+    # are retained without opening a port or starting the receiver/executor.
+    receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)].append(socket)
+    try:
+        yield worker, receiver, engine, socket, peer
+    finally:
+        receiver.executor.shutdown(wait=True)
 
-    def test_duplicate_task_update(self):
-        self.tracker.add_req_to_process("req1")
-        self.tracker.update_done_task_count("req1")
-        self.tracker.update_done_task_count("req1")
-        self.tracker.update_done_task_count("req1")
 
-        finished = self.tracker.get_and_clear_finished_requests()
-        self.assertEqual(finished, {"req1"})
+@pytest.mark.parametrize(
+    "invalid_base", [False, True], ids=["valid-shared-target-and-draft", "reject-view-before-base"]
+)
+def test_k3_registration_boundary_keeps_logical_metadata(wire_transfer_contract, monkeypatch, invalid_base):
+    """UT integration: real group building and registration, only backend/startup faked.
+
+    Fixed MLA + Mamba + draft schema captures K3 padding/aliasing mechanisms;
+    this is not execution of the K3 model or the NPU allocator.
+    """
+    worker, _, _, _, _ = wire_transfer_contract
+    module = sys.modules[MooncakeConnectorWorker.__module__]
+    size = 4 * 1024 * 1024
+    target, draft = make_exact_aligned_cpu_buffer(size), make_exact_aligned_cpu_buffer(size)
+    if invalid_base:
+        target = torch.frombuffer(target.numpy(), dtype=torch.uint8, offset=1)
+    attention, state, mtp = "model.layers.0.self_attn", "model.layers.1.mamba", "model.mtp.0.self_attn"
+    mla = MLAAttentionSpec(block_size=16, num_kv_heads=1, head_size=16, dtype=torch.uint8)
+    mamba = MambaSpec(block_size=16, shapes=((16,), (16,)), dtypes=(torch.uint8, torch.uint8))
+    worker.total_layers = 2
+    worker.kv_cache_config.num_blocks = 2
+    worker.kv_cache_config.kv_cache_groups = [
+        KVCacheGroupSpec(layer_names=[attention], kv_cache_spec=mla),
+        KVCacheGroupSpec(layer_names=[state], kv_cache_spec=mamba),
+        KVCacheGroupSpec(layer_names=[mtp], kv_cache_spec=mla),
+    ]
+    worker._layer_specs = worker._build_layer_specs_from_kv_cache_config(worker.kv_cache_config)
+    worker.kv_cache_config.kv_cache_tensors = [
+        make_kv_cache_tensor(size=size, layers=[attention, state], block_stride=16),
+        make_kv_cache_tensor(size=size, layers=[state], block_stride=16),
+        make_kv_cache_tensor(size=size, layers=[mtp], block_stride=16),
+    ]
+    caches = {
+        attention: target[128:160].view(2, 16),
+        state: (target[256:288].view(2, 16), target[512:544].view(2, 16)),
+        mtp: draft[2 * 1024 * 1024 + 64 : 2 * 1024 * 1024 + 96].view(2, 16),
+    }
+    backend = MagicMock()
+    startup = MagicMock()
+
+    def ready_receiver(*args, **kwargs):
+        arguments = inspect.signature(KVCacheRecvingThread).bind(*args, **kwargs).arguments
+        arguments["ready_event"].set()
+        return startup
+
+    monkeypatch.setattr(module.global_te, "register_buffer", backend)
+    monkeypatch.setattr(module, "KVCacheRecvingThread", ready_receiver)
+    if invalid_base:
+        with pytest.raises(RuntimeError, match="Unable to recover an aligned private KV layer storage"):
+            worker.register_kv_caches(caches)
+        backend.assert_not_called()
+        startup.start.assert_not_called()
+        return
+
+    worker.register_kv_caches(caches)
+    backend.assert_called_once_with([target.data_ptr(), draft.data_ptr()], [size, size])
+    startup.start.assert_called_once()
+    # Registration covers raw allocations; wire metadata must still address
+    # each logical state/attention view rather than the rounded allocation base.
+    assert worker.xfer_handshake_metadata.kv_caches_base_addr == [
+        [target.data_ptr() + 128],
+        [target.data_ptr() + 256, target.data_ptr() + 512],
+        [draft.data_ptr() + 2 * 1024 * 1024 + 64],
+    ]
+    assert worker.xfer_handshake_metadata.block_strides == [[16], [16, 16], [16]]
+
+
+@pytest.mark.parametrize(
+    "computed_tokens,local_blocks,remote_offsets",
+    [(0, [1, 2], [288, 384]), (16, [1, 2], [384, 480]), (48, [], [])],
+    ids=["no-prefix", "partial-prefix", "full-prefix"],
+)
+def test_metadata_to_wire_descriptors_and_completion(
+    wire_transfer_contract, computed_tokens, local_blocks, remote_offsets
+):
+    """UT-IT: prefix + padded P/D layout reaches the backend without bridging mocks."""
+    worker, receiver, engine, socket, peer = wire_transfer_contract
+    socket.recv.side_effect = [msgspec.msgpack.encode(peer), b"ACK"] if local_blocks else [b"ACK"]
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        (local_blocks,),
+        48 - computed_tokens,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3, 4, 5],),
+            "remote_block_size": 16,
+            "num_computed_tokens": computed_tokens,
+        },
+    )
+    worker.start_load_kv(metadata)
+    assert worker.get_finished() == (set(), set())
+    receiver._handle_request(receiver.request_queue.get_nowait())
+    assert receiver.request_queue.empty()
+    if local_blocks:
+        # 64 bytes per K/V block, D stride 80, P stride 96. The padding
+        # forbids coalescing even though the logical block ids are contiguous.
+        engine.batch_transfer_sync_read.assert_called_once_with(
+            "127.0.0.1:9090",
+            [0x1000 + 80, 0x1000 + 160, 0x2000 + 80, 0x2000 + 160],
+            [base + offset for base in (0x3000, 0x4000) for offset in remote_offsets],
+            [64, 64, 64, 64],
+        )
+    else:
+        engine.batch_transfer_sync_read.assert_not_called()
+    messages = [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list]
+    expected = [[GET_META_MSG, ""]] if local_blocks else []
+    assert messages == expected + [[DONE_RECVING_MSG, "prefill-request", {}]]
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.get_finished() == (set(), {"decode-request"})
+    assert worker.get_finished() == (set(), set())
+
+
+@pytest.mark.parametrize("done_ack", [b"ACK", b"NOT-ACK"], ids=["cleanup-succeeds", "cleanup-also-fails"])
+def test_wire_transfer_failure_does_not_poison_next_request(wire_transfer_contract, monkeypatch, done_ack):
+    """UT-IT: retain first-failure evidence even if DONE cleanup also fails.
+
+    D completion means local cleanup, not successful transfer or proven P-side
+    release. A failed DONE is not allowed to erase the original transfer error.
+    """
+    worker, receiver, engine, _, peer = wire_transfer_contract
+    module = sys.modules[MooncakeConnectorWorker.__module__]
+    socket = MagicMock(spec=Socket)
+    socket.recv.side_effect = [msgspec.msgpack.encode(peer), done_ack, b"ACK"]
+    socket_pool = receiver.remote_sockets[make_zmq_path("tcp", "127.0.0.1", 6000)]
+    socket_pool.clear()
+    socket_pool.append(socket)
+    used_sockets = [socket]
+    failures: list[tuple[str, str | None, Exception, types.TracebackType | None]] = []
+
+    def record_transfer_error(message, request_id, error):
+        failures.append(("transfer", request_id, error, sys.exc_info()[2]))
+
+    def record_cleanup_error(message, error):
+        failures.append(("cleanup", None, error, sys.exc_info()[2]))
+
+    # Observe logging at its output boundary, not the transfer/cleanup helpers.
+    monkeypatch.setattr(module.logger, "exception", record_transfer_error)
+    monkeypatch.setattr(module.logger, "warning", record_cleanup_error)
+    engine.batch_transfer_sync_read.side_effect = [-1, 0]
+    for request_id, block_id, expected_errors in [("a", 1, {1}), ("b", 2, set())]:
+        if request_id == "b" and done_ack != b"ACK":
+            socket.close.assert_called_once_with()
+            assert not socket_pool  # The failed connection must not be reused.
+            replacement = MagicMock(spec=Socket)
+            replacement.recv.return_value = b"ACK"
+            socket_pool.append(replacement)
+            used_sockets.append(replacement)
+        metadata = MooncakeConnectorMetadata()
+        metadata.reqs_in_batch.add(request_id)
+        metadata.add_new_req(
+            request_id,
+            ([block_id],),
+            16,
+            {
+                "remote_request_id": "prefill-" + request_id,
+                "remote_engine_id": "prefill-engine",
+                "remote_host": "127.0.0.1",
+                "remote_port": 6000,
+                "remote_block_ids": ([3],),
+                "remote_block_size": 16,
+            },
+        )
+        worker.start_load_kv(metadata)
+        assert worker.get_finished() == (set(), set())
+        receiver._handle_request(receiver.request_queue.get_nowait())
+        # Completion permits cleanup; it does NOT mean the transfer succeeded.
+        assert worker.get_block_ids_with_load_errors() == expected_errors
+        assert worker.get_block_ids_with_load_errors() == set()
+        assert worker.get_finished() == (set(), {request_id})
+        assert worker.get_finished() == (set(), set())
+        assert receiver.request_queue.unfinished_tasks == 0
+    assert engine.batch_transfer_sync_read.call_count == 2
+    assert [msgspec.msgpack.decode(call.args[0]) for sock in used_sockets for call in sock.send.call_args_list] == [
+        [GET_META_MSG, ""],
+        [DONE_RECVING_MSG, "prefill-a", {}],
+        [DONE_RECVING_MSG, "prefill-b", {}],
+    ]
+    assert failures[0][:2] == ("transfer", "prefill-a")
+    assert isinstance(failures[0][2], RuntimeError)
+    assert str(failures[0][2]) == "Mooncake transfer failed, ret: -1"
+    assert failures[0][3] is not None
+    assert [failure[0] for failure in failures] == (["transfer"] if done_ack == b"ACK" else ["transfer", "cleanup"])
+    if done_ack != b"ACK":
+        assert "NOT-ACK" in str(failures[1][2])
+        assert failures[1][3] is not None
+    else:
+        socket.close.assert_not_called()
+
+
+@pytest.mark.parametrize("wire_transfer_contract", ["split-kernels"], indirect=True)
+@pytest.mark.parametrize(
+    "computed_tokens,full_offsets,mla_offsets",
+    [(0, [288, 384], [384, 448, 512, 576]), (16, [384, 480], [512, 576, 640, 704])],
+    ids=["no-prefix", "partial-prefix"],
+)
+def test_one_cache_group_reaches_distinct_transfer_descriptors(
+    wire_transfer_contract, computed_tokens, full_offsets, mla_offsets
+):
+    """UT-IT / HIST-003 mechanism: cache ids must not index transfer groups.
+
+    Both layers consume manager group 0. Full attention uses scale 1; MLA
+    uses scale 2. Retaining only the last group's block ids corrupts the first
+    layer; indexing manager ids by transfer group fails on the second layer.
+    """
+    worker, receiver, engine, socket, peer = wire_transfer_contract
+    socket.recv.side_effect = [msgspec.msgpack.encode(peer), b"ACK"]
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        ([1, 2],),
+        32,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3, 4, 5],),
+            "remote_block_size": 16,
+            "num_computed_tokens": computed_tokens,
+        },
+    )
+    worker.start_load_kv(metadata)
+    assert worker.get_finished() == (set(), set())
+    receiver._handle_request(receiver.request_queue.get_nowait())
+    engine.batch_transfer_sync_read.assert_called_once_with(
+        "127.0.0.1:9090",
+        [0x1000 + 80, 0x1000 + 160, 0x2000 + 80, 0x2000 + 160]
+        + [0x5000 + 96, 0x5000 + 144, 0x5000 + 192, 0x5000 + 240],
+        [base + offset for base in (0x3000, 0x4000) for offset in full_offsets]
+        + [0x6000 + offset for offset in mla_offsets],
+        [64, 64, 64, 64, 32, 32, 32, 32],
+    )
+    assert worker.get_block_ids_with_load_errors() == set()
+    assert worker.get_finished() == (set(), {"decode-request"})
+    assert worker.get_finished() == (set(), set())
+
+
+@pytest.mark.parametrize("invalid_peer", ["invalid-msgpack", "conflicting-engine"])
+def test_invalid_wire_metadata_never_submits_a_transfer(wire_transfer_contract, invalid_peer):
+    """UT-IT: handshake failure is reported before backend I/O, with P cleanup."""
+    worker, receiver, engine, socket, peer = wire_transfer_contract
+    if invalid_peer == "conflicting-engine":
+        peer.engine_id = "decode-engine"
+        payload = msgspec.msgpack.encode(peer)
+    else:
+        payload = b"\xc1"  # Reserved MessagePack byte, not a fabricated decoder exception.
+    socket.recv.side_effect = [payload, b"ACK"]
+    metadata = MooncakeConnectorMetadata()
+    metadata.reqs_in_batch.add("decode-request")
+    metadata.add_new_req(
+        "decode-request",
+        ([1],),
+        16,
+        {
+            "remote_request_id": "prefill-request",
+            "remote_engine_id": "prefill-engine",
+            "remote_host": "127.0.0.1",
+            "remote_port": 6000,
+            "remote_block_ids": ([3],),
+            "remote_block_size": 16,
+        },
+    )
+    worker.start_load_kv(metadata)
+    receiver._handle_request(receiver.request_queue.get_nowait())
+    engine.batch_transfer_sync_read.assert_not_called()
+    assert worker.get_block_ids_with_load_errors() == {1}
+    assert worker.get_finished() == (set(), {"decode-request"})
+    assert worker.get_finished() == (set(), set())
+    assert [msgspec.msgpack.decode(call.args[0]) for call in socket.send.call_args_list] == [
+        [GET_META_MSG, ""],
+        [DONE_RECVING_MSG, "prefill-request", {}],
+    ]
+
+
+@pytest.mark.parametrize("request_ids", [(), ("a",), ("a", "b", "c")], ids=["empty", "single", "multiple"])
+def test_tracker_publishes_completed_requests_once(request_ids):
+    """Completion is observed through the public drain API, never seeded state."""
+    tracker = KVCacheTaskTracker()
+    for req_id in request_ids:
+        tracker.add_req_to_process(req_id)
+    assert tracker.get_and_clear_finished_requests() == set()
+    for req_id in request_ids:
+        tracker.update_done_task_count(req_id)
+        tracker.update_done_task_count(req_id)
+    assert tracker.get_and_clear_finished_requests() == set(request_ids)
+    for req_id in request_ids:
+        tracker.update_done_task_count(req_id)
+        tracker.add_delayed_request(req_id, 0)
+    assert tracker.get_and_clear_finished_requests() == set()
+
+
+@pytest.mark.parametrize("role", ["kv_producer", "kv_consumer"])
+def test_worker_role_drains_only_its_completion_and_error_channel(role):
+    """UT-F: route completion/errors by role, without draining the other side.
+
+    This isolates the worker polling contract, not thread startup or transport.
+    """
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_role = role
+    worker.tp_rank = 0
+    sender = MagicMock(spec=KVCacheSendingThread)
+    receiver = MagicMock(spec=KVCacheRecvingThread)
+    worker.kv_send_thread = sender
+    worker.kv_recv_thread = receiver
+    sender.get_and_clear_finished_requests.side_effect = [{"sent"}, set()]
+    receiver.get_and_clear_finished_requests.side_effect = [{"received"}, set()]
+    receiver.get_and_clear_invalid_block_ids.side_effect = [{7}, set()]
+
+    assert worker.get_finished() == (({"sent"}, set()) if role == "kv_producer" else (set(), {"received"}))
+    assert worker.get_finished() == (set(), set())
+    assert worker.get_block_ids_with_load_errors() == (set() if role == "kv_producer" else {7})
+    assert worker.get_block_ids_with_load_errors() == set()
+    if role == "kv_producer":
+        receiver.get_and_clear_finished_requests.assert_not_called()
+        receiver.get_and_clear_invalid_block_ids.assert_not_called()
+    else:
+        sender.get_and_clear_finished_requests.assert_not_called()
+
+
+def test_tracker_completion_is_consumed_by_only_one_reader():
+    """Keep the lock's concurrency contract without asserting its implementation."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    tracker = KVCacheTaskTracker()
+    for req_id in ("a", "b"):
+        tracker.add_req_to_process(req_id)
+        tracker.update_done_task_count(req_id)
+    barrier = threading.Barrier(3)
+
+    def drain():
+        barrier.wait(timeout=5)
+        return tracker.get_and_clear_finished_requests()
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(drain) for _ in range(3)]
+        results = [future.result(timeout=5) for future in futures]
+    assert [result for result in results if result] == [{"a", "b"}]
+    assert tracker.get_and_clear_finished_requests() == set()
+
+
+@pytest.mark.parametrize("elapsed,expired", [(9.999, False), (10.0, False), (10.001, True)])
+def test_tracker_timeout_boundary(elapsed, expired):
+    tracker = KVCacheTaskTracker()
+    tracker.add_req_to_process("a")
+    tracker.add_delayed_request("a", 100)
+    module = sys.modules[KVCacheTaskTracker.__module__]
+    with (
+        patch.object(module.time, "time", return_value=100 + elapsed),
+        patch.object(module.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 10),
+    ):
+        assert tracker.get_and_clear_finished_requests() == ({"a"} if expired else set())
+
+
+def test_tracker_late_events_do_not_republish_or_pollute_next_request():
+    """HIST-008/015/022: expire A, late A events, then finish B normally."""
+    tracker = KVCacheTaskTracker()
+    module = sys.modules[KVCacheTaskTracker.__module__]
+    with (
+        patch.object(module.time, "time", return_value=111) as clock,
+        patch.object(module.envs, "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", 10),
+    ):
+        tracker.add_req_to_process("a")
+        tracker.add_delayed_request("a", 100)
+        tracker.add_req_to_process("b")
+        tracker.add_delayed_request("b", 110)
+        assert tracker.get_and_clear_finished_requests() == {"a"}
+        tracker.update_done_task_count("a")
+        tracker.add_delayed_request("a", 111)
+        tracker.update_done_task_count("unknown")
+        tracker.add_delayed_request("unknown", 0)
+        assert tracker.get_and_clear_finished_requests() == set()
+        tracker.update_done_task_count("b")
+        assert tracker.get_and_clear_finished_requests() == {"b"}
+        clock.return_value = 200
+        assert tracker.get_and_clear_finished_requests() == set()
+
+
+def test_tracker_no_transfer_request_completes_without_peer_done():
+    tracker = KVCacheTaskTracker()
+    tracker.add_req_to_process("empty")
+    tracker.add_not_transfer_request("empty")
+    assert tracker.get_and_clear_finished_requests() == {"empty"}
+    tracker.update_done_task_count("empty")
+    assert tracker.get_and_clear_finished_requests() == set()
 
 
 class TestMooncakeConnectorMetadata(unittest.TestCase):
+    def test_missing_required_field_does_not_publish_partial_request(self):
+        params = {
+            "remote_block_ids": ([4, 5],),
+            "remote_engine_id": "producer",
+            "remote_request_id": "producer-request",
+            "remote_host": "127.0.0.1",
+            "remote_port": 5000,
+        }
+        for missing in params:
+            with self.subTest(missing=missing):
+                meta = MooncakeConnectorMetadata()
+                meta.add_new_req("healthy", ([1, 2],), 32, params)
+                invalid = {key: value for key, value in params.items() if key != missing}
+                with self.assertRaises(KeyError) as error:
+                    meta.add_new_req("invalid", ([3, 4],), 32, invalid)
+                self.assertEqual(error.exception.args, (missing,))
+                self.assertEqual(set(meta.requests), {"healthy"})
+                self.assertEqual(meta.requests["healthy"].remote_request_id, "producer-request")
+
+    def test_grouped_metadata_preserves_prefix_and_topology_contract(self):
+        # Schema samples, not a Cartesian product of model names.
+        for pcp, dcp, ptp, prefix in ((1, 1, 2, 0), (2, 1, 4, 16), (1, 2, 4, 32)):
+            with self.subTest(pcp=pcp, dcp=dcp, ptp=ptp, prefix=prefix):
+                meta = MooncakeConnectorMetadata()
+                meta.add_new_req(
+                    "decode-request",
+                    ([11, 12], [21]),
+                    32,
+                    {
+                        "remote_block_ids": ([1, 2, 3], [7]),
+                        "remote_engine_id": "producer",
+                        "remote_request_id": "prefill-request",
+                        "remote_host": "127.0.0.1",
+                        "remote_port": 5000,
+                        "remote_pcp_size": pcp,
+                        "remote_dcp_size": dcp,
+                        "remote_ptp_size": ptp,
+                        "num_computed_tokens": prefix,
+                        "num_prompt_blocks": 3,
+                        "remote_block_size": 16,
+                    },
+                    local_full_block_ids=([10, 11, 12], [21]),
+                )
+                request = meta.requests["decode-request"]
+                self.assertEqual(request.local_block_ids, ([11, 12], [21]))
+                self.assertEqual(request.remote_block_ids, ([1, 2, 3], [7]))
+                self.assertEqual(request.local_full_block_ids, ([10, 11, 12], [21]))
+                self.assertEqual(request.num_computed_tokens, prefix)
+                self.assertEqual(request.num_external_tokens, 32)
+                self.assertEqual(request.remote_request_id, "prefill-request")
+                self.assertEqual(
+                    (request.remote_pcp_size, request.remote_dcp_size, request.remote_ptp_size), (pcp, dcp, ptp)
+                )
+                self.assertEqual(request.remote_block_size, 16)
+
     def test_add_new_req(self):
         meta = MooncakeConnectorMetadata()
         self.assertEqual(len(meta.requests), 0)
@@ -2014,6 +2507,29 @@ class TestHelperFunctions(unittest.TestCase):
         self.assertNotEqual(hash1, hash3)
 
 
+@pytest.mark.parametrize("role", [KVConnectorRole.SCHEDULER, KVConnectorRole.WORKER])
+def test_connector_rejects_both_before_creating_role_objects(role):
+    config = MockVllmConfig()
+    # Upstream accepts kv_both for other connectors. V1 cannot treat it as D:
+    # its completion polling only recognizes the two explicit disaggregated roles.
+    config.kv_transfer_config = KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role="kv_both")
+    module = sys.modules[MooncakeConnector.__module__]
+    with (
+        patch.object(module, "MooncakeConnectorScheduler") as scheduler,
+        patch.object(module, "MooncakeConnectorWorker") as worker,
+        pytest.raises(ValueError, match="kv_both is not supported"),
+    ):
+        MooncakeConnector(config, role, MockKVCacheConfig())
+    scheduler.assert_not_called()
+    worker.assert_not_called()
+
+
+@pytest.mark.parametrize("role", [None, "invalid", "producer"])
+def test_upstream_configuration_rejects_missing_or_invalid_role(role):
+    with pytest.raises(ValueError, match="kv_role"):
+        KVTransferConfig(kv_connector="MooncakeConnectorV1", kv_role=role)
+
+
 class TestMooncakeConnectorForScheduler(unittest.TestCase):
     def test_scheduler_role(self):
         config = MockVllmConfig()
@@ -2066,7 +2582,9 @@ class MockForwardContext:
 class TestMooncakeConnector(unittest.TestCase):
     def setUp(self):
         self.config = MockVllmConfig()
-        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1"
+        visible_devices = patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+        visible_devices.start()
+        self.addCleanup(visible_devices.stop)
 
     def test_scheduler_initialization(self):
         with (
@@ -2531,7 +3049,10 @@ class TestUtils(unittest.TestCase):
         mock_socket.send.side_effect = zmq.ZMQError(  # type: ignore
             "send failed"
         )
-        with self.assertRaises(RuntimeError):
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "Failed to send data.*after 2 retries"),
+        ):
             ensure_zmq_send(mock_socket, b"hello", "tcp://localhost:1234", max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
 
@@ -2546,8 +3067,12 @@ class TestUtils(unittest.TestCase):
     def test_ensure_zmq_recv_timeout_and_fail(self, mock_logger):
         mock_socket = MagicMock()
         mock_socket.recv.side_effect = zmq.ZMQError("Receive timeout")  # type: ignore
-        with self.assertRaises(RuntimeError):
+        with (
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "Failed to receive data after 2 retries"),
+        ):
             ensure_zmq_recv(mock_socket, "tcp://localhost:1234", max_retries=2)
+        self.assertEqual(mock_socket.recv.call_count, 2)
 
 
 class MockMooncakeAgentMetadata:
@@ -2648,11 +3173,11 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
             patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_tp_group", mock_get_tp_group),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pp_group",
-                return_value=_mock_pp_group,
+                return_value=types.SimpleNamespace(rank_in_group=0, world_size=1),
             ),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_pcp_group",
-                return_value=_mock_pcp_group,
+                return_value=types.SimpleNamespace(rank_in_group=0, world_size=1),
             ),
             patch(
                 "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_decode_context_model_parallel_world_size",
@@ -2716,6 +3241,81 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertIsNotNone(worker.kv_send_thread)
         self.assertIsNone(worker.kv_recv_thread)
 
+    def test_missing_parallel_fields_reject_before_backend_creation(self):
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        for role, field in (
+            ("prefill", "tp_size"),
+            ("prefill", "dp_size"),
+            ("decode", "tp_size"),
+            ("decode", "dp_size"),
+        ):
+            with self.subTest(role=role, field=field):
+                parallel = {"prefill": {"tp_size": 2, "dp_size": 1}, "decode": {"tp_size": 2, "dp_size": 1}}
+                del parallel[role][field]
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+                with (
+                    patch.object(module.global_te, "get_transfer_engine") as backend,
+                    self.assertRaises(AssertionError),
+                ):
+                    MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                backend.assert_not_called()
+
+    def test_unsupported_parallel_combinations_reject_before_backend_creation(self):
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        # Existing V1 constraints, not new compatibility rules invented by UT.
+        cases = (
+            (2, 4, 1, 1, 1, ValueError, "prefill_tp_size"),
+            (2, 2, 2, 1, 1, AssertionError, "decode pp size must be 1"),
+            (2, 2, 1, 2, 2, AssertionError, "pp and pcp cannot open in same time"),
+        )
+        for prefill_tp, decode_tp, decode_pp, local_pp, local_pcp, error, message in cases:
+            with self.subTest(
+                prefill_tp=prefill_tp, decode_tp=decode_tp, decode_pp=decode_pp, pp=local_pp, pcp=local_pcp
+            ):
+                parallel = {
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "decode": {"tp_size": decode_tp, "dp_size": 1, "pp_size": decode_pp},
+                }
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+                self.vllm_config.parallel_config.pipeline_parallel_size = local_pp
+                with (
+                    patch.object(module.global_te, "get_transfer_engine") as backend,
+                    patch.object(
+                        module,
+                        "get_pcp_group",
+                        return_value=types.SimpleNamespace(rank_in_group=0, world_size=local_pcp),
+                    ),
+                    self.assertRaisesRegex(error, message),
+                ):
+                    MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                backend.assert_not_called()
+
+    def test_supported_parallel_neighbors_create_backend(self):
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        for prefill_tp, decode_tp, local_pp, local_pcp in ((2, 2, 1, 1), (4, 2, 2, 1), (4, 2, 1, 2)):
+            with self.subTest(prefill_tp=prefill_tp, decode_tp=decode_tp, pp=local_pp, pcp=local_pcp):
+                parallel = {
+                    "prefill": {"tp_size": prefill_tp, "dp_size": 1},
+                    "decode": {"tp_size": decode_tp, "dp_size": 1},
+                }
+                self.vllm_config.kv_transfer_config.get_from_extra_config.side_effect = parallel.get
+                self.vllm_config.parallel_config.pipeline_parallel_size = local_pp
+                with (
+                    patch.object(
+                        module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
+                    ) as backend,
+                    patch.object(
+                        module,
+                        "get_pcp_group",
+                        return_value=types.SimpleNamespace(rank_in_group=0, world_size=local_pcp),
+                    ),
+                    patch.object(module.torch.npu, "current_device", return_value=5),
+                ):
+                    worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                backend.assert_called_once_with("127.0.0.1", device_name="5" if local_pp > 1 else None)
+                self.assertEqual((worker._prefill_tp_size, worker._decode_tp_size), (prefill_tp, decode_tp))
+                self.assertEqual(worker.handshake_port, 5000)
+
     def test_register_kv_caches_consumer(self):
         self.vllm_config.kv_transfer_config.kv_role = "kv_consumer"
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
@@ -2746,7 +3346,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker.num_blocks = 1579
         worker._layer_specs = {layer_name: MagicMock()}
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
+            kv_cache_tensors=[make_kv_cache_tensor(size=tensor_size, layers=[layer_name], block_stride=128)]
         )
 
         self.assertEqual(aligned_tensor.data_ptr() % alignment, 0)
@@ -2767,7 +3367,13 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.kv_cache_config = types.SimpleNamespace(
-            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name])]
+            kv_cache_tensors=[
+                make_kv_cache_tensor(
+                    size=tensor_size,
+                    layers=[layer_name],
+                    block_stride=128,
+                )
+            ]
         )
 
         # Subtracting a stale one-group padding value from this view would
@@ -2842,10 +3448,27 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(lengths, [layer_size])
 
     def test_device_id_selection_with_physical_devices(self):
-        # Test with physical devices set
-        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
-        # Default tp_rank is 0, so device_id should be 10
-        self.assertIsNotNone(worker.engine)
+        # V1 delegates non-PP device selection to the backend. With PP it
+        # explicitly passes the current device, not the TP rank or a stale
+        # hard-coded physical index. The backend boundary is the contract.
+        module = sys.modules[MooncakeConnectorWorker.__module__]
+        for pp_size, expected_device in ((1, None), (2, "5")):
+            with self.subTest(pp_size=pp_size):
+                self.vllm_config.parallel_config.pipeline_parallel_size = pp_size
+                with (
+                    patch.object(
+                        module.global_te, "get_transfer_engine", return_value=self.mock_transfer_engine
+                    ) as get_te,
+                    patch.object(module.torch.npu, "current_device", return_value=5) as current_device,
+                ):
+                    worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                get_te.assert_called_once_with("127.0.0.1", device_name=expected_device)
+                if pp_size == 1:
+                    current_device.assert_not_called()
+                else:
+                    current_device.assert_called_once_with()
+                self.assertIs(worker.engine, self.mock_transfer_engine)
+                self.assertEqual(worker.te_rpc_port, 9090)
 
     def test_get_remote_tp_rank(self):
         def get_tp_rank(
@@ -3687,7 +4310,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(local_ids, [([70, 71, 72, 73], [80, 81, 82, 83])])
         self.assertEqual(remote_ids, [([50, 51, 52, 53], [60, 61, 62, 63])])
 
-    def test_issue_13934_dcp_split_transfer_groups_use_kv_cache_group_id(self):
+    def test_dcp_split_transfer_groups_use_kv_cache_group_id(self):
         """DCP metadata is cache-group indexed, not transfer-group indexed."""
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
         worker._is_hma_required = True
@@ -3987,6 +4610,170 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             worker._get_sfa_replicate_k_block_ids(cast(ReqMeta, meta))
+
+
+@pytest.mark.parametrize("payload", ["tokens", "embeds", "missing"])
+@pytest.mark.parametrize("guard", ["normal", "already-truncated", "single-token", "no-params"])
+def test_prefill_truncation_preserves_payload_and_is_idempotent(payload, guard):
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    count = 1 if guard == "single-token" else 3
+    tokens = list(range(count))
+    embeds = torch.arange(count * 2).reshape(count, 2)
+    params = None if guard == "no-params" else {"_p_side_truncated": guard == "already-truncated"}
+    request = types.SimpleNamespace(
+        kv_transfer_params=params,
+        prompt_token_ids=tokens.copy() if payload == "tokens" else None,
+        prompt_embeds=embeds.clone() if payload == "embeds" else None,
+        _all_token_ids=tokens.copy(),
+        num_prompt_tokens=count,
+        max_tokens=16,
+    )
+    should_truncate = guard == "normal" and payload != "missing"
+    for _ in range(2):  # Preemption/reschedule must not drop a second token.
+        scheduler._truncate_request_for_prefill(request)
+        expected = tokens[:-1] if should_truncate else tokens
+        assert request._all_token_ids == expected
+        assert request.num_prompt_tokens == len(expected)
+        assert request.max_tokens == (1 if should_truncate else 16)
+        if payload == "tokens":
+            assert request.prompt_token_ids == expected
+        if payload == "embeds":
+            assert torch.equal(request.prompt_embeds, embeds[: len(expected)])
+        assert request.kv_transfer_params == (
+            None if params is None else {"_p_side_truncated": should_truncate or guard == "already-truncated"}
+        )
+
+
+@pytest.mark.parametrize("truncate", [False, True])
+@pytest.mark.parametrize("tokens", [0, 1, 2, 32])
+def test_state_prefill_token_count_boundary(truncate, tokens):
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.need_truncate = truncate
+    assert scheduler._state_prefill_token_count(tokens) == (tokens - 1 if truncate and tokens > 1 else tokens)
+
+
+@pytest.mark.parametrize("mode", ["empty", "legacy", "pp-key", "invalid-pp-key"])
+def test_worker_handshake_mapping_preserves_previous_entries_and_updates_atomically(mode):
+    scheduler = MooncakeConnectorScheduler.__new__(MooncakeConnectorScheduler)
+    scheduler.vllm_config = types.SimpleNamespace(kv_transfer_config=types.SimpleNamespace(kv_port=6000))
+    original = {"9": {"host": "old-host", "engine_id": "old-engine", "handshake_port": 6009}}
+    scheduler.multi_nodes_meta_mapping = original.copy()
+    metadata = {}
+    if mode != "empty":
+        key = 2 if mode == "legacy" else (0, 1, 2)
+        metadata[key] = make_agent_metadata(
+            local_ip="new-host", engine_id="new-engine", handshake_port=6002 if mode == "pp-key" else 0
+        )
+    if mode == "invalid-pp-key":
+        # Even if an earlier entry is valid, a later invalid entry must not
+        # publish a partial mapping to the next request.
+        metadata = {1: make_agent_metadata(local_ip="other-host"), **metadata}
+        with pytest.raises(ValueError, match="missing handshake_port"):
+            scheduler.set_xfer_handshake_metadata(metadata)
+        assert scheduler.multi_nodes_meta_mapping == original
+    else:
+        scheduler.set_xfer_handshake_metadata(metadata)
+        expected = original.copy()
+        if mode != "empty":
+            expected["2"] = {"host": "new-host", "engine_id": "new-engine", "handshake_port": 6002}
+        assert scheduler.multi_nodes_meta_mapping == expected
+
+
+@pytest.mark.parametrize("finish_order", [(0, 1, 2), (2, 0, 1), (1, 2, 0)])
+def test_recv_completion_waits_for_all_submitted_pulls(finish_order):
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.request_task_counts_lock = threading.Lock()
+    receiver.request_task_counts = defaultdict(int)
+    receiver.finished_request_markers = set()
+    for index in range(3):
+        receiver._mark_request_task_submitted({"request_id": "r", "all_task_done": index == 2})
+    completions = [receiver._mark_request_task_done("r", index == 2) for index in finish_order]
+    assert completions == [False, False, True]
+    assert not receiver.request_task_counts
+    assert not receiver.finished_request_markers
+    # A subsequent request must not inherit the preceding completion marker.
+    receiver._mark_request_task_submitted({"request_id": "next", "all_task_done": False})
+    assert receiver._mark_request_task_done("next", False) is False
+    receiver._mark_request_task_submitted({"request_id": "next", "all_task_done": True})
+    assert receiver._mark_request_task_done("next", True) is True
+
+
+@pytest.mark.parametrize("primary", [False, True])
+@pytest.mark.parametrize("has_ports", [False, True])
+def test_unused_remote_ports_are_notified_once_by_primary_receiver(primary, has_ports):
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.side_channel_port = 6000 if primary else 6001
+    receiver.local_handshake_port = 6000
+    receiver.proc_not_transfer_request_lock = threading.Lock()
+    receiver.proc_not_transfer_request = {}
+    sent = []
+    receiver._send_done_recv_signal = lambda *args: sent.append(args)
+    ports = {7000: {"num": 0, "host": "idle-peer"}, 7001: {"num": 2, "host": "busy-peer"}} if has_ports else {}
+    for _ in range(2):
+        receiver._send_done_signal_to_free_remote_port("r", "default-peer", ports)
+    assert sent == ([("r", "idle-peer", 7000, ports)] if primary and has_ports else [])
+
+
+@pytest.mark.parametrize("pulls", [1, 2, 4])
+def test_head_reformat_preserves_token_head_order_at_scatter_boundary(monkeypatch, pulls):
+    """Validate PD's CPU reshape arithmetic, not the external NPU scatter op."""
+    receiver = KVCacheRecvingThread.__new__(KVCacheRecvingThread)
+    receiver.block_size = 2
+    blocks, heads, dim = 2, 4, 2
+    source = torch.arange(blocks * 2 * heads * dim).reshape(blocks * 2, heads, dim)
+    slots = torch.tensor([6, 7, 2, 3], dtype=torch.int32)
+    k_cache, v_cache = torch.zeros(1), torch.zeros(1)
+    captured = []
+    module = sys.modules[KVCacheRecvingThread.__module__]
+    monkeypatch.setattr(module.torch_npu, "npu_scatter_pa_kv_cache", lambda **kwargs: captured.append(kwargs))
+    receiver._cat_kv_cache(k_cache, v_cache, source, source + 1000, pulls, blocks, blocks * 2, slots, heads)
+    # Scalar indexing oracle independent of the implementation's view/transpose.
+    expected = torch.empty_like(source)
+    width = heads * dim // pulls
+    flat = source.flatten()
+    for block in range(blocks):
+        for token in range(2):
+            for pull in range(pulls):
+                offset = ((block * pulls + pull) * 2 + token) * width
+                expected[block * 2 + token].flatten()[pull * width : (pull + 1) * width] = flat[offset : offset + width]
+    assert len(captured) == 1
+    assert torch.equal(captured[0]["key"], expected)
+    assert torch.equal(captured[0]["value"], expected + 1000)
+    assert captured[0]["key_cache"] is k_cache
+    assert captured[0]["value_cache"] is v_cache
+    assert captured[0]["slot_mapping"] is slots
+    assert captured[0]["cache_mode"] == "Norm"
+
+
+@pytest.mark.parametrize(
+    "registration", ["_get_registered_kv_tensor_buffers", "_get_registered_kv_tensor_buffers_hybrid"]
+)
+@pytest.mark.parametrize("layout", ["layer-outermost", "block-outermost"])
+@pytest.mark.parametrize("offset", [0, 64])
+def test_main_placement_layout_registers_backing_storage_not_logical_views(registration, layout, offset):
+    """Both main layouts describe size bytes of storage, not size bytes per view."""
+    size = 2 * 1024 * 1024
+    allocation = make_exact_aligned_cpu_buffer(size)
+    page, blocks = 32, 3
+    layer_stride = page * blocks if layout == "layer-outermost" else page
+    block_stride = page if layout == "layer-outermost" else 2 * page
+    placement = KVCacheTensor(
+        size=size,
+        layers=["attention", "indexer"],
+        offset=offset,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+    )
+    views = {
+        name: allocation.as_strided((blocks, page), (block_stride, 1), offset + index * layer_stride)
+        for index, name in enumerate(placement.layers)
+    }
+    for index, name in enumerate(placement.layers):
+        assert views[name].data_ptr() == allocation.data_ptr() + offset + index * layer_stride
+        assert views[name].stride() == (block_stride, 1)
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.kv_cache_config = types.SimpleNamespace(kv_cache_tensors=[placement])
+    assert getattr(worker, registration)(views) == ([allocation.data_ptr()], [size])
 
 
 if __name__ == "__main__":

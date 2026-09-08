@@ -26,18 +26,24 @@ NPU is available. 310P-specific tests live in ``tests/ut/_310p/`` but also
 run on CPU via mocks.
 """
 
+import faulthandler
 import importlib.util
 import subprocess
 import sys
 import types
 from unittest.mock import MagicMock
 
-try:
-    # Note: do not import torch here for cpu env, which will lead to circle import error.
-    subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
-    _npu_available = True
-except (subprocess.CalledProcessError, FileNotFoundError):
+if "--pd-unit" in sys.argv:
+    # This must happen before torch/platform imports. The CLI option is
+    # registered below; explicit PD UT never probes or uses an available NPU.
     _npu_available = False
+else:
+    try:
+        # Note: do not import torch here for cpu env, which will lead to circle import error.
+        subprocess.run(["npu-smi", "info"], capture_output=True, check=True)
+        _npu_available = True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        _npu_available = False
 
 if not _npu_available:
     triton_runtime = MagicMock()
@@ -235,24 +241,67 @@ if not _npu_available:
         return_value=(MagicMock(), MagicMock())
     )
 
-adapt_patch()
-adapt_patch(True)
 
-# register Ascend CustomOp here because uts will use this
-register_ascend_customop()
+def pytest_addoption(parser):
+    parser.addoption(
+        "--pd-unit",
+        action="store_true",
+        help="Run Mooncake V1 CPU UT without unrelated model/worker patches or NPU operators.",
+    )
 
-if not _npu_available:
-    import torch
 
-    from tests.ut.helpers.golden_copy_and_expand import npu_copy_and_expand_eagle_inputs_stub
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Bound PD setup, test and teardown, even if executor shutdown deadlocks.
 
-    enable_custom_op()
-    if hasattr(torch.ops, "_C_ascend") and not hasattr(torch.ops._C_ascend, "npu_copy_and_expand_eagle_inputs"):
-        torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs = npu_copy_and_expand_eagle_inputs_stub
-    # Re-sync after enable_custom_op / adapt_patch so @patch("torch.npu.*") hits
-    # the same object production code uses via `torch.npu`.
-    torch.npu.current_device = MagicMock(return_value="cpu")
-    sys.modules["torch.npu"] = torch.npu
+    CPython's watchdog exits the isolated pytest process on expiry; raising in
+    the main thread is insufficient when teardown waits for a blocked worker.
+    This is a hang guard, not a product-performance threshold.
+    """
+    if not item.config.getoption("--pd-unit"):
+        yield
+        return
+    faulthandler.dump_traceback_later(60, exit=True)
+    try:
+        yield
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+if "--pd-unit" not in sys.argv:
+    # PD control-plane tests exercise real connectors and dependency types, not
+    # model execution. Importing every model patch here couples their collection
+    # to unrelated model APIs. Preserve the default import-time setup, before
+    # child conftests are imported; delaying it to pytest_configure changes that
+    # ordering for unrelated tests.
+    adapt_patch()
+    adapt_patch(True)
+    register_ascend_customop()
+
+    if not _npu_available:
+        import torch
+
+        from tests.ut.helpers.golden_copy_and_expand import npu_copy_and_expand_eagle_inputs_stub
+
+        enable_custom_op()
+        if hasattr(torch.ops, "_C_ascend") and not hasattr(torch.ops._C_ascend, "npu_copy_and_expand_eagle_inputs"):
+            torch.ops._C_ascend.npu_copy_and_expand_eagle_inputs = npu_copy_and_expand_eagle_inputs_stub
+        torch.npu.current_device = MagicMock(return_value="cpu")
+        sys.modules["torch.npu"] = torch.npu
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--pd-unit"):
+        return
+    allowed = (
+        "tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py::",
+        "tests/ut/distributed/kv_transfer/kv_p2p/test_remote_decode_lifecycle.py::",
+        "tests/ut/distributed/kv_transfer/kv_p2p/test_remote_prefill_lifecycle.py::",
+    )
+    outside_pd = [item.nodeid for item in items if not item.nodeid.startswith(allowed)]
+    if outside_pd:
+        raise pytest.UsageError("--pd-unit is restricted to Mooncake V1 control-plane tests: " + outside_pd[0])
+
 
 # Clean up any stale mock modules that may have been installed by
 # other test files (e.g., ascend_store/_mock_deps.py) which replace
@@ -267,28 +316,57 @@ for _m in _stale_modules:
 
 
 @pytest.fixture(autouse=True)
+def _pd_unit_network_boundary(request, monkeypatch):
+    """Fail closed if a PD UT accidentally opens a server or real connection."""
+    if not request.config.getoption("--pd-unit"):
+        yield
+        return
+    import socket
+
+    from zmq.sugar.socket import Socket
+
+    monkeypatch.setenv("VLLM_HOST_IP", "127.0.0.1")
+
+    def reject_network(*args, **kwargs):
+        raise AssertionError("PD UT must fake the transport boundary; real bind/connect/listen is forbidden")
+
+    for method in ("bind", "connect", "connect_ex", "listen"):
+        monkeypatch.setattr(socket.socket, method, reject_network)
+    for method in ("bind", "connect"):
+        monkeypatch.setattr(Socket, method, reject_network)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _clear_enable_sp_before_test():
     clear_enable_sp()
     yield
 
 
 @pytest.fixture(autouse=True)
-def _reset_stream_globals_before_test():
+def _reset_stream_globals_before_test(request):
     """Avoid cross-test leakage from utils.current_stream() caching."""
-    import vllm_ascend.ops.fused_moe.moe_utils as moe_utils_mod
     import vllm_ascend.utils as utils_mod
+
+    moe_utils_mod = None
+    if not request.config.getoption("--pd-unit"):
+        from vllm_ascend.ops.fused_moe import moe_utils
+
+        moe_utils_mod = moe_utils
 
     utils_mod._CURRENT_STREAM = None
     utils_mod._GLOBAL_STREAM = None
     if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
         utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    if moe_utils_mod is not None:
+        moe_utils_mod.COMM_STREAM = None
     yield
     utils_mod._CURRENT_STREAM = None
     utils_mod._GLOBAL_STREAM = None
     if hasattr(utils_mod, "_SHARED_EXPERTS_CALCULATION_STREAM"):
         utils_mod._SHARED_EXPERTS_CALCULATION_STREAM = None
-    moe_utils_mod.COMM_STREAM = None
+    if moe_utils_mod is not None:
+        moe_utils_mod.COMM_STREAM = None
 
 
 @pytest.fixture(autouse=True)

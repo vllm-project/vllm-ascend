@@ -53,6 +53,8 @@ def test_basic_lifecycle():
     assert len(scheduler.requests) == 1
     assert len(scheduler.running) == 1
     assert len(scheduler_output.scheduled_new_reqs) == 1
+    held_block_ids = scheduler.kv_cache_manager.get_block_ids(request_id)
+    assert any(held_block_ids)
 
     # (1b): execute_model()
     model_runner_output = create_model_runner_output(reqs=[request])
@@ -73,9 +75,7 @@ def test_basic_lifecycle():
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 0
     assert len(scheduler.requests) == 1
-    blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[0].req_to_blocks[request_id]
-    for block in blocks:
-        assert block.ref_cnt == 1
+    assert scheduler.kv_cache_manager.get_block_ids(request_id) == held_block_ids
 
     # STEP (2): Send Finished to PB.
     scheduler_output = scheduler.schedule()
@@ -91,6 +91,7 @@ def test_basic_lifecycle():
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # STEP (3): Finished sending.
+    assert scheduler.kv_cache_manager.get_block_ids(request_id) == held_block_ids
     scheduler_output = scheduler.schedule()
     assert len(scheduler.requests) == 1
     assert len(scheduler.running) == 0
@@ -132,9 +133,15 @@ def test_prefix_cache_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request_remote = create_request(request_id=1, num_tokens=NUM_TOKENS, do_remote_decode=True, block_size=BLOCK_SIZE)
+    request_remote.request_id = "remote-prefix-hit"
+    assert request_remote.prompt_token_ids == request_normal.prompt_token_ids[:NUM_TOKENS]
 
     scheduler.add_request(request_remote)
     scheduler_output = scheduler.schedule()
+    scheduled_remote = scheduler_output.scheduled_new_reqs[0]
+    assert scheduled_remote.req_id == request_remote.request_id
+    assert scheduled_remote.num_computed_tokens == NUM_EXTERNAL_FULL_BLOCKS * BLOCK_SIZE
+    assert scheduler_output.num_scheduled_tokens[request_remote.request_id] == NUM_TOKENS % BLOCK_SIZE
     model_runner_output = create_model_runner_output(reqs=[request_remote])
     scheduler.update_from_output(scheduler_output, model_runner_output)
 

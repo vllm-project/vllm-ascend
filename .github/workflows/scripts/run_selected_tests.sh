@@ -223,8 +223,12 @@ run_pytest_batch() {
   local target="$1"
   shift
   local batch_targets=("$@")
+  local batch_name="cpu-ut"
+  if [ "${batch_targets[0]}" = "--pd-unit" ]; then
+    batch_name="mooncake-v1-ut"
+  fi
   test_index=$((test_index + 1))
-  local log_file="${pytest_log_dir}/${test_index}-cpu-ut.log"
+  local log_file="${pytest_log_dir}/${test_index}-${batch_name}.log"
 
   echo "::group::${target}"
   echo -e "\033[1;34m=== Running target: ${target} ===\033[0m"
@@ -234,7 +238,13 @@ run_pytest_batch() {
   fi
   if [ "${enable_coverage}" = "true" ]; then
     echo "DEBUG: Go to the [Coverage Branch] page."
+    # Preserve the assembler's cpu-ut key, but never overwrite the other
+    # process's coverage file. A failure invalidates the whole CPU bucket.
     setup_coverage "cpu-ut"
+    if [ "${batch_name}" = "mooncake-v1-ut" ]; then
+      export COVERAGE_FILE="${COVERAGE_FILE}-mooncake-v1"
+      echo "V1 COVERAGE_FILE: ${COVERAGE_FILE}"
+    fi
     set +e
     run_logged_command "${log_file}" python -m coverage run --rcfile="${project_root}/tests/coveragerc" -m pytest -sv --color=yes "${batch_targets[@]}"
   else
@@ -289,7 +299,38 @@ print_test_info
 setup_vllm_cache_root
 
 if [ "${npu_type}" = "cpu" ]; then
-  run_pytest_batch "cpu-ut (${#targets[@]} targets)" "${targets[@]}"
+  # V1 control-plane contracts use real dependency types without loading all
+  # model patches. Keep them in a separate process from the default UT setup.
+  # Expand directory targets (including the PR job's tests/ut) using the same
+  # test_*.py convention as select_tests.py; preserve explicit nodeids.
+  cpu_targets=()
+  mooncake_v1_targets=()
+  for target in "${targets[@]}"; do
+    target="${target#./}"
+    expanded_targets=("${target}")
+    if [ -d "${target}" ]; then
+      mapfile -d '' -t expanded_targets < <(find "${target}" -type f -name 'test_*.py' -print0 | sort -z)
+      if [ "${#expanded_targets[@]}" -eq 0 ]; then
+        # Let pytest report an empty/misconfigured target, not a green no-op.
+        expanded_targets=("${target}")
+      fi
+    fi
+    for expanded_target in "${expanded_targets[@]}"; do
+      case "${expanded_target%%::*}" in
+        tests/ut/distributed/kv_transfer/kv_p2p/test_mooncake_connector.py|\
+        tests/ut/distributed/kv_transfer/kv_p2p/test_remote_decode_lifecycle.py|\
+        tests/ut/distributed/kv_transfer/kv_p2p/test_remote_prefill_lifecycle.py)
+          mooncake_v1_targets+=("${expanded_target}") ;;
+        *) cpu_targets+=("${expanded_target}") ;;
+      esac
+    done
+  done
+  if [ "${#mooncake_v1_targets[@]}" -gt 0 ]; then
+    run_pytest_batch "mooncake-v1-ut (${#mooncake_v1_targets[@]} targets)" --pd-unit "${mooncake_v1_targets[@]}"
+  fi
+  if [ "${#cpu_targets[@]}" -gt 0 ]; then
+    run_pytest_batch "cpu-ut (${#cpu_targets[@]} targets)" "${cpu_targets[@]}"
+  fi
 elif [ "${mode}" = "with-device" ]; then
   aclgraph_capture_replay="tests/e2e/pull_request/two_card/aclgraph/test_aclgraph_capture_replay.py"
   run_aclgraph_capture_replay=0
