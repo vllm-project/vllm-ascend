@@ -933,7 +933,7 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
 
 def test_partition_batch_clears_padded_dcp_local_seq_lens() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager.vllm_config = object()
+    manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     manager._input_buffers = AscendInputBuffers(
         max_num_reqs=8,
         max_num_tokens=16,
