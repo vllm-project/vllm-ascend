@@ -9,6 +9,7 @@ the generic MLA/MoE implementation and the Ascend KDA backend.
 
 import math
 from copy import copy
+from typing import NamedTuple
 
 import torch
 import vllm.envs as envs
@@ -19,6 +20,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -78,6 +80,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
+from vllm_ascend import envs as ascend_envs
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
 from vllm_ascend.utils import get_rotation_path
 
@@ -123,6 +126,119 @@ def _apply_ascend_attn_res(
     scores = (normalized_without_gamma * score_weight).sum(-1)
     probabilities = scores.softmax(-1).unsqueeze(1)
     return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
+
+
+class AttnResPhase1Stats(NamedTuple):
+    """Historical statistics for all slots in one K3 AttnRes block."""
+
+    inter_numerator: torch.Tensor
+    inter_max: torch.Tensor
+    inter_exp_sum: torch.Tensor
+
+
+class AttnResPhase2Slot(NamedTuple):
+    """Query and historical statistics selected for one AttnRes slot."""
+
+    effective_query: torch.Tensor
+    inter_numerator: torch.Tensor
+    inter_max: torch.Tensor
+    inter_exp_sum: torch.Tensor
+
+
+try:
+    from cann_ops_transformer.ops import (  # type: ignore[import-not-found]
+        block_attn_res_prepare as _block_attn_res_prepare_fused,
+    )
+    from cann_ops_transformer.ops import (  # type: ignore[import-not-found]
+        block_attn_res_update as _block_attn_res_update_fused,
+    )
+except ImportError:
+    _block_attn_res_prepare_fused = None  # type: ignore[assignment]
+    _block_attn_res_update_fused = None  # type: ignore[assignment]
+
+
+def _use_fused_attn_res() -> bool:
+    """Whether the CANNBot DSL fused AttnRes backend is usable."""
+    return (
+        ascend_envs.VLLM_ASCEND_KIMI_K3_ATTNRES_FUSED_ENABLED
+        and _block_attn_res_prepare_fused is not None
+        and _block_attn_res_update_fused is not None
+    )
+
+
+def _prepare_attn_res_phase1(
+    block_residual: torch.Tensor,
+    effective_queries: torch.Tensor,
+    epsilon: float,
+) -> AttnResPhase1Stats:
+    """Prepare FP32 Online Softmax statistics for every slot in one block.
+
+    block_residual holds the completed block-start states on its (dynamic)
+    block axis, so every row is a valid candidate. The slot RMS normalization
+    is query-independent, so the per-slot statistics are computed once and
+    shared by every Attention/MLP sublayer of the block (and reused across the
+    block's applications that merge the running partial in Phase 2).
+    """
+    values_float = block_residual.float()
+    inv_rms = torch.rsqrt(values_float.square().mean(dim=-1) + epsilon)
+    inter_logits = torch.matmul(values_float, effective_queries.transpose(0, 1)).permute(2, 0, 1) * inv_rms.unsqueeze(0)
+    inter_max = inter_logits.max(dim=2).values
+    inter_exp = torch.exp(inter_logits - inter_max.unsqueeze(2))
+    inter_exp_sum = inter_exp.sum(dim=2)
+    inter_numerator = torch.matmul(inter_exp.permute(1, 0, 2), values_float).permute(1, 0, 2)
+    return AttnResPhase1Stats(
+        inter_numerator=inter_numerator,
+        inter_max=inter_max,
+        inter_exp_sum=inter_exp_sum,
+    )
+
+
+def _merge_attn_res_slot(
+    partial_float: torch.Tensor,
+    slot: AttnResPhase2Slot,
+    epsilon: float,
+) -> torch.Tensor:
+    """Merge one candidate (the running partial) with Phase 1 statistics.
+
+    Mirrors the reference Online Softmax step: the partial candidate's logit
+    is the RMS-normalized learned query score and is folded into the shared
+    softmax over the historical block states.
+    """
+    input_logit = torch.matmul(partial_float, slot.effective_query) * torch.rsqrt(
+        partial_float.square().mean(dim=-1) + epsilon
+    )
+    merged_max = torch.maximum(slot.inter_max, input_logit)
+    inter_scale = torch.exp(slot.inter_max - merged_max)
+    input_scale = torch.exp(input_logit - merged_max)
+    merged_exp_sum = inter_scale * slot.inter_exp_sum + input_scale
+    merged_numerator = inter_scale.unsqueeze(-1) * slot.inter_numerator + input_scale.unsqueeze(-1) * partial_float
+    return merged_numerator / merged_exp_sum.unsqueeze(-1)
+
+
+def _update_attn_res_phase2(
+    partial_block: torch.Tensor,
+    partial_delta: torch.Tensor,
+    slot: AttnResPhase2Slot,
+    epsilon: float,
+) -> torch.Tensor:
+    """Update partial in place, then merge one selected slot with Online Softmax."""
+    partial_updated = (partial_block.float() + partial_delta.float()).to(partial_block.dtype)
+    partial_block.copy_(partial_updated)
+    return _merge_attn_res_slot(partial_block.float(), slot, epsilon).to(partial_block.dtype)
+
+
+def _merge_attn_res_partial(
+    partial_block: torch.Tensor,
+    slot: AttnResPhase2Slot,
+    epsilon: float,
+) -> torch.Tensor:
+    """Merge the already-accumulated partial without folding in a delta.
+
+    Used when a pipeline rank starts in the middle of a block: the incoming
+    hidden_states already contain every delta, so the partial must not be
+    updated again before the first Attention phase-2 merge.
+    """
+    return _merge_attn_res_slot(partial_block.float(), slot, epsilon).to(partial_block.dtype)
 
 
 class AscendKimiMLP(KimiMLP):
@@ -514,6 +630,24 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
         # Ascend attention returns its output instead of filling an AMD buffer.
         return self.self_attn(positions=positions, hidden_states=hidden_states)
 
+    def _attention(self, positions: torch.Tensor, attention_input: torch.Tensor) -> torch.Tensor:
+        """Run the attention delta for a pre-computed AttnRes blend."""
+        hidden_states = self.input_layernorm(attention_input)
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)
+            hidden_states = hidden_states[: positions.shape[0]]
+        hidden_states = self.self_attn(
+            hidden_states=hidden_states,
+            positions=positions,
+        )
+        if self.use_sequence_parallel:
+            hidden_states = sp_reduce_scatter(hidden_states)
+        return hidden_states
+
+    def _mlp(self, mlp_input: torch.Tensor) -> torch.Tensor:
+        """Run the MLP/MoE delta for a pre-computed AttnRes blend."""
+        return self.mlp(self.post_attention_layernorm(mlp_input))
+
     def forward_attn_residual(
         self,
         positions: torch.Tensor,
@@ -591,6 +725,22 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
             and parallel_config.tensor_parallel_size > 1
         )
 
+        attn_res_mode = getattr(config, "attn_res_mode", "fused")
+        if attn_res_mode == "original":
+            self.attn_res_mode = "original"
+        elif attn_res_mode == "fused":
+            if _use_fused_attn_res():
+                self.attn_res_mode = "fused"
+            else:
+                logger.warning_once(
+                    "Kimi K3 'fused' AttnRes backend requested but unavailable; falling back to 'two_phase'"
+                )
+                self.attn_res_mode = "two_phase"
+        else:
+            self.attn_res_mode = "two_phase"
+        logger.info("Kimi K3 AttnRes mode: %s", self.attn_res_mode)
+        self.attn_res_effective_queries: torch.Tensor | None = None
+
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -662,7 +812,244 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
                 else:
                     yield args
 
-        return super().load_weights(remap_mixed_gate_weights())
+        result = super().load_weights(remap_mixed_gate_weights())
+        if self.config.attn_res_block_size is not None and self.attn_res_mode != "original":
+            self._prepare_attn_res_effective_queries()
+        return result
+
+    def _prepare_attn_res_effective_queries(self) -> None:
+        """Precompute q * RMSNorm gain once after checkpoint loading."""
+        layers = self.layers[self.start_layer : self.end_layer]
+        if not layers:
+            return
+        first_weight = layers[0].self_attention_res_norm.weight
+        effective_queries = torch.empty(
+            2 * len(layers),
+            self.config.hidden_size,
+            dtype=torch.float32,
+            device=first_weight.device,
+        )
+        for local_idx, layer in enumerate(layers):
+            effective_queries[2 * local_idx].copy_(
+                (
+                    layer.self_attention_res_norm.weight.float()
+                    * layer.self_attention_res_proj.weight.squeeze(0).float()
+                ).detach()
+            )
+            effective_queries[2 * local_idx + 1].copy_(
+                (layer.mlp_res_norm.weight.float() * layer.mlp_res_proj.weight.squeeze(0).float()).detach()
+            )
+        self.attn_res_effective_queries = effective_queries
+
+    def _run_attn_res_phase1(
+        self,
+        block_residual: torch.Tensor,
+        block_queries: torch.Tensor,
+        epsilon: float,
+    ) -> AttnResPhase1Stats:
+        """Run the Phase-1 (historical block statistics) backend.
+
+        ``fused`` dispatches to the CANNBot DSL kernel when available and
+        falls back to the pure-Torch implementation otherwise. The pure Torch
+        path treats every row of ``block_residual`` as a valid candidate,
+        while the DSL kernel needs an explicit ``valid_blocks`` count for its
+        static UB buffers.
+        """
+        if self.attn_res_mode == "fused" and _block_attn_res_prepare_fused is not None and block_residual.shape[1] > 0:
+            # The CANNBot DSL kernel keeps V resident in FP32; the plugin's
+            # block_residual is bf16 because it also travels through the PP
+            # IntermediateTensors channel.
+            v_fp32 = block_residual.float().contiguous()
+            valid_blocks = torch.tensor([v_fp32.shape[1]], dtype=torch.uint64, device=block_residual.device)
+            inter_numerator, inter_max, inter_exp_sum = _block_attn_res_prepare_fused(
+                v_fp32,
+                valid_blocks,
+                block_queries,
+                eps=epsilon,
+            )
+            return AttnResPhase1Stats(
+                inter_numerator=inter_numerator,
+                inter_max=inter_max,
+                inter_exp_sum=inter_exp_sum,
+            )
+        return _prepare_attn_res_phase1(block_residual, block_queries, epsilon)
+
+    def _run_attn_res_phase2(
+        self,
+        partial_block: torch.Tensor,
+        partial_delta: torch.Tensor,
+        slot: AttnResPhase2Slot,
+        epsilon: float,
+    ) -> torch.Tensor:
+        """Fold the running ``partial_block`` delta into one slot.
+
+        ``fused`` dispatches to the CANNBot DSL kernel which updates the
+        partial in place and returns the merged output plus the updated
+        partial buffer. The pure Torch path updates the partial in place
+        and returns the merged slot output.
+        """
+        if self.attn_res_mode == "fused" and _block_attn_res_update_fused is not None:
+            merged_output = _block_attn_res_update_fused(
+                partial_block,
+                partial_delta,
+                slot.effective_query,
+                slot.inter_numerator,
+                slot.inter_max,
+                slot.inter_exp_sum
+            )
+            return merged_output
+        return _update_attn_res_phase2(partial_block, partial_delta, slot, epsilon)
+
+    def _forward_attn_res_blocks(
+        self,
+        hidden_states: torch.Tensor,
+        block_residual: torch.Tensor,
+        num_valid_blocks: int,
+        positions: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Run the two-phase AttnRes over the rank-local AttnRes blocks.
+
+        A rank may start mid-block under pipeline parallelism; finish that
+        in-flight block first (continuation), then process the remainder on
+        block boundaries.
+        """
+        block_size = self.config.attn_res_block_size
+        end_layer = self.end_layer
+
+        next_layer = self.start_layer
+        if next_layer % block_size != 0 and next_layer < end_layer:
+            piece_end = min(((next_layer // block_size) + 1) * block_size, end_layer)
+            hidden_states, num_valid_blocks = self._forward_attn_res_block(
+                next_layer,
+                piece_end,
+                starts_in_rank=False,
+                hidden_states=hidden_states,
+                block_residual=block_residual,
+                num_valid_blocks=num_valid_blocks,
+                positions=positions,
+                aux_hidden_states=aux_hidden_states,
+            )
+            next_layer = piece_end
+        while next_layer < end_layer:
+            block_end = min(next_layer + block_size, end_layer)
+            hidden_states, num_valid_blocks = self._forward_attn_res_block(
+                next_layer,
+                block_end,
+                starts_in_rank=True,
+                hidden_states=hidden_states,
+                block_residual=block_residual,
+                num_valid_blocks=num_valid_blocks,
+                positions=positions,
+                aux_hidden_states=aux_hidden_states,
+            )
+            next_layer = block_end
+        return hidden_states, aux_hidden_states
+
+    def _forward_attn_res_block(
+        self,
+        start_layer_idx: int,
+        end_layer_idx: int,
+        starts_in_rank: bool,
+        hidden_states: torch.Tensor,
+        block_residual: torch.Tensor,
+        num_valid_blocks: int,
+        positions: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor],
+    ) -> tuple[torch.Tensor, int]:
+        """Process one AttnRes block with the two-phase backend.
+
+        Phase 1 computes the FP32 inter-block softmax statistics once for all
+        slots of the block. Phase 2 folds the running partial block into each
+        slot through an Online Softmax merge. ``starts_in_rank`` selects
+        between a fresh block (the current partial becomes the newest block
+        start) and an in-flight continuation whose partial is carried in
+        ``hidden_states``.
+        """
+        layers = self.layers[start_layer_idx:end_layer_idx]
+        if len(layers) == 0:
+            return hidden_states, num_valid_blocks
+        if self.attn_res_effective_queries is None or self.attn_res_effective_queries.device != hidden_states.device:
+            self._prepare_attn_res_effective_queries()
+        if self.attn_res_effective_queries is None:
+            raise RuntimeError("Kimi K3 AttnRes effective queries are not initialized")
+        if starts_in_rank:
+            block_residual[:, num_valid_blocks, :].copy_(hidden_states)
+            num_valid_blocks += 1
+            partial_block = torch.zeros_like(
+                hidden_states, dtype=torch.float32 if self.attn_res_mode == "fused" else hidden_states.dtype
+            )
+        else:
+            partial_block = hidden_states.clone().to(
+                torch.float32 if self.attn_res_mode == "fused" else hidden_states.dtype
+            )
+        block_queries = self.attn_res_effective_queries[
+            2 * (start_layer_idx - self.start_layer) : 2 * (end_layer_idx - self.start_layer)
+        ].contiguous()
+        epsilon = self.config.rms_norm_eps
+        phase1 = self._run_attn_res_phase1(block_residual[:, :num_valid_blocks], block_queries, epsilon)
+
+        previous_mlp_delta = None
+        for layer_offset, layer in enumerate(layers):
+            attention_slot = 2 * layer_offset
+            mlp_slot = attention_slot + 1
+            layer_idx = start_layer_idx + layer_offset
+            if previous_mlp_delta is None:
+                if starts_in_rank:
+                    attention_input = (
+                        phase1.inter_numerator[attention_slot] / phase1.inter_exp_sum[attention_slot].unsqueeze(-1)
+                    ).to(hidden_states.dtype)
+                else:
+                    attention_input = _merge_attn_res_partial(
+                        partial_block,
+                        AttnResPhase2Slot(
+                            effective_query=block_queries[attention_slot],
+                            inter_numerator=phase1.inter_numerator[attention_slot],
+                            inter_max=phase1.inter_max[attention_slot],
+                            inter_exp_sum=phase1.inter_exp_sum[attention_slot],
+                        ),
+                        epsilon,
+                    )
+            else:
+                attention_slot_stats = AttnResPhase2Slot(
+                    effective_query=block_queries[attention_slot],
+                    inter_numerator=phase1.inter_numerator[attention_slot],
+                    inter_max=phase1.inter_max[attention_slot],
+                    inter_exp_sum=phase1.inter_exp_sum[attention_slot],
+                )
+                attention_input = self._run_attn_res_phase2(
+                    partial_block,
+                    previous_mlp_delta.contiguous(),
+                    attention_slot_stats,
+                    epsilon,
+                ).to(hidden_states.dtype)
+            if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(attention_input)
+            attention_output = layer._attention(positions, attention_input)
+            mlp_slot_stats = AttnResPhase2Slot(
+                effective_query=block_queries[mlp_slot],
+                inter_numerator=phase1.inter_numerator[mlp_slot],
+                inter_max=phase1.inter_max[mlp_slot],
+                inter_exp_sum=phase1.inter_exp_sum[mlp_slot],
+            )
+            mlp_input = self._run_attn_res_phase2(
+                partial_block,
+                attention_output.contiguous(),
+                mlp_slot_stats,
+                epsilon,
+            ).to(hidden_states.dtype)
+            previous_mlp_delta = layer._mlp(mlp_input)
+            if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+                self._maybe_add_hidden_state(
+                    aux_hidden_states,
+                    layer_idx + 1,
+                    (partial_block + previous_mlp_delta).to(hidden_states.dtype),
+                    None,
+                )
+
+        if previous_mlp_delta is not None:
+            partial_block.add_(previous_mlp_delta)
+        return partial_block.to(hidden_states.dtype), num_valid_blocks
 
     def forward(
         self,
@@ -720,34 +1107,44 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         )
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
+        num_valid_blocks = residual.size(1) if residual is not None else 0
         residual = block_residual
 
-        for layer_idx, layer in enumerate(
-            self.layers[self.start_layer : self.end_layer],
-            start=self.start_layer,
-        ):
-            if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(
-                    _apply_ascend_attn_res(
+        if self.attn_res_mode != "original":
+            hidden_states, aux_hidden_states = self._forward_attn_res_blocks(
+                hidden_states,
+                block_residual,
+                num_valid_blocks,
+                positions,
+                aux_hidden_states,
+            )
+        else:
+            for layer_idx, layer in enumerate(
+                self.layers[self.start_layer : self.end_layer],
+                start=self.start_layer,
+            ):
+                if self.dspark_aux_capture_materialized and layer_idx in self.aux_hidden_state_layers:
+                    aux_hidden_states.append(
+                        _apply_ascend_attn_res(
+                            hidden_states,
+                            residual,
+                            layer.self_attention_res_proj,
+                            layer.self_attention_res_norm,
+                            layer.prev_valid_blocks,
+                        )
+                    )
+                hidden_states, residual = layer(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    residual=residual,
+                )
+                if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
+                    self._maybe_add_hidden_state(
+                        aux_hidden_states,
+                        layer_idx + 1,
                         hidden_states,
                         residual,
-                        layer.self_attention_res_proj,
-                        layer.self_attention_res_norm,
-                        layer.prev_valid_blocks,
                     )
-                )
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
-            if not self.dspark_aux_capture_materialized and (layer_idx + 1) in self.aux_hidden_state_layers:
-                self._maybe_add_hidden_state(
-                    aux_hidden_states,
-                    layer_idx + 1,
-                    hidden_states,
-                    residual,
-                )
 
         if not get_pp_group().is_last_rank:
             assert not self.use_sequence_parallel, "Sequence parallelism is not supported with pipeline parallelism"
