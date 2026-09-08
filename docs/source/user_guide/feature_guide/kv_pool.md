@@ -33,7 +33,7 @@ When `MultiConnector` is used, configure `kv_load_failure_policy` on the `MultiC
 | `use_layerwise` | Enable layer-by-layer KV save/load. Only supported on the Prefill node and requires the `memcache` backend. The default value is false. |
 | `prefill_pp_size` | Prefill PP size, needs to be set when Prefill node enables PP. |
 | `prefill_pp_layer_partition` | Prefill PP layer partition, needs to be set when Prefill node enables PP. |
-| `qos_priority` | Transfer QoS priority for KV pool, an integer in `[0, 4]` (a larger value means a higher priority).
+| `qos_priority` | Transfer QoS priority for KV pool, an integer in `[0, 4]` (a larger value means a higher priority). |
 
 ### Environment Variable Configuration
 
