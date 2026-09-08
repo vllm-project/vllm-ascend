@@ -338,6 +338,17 @@ benchmarks:
     request_rate: 1
     baseline: 0
     threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs30_r1:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 30
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
   perf_TPOT50_128k_1_prefix90_bs24_r1:
     case_type: performance
     dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
@@ -357,6 +368,17 @@ benchmarks:
     num_prompts: 192
     max_out_len: 1024
     batch_size: 24
+    request_rate: 1
+    baseline: 0
+    threshold: 0.95
+  perf_TPOT50_128k_1_prefix90_bs30_r2:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K-in128k-bs512-prefix90-ds
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 192
+    max_out_len: 1024
+    batch_size: 30
     request_rate: 1
     baseline: 0
     threshold: 0.95
