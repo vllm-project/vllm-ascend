@@ -1191,6 +1191,8 @@ def refresh_block_size(vllm_config):
     scheduler_config = vllm_config.scheduler_config
     model_config = vllm_config.model_config
 
+    # The draft model shares CacheConfig with the target model and uses the
+    # target's resolved cache layout, so do not refresh its block size.
     spec_cfg = vllm_config.speculative_config
     if spec_cfg is not None and model_config is spec_cfg.draft_model_config:
         return
