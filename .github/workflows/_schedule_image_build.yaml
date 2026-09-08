@@ -165,7 +165,7 @@ jobs:
     name: build
     runs-on: ${{ matrix.runner_info.runner }}
     container:
-      image: ${{ format('{0}:{1}-{2}-ubuntu22.04-py3.12', inputs.cann_swr_url, inputs.cann_image_version, inputs.soc) }}
+      image: ${{ matrix.runner_info.tag == 'arm64' && 'arm64v8/ubuntu:22.04' || 'ubuntu:latest' }}
       env:
         SOC: ${{ inputs.soc }}
     permissions:
@@ -180,6 +180,14 @@ jobs:
           - {runner: linux-amd64-cpu-4, tag: amd64}
 
     steps:
+
+    - name: Install build tools
+      run: |
+        if [ -n "$APTMIRROR" ]; then
+          sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
+        fi
+        apt-get update -y
+        apt-get install -y git zstd
 
     - name: Validate inputs (workflow_dispatch only)
       if: ${{ github.event_name == 'workflow_dispatch' }}
@@ -297,14 +305,6 @@ jobs:
           aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
           *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
         esac
-
-    - name: Install csrc cache dependencies
-      run: |
-        if [ -n "$APTMIRROR" ]; then
-          sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list
-        fi
-        apt-get update -y
-        apt-get install -y zstd
 
     - name: Restore vllm-ascend csrc cache
       id: cache-csrc
