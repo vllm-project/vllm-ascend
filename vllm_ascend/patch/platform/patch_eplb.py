@@ -3,6 +3,7 @@
 
 """Narrow vLLM EPLB construction and commit adapters for Ascend."""
 
+import math
 from functools import wraps
 from inspect import signature
 
@@ -112,6 +113,9 @@ def _wrap_move_to_workspace(original_move):
             result = original_move(*bound.args, **bound.kwargs)
             if layer_idx is not None:
                 refresh_model_routing_tables(model_state, layer_idx)
+                candidate_scores = getattr(model_state, "_stair_candidate_scores", None)
+                if candidate_scores is not None and math.isfinite(float(candidate_scores[layer_idx])):
+                    model_state._stair_accepted_scores[layer_idx] = candidate_scores[layer_idx]
                 if bound.arguments["ep_rank"] == 0 and layer_idx == model_state.model.num_moe_layers - 1:
                     logger.info(
                         "%s: model=%s",

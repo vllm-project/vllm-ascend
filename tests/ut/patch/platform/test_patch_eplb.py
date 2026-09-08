@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import pytest
 from vllm.config import EPLBConfig, ParallelConfig, VllmConfig
 from vllm.config import parallel as parallel_module
@@ -171,6 +172,27 @@ def test_async_workspace_wrapper_refreshes_committed_layer(monkeypatch):
         "model",
     )
     assert call_order == ["move", "refresh", "ack"]
+
+
+def test_async_workspace_wrapper_updates_stair_anchor_after_commit(monkeypatch):
+    consumed_event = MagicMock()
+    pending_result = SimpleNamespace(layer_idx=0, consumed_event=consumed_event)
+    model_state = SimpleNamespace(
+        pending_result=pending_result,
+        model=SimpleNamespace(num_moe_layers=1),
+        model_name="model",
+        _stair_candidate_scores=np.array([1.2]),
+        _stair_accepted_scores=np.array([np.nan]),
+    )
+    monkeypatch.setattr(patch_eplb, "refresh_model_routing_tables", MagicMock())
+
+    def original_move(model_state, ep_rank):
+        model_state.pending_result.consumed_event.record()
+        model_state.pending_result = None
+
+    patch_eplb._wrap_move_to_workspace(original_move)(model_state, 0)
+
+    np.testing.assert_array_equal(model_state._stair_accepted_scores, [1.2])
 
 
 def test_worker_planner_wrapper_preserves_default_path(monkeypatch):
