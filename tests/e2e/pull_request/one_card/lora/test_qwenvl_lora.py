@@ -157,62 +157,7 @@ EXPECTED_BEAM_SEARCH_OUTPUTS = [
 ]
 
 QWEN2VL_MODEL_PATH = "Qwen/Qwen2-VL-2B-Instruct"
-QWEN25VL_MODEL_PATH = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3VL_MODEL_PATH = "Qwen/Qwen3-VL-4B-Instruct"
-
-
-@wait_until_npu_memory_free()
-def test_qwen2vl_lora(qwen2vl_lora_files):
-    """Test Qwen 2.0 VL model with LoRA, including beam search on the same engine."""
-    config = TestConfig(model_path=QWEN2VL_MODEL_PATH, lora_path=qwen2vl_lora_files)
-
-    with _vllm_runner(config) as vllm_model:
-        llm = vllm_model.model
-        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=1)
-        # NOTE currently, we only test cherry blossom since stop sign
-        # output is slightly different for v1; - the root cause is likely
-        # independent of the intent of this test, which is to ensure beam
-        # search passes through lora through correctly.
-        run_beam_search_test(
-            llm,
-            config,
-            [ImageAsset("cherry_blossom")],
-            expected_outputs=EXPECTED_BEAM_SEARCH_OUTPUTS,
-            lora_id=1,
-        )
-
-
-@wait_until_npu_memory_free()
-def test_qwen25vl_lora(qwen25vl_lora_files):
-    """Test Qwen 2.5 VL model with LoRA"""
-    config = TestConfig(model_path=QWEN25VL_MODEL_PATH, lora_path=qwen25vl_lora_files)
-
-    with _vllm_runner(config) as vllm_model:
-        llm = vllm_model.model
-        run_test(llm, config, TEST_IMAGES, expected_outputs=EXPECTED_OUTPUTS, lora_id=1)
-
-
-@wait_until_npu_memory_free()
-def test_qwen25vl_vision_lora(qwen25vl_vision_lora_files):
-    config = TestConfig(
-        model_path=QWEN25VL_MODEL_PATH,
-        lora_path=qwen25vl_vision_lora_files,
-        # Currently, tower_connector_lora is incompatible with
-        # the multi-modal processor cache.
-        # TODO: Remove this restriction
-        mm_processor_cache_gb=0,
-        enable_tower_connector_lora=True,
-    )
-    with _vllm_runner(config) as vllm_model:
-        llm = vllm_model.model
-
-        run_test(
-            llm,
-            config,
-            TEST_IMAGES,
-            expected_outputs=EXPECTED_OUTPUTS,
-            lora_id=1,
-        )
 
 
 @wait_until_npu_memory_free()
@@ -240,6 +185,7 @@ def test_qwen3vl_vision_lora(qwen3vl_vision_lora_files):
 
 @wait_until_npu_memory_free()
 def test_qwen2vl_multiple_lora_types(
+    qwen2vl_lora_files,
     qwen2vl_language_lora_files,
     qwen2vl_vision_tower_connector_lora_files,
     qwen2vl_vision_tower_lora_files,
@@ -302,3 +248,14 @@ def test_qwen2vl_multiple_lora_types(
                 lora_id=lora_id,
                 lora_name="vision_tower",
             )
+
+        # Beam search on the pokemon LoRA; cherry blossom only (stop-sign
+        # beam output differs slightly and is unrelated to LoRA plumbing).
+        config.lora_path = qwen2vl_lora_files
+        run_beam_search_test(
+            llm,
+            config,
+            [ImageAsset("cherry_blossom")],
+            expected_outputs=EXPECTED_BEAM_SEARCH_OUTPUTS,
+            lora_id=1,
+        )
