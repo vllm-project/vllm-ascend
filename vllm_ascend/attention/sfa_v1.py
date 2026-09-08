@@ -1272,20 +1272,25 @@ class AscendSFAImpl(MLAAttentionImpl):
         backend's builder; ``None`` when this layer has no indexer."""
         if not self.has_indexer:
             return None
+        prefix = self.indexer.k_cache.prefix
+        if self.kv_sharing_target_layer_name is not None:
+            # A KV-sharing layer (e.g. an MTP draft layer) owns no cache of
+            # its own, so no metadata is built under its own prefix; resolve
+            # to the sharing target's indexer cache prefix instead.
+            target_base = self.kv_sharing_target_layer_name.removesuffix(".attn")
+            prefix = f"{target_base}.indexer.k_cache"
         forward_metadata = get_forward_context().attn_metadata
-        indexer_metadata = (
-            forward_metadata.get(self.indexer.k_cache.prefix) if isinstance(forward_metadata, dict) else None
-        )
+        indexer_metadata = forward_metadata.get(prefix) if isinstance(forward_metadata, dict) else None
         if indexer_metadata is None and isinstance(forward_metadata, dict):
-            # A KV-sharing layer (e.g. an MTP draft layer) owns no indexer
-            # cache of its own, so no metadata is built under its prefix; the
-            # indexer shares this layer's SFA attention metadata instead
-            # (slot_mapping / block_table are identical for both caches).
+            # During MTP draft propose the proposer only builds metadata for
+            # the draft attention layers (keyed by layer name), so fall back
+            # to this layer's SFA attention metadata - the same metadata the
+            # pre-refactor inline indexer consumed (slot_mapping/block_table
+            # are identical for both caches).
             indexer_metadata = forward_metadata.get(self.layer_name)
         if indexer_metadata is None:
             raise RuntimeError(
-                "No metadata was built for the indexer cache layer "
-                f"prefix={self.indexer.k_cache.prefix}. layer_name={self.layer_name}."
+                f"No metadata was built for the indexer cache layer prefix={prefix}. layer_name={self.layer_name}."
             )
         return indexer_metadata
 
