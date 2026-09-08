@@ -340,7 +340,7 @@ jobs:
             for ((i=1; i<SIZE; i++)); do
               POD="${LWS_NAME}-0-${i}"
               PHASE=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-              READY=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)
+              READY=$(kubectl get pod "$POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
               echo "Worker [$POD] phase=$PHASE ready=$READY"
               if [[ "$PHASE" != "Running" || "$READY" != "true" ]]; then
                 ALL_READY=false
@@ -349,7 +349,7 @@ jobs:
             done
 
             LEADER_PHASE=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "NotFound")
-            LEADER_READY=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null || true)
+            LEADER_READY=$(kubectl get pod "$LEADER_POD" -n "$NAMESPACE" -o jsonpath='{.status.containerStatuses[*].ready}' 2>/dev/null)
             echo "Leader [$LEADER_POD] phase=$LEADER_PHASE ready=$LEADER_READY"
             if [[ "$LEADER_PHASE" != "Running" || "$LEADER_READY" != "true" ]]; then
               ALL_READY=false
