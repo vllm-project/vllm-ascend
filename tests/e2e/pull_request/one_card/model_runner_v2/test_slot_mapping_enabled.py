@@ -9,7 +9,8 @@ from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import _compute
 
 @pytest.mark.parametrize("cp_size, cp_rank, expected", [(1, 0, [40, 43, 44, 47]), (2, 1, [-1, 41, -1, 43])])
 @pytest.mark.parametrize("has_enablement", [False, True])
-def test_circular_buffer_slot_mapping_disabled(cp_size, cp_rank, expected, has_enablement):
+@pytest.mark.parametrize("use_block_table_staging", [False, True])
+def test_circular_buffer_slot_mapping_disabled(cp_size, cp_rank, expected, has_enablement, use_block_table_staging):
     """PR #53896: disabled state groups emit PAD without token-indexing rows."""
     device = "npu"
     block_tables = [
@@ -37,6 +38,7 @@ def test_circular_buffer_slot_mapping_disabled(cp_size, cp_rank, expected, has_e
         PAD_ID=-1,
         TRITON_BLOCK_SIZE=1024,
         BLOCK_TABLE_PAD_SIZE=2,
+        USE_BLOCK_TABLE_STAGING=use_block_table_staging,
         slot_mapping_enabled=enabled,
         HAS_SLOT_MAPPING_ENABLED=has_enablement,
     )

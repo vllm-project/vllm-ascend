@@ -125,7 +125,8 @@ def test_hybrid_mamba_checkpoint_matches_eagle_replay_boundary(use_eagle, expect
         num_local_computed_tokens=0,
         num_tokens_main_model=200,
     )
-    assert manager._checkpoint_positions["checkpoint"] == expected_checkpoint
+    # vLLM #55747 retains both the checkpoint boundary and its reserved slot.
+    assert manager._checkpoints["checkpoint"] == (expected_checkpoint, 0)
 
 
 def _make_kimi_k3_dspark_kv_cache_specs(

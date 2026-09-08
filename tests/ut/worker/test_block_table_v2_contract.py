@@ -38,5 +38,6 @@ class TestBlockTableV2Contract(PytestBase):
         kwargs = kernel.__getitem__.return_value.call_args.kwargs
         assert kwargs["HAS_SLOT_MAPPING_ENABLED"] is not legacy
         assert kwargs["slot_mapping_enabled"] is (None if legacy else tables.slot_mapping_enabled)
+        assert kwargs["USE_BLOCK_TABLE_STAGING"] is True
         assert result.shape == (2, 6)
         assert result.data_ptr() == tables.slot_mappings.data_ptr()
