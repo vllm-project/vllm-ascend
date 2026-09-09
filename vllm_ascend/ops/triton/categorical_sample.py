@@ -74,8 +74,10 @@ def _element(values, index):
 def _load_logits(logits, row_offset, offsets, vocab, temperature, APPLY: tl.constexpr):
     values = tl.load(logits + row_offset + offsets, offsets < vocab, other=-float("inf")).to(tl.float32)
     if logits.dtype.element_ty == tl.float32:
-        # Native FP32 LoadTile uses Adds(0); preserve its signed-zero behavior.
-        values = values + 0.0
+        # Native FP32 LoadTile uses Adds(0), normalizing -0. Triton's float
+        # optimizer can eliminate an add-zero before a cache dtype cast.
+        bits = values.to(tl.int32, bitcast=True)
+        values = tl.where(bits == -0x80000000, 0, bits).to(tl.float32, bitcast=True)
     if APPLY:
         if temperature != 0:
             values = values / temperature
@@ -157,7 +159,8 @@ def _categorical_kernel(
         valid = (offsets < TILE) & (indices < VOCAB)
         raw = tl.load(logits + row_offset + indices, valid, other=-float("inf")).to(tl.float32)
         if logits.dtype.element_ty == tl.float32:
-            raw = raw + 0.0
+            bits = raw.to(tl.int32, bitcast=True)
+            raw = tl.where(bits == -0x80000000, 0, bits).to(tl.float32, bitcast=True)
         if cache is not None:
             tl.store(
                 cache + request.to(tl.int64) * cache_stride + column.to(tl.int64) * col_stride + indices, raw, valid
