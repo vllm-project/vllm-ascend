@@ -1326,7 +1326,6 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 query_start_loc,
                 seq_lens,
                 self.num_actual_tokens,
-                buffer=self.dspark_swa_indices_buffer,
             )
             if self._device_metadata_enabled and not has_prefill:
                 if self.dspark_swa_indices_buffer is None:
@@ -1344,7 +1343,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                     indices_output=dspark_swa_indices,
                 )
             else:
-                dspark_swa_indices, _ = build_dspark_swa_indices(*dspark_swa_args)
+                dspark_swa_indices, _ = build_dspark_swa_indices(
+                    *dspark_swa_args, buffer=self.dspark_swa_indices_buffer
+                )
                 dspark_swa_indices = dspark_swa_indices[: self.num_actual_tokens]
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
 

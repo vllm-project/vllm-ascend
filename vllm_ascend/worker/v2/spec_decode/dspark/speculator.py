@@ -15,6 +15,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import logging
 from typing import Any, cast
 
 import torch
@@ -36,6 +37,13 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
+from vllm_ascend.worker.v2.spec_decode.dspark.buffers import IndexedConfidenceBuffer, IndexedDraftTokenBuffer
+from vllm_ascend.worker.v2.spec_decode.physical_k import (
+    initialize_physical_k_buffers,
+    physical_k_scope,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class AscendDSparkSpeculator(DSparkSpeculator):
@@ -44,6 +52,20 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
+        self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
+        self._physical_k_log_count = 0
+        # DSpark changes ``sample_from_anchor`` after DFlash initialization,
+        # so initialize the width-dependent anchor indices only now.
+        initialize_physical_k_buffers(self)
+        self._physical_token_buffer = IndexedDraftTokenBuffer(self.draft_tokens)
+        # Retain the full backing allocation, not physical_k_scope's narrow
+        # (noncontiguous) view. Allocate indices before graph capture.
+        confidence_probs = getattr(self, "draft_token_confidence_probs", None)
+        self._physical_confidence_buffers = (
+            {k: IndexedConfidenceBuffer(confidence_probs, k) for k in range(1, self.num_speculative_steps)}
+            if confidence_probs is not None
+            else {}
+        )
 
     def load_draft_model(
         self,
@@ -107,8 +129,44 @@ class AscendDSparkSpeculator(DSparkSpeculator):
 
         self.attn_backends = attn_backends
 
-    def build_draft_attn_metadatas(self, num_reqs_padded, seq_lens_cpu_upper_bound):
-        num_tokens_padded = num_reqs_padded * self.num_query_per_req
+    def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+        """Keep DSpark confidence writes compatible with active physical K.
+
+        Upstream DSpark assigns the confidence result to the whole fixed-width
+        request buffer.  During V2 graph capture the physical-K scope exposes a
+        smaller ``num_speculative_steps``, so the result has shape ``[B, K]``
+        while the buffer is still ``[B, max_K]``.  A narrow view preserves the
+        fixed backing allocation and makes both the dense and top-k sampling
+        paths shape-safe; the full view is restored before the caller records
+        confidences for the next scheduler step.
+        """
+        active_k = int(self.num_speculative_steps)
+        max_k = int(getattr(self, "_vllm_ascend_max_speculative_steps", active_k))
+        if active_k >= max_k:
+            # Keep the fixed-K path unchanged; the indexed adapter is only
+            # needed by a smaller physical-K graph.
+            super()._sample_sequential(num_reqs, head_hidden)
+            return
+
+        confidence_probs = getattr(self, "draft_token_confidence_probs", None)
+        old_draft_tokens = self.draft_tokens
+        self.draft_tokens = self._physical_token_buffer
+        if confidence_probs is not None and confidence_probs.ndim >= 2:
+            self.draft_token_confidence_probs = self._physical_confidence_buffers[active_k]
+        try:
+            super()._sample_sequential(num_reqs, head_hidden)
+        finally:
+            self.draft_tokens = old_draft_tokens
+            if confidence_probs is not None and confidence_probs.ndim >= 2:
+                self.draft_token_confidence_probs = confidence_probs
+
+    def build_draft_attn_metadatas(
+        self,
+        num_reqs_padded,
+        seq_lens_cpu_upper_bound,
+        num_tokens_padded=None,
+    ):
+        num_tokens_padded = num_tokens_padded or (num_reqs_padded * self.num_query_per_req)
         assert self.input_batch is not None
         # The draft attention metadata is built through the generic
         # (Ascend) build_attn_metadata path; the factory forwards the draft
@@ -169,33 +227,43 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
-        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        # Preserve the PR #15098 calling convention for the upstream DP state.
         dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
         assert self.input_batch is not None
-        sync_state = dp_sync
-        with (
-            build_attn_metadata_wrapper(),
-            build_draft_attn_metadata_factory(
-                self.input_buffers.positions, self.max_num_tokens, torch.from_numpy(self.input_batch.is_prefilling_np)
-            ),
-        ):
-            return super().propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings,
-                last_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                temperature,
-                seeds,
-                sync_state,
-                dummy_run,
-                skip_attn_for_dummy_run,
-                mm_inputs,
-                is_profile=is_profile,
-            )
+        with physical_k_scope(self, input_batch) as active_k:
+            if not dummy_run and not is_profile and self._physical_k_log_count < 16:
+                logger.warning(
+                    "V2 DSpark physical K #%d: reqs=%d K=%d",
+                    self._physical_k_log_count + 1,
+                    input_batch.num_reqs,
+                    active_k,
+                )
+                self._physical_k_log_count += 1
+            with (
+                build_attn_metadata_wrapper(),
+                build_draft_attn_metadata_factory(
+                    self.input_buffers.positions,
+                    self.max_num_tokens,
+                    torch.from_numpy(self.input_batch.is_prefilling_np),
+                ),
+            ):
+                return super().propose(
+                    input_batch,
+                    attn_metadata,
+                    slot_mappings,
+                    last_hidden_states,
+                    aux_hidden_states,
+                    num_sampled,
+                    num_rejected,
+                    last_sampled,
+                    next_prefill_tokens,
+                    temperature,
+                    seeds,
+                    dp_sync,
+                    dummy_run,
+                    skip_attn_for_dummy_run,
+                    mm_inputs,
+                    is_profile=is_profile,
+                )

@@ -19,6 +19,7 @@
 
 import os
 from contextlib import contextmanager
+from types import MethodType
 
 import numpy as np
 import torch
@@ -72,6 +73,7 @@ from vllm_ascend.worker.v2.pp_utils import (
     restore_pp_after_upstream_init,
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
+from vllm_ascend.worker.v2.spec_decode.diagnostics import enable_budget_debug
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
@@ -124,7 +126,7 @@ class NPUModelRunner(GPUModelRunner):
         )
 
         self.update_stream = None
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self.update_stream = torch.npu.Stream()
 
         # because we will override these attribute, delete these attribute to
@@ -167,6 +169,10 @@ class NPUModelRunner(GPUModelRunner):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        # The upstream manager may predate the Ascend state replacements.
+        if getattr(self, "adaptive_verification", None) is not None:
+            self.adaptive_verification.req_states = self.req_states
+            self.adaptive_verification.query_start_loc = self.input_buffers.query_start_loc
 
         # Pinned D2H staging for corrected device state after spec rejection.
         # The authoritative host state is the shared NumPy/torch RequestState view.
@@ -242,7 +248,7 @@ class NPUModelRunner(GPUModelRunner):
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        with graph_manager_wrapper(self):
+        with graph_manager_wrapper(self), adaptive_verification_gate_wrapper(self):
             super().initialize_kv_cache(kv_cache_config)
             if self.pcp_manager is not None:
                 assert isinstance(self.pcp_manager, AscendPCPManager)
@@ -350,13 +356,6 @@ class NPUModelRunner(GPUModelRunner):
                 ],
                 dtype=np.int32,
             )
-        attn_state = build_attn_state(
-            self.vllm_config,
-            self.input_buffers.seq_lens_np,
-            num_reqs,
-            num_scheduled_tokens_np,
-            num_valid_tokens,
-        )
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -385,11 +384,17 @@ class NPUModelRunner(GPUModelRunner):
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
         num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        adaptive_verification = self.adaptive_verification if num_draft_tokens_per_req is not None else None
+        if adaptive_verification is not None:
+            # Preserve non-draft counts above; compact only the speculative suffix.
+            num_scheduled_tokens_np, cu_num_logits_np = adaptive_verification.compact_batch(
+                num_draft_tokens_per_req, num_scheduled_tokens_np, cu_num_logits_np
+            )
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
         num_reqs_padded = batch_desc.num_reqs or num_reqs
-        query_start_loc_np = np.empty(self.max_num_reqs + 2, dtype=np.int32)
+        query_start_loc_np = self.input_buffers.query_start_loc_cpu.numpy()
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens_np, out=query_start_loc_np[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
@@ -410,6 +415,22 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
 
+        if adaptive_verification is not None:
+            cu_num_logits, query_start_loc, total_num_draft_tokens = adaptive_verification.reallocate_drafts(
+                req_ids, idx_mapping
+            )
+            total_num_logits = num_reqs * self.model_state.num_new_sampled_tokens_per_step + total_num_draft_tokens
+            if num_reqs_padded > num_reqs:
+                # Restore graph padding without overwriting per-request allocation.
+                async_copy_to_gpu(
+                    query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1],
+                    out=query_start_loc[num_reqs + 1 : num_reqs_padded + 1],
+                )
+            # Ascend builders read host boundaries. Copy the manager's actual
+            # result, not a possibly stale input-buffer allocation.
+            self.input_buffers.query_start_loc_cpu.copy_(query_start_loc)
+            query_start_loc_np = self.input_buffers.query_start_loc_cpu.numpy()
+
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, self.decode_query_len
@@ -418,6 +439,14 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np = query_start_loc_np[: num_reqs_padded + 1]
         query_start_loc = query_start_loc[: num_reqs_padded + 1]
         self.eplb.set_batch_phase(batch_req_state.has_prefill)
+
+        attn_state = build_attn_state(
+            self.vllm_config,
+            self.input_buffers.seq_lens_np,
+            num_reqs,
+            num_scheduled_tokens_np,
+            num_valid_tokens,
+        )
 
         # Get prefill tokens if any.
         if batch_req_state.has_prefill:
@@ -535,6 +564,7 @@ class NPUModelRunner(GPUModelRunner):
             input_batch,
             padded_num_tokens=batch_desc.num_tokens,
         )
+        input_batch._vllm_ascend_physical_draft_k = int(scheduler_output.num_spec_tokens_to_schedule)
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
@@ -866,13 +896,20 @@ class NPUModelRunner(GPUModelRunner):
         else:
             num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
 
-        if num_tokens_padded == num_reqs_padded * self.decode_query_len:
+        runtime_query_len = self.decode_query_len
+        if num_reqs_padded > 0 and num_tokens_padded % num_reqs_padded == 0:
+            runtime_query_len = num_tokens_padded // num_reqs_padded
+        is_uniform_batch = (
+            num_tokens_padded == num_reqs_padded * runtime_query_len
+            and query_start_loc_np[num_reqs] == num_reqs * runtime_query_len
+        )
+        if is_uniform_batch:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 
             last_loc = query_start_loc_np[num_reqs]
             query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = (
-                np.arange(1, num_reqs_padded + 1 - num_reqs) * self.decode_query_len + last_loc
+                np.arange(1, num_reqs_padded + 1 - num_reqs) * runtime_query_len + last_loc
             )
         else:
             # Mixed-batch case: num_reqs must equal num_reqs_padded
@@ -898,6 +935,11 @@ def graph_manager_wrapper(model_runner):
         lora_capture_cases: list[int] | None = None,
         varlen_decode: bool = False,
     ):
+        if getattr(model_runner, "adaptive_verification", None) is not None:
+            # Keep target verification on PIECEWISE; short-K FULL captures
+            # belong to the drafter, not to a varlen target graph.
+            cudagraph_mode = CUDAGraphMode.PIECEWISE
+            varlen_decode = False
         return ModelAclGraphManager(
             vllm_config,
             device,
@@ -928,24 +970,37 @@ def adaptive_verification_gate_wrapper(model_runner):
     so the ALWAYS hard gate is relaxed here while every other upstream
     validation (device/CPU query-len mismatch support, etc.) still runs.
     """
-    original_factory = getattr(
-        vllm_model_runner, "maybe_create_adaptive_verification_manager", None
-    )
+    original_factory = getattr(vllm_model_runner, "maybe_create_adaptive_verification_manager", None)
     if original_factory is None:
         yield
         return
+
+    # Keep the allocator algorithm from vLLM PR #47808, but do not use its
+    # torch.compile wrapper on Ascend.  The compiled NPU graph corrupts the
+    # in-place ``capacities`` result for dynamic request counts (for example a
+    # budget of 2 has produced [1, 0, 10]); the identical eager function has
+    # exact budget conservation across the same NPU shape matrix.  Runtime
+    # ``reallocate_drafts`` resolves this module global on every call, so the
+    # Ascend plugin can replace only the execution wrapper without forking the
+    # confidence or prefix-allocation logic.
+    from vllm.v1.worker.gpu.spec_decode import adaptive_verification as adaptive_mod
+
+    if adaptive_mod._assign_draft_token_budget_compiled is not adaptive_mod._assign_draft_token_budget:
+        adaptive_mod._assign_draft_token_budget_compiled = adaptive_mod._assign_draft_token_budget
+        logger.warning(
+            "Adaptive verification on Ascend uses the upstream eager prefix "
+            "allocator because its torch.compile wrapper corrupts dynamic "
+            "capacity outputs on NPU."
+        )
 
     from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
         AdaptiveVerificationManager,
     )
 
-    def make_piecewise_manager(
-        req_states,
-        query_start_loc,
-        num_bonus_tokens,
-        max_total_logits,
+    def configure_piecewise_manager(
+        manager: AdaptiveVerificationManager,
     ) -> AdaptiveVerificationManager:
-        """Plan-A manager whose cost curves seed from piecewise dummy runs.
+        """Make one upstream manager consume Ascend PIECEWISE timings.
 
         Upstream seeds its step-cost tables from FULL-decode-graph dummy runs
         (``full_cudagraph=True`` samples) and profile sizes derived from the
@@ -953,52 +1008,55 @@ def adaptive_verification_gate_wrapper(model_runner):
         through PIECEWISE graphs, so there are no full graphs to price: profile
         a representative grid of piecewise batch sizes instead and price the
         drafter curve from every sample (not only ``full_cudagraph`` ones).
+
+        Keep the object returned by the upstream factory. It owns the
+        confidence buffers, copy stream, events, and validation state used by
+        the rest of #47808; constructing and discarding it would allocate all
+        of those resources twice during startup.
         """
 
-        class AscendPiecewiseAdaptiveManager(AdaptiveVerificationManager):
-            def batches_to_profile(self, capture_sizes):
-                del capture_sizes
-                # No FULL graphs: leave ``_cudagraph_limit`` at 0 so the cost
-                # tables stay smooth (nothing pads to a captured size).
-                self._cudagraph_limit = 0
-                max_num_tokens = self.req_states.max_num_batched_tokens
-                base_size = max(1, self.num_speculative_steps + 1)
-                grid = [base_size]
-                while grid[-1] < max_num_tokens:
-                    grid.append(min(grid[-1] * 2, max_num_tokens))
-                from vllm import envs
+        def batches_to_profile(self, capture_sizes):
+            del capture_sizes
+            # No FULL graphs: leave ``_cudagraph_limit`` at 0 so the cost
+            # tables stay smooth (nothing pads to a captured size).
+            self._cudagraph_limit = 0
+            max_num_tokens = self.req_states.max_num_batched_tokens
+            base_size = max(1, self.num_speculative_steps + 1)
+            grid = [base_size]
+            while grid[-1] < max_num_tokens:
+                grid.append(min(grid[-1] * 2, max_num_tokens))
+            from vllm import envs
 
-                context_len = envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
-                for num_tokens in grid:
-                    for _ in range(3):
-                        yield {
-                            "num_tokens": num_tokens,
-                            "context_len": context_len,
-                        }
+            context_len = envs.VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN
+            for num_tokens in grid:
+                for _ in range(3):
+                    yield {
+                        "num_tokens": num_tokens,
+                        "context_len": context_len,
+                    }
 
-            def set_initial_cost_curves(self, samples):
-                from collections import defaultdict
+        def set_initial_cost_curves(self, samples):
+            from collections import defaultdict
 
-                def median_curve(points):
-                    grouped: dict[int, list[float]] = defaultdict(list)
-                    for key, value in points:
-                        grouped[key].append(value)
-                    return [(k, float(np.median(v))) for k, v in sorted(grouped.items())]
+            def median_curve(points):
+                grouped: dict[int, list[float]] = defaultdict(list)
+                for key, value in points:
+                    grouped[key].append(value)
+                return [(k, float(np.median(v))) for k, v in sorted(grouped.items())]
 
-                draft_curve = median_curve(
-                    (s.num_reqs, s.drafter_ms) for s in samples
-                )
-                verify_curve = median_curve(
-                    (s.num_target_tokens, s.forward_ms) for s in samples
-                )
-                self.set_cost_curves(draft_curve, verify_curve)
+            draft_curve = median_curve((s.num_reqs, s.drafter_ms) for s in samples)
+            verify_curve = median_curve((s.num_target_tokens, s.forward_ms) for s in samples)
+            self.set_cost_curves(draft_curve, verify_curve)
+            logger.debug("ASCEND_AV_COST_CURVES draft=%s verify=%s", draft_curve, verify_curve)
 
-        return AscendPiecewiseAdaptiveManager(
-            req_states,
-            query_start_loc,
-            num_bonus_tokens,
-            max_total_logits=max_total_logits,
+        manager.batches_to_profile = MethodType(  # type: ignore[method-assign]
+            batches_to_profile, manager
         )
+        manager.set_initial_cost_curves = MethodType(  # type: ignore[method-assign]
+            set_initial_cost_curves, manager
+        )
+        enable_budget_debug(manager, logger)
+        return manager
 
     def relaxed_factory(
         *,
@@ -1041,14 +1099,19 @@ def adaptive_verification_gate_wrapper(model_runner):
                 exc,
             )
             manager = None
+
+        # Preserve the upstream manager whenever validation succeeds. If only
+        # the ALWAYS gate rejected Ascend, instantiate the same upstream class
+        # once, then configure either instance for PIECEWISE profiling.
         if manager is None:
-            manager = make_piecewise_manager(
+            manager = AdaptiveVerificationManager(
                 req_states,
                 query_start_loc,
                 num_bonus_tokens,
                 max_total_logits=max_total_logits,
             )
-        return manager
+        logger.info("Using the upstream adaptive-verification manager with Ascend PIECEWISE cost profiling.")
+        return configure_piecewise_manager(manager)
 
     try:
         vllm_model_runner.maybe_create_adaptive_verification_manager = relaxed_factory

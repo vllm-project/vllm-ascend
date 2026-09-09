@@ -845,6 +845,19 @@ class TestSubconfigPydanticTypeValidation(TestBase):
     def test_dynamic_spec_config_accepts_dflash(self):
         self.assertEqual(DynamicSpecConfig(method="dflash").method, "dflash")
 
+    def test_dynamic_spec_config_compact_physical_k(self):
+        cfg = DynamicSpecConfig(method="dspark", policy="hardware_aware", physical_k={"min_k": 3, "capture_k": [3, 5]})
+        self.assertEqual(cfg.physical_k["min_k"], 3)
+        self.assertEqual(cfg.method_params, {})
+
+    def test_dynamic_spec_config_rejects_compact_typos_and_conflicts(self):
+        with self.assertRaises(ValueError):
+            DynamicSpecConfig(method="dspark", policy="hardware_aware", physical_k={"minimum_k": 3})
+        with self.assertRaises(ValueError):
+            DynamicSpecConfig(
+                method="dspark", policy="hardware_aware", physical_k={}, method_params={"adaptive_draft_k": True}
+            )
+
     def test_short_request_first_config_unknown_key_forbidden(self):
         # Was hand-written unknown-key check; now extra="forbid".
         with self.assertRaises(ValueError):
