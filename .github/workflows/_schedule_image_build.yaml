@@ -325,6 +325,20 @@ jobs:
         username: ${{ secrets.SWR_USERNAME }}
         password: ${{ secrets.SWR_PASSWORD }}
 
+    - name: Prepare tag pattern
+      id: tag_pattern
+      run: |
+        PATTERN="${{ inputs.schedule_tag_pattern }}"
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          if [ -n "${{ inputs.workflow_dispatch_tag }}" ]; then
+            PATTERN="${{ inputs.workflow_dispatch_tag }}"
+          elif [ -n "${{ inputs.branch_ref }}" ]; then
+            PATTERN="${{ inputs.branch_ref }}"
+            PATTERN="${PATTERN//\//-}"
+          fi
+        fi
+        echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
+
     - name: Build and push
       uses: docker/build-push-action@v7
       id: build
@@ -382,10 +396,10 @@ jobs:
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
         else
-          TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
+          TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-temp"
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             DATE=$(date +'%Y%m%d')
-            TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
+            TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${{ matrix.runner_info.tag }}-${DATE}-temp"
           fi
         fi
         echo "Creating temp tag: ${{ inputs.swr_temp_repo }}:$TAG"
@@ -444,6 +458,20 @@ jobs:
             echo "SUFFIX=" >> $GITHUB_ENV
           fi
 
+      - name: Prepare tag pattern
+        id: tag_pattern
+        run: |
+          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.workflow_dispatch_tag }}" ]; then
+              PATTERN="${{ inputs.workflow_dispatch_tag }}"
+            elif [ -n "${{ inputs.branch_ref }}" ]; then
+              PATTERN="${{ inputs.branch_ref }}"
+              PATTERN="${PATTERN//\//-}"
+            fi
+          fi
+          echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
+
       # ===== New: Generate custom tags for daily scenario =====
       - name: Generate daily tags
         id: daily_tags
@@ -454,7 +482,7 @@ jobs:
           # Get CANN version and convert to lowercase (e.g., 2026.08.03 -> 2026.08.03)
           CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
           # Get the base tag pattern (e.g., main)
-          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          PATTERN="${{ steps.tag_pattern.outputs.pattern }}"
           # Get the suffix
           SUFFIX="${{ inputs.suffix }}"
           
@@ -499,9 +527,9 @@ jobs:
             # (e.g. main-310p, nightly-main-310p) without date info, so they are disabled
             # for daily builds only.
             type=pep440,pattern={{raw}},suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
-            type=schedule,pattern=${{ inputs.schedule_tag_pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
+            type=schedule,pattern=${{ steps.tag_pattern.outputs.pattern }},prefix=nightly-,suffix=${{ env.SUFFIX }},enable=${{ inputs.build_type != 'daily' }}
             type=raw,value=${{ inputs.workflow_dispatch_tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag != '' && inputs.build_type != 'daily' }},suffix=${{ env.SUFFIX }}
-            type=raw,value=${{ inputs.branch_ref }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
+            type=raw,value=${{ steps.tag_pattern.outputs.pattern }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.workflow_dispatch_tag == '' }},prefix=nightly-,suffix=${{ env.SUFFIX }}
             
             # ===== New: Daily scenario specific tags =====
             type=raw,value=${{ steps.daily_tags.outputs.daily_tag }},enable=${{ inputs.build_type == 'daily' }}
@@ -525,7 +553,7 @@ jobs:
           SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
           TAGS: ${{ steps.meta.outputs.tags }}
           BUILD_TYPE: ${{ inputs.build_type }}
-          SCHEDULE_TAG_PATTERN: ${{ inputs.schedule_tag_pattern }}
+          SCHEDULE_TAG_PATTERN: ${{ steps.tag_pattern.outputs.pattern }}
           SUFFIX: ${{ env.SUFFIX }}
         run: |
           set -euo pipefail
@@ -576,7 +604,7 @@ jobs:
           # Skip cleanup if skopeo is not available (no sudo/root on this runner).
           if command -v skopeo >/dev/null 2>&1; then
             for arch in amd64 arm64; do
-              TAG="nightly-${{ inputs.schedule_tag_pattern }}${SUFFIX}-${arch}-${DATE}-temp"
+              TAG="nightly-${{ steps.tag_pattern.outputs.pattern }}${SUFFIX}-${arch}-${DATE}-temp"
               skopeo delete \
                 --creds "${{ secrets.SWR_USERNAME }}:${{ secrets.SWR_PASSWORD }}" \
                 "docker://${{ inputs.swr_temp_repo }}:${TAG}" || true
@@ -612,6 +640,20 @@ jobs:
           registry: ${{ inputs.swr_registry }}
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
+
+      - name: Prepare tag pattern
+        id: tag_pattern
+        run: |
+          PATTERN="${{ inputs.schedule_tag_pattern }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ inputs.workflow_dispatch_tag }}" ]; then
+              PATTERN="${{ inputs.workflow_dispatch_tag }}"
+            elif [ -n "${{ inputs.branch_ref }}" ]; then
+              PATTERN="${{ inputs.branch_ref }}"
+              PATTERN="${PATTERN//\//-}"
+            fi
+          fi
+          echo "pattern=${PATTERN}" >> $GITHUB_OUTPUT
 
       - name: Merge and push multi-arch manifest to SWR temp
         env:
@@ -660,7 +702,7 @@ jobs:
           if [ "${{ inputs.build_type }}" = "daily" ]; then
             DATE=$(date +'%Y%m%d')
             CANN_VERSION=$(echo "${{ inputs.cann_version }}" | tr '[:upper:]' '[:lower:]')
-            PATTERN="${{ inputs.schedule_tag_pattern }}"
+            PATTERN="${{ steps.tag_pattern.outputs.pattern }}"
             if [ -n "${{ inputs.suffix }}" ]; then
               DAILY_TAG="${IMAGE}:nightly-${PATTERN}-${{ inputs.suffix }}-cann${CANN_VERSION}-${DATE}"
             else
