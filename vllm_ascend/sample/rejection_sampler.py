@@ -89,16 +89,30 @@ class AscendRejectionSampler(RejectionSampler):
         # self.synthetic_mode / self.synthetic_conditional_rates get populated
         # when rejection_sample_method == "synthetic".
         super().__init__(sampler, spec_config, device)
+
+        # FLy verify is configured through Ascend additional_config
+        ascend_config = get_ascend_config()
+        rejection_config = ascend_config.rejection_sampler_config
+        self._fly_verify = rejection_config.enable_fly_verify
+        self._fly_entropy_top_k = rejection_config.fly_entropy_top_k
+        self._fly_entropy_threshold = rejection_config.fly_entropy_threshold
+        self._fly_window_size = rejection_config.fly_window_size or 0
+
         # Store Ascend-specific optimizations
         self._ascend_optimizations_enabled = True
         self.top_k = None
         logger.debug(
             "[sample/rejection_sampler] AscendRejectionSampler initialized. "
             "ascend_optimizations_enabled=%s, triton_available=%s, "
-            "reduce_sample=%s",
+            "reduce_sample=%s, fly_verify=%s, fly_entropy_top_k=%d, "
+            "fly_entropy_threshold=%s, fly_window_size=%d",
             self._ascend_optimizations_enabled,
             HAS_TRITON,
-            get_ascend_config().enable_reduce_sample,
+            ascend_config.enable_reduce_sample,
+            self._fly_verify,
+            self._fly_entropy_top_k,
+            self._fly_entropy_threshold,
+            self._fly_window_size,
         )
 
     def apply_logits_processors(
@@ -226,6 +240,15 @@ class AscendRejectionSampler(RejectionSampler):
             # apply_logits_processors modifies the tensor in-place.
             target_logits = target_logits.clone()
         target_logits = self.apply_logits_processors(target_logits, sampling_metadata, metadata)
+        fly_target_argmax = None
+        fly_entropy = None
+        fly_draft_allowed = None
+        if self._fly_verify and not sampling_metadata.all_random:
+            (
+                fly_target_argmax,
+                fly_entropy,
+                fly_draft_allowed,
+            ) = _compute_fly_greedy_stats(target_logits, metadata.draft_token_ids, self._fly_entropy_top_k)
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `apply_sampling_constraints` function.
@@ -245,6 +268,11 @@ class AscendRejectionSampler(RejectionSampler):
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
             ori_target_logits=raw_target_logits,
+            fly_target_argmax=fly_target_argmax,
+            fly_entropy=fly_entropy,
+            fly_draft_allowed=fly_draft_allowed,
+            fly_entropy_threshold=self._fly_entropy_threshold,
+            fly_window_size=self._fly_window_size,
         )
 
         self._log_rejection_sampler_exit(output_token_ids, metadata)
@@ -349,6 +377,144 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
     target_argmax = gathered_global_idx.gather(dim=-1, index=global_max_rank.unsqueeze(-1)).squeeze(-1)  # [B]
     return target_argmax
 
+def _compute_fly_entropy(
+    top_logits: torch.Tensor,
+    log_normalizer: torch.Tensor,
+) -> torch.Tensor:
+    """Compute FLy's unnormalized Top-k partial entropy."""
+    top_log_probs = top_logits - log_normalizer.unsqueeze(-1)
+    top_probs = top_log_probs.exp()
+    entropy_terms = torch.where(
+        top_probs > 0,
+        top_probs * top_log_probs,
+        torch.zeros_like(top_probs),
+    )
+    return -entropy_terms.sum(dim=-1)
+
+def _compute_fly_greedy_stats(
+    logits: torch.Tensor,
+    draft_token_ids: torch.Tensor,
+    entropy_top_k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Return target argmax, Top-k entropy, and draft-token validity.
+
+    With reduce sampling enabled, each TP rank owns a vocabulary shard. The
+    function gathers only local Top-k values, local logsumexp, the local draft
+    logit, and the local argmax token ID. It never gathers the full vocabulary.
+    """
+    num_tokens, local_vocab_size = logits.shape
+    draft_token_ids_long = draft_token_ids.to(torch.long)
+
+    if not get_ascend_config().enable_reduce_sample:
+        top_k = min(entropy_top_k, local_vocab_size)
+        top_logits = torch.topk(logits, k=top_k, dim=-1).values
+        log_normalizer = torch.logsumexp(logits, dim=-1)
+        entropy = _compute_fly_entropy(top_logits, log_normalizer)
+
+        valid_draft = (
+            (draft_token_ids_long >= 0)
+            & (draft_token_ids_long < local_vocab_size)
+        )
+        safe_draft_ids = draft_token_ids_long.clamp(
+            min=0,
+            max=local_vocab_size - 1,
+        )
+        draft_logits = logits.gather(
+            dim=-1,
+            index=safe_draft_ids.unsqueeze(-1),
+        ).squeeze(-1)
+        draft_allowed = valid_draft & (draft_logits > float("-inf"))
+        target_argmax = logits.argmax(dim=-1).view(-1)
+        return target_argmax, entropy, draft_allowed
+
+    tp_group = get_tp_group()
+    rank = tp_group.rank_in_group
+    local_top_k = min(entropy_top_k, local_vocab_size)
+
+    local_top_logits = torch.topk(
+        logits,
+        k=local_top_k,
+        dim=-1,
+    ).values
+    _, local_argmax_indices = logits.max(dim=-1)
+    local_argmax_ids = local_argmax_indices + rank * local_vocab_size
+    local_log_normalizer = torch.logsumexp(logits, dim=-1)
+
+    local_vocab_start = rank * local_vocab_size
+    local_vocab_end = local_vocab_start + local_vocab_size
+    draft_is_local = (
+        (draft_token_ids_long >= local_vocab_start)
+        & (draft_token_ids_long < local_vocab_end)
+    )
+    safe_local_draft_ids = (
+        draft_token_ids_long - local_vocab_start
+    ).clamp(min=0, max=local_vocab_size - 1)
+    local_draft_logits = logits.gather(
+        dim=-1,
+        index=safe_local_draft_ids.unsqueeze(-1),
+    ).squeeze(-1)
+    local_draft_logits = torch.where(
+        draft_is_local,
+        local_draft_logits,
+        torch.full_like(local_draft_logits, float("-inf")),
+    )
+
+    # One floating-point collective carries Top-k values, local logsumexp,
+    # and the draft-token logit.
+    local_stats = torch.cat(
+        (
+            local_top_logits,
+            local_log_normalizer.unsqueeze(-1),
+            local_draft_logits.unsqueeze(-1),
+        ),
+        dim=-1,
+    )
+    gathered_stats = tp_group.all_gather(local_stats, dim=-1)
+    stats_per_rank = local_top_k + 2
+    tp_size = gathered_stats.shape[-1] // stats_per_rank
+    gathered_stats = gathered_stats.view(
+        num_tokens,
+        tp_size,
+        stats_per_rank,
+    )
+
+    # A second integer collective preserves the existing greedy_sample tie
+    # behavior: local max chooses the first local ID and rank argmax chooses
+    # the first TP rank when maximum logits are exactly equal.
+    gathered_argmax_ids = tp_group.all_gather(
+        local_argmax_ids.unsqueeze(-1),
+        dim=-1,
+    )
+    global_max_rank = gathered_stats[:, :, 0].argmax(dim=-1)
+    target_argmax = gathered_argmax_ids.gather(
+        dim=-1,
+        index=global_max_rank.unsqueeze(-1),
+    ).squeeze(-1)
+
+    entropy_candidates = gathered_stats[:, :, :local_top_k].reshape(
+        num_tokens,
+        -1,
+    )
+    global_top_k = min(entropy_top_k, entropy_candidates.shape[-1])
+    global_top_logits = torch.topk(
+        entropy_candidates,
+        k=global_top_k,
+        dim=-1,
+    ).values
+    global_log_normalizer = torch.logsumexp(
+        gathered_stats[:, :, local_top_k],
+        dim=-1,
+    )
+    entropy = _compute_fly_entropy(
+        global_top_logits,
+        global_log_normalizer,
+    )
+
+    global_draft_logits = gathered_stats[:, :, local_top_k + 1].amax(
+        dim=-1
+    )
+    draft_allowed = global_draft_logits > float("-inf")
+    return target_argmax, entropy, draft_allowed
 
 def apply_sampling_constraints(
     logits: torch.Tensor,  # [num_tokens, vocab_size//tp_size]
@@ -439,6 +605,11 @@ def rejection_sample(
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
     ori_target_logits: torch.Tensor | None = None,
+    fly_target_argmax: torch.Tensor | None = None,
+    fly_entropy: torch.Tensor | None = None,
+    fly_draft_allowed: torch.Tensor | None = None,
+    fly_entropy_threshold: float = 0.3,
+    fly_window_size: int = 0,
 ) -> torch.Tensor:
     """
     Rejection sampling for speculative decoding in distributed setting.
@@ -456,6 +627,11 @@ def rejection_sample(
                 - indices: [num_tokens, top_k*tp_size] global vocabulary indices or None
         bonus_token_ids: Bonus token IDs [batch_size, 1]
         sampling_metadata: Sampling metadata
+        fly_target_argmax: Precomputed global target argmax for FLy.
+        fly_entropy: Per-token Top-k partial entropy for FLy.
+        fly_draft_allowed: Whether each draft token remains valid after target logits processors.
+        fly_entropy_threshold: Entropy gate threshold for FLy.
+        fly_window_size: Number of subsequent native matches required by FLy.
 
     Returns:
         output_token_ids: [batch_size, max_spec_len + 1]
@@ -489,8 +665,11 @@ def rejection_sample(
     )
 
     # Block verify requires enable_block_verify config and max_spec_len >= 3.
-    using_block_verify = max_spec_len >= 3 and bool(get_ascend_config().rejection_sampler_config.enable_block_verify)
-    using_entropy_verify = bool(get_ascend_config().rejection_sampler_config.enable_entropy_verify)
+    rejection_config = get_ascend_config().rejection_sampler_config
+    using_block_verify = max_spec_len >= 3 and bool(rejection_config.enable_block_verify)
+    using_entropy_verify = bool(rejection_config.enable_entropy_verify)
+    using_fly_verify = fly_entropy is not None
+
     # Synthetic mode uses per-token rate acceptance with first-rejection
     # semantics, which is incompatible with block-verify's joint (cumprod)
     # verification. Disable block-verify under synthetic_mode so the standard
@@ -506,10 +685,11 @@ def rejection_sample(
     posterior_alpha = float(get_ascend_config().rejection_sampler_config.posterior_alpha)
     logger.debug_once(
         "[sample/rejection_sampler] Rejection sampling path: "
-        "block_verify=%s, entropy_verify=%s, all_greedy=%s, all_random=%s, "
-        "reduce_sample=%s, triton=%s",
+        "block_verify=%s, entropy_verify=%s, fly_verify=%s, "
+        "all_greedy=%s, all_random=%s, reduce_sample=%s, triton=%s",
         using_block_verify,
         using_entropy_verify,
+        using_fly_verify,
         sampling_metadata.all_greedy,
         sampling_metadata.all_random,
         get_ascend_config().enable_reduce_sample,
@@ -549,13 +729,17 @@ def rejection_sample(
             device,
         ).to(torch.float32)
 
-    if using_block_verify or using_entropy_verify:
+    if using_block_verify or using_entropy_verify or using_fly_verify:
         logger.info_once(
             "RejectionSampler config: block_verify=%s, entropy_verify=%s, "
+            "fly_verify=%s, fly_entropy_threshold=%s, fly_window_size=%s, "
             "posterior_threshold=%s, posterior_alpha=%s, reduce_sample=%s, "
             "has_triton=%s, all_greedy=%s, all_random=%s",
             using_block_verify,
             using_entropy_verify,
+            using_fly_verify,
+            fly_entropy_threshold,
+            fly_window_size,
             posterior_threshold,
             posterior_alpha,
             target_indices is not None,
@@ -565,8 +749,11 @@ def rejection_sample(
         )
 
     # For greedy sampling, we need to do allgather first to get global argmax
+    # When FLy is enabled, forward() has already computed it together with the entropy statistics
     if not sampling_metadata.all_random:
-        if get_ascend_config().enable_reduce_sample:
+        if using_fly_verify:
+            target_argmax = fly_target_argmax
+        elif get_ascend_config().enable_reduce_sample:
             target_argmax = greedy_sample(target_logits)
         else:
             target_argmax = target_logits.argmax(dim=-1).view(-1)
@@ -586,6 +773,10 @@ def rejection_sample(
                 uniform_probs=uniform_probs_for_greedy,
                 synthetic_conditional_rates=synthetic_conditional_rates,
                 synthetic_mode=synthetic_mode,
+                fly_entropy=fly_entropy,
+                fly_draft_allowed=fly_draft_allowed,
+                fly_entropy_threshold=fly_entropy_threshold,
+                fly_window_size=fly_window_size,
             )
         else:
             if min(num_draft_tokens) == 1 and max(num_draft_tokens) == 1 and sampling_metadata.all_greedy:
@@ -611,6 +802,10 @@ def rejection_sample(
                     uniform_probs=uniform_probs_for_greedy,
                     synthetic_conditional_rates=synthetic_conditional_rates,
                     synthetic_mode=synthetic_mode,
+                    fly_entropy=fly_entropy,
+                    fly_draft_allowed=fly_draft_allowed,
+                    fly_entropy_threshold=fly_entropy_threshold,
+                    fly_window_size=fly_window_size,
                 )
         if sampling_metadata.all_greedy:
             return output_token_ids
@@ -1067,6 +1262,10 @@ def rejection_greedy_sample_pytorch(
     uniform_probs=None,
     synthetic_conditional_rates=None,
     synthetic_mode=False,
+    fly_entropy=None,
+    fly_draft_allowed=None,
+    fly_entropy_threshold=0.3,
+    fly_window_size=0,
 ):
     batch_size = output_token_ids.size(0)
     num_tokens = draft_token_ids.size(0)
@@ -1079,6 +1278,7 @@ def rejection_greedy_sample_pytorch(
     req_ids = torch.arange(batch_size, device=device)
     token_req_ids = torch.repeat_interleave(req_ids, draft_tokens_per_req)
     token_positions = torch.arange(num_tokens, device=device) - start_indices[token_req_ids]
+    fly_verify = fly_entropy is not None
 
     # Find the first mismatch position of each request.
     if synthetic_mode:
@@ -1088,9 +1288,38 @@ def rejection_greedy_sample_pytorch(
         # first position not accepted.
         rates_per_token = synthetic_conditional_rates[token_positions]
         accept_per_token = (uniform_probs < rates_per_token) & (draft_token_ids >= 0)
-        mismatch_global = ~accept_per_token
     else:
-        mismatch_global = draft_token_ids != target_argmax
+        native_accept_per_token = draft_token_ids == target_argmax
+        accept_per_token = native_accept_per_token
+
+        if fly_verify:
+            assert fly_draft_allowed is not None
+            assert fly_window_size > 0
+
+            # Build the original native-match matrix once. FLy lookahead must
+            # never inspect decisions already changed by an earlier FLy rescue.
+            native_accept_matrix = torch.zeros((batch_size, max_spec_len), dtype=torch.bool, device=device)
+            native_accept_matrix[token_req_ids, token_positions] = native_accept_per_token
+            can_defer_matrix = torch.zeros_like(native_accept_matrix)
+            can_defer_matrix[token_req_ids, token_positions] = (
+                (~native_accept_per_token)
+                & fly_draft_allowed
+                & (fly_entropy >= fly_entropy_threshold)
+            )
+            # A zero-filled shift makes any window crossing the end of a
+            # request fail naturally, including dynamically shortened drafts.
+            for offset in range(1, fly_window_size + 1):
+                future_native_accept = torch.zeros_like(
+                    native_accept_matrix
+                )
+                future_native_accept[:, :-offset] = (
+                    native_accept_matrix[:, offset:]
+                )
+                can_defer_matrix &= future_native_accept
+            accept_matrix = native_accept_matrix | can_defer_matrix
+            accept_per_token = accept_matrix[token_req_ids, token_positions]
+
+    mismatch_global = ~accept_per_token
     if max_spec_len == 0:
         first_mismatch_pos_per_req = torch.zeros(batch_size, dtype=torch.long, device=device)
     else:
@@ -1111,9 +1340,9 @@ def rejection_greedy_sample_pytorch(
     greedy_mask = is_greedy.unsqueeze(1)
     final_copy_mask = copy_mask & greedy_mask
     global_idx = start_indices.unsqueeze(1) + copy_indices
-    if synthetic_mode:
-        # Accepted positions emit the draft token; the first rejected position
-        # emits target_argmax (greedy recovery).
+    if synthetic_mode or fly_verify:
+        # Accepted FLy mismatches must emit the draft token
+        # The first final rejection still emits the original target argmax
         copy_tokens = torch.where(accept_per_token, draft_token_ids, target_argmax)
     else:
         copy_tokens = target_argmax

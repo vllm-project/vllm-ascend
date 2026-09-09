@@ -203,6 +203,11 @@ class RejectionSamplerConfig:
     posterior_threshold: float = 0.95
     posterior_alpha: float = 0.4
 
+    enable_fly_verify: bool = False
+    fly_entropy_top_k: int = 3
+    fly_entropy_threshold: float = 0.3
+    fly_window_size: int | None = None
+
     @model_validator(mode="after")
     def _validate(self):
         if not (0 < self.posterior_threshold <= 1):
@@ -211,6 +216,12 @@ class RejectionSamplerConfig:
             )
         if self.posterior_alpha < 0:
             raise ValueError(f"rejection_sampler_config.posterior_alpha must be >= 0, got {self.posterior_alpha}")
+        if self.fly_entropy_top_k < 1:
+            raise ValueError(f"rejection_sampler_config.fly_entropy_top_k must be >= 1, got {self.fly_entropy_top_k}")
+        if self.fly_entropy_threshold < 0:
+            raise ValueError(f"rejection_sampler_config.fly_entropy_threshold must be >= 0, got {self.fly_entropy_threshold}")
+        if self.fly_window_size is not None and self.fly_window_size < 1:
+            raise ValueError(f"rejection_sampler_config.fly_window_size must be >= 1, got {self.fly_window_size}")
         return self
 
 
@@ -324,7 +335,11 @@ class AscendConfig:
                 "enable_block_verify": false,
                 "enable_entropy_verify": false,
                 "posterior_threshold": 0.95,
-                "posterior_alpha": 0.4
+                "posterior_alpha": 0.4,
+                "enable_fly_verify": false,
+                "fly_entropy_top_k": 3,
+                "fly_entropy_threshold": 0.3,
+                "fly_window_size": null
             },
             "rl_config": {
                 "enabled": false,
@@ -519,6 +534,52 @@ class AscendConfig:
         ):
             raise ValueError("enable_force_eplb cannot be mixed with dynamic_eplb.")
         self._check_mooncake_c8_kv_cache_quant(vc)
+
+        # fly verify
+        fly_config = self.rejection_sampler_config
+        if fly_config.enable_fly_verify:
+            spec_config = vc.speculative_config
+            if spec_config is None:
+                raise ValueError(
+                    "enable_fly_verify requires speculative decoding to be enabled."
+                )
+            num_speculative_tokens = spec_config.num_speculative_tokens
+            if num_speculative_tokens < 2:
+                raise ValueError(
+                    "enable_fly_verify requires num_speculative_tokens >= 2, "
+                    f"got {num_speculative_tokens}."
+                )
+            if fly_config.fly_window_size is None:
+                fly_config.fly_window_size = min(
+                    6,
+                    num_speculative_tokens - 1,
+                )
+            elif fly_config.fly_window_size >= num_speculative_tokens:
+                raise ValueError(
+                    "rejection_sampler_config.fly_window_size must be smaller "
+                    "than num_speculative_tokens, got "
+                    f"fly_window_size={fly_config.fly_window_size} and "
+                    f"num_speculative_tokens={num_speculative_tokens}."
+                )
+            if fly_config.enable_block_verify or fly_config.enable_entropy_verify:
+                raise ValueError(
+                    "FLy Verify is incompatible with Block Verify and Entropy "
+                    "Verify. Enable only one verification policy."
+                )
+            if spec_config.rejection_sample_method != "standard":
+                raise ValueError(
+                    "enable_fly_verify currently requires "
+                    "rejection_sample_method='standard'."
+                )
+            if vc.use_v2_model_runner:
+                raise ValueError(
+                    "enable_fly_verify currently supports ModelRunner V1 only."
+                )
+            logger.warning_once(
+                "FLy Verify is a lossy speculative-decoding optimization. "
+                "It can change generated tokens and does not preserve the "
+                "target model distribution."
+            )
 
         # profiling_chunk vs min_chunk clamp
         if self.scheduler_config.profiling_chunk_config.enabled:
