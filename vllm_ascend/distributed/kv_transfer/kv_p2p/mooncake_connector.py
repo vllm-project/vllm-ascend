@@ -2836,36 +2836,41 @@ class MooncakeConnectorWorker:
             group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
         return group_kernel_params
 
-    def _uses_k3_p2d1_transfer(self, prefill_tp_size, remote_pcp_size, remote_dcp_size):
-        """Symmetric TP2 K3 heads, with two P context shards and one D shard."""
+    def _uses_k3_independent_transfer(self, prefill_tp_size, remote_pcp_size, remote_dcp_size):
+        """Equal TP head shards permit independent K3 context-block routing."""
         return (
             self.use_mla
-            and prefill_tp_size == self.tp_size == 2
+            and prefill_tp_size == self.tp_size
             and remote_pcp_size == self.pcp_size == 1
-            and remote_dcp_size == 2
-            and self.dcp_size == 1
+            and remote_dcp_size > 0
+            and self.dcp_size > 0
+            and self.tp_size % remote_dcp_size == 0
+            and self.tp_size % self.dcp_size == 0
             and any(
                 spec["kv_cache_spec_type"] == "AscendDCPReplicatedDraftAttentionSpec"
                 for spec, _ in self.kv_group2layeridx.values()
             )
+            and self.pp_size == self._prefill_pp_size == 1
         )
 
-    def _get_k3_p2d1_split_metadata(self, meta):
+    def _get_k3_independent_split_metadata(self, meta):
         """Map global context blocks independently for MLA, draft and KDA.
 
-        Both D TP ranks pull once from each P TP rank, including empty
-        transfers. This gives every P allocation exactly two completion ACKs.
+        Each D TP rank pulls once from every P TP rank, including empty
+        transfers. Every P allocation waits for all D TP completion ACKs.
         Draft/KDA head shards are read only from the matching TP rank.
         """
         if (meta.remote_block_size or self.block_size) != self.block_size or meta.num_computed_tokens != 0:
-            raise NotImplementedError("K3 P_DCP2 to D_DCP1 requires equal block sizes and a cold D prefix")
+            raise NotImplementedError("K3 independent transfer requires equal block sizes and a cold D prefix")
         num_global_blocks = math.ceil(meta.num_external_tokens / self.block_size)
-        ports = [[meta.remote_port + rank] for rank in range(2)]
+        ports = [[meta.remote_port + rank] for rank in range(self.tp_size)]
+        p_cp, d_cp = meta.remote_dcp_size, self.dcp_size
+        p_replica = (self.tp_rank // d_cp) % (self.tp_size // p_cp)
         local_lists, remote_lists = [], []
         self.remote_port_send_num[meta.remote_engine_id] = {
             port[0]: {"num": self.tp_size, "host": meta.remote_host} for port in ports
         }
-        for p_rank in range(2):
+        for p_rank in range(self.tp_size):
             local_groups = [[] for _ in self.kv_group2layeridx]
             remote_groups = [[] for _ in self.kv_group2layeridx]
             for gid, (spec, layers) in self.kv_group2layeridx.items():
@@ -2879,29 +2884,36 @@ class MooncakeConnectorWorker:
                         remote_groups[gid] = remote_blocks
                     continue
                 if kind not in ("AscendMLAAttentionSpec", "AscendDCPReplicatedDraftAttentionSpec"):
-                    raise NotImplementedError(f"Unsupported K3 P2D1 cache group: {kind}")
+                    raise NotImplementedError(f"Unsupported K3 independent cache group: {kind}")
                 draft = kind == "AscendDCPReplicatedDraftAttentionSpec"
                 if draft and p_rank != self.tp_rank:
                     continue
                 scale = self._get_kernel_block_scale(layers)
-                if len(local_blocks) < num_global_blocks or len(remote_blocks) < math.ceil(num_global_blocks / 2):
-                    raise ValueError("K3 P2D1 block tables do not cover the external context")
+                if draft:
+                    if scale % d_cp:
+                        raise ValueError("Replicated draft kernel scale must contain complete DCP lanes")
+                    scale //= d_cp
+                if len(local_blocks) < math.ceil(num_global_blocks / d_cp) or len(remote_blocks) < math.ceil(
+                    num_global_blocks / p_cp
+                ):
+                    raise ValueError("K3 block tables do not cover the external context")
                 for g in range(num_global_blocks):
-                    if not draft and g % 2 != p_rank:
+                    if not draft and (g % d_cp != self.dcp_rank or p_rank != g % p_cp + p_replica * p_cp):
                         continue
-                    # P's replicated draft keeps both CP lanes in each logical
-                    # allocation; MLA keeps only this rank's context lane.
-                    remote_base = remote_blocks[g // 2] * scale * (2 if draft else 1)
+                    # MLA stores one CP lane. Replicated draft stores every
+                    # context lane, but retains this TP rank's GQA head shard.
+                    remote_base = remote_blocks[g // p_cp] * scale * (p_cp if draft else 1)
+                    local_base = local_blocks[g // d_cp] * scale * (d_cp if draft else 1)
                     if draft:
-                        remote_base += (g % 2) * scale
-                    local_base = local_blocks[g] * scale
+                        remote_base += (g % p_cp) * scale
+                        local_base += (g % d_cp) * scale
                     remote_groups[gid].extend(range(remote_base, remote_base + scale))
                     local_groups[gid].extend(range(local_base, local_base + scale))
             local_lists.append(tuple(local_groups))
             remote_lists.append(tuple(remote_groups))
         return ports, local_lists, remote_lists
 
-    def _get_k3_p2d1_group_pulls(self, ports, remote_base_port):
+    def _get_k3_independent_group_pulls(self, ports, remote_base_port):
         result = []
         for shard_ports in ports:
             per_port = []
@@ -2986,8 +2998,8 @@ class MooncakeConnectorWorker:
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
-        if self._uses_k3_p2d1_transfer(prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size):
-            return self._get_k3_p2d1_split_metadata(meta)
+        if self._uses_k3_independent_transfer(prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size):
+            return self._get_k3_independent_split_metadata(meta)
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
             if self._is_hma_required:
@@ -3492,8 +3504,8 @@ class MooncakeConnectorWorker:
             this pull is the final pull for the group. The final-pull flag is
             used by the receiver to decide when group reformatting can run.
         """
-        if self._uses_k3_p2d1_transfer(prefill_tp_size, remote_pcp_size, remote_dcp_size):
-            return self._get_k3_p2d1_group_pulls(remote_handshake_port_list, remote_base_port)
+        if self._uses_k3_independent_transfer(prefill_tp_size, remote_pcp_size, remote_dcp_size):
+            return self._get_k3_independent_group_pulls(remote_handshake_port_list, remote_base_port)
 
         cp_transfer = remote_pcp_size * remote_dcp_size * self.pcp_size * self.dcp_size > 1
         if self._is_hma_required:
@@ -3832,6 +3844,9 @@ class MooncakeConnectorWorker:
                     remote_port_send_num = (
                         self.remote_port_send_num[meta.remote_engine_id]
                         if meta.remote_pcp_size * meta.remote_dcp_size > 1
+                        or self._uses_k3_independent_transfer(
+                            prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size
+                        )
                         else None
                     )
                     local_block_ids_replicate_k_for_port = (

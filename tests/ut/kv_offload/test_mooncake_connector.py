@@ -2931,6 +2931,77 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                     with self.assertRaises(NotImplementedError):
                         worker._get_kv_split_metadata("prefix", meta)
 
+    def test_k3_independent_dcp_routes(self):
+        """Decode physical positions back into logical tokens and TP head IDs."""
+        for tp, pcp, dcp in ((2, 1, 2), (2, 2, 1), (2, 2, 2), (4, 2, 4), (4, 4, 2), (4, 1, 4), (6, 2, 3), (6, 3, 2)):
+            for rank in range(tp):
+                for tokens in (1, 3071, 3072, 3073, 6144, 6145, 8191):
+                    with self.subTest(tp=tp, pcp=pcp, dcp=dcp, rank=rank, tokens=tokens):
+                        worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id, MockKVCacheConfig())
+                        worker.use_mla = True
+                        worker.use_sparse = False
+                        worker.pcp_size = 1
+                        worker.pcp_rank = 0
+                        worker.dcp_size = dcp
+                        worker.dcp_rank = rank % dcp
+                        worker.tp_size = worker._prefill_tp_size = tp
+                        worker.tp_rank = rank
+                        worker.block_size = 3072
+                        worker.block_size_scale = [[24], [24 * dcp], [1]]
+                        worker.kv_group2layeridx = {
+                            0: ({"kv_cache_spec_type": "AscendMLAAttentionSpec", "kv_cache_group_id": 0}, [0]),
+                            1: (
+                                {"kv_cache_spec_type": "AscendDCPReplicatedDraftAttentionSpec", "kv_cache_group_id": 0},
+                                [1],
+                            ),
+                            2: ({"kv_cache_spec_type": "MambaSpec", "kv_cache_group_id": 1}, [2]),
+                        }
+                        n = (tokens + 3071) // 3072
+                        pb = [10, 27, 43][: (n + pcp - 1) // pcp]
+                        db = [100, 119, 134][: (n + dcp - 1) // dcp]
+                        meta = types.SimpleNamespace(
+                            remote_pcp_size=1,
+                            remote_dcp_size=pcp,
+                            remote_ptp_size=tp,
+                            remote_port=30000,
+                            remote_block_ids=(pb, [7]),
+                            local_block_ids=(db, [99]),
+                            num_external_tokens=tokens,
+                            num_prompt_blocks=n,
+                            num_computed_tokens=0,
+                            remote_block_size=3072,
+                            remote_engine_id="k3",
+                            remote_host="localhost",
+                            remote_multi_nodes_meta_mapping={},
+                        )
+                        ports, local, remote = worker._get_kv_split_metadata("k3", meta)
+                        pulls = worker._get_group_pulls_metadata("k3", ports, tp, 30000, 1, pcp)
+                        seen = [[], []]
+                        for source in range(tp):
+                            self.assertEqual(ports[source], [30000 + source])
+                            for gid in (0, 1):
+                                self.assertEqual(len(local[source][gid]), len(remote[source][gid]))
+                                for dst, src in zip(local[source][gid], remote[source][gid]):
+                                    if gid == 0:
+                                        dg = db.index(dst // 24) * dcp + rank % dcp
+                                        pg = pb.index(src // 24) * pcp + source % pcp
+                                    else:
+                                        self.assertEqual(source, rank)
+                                        dg = db.index(dst // (24 * dcp)) * dcp + dst // 24 % dcp
+                                        pg = pb.index(src // (24 * pcp)) * pcp + src // 24 % pcp
+                                    self.assertEqual((dg, dst % 24), (pg, src % 24))
+                                    seen[gid].append((dg, dst % 24))
+                            self.assertEqual(local[source][2], [99] if source == rank else [])
+                            self.assertEqual(remote[source][2], [7] if source == rank else [])
+                            self.assertEqual(
+                                [p.group_id for p in pulls[source][0]], [0, 1, 2] if source == rank else [0]
+                            )
+                        self.assertEqual(
+                            sorted(seen[0]), [(g, k) for g in range(n) if g % dcp == rank % dcp for k in range(24)]
+                        )
+                        self.assertEqual(sorted(seen[1]), [(g, k) for g in range(n) for k in range(24)])
+                        self.assertEqual([v["num"] for v in worker.remote_port_send_num["k3"].values()], [tp] * tp)
+
     def test_get_kv_split_metadata(self):
         def get_kv_split_metadata(
             use_mla,
