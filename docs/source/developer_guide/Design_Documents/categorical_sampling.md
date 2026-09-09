@@ -1,6 +1,6 @@
 # MRV2 categorical sampling on Ascend
 
-NPU Model Runner V2 uses an AscendC categorical operator for ordinary random sampling. The operator preserves the sampler's request-level seed and position model while avoiding a full-vocabulary random tensor and per-token host synchronization.
+NPU Model Runner V2 uses an AscendC categorical operator for ordinary random sampling. The operator preserves the sampler's request-level seed and position model and replaces per-vocabulary Gumbel noise generation with a row-local random draw. Like the existing Triton path, normal execution requires no per-token host synchronization.
 
 This page describes the first integration stage and its contributor-facing contracts. The broader design in [RFC #14130](https://github.com/vllm-project/vllm-ascend/issues/14130) also proposes routing speculative rejection resampling through this operator in a follow-up change.
 
@@ -32,7 +32,7 @@ Each logits row maps to request state through `expanded_idx_mapping`. A mapping 
 
 Temperature zero is the greedy sentinel and selects the first maximum. For a nonzero temperature, the operator optionally applies temperature scaling, finds the row maximum, computes stable weights `exp(logit - max)`, and selects the first token whose cumulative weight crosses a stateless uniform draw. Logits may be FP16, BF16, or FP32; reductions use FP32, while the optional cache retains its supplied dtype.
 
-The default path uses a 32-bit random draw and FP32 weight accumulation. `use_fp64=True` selects a higher-precision path based on a 64-bit Philox-derived draw and 64-bit fixed-point masses. It does not change input or output dtypes and does not imply FP64 vector arithmetic on the NPU. The purpose of this mode is to preserve tail resolution for precision-sensitive categorical distributions.
+The default path uses a Philox-derived FP32 uniform draw and FP32 weight accumulation. `use_fp64=True` selects a higher-precision path based on a 64-bit Philox-derived draw and 64-bit fixed-point masses. It does not change input or output dtypes and does not imply FP64 vector arithmetic on the NPU. The purpose of this mode is to preserve tail resolution for precision-sensitive categorical distributions.
 
 Ordinary MRV2 sampling invokes the wrapper after logits processing. Speculators use the same wrapper when producing draft tokens and may write request-indexed raw logits into a two-dimensional cache or into a selected scalar/per-token column of a three-dimensional cache. Rejection and bonus-token resampling remain in the existing Ascend rejection-sampler implementation and do not call this operator in this integration stage.
 
@@ -60,7 +60,7 @@ The implementation preserves these layout rules:
 - The logits cache is FP16, BF16, or FP32 and has shape `[requests, vocab]` or `[requests, columns, vocab]`.
 - The supported vocabulary range is from 1 through 1,048,576 entries.
 
-The Python wrapper makes the expanded mapping, logical positions, and optional cache-column metadata contiguous. Positions are normalized to int64 for the native operator; drafting applies the upstream position salt. Cache columns use their actual stride, and a cache vocabulary dimension wider than the sampled logits is supported. It does not silently copy or cast logits, temperature, seed, or cache tensors.
+The Python wrapper makes the expanded mapping, logical positions, and optional cache-column metadata contiguous. Mappings are normalized to int32 and positions to int64 for the native operator; drafting applies the upstream position salt. Cache columns use their actual stride, and a cache vocabulary dimension wider than the sampled logits is supported. It does not silently copy or cast logits, temperature, seed, or cache tensors.
 
 ## Hardware registration
 
