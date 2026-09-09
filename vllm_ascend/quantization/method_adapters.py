@@ -63,34 +63,6 @@ def _make_mx_scale_weight_loader(
     return mx_scale_weight_loader
 
 
-def _make_padded_mx_scale_weight_loader(weight_loader, tp_size: int):
-    """Pad MX scales so the upstream loader can shard them evenly.
-
-    Some MX schemes (for example W8A8 MXFP8) create one local scale for
-    every partial group, so the sum of the local scale counts can be a few
-    entries larger than the unsharded checkpoint tensor.  Pad those missing
-    tail entries before delegating to the standard TP loader.
-    """
-
-    def mx_scale_weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
-        input_dim = getattr(param, "input_dim", None)
-        if input_dim is not None:
-            expected_size = param.shape[input_dim] * tp_size
-            loaded_size = loaded_weight.shape[input_dim]
-            padding = expected_size - loaded_size
-            if 0 < padding < tp_size:
-                padded_shape = list(loaded_weight.shape)
-                padded_shape[input_dim] = expected_size
-                padded_weight = loaded_weight.new_zeros(padded_shape)
-                index = [slice(None)] * loaded_weight.ndim
-                index[input_dim] = slice(0, loaded_size)
-                padded_weight[tuple(index)] = loaded_weight
-                loaded_weight = padded_weight
-        return weight_loader(param, loaded_weight)
-
-    return mx_scale_weight_loader
-
-
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
@@ -199,20 +171,16 @@ class AscendLinearMethod(LinearMethodBase):
                 or is_mx_quant_type(self.quant_method)
             ):
                 param.input_dim = 1
-            if isinstance(layer, RowParallelLinear):
-                if getattr(self.quant_method, "supports_unaligned_tp_groups", False):
-                    assert hasattr(self.quant_method, "group_size")
-                    param.weight_loader = _make_mx_scale_weight_loader(
-                        weight_loader,
-                        layer.tp_rank,
-                        input_size_per_partition,
-                        self.quant_method.group_size,
-                    )
-                elif is_mx_quant_type(self.quant_method):
-                    # Preserve the established loading behavior for MX schemes
-                    # that do not implement group-phase-aware weight/activation
-                    # padding themselves (notably W8A8 MXFP8).
-                    param.weight_loader = _make_padded_mx_scale_weight_loader(weight_loader, layer.tp_size)
+            if isinstance(layer, RowParallelLinear) and getattr(
+                self.quant_method, "supports_unaligned_tp_groups", False
+            ):
+                assert hasattr(self.quant_method, "group_size")
+                param.weight_loader = _make_mx_scale_weight_loader(
+                    weight_loader,
+                    layer.tp_rank,
+                    input_size_per_partition,
+                    self.quant_method.group_size,
+                )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
