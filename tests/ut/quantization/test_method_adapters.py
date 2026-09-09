@@ -10,8 +10,27 @@ from vllm_ascend.quantization.method_adapters import (
     AscendFusedMoEMethod,
     AscendKVCacheMethod,
     AscendLinearMethod,
+    _make_mx_scale_weight_loader,
 )
 from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme
+
+
+def test_mx_scale_weight_loader_preserves_group_phase():
+    weight_loader = MagicMock()
+    param = torch.nn.Parameter(torch.empty(2, 17), requires_grad=False)
+    param.input_dim = 1
+    loader = _make_mx_scale_weight_loader(
+        weight_loader,
+        tp_rank=3,
+        input_size_per_partition=528,
+        group_size=32,
+    )
+    loaded_weight = torch.arange(2 * 66, dtype=torch.float32).reshape(2, 66)
+
+    loader(param, loaded_weight)
+
+    weight_loader.assert_not_called()
+    torch.testing.assert_close(param, loaded_weight[:, 49:66])
 
 
 class TestAscendLinearMethod(TestBase):
