@@ -532,9 +532,17 @@ jobs:
           SCHEDULE_TAG_PATTERN: ${{ inputs.schedule_tag_pattern }}
           SUFFIX: ${{ env.SUFFIX }}
         run: |
-          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
+          set -euo pipefail
 
-          echo "Digests: $DIGESTS"
+          DIGEST_DIR="${{ runner.temp }}/digests"
+
+          # Install skopeo if not present.
+          if ! command -v skopeo >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq skopeo
+          fi
+
+          echo "Digests:"
+          ls -la "$DIGEST_DIR"
           echo "Current tags:"
           echo "$TAGS"
 
@@ -548,9 +556,34 @@ jobs:
               continue
             fi
             echo "Creating tag $tag"
-            docker buildx imagetools create \
-              -t "$tag" \
-              $DIGESTS
+
+            # SWR rejects OCI image index (application/vnd.oci.image.index.v1+json)
+            # produced by "docker buildx imagetools create".  To work around this,
+            # copy each single-arch digest to the destination with a per-arch
+            # temp tag, converting to Docker v2 schema2 format via skopeo, then
+            # create a Docker manifest list which SWR accepts.
+            DIGEST_REFS=""
+            for digest_file in "$DIGEST_DIR"/*; do
+              digest=$(basename "$digest_file")
+              short_digest=$(echo "$digest" | cut -c1-12)
+              ARCH_TAG="${tag}-t${short_digest}"
+              echo "  Copying $SOURCE_IMAGE@sha256:$digest → $ARCH_TAG (format v2s2)"
+              skopeo copy \
+                --format v2s2 \
+                "docker://${SOURCE_IMAGE}@sha256:${digest}" \
+                "docker://${ARCH_TAG}"
+              DIGEST_REFS="$DIGEST_REFS $ARCH_TAG"
+            done
+
+            # shellcheck disable=SC2086
+            docker manifest create "$tag" $DIGEST_REFS
+            docker manifest push "$tag"
+
+            # Clean up per-arch temp tags
+            for digest_ref in $DIGEST_REFS; do
+              echo "  Cleaning up $digest_ref"
+              skopeo delete "docker://$digest_ref" || true
+            done
           done
 
       - name: Clean up temp tags
@@ -606,6 +639,14 @@ jobs:
           SOURCE_IMAGE: ${{ inputs.swr_temp_repo }}
         run: |
           set -euo pipefail
+
+          DIGEST_DIR="${{ runner.temp }}/digests"
+
+          # Install skopeo if not present.
+          if ! command -v skopeo >/dev/null 2>&1; then
+            apt-get update -qq && apt-get install -y -qq skopeo
+          fi
+
           SUFFIX=""
           if [ -n "${{ inputs.suffix }}" ]; then
             SUFFIX="-${{ inputs.suffix }}"
@@ -613,12 +654,40 @@ jobs:
           VLLM_SHORT=$(echo "${{ inputs.vllm_commit }}" | cut -c1-7)
           ASCEND_SHORT=$(echo "${{ inputs.vllm_ascend_commit }}" | cut -c1-7)
           TAG="${IMAGE}:vllm-ascend-${VLLM_SHORT}-${ASCEND_SHORT}${SUFFIX}"
-          DIGESTS=$(printf "$SOURCE_IMAGE@sha256:%s " $(ls ${{ runner.temp }}/digests))
-          echo "Digests: $DIGESTS"
+
+          echo "Digests:"
+          ls -la "$DIGEST_DIR"
           echo "Creating multi-arch manifest tag: $TAG"
-          docker buildx imagetools create \
-            -t "$TAG" \
-            $DIGESTS
+
+          # SWR rejects OCI image index produced by "docker buildx imagetools create".
+          # Copy each single-arch digest to a per-arch temp tag in Docker v2 schema2
+          # format via skopeo, then create a Docker manifest list which SWR accepts.
+          merge_and_push() {
+            local dest_tag="$1"
+            local digest_refs=""
+            for digest_file in "$DIGEST_DIR"/*; do
+              digest=$(basename "$digest_file")
+              short_digest=$(echo "$digest" | cut -c1-12)
+              ARCH_TAG="${dest_tag}-t${short_digest}"
+              echo "  Copying $SOURCE_IMAGE@sha256:$digest → $ARCH_TAG (format v2s2)"
+              skopeo copy \
+                --format v2s2 \
+                "docker://${SOURCE_IMAGE}@sha256:${digest}" \
+                "docker://${ARCH_TAG}"
+              digest_refs="$digest_refs $ARCH_TAG"
+            done
+
+            # shellcheck disable=SC2086
+            docker manifest create "$dest_tag" $digest_refs
+            docker manifest push "$dest_tag"
+
+            for digest_ref in $digest_refs; do
+              echo "  Cleaning up $digest_ref"
+              skopeo delete "docker://$digest_ref" || true
+            done
+          }
+
+          merge_and_push "$TAG"
 
           # ===== Daily scenario: also push daily tag =====
           if [ "${{ inputs.build_type }}" = "daily" ]; then
@@ -631,9 +700,7 @@ jobs:
               DAILY_TAG="${IMAGE}:nightly-${PATTERN}-cann${CANN_VERSION}-${DATE}"
             fi
             echo "Creating daily tag: $DAILY_TAG"
-            docker buildx imagetools create \
-              -t "$DAILY_TAG" \
-              $DIGESTS
+            merge_and_push "$DAILY_TAG"
           fi
 
       - name: Clean up temp tags
