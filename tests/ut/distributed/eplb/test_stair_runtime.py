@@ -8,6 +8,9 @@ from vllm_ascend.distributed.eplb import stair_worker
 
 
 class FakeCommunicator:
+    _stair_source_rank: np.ndarray
+    _stair_source_slot: np.ndarray
+
     def __init__(self):
         self.sends = []
         self.recvs = []
