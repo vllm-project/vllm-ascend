@@ -1144,15 +1144,22 @@ class TestCoreFunctionality(unittest.TestCase):
     @patch.object(KVCacheRecvingThread, "_transfer_kv_cache_all_groups")
     @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
     def test_handle_request(self, mock_send, mock_transfer):
-        mock_transfer.return_value = None
-        mock_send.return_value = None
+        for transfer_error in (None, RuntimeError("transfer failed")):
+            with self.subTest(transfer_error=transfer_error):
+                mock_send.reset_mock()
+                mock_transfer.reset_mock()
+                mock_transfer.side_effect = transfer_error
+                self.thread.task_tracker.reset_mock()
+                self.mock_queue.reset_mock()
 
-        self.thread._handle_request(self.test_req)
+                self.thread._handle_request(self.test_req)
 
-        mock_transfer.assert_called_once_with(self.test_req)
-        mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
-        self.mock_queue.task_done.assert_called_once()
+                mock_transfer.assert_called_once_with(self.test_req)
+                mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
+                self.thread.task_tracker.update_done_task_count.assert_called_once_with("req1")
+                self.mock_queue.task_done.assert_called_once()
+                expected_errors = {1, 2} if transfer_error else set()
+                self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), expected_errors)
 
     @patch.object(KVCacheRecvingThread, "_send_done_signal_to_free_remote_port")
     @patch.object(KVCacheRecvingThread, "_send_done_recv_signal")
@@ -3456,12 +3463,134 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                 self.assertEqual(local_ids, [([70, 71], [80, 81, 82])])
                 self.assertEqual(remote_ids, [([50, 51], [60, 61, 62])])
                 self.assertGreater(len(ports[0]), 1)
+                for port, pulls in zip(ports[0], group_pulls[0]):
+                    self.assertTrue(all(pull.prefill_pp_rank == (port - 31000) // 4 for pull in pulls))
                 self._assert_hybrid_group_pull_finish_flags(
                     ports,
                     group_pulls,
                     expected_group_ids={0, 1},
                     expected_finishes={0: worker._prefill_pp_size, 1: worker._prefill_pp_size},
                 )
+
+    def test_start_load_kv_replica_routing_and_completion(self):
+        """D pulls and P completion tracking must agree across layouts and batches."""
+        cases = [
+            (1, 2, 2, "gqa"),
+            (2, 2, 2, "gqa"),
+            (2, 2, 1, "gqa"),
+            (1, 4, 2, "mla"),
+            (2, 4, 2, "mla"),
+            (1, 4, 2, "hybrid"),
+            (2, 4, 2, "hybrid"),
+        ]
+        for pcp_size, prefill_tp_size, decode_tp_size, layout in cases:
+            with self.subTest(
+                pcp_size=pcp_size, prefill_tp_size=prefill_tp_size, decode_tp_size=decode_tp_size, layout=layout
+            ):
+                case = dict(
+                    use_mla=layout != "gqa",
+                    num_key_value_heads=8 if layout == "gqa" else 1,
+                    prefill_tp_size=prefill_tp_size,
+                    decode_tp_size=decode_tp_size,
+                    prefill_pp_size=1,
+                    pcp_size=1,
+                    dcp_size=1,
+                )
+                decoders = [self._build_worker_for_pd_case(case, rank) for rank in range(decode_tp_size)]
+                senders = {}
+                for pcp_rank in range(pcp_size):
+                    for tp_rank in range(prefill_tp_size):
+                        sender = self._build_worker_for_pd_case(
+                            {**case, "decode_tp_size": prefill_tp_size, "pcp_size": pcp_size}, tp_rank, pcp_rank
+                        )
+                        sender._decode_tp_size = decode_tp_size
+                        sender.kv_send_thread = KVCacheSendingThread.__new__(KVCacheSendingThread)
+                        sender.kv_send_thread.task_tracker = KVCacheTaskTracker()
+                        senders[31000 + pcp_rank * prefill_tp_size + tp_rank] = sender
+
+                for worker in [*decoders, *senders.values()]:
+                    worker._is_hma_required = layout == "hybrid"
+                    worker.enable_sfa_dcp_replicated_indexer = False
+                    worker.kv_group2layeridx[0][0]["kv_cache_spec"] = {"num_kv_heads": case["num_key_value_heads"]}
+                    if layout == "hybrid":
+                        worker.kv_group2layeridx[1] = ({"kv_cache_spec_type": "MambaSpec"}, [1])
+                    worker.block_size_scale = [[2], [1]]
+                for worker in decoders:
+                    worker.kv_recv_thread = MagicMock()
+
+                # Reuse workers across requests; D and P have different request IDs.
+                for request_id in ("req-0", "req-1", "req-2", "req-3"):
+                    with self.subTest(request_id=request_id):
+                        metadata = MooncakeConnectorMetadata()
+                        metadata.add_new_req(
+                            request_id=f"decode-{request_id}",
+                            local_block_ids=([20, 21], [40, 41, 42]),
+                            num_external_tokens=32,
+                            kv_transfer_params=dict(
+                                remote_request_id=request_id,
+                                remote_engine_id="prefill",
+                                remote_host="prefill-host",
+                                remote_port=31000,
+                                remote_pcp_size=pcp_size,
+                                remote_dcp_size=1,
+                                remote_ptp_size=prefill_tp_size,
+                                remote_block_ids=([10, 11, 12], [30, 31, 32]),
+                                remote_block_size=16,
+                                num_prompt_blocks=3,
+                                num_computed_tokens=16,
+                            ),
+                        )
+                        metadata.reqs_in_batch = {f"decode-{request_id}"}
+                        source_ports = set()
+                        for decoder in decoders:
+                            decoder.kv_recv_thread.reset_mock()
+                            decoder.start_load_kv(metadata)
+                            pulls = [call.kwargs for call in decoder.kv_recv_thread.add_request.call_args_list]
+                            self.assertTrue(pulls)
+                            self.assertEqual(sum(pull["all_task_done"] for pull in pulls), 1)
+                            group_pulls = [group for pull in pulls for group in pull["group_pulls"]]
+                            for group_id in (0, 1):
+                                group = [pull for pull in group_pulls if pull.group_id == group_id]
+                                num_pulls = (
+                                    prefill_tp_size // decode_tp_size
+                                    if layout == "gqa" or (layout == "hybrid" and group_id == 1)
+                                    else 1
+                                )
+                                self.assertEqual(
+                                    sorted((pull.remote_tp_offset, pull.is_group_transfer_end) for pull in group),
+                                    [(offset, offset == num_pulls - 1) for offset in range(num_pulls)],
+                                )
+                            for pull in pulls:
+                                source_ports.add(pull["remote_handshake_port"])
+                                self.assertEqual(pull["remote_request_id"], request_id)
+                                self.assertEqual(
+                                    pull["local_block_ids"],
+                                    ([40, 41, 42, 43], [40, 41, 42] if layout == "hybrid" else [40, 41]),
+                                )
+                                self.assertEqual(
+                                    pull["remote_block_ids"],
+                                    ([22, 23, 24, 25], [30, 31, 32] if layout == "hybrid" else [31, 32]),
+                                )
+                                self.assertIsNone(pull["remote_port_send_num"])
+                                self.assertEqual(pull["shard_idx"], 0)
+
+                        self.assertEqual(len({(port - 31000) // prefill_tp_size for port in source_ports}), 1)
+                        self.assertTrue(source_ports.issubset(senders))
+                        send_metadata = MooncakeConnectorMetadata()
+                        send_metadata.reqs_in_batch = {request_id}
+                        send_metadata.requests_to_send = {request_id: time.time()}
+                        for port, sender in senders.items():
+                            sender.start_load_kv(send_metadata)
+                            tracker = sender.kv_send_thread.task_tracker
+                            if port in source_ports:
+                                self.assertEqual(tracker.get_and_clear_finished_requests(), set())
+                                self.assertEqual(set(tracker.delayed_free_requests), {request_id})
+                                # The selected source completes only after D's DONE message.
+                                tracker.update_done_task_count(request_id)
+                            self.assertEqual(tracker.get_and_clear_finished_requests(), {request_id})
+                            self.assertEqual(tracker.get_and_clear_finished_requests(), set())
+                            self.assertFalse(tracker.delayed_free_requests)
+                            self.assertFalse(tracker.reqs_to_process)
 
     def test_hybrid_no_cp_uses_kv_cache_group_ids_for_split_transfer_groups(self):
         with patch.object(
@@ -3638,6 +3767,8 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
         worker.kv_send_thread = None
         worker.kv_recv_thread = MagicMock()
+        worker.pcp_size = 1
+        worker.dcp_size = 1
         worker._prefill_tp_size = 4
         worker.remote_port_send_num = {"remote_engine": {31001: {"num": 1, "host": "localhost"}}}
         worker._get_sfa_replicate_k_block_ids = MagicMock(return_value=(([40],), ([20],)))

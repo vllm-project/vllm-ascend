@@ -2138,6 +2138,11 @@ class MooncakeConnectorWorker:
 
         self.max_device_id = self.tp_size * self.dp_size * self.pcp_size * self.pp_size
         self.kv_role = vllm_config.kv_transfer_config.kv_role
+        if self.kv_role == "kv_consumer" and self.pcp_size > 1:
+            raise ValueError(
+                "In P/D disaggregation, Mooncake supports PCP only on the prefill (kv_producer) engine. "
+                "Set prefill_context_parallel_size=1 on the decode (kv_consumer) engine."
+            )
         self.num_key_value_heads = self.vllm_config.model_config.hf_text_config.num_key_value_heads
 
         # kv cache config
@@ -2934,21 +2939,24 @@ class MooncakeConnectorWorker:
             * remote_block_ids_list[i]: remote kernel block ids, grouped by KV cache
               group, where blocks are read from.
 
-        In PCP/DCP scenarios, prompt blocks can be split across multiple remote
-        P workers. This method also accounts for unequal P/D prefix-cache hits
-        by reducing the number of remote blocks that still need to be pulled.
+        PCP selects one complete P-side KV replica; DCP splits prompt blocks
+        across P workers. Unequal P/D prefix-cache hits reduce the number of
+        remote blocks that still need to be pulled.
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
 
-        if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
+        if self.dcp_size == meta.remote_dcp_size == 1:
             if self._is_hma_required:
                 chosen_rank_list, _ = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
             else:
                 chosen_rank_list = self._get_remote_rank(req_id, prefill_tp_size)
 
-            remote_handshake_port_list = [[x + meta.remote_port for x in chosen_rank_list]]
-            # No CP: expand logical blocks into kernel blocks here so the transfer
-            # stage consumes kernel-level ids directly (chunk_starts no longer needed).
+            # Select the same TP rank in the chosen PCP replica.
+            # E.g. TP2/PP1, PCP rank 1, TP rank 1: offset = 2, port = base + 3.
+            pcp_offset = self._get_selected_pcp_rank(req_id, meta.remote_pcp_size) * prefill_tp_size
+            remote_handshake_port_list = [[x + meta.remote_port + pcp_offset for x in chosen_rank_list]]
+            # Complete KV replicas use the same logical-to-kernel block mapping
+            # as the non-CP path.
             use_transfer_group_block_ids = transfer_groups_need_independent_block_ids(
                 self.kv_group2layeridx,
                 self.block_size_scale,
@@ -3418,10 +3426,15 @@ class MooncakeConnectorWorker:
         dcp_transfer = remote_dcp_size * self.dcp_size > 1
         if self._is_hma_required:
             if not dcp_transfer:
-                # Non-DCP case: port = base + chosen_rank, which has a one-to-one correspondence
-                # with the table keys, maintaining the original logic.
+                # The table uses TP/PP ranks without PCP replica offsets.
+                # Undo the offset added by _get_kv_split_metadata, keeping the PP stage.
+                # E.g. TP2/PP1, PCP rank 1: port base + 3 maps back to rank 3 - 2 = 1.
                 _, rank_group_pulls = self._get_hybrid_remote_rank_group_pulls(req_id, prefill_tp_size)
-                return [[rank_group_pulls[p - remote_base_port] for p in ports] for ports in remote_handshake_port_list]
+                pcp_offset = self._get_selected_pcp_rank(req_id, remote_pcp_size) * prefill_tp_size
+                return [
+                    [rank_group_pulls[p - remote_base_port - pcp_offset] for p in ports]
+                    for ports in remote_handshake_port_list
+                ]
 
             # The DCP path has already selected the source ports for each shard.
             return self._get_dcp_shard_pulls(remote_handshake_port_list, prefill_tp_size, remote_base_port)
@@ -3782,7 +3795,10 @@ class MooncakeConnectorWorker:
 
         if self.kv_send_thread is not None and self.dcp_size == 1:
             for req_id, delay_start_time in metadata.requests_to_send.items():
-                if self.tp_rank in self._prefill_get_remote_rank(req_id):
+                # Unused PCP replicas report completion locally; only transfer
+                # sources wait for the D-side completion signal.
+                selected_pcp_rank = self._get_selected_pcp_rank(req_id, self.pcp_size)
+                if self.pcp_rank == selected_pcp_rank and self.tp_rank in self._prefill_get_remote_rank(req_id):
                     self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
                 else:
                     self.kv_send_thread.add_not_transfer_request(req_id)
@@ -3805,6 +3821,14 @@ class MooncakeConnectorWorker:
             num_p_block_heads = max(1, self.num_key_value_heads // prefill_tp_size)
             tp_num_need_pulls = num_d_block_heads // num_p_block_heads
         return tp_num_need_pulls
+
+    @staticmethod
+    def _get_selected_pcp_rank(req_id: str, pcp_size: int) -> int:
+        if pcp_size == 1:
+            return 0
+        # P and D use the P request ID to select the same replica, independently
+        # of TP routing.
+        return random.Random(string_to_int64_hash(f"pcp:{req_id}")).randrange(pcp_size)
 
     def _get_remote_host_info_by_port(
         self,

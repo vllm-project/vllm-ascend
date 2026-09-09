@@ -1301,22 +1301,22 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
 
-    cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
+    dcp_enabled = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
-        and cp_size > 1
+        and dcp_enabled
     ):
         raise AssertionError(
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
             f"and block_size({cache_config.block_size}) "
-            "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
+            "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+    if use_sparse and dcp_enabled and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
         logger.warning_once(
-            "The current SFA context-parallel implementation requires "
+            "The current SFA decode-context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
             f" == block_size({cache_config.block_size}). "
             f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."
