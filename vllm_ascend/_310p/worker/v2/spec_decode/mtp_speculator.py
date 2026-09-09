@@ -5,9 +5,8 @@
 """310P MTP speculator: CPU block-table slot mappings + RoPE flag + draft quant.
 
 Target path aligns with MRv1 concurrent uniform SpecDecoding FULL (hybrid
-``prepare_attn`` actual/pad split). Draft ACLGraph stays skipped for K=1 until
-AR draft-prefill FULL recovers accept rate (~90% eager vs ~55% graph; see docs
-Step2-E2E-4). ``AutoRegressiveAclGraphManager310`` remains wired for retries.
+``prepare_attn`` actual/pad split). Draft-prefill FULL (K=1) uses
+``AutoRegressiveAclGraphManager310`` with SpecDecoding capture (splitfuse).
 """
 
 from __future__ import annotations
@@ -101,11 +100,10 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
 
     def capture(self) -> None:
-        """Skip draft ACLGraph until AR draft-prefill FULL recovers accept rate."""
+        """Capture draft-prefill FULL (K=1) with SpecDecoding make_dummy patch."""
         self.last_token_indices.zero_()
-        logger.info(
-            "Skipping draft ACLGraph capture on 310P MTP (eager draft; E2E-4: draft FULL accept ~55% vs eager ~90%)."
-        )
+        logger.info("Capturing 310P MTP draft ACLGraph (K=1 draft-prefill FULL; SpecDecoding capture).")
+        super().capture()
 
     @torch.inference_mode()
     def _run_model(
