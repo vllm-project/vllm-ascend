@@ -761,10 +761,12 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         assert all(call["pcp_cache_group_idx"] is None for call in calls)
 
 
-def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
-    """HiddenStateCacheSpec must stay on a private [B, H, N, C] path after #51718."""
+@pytest.mark.parametrize("alignment", [None, 1024])
+def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch, alignment):
+    """Keep private buffers and match the lane's upstream cache-write layout."""
     from vllm.model_executor.models.extract_hidden_states import (
         CacheOnlyAttentionBackend,
+        basic_cache,
     )
 
     layer_name = "draft.cache_only_layers.36"
@@ -778,6 +780,7 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
         num_kv_heads=num_kv_heads,
         head_size=head_size,
         dtype=dtype,
+        alignment=alignment,
     )
     page_bytes = spec.page_size_bytes
     tensor_size = num_blocks * page_bytes
@@ -829,9 +832,21 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     )
     cache = reshaped[layer_name]
     assert isinstance(cache, torch.Tensor)
-    # vLLM #51718 standardized cache-only writes as kv_cache[block, :, pos].
-    assert cache.shape == (num_blocks, num_kv_heads, block_size, head_size)
+    if vllm_version_is("0.28.0"):
+        assert cache.shape == (num_blocks, block_size, num_kv_heads, head_size)
+    else:
+        assert cache.shape == (num_blocks, num_kv_heads, block_size, head_size)
     assert cache.dtype == dtype
+    # Exercise the real upstream writer, not just an expected shape tuple.
+    values = torch.arange(2 * num_kv_heads * head_size, dtype=dtype).reshape(2, num_kv_heads, head_size)
+    slots = torch.tensor([block_size + 1, 2 * block_size + 2])
+    basic_cache(values, cache, slots)
+    if vllm_version_is("0.28.0"):
+        torch.testing.assert_close(cache[1, 1], values[0])
+        torch.testing.assert_close(cache[2, 2], values[1])
+    else:
+        torch.testing.assert_close(cache[1, :, 1], values[0])
+        torch.testing.assert_close(cache[2, :, 2], values[1])
 
 
 class _PrefillStateBuilder:

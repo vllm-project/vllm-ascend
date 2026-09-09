@@ -42,6 +42,8 @@ from vllm import LLM, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import example_hidden_states_connector
 from vllm.inputs import TokensPrompt
 
+from vllm_ascend.utils import vllm_version_is
+
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 DENSE_MODEL = "Qwen/Qwen3-8B"
@@ -287,6 +289,16 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, m
             llm_kwargs["load_format"] = case.load_format
         if case.skip_tokenizer_init:
             llm_kwargs["skip_tokenizer_init"] = True
+
+        if case.use_v2_model_runner and vllm_version_is("0.28.0"):
+            # #49811 is main-only: release must reject forced MRV2, not
+            # silently use V1 or import a speculator absent from this version.
+            with pytest.raises(
+                ValueError,
+                match="Model Runner V2 does not yet support: .*speculative method 'extract_hidden_states'",
+            ):
+                LLM(**llm_kwargs)
+            return
 
         llm = LLM(**llm_kwargs)
 

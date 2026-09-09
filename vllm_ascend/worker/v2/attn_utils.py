@@ -1040,17 +1040,26 @@ def _reshape_kv_cache_v2(
                 num_blocks = raw_cache.numel() // kv_cache_spec.page_size_bytes
                 if num_blocks < kv_cache_config.num_blocks:
                     raise ValueError(f"Hidden-state cache for {layer_name} has fewer blocks than KVCacheManager.")
-                # CacheOnlyAttentionBackend dropped get_kv_cache_shape in #51718.
-                # Spec properties already give the [B, H, N, C] layout that
-                # basic_cache writes as kv_cache[block, :, offset].
-                kv_cache_shape = (
-                    num_blocks,
-                    kv_cache_spec.num_heads,
-                    kv_cache_spec.num_states,
-                    kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
-                )
+                if vllm_version_is("0.28.0"):
+                    # Release basic_cache writes [block, offset, :, :].
+                    kv_cache_shape = group.backend.get_kv_cache_shape(
+                        num_blocks,
+                        kv_cache_spec.block_size,
+                        kv_cache_spec.num_kv_heads,
+                        kv_cache_spec.head_size,
+                        cache_dtype,
+                    )
+                else:
+                    # #51718 removes the backend shape hook and changes
+                    # basic_cache writes to [block, :, offset, :].
+                    kv_cache_shape = (
+                        num_blocks,
+                        kv_cache_spec.num_heads,
+                        kv_cache_spec.num_states,
+                        kv_cache_spec.state_content_size_bytes // get_dtype_size(kv_cache_spec.dtype),
+                    )
                 typed_cache = raw_cache.view(kv_cache_spec.dtype)
-                page_size_padded = getattr(kv_cache_spec, "page_size_padded", None)
+                page_size_padded = kv_cache_spec.page_size_padded
                 if page_size_padded is not None:
                     dtype_size = get_dtype_size(kv_cache_spec.dtype)
                     page_stride = page_size_padded // dtype_size
