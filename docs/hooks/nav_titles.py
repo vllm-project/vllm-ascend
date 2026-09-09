@@ -159,6 +159,10 @@ TITLES = {
         "zh": "Qwen3-Dense(0.6B/1.7B/4B/8B/14B/32B)",
     },
     "tutorials/models/Qwen3-Next.md": {"en": "Qwen3-Next", "zh": "Qwen3-Next"},
+    "tutorials/models/Qwen3.8-Flash-Next.md": {
+        "en": "Qwen3.8-Flash-Next",
+        "zh": "Qwen3.8-Flash-Next",
+    },
     "tutorials/models/Qwen3-Omni-30B-A3B-Thinking.md": {
         "en": "Qwen3-Omni-30B-A3B-Thinking",
         "zh": "Qwen3-Omni-30B-A3B-Thinking",
