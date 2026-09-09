@@ -787,10 +787,15 @@ def test_triton_cache_and_graph_replay(dtype, use_fp64):
     kwargs = dict(return_lse=False, apply_temperature=True, logits_cache_col=col, use_fp64=use_fp64)
     args = logits, mapping, temperature, seed, pos
     # Warm up compilation before capture.
-    categorical_sample(*args, logits_cache=triton_cache, **kwargs)
+    warmup = categorical_sample(*args, logits_cache=triton_cache, **kwargs)
+    expected = torch.ops._C_ascend.npu_categorical_sample(*args, logits_cache=native_cache, **kwargs)
+    torch.testing.assert_close(warmup[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(triton_cache, native_cache, rtol=0, atol=0)
+    torch.npu.synchronize()
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph):
         actual = categorical_sample(*args, logits_cache=triton_cache, **kwargs)
+    torch.npu.synchronize()
     for _ in range(3):
         pos.add_(1)
         expected = torch.ops._C_ascend.npu_categorical_sample(*args, logits_cache=native_cache, **kwargs)
