@@ -23,11 +23,11 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance supports Ascend Atlas A2, A3, and Ascend 950 (Atlas A5) NPUs.
+Batch invariance supports Ascend Atlas A2, A3, and Ascend 950 NPUs.
 
 ## Software Requirements
 
-Batch invariance requires custom operators for Atlas A2, A3, and Ascend 950 (Atlas A5) products. Set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend from source to build and install the required operator packages.
+Batch invariance requires custom operators for Atlas A2, A3, and Ascend 950 products. Set `VLLM_BATCH_INVARIANT=1` before building vllm-ascend from source to build and install the required operator packages.
 
 The `batch_invariant_ops` build and installation process consists of two stages as in the [build_batch_invariant_ops.sh](https://github.com/vllm-project/vllm-ascend/blob/main/csrc/build_batch_invariant_ops.sh), which must run in order:
 
@@ -74,7 +74,7 @@ cd <vllm-ascend-source-dir>
 bash csrc/build_batch_invariant_ops.sh ascend910_93
 ```
 
-**Ascend 950 (Atlas A5):**
+**Ascend 950:**
 
 ```bash
 cd <vllm-ascend-source-dir>
