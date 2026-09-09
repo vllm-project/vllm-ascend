@@ -185,6 +185,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             base,
             model_config=spec_config.draft_model_config,
             parallel_config=draft_parallel_config,
+            # GQA backend setup normalizes its cache block size to 128.
+            # Keep the parent hybrid model's page geometry unchanged.
+            cache_config=copy.deepcopy(base.cache_config),
             # The target runner owns the PD connector and transfers all cache
             # groups. The model-only draft config must not validate that
             # connector's target topology against its local DP/DCP settings.
@@ -602,6 +605,9 @@ class AscendDSparkProposer(AscendDflashProposer):
         context_positions = self._context_positions_buffer[:num_input_tokens]
         context_states = self.hidden_states[:num_input_tokens]
 
+        # DP dummy iterations must never reuse the previous request's context
+        # slots: its blocks can still be pinned for asynchronous PD transfer.
+        self._context_slot_mapping_buffers = None
         self.token_indices_to_sample.fill_(0)
         self._pad_draft_buffers(num_query_total, num_input_tokens)
 
