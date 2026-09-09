@@ -125,8 +125,10 @@ class AscendPCPManager(PCPManager):
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
         if speculative_config is not None:
-            if speculative_config.method not in ("mtp", "eagle3"):
-                raise NotImplementedError("Ascend MRV2 PCP supports speculative decoding only with MTP and Eagle3.")
+            if speculative_config.method not in ("mtp", "eagle3", "dspark"):
+                raise NotImplementedError(
+                    "Ascend MRV2 PCP supports speculative decoding only with MTP, Eagle3 and DSpark."
+                )
             if speculative_config.draft_sample_method != "greedy":
                 raise NotImplementedError(
                     "Ascend MRV2 PCP speculative decoding currently requires greedy draft sampling."

@@ -384,6 +384,10 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
             "vllm_ascend.worker.v2.pcp_manager.build_attn_state",
             return_value=local_attn_state,
         ) as build_attn_state,
+        patch(
+            "vllm_ascend.worker.v2.pcp_manager.async_copy_to_gpu",
+            side_effect=_mock_async_copy_to_cpu,
+        ),
     ):
         result = manager.partition_batch(global_batch, padded_num_tokens=4)
 
@@ -752,16 +756,19 @@ def test_pcp_manager_skips_hidden_restore_before_last_pp_rank() -> None:
     parent_restore.assert_not_called()
 
 
-@pytest.mark.parametrize("method", ["mtp", "eagle3"])
-def test_validate_config_allows_supported_speculators(method: str) -> None:
+@pytest.mark.parametrize("method", ["mtp", "eagle3", "dspark"])
+@pytest.mark.parametrize(
+    ("cudagraph_mode", "sparse_mla"),
+    [(CUDAGraphMode.NONE, False), (CUDAGraphMode.NONE, True), (CUDAGraphMode.FULL_DECODE_ONLY, True)],
+)
+def test_validate_config_allows_supported_speculators(
+    method: str, cudagraph_mode: CUDAGraphMode, sparse_mla: bool
+) -> None:
     speculative_config = SimpleNamespace(
         method=method,
         draft_sample_method="greedy",
     )
-    vllm_config = _make_pcp_config(
-        CUDAGraphMode.NONE,
-        sparse_mla=False,
-    )
+    vllm_config = _make_pcp_config(cudagraph_mode, sparse_mla=sparse_mla)
     vllm_config.speculative_config = speculative_config
 
     AscendPCPManager.validate_config(
@@ -773,8 +780,10 @@ def test_validate_config_allows_supported_speculators(method: str) -> None:
 @pytest.mark.parametrize(
     ("method", "draft_sample_method", "error"),
     [
-        ("draft_model", "greedy", "only with MTP and Eagle3"),
+        ("draft_model", "greedy", "supports speculative decoding only with"),
         ("mtp", "random", "requires greedy draft sampling"),
+        ("eagle3", "random", "requires greedy draft sampling"),
+        ("dspark", "random", "requires greedy draft sampling"),
     ],
 )
 def test_validate_config_rejects_unsupported_speculator_options(
