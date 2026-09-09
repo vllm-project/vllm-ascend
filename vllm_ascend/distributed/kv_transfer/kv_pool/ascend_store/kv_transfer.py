@@ -888,6 +888,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
+        record_operation: Callable[[str, float, int], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -902,6 +903,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
+        self._record_operation_cb = record_operation
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -977,7 +979,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 len(key_list_c),
                 key_list_c[:3],
             )
+            load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
             ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if self._record_operation_cb is not None:
+                self._record_operation_cb(
+                    "load_get",
+                    time.perf_counter() - load_get_start,
+                    len(key_list_c),
+                )
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,

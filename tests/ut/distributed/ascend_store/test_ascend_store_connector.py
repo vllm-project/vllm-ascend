@@ -91,12 +91,15 @@ class TestAscendStoreConnector(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-        _connector = AscendStoreConnector(
+        connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.SCHEDULER,
             kv_cache_config=MagicMock(),
         )
+        stats = MagicMock()
+        mock_scheduler_cls.return_value.get_stats.return_value = stats
         mock_scheduler_cls.assert_called_once()
+        self.assertIs(connector.get_kv_connector_stats(), stats)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")
@@ -104,13 +107,16 @@ class TestAscendStoreConnector(unittest.TestCase):
         config = self._make_vllm_config()
         from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
-        _connector = AscendStoreConnector(
+        connector = AscendStoreConnector(
             vllm_config=config,
             role=KVConnectorRole.WORKER,
             kv_cache_config=None,
         )
+        stats = MagicMock()
+        mock_worker_cls.return_value.get_stats.return_value = stats
         mock_worker_cls.assert_called_once()
         mock_lookup_cls.assert_called_once()
+        self.assertIs(connector.get_kv_connector_stats(), stats)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
     def test_scheduler_methods_delegate(self, mock_scheduler_cls):
