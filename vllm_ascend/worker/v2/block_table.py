@@ -30,6 +30,9 @@ from vllm_ascend.utils import vllm_version_is
 class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
 
+    block_sizes_tensor: torch.Tensor
+    kernel_block_sizes_tensor: torch.Tensor
+
     def __init__(
         self,
         block_sizes: list[int],
@@ -89,6 +92,16 @@ class AscendBlockTables(BlockTables):
             dtype=torch.int32,
             device=self.device,
         )
+
+    def init_block_table_layout_tensors(self) -> None:
+        super().init_block_table_layout_tensors()
+        if vllm_version_is("0.28.0"):
+            # Both versions expand KV block IDs into kernel block IDs. The
+            # release parent stores kernel sizes in block_sizes_tensor, while
+            # main separates KV and kernel sizes. Normalize that contract on
+            # KV-cache wake-up as well as at startup.
+            self.kernel_block_sizes_tensor = self.block_sizes_tensor
+            self.block_sizes_tensor = torch.tensor(self.block_sizes, dtype=torch.int32, device=self.device)
 
     def compute_slot_mappings(
         self,
