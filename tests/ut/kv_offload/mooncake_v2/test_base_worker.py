@@ -13,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker import (
     MooncakeBaseConnectorWorker,
 )
@@ -65,11 +66,13 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
     worker.handshake_port = 5000
     transfer_engine = MagicMock()
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.global_te",
+        base_worker,
+        "global_te",
         transfer_engine,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.validate_register_region_count",
+        base_worker,
+        "validate_register_region_count",
         MagicMock(),
     )
 
@@ -112,11 +115,13 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
     worker.handshake_port = 5000
     transfer_engine = MagicMock()
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.global_te",
+        base_worker,
+        "global_te",
         transfer_engine,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.validate_register_region_count",
+        base_worker,
+        "validate_register_region_count",
         MagicMock(),
     )
 
@@ -165,11 +170,13 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
     worker.handshake_port = 5000
     transfer_engine = MagicMock()
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.global_te",
+        base_worker,
+        "global_te",
         transfer_engine,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.validate_register_region_count",
+        base_worker,
+        "validate_register_region_count",
         MagicMock(),
     )
 
@@ -270,7 +277,8 @@ def patch_worker_runtime(
     }
     for name, value in patches.items():
         monkeypatch.setattr(
-            f"vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.{name}",
+            base_worker,
+            name,
             value,
         )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=7))

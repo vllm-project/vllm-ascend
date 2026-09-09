@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -7,6 +8,7 @@ import pytest
 import torch
 import zmq
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import utils
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     SizedDict,
     as_kv_cache_tensors,
@@ -156,12 +158,18 @@ def test_zmq_ctx_rejects_unknown_socket_type() -> None:
         pass
 
 
-def test_zmq_ctx_destroys_context(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("detach_parent_package", [False, True])
+def test_zmq_ctx_destroys_context(monkeypatch: pytest.MonkeyPatch, detach_parent_package: bool) -> None:
+    if detach_parent_package:
+        # Other CPU tests can replace parent packages while child modules stay cached.
+        parent = importlib.import_module("vllm_ascend.distributed.kv_transfer")
+        monkeypatch.delattr(parent, "kv_p2p", raising=False)
     context = MagicMock()
     socket = MagicMock()
     monkeypatch.setattr(zmq, "Context", MagicMock(return_value=context))
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils.make_zmq_socket",
+        utils,
+        "make_zmq_socket",
         MagicMock(return_value=socket),
     )
 
@@ -172,7 +180,7 @@ def test_zmq_ctx_destroys_context(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_zmq_retry_helpers_succeed_after_transient_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils.time.sleep", MagicMock())
+    monkeypatch.setattr(utils.time, "sleep", MagicMock())
     socket = MagicMock()
     socket.send.side_effect = [zmq.ZMQError("transient"), None]  # type: ignore[attr-defined]
     socket.recv.side_effect = [zmq.ZMQError("transient"), b"response"]  # type: ignore[attr-defined]
@@ -184,7 +192,7 @@ def test_zmq_retry_helpers_succeed_after_transient_error(monkeypatch: pytest.Mon
 
 
 def test_zmq_retry_helpers_raise_after_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils.time.sleep", MagicMock())
+    monkeypatch.setattr(utils.time, "sleep", MagicMock())
     socket = MagicMock()
     socket.send.side_effect = zmq.ZMQError("failed")  # type: ignore[attr-defined]
     socket.recv.side_effect = zmq.ZMQError("failed")  # type: ignore[attr-defined]

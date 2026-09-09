@@ -13,6 +13,7 @@ import torch
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_worker, pull_worker
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.metadata import (
     MooncakeConnectorMetadata,
     MooncakeTransferMetadataGroups,
@@ -691,15 +692,18 @@ def test_get_remote_metadata_fetches_once_and_populates_layout_cache(
         return_value=({0: {(0, 0): [[0]]}}, {0: [(0, 0)]})
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.zmq_ctx",
+        pull_worker,
+        "zmq_ctx",
         MagicMock(return_value=context),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_send",
+        pull_worker,
+        "ensure_zmq_send",
         send,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_recv",
+        pull_worker,
+        "ensure_zmq_recv",
         recv,
     )
 
@@ -723,15 +727,18 @@ def test_get_remote_metadata_rejects_empty_response(monkeypatch: pytest.MonkeyPa
     context = MagicMock()
     context.__enter__.return_value = socket
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.zmq_ctx",
+        pull_worker,
+        "zmq_ctx",
         MagicMock(return_value=context),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_send",
+        pull_worker,
+        "ensure_zmq_send",
         MagicMock(),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_recv",
+        pull_worker,
+        "ensure_zmq_recv",
         MagicMock(return_value=b""),
     )
 
@@ -850,8 +857,9 @@ def test_whole_block_coalescing_is_prepared_per_request_and_reused_across_layers
     dst: list[int] = []
     lengths: list[int] = []
 
-    with patch(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.group_concurrent_contiguous",
+    with patch.object(
+        pull_worker,
+        "group_concurrent_contiguous",
         wraps=group_concurrent_contiguous,
     ) as mock_group:
         thread._append_spec_transfer_addresses(
@@ -1000,15 +1008,18 @@ def test_get_remote_metadata_propagates_network_error_without_caching(
     context = MagicMock()
     context.__enter__.return_value = MagicMock()
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.zmq_ctx",
+        pull_worker,
+        "zmq_ctx",
         MagicMock(return_value=context),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_send",
+        pull_worker,
+        "ensure_zmq_send",
         MagicMock(),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.ensure_zmq_recv",
+        pull_worker,
+        "ensure_zmq_recv",
         MagicMock(side_effect=RuntimeError("timed out")),
     )
 
@@ -1051,11 +1062,13 @@ def test_register_kv_caches_starts_receiving_thread_only_for_consumer(
         return thread
 
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_worker.MooncakeBaseConnectorWorker.register_kv_caches",
+        base_worker.MooncakeBaseConnectorWorker,
+        "register_kv_caches",
         fake_register,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_worker.MooncakePullRecvingThread",
+        pull_worker,
+        "MooncakePullRecvingThread",
         fake_thread,
     )
     monkeypatch.setattr(torch.npu, "current_device", MagicMock(return_value=0))

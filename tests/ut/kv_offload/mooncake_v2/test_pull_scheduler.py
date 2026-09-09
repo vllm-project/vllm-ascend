@@ -12,6 +12,7 @@ import torch
 import zmq
 from vllm.v1.request import RequestStatus
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import pull_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
@@ -206,11 +207,13 @@ def test_sending_thread_force_frees_expired_request(monkeypatch: pytest.MonkeyPa
     thread = make_sending_thread()
     thread.add_delayed_request("expired", 10.0)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.envs.VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
+        pull_scheduler.envs,
+        "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT",
         5,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.time.time",
+        pull_scheduler.time,
+        "time",
         MagicMock(return_value=20.0),
     )
 
@@ -228,11 +231,13 @@ def test_recving_thread_reuses_socket_after_ack_and_discards_it_on_error(
     send = MagicMock()
     recv = MagicMock(return_value=ACK_MSG)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.ensure_zmq_send",
+        pull_scheduler,
+        "ensure_zmq_send",
         send,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.ensure_zmq_recv",
+        pull_scheduler,
+        "ensure_zmq_recv",
         recv,
     )
 
@@ -260,11 +265,13 @@ def test_recving_thread_socket_pool_creates_once_and_reuses_by_endpoint(
     context_cls = MagicMock(return_value=context)
     make_socket = MagicMock(return_value=socket)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.zmq.Context",
+        pull_scheduler.zmq,
+        "Context",
         context_cls,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.make_zmq_socket",
+        pull_scheduler,
+        "make_zmq_socket",
         make_socket,
     )
     path = "tcp://10.0.0.1:6000"
@@ -510,7 +517,8 @@ def test_set_worker_metadata_starts_only_one_producer_sending_thread(
 
     thread_cls = MagicMock(side_effect=make_fake_thread)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.pull_scheduler.MooncakeSchedulerSendingThread",
+        pull_scheduler,
+        "MooncakeSchedulerSendingThread",
         thread_cls,
     )
     metadata = {0: make_transfer_metadata()}

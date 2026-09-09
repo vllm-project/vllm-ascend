@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, UniformTypeKVCacheSpecs
 
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake import base_scheduler
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler import (
     MooncakeBaseConnectorScheduler,
 )
@@ -49,15 +50,18 @@ def test_base_scheduler_initializes_parallel_layout_and_control_port(
     ascend_config = object()
     init_ascend_config = MagicMock()
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler.init_ascend_config",
+        base_scheduler,
+        "init_ascend_config",
         init_ascend_config,
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler.get_ascend_config",
+        base_scheduler,
+        "get_ascend_config",
         MagicMock(return_value=ascend_config),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler.get_ip",
+        base_scheduler,
+        "get_ip",
         MagicMock(return_value="10.0.0.1"),
     )
 
@@ -90,15 +94,18 @@ def test_base_scheduler_rejects_invalid_transfer_roles(
 def test_base_scheduler_rejects_unsupported_pcp(monkeypatch: pytest.MonkeyPatch) -> None:
     config = make_scheduler_config(pcp_size=2)
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler.init_ascend_config",
+        base_scheduler,
+        "init_ascend_config",
         MagicMock(),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler.get_ascend_config",
+        base_scheduler,
+        "get_ascend_config",
         MagicMock(),
     )
     monkeypatch.setattr(
-        "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.base_scheduler.get_ip",
+        base_scheduler,
+        "get_ip",
         MagicMock(return_value="10.0.0.1"),
     )
 
