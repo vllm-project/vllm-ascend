@@ -6,14 +6,12 @@
 import importlib
 
 
-def register_connector() -> None:
-    """Replace upstream ECCPUConnector with the Ascend worker adaptation.
-
-    Scheduler-side cache allocation and metadata remain upstream-owned. The
-    override is installed only when the upstream CPU connector exists; import
-    errors inside an available upstream module are deliberately propagated.
-    """
-    upstream_module = "vllm.distributed.ec_transfer.ec_connector.cpu.connector"
+def _replace_connector(
+    name: str,
+    upstream_module: str,
+    ascend_module: str,
+    ascend_class: str,
+) -> None:
     try:
         importlib.import_module(upstream_module)
     except ModuleNotFoundError as exc:
@@ -25,10 +23,26 @@ def register_connector() -> None:
         ECConnectorFactory,
     )
 
-    # replace worker
-    ECConnectorFactory._registry.pop("ECCPUConnector", None)
+    ECConnectorFactory._registry.pop(name, None)
     ECConnectorFactory.register_connector(
+        name,
+        ascend_module,
+        ascend_class,
+    )
+
+
+def register_connector() -> None:
+    """Register available Ascend encoder-cache transfer adaptations."""
+
+    _replace_connector(
         "ECCPUConnector",
+        "vllm.distributed.ec_transfer.ec_connector.cpu.connector",
         "vllm_ascend.distributed.ec_transfer.ec_connector.cpu.connector",
         "AscendECCPUConnector",
+    )
+    _replace_connector(
+        "ECMooncakeConnector",
+        "vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector",
+        "vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.connector",
+        "AscendECMooncakeConnector",
     )
