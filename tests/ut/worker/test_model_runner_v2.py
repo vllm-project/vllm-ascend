@@ -1,12 +1,49 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.ascend_config import EplbConfig, StairConfig
+from vllm_ascend.worker.v2 import model_runner
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+
+
+@pytest.mark.parametrize("enable_eplb", [True, False])
+@pytest.mark.parametrize("overrides", [{}, {"stair_config": {"sample_size": 16}}])
+def test_init_selects_stair_when_eplb_is_enabled(monkeypatch, enable_eplb, overrides):
+    eplb_config = EplbConfig(**overrides)
+    config = MagicMock(parallel_config=SimpleNamespace(enable_eplb=enable_eplb))
+    monkeypatch.setattr(model_runner, "get_ascend_config", lambda: SimpleNamespace(eplb_config=eplb_config))
+    monkeypatch.setattr(model_runner, "set_potential_max_tokens", lambda _: None)
+    monkeypatch.setattr(model_runner, "resolve_spec_pp_support", lambda _: None)
+    monkeypatch.setattr(model_runner, "torch_cuda_wrapper", nullcontext)
+    monkeypatch.setattr(model_runner, "bypass_upstream_spec_pp_guard", lambda *_: nullcontext(False))
+    monkeypatch.setattr(
+        GPUModelRunner,
+        "__init__",
+        lambda self, *_: setattr(self, "compilation_config", SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE)),
+    )
+
+    # Stop after controller construction; the rest of initialization allocates device buffers.
+    with (
+        patch.object(
+            model_runner, "AscendEPLBController", side_effect=RuntimeError("controller reached")
+        ) as controller,
+        pytest.raises(RuntimeError, match="controller reached"),
+    ):
+        NPUModelRunner(config, torch.device("cpu"))
+
+    selected = controller.call_args.kwargs["stair_config"]
+    if enable_eplb:
+        assert isinstance(selected, StairConfig)
+        assert selected == eplb_config.resolved_stair_config
+    else:
+        assert selected is None
 
 
 def _make_runner(need_timing: bool = True):

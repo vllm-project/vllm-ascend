@@ -203,7 +203,7 @@ class TestAscendConfig(TestBase):
             EplbConfig(load_collection_phase="prompt")
 
     def test_stair_config_defaults_and_overrides(self):
-        config = EplbConfig(algorithm="stair", stair_config={"max_expert_transfers_per_rank_pair": 2})
+        config = EplbConfig(stair_config={"max_expert_transfers_per_rank_pair": 2})
 
         self.assertEqual(config.resolved_stair_config.max_expert_transfers_per_rank_pair, 2)
         self.assertEqual(config.resolved_stair_config.sample_size, 64)
@@ -216,7 +216,12 @@ class TestAscendConfig(TestBase):
             {"flash_tree_width": -1},
         ):
             with self.subTest(value=value), self.assertRaises(ValueError):
-                EplbConfig(algorithm="stair", stair_config=value)
+                EplbConfig(stair_config=value)
+
+    def test_eplb_config_rejects_algorithm_selection(self):
+        for algorithm in ("default", "stair"):
+            with self.subTest(algorithm=algorithm), self.assertRaises(ValueError):
+                EplbConfig(**{"algorithm": algorithm})
 
     def test_stair_config_rejects_removed_score_options(self):
         for name in ("min_relative_score_improvement", "min_absolute_score_improvement", "score_tie_tolerance"):

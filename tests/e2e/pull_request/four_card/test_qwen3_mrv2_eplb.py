@@ -88,11 +88,6 @@ def _run_dp2_tp2(capfd: pytest.CaptureFixture[str]):
             "log_balancedness": False,
             "use_async": True,
         },
-        "additional_config": {
-            "eplb_config": {
-                "load_collection_phase": "prefill",
-            },
-        },
     }
 
     captured_output = ""

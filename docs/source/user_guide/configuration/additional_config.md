@@ -132,9 +132,8 @@ configuration.
 | `num_redundant_experts`          | int | `0`    | MRv1 only in this table. Configure the MRv2 value through upstream `--eplb-config`. |
 | `eplb_policy_type`               | int | `2`    | MRv1 only. EPLB policy: `0`=Random, `1`=DefaultEplb, `2`=SwiftBalanceEplb, `3`=FlashLB. |
 | `eplb_heat_collection_stage`     | str | `"all"`| MRv1 only. Select `"all"`, `"prefill"`, or `"decode"` heat collection. |
-| `load_collection_phase`          | str | `"all"`| MRv2 only. Select `"all"`, `"prefill"`, or `"decode"` load submission. Any batch containing a prefill request is classified entirely as prefill. |
-| `algorithm`                      | str | `"default"` | MRv2 only. Select the upstream default policy or the experimental `"stair"` policy. |
-| `stair_config`                   | dict | `None` | MRv2 only. Advanced STAIR tuning; defaults are intended for normal use. |
+| `load_collection_phase`          | str | `"all"`| MRv2 only. STAIR requires `"all"`; phase-only load collection is not supported. |
+| `stair_config`                   | dict | `None` | MRv2 only. Advanced tuning for STAIR, which is always used when EPLB is enabled; defaults are intended for normal use. |
 
 **scheduler_config**
 

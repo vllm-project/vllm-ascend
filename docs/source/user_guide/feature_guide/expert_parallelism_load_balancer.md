@@ -129,16 +129,15 @@ planner-selected source for every incoming expert. Candidates must be valid,
 must not worsen mean imbalance (equal scores are allowed), and must satisfy
 the p95 regression guard before admission.
 
-Enable STAIR through the Ascend extension while leaving the upstream
-`--eplb-config.policy` at `default`:
+MRv2 always uses STAIR when `--enable-eplb` is set; no algorithm selector is
+needed. Leave the upstream `--eplb-config.policy` at `default`:
 
 ```bash
 vllm serve Qwen/Qwen3-30B-A3B \
   --tensor-parallel-size 16 \
   --enable-expert-parallel \
   --enable-eplb \
-  --eplb-config.num_redundant_experts 16 \
-  --additional-config '{"eplb_config":{"algorithm":"stair"}}'
+  --eplb-config.num_redundant_experts 16
 ```
 
 STAIR currently requires MRv2, asynchronous EPLB, `load_collection_phase=all`,
@@ -171,7 +170,6 @@ covariance modeling:
 ```json
 {
   "eplb_config": {
-    "algorithm": "stair",
     "stair_config": {
       "max_expert_transfers_per_rank_pair": 2,
       "use_covariance": true
@@ -186,32 +184,9 @@ such as CVaR better predicts serving latency remains an evaluation question.
 
 #### MRv2 Load Collection Phase
 
-`load_collection_phase` controls which batch phases contribute to
-the upstream load window; it does not disable routing or MoE computation for
-non-matching batches.
-
-| Value | Behavior | Typical use |
-| --- | --- | --- |
-| `all` | Collect load from every batch. This is the default. | General and mixed workloads. |
-| `prefill` | Collect only from batches containing at least one prefill request. | Optimize prefill balance and TTFT. |
-| `decode` | Collect only from batches containing decode requests and no prefill request. | Optimize decode balance and TPOT. |
-
-Classification is performed once per batch. A batch containing any prefill
-request is classified entirely as prefill; otherwise it is decode. A batch
-that does not match `load_collection_phase` contributes zero load whenever the
-current step is recorded; it does not suppress the shared EPLB window advance.
-This keeps load-window slots, scheduling, and communication aligned across
-data-parallel ranks.
-
-For example, to collect only prefill load:
-
-```bash
-vllm serve Qwen/Qwen3-30B-A3B \
-  --enable-expert-parallel \
-  --enable-eplb \
-  --eplb-config.use_async true \
-  --additional-config '{"eplb_config":{"load_collection_phase":"prefill"}}'
-```
+MRv2 STAIR requires `load_collection_phase=all` (the default), collecting
+load from both prefill and decode batches. Phase-only collection with
+`prefill` or `decode` is not supported and is rejected at startup.
 
 !!! IMPORTANT
 

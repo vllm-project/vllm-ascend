@@ -49,6 +49,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=True,
             communicator=None,
+            policy="default",
+            num_redundant_experts=1,
         )
         mock_vllm_config.cache_config = MagicMock()
         mock_vllm_config.scheduler_config = MagicMock()
@@ -125,11 +127,10 @@ class TestNPUPlatform(TestBase):
             mock_warning.call_args.args[0],
         )
 
-    def test_validate_eplb_config_allows_v2_load_collection_phase(self):
+    def test_validate_eplb_config_defaults_to_stair(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
         vllm_config.parallel_config.enable_eplb = True
-        vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "prefill"}}
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
@@ -146,16 +147,17 @@ class TestNPUPlatform(TestBase):
             policy="default",
             num_redundant_experts=1,
         )
-        vllm_config.additional_config = {"eplb_config": {"algorithm": "stair", "stair_config": {}}}
+        vllm_config.additional_config = {"eplb_config": {"stair_config": {}}}
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)
 
     def test_validate_eplb_config_rejects_invalid_stair_modes(self):
         cases = (
-            ({"algorithm": "unknown"}, "algorithm"),
-            ({"stair_config": {}}, "requires algorithm"),
-            ({"algorithm": "stair", "load_collection_phase": "decode"}, "requires load_collection_phase"),
+            ({"algorithm": "default"}, "algorithm"),
+            ({"algorithm": "stair"}, "algorithm"),
+            ({"load_collection_phase": "decode"}, "requires load_collection_phase"),
+            ({"load_collection_phase": "prefill"}, "requires load_collection_phase"),
         )
         for eplb_config, message in cases:
             with self.subTest(eplb_config=eplb_config):
@@ -172,6 +174,27 @@ class TestNPUPlatform(TestBase):
                 with self.assertRaisesRegex(ValueError, message):
                     _validate_eplb_config(vllm_config)
 
+    def test_validate_eplb_config_does_not_enable_stair_when_eplb_is_disabled(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.eplb_config.num_redundant_experts = 0
+
+        with patch.dict("os.environ", {}, clear=True):
+            _validate_eplb_config(vllm_config)
+
+        vllm_config.additional_config = {"eplb_config": {"stair_config": {}}}
+        with self.assertRaisesRegex(ValueError, "requires --enable-eplb"):
+            _validate_eplb_config(vllm_config)
+
+    def test_validate_eplb_config_rejects_non_default_upstream_policy(self):
+        vllm_config = self.mock_vllm_config()
+        vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.enable_eplb = True
+        vllm_config.parallel_config.eplb_config.policy = "other"
+
+        with self.assertRaisesRegex(ValueError, "upstream EPLB policy"):
+            _validate_eplb_config(vllm_config)
+
     def test_validate_eplb_config_requires_stair_redundancy(self):
         vllm_config = self.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
@@ -182,7 +205,6 @@ class TestNPUPlatform(TestBase):
             policy="default",
             num_redundant_experts=0,
         )
-        vllm_config.additional_config = {"eplb_config": {"algorithm": "stair"}}
 
         with self.assertRaisesRegex(ValueError, "redundant expert"):
             _validate_eplb_config(vllm_config)
@@ -194,6 +216,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=False,
             communicator="torch_gloo",
+            policy="default",
+            num_redundant_experts=1,
         )
 
         with patch.dict("os.environ", {}, clear=True), patch("vllm_ascend.platform.logger.warning") as warning:
@@ -210,6 +234,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=False,
             communicator="torch_nccl",
+            policy="default",
+            num_redundant_experts=1,
         )
 
         with (
@@ -226,6 +252,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=True,
             communicator=None,
+            policy="default",
+            num_redundant_experts=1,
         )
 
         with patch.dict("os.environ", {}, clear=True):
@@ -243,6 +271,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=True,
             communicator=None,
+            policy="default",
+            num_redundant_experts=1,
         )
 
         with (
@@ -259,6 +289,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=True,
             communicator="torch_nccl",
+            policy="default",
+            num_redundant_experts=1,
         )
 
         with (
@@ -275,6 +307,8 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.eplb_config = MagicMock(
             use_async=True,
             communicator="nixl",
+            policy="default",
+            num_redundant_experts=1,
         )
 
         with (
@@ -283,7 +317,7 @@ class TestNPUPlatform(TestBase):
         ):
             _validate_eplb_config(vllm_config)
 
-    def test_validate_eplb_config_allows_load_collection_phase_with_dbo_and_spec_decode(
+    def test_validate_eplb_config_allows_stair_with_dbo_and_spec_decode(
         self,
     ):
         vllm_config = self.mock_vllm_config()
@@ -291,7 +325,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.enable_eplb = True
         vllm_config.parallel_config.enable_dbo = True
         vllm_config.speculative_config = object()
-        vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "decode"}}
+        vllm_config.additional_config = {"eplb_config": {"load_collection_phase": "all"}}
 
         with patch.dict("os.environ", {}, clear=True):
             _validate_eplb_config(vllm_config)

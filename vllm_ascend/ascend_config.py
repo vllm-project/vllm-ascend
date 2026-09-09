@@ -171,7 +171,6 @@ class EplbConfig:
     # upstream EPLB expert-load window; any prefill request marks the batch
     # as prefill.
     load_collection_phase: str = "all"
-    algorithm: Literal["default", "stair"] = "default"
     stair_config: StairConfig | None = None
 
     @property
