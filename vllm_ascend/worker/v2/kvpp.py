@@ -102,6 +102,7 @@ class KVPPScheduler:
     def wait_for_layer(self, layer_name: str) -> None:
         if not self._has_history:
             return
+        assert self._prefetch_future is not None
         self._prefetch_future.result()
         self._prefetch_future = None
         self._next_attention_layer_index += 1
