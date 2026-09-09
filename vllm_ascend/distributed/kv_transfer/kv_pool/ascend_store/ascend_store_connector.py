@@ -252,6 +252,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_layer_load()
         if self._mamba_copy_bufs is not None:
             mamba_utils.do_mamba_copy_block_for_layer(
@@ -283,6 +284,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             # A load-only consumer does not publish KV.
             return
+        assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
@@ -293,6 +295,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.use_layerwise:
             return
 
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -316,6 +319,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:
             return None
