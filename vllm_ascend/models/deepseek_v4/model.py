@@ -412,6 +412,13 @@ class DeepseekV4MoE(nn.Module):
                 if not self.is_rocm_aiter_moe_enabled:
                     if self.shared_experts is not None:
                         assert shared_output is not None
+                        if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                            print(
+                                f"[MoE-DEBUG] layer={self.layer_idx} tp_rank={self.tp_rank} "
+                                f"ep_rank={self.ep_rank} | 合并：routed_out {tuple(final_hidden_states.shape)} "
+                                f"+ shared_out {tuple(shared_output.shape)}（×routed_scaling_factor={self.routed_scaling_factor}）",
+                                flush=True,
+                            )
                         final_hidden_states = muls_add_triton(
                             final_hidden_states, shared_output, self.routed_scaling_factor
                         )

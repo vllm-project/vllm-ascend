@@ -17,6 +17,8 @@
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from functools import wraps
+import os
+import time
 
 import torch
 import torch.nn.functional as F
@@ -271,12 +273,27 @@ class AscendSharedExperts:
             if self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY
             else fused_moe_evts.before_combine
         )
+        if os.environ.get("DSV4_MOE_DEBUG") == "1":
+            print(
+                f"[MoE-DEBUG] 共享专家 forward：mode={mode.name} "
+                f"weights_replicated={self.weights_replicated} "
+                f"multistream_overlap={self.multistream_overlap} "
+                f"sp={self.is_sequence_parallel} "
+                f"down_proj_waits={'after_routed_finalize' if (self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY) else 'before_combine'}",
+                flush=True,
+            )
 
         def maybe_wait_event(evt: torch.npu.Event | None):
             if evt is not None:
                 torch.npu.current_stream().wait_event(evt)
 
         with npu_stream_switch(shared_experts_calculation_stream(), enabled=self.multistream_overlap):
+            if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                print(
+                    f"[MoE-DEBUG][{time.monotonic():.4f}] 共享专家 进入计算（multistream={self.multistream_overlap}，"
+                    f"mode={mode.name}）",
+                    flush=True,
+                )
             if mode is SharedExpertParallelMode.SHARED_EXPERT_DATA_PARALLEL_ONLY:
                 # Full activations + replicated weights: shard tokens locally,
                 # run the MLP, then gather its complete output.
@@ -299,10 +316,20 @@ class AscendSharedExperts:
                 original_dtype = hidden_states.dtype
                 # Execute dynamic quant concurrently with MoE gate.
                 torch.npu.current_stream().wait_event(fused_moe_evts.before_routed_experts)
+                if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                    print(
+                        f"[MoE-DEBUG][{time.monotonic():.4f}] 共享专家 等 before_routed_experts（routed 开始）→ 动态量化",
+                        flush=True,
+                    )
                 quantized_x, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
                 # Execute the gate projection and activation concurrently with the
                 # dispatch communication.
                 maybe_wait_event(fused_moe_evts.after_routed_experts)
+                if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                    print(
+                        f"[MoE-DEBUG][{time.monotonic():.4f}] 共享专家 等 after_routed_experts（dispatch 完成）→ gate_up 投影",
+                        flush=True,
+                    )
                 hidden_states = torch_npu.npu_quant_matmul(
                     quantized_x,
                     self.layer.gate_up_proj.weight,
@@ -348,6 +375,11 @@ class AscendSharedExperts:
                         ),
                     )
                 maybe_wait_event(down_projection_ready)
+                if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                    print(
+                        f"[MoE-DEBUG][{time.monotonic():.4f}] 共享专家 等 {('after_routed_finalize' if (self.multistream_overlap and mode is SharedExpertParallelMode.SEQUENCE_PARALLEL_ONLY) else 'before_combine')}（combine 就绪）→ down 投影",
+                        flush=True,
+                    )
                 shared_out = torch_npu.npu_quant_matmul(
                     quantized_x,
                     self.layer.down_proj.weight,
