@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import torch
 from vllm.v1.kv_cache_interface import UniformTypeKVCacheSpecs
 
 from vllm_ascend.distributed.kv_transfer.sparse_kv_offload import (
@@ -13,6 +14,44 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     plan_sparse_kv_offload_memory,
 )
 from vllm_ascend.utils import AscendDeviceType
+
+
+class TestSparseParentCache(unittest.TestCase):
+    def test_allocate_and_reshape_share_one_parent_on_host_and_device(self):
+        allocated_cpu_sizes = []
+        allocated_device_sizes = []
+
+        def allocate_cpu(sizes, alignment):
+            allocated_cpu_sizes.extend(sizes)
+            return [torch.zeros(size, dtype=torch.int8) for size in sizes]
+
+        def allocate_device(size, alignment):
+            allocated_device_sizes.append(size)
+            return torch.zeros(size, dtype=torch.int8)
+
+        with patch.object(manager_module, "empty_aligned_int8_cpu_tensors", side_effect=allocate_cpu):
+            raw = manager_module.allocate_kv_cache_tensors_for_sparse_kv_offload(192, 96, 32, 0, True, allocate_device)
+        self.assertEqual(allocated_cpu_sizes, [288])
+        self.assertEqual(allocated_device_sizes, [288])
+        spec = SimpleNamespace(page_size_bytes=96, block_size=4, num_kv_heads=1, head_size=12, dtype=torch.bfloat16)
+        backend = SimpleNamespace(get_kv_cache_shape=lambda nb, bs, nh, hd: (nb, bs, nh, hd))
+        config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(kv_lora_rank=8, qk_rope_head_dim=4))
+        )
+        with patch.object(manager_module, "allocate_kv_offload_topk_buffer_pair", return_value=(None, None)):
+            cache = manager_module.reshape_kv_cache_tensors_for_sparse_kv_offload(raw, spec, backend, 0, config, None)
+        for k, r in (cache[:2], cache[2:4]):
+            self.assertEqual(k.untyped_storage().data_ptr(), r.untyped_storage().data_ptr())
+            self.assertEqual(k.stride(1), 12)
+            self.assertEqual(r.data_ptr() - k.data_ptr(), 16)
+
+    def test_non_owner_rank_does_not_allocate_host_or_default_device_cache(self):
+        with patch.object(manager_module, "empty_aligned_int8_cpu_tensors") as host_allocate:
+            device_allocate = MagicMock()
+            raw = manager_module.allocate_kv_cache_tensors_for_sparse_kv_offload(192, 96, 32, 1, False, device_allocate)
+        host_allocate.assert_not_called()
+        device_allocate.assert_not_called()
+        self.assertEqual(raw, (None, None, 288))
 
 
 class _FakeKVCacheSpec:
