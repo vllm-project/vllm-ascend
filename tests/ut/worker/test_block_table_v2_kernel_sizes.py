@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from triton.runtime.interpreter import InterpretedFunction
+from vllm.triton_utils import triton
 
 from vllm_ascend.ops.triton.v2.block_table import compute_slot_mappings as slot_kernel
 from vllm_ascend.worker.v2.block_table import AscendBlockTables
@@ -15,7 +15,8 @@ from vllm_ascend.worker.v2.block_table import AscendBlockTables
 @pytest.mark.parametrize("block_size", [128, 1536])
 @pytest.mark.parametrize("cp_size,cp_rank", [(1, 0), (2, 0), (2, 1), (4, 3)])
 @pytest.mark.parametrize("interleave", [1, 128])
-def test_slot_mapping_uses_expanded_kernel_blocks(block_size, cp_size, cp_rank, interleave):
+def test_slot_mapping_uses_expanded_kernel_blocks(monkeypatch, block_size, cp_size, cp_rank, interleave):
+    monkeypatch.setenv("TRITON_INTERPRET", "1")
     kernel_size = 128
     factor = block_size // kernel_size
     block_ids = [1, 5]
@@ -33,8 +34,8 @@ def test_slot_mapping_uses_expanded_kernel_blocks(block_size, cp_size, cp_rank, 
             expected.append(block_ids[block] * block_size + local_offset)
 
     # Execute the actual address arithmetic on CPU, without compiling or using an NPU.
-    kernel = InterpretedFunction(slot_kernel._compute_slot_mappings_kernel.fn)
-    with patch.object(slot_kernel, "_load_ptr", InterpretedFunction(slot_kernel._load_ptr.fn)):
+    kernel = triton.jit(slot_kernel._compute_slot_mappings_kernel.fn)
+    with patch.object(slot_kernel, "_load_ptr", triton.jit(slot_kernel._load_ptr.fn)):
         kernel[(1, 2)](
             out.numel(),
             torch.tensor([0], dtype=torch.int32),
