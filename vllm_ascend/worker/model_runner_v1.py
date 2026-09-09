@@ -848,7 +848,7 @@ class NPUModelRunner(GPUModelRunner):
         """
         ids = torch.tensor(block_copies, dtype=torch.long, device=self.device)
         src_ids, dst_ids = ids.unbind(dim=1)
-        for layer_cache in self.kv_caches.values():
+        for layer_cache in self.kv_caches:
             tensors = layer_cache if isinstance(layer_cache, (list, tuple)) else (layer_cache,)
             for cache_tensor in tensors:
                 if cache_tensor is None or cache_tensor.dim() == 0:
