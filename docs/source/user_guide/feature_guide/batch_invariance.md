@@ -23,7 +23,7 @@ Batch invariance is crucial for several use cases:
 
 ## Hardware Requirements
 
-Batch invariance supports Ascend Atlas A2, A3, and Ascend 950 NPUs.
+Batch invariance supports Atlas A2, A3, and Ascend 950 products.
 
 ## Software Requirements
 
