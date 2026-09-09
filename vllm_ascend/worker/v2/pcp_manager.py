@@ -359,6 +359,10 @@ class AscendPCPManager(PCPManager):
         restored_hidden_states = self.restore_hidden_states(hidden_states[:local_num_tokens_padded])
         hidden_states[: restored_hidden_states.shape[0]].copy_(restored_hidden_states)
 
+    # TODO(wzx0726): Once the paired vLLM includes https://github.com/vllm-project/vllm/pull/53867,
+    # adapt its PCP prepare_inputs_to_capture path to create AscendInputBatch
+    # directly in persistent PCP buffers, then remove this method and the
+    # NPUModelRunner.prepare_dummy_attn override after capture/idle replay validation.
     def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         # Runtime dummy inputs use the runner buffers, whereas FULL graphs
         # capture PCP-local storage. Refresh that storage after a real batch.
