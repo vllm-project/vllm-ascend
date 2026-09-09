@@ -25,8 +25,9 @@ states are correctly extracted and saved on the Ascend NPU. Parametrized over:
   mirrors upstream vLLM PR #39949.
 * Model Runner V1 (Ascend default) and Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`),
   covering the Ascend adaptation of upstream vLLM PR #49811 on the 0828 pin.
-* token-in / token-out via ``skip_tokenizer_init`` + ``TokensPrompt`` (dummy
-  hybrid), which is the typical EAGLE dump collection path.
+* token-in / token-out via ``skip_tokenizer_init`` + ``TokensPrompt`` on the
+  text-only dense model (dummy weights). Qwen3.5 is multimodal, so skipping
+  tokenizer init leaves ``tokenizer=None`` and ``Qwen3VLProcessor`` crashes.
 """
 
 from __future__ import annotations
@@ -161,26 +162,28 @@ CASES = [
     ),
     pytest.param(
         ExtractHiddenStatesCase(
-            model_name=HYBRID_MODEL,
-            aux_hidden_state_layer_ids=HYBRID_AUX_HIDDEN_STATE_LAYER_IDS,
+            model_name=DENSE_MODEL,
+            aux_hidden_state_layer_ids=DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
             token_prompts=TOKEN_IN_PROMPTS,
             enforce_eager=True,
-            gpu_memory_utilization=0.4,
+            gpu_memory_utilization=0.8,
+            max_num_seqs=16,
             max_model_len=256,
             load_format="dummy",
             verify_nonzero=False,
             verify_token_ids=True,
             skip_tokenizer_init=True,
         ),
-        id="hybrid_dummy_token_in_token_out",
+        id="dense_dummy_token_in_token_out",
     ),
     pytest.param(
         ExtractHiddenStatesCase(
-            model_name=HYBRID_MODEL,
-            aux_hidden_state_layer_ids=HYBRID_AUX_HIDDEN_STATE_LAYER_IDS,
+            model_name=DENSE_MODEL,
+            aux_hidden_state_layer_ids=DENSE_AUX_HIDDEN_STATE_LAYER_IDS,
             token_prompts=TOKEN_IN_PROMPTS,
             enforce_eager=True,
-            gpu_memory_utilization=0.4,
+            gpu_memory_utilization=0.8,
+            max_num_seqs=16,
             max_model_len=256,
             load_format="dummy",
             verify_nonzero=False,
@@ -188,7 +191,7 @@ CASES = [
             use_v2_model_runner=True,
             skip_tokenizer_init=True,
         ),
-        id="hybrid_dummy_token_in_token_out_mrv2",
+        id="dense_dummy_token_in_token_out_mrv2",
     ),
 ]
 
