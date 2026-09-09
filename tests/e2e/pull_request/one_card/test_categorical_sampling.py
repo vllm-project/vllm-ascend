@@ -806,6 +806,9 @@ def test_triton_cache_and_graph_replay(dtype, use_fp64):
     torch.npu.synchronize()
     for _ in range(3):
         pos.add_(1)
+        logits[0].copy_(logits[0].roll(1))
+        native_cache.fill_(-123.0)
+        triton_cache.fill_(-123.0)
         expected = torch.ops._C_ascend.npu_categorical_sample(*args, logits_cache=native_cache, **kwargs)
         graph.replay()
         torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
