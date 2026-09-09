@@ -75,6 +75,15 @@ SWA_INT_MAX = 2147483647
 _ATTN_KEYS_BUFFER = None
 
 
+def _is_v2_hybrid_pp(vllm_config: VllmConfig) -> bool:
+    # Hybrid PP stages can have FIA layers in different KV cache groups.
+    return (
+        vllm_config.use_v2_model_runner
+        and vllm_config.model_config.is_hybrid
+        and vllm_config.parallel_config.pipeline_parallel_size > 1
+    )
+
+
 @register_backend(AttentionBackendEnum.CUSTOM, "ASCEND")
 class AscendAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -505,12 +514,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
-        # Hybrid PP stages can have FIA layers in different KV cache groups.
-        self._use_layer_aware_fia_graph_replay |= (
-            self.vllm_config.use_v2_model_runner
-            and self.vllm_config.model_config.is_hybrid
-            and self.vllm_config.parallel_config.pipeline_parallel_size > 1
-        )
+        self._use_layer_aware_fia_graph_replay |= _is_v2_hybrid_pp(self.vllm_config)
         self.sinks = sinks
         self.layerIndex = 0
         # Some mixed-attention models cannot rely on the iteration order of
@@ -533,11 +537,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        use_layer_aware_replay = needs_layer_aware_fia_graph_replay() or (
-            vllm_config.use_v2_model_runner
-            and vllm_config.model_config.is_hybrid
-            and vllm_config.parallel_config.pipeline_parallel_size > 1
-        )
+        use_layer_aware_replay = needs_layer_aware_fia_graph_replay() or _is_v2_hybrid_pp(vllm_config)
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
