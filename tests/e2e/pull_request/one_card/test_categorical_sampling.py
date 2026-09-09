@@ -22,6 +22,7 @@ import torch
 import torch_npu  # noqa: F401  # Registers the NPU and ACLGraph APIs.
 
 from tests.e2e.pull_request.one_card.sampling_utils import require_categorical_sampling_operator
+from vllm_ascend.ops.triton.categorical_sample import categorical_sample
 
 DEVICE = torch.device("npu")
 MAX_VOCAB_SIZE = 1_048_576
@@ -733,3 +734,70 @@ def test_categorical_sampling_aclgraph_distribution(case: CategoricalSamplingDis
         f"{case.name}: chi-squared distribution check failed: "
         f"statistic={statistic:.6f}, p_value={p_value:.6g}, alpha={STATISTICAL_ALPHA}"
     )
+
+
+def _compare_triton_native(logits, mapping, temperature, seed, pos, **kwargs):
+    expected = torch.ops._C_ascend.npu_categorical_sample(logits, mapping, temperature, seed, pos, **kwargs)
+    actual = categorical_sample(logits, mapping, temperature, seed, pos, **kwargs)
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+    return actual
+
+
+@pytest.mark.parametrize("use_fp64", [False, True])
+@pytest.mark.parametrize("vocab", [1, 33, 256, 4096, 4097, 32768, 151936, 1_048_576])
+def test_triton_same_input_matches_native(vocab, use_fp64):
+    generator = torch.Generator().manual_seed(17)
+    logits = torch.randn(8, vocab, generator=generator, dtype=torch.float32).to("npu")
+    mapping = torch.tensor([0, 1, 2, 3, 0, 1, 2, -1], dtype=torch.int32, device="npu")
+    temperature = torch.tensor([0.0, 0.7, 1.0, -2.0], device="npu")
+    seeds = torch.tensor([17, -37, (1 << 40) + 17, -(1 << 63)], dtype=torch.int64, device="npu")
+    pos = torch.tensor([0, 1, 99, (1 << 32) + 3, (1 << 40) + 5, -1, -(1 << 63), 0], device="npu")
+    _compare_triton_native(
+        logits, mapping, temperature, seeds, pos, return_lse=True, apply_temperature=True, use_fp64=use_fp64
+    )
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("use_fp64", [False, True])
+def test_triton_cache_and_graph_replay(dtype, use_fp64):
+    logits = torch.arange(33, device="npu", dtype=torch.float32).to(dtype).expand(4, -1)
+    mapping = torch.tensor([0, 1, 0, -1], dtype=torch.int32, device="npu")
+    temperature = torch.tensor([0.7, 0.0], device="npu")
+    seed = torch.tensor([17, -37], device="npu")
+    pos = torch.tensor([0, 1, (1 << 40) + 3, 0], device="npu")
+    col = torch.tensor([0, 0, 1, -1], dtype=torch.int32, device="npu")
+    native_cache = torch.full((2, 3, 48), -123.0, dtype=dtype, device="npu")
+    triton_cache = native_cache.clone()
+    kwargs = dict(return_lse=False, apply_temperature=True, logits_cache_col=col, use_fp64=use_fp64)
+    args = logits, mapping, temperature, seed, pos
+    # Warm up compilation before capture.
+    categorical_sample(*args, logits_cache=triton_cache, **kwargs)
+    graph = torch.npu.NPUGraph()
+    with torch.npu.graph(graph):
+        actual = categorical_sample(*args, logits_cache=triton_cache, **kwargs)
+    for _ in range(3):
+        pos.add_(1)
+        expected = torch.ops._C_ascend.npu_categorical_sample(*args, logits_cache=native_cache, **kwargs)
+        graph.replay()
+        torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+        torch.testing.assert_close(triton_cache, native_cache, rtol=0, atol=0)
+        assert actual[1].numel() == 0
+
+
+@pytest.mark.parametrize("use_fp64", [False, True])
+@pytest.mark.parametrize("infinity", [False, True])
+def test_triton_philox_endpoint_and_first_max(use_fp64, infinity):
+    # This seed/position rounds the FP32 draw to 1.0. For +inf logits
+    # the last supported token must win, never the default token zero.
+    logits = torch.full((3, 8193), -float("inf"), device="npu")
+    logits[:, [1, 4096, 8192]] = float("inf") if infinity else 0.0
+    mapping = torch.tensor([0, 1, -1], dtype=torch.int32, device="npu")
+    temperature = torch.tensor([1.0, 0.0], device="npu")
+    seeds = torch.tensor([17, -37], device="npu")
+    pos = torch.tensor([1_217_933, 0, 0], device="npu")
+    result = _compare_triton_native(
+        logits, mapping, temperature, seeds, pos, return_lse=True, apply_temperature=False, use_fp64=use_fp64
+    )
+    assert result[0][1].item() == 1
+    assert result[0][2].item() == 0
