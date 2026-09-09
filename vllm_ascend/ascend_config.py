@@ -556,7 +556,7 @@ class AscendConfig:
                 "DSA-CP is enabled, but the current config does not support sequence-parallel. Disabling DSA-CP."
             )
         self.enable_dsa_cp = self.enable_dsa_cp and has_indexer and vc.parallel_config.use_sequence_parallel_moe
-        
+
         logger.info_once(
             "DSA-CP is %s.",
             "enabled" if self.enable_dsa_cp else "disabled",

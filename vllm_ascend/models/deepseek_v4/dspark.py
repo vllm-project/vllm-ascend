@@ -288,7 +288,7 @@ class DeepseekV4DSparkModel(nn.Module):
             hidden_states = hidden_states[:full_num_tokens]
 
         if forward_context is not None:
-                forward_context.is_padding = orig_is_padding
+            forward_context.is_padding = orig_is_padding
         head_hidden = self.hc_head(hidden_states, self.hc_head_fn, self.hc_head_scale, self.hc_head_base)
         return head_hidden
 
