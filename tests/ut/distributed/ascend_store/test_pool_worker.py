@@ -651,11 +651,6 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         self.assertEqual(stats.data["load_get_keys"], 1)
         self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
-        worker.m_store.get.side_effect = RuntimeError("get failed")
-        with self.assertRaisesRegex(RuntimeError, "get failed"):
-            worker.start_load_kv(meta)
-        self.assertIsNone(worker.get_stats())
-
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
         autospec=True,

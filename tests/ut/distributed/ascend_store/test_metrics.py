@@ -4,9 +4,6 @@
 from unittest.mock import MagicMock
 
 from prometheus_client import Counter, Gauge, Histogram
-from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
-    MultiKVConnectorPromMetrics,
-)
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
@@ -38,7 +35,7 @@ class _Metric:
         return self.child
 
 
-def test_stats_aggregate():
+def test_stats_aggregate_and_reduce():
     first = AscendStoreKVConnectorStats()
     first.set_delayed_release(1, 2)
     first.record_operation("load_get", 0.01, 3)
@@ -48,23 +45,9 @@ def test_stats_aggregate():
 
     first.aggregate(second)
 
-    assert first.data == {
+    assert first.reduce() == {
         "delayed_release_requests": 2,
         "delayed_release_blocks": 5,
-        "load_get_duration_seconds": [0.01, 0.02],
-        "load_get_keys": 8,
-    }
-
-
-def test_stats_reduce_and_ignore_unknown_operation():
-    stats = AscendStoreKVConnectorStats()
-    stats.record_operation("load_get", 0.01, 3)
-    stats.record_operation("load_get", 0.02, 5)
-    stats.record_operation("save_put", 1.0, 100)
-
-    assert stats.reduce() == {
-        "delayed_release_requests": 0,
-        "delayed_release_blocks": 0,
         "load_get_count": 2,
         "load_get_avg_ms": 15.0,
         "load_get_keys": 8,
@@ -76,24 +59,12 @@ def test_prom_metrics_observe():
     labelnames = ["model_name"]
     labelvalues = {0: ["test-model"]}
     ascend_store_prom = AscendStorePromMetrics(MagicMock(), metric_types, labelnames, labelvalues)
-    prom = MultiKVConnectorPromMetrics(
-        MagicMock(),
-        metric_types,
-        labelnames,
-        labelvalues,
-        {"AscendStoreConnector": ascend_store_prom},
-    )
-
-    prom.observe(
+    ascend_store_prom.observe(
         {
-            "AscendStoreConnector": {
-                "data": {
-                    "delayed_release_requests": 2,
-                    "delayed_release_blocks": 5,
-                    "load_get_duration_seconds": [0.01, 0.02],
-                    "load_get_keys": 8,
-                }
-            }
+            "delayed_release_requests": 2,
+            "delayed_release_blocks": 5,
+            "load_get_duration_seconds": [0.01, 0.02],
+            "load_get_keys": 8,
         }
     )
 

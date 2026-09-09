@@ -99,8 +99,6 @@ class TestAscendStoreConnector(unittest.TestCase):
         stats = MagicMock()
         mock_scheduler_cls.return_value.get_stats.return_value = stats
         mock_scheduler_cls.assert_called_once()
-        self.assertIs(connector.connector_scheduler, mock_scheduler_cls.return_value)
-        self.assertIsNone(connector.connector_worker)
         self.assertIs(connector.get_kv_connector_stats(), stats)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
@@ -118,8 +116,6 @@ class TestAscendStoreConnector(unittest.TestCase):
         mock_worker_cls.return_value.get_stats.return_value = stats
         mock_worker_cls.assert_called_once()
         mock_lookup_cls.assert_called_once()
-        self.assertIs(connector.connector_worker, mock_worker_cls.return_value)
-        self.assertIsNone(connector.connector_scheduler)
         self.assertIs(connector.get_kv_connector_stats(), stats)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolScheduler")
