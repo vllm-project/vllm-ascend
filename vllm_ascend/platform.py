@@ -240,9 +240,6 @@ class NPUPlatform(Platform):
         key = (use_mla, use_sparse)
         backend_key = (*key, use_compress)
 
-        if attn_selector_config.use_pcp and use_dcp and backend_key != (True, True, False):
-            raise NotImplementedError("Ascend MRV2 does not support PCP and DCP simultaneously yet.")
-
         if not attn_selector_config.use_pcp and _validate_fa3_backend(key, attn_selector_config):
             return "vllm_ascend.attention.fa3_v1.AscendFABackend"
 
