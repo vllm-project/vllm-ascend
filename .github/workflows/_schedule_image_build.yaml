@@ -521,9 +521,6 @@ jobs:
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Merge and push multi-arch image
         env:
           # Source digests live in SWR (where build-push-digest pushed them);
@@ -600,9 +597,6 @@ jobs:
           registry: ${{ inputs.swr_registry }}
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
 
       - name: Merge and push multi-arch manifest to SWR temp
         env:
