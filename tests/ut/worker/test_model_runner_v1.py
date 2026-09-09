@@ -158,6 +158,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
 
         @contextmanager
         def forward_context(*args, **kwargs):
+            self.assertEqual(kwargs["num_actual_tokens"], expected_actual_tokens)
             events.append("context_enter")
             yield
             events.append("context_exit")
@@ -168,9 +169,13 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
             patch("vllm_ascend.worker.model_runner_v1.set_ascend_forward_context", forward_context),
             patch("vllm_ascend.worker.model_runner_v1.update_cos_sin"),
         ):
-            runner._dummy_run(4, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True)
-
-        self.assertEqual(events, ["context_enter", "forward", "context_exit", "release"])
+            for actual_tokens in (None, 0, 2):
+                with self.subTest(actual_tokens=actual_tokens):
+                    events.clear()
+                    expected_actual_tokens = 4 if actual_tokens is None else actual_tokens
+                    kwargs = {} if actual_tokens is None else {"num_actual_tokens": actual_tokens}
+                    runner._dummy_run(4, cudagraph_runtime_mode=CUDAGraphMode.FULL, is_graph_capturing=True, **kwargs)
+                    self.assertEqual(events, ["context_enter", "forward", "context_exit", "release"])
 
 
 class TestDSparkAuxCaptureMode(unittest.TestCase):

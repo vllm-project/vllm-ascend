@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -219,3 +220,27 @@ def test_disabled_capability_does_not_force_dp_allreduce(monkeypatch, switch, en
     monkeypatch.setattr(afc, "use_cann_megamoe", lambda _: False)
     monkeypatch.setattr(afc, "select_moe_comm_method", lambda *args, **kwargs: afc.MoECommType.MC2)
     assert utils.should_skip_allreduce_across_dp_group(config, cann_mega_moe_supported=True) is skip
+
+
+@pytest.mark.parametrize("mask", [[True, True], [True, False], [False, False]])
+@pytest.mark.parametrize("dtype", [torch.bool, torch.int8])
+def test_a5_mxfp_padding_does_not_route_or_propagate_stale_output(mask, dtype):
+    impl = _implementation()
+    request = _request()
+    valid = torch.tensor(mask)
+    request = replace(request, routing=replace(request.routing, mc2_mask=valid.to(dtype)))
+    original_ids = request.topk_ids.clone()
+    impl.mega_moe.return_value[0][~valid] = float("nan")
+    with (
+        patch.object(comm, "get_ascend_config", return_value=SimpleNamespace(enable_fused_mc2=1)),
+        patch.object(comm, "is_mega_moe_supported", return_value=True),
+        patch.object(comm, "_EXTRA_CTX", SimpleNamespace(is_decode_only_node=False)),
+    ):
+        result = impl.fused_experts(request)
+    routed_ids = impl.mega_moe.call_args.args[1]
+    assert torch.equal(routed_ids[valid], original_ids[valid].int())
+    assert (routed_ids[~valid] == -1).all()
+    assert torch.equal(request.topk_ids, original_ids)
+    assert (result.routed_out[~valid] == 0).all()
+    assert (result.routed_out[valid] == 1).all()
+    assert impl.mega_moe.call_args.kwargs["x_active_mask"] is None

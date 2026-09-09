@@ -466,6 +466,15 @@ class FusedMC2CommImpl(MoECommMethod):
         activation = activation_config.name
         activation_clamp = None if activation == "situglu" else self.swiglu_limit if self.swiglu_limit > 0 else None
         x_active_mask = None
+        invalid_mxfp_tokens = None
+        if (
+            fused_experts_input.quant.quant_type == QuantType.W4A8MXFP
+            and fused_experts_input.routing.mc2_mask is not None
+        ):
+            # A5 MegaMoe does not consume x_active_mask. Exclude padding
+            # from expert routing; -1 matches no expert in SendMask.
+            invalid_mxfp_tokens = ~fused_experts_input.routing.mc2_mask.bool()
+            topk_ids = topk_ids.masked_fill(invalid_mxfp_tokens.unsqueeze(-1), -1)
         if (
             fused_experts_input.quant.quant_type != QuantType.W4A8MXFP
             and self.token_dispatcher.global_bs == 0
@@ -519,6 +528,9 @@ class FusedMC2CommImpl(MoECommMethod):
         # pre-allocated in/out buffer. The MegaMoe op returns a fresh
         # expert_tokens tensor that is consumed by the caller via the
         # return value, so there is nothing to keep on the instance.
+        if invalid_mxfp_tokens is not None:
+            # Unpermute reads fixed route slots even for masked tokens.
+            out.masked_fill_(invalid_mxfp_tokens.unsqueeze(-1), 0)
         return out, expert_tokens
 
     def fused_experts(
