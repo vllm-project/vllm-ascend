@@ -486,13 +486,11 @@ class NPUModelRunner(GPUModelRunner):
                 (
                     query_start_loc_np,
                     num_reqs_padded,
-                ) = self._pad_query_start_loc_for_fia(
+                ) = self._pad_adaptive_query_start_loc_for_fia(
                     num_tokens_after_padding,
                     num_reqs_padded,
                     num_reqs,
                     query_start_loc_np,
-                    batch_desc.cg_mode,
-                    batch_desc.num_reqs,
                 )
                 async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
                 query_start_loc = self.input_buffers.query_start_loc
@@ -813,6 +811,30 @@ class NPUModelRunner(GPUModelRunner):
             req_index = self.req_states.req_id_to_index[req_id]
             num_computed_tokens = self.req_states.num_computed_tokens_cpu[req_index]
             self.input_buffers.seq_lens_cpu[i] = num_computed_tokens + num_scheduled_tokens[req_id]
+
+    def _pad_adaptive_query_start_loc_for_fia(
+        self,
+        num_tokens_padded: int,
+        num_reqs_padded: int,
+        num_reqs: int,
+        query_start_loc_np: np.ndarray,
+    ) -> tuple[np.ndarray, int]:
+        """
+        slippers
+        """
+        assert num_reqs <= num_reqs_padded <= self.max_num_reqs
+        num_padding_reqs = num_reqs_padded - num_reqs
+
+        if num_padding_reqs == 0:
+            query_start_loc_np[num_reqs] = num_tokens_padded
+            return query_start_loc_np, num_reqs_padded
+        last_loc = int(query_start_loc_np[num_reqs])
+        num_padding_tokens = num_tokens_padded - last_loc
+        assert num_padding_tokens>0
+
+        cummulative_padding = np.arange(1, num_padding_reqs + 1, dtype=np.int32) * num_padding_tokens // num_padding_reqs
+        query_start_loc_np[num_reqs + 1 : num_reqs_padded + 1] = last_loc + cummulative_padding
+        return query_start_loc_np, num_reqs_padded
 
     def _pad_query_start_loc_for_fia(
         self,
