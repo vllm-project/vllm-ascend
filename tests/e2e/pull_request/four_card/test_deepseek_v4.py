@@ -25,6 +25,15 @@ from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
+MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
+MAX_MODEL_LEN = 2048
+MAX_NUM_SEQS = 8
+MAX_NUM_BATCHED_TOKENS = 256
+COMPILATION_CONFIG = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": [4, 8],
+}
+
 
 @pytest.mark.e2e_model("gdydems/DeepSeek-V4-Flash-w4a8-mtp")
 @pytest.mark.e2e_coverage(
@@ -46,10 +55,10 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
     max_tokens = 5
 
     with VllmRunner(
-        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
-        max_model_len=8192,
-        max_num_seqs=16,
-        max_num_batched_tokens=4096,
+        MODEL,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=MAX_NUM_SEQS,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
         dtype="auto",
         tensor_parallel_size=4,
         enable_expert_parallel=True,
@@ -57,9 +66,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
+        compilation_config=COMPILATION_CONFIG,
         speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -99,10 +106,10 @@ def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
     max_tokens = 5
 
     with VllmRunner(
-        "gdydems/DeepSeek-V4-Flash-w4a8-mtp",
-        max_model_len=8192,
-        max_num_seqs=16,
-        max_num_batched_tokens=4096,
+        MODEL,
+        max_model_len=MAX_MODEL_LEN,
+        max_num_seqs=MAX_NUM_SEQS,
+        max_num_batched_tokens=MAX_NUM_BATCHED_TOKENS,
         dtype="auto",
         tensor_parallel_size=4,
         enable_expert_parallel=True,
@@ -110,9 +117,7 @@ def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
-        compilation_config={
-            "cudagraph_mode": "FULL_DECODE_ONLY",
-        },
+        compilation_config=COMPILATION_CONFIG,
         hf_overrides={
             "use_index_cache": True,
             "index_topk_freq": 4,
