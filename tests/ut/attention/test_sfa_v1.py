@@ -945,6 +945,7 @@ class TestAscendSFAImpl(TestBase):
             sin=None,
             slot_mapping=torch.arange(2),
             num_input_tokens=2,
+            num_decode_tokens=2,
             attn_state=AscendAttentionState.DecodeOnly,
         )
         context = SimpleNamespace(
@@ -981,23 +982,22 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._prepare_native_hidden_states = lambda x, _: x
                 self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
-                self.impl.indexer_select_pre_process = lambda **_kwargs: record_event(
-                    "indexer_projection", (hidden, None)
+                self.impl.indexer = lambda *_args, **_kwargs: record_event(
+                    "indexer_cache", torch.zeros(2, 1, dtype=torch.int64)
                 )
                 self.impl.layerwise_kv_cache_hook = SimpleNamespace(
                     wait_for_layer=lambda name: events.append(("wait", name))
                 )
                 self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
-                self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, None, None, [])
+                self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, [])
                 self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
                 self.impl._record_query_gather_context = lambda *_args: None
-                self.impl._store_parallel_kv = lambda *_args: (hidden, hidden, hidden)
+                self.impl._store_parallel_kv = lambda *_args: (hidden, hidden)
                 self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: record_event(
                     "cache", (hidden, hidden, hidden, hidden)
                 )
                 self.impl._sfa_preprocess_mlapo = self.impl._sfa_preprocess_prolog_v3
-                self.impl._write_indexer_cache = lambda *_args: events.append("indexer_cache")
                 self.impl._get_indexcache_topk_indices = lambda _: torch.zeros(2, 1, dtype=torch.int64)
                 self.impl._execute_sparse_flash_attention_process = lambda *_args: torch.ones(2, 4)
                 self.impl._v_up_proj = lambda x: x
@@ -1012,8 +1012,6 @@ class TestAscendSFAImpl(TestBase):
                     self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)
                     self.assertTrue(torch.all(output == 1))
                     expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
-                    if has_indexer:
-                        expected.append("indexer_projection")
                     expected.extend([("wait", "layer"), "cache"])
                     if has_indexer:
                         expected.append("indexer_cache")

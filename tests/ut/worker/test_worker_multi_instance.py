@@ -54,6 +54,7 @@ class TestDetermineAvailableMemoryMultiInstance(TestBase):
             worker = NPUWorker()
 
         worker.vllm_config = SimpleNamespace(kv_transfer_config=None, additional_config={})
+        worker._kvpp_cache_allocation_plan = None
         worker.model_runner = MagicMock()
         worker.model_runner.model_memory_usage = model_memory_usage
 
