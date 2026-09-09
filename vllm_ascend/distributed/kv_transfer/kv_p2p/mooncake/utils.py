@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 
+KV_CACHE_BUFFER_ALIGNMENT = 2 * 1024 * 1024
+
+
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[Any]:
     """Create a Mooncake ROUTER or REQ socket and clean up its context."""
@@ -69,6 +72,15 @@ def _get_storage_nbytes(tensor: torch.Tensor) -> int:
             return tensor.nbytes
 
 
+def _get_tensor_span_nbytes(tensor: torch.Tensor) -> int:
+    """Return the physical byte span touched by a strided tensor view."""
+    if tensor.numel() == 0:
+        return 0
+    return tensor.element_size() + sum(
+        (size - 1) * stride * tensor.element_size() for size, stride in zip(tensor.shape, tensor.stride())
+    )
+
+
 def collect_configured_register_regions(
     kv_cache_config: "KVCacheConfig",
     kv_caches: dict[str, Any],
@@ -92,11 +104,11 @@ def collect_configured_register_regions(
             )
 
     for tensor_config in kv_cache_config.kv_cache_tensors:
-        if not tensor_config.shared_by:
+        if not tensor_config.layers:
             continue
 
         cache_tensors: list[torch.Tensor] = []
-        for layer_name in tensor_config.shared_by:
+        for layer_name in tensor_config.layers:
             cache_tensors.extend(as_kv_cache_tensors(kv_caches.get(layer_name)))
 
         caches_by_storage: dict[int, list[torch.Tensor]] = {}
@@ -105,16 +117,36 @@ def collect_configured_register_regions(
             caches_by_storage.setdefault(storage_key, []).append(cache)
 
         if len(caches_by_storage) == 1:
-            # KVCacheTensor.size is authoritative when all layer views belong
-            # to its one configured allocation. Packed layouts expose each
-            # view at allocation_base + offset.
+            # The model runner over-allocates by one alignment unit and returns
+            # views into the aligned suffix of that raw storage. ``offset`` is
+            # relative to the standardized backing, not necessarily to the
+            # first logical view (for example, compressor scale follows K in a
+            # padded page), so recover the backing from the storage boundary.
             storage_key, storage_caches = next(iter(caches_by_storage.items()))
-            register_start = min(cache.data_ptr() for cache in storage_caches) - tensor_config.offset
-            merge_storage_range(
-                storage_key,
-                register_start,
-                register_start + tensor_config.size,
+            storage_end = storage_key + _get_storage_nbytes(storage_caches[0])
+            aligned_start = (
+                (storage_key + KV_CACHE_BUFFER_ALIGNMENT - 1) // KV_CACHE_BUFFER_ALIGNMENT * KV_CACHE_BUFFER_ALIGNMENT
             )
+            configured_end = aligned_start + tensor_config.size
+            views_fit_configured_range = all(
+                aligned_start <= cache.data_ptr()
+                and cache.data_ptr() + _get_tensor_span_nbytes(cache) <= configured_end
+                for cache in storage_caches
+            )
+            if configured_end <= storage_end and views_fit_configured_range:
+                merge_storage_range(
+                    storage_key,
+                    aligned_start,
+                    configured_end,
+                )
+            else:
+                # Cache types that allocate components independently do not
+                # expose the standardized shared backing. Register the actual
+                # allocation range instead.
+                register_start = min(cache.data_ptr() for cache in storage_caches)
+                if storage_end <= register_start:
+                    raise ValueError(f"Invalid KV cache storage range: start={register_start}, end={storage_end}.")
+                merge_storage_range(storage_key, register_start, storage_end)
         else:
             # Some cache types initialize component tensors independently.
             # The config size cannot be applied to every storage, so register

@@ -221,7 +221,7 @@ class MooncakeBaseConnectorWorker:
         configured_layer_names: set[str] = set()
 
         for tensor_config in self.kv_cache_config.kv_cache_tensors:
-            for layer_name in tensor_config.shared_by:
+            for layer_name in tensor_config.layers:
                 if layer_name in configured_layer_names:
                     raise ValueError(f"Layer {layer_name!r} is referenced by more than one configured KV cache tensor.")
                 if layer_name not in self.layer_name_to_group_index:

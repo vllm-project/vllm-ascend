@@ -44,7 +44,22 @@ def test_sized_dict_evicts_oldest_entry_and_initializes_missing_value() -> None:
 def test_collect_register_regions_deduplicates_shared_storage() -> None:
     backing = torch.empty(128, dtype=torch.uint8)
     config = SimpleNamespace(
-        kv_cache_tensors=[SimpleNamespace(shared_by=["layer.0", "layer.1"], offset=0, size=backing.nbytes)]
+        kv_cache_tensors=[
+            SimpleNamespace(
+                layers=["layer.0"],
+                layer_stride=64,
+                block_stride=64,
+                offset=0,
+                size=backing.nbytes,
+            ),
+            SimpleNamespace(
+                layers=["layer.1"],
+                layer_stride=64,
+                block_stride=64,
+                offset=64,
+                size=backing.nbytes,
+            ),
+        ]
     )
 
     regions = collect_configured_register_regions(
@@ -54,13 +69,23 @@ def test_collect_register_regions_deduplicates_shared_storage() -> None:
 
     assert regions.ptrs == [backing.data_ptr()]
     assert regions.lengths == [backing.nbytes]
-    assert regions.logical_tensor_count == 1
+    assert regions.logical_tensor_count == 2
 
 
 def test_collect_register_regions_handles_independent_storages() -> None:
     first = torch.empty(32, dtype=torch.uint8)
     second = torch.empty(48, dtype=torch.uint8)
-    config = SimpleNamespace(kv_cache_tensors=[SimpleNamespace(shared_by=["layer.0", "layer.1"], offset=0, size=80)])
+    config = SimpleNamespace(
+        kv_cache_tensors=[
+            SimpleNamespace(
+                layers=["layer.0", "layer.1"],
+                layer_stride=40,
+                block_stride=40,
+                offset=0,
+                size=80,
+            )
+        ]
+    )
 
     regions = collect_configured_register_regions(config, {"layer.0": first, "layer.1": second})
 
@@ -68,6 +93,34 @@ def test_collect_register_regions_handles_independent_storages() -> None:
         (first.data_ptr(), first.nbytes),
         (second.data_ptr(), second.nbytes),
     }
+
+
+def test_collect_register_regions_recovers_aligned_backing_before_view() -> None:
+    alignment = 2 * 1024 * 1024
+    backing_size = 2 * alignment
+    raw = torch.empty(backing_size + alignment, dtype=torch.uint8)
+    aligned_offset = (-raw.data_ptr()) % alignment
+    backing = raw[aligned_offset : aligned_offset + backing_size]
+    logical_view = backing[alignment + 64 :]
+    config = SimpleNamespace(
+        kv_cache_tensors=[
+            SimpleNamespace(
+                layers=["layer.0"],
+                layer_stride=backing_size,
+                block_stride=alignment,
+                offset=alignment,
+                size=backing_size,
+            )
+        ]
+    )
+
+    regions = collect_configured_register_regions(
+        config,
+        {"layer.0": logical_view},
+    )
+
+    assert regions.ptrs == [backing.data_ptr()]
+    assert regions.lengths == [backing_size]
 
 
 def test_group_concurrent_contiguous_honors_byte_strides() -> None:

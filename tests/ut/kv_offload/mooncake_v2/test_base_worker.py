@@ -49,7 +49,9 @@ def test_register_kv_caches_uses_config_order_and_publishes_tensor_metadata(monk
         kv_cache_tensors=[
             KVCacheTensor(
                 size=k_cache.nbytes + v_cache.nbytes,
-                shared_by=["layer.0"],
+                layers=["layer.0"],
+                layer_stride=k_cache.nbytes + v_cache.nbytes,
+                block_stride=spec.page_size_bytes,
             )
         ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
@@ -91,7 +93,14 @@ def test_register_kv_caches_collapses_views_packed_in_one_page(monkeypatch) -> N
     scale_cache = torch.as_strided(raw_cache, size=(4, 8), stride=(64, 1), storage_offset=32)
     config = KVCacheConfig(
         num_blocks=4,
-        kv_cache_tensors=[KVCacheTensor(size=raw_cache.nbytes, shared_by=["layer.0"])],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=raw_cache.nbytes,
+                layers=["layer.0"],
+                layer_stride=raw_cache.nbytes,
+                block_stride=128,
+            )
+        ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
@@ -137,7 +146,14 @@ def test_register_kv_caches_publishes_sfa_indexer_virtual_block_size(monkeypatch
     cache = torch.empty((4, 16, 1, 8), dtype=torch.float16)
     config = KVCacheConfig(
         num_blocks=2,
-        kv_cache_tensors=[KVCacheTensor(size=cache.nbytes, shared_by=["layer.0.indexer"])],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=cache.nbytes,
+                layers=["layer.0.indexer"],
+                layer_stride=cache.nbytes,
+                block_stride=cache.stride(0) * cache.element_size(),
+            )
+        ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0.indexer"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
@@ -170,7 +186,14 @@ def test_register_kv_caches_rejects_missing_and_unconfigured_layers() -> None:
     spec = make_full_spec()
     config = KVCacheConfig(
         num_blocks=2,
-        kv_cache_tensors=[KVCacheTensor(size=64, shared_by=["layer.0"])],
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=64,
+                layers=["layer.0"],
+                layer_stride=64,
+                block_stride=spec.page_size_bytes,
+            )
+        ],
         kv_cache_groups=[KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)],
     )
     worker = MooncakeBaseConnectorWorker.__new__(MooncakeBaseConnectorWorker)
