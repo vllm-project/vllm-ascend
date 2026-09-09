@@ -5,19 +5,23 @@ from __future__ import annotations
 
 import argparse
 import copy
+import importlib
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch_npu  # noqa: F401  # registers the NPU backend
-import vllm_ascend.vllm_ascend_C  # noqa: F401  # registers torch.ops._C_ascend kernels
 from vllm.config import set_current_vllm_config
 
 from tests.e2e.pull_request.one_card.attention_utils import create_vllm_config
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.sfa_v1 import SFA_FIA_SHARED_PREFILL_TOPK_WIDTH, AscendSFAImpl, AscendSFAMetadata
+
+# Register the native torch.ops._C_ascend kernels without asking mypy to
+# statically analyze the binary extension module.
+importlib.import_module("vllm_ascend.vllm_ascend_C")
 
 pytestmark = pytest.mark.skipif(
     torch.npu.device_count() < 1,
