@@ -18,7 +18,6 @@ import os
 
 import vllm_ascend.patch.platform.patch_deepseek_v4_frontend  # noqa
 import vllm_ascend.patch.platform.patch_deepseek_v4_tool_streaming  # noqa
-import vllm_ascend.patch.platform.patch_deepseek_v4_vision  # noqa
 import vllm_ascend.patch.platform.patch_distributed  # noqa
 import vllm_ascend.patch.platform.patch_kv_cache_utils  # noqa
 import vllm_ascend.patch.platform.patch_mamba_block_aligned_split  # noqa
@@ -50,4 +49,3 @@ import vllm_ascend.patch.platform.patch_eplb  # noqa
 import vllm_ascend.patch.platform.patch_fused_moe  # noqa
 import vllm_ascend.patch.platform.patch_dp_device_ids  # noqa
 import vllm_ascend.patch.platform.patch_vision  # noqa
-import vllm_ascend.patch.platform.patch_glm5next_config  # noqa
