@@ -984,6 +984,7 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields(with_kv_c
         scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once_with()
         assert scheduler_output.kv_connector_block_state is None
     if with_kv_connector:
+        assert scheduler.connector is not None
         scheduler.connector.build_connector_meta.assert_called_once_with(scheduler_output)
         assert scheduler_output.kv_connector_metadata == "kv-meta"
         assert len(connector_states) == 1
