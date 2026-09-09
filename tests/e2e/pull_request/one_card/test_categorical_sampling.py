@@ -635,7 +635,9 @@ def test_categorical_sampling_asserts_invalid_device_values(
     else:
         # Triton's device_assert traps but C220 does not flush its message.
         # Require the device trap, not an arbitrary import/compile failure.
-        assert "error code is 507035" in output and "trap error" in output, output
+        # ACLGraph may wrap the vector-core failure in a model-stream error.
+        assert any(f"error code is {code}" in output for code in (507035, 507011)), output
+        assert "exception of aivec error" in output, output
 
 
 @dataclass(frozen=True)
@@ -843,3 +845,58 @@ def test_triton_raw_cache_bits(dtype):
     categorical_sample(*args, logits_cache=triton_cache)
     bit_dtype = torch.int32 if dtype == torch.float32 else torch.int16
     assert torch.equal(triton_cache.cpu().view(bit_dtype), native_cache.cpu().view(bit_dtype))
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "rank",
+        "dtype",
+        "empty",
+        "vocab_stride",
+        "row_overlap",
+        "mapping_dtype",
+        "mapping_length",
+        "seed_length",
+        "temperature_dtype",
+        "pos_dtype",
+        "cache_width",
+        "cache_overlap",
+        "col_without_cache",
+    ],
+)
+def test_triton_matches_native_metadata_rejection(case):
+    logits = torch.zeros(2, 33, device=DEVICE)
+    mapping = torch.arange(2, dtype=torch.int32, device=DEVICE)
+    temperature = torch.ones(2, device=DEVICE)
+    seeds, pos = mapping.long(), mapping.long()
+    cache = col = None
+    if case == "rank":
+        logits = logits[0]
+    elif case == "dtype":
+        logits = logits.to(torch.int32)
+    elif case == "empty":
+        logits = logits[:0]
+    elif case == "vocab_stride":
+        logits = logits[:, ::2]
+    elif case == "row_overlap":
+        logits = logits.as_strided((2, 33), (1, 1))
+    elif case == "mapping_dtype":
+        mapping = mapping.long()
+    elif case == "mapping_length":
+        mapping = mapping[:1]
+    elif case == "seed_length":
+        seeds = seeds[:1]
+    elif case == "temperature_dtype":
+        temperature = temperature.half()
+    elif case == "pos_dtype":
+        pos = pos.int()
+    elif case == "cache_width":
+        cache = torch.empty(2, 32, device=DEVICE)
+    elif case == "cache_overlap":
+        cache = torch.empty(1, 33, device=DEVICE).expand(2, -1)
+    elif case == "col_without_cache":
+        col = torch.zeros((), dtype=torch.int32, device=DEVICE)
+    for operator in (torch.ops._C_ascend.npu_categorical_sample, categorical_sample):
+        with pytest.raises(RuntimeError):
+            operator(logits, mapping, temperature, seeds, pos, False, False, cache, col)

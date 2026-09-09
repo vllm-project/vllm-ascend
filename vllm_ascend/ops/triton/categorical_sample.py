@@ -294,7 +294,16 @@ def categorical_sample(
     logits_cache_col: torch.Tensor | None = None,
     use_fp64: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Sample with the native categorical interface, without calling native code."""
+    """Sample with the native categorical interface, without calling native code.
+
+    ``use_fp64`` selects the native 42-fractional-bit integer-mass algorithm,
+    not floating-point double precision. FP32 sums preserve the C220 native
+    tile/repeat/CDF ordering. Cache entries contain raw, unscaled logits.
+
+    Invalid device values trigger Triton's device assertion; its runtime
+    diagnostic text differs from the AscendC assertion. No device values are
+    copied to the host for validation, so the call can be captured in ACLGraph.
+    """
     logits = processed_logits
     float_dtypes = (torch.float16, torch.bfloat16, torch.float32)
     if logits.device.type != "npu" or logits.ndim != 2 or logits.dtype not in float_dtypes:
