@@ -267,7 +267,7 @@ def gumbel_sample(
             use_fp64,
         )
 
-    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    expanded_idx_mapping = expanded_idx_mapping.to(torch.int32).contiguous()
     pos = pos.to(torch.int64).contiguous()
     if is_drafting:
         # Use the same draft/target random-stream separation as upstream.

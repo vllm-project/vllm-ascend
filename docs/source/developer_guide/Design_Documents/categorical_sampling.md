@@ -11,7 +11,7 @@ The integration supports the `logits_cache` contract used by both the verified v
 The sampling path has four layers with distinct ownership:
 
 1. The MRV2 sampler and speculators own processed logits, request mappings, temperatures, seeds, positions, and optional logits cache storage.
-2. The Python wrapper preserves the upstream release contract, normalizes only non-strided metadata, and dispatches the native operator.
+2. The Python wrapper preserves the upstream release contract, normalizes metadata layout and index dtypes, and dispatches the native operator.
 3. The Torch binding and host tiling validate static tensor and platform properties and create the launch description.
 4. AscendC validates row data, performs greedy or categorical selection, writes the optional cache, and returns sampled token IDs.
 

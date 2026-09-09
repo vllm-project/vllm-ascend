@@ -290,7 +290,8 @@ class TestGumbelSampling:
                 f"Token {tok} (temp=0) should be greedy: got {sampled[tok].item()}, expected {greedy[tok].item()}"
             )
 
-    def test_gumbel_sample_expanded_idx_mapping(self):
+    @pytest.mark.parametrize("mapping_dtype", [torch.int32, torch.int64])
+    def test_gumbel_sample_expanded_idx_mapping(self, mapping_dtype):
         """Multiple tokens mapping to the same request must work correctly."""
         torch.manual_seed(99)
         num_tokens = 6
@@ -299,7 +300,7 @@ class TestGumbelSampling:
 
         logits = torch.randn(num_tokens, vocab_size, dtype=torch.float32, device=DEVICE)
         # tokens 0,1,2 -> req 0; tokens 3,4,5 -> req 1
-        expanded_idx_mapping = torch.tensor([0, 0, 0, 1, 1, 1], dtype=torch.int32, device=DEVICE)
+        expanded_idx_mapping = torch.tensor([0, 0, 0, 1, 1, 1], dtype=mapping_dtype, device=DEVICE)
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=DEVICE)
         seed = torch.randint(0, 2**31, (num_reqs,), dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
