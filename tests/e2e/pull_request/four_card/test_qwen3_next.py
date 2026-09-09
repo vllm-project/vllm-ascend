@@ -21,7 +21,6 @@ from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
 
-
 MAX_MODEL_LEN = 1024
 MAX_NUM_SEQS = 4
 MAX_NUM_BATCHED_TOKENS = 256
