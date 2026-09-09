@@ -2761,6 +2761,31 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         self.assertEqual(ptrs, [aligned_tensor.data_ptr()])
         self.assertEqual(lengths, [tensor_size])
 
+    def test_registered_hybrid_buffers_deduplicate_shared_backing(self):
+        alignment = 2 * 1024 * 1024
+        tensor_size = 4 * alignment
+        raw_tensor = torch.empty(tensor_size + alignment, dtype=torch.uint8)
+        aligned_offset = (-raw_tensor.data_ptr()) % alignment
+        backing = raw_tensor[aligned_offset : aligned_offset + tensor_size]
+        layer_names = [
+            "model.layers.3.self_attn",
+            "model.layers.0.linear_attn",
+            "model.layers.1.linear_attn",
+            "model.layers.2.linear_attn",
+        ]
+
+        worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+        worker.kv_cache_config = types.SimpleNamespace(
+            kv_cache_tensors=[make_mock_kv_cache_tensor(tensor_size, [layer_name]) for layer_name in layer_names]
+        )
+
+        ptrs, lengths = worker._get_registered_kv_tensor_buffers(
+            {layer_name: backing[index * alignment :] for index, layer_name in enumerate(layer_names)}
+        )
+
+        self.assertEqual(ptrs, [backing.data_ptr()])
+        self.assertEqual(lengths, [tensor_size])
+
     def test_registered_mtp_buffer_ignores_aligned_stale_group_padding(self):
         alignment = 2 * 1024 * 1024
         tensor_size = 4 * alignment

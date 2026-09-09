@@ -2462,8 +2462,7 @@ class MooncakeConnectorWorker:
         return candidates.pop() if candidates else None
 
     def _get_registered_kv_tensor_buffers(self, kv_caches: dict[str, torch.Tensor]) -> tuple[list[int], list[int]]:
-        ptrs: list[int] = []
-        lengths: list[int] = []
+        regions: OrderedDict[int, int] = OrderedDict()
         private_layer_tensors: list[torch.Tensor] = []
 
         for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
@@ -2494,11 +2493,15 @@ class MooncakeConnectorWorker:
                 continue
             if base_addr % KV_CACHE_BUFFER_ALIGNMENT != 0:
                 raise RuntimeError(f"Tensor start addr {base_addr} is not aligned to 2 MiB.")
-            ptrs.append(base_addr)
-            lengths.append(kv_cache_tensor.size)
+            # Standardized hybrid descriptors can describe different cache
+            # groups as views of the same backing allocation. Register that
+            # physical range once while keeping logical layer metadata intact.
+            regions[base_addr] = max(
+                regions.get(base_addr, base_addr),
+                base_addr + kv_cache_tensor.size,
+            )
 
         if private_layer_tensors:
-            regions_by_storage: OrderedDict[int, tuple[int, int]] = OrderedDict()
             for tensor in private_layer_tensors:
                 if tensor.numel() == 0:
                     continue
@@ -2520,16 +2523,12 @@ class MooncakeConnectorWorker:
                         f"data_ptr={tensor.data_ptr()}, tensor_end={tensor_end}, "
                         f"storage=[{storage_base}, {storage_end})."
                     )
-                previous = regions_by_storage.get(storage_base)
-                regions_by_storage[storage_base] = (
-                    aligned_base,
-                    max(previous[1] if previous is not None else aligned_base, tensor_end),
+                regions[aligned_base] = max(
+                    regions.get(aligned_base, aligned_base),
+                    tensor_end,
                 )
 
-            ptrs.extend(base for base, _ in regions_by_storage.values())
-            lengths.extend(end - base for base, end in regions_by_storage.values())
-
-        return ptrs, lengths
+        return list(regions), [end - base for base, end in regions.items()]
 
     def _get_registered_kv_tensor_buffers_hybrid(
         self, kv_caches: dict[str, torch.Tensor]

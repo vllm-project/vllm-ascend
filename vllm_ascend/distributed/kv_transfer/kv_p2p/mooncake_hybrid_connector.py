@@ -90,6 +90,40 @@ class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     local_ip: str = ""
 
 
+def _reconstruct_dsv4_shared_by(
+    kv_cache_config: KVCacheConfig,
+) -> list[tuple[list[str], int]]:
+    """Rebuild the legacy DSV4 shared-page table from main descriptors.
+
+    Main descriptors list layers within one cache group. DSV4 sharing is
+    expressed by descriptors from different groups placing layers at the same
+    backing offset. Return one entry per occupied physical page slot, ordered by
+    its offset, with all layer names that previously appeared in ``shared_by``.
+    """
+    placement_layers: dict[tuple[int, int], list[str]] = {}
+    seen_layers: set[str] = set()
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        if descriptor.block_stride <= 0:
+            raise ValueError(
+                f"DeepSeek-V4 KV cache descriptor must have a positive block_stride, got {descriptor.block_stride}."
+            )
+        for layer_idx, layer_name in enumerate(get_kv_cache_tensor_layers(descriptor)):
+            if layer_name in seen_layers:
+                raise ValueError(f"DeepSeek-V4 KV cache layer appears in multiple descriptors: {layer_name}.")
+            seen_layers.add(layer_name)
+            start = descriptor.offset + layer_idx * descriptor.layer_stride
+            end = start + kv_cache_config.num_blocks * descriptor.block_stride
+            if start < 0 or end > descriptor.size:
+                raise ValueError(
+                    "DeepSeek-V4 KV cache placement exceeds its backing: "
+                    f"layer={layer_name}, start={start}, end={end}, "
+                    f"backing_size={descriptor.size}."
+                )
+            placement_layers.setdefault((start, descriptor.block_stride), []).append(layer_name)
+
+    return [(placement_layers[placement], placement[1]) for placement in sorted(placement_layers)]
+
+
 @dataclass
 class ReqMeta:
     local_block_ids: BlockIds
@@ -1713,50 +1747,45 @@ class MooncakeConnectorWorker:
             for i, group in enumerate(self.kv_cache_config.kv_cache_groups):
                 for layer_name in group.layer_names:
                     layer_group_idx[layer_name] = i
-            # Hybrid attention overlays several kv_cache_groups (full-attn /
-            # sparse / SWA / state-cache) onto the same physical per-layer
-            # pools: one tensor is registered in kv_caches under multiple
-            # layer names that belong to different groups. Registering each
-            # pool only under the first group that touched it left the
-            # overlay groups (e.g. odd-layer full attention, SWA, state
-            # cache) with zero registered addresses, and the transfer loop
-            # (`if i not in addr_group_arr[k]: continue`) never applied their
-            # block-id mappings. Decode then read those pools through the
-            # overlay groups' own block-id spaces, i.e. misaligned or stale
-            # KV, corrupting the output. Collect every unique address once
-            # together with the FULL set of groups that reference it, so each
-            # group's block-id mapping is transferred for every pool it
-            # overlays. Walking every tensor's every layer's every
-            # single_tensor also keeps per-layer pools all registered:
-            # registering only the minimum address of a descriptor used to
-            # transfer just one layer per descriptor and leave the other
-            # layers zero-filled on the decode side.
-            _addr_groups: dict[int, set[int]] = {}
-            _addr_stride: dict[int, int] = {}
-            for kv_cache_tensor in self.kv_cache_config.kv_cache_tensors:
-                if not get_kv_cache_tensor_layers(kv_cache_tensor):
-                    continue
-                for layer_name in get_kv_cache_tensor_layers(kv_cache_tensor):
+            # ``use_compress`` identifies the DSV4 layout. Recreate the old
+            # ``shared_by`` table from descriptor placements: one entry is one
+            # complete padded page, so sub-views such as indexer K and scale
+            # must not become independent full-page transfers.
+            for shared_by, descriptor_block_stride in _reconstruct_dsv4_shared_by(self.kv_cache_config):
+                page_base_addr: int | None = None
+                page_groups: set[int] = set()
+                for layer_name in shared_by:
+                    page_groups.add(layer_group_idx[layer_name])
                     kv_cache_tuple = kv_caches[layer_name]
                     if not isinstance(kv_cache_tuple, (tuple, list)):
                         kv_cache_tuple = [kv_cache_tuple]
-                    for single_tensor in kv_cache_tuple:
-                        tensor_addr = single_tensor.data_ptr()
-                        _stride = single_tensor.stride(0) * single_tensor.element_size()
-                        _addr_groups.setdefault(tensor_addr, set()).add(layer_group_idx[layer_name])
-                        if tensor_addr in _addr_stride and _addr_stride[tensor_addr] != _stride:
-                            logger.warning(
-                                "Hybrid KV cache address 0x%x is shared by layers with conflicting strides %d vs %d.",
-                                tensor_addr,
-                                _addr_stride[tensor_addr],
-                                _stride,
+                    layer_tensors = [tensor for tensor in kv_cache_tuple if tensor is not None]
+                    if not layer_tensors:
+                        raise ValueError(f"DeepSeek-V4 shared KV cache layer has no materialized tensor: {layer_name}.")
+                    layer_page_base = min(tensor.data_ptr() for tensor in layer_tensors)
+                    if page_base_addr is not None and layer_page_base != page_base_addr:
+                        raise ValueError(
+                            "DeepSeek-V4 layers at one descriptor placement "
+                            "do not share the same runtime address: "
+                            f"layers={shared_by}."
+                        )
+                    page_base_addr = layer_page_base
+                    for tensor in layer_tensors:
+                        tensor_block_stride = tensor.stride(0) * tensor.element_size()
+                        if tensor_block_stride != descriptor_block_stride:
+                            raise ValueError(
+                                "DeepSeek-V4 runtime block stride disagrees "
+                                "with its descriptor: "
+                                f"layer={layer_name}, "
+                                f"runtime_stride={tensor_block_stride}, "
+                                "descriptor_stride="
+                                f"{descriptor_block_stride}."
                             )
-                        _addr_stride.setdefault(tensor_addr, _stride)
-            for tensor_addr, _groups in _addr_groups.items():
-                self.kv_caches_base_addr.append(tensor_addr)
-                self.addr_group_idx.append(sorted(_groups))
-                self.block_stride_per_addr.append(_addr_stride[tensor_addr])
-                self.block_len_per_addr.append(_addr_stride[tensor_addr])
+                assert page_base_addr is not None
+                self.kv_caches_base_addr.append(page_base_addr)
+                self.addr_group_idx.append(sorted(page_groups))
+                self.block_stride_per_addr.append(descriptor_block_stride)
+                self.block_len_per_addr.append(descriptor_block_stride)
         else:
             raise TypeError("Mooncake connector does not support this type kv_cache now.")
 
