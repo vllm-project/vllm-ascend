@@ -14,6 +14,7 @@ def _compute_slot_mappings_kernel(
     block_table_ptrs,
     block_table_strides,
     block_sizes,
+    kernel_block_sizes,
     slot_mappings_ptr,
     slot_mappings_stride,
     cp_rank,
@@ -38,6 +39,7 @@ def _compute_slot_mappings_kernel(
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
     block_size = tl.load(block_sizes + group_id)
+    kernel_block_size = tl.load(kernel_block_sizes + group_id)
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
     end_idx = tl.load(query_start_loc + batch_idx + 1)
@@ -59,23 +61,24 @@ def _compute_slot_mappings_kernel(
         offset = i + lane_offsets
         valid = offset < end_idx
         positions = tl.load(pos + offset, mask=valid, other=0).to(tl.int32)
-        block_indices = positions // (block_size * CP_SIZE)
-        # block_offset = positions % (block_size * CP_SIZE). Replacing the
-        # remainder with multiply/subtract avoids scalar fallback on Ascend.
-        block_offsets = positions - (block_size * CP_SIZE) * block_indices
+        local_positions = positions
+        if CP_SIZE != 1:
+            virtual_block_indices = positions // (block_size * CP_SIZE)
+            block_offsets = positions - (block_size * CP_SIZE) * virtual_block_indices
+            is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+            rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
+            remainder = block_offsets % CP_INTERLEAVE
+            local_positions = virtual_block_indices * block_size + rounds * CP_INTERLEAVE + remainder
+        # The block table is already expanded into kernel-sized blocks.
+        block_indices = local_positions // kernel_block_size
+        block_offsets = local_positions - kernel_block_size * block_indices
         if USE_BLOCK_TABLE_STAGING:
             block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
         else:
             block_numbers = tl.load(block_table_ptr + req_state_idx * block_table_stride + block_indices)
 
-        if CP_SIZE == 1:
-            slot_ids = block_numbers * block_size + block_offsets
-        else:
-            is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
-            rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
-            remainder = block_offsets % CP_INTERLEAVE
-            local_offsets = rounds * CP_INTERLEAVE + remainder
-            slot_ids = block_numbers * block_size + local_offsets
+        slot_ids = block_numbers * kernel_block_size + block_offsets
+        if CP_SIZE != 1:
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=valid)
