@@ -898,6 +898,9 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
+    # Dump contract from the production initializer; helpers no-op on None.
+    runner.debugger = None
+    runner._debugger_started = False
     # vLLM main added the `dp_sync` field to ExecuteModelState; v0.28.0 lacks it.
     state_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):

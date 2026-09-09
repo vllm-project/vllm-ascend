@@ -187,6 +187,26 @@ class NPUModelRunner(GPUModelRunner):
         set_mc2_mask(vllm_config, self.device)
         set_potential_max_tokens(vllm_config)
 
+        # msprobe dump (same as v1 NPUModelRunner; not via DFX).
+        dump_cfg = self.ascend_config.dump_config_path
+        self.debugger = None
+        if dump_cfg is not None:
+            self._debugger_started = False
+            if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+                from msprobe.pytorch import PrecisionDebugger
+
+                self.debugger = PrecisionDebugger(dump_cfg)
+            else:
+                try:
+                    from msprobe.pytorch import AclGraphDumper
+                except Exception as exc:
+                    raise RuntimeError(
+                        "Failed to import AclGraphDumper from msprobe. "
+                        "Please install/rebuild msprobe with aclgraph_dump enabled."
+                    ) from exc
+
+                self.debugger = AclGraphDumper(dump_cfg)
+
     @property
     def pcp_manager_cls(self) -> type[AscendPCPManager]:
         return AscendPCPManager
@@ -237,6 +257,27 @@ class NPUModelRunner(GPUModelRunner):
             assert self.pp_handler is not None
             # Wait until propose() has populated this step's draft tokens.
             self.pp_handler.broadcast_draft_tokens()
+        # Close the per-step msprobe dump cycle on the normal last-PP-rank
+        # path (v1 parity: v1 finalizes at the end of sample_tokens).
+        self._finalize_dump_data()
+        return output
+
+    def load_model(self) -> None:
+        super().load_model()
+        # In cudagraph modes the dumper must be started before graph capture so
+        # that aclgraph capture/replay is instrumented (v1 parity: v1 starts
+        # the dumper at the end of load_model).
+        if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self._start_dump_data()
+
+    def pool(self):
+        output = super().pool()
+        # Pooling models never go through sample_tokens() in the v2
+        # architecture: the worker calls pool() directly, and the engine skips
+        # sampling whenever execute_model()/pool() returns a non-None output.
+        # Close the dump cycle here, mirroring v1 which finalizes after
+        # _pool() on the pooling path.
+        self._finalize_dump_data()
         return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
@@ -268,6 +309,10 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
+        dump_forward = dummy_run or scheduler_output.total_num_scheduled_tokens > 0
+        if dump_forward:
+            self._start_dump_data(scheduled_tokens=scheduler_output.num_scheduled_tokens)
+
         output = super().execute_model(
             scheduler_output,
             intermediate_tensors=intermediate_tensors,
@@ -276,6 +321,13 @@ class NPUModelRunner(GPUModelRunner):
             is_profile=is_profile,
             context_len=context_len,
         )
+
+        if dump_forward:
+            if dummy_run:
+                self._finalize_dump_data(dump=False)
+            elif isinstance(output, IntermediateTensors):
+                # PP non-last rank: sample_tokens is not called (v1 parity).
+                self._finalize_dump_data()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
@@ -633,6 +685,11 @@ class NPUModelRunner(GPUModelRunner):
                 device=hidden_states.device,
             )
             self.model.compute_logits(hidden_states[dummy_indices])
+        # Flush the dump window opened across dummy forwards without writing
+        # data, so capture/profiling forwards do not leak into the first real
+        # step (v1 parity: v1 finalizes with dump=False at the end of
+        # _dummy_run).
+        self._finalize_dump_data(dump=False)
         return hidden_states, sample_hidden_states
 
     def postprocess_sampled(
@@ -735,6 +792,21 @@ class NPUModelRunner(GPUModelRunner):
             num_reqs_padded = num_reqs_padded + 1
 
         return query_start_loc_np, num_reqs_padded
+
+    def _start_dump_data(self, **kwargs) -> None:
+        if self.debugger is None or self._debugger_started:
+            return
+        self.debugger.start(self.model, **kwargs)
+        self._debugger_started = True
+
+    def _finalize_dump_data(self, **kwargs) -> None:
+        if self.debugger is None or not self._debugger_started:
+            return
+        if hasattr(self.debugger, "stop"):
+            self.debugger.stop()
+            self._debugger_started = False
+
+        self.debugger.step(**kwargs)
 
 
 @contextmanager
