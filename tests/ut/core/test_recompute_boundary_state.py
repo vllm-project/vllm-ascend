@@ -4,11 +4,17 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import vllm_ascend.core.recompute_scheduler as scheduler_module
 from vllm_ascend.core.recompute_scheduler import RecomputeScheduler
+from vllm_ascend.utils import vllm_version_is
 
 
-def test_connector_receives_current_block_tables_and_exact_boundary_offers():
+def test_connector_receives_current_block_tables_and_exact_boundary_offers(monkeypatch):
     """#51358 requires snapshots, not reconstruction from appended blocks."""
+    # Exercise the pure snapshot algorithm on release as well; its production
+    # call site is main-only, and release handoff is covered by live schedule tests.
+    if vllm_version_is("0.28.0"):
+        monkeypatch.setattr(scheduler_module, "KVConnectorBlockState", SimpleNamespace, raising=False)
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
     scheduler.connector = Mock()
     scheduler.requests = {req_id: Mock() for req_id in ("new", "cached", "boundary", "unchanged")}
@@ -28,7 +34,7 @@ def test_connector_receives_current_block_tables_and_exact_boundary_offers():
     scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once_with()
 
 
-def test_boundary_offers_are_drained_without_a_connector():
+def test_boundary_offers_are_drained_without_a_connector(monkeypatch):
     scheduler = RecomputeScheduler.__new__(RecomputeScheduler)
     scheduler.connector = None
     scheduler.kv_cache_manager = Mock()

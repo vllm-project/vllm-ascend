@@ -45,7 +45,7 @@ class AscendBlockTables(BlockTables):
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
-        if vllm_version_is("0.27.1"):
+        if vllm_version_is("0.28.0"):
             super().__init__(
                 block_sizes,
                 max_num_reqs,
@@ -101,7 +101,7 @@ class AscendBlockTables(BlockTables):
         num_reqs = idx_mapping.shape[0]
         num_groups = self.num_kv_cache_groups
         slot_mappings = self.slot_mappings if out is None else out
-        if vllm_version_is("0.27.1"):
+        if vllm_version_is("0.28.0"):
             slot_mapping_enabled = None
         else:
             slot_mapping_enabled = self.slot_mapping_enabled
@@ -123,6 +123,6 @@ class AscendBlockTables(BlockTables):
             TRITON_BLOCK_SIZE=self._triton_block_size,
             BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
             slot_mapping_enabled=slot_mapping_enabled,
-            HAS_SLOT_MAPPING_ENABLED=not vllm_version_is("0.27.1"),
+            HAS_SLOT_MAPPING_ENABLED=not vllm_version_is("0.28.0"),
         )
         return slot_mappings[:, :num_tokens_padded]

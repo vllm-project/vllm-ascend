@@ -129,7 +129,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.cp_interleave = 1
     block_tables._triton_block_size = 1024
     block_tables._block_table_window_size = 512
-    if not vllm_version_is("0.27.1"):
+    if not vllm_version_is("0.28.0"):
         block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)

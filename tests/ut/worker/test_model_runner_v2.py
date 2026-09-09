@@ -9,6 +9,7 @@ import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
@@ -55,7 +56,8 @@ def test_execute_model_records_profiling_time():
         "is_profile": False,
         "context_len": 0,
     }
-    expected_kwargs["valid_dummy_state_slots"] = True
+    if not vllm_version_is("0.28.0"):
+        expected_kwargs["valid_dummy_state_slots"] = True
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 

@@ -256,6 +256,7 @@ class NPUModelRunner310V2(NPUModelRunner):
             num_computed_tokens_np=self.req_states.num_computed_tokens_np[idx_mapping_np],
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
+            **({"max_seq_len_np": None} if vllm_version_is("0.28.0") else {}),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
@@ -455,7 +456,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         block_sizes = []
         max_num_blocks_per_group = []
         slot_mapping_enabled = []
-        circular_buffer_spec = None if vllm_version_is("0.27.1") else kv_cache_interface.CircularBufferSpec
+        circular_buffer_spec = None if vllm_version_is("0.28.0") else kv_cache_interface.CircularBufferSpec
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             spec = kv_cache_group.kv_cache_spec
             block_sizes.append(spec.block_size)

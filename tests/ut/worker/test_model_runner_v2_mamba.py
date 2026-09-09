@@ -1,5 +1,6 @@
 import ast
 import inspect
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -101,7 +102,25 @@ def test_mrv2_advertises_standardized_shared_kv_backing():
 
 def test_prepare_inputs_tracks_upstream_max_seq_len_contract():
     source = inspect.getsource(NPUModelRunner.prepare_inputs)
-    assert ("max_seq_len_np" in source) is vllm_version_is("0.27.1")
+    tree = ast.parse(textwrap.dedent(source))
+    version_kwargs = next(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.keyword) and node.arg is None and "max_seq_len_np" in ast.unparse(node.value)
+    )
+    max_seq_len = torch.tensor([16, 32, 64]).numpy()
+    for use_pp in (False, True):
+        runner = SimpleNamespace(use_pp=use_pp, req_states=SimpleNamespace(max_seq_len=max_seq_len))
+        kwargs = eval(
+            compile(ast.Expression(version_kwargs), "<prepare_inputs kwargs>", "eval"),
+            {"self": runner, "idx_mapping_np": [2, 0], "vllm_version_is": vllm_version_is},
+        )
+        assert ("max_seq_len_np" in kwargs) is vllm_version_is("0.28.0")
+        if vllm_version_is("0.28.0"):
+            if use_pp:
+                assert kwargs["max_seq_len_np"].tolist() == [64, 16]
+            else:
+                assert kwargs["max_seq_len_np"] is None
 
 
 def test_prepare_inputs_propagates_padded_request_count():

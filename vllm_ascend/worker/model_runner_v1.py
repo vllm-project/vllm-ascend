@@ -952,7 +952,7 @@ class NPUModelRunner(GPUModelRunner):
 
     def _get_ascend_mamba_state_copy_funcs(self):
         """Bridge the copy-func tuple-to-mapping contract from vLLM #53896."""
-        if vllm_version_is("0.27.1"):
+        if vllm_version_is("0.28.0"):
             return self.model.get_mamba_state_copy_func()
         return self._get_mamba_state_copy_funcs()
 

@@ -44,7 +44,7 @@ def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
     )
 
     copy_funcs: Any
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         group_ids, resolved_spec = _get_mamba_groups(kv_cache_config)
         assert group_ids == [0, 1, 2]
         assert resolved_spec == mamba_spec

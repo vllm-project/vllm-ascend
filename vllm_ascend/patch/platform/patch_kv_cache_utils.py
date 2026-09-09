@@ -37,7 +37,7 @@ _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
 _orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_page_size
 _orig_get_kv_cache_groups = vllm.v1.core.kv_cache_utils.get_kv_cache_groups
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
     _orig_get_packed_kv_cache_groups = None
 else:
     _orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
@@ -347,7 +347,7 @@ def _get_kv_cache_groups_uniform_groups(
 
 def _get_max_layers_per_page_size(spec: UniformTypeKVCacheSpecs) -> int:
     """Bridge the UniformTypeKVCacheSpecs helper renamed by vLLM #53896."""
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         return spec.get_num_layer_tuples()
     return spec.get_max_layers_per_page_size()
 
@@ -610,7 +610,7 @@ def _ascend_get_kv_cache_config_from_groups(
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
     vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
     vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
 else:

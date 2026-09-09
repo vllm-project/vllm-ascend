@@ -29,6 +29,8 @@ def gumbel_sample(
     apply_temperature: bool,
     logits_cache: torch.Tensor | None = None,
     logits_cache_col: torch.Tensor | None = None,
+    *,
+    is_drafting: bool = False,
 ) -> torch.Tensor:
     """Run the existing target-sampling assertions through each lane's API."""
     if vllm_version_is("0.28.0"):
@@ -41,6 +43,7 @@ def gumbel_sample(
             apply_temperature=apply_temperature,
             logits_cache=logits_cache,
             logits_cache_col=logits_cache_col,
+            is_drafting=is_drafting,
         )
     return _sample_for_version(
         logits,
@@ -49,7 +52,7 @@ def gumbel_sample(
         seed,
         pos,
         apply_temperature=apply_temperature,
-        is_drafting=False,
+        is_drafting=is_drafting,
         logits_cache=logits_cache,
         logits_cache_col=logits_cache_col,
     )
@@ -72,7 +75,7 @@ def _ref_apply_temperature(
 
 
 class TestGumbelSampling:
-    @pytest.mark.parametrize("is_drafting", [False] if vllm_version_is("0.28.0") else [False, True])
+    @pytest.mark.parametrize("is_drafting", [False, True])
     def test_draft_noise_matches_salted_target(self, is_drafting):
         """#54282 salts draft positions without changing target sampling."""
         num_tokens, vocab_size = 8, 32000
@@ -82,7 +85,9 @@ class TestGumbelSampling:
         seed = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
         pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
         if vllm_version_is("0.28.0"):
-            actual = _sample_for_version(logits, idx_mapping, temperature, seed, pos, apply_temperature=False)
+            actual = _sample_for_version(
+                logits, idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=is_drafting
+            )
         else:
             actual = _sample_for_version(
                 logits, idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=is_drafting

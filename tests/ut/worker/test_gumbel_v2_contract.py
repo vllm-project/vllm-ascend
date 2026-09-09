@@ -11,10 +11,10 @@ from vllm_ascend.worker.v2.sample import gumbel
 
 def test_gumbel_sample_preserves_lane_argument_order(monkeypatch):
     logits, indices, temperature, seed, pos, cache, col = [torch.empty(1) for _ in range(7)]
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         bound = signature(gumbel.gumbel_sample).bind(logits, indices, temperature, seed, pos, True, cache, col, False)
-        assert bound.arguments["output_processed_logits"] is cache
-        assert bound.arguments["output_processed_logits_col"] is col
+        assert bound.arguments["logits_cache"] is cache
+        assert bound.arguments["logits_cache_col"] is col
         assert bound.arguments["use_fp64"] is False
     else:
         implementation = MagicMock(return_value=indices)

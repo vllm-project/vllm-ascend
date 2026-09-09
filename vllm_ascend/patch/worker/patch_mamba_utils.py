@@ -66,7 +66,7 @@ def _get_state_copy_funcs_for_layer(
     layer_name: str,
     mamba_state_copy_funcs,
 ):
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         return mamba_state_copy_funcs
 
     mamba_spec = kv_cache_group.kv_cache_spec
@@ -428,9 +428,9 @@ else:
     mamba_utils.do_mamba_copy_block = _do_mamba_copy_block_torch
     mamba_utils.postprocess_mamba_align_gpu = _postprocess_mamba_align_gpu_cpu_fallback
 
-# v0.27.1 cannot see Mamba layers nested in UniformTypeKVCacheSpecs. Current
+# v0.28.0 cannot see Mamba layers nested in UniformTypeKVCacheSpecs. Current
 # main handles those wrappers and heterogeneous MambaSpec groups upstream.
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
     mamba_utils.get_mamba_groups = _get_mamba_groups
 
 # Ascend NPU does not support DT_UINT64 in aclnnInplaceZero.

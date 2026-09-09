@@ -18,6 +18,7 @@ from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
 from vllm_ascend.ops import mla as ascend_mla
+from vllm_ascend.utils import vllm_version_is
 
 
 @pytest.mark.parametrize("use_rope", [False, True])
@@ -50,10 +51,16 @@ def test_kimi_mla_subclass_dispatch_preserves_ascend_initialization(monkeypatch,
     monkeypatch.setattr(ascend_mla, "get_tensor_model_parallel_world_size", lambda: 1)
 
     # Instantiate the exact new upstream class, not the replacement directly.
-    wrapper = kimi_k3.KimiK3MultiHeadLatentAttentionWrapper(
-        16, 2, 0.5, 4, 4, 8, q_lora_rank, 8, modules, prefix="model.layers.0.mla"
-    )
-    assert isinstance(wrapper, kimi_k3.AscendKimiK3MultiHeadLatentAttention)
+    if vllm_version_is("0.28.0"):
+        from vllm.models.kimi_k3.amd.linear import MultiHeadLatentAttentionWrapper
+
+        wrapper_cls = MultiHeadLatentAttentionWrapper
+        expected_cls = ascend_mla.AscendMultiHeadLatentAttention
+    else:
+        wrapper_cls = kimi_k3.KimiK3MultiHeadLatentAttentionWrapper
+        expected_cls = kimi_k3.AscendKimiK3MultiHeadLatentAttention
+    wrapper = wrapper_cls(16, 2, 0.5, 4, 4, 8, q_lora_rank, 8, modules, prefix="model.layers.0.mla")
+    assert isinstance(wrapper, expected_cls)
     assert wrapper.mla_attn is attention
     assert wrapper.forward.__func__ is ascend_mla.AscendMultiHeadLatentAttention.forward
     assert config.compilation_config.static_forward_context["model.layers.0.mla"] is wrapper

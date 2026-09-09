@@ -39,7 +39,6 @@ import vllm.model_executor.models.utils as model_utils
 import vllm.v1.worker.gpu.spec_decode.dspark.speculator as speculator_module
 import vllm.v1.worker.gpu.spec_decode.dspark.utils as dspark_utils
 import vllm.v1.worker.gpu.spec_decode.eagle.utils as eagle_utils
-from vllm.config import replace
 
 from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.pp_utils import (
@@ -59,7 +58,6 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
     speculative_config = vllm_config.speculative_config
     draft_model_config = speculative_config.draft_model_config
     inherits_target_quant = draft_model_config.model == vllm_config.model_config.model
-    original_draft_parallel_config = speculative_config.draft_parallel_config
     spec_pp_support = resolve_spec_pp_support(vllm_config)
     bypass_pp_guard = spec_pp_support is not None
     original_eagle_should_share = eagle_utils._should_share
@@ -87,20 +85,10 @@ def _load_dspark_model_with_target_quant(target_model, vllm_config):
         if vllm_version_is("0.28.0"):
             dspark_utils._should_share = should_share
     try:
-        if inherits_target_quant:
-            # vLLM #50514 now loads with draft_parallel_config, whose factory
-            # omits EP. Same-checkpoint MoE drafts share Ascend's target EP
-            # dispatch path and must retain its expert placement, while PP
-            # remains 1 and the draft's TP setting is preserved.
-            speculative_config.draft_parallel_config = replace(
-                original_draft_parallel_config,
-                enable_expert_parallel=vllm_config.parallel_config.enable_expert_parallel,
-            )
         # get_model also reads the config PP size; keep the draft unsharded.
         with bypass_upstream_spec_pp_guard(vllm_config, spec_pp_support):
             return _original_load_dspark_model(target_model, vllm_config)
     finally:
-        speculative_config.draft_parallel_config = original_draft_parallel_config
         if inherits_target_quant:
             model_utils.get_draft_quant_config = _original_get_draft_quant_config
         if bypass_pp_guard:

@@ -100,8 +100,14 @@ def test_hybrid_mamba_checkpoint_matches_eagle_replay_boundary(use_eagle, expect
         config.kv_cache_groups[1].kv_cache_spec,
         mamba_cache_mode="align",
         num_speculative_blocks=1,
-        num_prefill_checkpoint_blocks=1,
-        prefill_checkpoint_alignment=16,
+        **(
+            {}
+            if vllm_version_is("0.28.0")
+            else {
+                "num_prefill_checkpoint_blocks": 1,
+                "prefill_checkpoint_alignment": 16,
+            }
+        ),
     )
     coordinator = AscendHybridKVCacheCoordinator(
         config,
@@ -116,8 +122,9 @@ def test_hybrid_mamba_checkpoint_matches_eagle_replay_boundary(use_eagle, expect
         scheduler_block_size=128,
     )
     manager = coordinator.single_type_managers[1]
-    assert manager.drop_eagle_checkpoint_block is use_eagle
-    manager.get_num_blocks_to_allocate(
+    if not vllm_version_is("0.28.0"):
+        assert manager.drop_eagle_checkpoint_block is use_eagle
+    allocated = manager.get_num_blocks_to_allocate(
         request_id="checkpoint",
         num_tokens=200,
         new_computed_blocks=[],
@@ -126,7 +133,12 @@ def test_hybrid_mamba_checkpoint_matches_eagle_replay_boundary(use_eagle, expect
         num_tokens_main_model=200,
     )
     # vLLM #55747 retains both the checkpoint boundary and its reserved slot.
-    assert manager._checkpoints["checkpoint"] == (expected_checkpoint, 0)
+    if vllm_version_is("0.28.0"):
+        # Release align mode reserves a running state plus the speculative block.
+        assert allocated == 2
+        assert "drop_eagle_checkpoint_block" not in vars(manager)
+    else:
+        assert manager._checkpoints["checkpoint"] == (expected_checkpoint, 0)
 
 
 def _make_kimi_k3_dspark_kv_cache_specs(
@@ -314,7 +326,7 @@ def test_ascend_mla_storage_geometry_survives_upstream_optional_field() -> None:
     merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
     assert get_storage_block_size(merged) == 128
     assert merged.page_size_bytes == 128 * 128 * 2
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         assert spec.storage_block_size == 128
     else:
         # #53906's optional override must not be populated with Ascend's
@@ -330,7 +342,7 @@ def test_optional_mla_storage_size_defaults_to_logical_block(spec_cls) -> None:
     assert get_storage_block_size(spec) == 32
     uniform_spec = UniformTypeKVCacheSpecs(kv_cache_specs={"layer.0": spec, "layer.1": spec}, block_size=32)
     assert get_storage_block_size(uniform_spec) == 32
-    if not vllm_version_is("0.27.1"):
+    if not vllm_version_is("0.28.0"):
         assert spec.storage_block_size is None
         explicit = replace(spec, storage_block_size=16)
         assert get_storage_block_size(explicit) == 16
@@ -512,7 +524,6 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
         assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
 
 
-@pytest.mark.skipif(vllm_version_is("0.27.1"), reason="vLLM #53896 introduced the packed-group hook")
 def test_deepseek_v4_groups_patch_the_live_packed_group_hook() -> None:
     c128_spec = MLAAttentionSpec(
         block_size=128 * 128,
@@ -546,7 +557,16 @@ def test_deepseek_v4_groups_patch_the_live_packed_group_hook() -> None:
         {"c128": c128_spec, "swa": swa_spec, "c4": c4_spec},
     )
 
-    assert vllm_kv_cache_utils._get_packed_kv_cache_groups is kv_cache_utils_patch._ascend_get_packed_kv_cache_groups
+    if vllm_version_is("0.28.0"):
+        assert vllm_kv_cache_utils.group_and_unify_kv_cache_specs is group_and_unify_kv_cache_specs
+        assert (
+            vllm_kv_cache_utils._get_kv_cache_groups_uniform_groups
+            is kv_cache_utils_patch._get_kv_cache_groups_uniform_groups
+        )
+    else:
+        assert (
+            vllm_kv_cache_utils._get_packed_kv_cache_groups is kv_cache_utils_patch._ascend_get_packed_kv_cache_groups
+        )
     assert [group.layer_names for group in groups[:2]] == [["c4"], ["c128"]]
     assert groups[2].layer_names == ["swa"]
 

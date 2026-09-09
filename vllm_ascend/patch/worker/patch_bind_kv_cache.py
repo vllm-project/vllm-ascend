@@ -54,7 +54,7 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
 
-    if not vllm_version_is("0.27.1"):
+    if not vllm_version_is("0.28.0"):
         utils.share_replayssm_ring_trackers(ordered_layer_names, forward_context, kv_cache_groups)
 
 

@@ -156,10 +156,14 @@ class NPUModelRunner(GPUModelRunner):
         if self.use_spec_pp:
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
                 install_spec_pp_draft_update,
+                install_spec_pp_token_broadcast,
             )
 
             assert self.pp_handler is not None
-            install_spec_pp_draft_update(self.pp_handler)
+            if vllm_version_is("0.28.0"):
+                install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
+            else:
+                install_spec_pp_draft_update(self.pp_handler)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
@@ -233,7 +237,11 @@ class NPUModelRunner(GPUModelRunner):
             )
 
         self._restore_replicated_draft_target_states()
-        return super().sample_tokens(grammar_output)
+        output = super().sample_tokens(grammar_output)
+        if vllm_version_is("0.28.0") and self.use_spec_pp and self.is_last_pp_rank:
+            assert self.pp_handler is not None
+            self.pp_handler.broadcast_draft_tokens()
+        return output
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         with graph_manager_wrapper(self):
@@ -280,7 +288,7 @@ class NPUModelRunner(GPUModelRunner):
             skip_attn_for_dummy_run=skip_attn_for_dummy_run,
             is_profile=is_profile,
             context_len=context_len,
-            valid_dummy_state_slots=valid_dummy_state_slots,
+            **({} if vllm_version_is("0.28.0") else {"valid_dummy_state_slots": valid_dummy_state_slots}),
         )
         self.model_state.kvpp_is_dummy_run = False
         self.kvpp.complete_forward()
@@ -503,6 +511,11 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            **(
+                {"max_seq_len_np": self.req_states.max_seq_len[idx_mapping_np] if self.use_pp else None}
+                if vllm_version_is("0.28.0")
+                else {}
+            ),
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],
