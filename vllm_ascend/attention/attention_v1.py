@@ -48,7 +48,6 @@ from vllm_ascend.attention.utils import (
     cache_graph_workspace,
     enable_dcp,
     needs_layer_aware_fia_graph_replay,
-    needs_max_fia_graph_workspace,
     notify_kv_cache_written,
     split_decodes_and_prefills,
     update_paged_attention_graph_param,
@@ -504,8 +503,14 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.enable_c8_quant = self.vllm_config.quant_config is not None and getattr(
             self.vllm_config.quant_config, "enable_c8_quant", False
         )
-        self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay(self.vllm_config)
-        self._use_max_workspace_for_fia_graph = needs_max_fia_graph_workspace()
+        self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
+        self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
+        # Hybrid PP stages can have FIA layers in different KV cache groups.
+        self._use_layer_aware_fia_graph_replay |= (
+            self.vllm_config.use_v2_model_runner
+            and self.vllm_config.model_config.is_hybrid
+            and self.vllm_config.parallel_config.pipeline_parallel_size > 1
+        )
         self.sinks = sinks
         self.layerIndex = 0
         # Some mixed-attention models cannot rely on the iteration order of
@@ -528,7 +533,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        use_layer_aware_replay = needs_layer_aware_fia_graph_replay(vllm_config)
+        use_layer_aware_replay = needs_layer_aware_fia_graph_replay() or (
+            vllm_config.use_v2_model_runner
+            and vllm_config.model_config.is_hybrid
+            and vllm_config.parallel_config.pipeline_parallel_size > 1
+        )
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:

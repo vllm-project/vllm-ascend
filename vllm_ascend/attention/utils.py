@@ -173,7 +173,7 @@ def cache_graph_workspace(
 
 
 @lru_cache(maxsize=1)
-def needs_max_fia_graph_workspace() -> bool:
+def needs_layer_aware_fia_graph_replay() -> bool:
     vllm_config = get_current_vllm_config()
     model_config = vllm_config.model_config
     hf_config = getattr(model_config, "hf_config", None)
@@ -185,15 +185,6 @@ def needs_max_fia_graph_workspace() -> bool:
         getattr(text_config, "model_type", None),
     )
     return any(model_type in {"gemma4", "gemma4_text"} for model_type in model_types)
-
-
-def needs_layer_aware_fia_graph_replay(vllm_config: VllmConfig) -> bool:
-    # PP target metadata can include draft layers, so numeric layer order is not reliable.
-    return needs_max_fia_graph_workspace() or (
-        vllm_config.use_v2_model_runner
-        and vllm_config.parallel_config.pipeline_parallel_size > 1
-        and vllm_config.speculative_config is not None
-    )
 
 
 def ascend_chunked_prefill_workspace_size(vllm_config: VllmConfig) -> int:
