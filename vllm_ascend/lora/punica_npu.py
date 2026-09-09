@@ -6,6 +6,7 @@ import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.lora.uno import uno_lora_weight_key
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 
 
@@ -35,6 +36,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self._dense_lora_slot: int | None = None
         self._dense_row_mask: torch.Tensor | None = None
         self._dense_sampler_mask: torch.Tensor | None = None
+        self._uno_packed_lora = {}
         # Graph replay retains tensor addresses even when the next base-only
         # mapping clears the active mask references. Own the backing buffers
         # for the lifetime of the wrapper and refresh their contents in place.
@@ -584,6 +586,15 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         """
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
+
+        packed = getattr(self, "_uno_packed_lora", None)
+        if packed and self._dense_lora_slot == 0:
+            entry = packed.get(uno_lora_weight_key(lora_a_stacked, lora_b_stacked))
+            if entry is not None:
+                if tuple(output_slices) != entry.output_slices:
+                    raise ValueError("UNO packed LoRA output layout changed after preparation.")
+                entry.apply(y, x, scale, self._dense_row_mask)
+                return
 
         if buffer is None:
             r = lora_b_stacked[0].size(-1)

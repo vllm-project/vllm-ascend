@@ -29,6 +29,10 @@ def _make_wrapper(*, is_prefill=False, no_lora=False) -> PunicaWrapperNPU:
     wrapper = object.__new__(PunicaWrapperNPU)
     wrapper.is_prefill = is_prefill
     wrapper.no_lora = no_lora
+    wrapper._dense_lora_slot = None
+    wrapper._dense_row_mask = None
+    wrapper._dense_sampler_mask = None
+    wrapper._uno_packed_lora = {}
     wrapper.bgmv_shrink = Mock()
     wrapper.bgmv_expand = Mock()
     wrapper.bgmv_expand_slice = Mock()
@@ -101,16 +105,22 @@ def test_prefill_shrink_and_expand_skip_when_no_lora() -> None:
     wrapper.sgmv_expand_slice.assert_not_called()
 
 
-def test_decode_always_invokes_bgmv() -> None:
-    wrapper = _make_wrapper(is_prefill=False, no_lora=True)
+@pytest.mark.parametrize("no_lora", [False, True])
+def test_decode_invokes_bgmv_only_for_active_lora(no_lora) -> None:
+    wrapper = _make_wrapper(is_prefill=False, no_lora=no_lora)
     y = torch.zeros(2, 8)
     x = torch.ones(2, 4)
     weights = torch.ones(2, 8, 4)
     wrapper._apply_shrink(y, x, weights, 0.5)
     wrapper._apply_expand(y, x, weights, 2, 4, False)
-    wrapper.bgmv_shrink.assert_called_once()
-    wrapper.bgmv_expand_slice.assert_called_once()
-    assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([0, 1]))
+    if no_lora:
+        wrapper.bgmv_shrink.assert_not_called()
+        wrapper.bgmv_expand_slice.assert_not_called()
+        assert torch.equal(y, torch.zeros_like(y))
+    else:
+        wrapper.bgmv_shrink.assert_called_once()
+        wrapper.bgmv_expand_slice.assert_called_once()
+        assert torch.equal(wrapper.bgmv_shrink.call_args.args[3], torch.tensor([0, 1]))
 
 
 def test_add_shrink_and_expand_walk_slices_with_offsets() -> None:

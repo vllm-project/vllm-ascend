@@ -640,6 +640,11 @@ class AscendUnoProposer:
         manager.remove_adapter(UNO_LORA_INT_ID)
         manager.add_adapter(self.lora_request)
         self._verify_adapter_resident()
+        if getattr(self, "tree_mode", False):
+            from vllm_ascend.lora.uno import prepare_uno_packed_lora
+
+            prepared = prepare_uno_packed_lora(self.get_model())
+            logger.info("UNO Tree prepared %d packed LoRA projections.", prepared)
         self._lora_loaded = True
         logger.info("UNO speculative decoding: loaded the draft LoRA from %s.", self.uno_lora_path)
 
