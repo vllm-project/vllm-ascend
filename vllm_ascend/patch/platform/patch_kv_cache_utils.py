@@ -21,9 +21,7 @@ from vllm.v1.kv_cache_interface import (
 _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 _orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
-_orig_get_kv_cache_groups_uniform_page_size = (
-    vllm.v1.core.kv_cache_planning._get_kv_cache_groups_uniform_page_size
-)
+_orig_get_kv_cache_groups_uniform_page_size = vllm.v1.core.kv_cache_planning._get_kv_cache_groups_uniform_page_size
 
 
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:

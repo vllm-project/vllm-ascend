@@ -529,9 +529,7 @@ def test_deepseek_v4_main_rank_replan_preserves_num_blocks() -> None:
 
     # Ascend shared-tuple divisor = layer_tuple_bytes * num_layer_tuples.
     ascend_bytes_per_block = kv_cache_builder._ascend_pool_bytes_per_block(kv_cache_groups)
-    assert ascend_bytes_per_block == (
-        small_page_spec.page_size_bytes + large_page_spec.page_size_bytes
-    ) * 2
+    assert ascend_bytes_per_block == (small_page_spec.page_size_bytes + large_page_spec.page_size_bytes) * 2
 
     expected_num_blocks = 7
     replanned_config = kv_cache_builder._ascend_get_kv_cache_config_from_groups(

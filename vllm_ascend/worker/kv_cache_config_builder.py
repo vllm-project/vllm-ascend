@@ -461,9 +461,7 @@ class AscendKVCacheConfigBuilder(KVCacheConfigBuilder):
         kv_cache_configs: list[KVCacheConfig] = []
         for projected_groups, available_memory_one_worker in zip(projected_groups_per_worker, available_memory):
             kv_cache_configs.append(
-                _ascend_get_kv_cache_config_from_groups(
-                    vllm_config, projected_groups, available_memory_one_worker
-                )
+                _ascend_get_kv_cache_config_from_groups(vllm_config, projected_groups, available_memory_one_worker)
             )
 
         # --- shrink each rank to the smallest num_blocks across ranks ---

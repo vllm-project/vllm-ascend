@@ -228,9 +228,7 @@ def test_ascend_get_kv_cache_config_from_groups_mtp_gets_own_tensor() -> None:
     )
 
     available_memory = 1 << 30
-    cfg = _ascend_get_kv_cache_config_from_groups(
-        _make_vllm_config(), [c4_group, mtp_group], available_memory
-    )
+    cfg = _ascend_get_kv_cache_config_from_groups(_make_vllm_config(), [c4_group, mtp_group], available_memory)
 
     # The MTP layer occupies its own trailing tuple slot, aliasing the shared buffer.
     mtp_tensors = [tensor for tensor in cfg.kv_cache_tensors if tensor.layers == ["model.layers.0.mtp"]]
@@ -252,9 +250,7 @@ def test_ascend_get_kv_cache_config_from_groups_num_gpu_blocks_override(monkeypa
     _monkeypatch_approximate_gcd(monkeypatch, value=2)
     groups = _ascend_get_kv_cache_groups_uniform_groups(grouped)
 
-    cfg = _ascend_get_kv_cache_config_from_groups(
-        _make_vllm_config(num_gpu_blocks_override=42), groups, 1 << 30
-    )
+    cfg = _ascend_get_kv_cache_config_from_groups(_make_vllm_config(num_gpu_blocks_override=42), groups, 1 << 30)
 
     assert cfg.num_blocks == 42
 
