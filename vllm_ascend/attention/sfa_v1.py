@@ -1627,11 +1627,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
             and len(query_lengths) == SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
             and query_lengths
-            == [SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH]
-            * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+            == [SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH] * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
             and kv_lengths
-            == [SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH]
-            * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+            == [SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH] * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
         )
         if exact_multi_segment:
             if (
@@ -1652,9 +1650,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dense_rope = q_pe[start:dense_end]
                 dense_metadata = copy(attn_metadata)
                 dense_metadata.block_table = attn_metadata.block_table[request : request + 1]
-                dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(
-                    [SFA_FIA_SHARED_PREFILL_TOPK_WIDTH]
-                )
+                dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
                 dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
                 dense_metadata.cum_query_lens = cum_query_lens.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
                 dense_metadata.seq_lens = seq_lens.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
