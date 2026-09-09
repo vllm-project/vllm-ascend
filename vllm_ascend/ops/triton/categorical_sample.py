@@ -73,6 +73,9 @@ def _element(values, index):
 @triton.jit
 def _load_logits(logits, row_offset, offsets, vocab, temperature, APPLY: tl.constexpr):
     values = tl.load(logits + row_offset + offsets, offsets < vocab, other=-float("inf")).to(tl.float32)
+    if logits.dtype.element_ty == tl.float32:
+        # Native FP32 LoadTile uses Adds(0); preserve its signed-zero behavior.
+        values = values + 0.0
     if APPLY:
         if temperature != 0:
             values = values / temperature
@@ -154,6 +157,8 @@ def _categorical_kernel(
         indices = tile * TILE + offsets
         valid = (offsets < TILE) & (indices < VOCAB)
         raw = tl.load(logits + row_offset + indices, valid, other=-float("inf")).to(tl.float32)
+        if logits.dtype.element_ty == tl.float32:
+            raw = raw + 0.0
         if cache is not None:
             tl.store(
                 cache + request.to(tl.int64) * cache_stride + column.to(tl.int64) * col_stride + indices, raw, valid
@@ -184,7 +189,7 @@ def _categorical_kernel(
                 low, high = _fixed_mass_words(weights)
                 tile_mass = (
                     tl.sum(low & 0xFFFF, 0).to(tl.uint64)
-                    + (tl.sum(low >> 16, 0).to(tl.uint64) << 16)
+                    + (tl.sum((low >> 16) & 0xFFFF, 0).to(tl.uint64) << 16)
                     + (tl.sum(high, 0).to(tl.uint64) << 32)
                 )
                 masses_low = tl.where(tile_ids == tile, tile_mass.to(tl.uint32), masses_low)

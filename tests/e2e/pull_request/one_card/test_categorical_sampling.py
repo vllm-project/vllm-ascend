@@ -807,3 +807,32 @@ def test_triton_philox_endpoint_and_first_max(use_fp64, infinity):
     )
     assert result[0][1].item() == 1
     assert result[0][2].item() == 0
+
+
+def test_triton_fp64_rare_probability_interval():
+    logits = torch.full((1, 32769), -26.0 * math.log(2.0), device=DEVICE)
+    logits[0, 0] = 0.0
+    result = _compare_triton_native(
+        logits,
+        torch.zeros(1, dtype=torch.int32, device=DEVICE),
+        torch.ones(1, device=DEVICE),
+        torch.tensor([0x0123456789ABCDEF], device=DEVICE),
+        torch.tensor([482600], device=DEVICE),
+        return_lse=False,
+        apply_temperature=False,
+        use_fp64=True,
+    )
+    assert result[0].item() > 0
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_triton_raw_cache_bits(dtype):
+    logits = torch.tensor([[-0.0, 0.0, 1.0625, -2.25]], dtype=dtype, device=DEVICE)
+    mapping = torch.zeros(1, dtype=torch.int32, device=DEVICE)
+    args = logits, mapping, torch.zeros(1, device=DEVICE), mapping.long(), mapping.long(), False, False
+    native_cache = torch.empty((1, 4), dtype=dtype, device=DEVICE)
+    triton_cache = torch.empty_like(native_cache)
+    torch.ops._C_ascend.npu_categorical_sample(*args, logits_cache=native_cache)
+    categorical_sample(*args, logits_cache=triton_cache)
+    bit_dtype = torch.int32 if dtype == torch.float32 else torch.int16
+    assert torch.equal(triton_cache.cpu().view(bit_dtype), native_cache.cpu().view(bit_dtype))
