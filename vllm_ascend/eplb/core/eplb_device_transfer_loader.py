@@ -71,7 +71,7 @@ class D2DExpertWeightLoader:
             )
 
         rank = adaptor.ep_rank
-        step = {"send": [], "recv": []}
+        step: dict[str, list[tuple[int, int, int]]] = {"send": [], "recv": []}
         local_copies = []
         for layer_id in range(adaptor.num_moe_layers):
             for redundant_id in range(num_redundant_experts):

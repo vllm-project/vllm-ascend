@@ -98,9 +98,7 @@ class VllmEplbAdaptor:
         # Get num_local_experts from first real MoE layer
         first_layer = self.moe_layers[0]
         eplb_config = get_ascend_config().eplb_config
-        self.global_slots_per_rank = (
-            eplb_config.num_redundant_experts if eplb_config.uses_global_expert_pool else 0
-        )
+        self.global_slots_per_rank = eplb_config.num_redundant_experts if eplb_config.uses_global_expert_pool else 0
         self.num_local_experts = first_layer.local_num_experts
         self.base_num_local_experts = self.num_local_experts
         self.ep_rank = first_layer.ep_rank

@@ -7,9 +7,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .policy_abstract import EplbPolicy
 from .layer_placement import build_layer_placement, replay_balancedness
-
+from .policy_abstract import EplbPolicy
 
 _PER_LAYER_GAIN_EPSILON = 1e-12
 _MAX_MIGRATION_LAYER_FRACTION = 0.25
@@ -87,9 +86,7 @@ def _placement_risk_by_layer(
     mean_rank_churn = changed.mean(axis=(1, 2))
     peak_rank_churn = changed.mean(axis=2).max(axis=1)
 
-    current_owners = np.zeros(
-        (current.shape[0], num_experts, current.shape[1]), dtype=bool
-    )
+    current_owners = np.zeros((current.shape[0], num_experts, current.shape[1]), dtype=bool)
     candidate_owners = np.zeros_like(current_owners)
     for layer in range(current.shape[0]):
         for rank in range(current.shape[1]):
@@ -132,19 +129,14 @@ def _align_retained_slots(current: np.ndarray, desired) -> np.ndarray:
 
 
 def _immutable(table: np.ndarray):
-    return tuple(
-        tuple(tuple(int(value) for value in rank) for rank in layer)
-        for layer in table
-    )
+    return tuple(tuple(tuple(int(value) for value in rank) for rank in layer) for layer in table)
 
 
 class LayerPlanner:
     """Plan stable per-layer placements using implementation-owned thresholds."""
 
     def __init__(self, num_redundant_experts: int) -> None:
-        if isinstance(num_redundant_experts, bool) or not isinstance(
-            num_redundant_experts, int
-        ):
+        if isinstance(num_redundant_experts, bool) or not isinstance(num_redundant_experts, int):
             raise TypeError("num_redundant_experts must be an integer")
         if num_redundant_experts <= 0:
             raise ValueError("num_redundant_experts must be positive")
@@ -157,9 +149,8 @@ class LayerPlanner:
 
     @staticmethod
     def _scores(table: np.ndarray, heat: np.ndarray, num_experts: int) -> np.ndarray:
-        return replay_balancedness(
-            heat, *_placement_maps(table, num_experts), table.shape[1]
-        )
+        physical_to_logical, physical_to_rank, copy_count = _placement_maps(table, num_experts)
+        return replay_balancedness(heat, physical_to_logical, physical_to_rank, copy_count, table.shape[1])
 
     @classmethod
     def _limit_migration_scope(
@@ -176,16 +167,9 @@ class LayerPlanner:
             return candidate
 
         gain_by_layer = cls._scores(candidate, heat, num_experts) - current_score
-        risk_by_layer = _placement_risk_by_layer(
-            current, candidate, heat, num_experts
-        )
-        net_gain_by_layer = (
-            gain_by_layer * _MIGRATION_AMORTIZATION_WINDOWS
-            - risk_by_layer * _NORMALIZED_MIGRATION_COST
-        )
-        profitable_layers = changed_layers[
-            net_gain_by_layer[changed_layers] > _PER_LAYER_GAIN_EPSILON
-        ]
+        risk_by_layer = _placement_risk_by_layer(current, candidate, heat, num_experts)
+        net_gain_by_layer = gain_by_layer * _MIGRATION_AMORTIZATION_WINDOWS - risk_by_layer * _NORMALIZED_MIGRATION_COST
+        profitable_layers = changed_layers[net_gain_by_layer[changed_layers] > _PER_LAYER_GAIN_EPSILON]
         if profitable_layers.size == 0:
             return current.copy()
 
@@ -197,10 +181,7 @@ class LayerPlanner:
             profitable_layers.tolist(),
             key=lambda layer: (
                 -float(net_gain_by_layer[layer]),
-                -float(
-                    gain_by_layer[layer]
-                    / max(risk_by_layer[layer], _PER_LAYER_GAIN_EPSILON)
-                ),
+                -float(gain_by_layer[layer] / max(risk_by_layer[layer], _PER_LAYER_GAIN_EPSILON)),
                 -float(gain_by_layer[layer]),
                 layer,
             ),
@@ -221,9 +202,7 @@ class LayerPlanner:
         per_layer_gain = predicted - current_score
         gain = float(per_layer_gain.mean())
         changed = int(np.count_nonzero(candidate != current))
-        placement_risk = _placement_risk_by_layer(
-            current, candidate, heat, num_experts
-        )
+        placement_risk = _placement_risk_by_layer(current, candidate, heat, num_experts)
         cost = float(placement_risk.mean()) * _NORMALIZED_MIGRATION_COST
         ready = (
             changed > 0
@@ -245,9 +224,7 @@ class LayerPlanner:
                 f"{replicas} redundant experts, expected "
                 f"{self.num_redundant_experts} from configuration"
             )
-        _, desired, _, _, _ = build_layer_placement(
-            heat, np.full(table.shape[0], replicas), table.shape[1]
-        )
+        _, desired, _, _, _ = build_layer_placement(heat, np.full(table.shape[0], replicas), table.shape[1])
         candidate = _align_retained_slots(table, desired)
         candidate = self._limit_migration_scope(
             table,
@@ -257,17 +234,12 @@ class LayerPlanner:
             num_experts,
         )
 
-        fresh_ready, fresh_gain_by_layer = self._eligible(
-            table, candidate, current_by_layer, heat, num_experts
-        )
+        fresh_ready, fresh_gain_by_layer = self._eligible(table, candidate, current_by_layer, heat, num_experts)
         selected = candidate
         selected_ready = fresh_ready
         selected_gain_by_layer = fresh_gain_by_layer
 
-        base_unchanged = (
-            self.pending_base is not None
-            and np.array_equal(self.pending_base, table)
-        )
+        base_unchanged = self.pending_base is not None and np.array_equal(self.pending_base, table)
         if not fresh_ready:
             self.pending = None
             self.pending_base = None
@@ -280,9 +252,7 @@ class LayerPlanner:
             self.pending_streak += 1
             selected = self.pending
         else:
-            pending_ready, pending_gains = self._eligible(
-                table, self.pending, current_by_layer, heat, num_experts
-            )
+            pending_ready, pending_gains = self._eligible(table, self.pending, current_by_layer, heat, num_experts)
             # Stability means that the incumbent remains beneficial under a
             # fresh load window, not that a deterministic optimizer reproduces
             # the same placement. Chasing every newly optimal placement keeps
@@ -299,32 +269,21 @@ class LayerPlanner:
                 self.pending_streak = 1
 
         cooldown = (
-            self.last_apply_window is not None
-            and self.window - self.last_apply_window
-            <= _POST_APPLY_COOLDOWN_WINDOWS
+            self.last_apply_window is not None and self.window - self.last_apply_window <= _POST_APPLY_COOLDOWN_WINDOWS
         )
-        should_apply = (
-            selected_ready
-            and self.pending_streak >= _REQUIRED_STABLE_WINDOWS
-            and not cooldown
-        )
+        should_apply = selected_ready and self.pending_streak >= _REQUIRED_STABLE_WINDOWS and not cooldown
         if should_apply:
             self.last_apply_window = self.window
             self.pending = None
             self.pending_base = None
             self.pending_streak = 0
 
-        selected_risk_by_layer = _placement_risk_by_layer(
-            table, selected, heat, num_experts
-        )
+        selected_risk_by_layer = _placement_risk_by_layer(table, selected, heat, num_experts)
         selected_net_gain_by_layer = (
             selected_gain_by_layer * _MIGRATION_AMORTIZATION_WINDOWS
             - selected_risk_by_layer * _NORMALIZED_MIGRATION_COST
         )
-        priority = tuple(
-            int(value)
-            for value in np.argsort(-selected_net_gain_by_layer, kind="stable")
-        )
+        priority = tuple(int(value) for value in np.argsort(-selected_net_gain_by_layer, kind="stable"))
         return LayerDecision(
             should_apply=should_apply,
             placement=_immutable(selected if should_apply else table),
@@ -337,9 +296,7 @@ class LayerEplb(EplbPolicy):
         self.planner = LayerPlanner(num_redundant_experts)
 
     def rebalance_experts(self, current_expert_table, expert_workload):
-        decision = self.planner.plan(
-            current_expert_table, expert_workload
-        )
+        decision = self.planner.plan(current_expert_table, expert_workload)
         return (
             int(decision.should_apply),
             np.asarray(decision.priority),

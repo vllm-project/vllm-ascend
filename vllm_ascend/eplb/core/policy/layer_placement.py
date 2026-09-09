@@ -8,10 +8,9 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
-
 
 Placement = tuple[tuple[np.ndarray, ...], ...]
 
@@ -43,8 +42,7 @@ def _normalise_load(expert_load: np.ndarray | Sequence[object]) -> np.ndarray:
         load = load[np.newaxis, ...]
     if load.ndim != 3:
         raise ValueError(
-            "expert_load must have shape [layers, experts] or "
-            f"[batches, layers, experts], got {load.shape}"
+            f"expert_load must have shape [layers, experts] or [batches, layers, experts], got {load.shape}"
         )
     if 0 in load.shape:
         raise ValueError(f"expert_load dimensions must be non-zero, got {load.shape}")
@@ -126,8 +124,7 @@ def _replicate_layer(
         eligible = np.flatnonzero(copy_count < num_ranks)
         if eligible.size == 0:
             raise ValueError(
-                "infeasible replica budget: all logical experts already have "
-                f"the maximum {num_ranks} total copies"
+                f"infeasible replica budget: all logical experts already have the maximum {num_ranks} total copies"
             )
         source_multiplicity = np.ceil(num_ranks / copy_count[eligible])
         effective_load = logical_load[eligible] * source_multiplicity / num_ranks
@@ -135,9 +132,7 @@ def _replicate_layer(
         replicas.append(expert)
         copy_count[expert] += 1
         if copy_count[expert] > num_ranks:
-            raise RuntimeError(
-                "layer-aware replica planner violated the per-expert copy limit"
-            )
+            raise RuntimeError("layer-aware replica planner violated the per-expert copy limit")
 
     physical_to_logical = np.concatenate(
         (
@@ -169,10 +164,7 @@ def _physical_copy_loads(
 ) -> np.ndarray:
     occurrence = np.zeros(logical_load.size, dtype=np.int64)
     result = np.empty(physical_to_logical.size, dtype=np.float64)
-    weights = [
-        _source_ranks_per_copy(int(count), num_ranks) / num_ranks
-        for count in copy_count.tolist()
-    ]
+    weights = [_source_ranks_per_copy(int(count), num_ranks) / num_ranks for count in copy_count.tolist()]
     for physical, logical_value in enumerate(physical_to_logical.tolist()):
         logical = int(logical_value)
         copy_index = int(occurrence[logical])
@@ -205,9 +197,7 @@ def _complete_degree_sequence_is_feasible(
 
     counts = np.arange(1, logical.size + 1, dtype=np.int64)
     logical_prefix = np.cumsum(logical)
-    rank_prefix_bound = np.minimum(
-        ranks[:, None], counts[None, :]
-    ).sum(axis=0)
+    rank_prefix_bound = np.minimum(ranks[:, None], counts[None, :]).sum(axis=0)
     return bool(np.all(logical_prefix <= rank_prefix_bound))
 
 
@@ -235,48 +225,30 @@ def _residual_placement_is_feasible(
     active_logical = np.flatnonzero(logical > 0)
     active_ranks = np.flatnonzero(ranks > 0)
     for logical_id in active_logical.tolist():
-        available = sum(
-            rank_id not in selected_ranks[logical_id]
-            for rank_id in active_ranks.tolist()
-        )
+        available = sum(rank_id not in selected_ranks[logical_id] for rank_id in active_ranks.tolist())
         if int(logical[logical_id]) > available:
             return False
 
-    has_active_forbidden_edges = any(
-        selected_ranks[logical_id]
-        for logical_id in active_logical.tolist()
-    )
+    has_active_forbidden_edges = any(selected_ranks[logical_id] for logical_id in active_logical.tolist())
     if not has_active_forbidden_edges:
         return _complete_degree_sequence_is_feasible(logical, ranks)
 
-    partial = [
-        logical_id
-        for logical_id in active_logical.tolist()
-        if selected_ranks[logical_id]
-    ]
+    partial = [logical_id for logical_id in active_logical.tolist() if selected_ranks[logical_id]]
     if len(partial) == 1:
         logical_id = partial[0]
-        available = [
-            rank_id
-            for rank_id in active_ranks.tolist()
-            if rank_id not in selected_ranks[logical_id]
-        ]
+        available_ranks = [rank_id for rank_id in active_ranks.tolist() if rank_id not in selected_ranks[logical_id]]
         needed = int(logical[logical_id])
         residual_logical = logical.copy()
         residual_logical[logical_id] = 0
         preferred = sorted(
-            available,
+            available_ranks,
             key=lambda rank_id: (-int(ranks[rank_id]), rank_id),
         )[:needed]
         residual_ranks = ranks.copy()
         residual_ranks[preferred] -= 1
-        return _complete_degree_sequence_is_feasible(
-            residual_logical, residual_ranks
-        )
+        return _complete_degree_sequence_is_feasible(residual_logical, residual_ranks)
 
-    raise RuntimeError(
-        "layer-aware placement order produced multiple partially placed experts"
-    )
+    raise RuntimeError("layer-aware placement order produced multiple partially placed experts")
 
 
 def _place_layer(
@@ -290,13 +262,10 @@ def _place_layer(
 
     num_ranks = rank_capacity.size
     if num_nodes <= 0 or num_ranks % num_nodes != 0:
-        raise ValueError(
-            f"num_nodes={num_nodes} must divide num_ranks={num_ranks}"
-        )
+        raise ValueError(f"num_nodes={num_nodes} must divide num_ranks={num_ranks}")
     if int(rank_capacity.sum()) != physical_to_logical.size:
         raise ValueError(
-            "rank capacity does not match physical expert count: "
-            f"{rank_capacity.sum()} != {physical_to_logical.size}"
+            f"rank capacity does not match physical expert count: {rank_capacity.sum()} != {physical_to_logical.size}"
         )
 
     ranks_per_node = num_ranks // num_nodes
@@ -313,17 +282,12 @@ def _place_layer(
     physical_to_rank = np.full(physical_to_logical.size, -1, dtype=np.int64)
 
     remaining_copies = copy_count.astype(np.int64, copy=True)
-    selected_ranks: list[set[int]] = [
-        set() for _ in range(logical_load.size)
-    ]
+    selected_ranks: list[set[int]] = [set() for _ in range(logical_load.size)]
     # Process all copies of one logical expert contiguously. This preserves the
     # bipartite Havel-Hakimi invariant: at most one active expert has forbidden
     # ranks, so residual feasibility needs one vectorized degree check instead
     # of rebuilding a generic max-flow graph for every candidate.
-    physical_by_logical = tuple(
-        np.flatnonzero(physical_to_logical == logical)
-        for logical in range(logical_load.size)
-    )
+    physical_by_logical = tuple(np.flatnonzero(physical_to_logical == logical) for logical in range(logical_load.size))
     logical_order = sorted(
         range(logical_load.size),
         key=lambda logical: (
@@ -346,15 +310,11 @@ def _place_layer(
             copies_by_node[selected // ranks_per_node] += 1
 
         eligible = [
-            rank
-            for rank in range(num_ranks)
-            if rank_remaining[rank] > 0
-            and rank not in selected_ranks[logical]
+            rank for rank in range(num_ranks) if rank_remaining[rank] > 0 and rank not in selected_ranks[logical]
         ]
         if not eligible:
             raise RuntimeError(
-                "rank capacities cannot realize a duplicate-free "
-                f"placement for logical expert {logical}"
+                f"rank capacities cannot realize a duplicate-free placement for logical expert {logical}"
             )
 
         ordered_candidates = sorted(
@@ -384,8 +344,7 @@ def _place_layer(
 
         if target is None:
             raise RuntimeError(
-                "no load-ordered rank preserves residual placement "
-                f"feasibility for logical expert {logical}"
+                f"no load-ordered rank preserves residual placement feasibility for logical expert {logical}"
             )
 
         physical_to_rank[physical] = target
@@ -394,9 +353,7 @@ def _place_layer(
         rank_count[target] += 1
 
     if not np.array_equal(rank_count, rank_capacity):
-        raise RuntimeError(
-            f"placement did not fill capacities: {rank_count} != {rank_capacity}"
-        )
+        raise RuntimeError(f"placement did not fill capacities: {rank_count} != {rank_capacity}")
     if np.any(remaining_copies != 0) or np.any(rank_remaining != 0):
         raise RuntimeError("placement left a non-empty residual degree sequence")
     # Runtime enumerates a logical expert's copies in physical rank order.
@@ -432,9 +389,7 @@ def build_layer_placement(
     if weights.ndim != 2:
         raise ValueError(f"aggregate_load must have shape [L, E], got {weights.shape}")
     if replicas.shape != (weights.shape[0],):
-        raise ValueError(
-            f"replica vector must have shape {(weights.shape[0],)}, got {replicas.shape}"
-        )
+        raise ValueError(f"replica vector must have shape {(weights.shape[0],)}, got {replicas.shape}")
     if np.any(replicas < 0):
         raise ValueError("replica counts must be non-negative")
 
@@ -502,10 +457,7 @@ def replay_balancedness(
         ndim=2,
     )
     if copy_table.shape != (num_layers, num_experts):
-        raise ValueError(
-            "logical_copy_count must have shape "
-            f"{(num_layers, num_experts)}, got {copy_table.shape}"
-        )
+        raise ValueError(f"logical_copy_count must have shape {(num_layers, num_experts)}, got {copy_table.shape}")
     if np.any(copy_table < 1) or np.any(copy_table > num_ranks):
         raise ValueError("logical_copy_count entries must be in [1, num_ranks]")
 
@@ -537,22 +489,14 @@ def replay_balancedness(
             physical = physical[np.argsort(phy2rank[physical], kind="stable")]
             target_ranks = phy2rank[physical]
             if np.unique(target_ranks).size != target_ranks.size:
-                raise ValueError(
-                    f"layer {layer} logical expert {logical} has two copies on one rank"
-                )
+                raise ValueError(f"layer {layer} logical expert {logical} has two copies on one rank")
             source_counts = _source_ranks_per_copy(physical.size, num_ranks)
             for copy_index, rank in enumerate(target_ranks.tolist()):
-                gpu_load[:, rank] += (
-                    load[:, layer, logical]
-                    * float(source_counts[copy_index])
-                    / num_ranks
-                )
+                gpu_load[:, rank] += load[:, layer, logical] * float(source_counts[copy_index]) / num_ranks
 
         maximum = gpu_load.max(axis=1)
         balancedness = np.ones(num_batches, dtype=np.float64)
         nonzero = maximum > 0
-        balancedness[nonzero] = (
-            gpu_load[nonzero].mean(axis=1) / maximum[nonzero]
-        )
+        balancedness[nonzero] = gpu_load[nonzero].mean(axis=1) / maximum[nonzero]
         result[layer] = balancedness.mean()
     return result

@@ -163,10 +163,7 @@ class EplbConfig:
             if self.eplb_heat_collection_stage == "all":
                 self.eplb_heat_collection_stage = self.eplb_node_role
             elif self.eplb_heat_collection_stage != self.eplb_node_role:
-                raise ValueError(
-                    "eplb_policy_type 4 requires eplb_heat_collection_stage "
-                    "to match eplb_node_role"
-                )
+                raise ValueError("eplb_policy_type 4 requires eplb_heat_collection_stage to match eplb_node_role")
         if self.dynamic_eplb:
             assert (
                 os.getenv("DYNAMIC_EPLB", "false").lower() in ("true", "1")
