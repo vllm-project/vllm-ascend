@@ -97,7 +97,9 @@ def test_verify_calls_validation(stop_token_ids, allowed_token_ids, match):
 def test_verify_accepts_in_vocab_ids():
     model_config = _make_model_config(129280)
     params = SamplingParams(stop_token_ids=[0, 129279], allowed_token_ids=[1, 2])
-    params.verify(model_config, None, None, None)
+    tokenizer = MagicMock()
+    tokenizer.__len__.return_value = 129280
+    params.verify(model_config, None, None, tokenizer)
 
 
 def test_patch_is_idempotent_when_upstream_has_fix():
