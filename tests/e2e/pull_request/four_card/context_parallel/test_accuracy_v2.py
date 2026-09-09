@@ -241,7 +241,9 @@ def test_dsv3_2_sfa_pcp_model_runner_v2_graph_accuracy() -> None:
     },
 )
 @wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_pcp_graph_diagnostic(graph_mode: str, collect_logits: bool) -> None:
+def test_dsv3_2_sfa_pcp_graph_diagnostic(
+    graph_mode: str, collect_logits: bool, input_variant: str = "original"
+) -> None:
     """Compare one graph variable, preserving the original accuracy assertions.
 
     Score collection is a separate axis so its effect on the original greedy
@@ -251,7 +253,16 @@ def test_dsv3_2_sfa_pcp_graph_diagnostic(graph_mode: str, collect_logits: bool) 
     runner_kwargs["compilation_config"] = {**FULL_DECODE_GRAPH, "cudagraph_mode": graph_mode}
     if collect_logits:
         runner_kwargs["logprobs_mode"] = "raw_logits"
+    if input_variant == "pcp1":
+        runner_kwargs["prefill_context_parallel_size"] = 1
     case = replace(DSV3_2_SFA_PCP_CASE, runner_kwargs=runner_kwargs)
+    if input_variant == "third_prompt_only":
+        # Retain the existing golden for the selected prompt verbatim.
+        case = replace(
+            case,
+            prompts=case.prompts[2:3],
+            expected_outputs=tuple(expected[2:3] for expected in DSV3_2_SFA_PCP_GOLDENS),
+        )
     original_generate = VllmRunner.generate_greedy
 
     def logged_generate(runner, prompts, max_tokens):
@@ -285,7 +296,12 @@ def test_dsv3_2_sfa_pcp_graph_diagnostic(graph_mode: str, collect_logits: bool) 
         print(
             "SFA_PCP_DIAGNOSTIC "
             + json.dumps(
-                {"graph_mode": graph_mode, "collect_logits": collect_logits, "requests": records},
+                {
+                    "graph_mode": graph_mode,
+                    "collect_logits": collect_logits,
+                    "input_variant": input_variant,
+                    "requests": records,
+                },
                 ensure_ascii=False,
             ),
             flush=True,
@@ -294,6 +310,13 @@ def test_dsv3_2_sfa_pcp_graph_diagnostic(graph_mode: str, collect_logits: bool) 
 
     with patch.object(VllmRunner, "generate_greedy", logged_generate):
         _run_accuracy_case(case)
+
+
+@pytest.mark.e2e_model(DSV3_2_MODEL)
+@pytest.mark.parametrize("input_variant", ["original", "pcp1", "third_prompt_only"])
+def test_dsv3_2_sfa_pcp_layout_diagnostic(input_variant: str) -> None:
+    """Vary only PCP or prompt batch against the fixed graph/scored reference."""
+    test_dsv3_2_sfa_pcp_graph_diagnostic("FULL_DECODE_ONLY", True, input_variant)
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
