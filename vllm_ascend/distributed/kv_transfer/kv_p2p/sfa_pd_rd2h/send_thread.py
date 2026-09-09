@@ -292,6 +292,11 @@ class MembPullSendingThread(threading.Thread):
                 "tensor_group_idx": list(meta.tensor_group_idx),
                 "main_tensor_count": meta.main_tensor_count,
                 "has_indexer": meta.has_indexer,
+                "main_cache_layout": meta.main_cache_layout,
+                "main_cache_dtype": meta.main_cache_dtype,
+                "main_cache_num_heads": meta.main_cache_num_heads,
+                "main_cache_nope_dim": meta.main_cache_nope_dim,
+                "main_cache_rope_dim": meta.main_cache_rope_dim,
             }
         dealer.send(encoder.encode((MF_META, self._state.p_session, encoder.encode(p_meta_dict))))
         if dealer.poll(timeout=int(self.timeout * 1000)):

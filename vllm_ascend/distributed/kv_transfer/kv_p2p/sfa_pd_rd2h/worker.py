@@ -30,6 +30,7 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
+    SFA_MAIN_CACHE_LAYOUT_TOKEN_CONCAT,
     LayerMetadata,
     SendTask,
     get_external_request_id,
@@ -71,6 +72,14 @@ CONNECTOR_THREAD_STARTUP_TIMEOUT_SECONDS = 10.0
 PD_READ_WAIT_LOG_INTERVAL_SECONDS = 10.0
 MIN_TCP_PORT = 1
 MAX_TCP_PORT = 65535
+
+
+def _get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
+    # PR2 owns this torch-only helper. Keep the dependency lazy so importing the
+    # connector does not force worker layout dependencies in scheduler-only use.
+    from vllm_ascend.worker.sfa_kv_layout import get_sfa_kv_parent
+
+    return get_sfa_kv_parent(nope, rope)
 
 
 def _layer_idx(layer_name: str) -> int:
@@ -317,13 +326,17 @@ class SFAPDRD2HConsumerWorker:
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             layer_metadata=self.layer_metadata,
             main_name_to_idx=self._main_name_to_idx,
-            cpu_pools=self._cpu_pools,
-            main_gva_bases=self._main_gva_bases,
-            main_block_lens=self._main_block_lens,
             indexer_tensors=self._indexer_tensors,
             indexer_scale_tensors=self._indexer_scale_tensors,
             dest_blocks_by_req=self._dest_blocks_by_req,
             get_offload_layer_id=self.offload_manager._get_offload_layer_id,
+            cpu_parent_caches=self._cpu_parent_caches,
+            main_parent_gva_bases=self._main_parent_gva_bases,
+            main_parent_block_lens=self._main_block_lens,
+            main_cache_dtype=self._main_cache_dtype,
+            main_cache_num_heads=self._main_cache_num_heads,
+            main_cache_nope_dim=self._main_cache_nope_dim,
+            main_cache_rope_dim=self._main_cache_rope_dim,
         )
 
     def _register_memfabric_pull(
@@ -340,22 +353,23 @@ class SFAPDRD2HConsumerWorker:
         # Store layer info for MembPullReadThread
         self._main_names = main_names
         self._main_name_to_idx = {n: i for i, n in enumerate(main_names)}
-        k_caches_cpu = self.offload_manager.k_caches_cpu
-        v_caches_cpu = self.offload_manager.v_caches_cpu
-        gvas_k = self.offload_manager.gvas_k_bases
-        gvas_v = self.offload_manager.gvas_v_bases
-        if len(gvas_k) != len(main_names) or len(gvas_v) != len(main_names):
+        self._cpu_parent_caches = list(self.offload_manager.cpu_parent_caches)
+        parent_gvas = self.offload_manager.gvas_parent_bases
+        if len(parent_gvas) != len(main_names):
             raise RuntimeError("SparseKVOffloadManager shared CPU GVA/layer count mismatch")
-        self._main_gva_bases = list(zip(gvas_k, gvas_v))
-        self._main_block_lens = self.offload_manager.cpu_block_lens
+        self._main_parent_gva_bases = list(parent_gvas)
+        self._main_block_lens = list(self.offload_manager.cpu_block_lens)
         if len(self._main_block_lens) != len(main_names):
             raise RuntimeError("SparseKVOffloadManager shared CPU block-size/layer count mismatch")
-        if self.tp_rank == 0:
-            if len(k_caches_cpu) != len(main_names) or len(v_caches_cpu) != len(main_names):
-                raise RuntimeError("SparseKVOffloadManager CPU pool/layer count mismatch")
-            self._cpu_pools = list(zip(k_caches_cpu, v_caches_cpu))
-        else:
-            self._cpu_pools = [None] * len(main_names)
+        if len(self._cpu_parent_caches) != len(main_names):
+            if self.tp_rank == 0:
+                raise RuntimeError("SparseKVOffloadManager CPU parent pool/layer count mismatch")
+        topk_k = self.offload_manager.topk_buffers_k[0]
+        topk_v = self.offload_manager.topk_buffers_v[0]
+        self._main_cache_dtype = str(topk_k.dtype).removeprefix("torch.")
+        self._main_cache_num_heads = int(topk_k.shape[-2])
+        self._main_cache_nope_dim = int(topk_k.shape[-1])
+        self._main_cache_rope_dim = int(topk_v.shape[-1])
         self._indexer_tensors = []
         self._indexer_scale_tensors: list[torch.Tensor | None] = []
         for main_name in main_names:
@@ -374,17 +388,9 @@ class SFAPDRD2HConsumerWorker:
         for pool_idx, mname in enumerate(main_names):
             indexer_t = self._indexer_tensors[pool_idx]
             indexer_scale_t = self._indexer_scale_tensors[pool_idx]
-            cpu_pool = self._cpu_pools[pool_idx]
-            if cpu_pool is not None:
-                k_cpu, v_cpu = cpu_pool
-                addrs = [k_cpu.data_ptr(), v_cpu.data_ptr()]
-                block_lens = [
-                    k_cpu.element_size() * math.prod(k_cpu.shape[1:]),
-                    v_cpu.element_size() * math.prod(v_cpu.shape[1:]),
-                ]
-                scales = [k_cpu.shape[0] // num_blocks, v_cpu.shape[0] // num_blocks]
-            else:
-                addrs, block_lens, scales = [], [], []
+            addrs = [self._main_parent_gva_bases[pool_idx]]
+            block_lens = [self._main_block_lens[pool_idx]]
+            scales = [1]
             groups = [main_group_idx] * len(addrs)
             if indexer_t is not None:
                 addrs.append(indexer_t.data_ptr())
@@ -401,8 +407,13 @@ class SFAPDRD2HConsumerWorker:
                 kv_caches_base_addr=addrs,
                 block_len=block_lens,
                 block_size_scale=scales,
-                main_tensor_count=2 if cpu_pool is not None else 0,
+                main_tensor_count=1,
                 has_indexer=indexer_t is not None,
+                main_cache_layout=SFA_MAIN_CACHE_LAYOUT_TOKEN_CONCAT,
+                main_cache_dtype=self._main_cache_dtype,
+                main_cache_num_heads=self._main_cache_num_heads,
+                main_cache_nope_dim=self._main_cache_nope_dim,
+                main_cache_rope_dim=self._main_cache_rope_dim,
             )
 
         # Create memfabric engine (no registration)
@@ -486,6 +497,7 @@ class SFAPDRD2HProducerWorker:
         # Layers whose PD send was already dispatched at scatter time by
         # on_kv_cache_written; save_kv_layer skips these at layer end.
         self._pd_dispatched_layers: set[int] = set()
+        self._registered_parent_caches: dict[str, torch.Tensor] = {}
 
     def get_finished(self) -> tuple[set[str], set[str]]:
         return set(), set()
@@ -642,13 +654,24 @@ class SFAPDRD2HProducerWorker:
 
         for physical_idx, main_name in sorted(main_by_layer.items()):
             layer_meta = LayerMetadata([], [], [], [])
-            _append_cache_tensors(layer_meta, kv_caches[main_name], layer2group_ids[main_name])
+            main_cache = kv_caches[main_name]
+            if not isinstance(main_cache, (list, tuple)) or len(main_cache) != 2:
+                raise RuntimeError(f"SFAPD producer layer {main_name} must expose NoPE/RoPE views")
+            nope, rope = main_cache
+            parent = _get_sfa_kv_parent(nope, rope)
+            self._registered_parent_caches[main_name] = parent
+            _append_cache_tensors(layer_meta, parent, layer2group_ids[main_name])
             layer_meta.main_tensor_count = len(layer_meta.kv_caches_base_addr)
-            if layer_meta.main_tensor_count != 2:
+            if layer_meta.main_tensor_count != 1:
                 raise RuntimeError(
-                    f"SFAPD producer layer {main_name} must expose main K/V tensors, "
+                    f"SFAPD producer layer {main_name} must expose one parent main tensor, "
                     f"got {layer_meta.main_tensor_count} tensor(s)"
                 )
+            layer_meta.main_cache_layout = SFA_MAIN_CACHE_LAYOUT_TOKEN_CONCAT
+            layer_meta.main_cache_dtype = str(parent.dtype).removeprefix("torch.")
+            layer_meta.main_cache_num_heads = parent.shape[-2]
+            layer_meta.main_cache_nope_dim = nope.shape[-1]
+            layer_meta.main_cache_rope_dim = rope.shape[-1]
             indexer_name = indexer_by_layer.get(physical_idx)
             if indexer_name is not None:
                 _append_cache_tensors(
@@ -668,7 +691,9 @@ class SFAPDRD2HProducerWorker:
         # can still share its main slot with a later layer that owns an indexer.
         self.layer_storage_slots = self._infer_layer_storage_slots(self.layer_metadata)
 
-        register_regions = collect_storage_merged_register_regions(kv_caches)
+        register_caches: dict[str, Any] = dict(self._registered_parent_caches)
+        register_caches.update({name: kv_caches[name] for name in indexer_by_layer.values()})
+        register_regions = collect_storage_merged_register_regions(register_caches)
         validate_register_region_count(register_regions)
         global_memfabric_te.register_buffer(register_regions.ptrs, register_regions.lengths)
 

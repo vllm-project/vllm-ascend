@@ -22,6 +22,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.sfa_pd_rd2h.protocol import (
     READ_DONE,
     READ_FAILED,
     READ_READY_BATCH,
+    SFA_MAIN_CACHE_LAYOUT_SEPARATE,
+    SFA_MAIN_CACHE_LAYOUT_TOKEN_CONCAT,
 )
 
 READ_THREAD_POLL_TIMEOUT_MS = 100
@@ -36,13 +38,17 @@ class ConsumerReadState:
     tp_size: int
     layer_metadata: dict[str, Any]
     main_name_to_idx: dict[str, int]
-    cpu_pools: list[tuple[Any, Any] | None]
-    main_gva_bases: list[tuple[int, int]]
-    main_block_lens: list[tuple[int, int]]
     indexer_tensors: list[Any | None]
     indexer_scale_tensors: list[Any | None]
     dest_blocks_by_req: dict[str, tuple[list[int], list[int]]]
     get_offload_layer_id: Callable[[str], int]
+    cpu_parent_caches: list[Any] | None = None
+    main_parent_gva_bases: list[int] | None = None
+    main_parent_block_lens: list[int] | None = None
+    main_cache_dtype: str | None = None
+    main_cache_num_heads: int | None = None
+    main_cache_nope_dim: int | None = None
+    main_cache_rope_dim: int | None = None
 
 
 def _coalesce_desc(
@@ -337,25 +343,58 @@ class MembPullReadThread(threading.Thread):
         p_base_addrs = p_meta["base_addrs"]
         p_block_len = p_meta["block_len"]
         p_block_size_scale = p_meta.get("block_size_scale", [1] * len(p_base_addrs))
+        main_cache_layout = p_meta.get("main_cache_layout", SFA_MAIN_CACHE_LAYOUT_SEPARATE)
         main_tensor_count = int(p_meta.get("main_tensor_count", 2))
-        if main_tensor_count != 2 or len(p_base_addrs) < main_tensor_count:
+        if main_cache_layout != SFA_MAIN_CACHE_LAYOUT_TOKEN_CONCAT:
             raise RuntimeError(
-                f"MembPull P metadata for {layer_name} must expose two main K/V "
-                f"tensors, got main_tensor_count={main_tensor_count}, "
-                f"total={len(p_base_addrs)}"
+                f"MembPull requires {SFA_MAIN_CACHE_LAYOUT_TOKEN_CONCAT} main cache layout for {layer_name}, "
+                f"got {main_cache_layout!r}"
             )
+        if main_tensor_count != 1 or len(p_base_addrs) < main_tensor_count:
+            raise RuntimeError(
+                f"MembPull P metadata for {layer_name} must expose one parent main tensor, "
+                f"got main_tensor_count={main_tensor_count}, total={len(p_base_addrs)}"
+            )
+        if len(p_block_len) != len(p_base_addrs) or len(p_block_size_scale) != len(p_base_addrs):
+            raise RuntimeError(f"MembPull metadata array lengths mismatch for {layer_name}")
+        if any(type(x) is not int or x <= 0 for x in (*p_block_len, *p_block_size_scale)):
+            raise RuntimeError(f"MembPull invalid page geometry for {layer_name}")
         p_has_indexer = bool(p_meta.get("has_indexer", len(p_base_addrs) > main_tensor_count))
+        if len(p_base_addrs) not in ((2, 3) if p_has_indexer else (1,)):
+            raise RuntimeError(f"MembPull unexpected tensor count for {layer_name}")
 
         try:
-            k_cpu_ptr, v_cpu_ptr = state.main_gva_bases[offload_id]
-            d_k_len, d_v_len = state.main_block_lens[offload_id]
-        except IndexError as error:
+            assert state.main_parent_gva_bases is not None
+            assert state.main_parent_block_lens is not None
+            parent_cpu_ptr = state.main_parent_gva_bases[offload_id]
+            d_parent_len = state.main_parent_block_lens[offload_id]
+        except (AssertionError, IndexError) as error:
             raise RuntimeError(f"MembPull shared CPU pool metadata is missing for {layer_name}") from error
-        p_k_len = p_block_len[0] * p_block_size_scale[0]
-        p_v_len = p_block_len[1] * p_block_size_scale[1]
-        if (p_k_len, p_v_len) != (d_k_len, d_v_len):
+        p_parent_len = p_block_len[0] * p_block_size_scale[0]
+        if p_parent_len != d_parent_len:
             raise RuntimeError(
-                f"MembPull main KV layout mismatch for {layer_name}: P=({p_k_len}, {p_v_len}), D=({d_k_len}, {d_v_len})"
+                f"MembPull main parent page bytes mismatch for {layer_name}: P={p_parent_len}, D={d_parent_len}"
+            )
+        d_dtype = state.main_cache_dtype
+        p_dtype = p_meta.get("main_cache_dtype")
+        if p_dtype not in ("float16", "bfloat16") or p_dtype != d_dtype:
+            raise RuntimeError(f"MembPull main cache dtype mismatch for {layer_name}: P={p_dtype}, D={d_dtype}")
+        d_heads = state.main_cache_num_heads
+        p_heads = p_meta.get("main_cache_num_heads")
+        p_nope_dim = p_meta.get("main_cache_nope_dim")
+        p_rope_dim = p_meta.get("main_cache_rope_dim")
+        d_nope_dim = state.main_cache_nope_dim
+        d_rope_dim = state.main_cache_rope_dim
+        d_width = None if d_nope_dim is None or d_rope_dim is None else d_nope_dim + d_rope_dim
+        if p_heads != d_heads or p_heads != 1 or not isinstance(p_nope_dim, int) or not isinstance(p_rope_dim, int):
+            raise RuntimeError(
+                f"MembPull main cache head geometry mismatch for {layer_name}: "
+                f"P=({p_heads}, {p_nope_dim}, {p_rope_dim}), D heads={d_heads}, width={d_width}"
+            )
+        if p_nope_dim <= 0 or p_rope_dim <= 0 or p_nope_dim != d_nope_dim or p_rope_dim != d_rope_dim:
+            raise RuntimeError(
+                f"MembPull main cache head geometry mismatch for {layer_name}: "
+                f"P=({p_heads}, {p_nope_dim}, {p_rope_dim}), D heads={d_heads}, width={d_width}"
             )
         d_indexer = state.indexer_tensors[pool_idx]
         if p_has_indexer != (d_indexer is not None):
@@ -420,12 +459,9 @@ class MembPullReadThread(threading.Thread):
             "layer_name": layer_name,
             "pool_idx": pool_idx,
             "offload_id": offload_id,
-            "p_k_base": p_base_addrs[0],
-            "p_v_base": p_base_addrs[1],
-            "p_k_len": p_block_len[0] * p_block_size_scale[0],
-            "p_v_len": p_block_len[1] * p_block_size_scale[1],
-            "k_cpu_ptr": k_cpu_ptr,
-            "v_cpu_ptr": v_cpu_ptr,
+            "p_parent_base": p_base_addrs[0],
+            "p_parent_len": p_parent_len,
+            "parent_cpu_ptr": parent_cpu_ptr,
             "indexer": indexer,
             "scale": scale,
         }
@@ -519,8 +555,8 @@ class MembPullReadThread(threading.Thread):
         if not p_main_block_ids and not p_indexer_block_ids:
             raise RuntimeError(f"MembPull source block ids are empty for {layer_name}")
 
-        p_k_base, p_v_base = layer["p_k_base"], layer["p_v_base"]
-        p_k_len, p_v_len = layer["p_k_len"], layer["p_v_len"]
+        p_parent_base = layer["p_parent_base"]
+        p_parent_len = layer["p_parent_len"]
 
         peer_chunks: list[np.ndarray] = []
         local_chunks: list[np.ndarray] = []
@@ -530,7 +566,7 @@ class MembPullReadThread(threading.Thread):
 
         # Main MLA is replicated across P ranks and already split across D TP; only the
         # group's first contributor pulls it, so it is neither duplicated nor fine-split.
-        pull_main = layer["k_cpu_ptr"] is not None and layer["v_cpu_ptr"] is not None and group_member_idx == 0
+        pull_main = layer["parent_cpu_ptr"] is not None and group_member_idx == 0
         if pull_main and len(p_main_block_ids) != len(d_main_ids):
             raise RuntimeError(
                 f"MembPull main block count mismatch for req {ext_req_id}: "
@@ -549,20 +585,10 @@ class MembPullReadThread(threading.Thread):
         if n_main:
             p_main = np.array(p_main_block_ids, dtype=np.int64)
             d_main = np.array(d_main_ids, dtype=np.int64)
-            len_k: np.ndarray = np.full(n_main, p_k_len, dtype=np.int64)
-            len_v: np.ndarray = np.full(n_main, p_v_len, dtype=np.int64)
             cp, cl, coalesced_lengths = _coalesce_desc(
-                p_k_base + p_main * p_k_len,
-                layer["k_cpu_ptr"] + d_main * p_k_len,
-                len_k,
-            )
-            peer_chunks.append(cp)
-            local_chunks.append(cl)
-            length_chunks.append(coalesced_lengths)
-            cp, cl, coalesced_lengths = _coalesce_desc(
-                p_v_base + p_main * p_v_len,
-                layer["v_cpu_ptr"] + d_main * p_v_len,
-                len_v,
+                p_parent_base + p_main * p_parent_len,
+                layer["parent_cpu_ptr"] + d_main * p_parent_len,
+                np.full(n_main, p_parent_len, dtype=np.int64),
             )
             peer_chunks.append(cp)
             local_chunks.append(cl)
@@ -666,7 +692,7 @@ class MembPullReadThread(threading.Thread):
                 "n_main": n_main,
                 "n_indexer": n_indexer,
                 "num_transfers": len(local_ptrs),
-                "atomic_transfers": 2 * n_main + n_indexer,
+                "atomic_transfers": n_main + n_indexer,
             }
         return local_ptrs, peer_ptrs, lengths, info
 
@@ -734,10 +760,7 @@ class MembPullReadThread(threading.Thread):
                     main_start_block,
                 )
                 owns_requested_main = (
-                    group_member_idx == 0
-                    and layer["k_cpu_ptr"] is not None
-                    and layer["v_cpu_ptr"] is not None
-                    and owned_main_end > owned_main_start
+                    group_member_idx == 0 and layer["parent_cpu_ptr"] is not None and owned_main_end > owned_main_start
                 )
                 owns_requested_indexer = (
                     layer["indexer"] is not None and read_info is not None and bool(read_info["d_indexer_ids"])

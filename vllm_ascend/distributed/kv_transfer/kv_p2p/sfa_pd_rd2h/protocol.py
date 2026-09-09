@@ -15,6 +15,8 @@ MF_META = b"mf_meta"
 READ_READY_BATCH = b"read_ready_batch"
 READ_DONE = b"read_done"
 READ_FAILED = b"read_failed"
+SFA_MAIN_CACHE_LAYOUT_SEPARATE = "separate_nope_rope"
+SFA_MAIN_CACHE_LAYOUT_TOKEN_CONCAT = "token_concat"
 
 
 def infer_sfa_component_group_ids(kv_cache_config: Any) -> tuple[int, int]:
@@ -58,6 +60,12 @@ class LayerMetadata:
     # indices and therefore do not own an indexer cache at all.
     main_tensor_count: int = 2
     has_indexer: bool = False
+    # Missing wire values are decoded as the legacy two-allocation layout.
+    main_cache_layout: str = SFA_MAIN_CACHE_LAYOUT_SEPARATE
+    main_cache_dtype: str | None = None
+    main_cache_num_heads: int | None = None
+    main_cache_nope_dim: int | None = None
+    main_cache_rope_dim: int | None = None
 
 
 @dataclass
