@@ -65,7 +65,10 @@ patch("vllm.distributed.parallel_state._DCP", _mock_dcp_group).start()
 # Do not permanently patch torch.npu.set_device here — the executor-binding
 # tests need to install a side_effect on the live set_device callable.
 
-from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec  # noqa: E402
+from vllm_ascend.core.kv_cache_interface import (  # noqa: E402
+    AscendSFAIndexerCacheSpec,
+    AscendSlidingWindowMLASpec,
+)
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector import (  # noqa: E402
     MAX_REQUESTS_PER_PEER_HANDLER,
     GroupPull,
@@ -2154,6 +2157,56 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
             ),
         ):
             self.scheduler = MooncakeConnectorScheduler(self.config, "test_engine", MockKVCacheConfig())
+
+    def test_scheduler_refreshes_block_size_before_snapshot(self):
+        config = MockVllmConfig()
+        config.cache_config.block_size = 2
+        calls = []
+
+        def refresh(vllm_config):
+            self.assertEqual(calls, ["init"])
+            vllm_config.cache_config.block_size = 32
+
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.init_ascend_config",
+                side_effect=lambda _: calls.append("init"),
+            ),
+            patch("vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.get_ascend_config"),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_connector.refresh_block_size",
+                side_effect=refresh,
+            ) as refresh_mock,
+        ):
+            scheduler = MooncakeConnectorScheduler(config, "test_engine", MockKVCacheConfig())
+
+        refresh_mock.assert_called_once_with(config)
+        self.assertEqual(scheduler.block_size, 32)
+
+    def test_scheduler_uses_dsv4_swa_not_largest_state_spec(self):
+        swa = AscendSlidingWindowMLASpec(
+            block_size=32,
+            num_kv_heads=1,
+            head_size=16,
+            dtype=torch.float16,
+            sliding_window=128,
+            model_version="deepseek_v4",
+        )
+        self.scheduler.vllm_config.cache_config.block_size = 2
+        self.scheduler.kv_cache_config = MockKVCacheConfig(
+            [
+                MockKVCacheGroup(kv_cache_spec=types.SimpleNamespace(block_size=4096)),
+                MockKVCacheGroup(kv_cache_spec=swa),
+            ]
+        )
+        self.assertEqual(self.scheduler._get_scheduler_block_size(), 32)
+
+    def test_scheduler_preserves_non_dsv4_block_size(self):
+        self.scheduler.vllm_config.cache_config.block_size = 128
+        self.scheduler.kv_cache_config = MockKVCacheConfig(
+            [MockKVCacheGroup(kv_cache_spec=types.SimpleNamespace(block_size=4096))]
+        )
+        self.assertEqual(self.scheduler._get_scheduler_block_size(), 128)
 
     def _make_remote_decode_request(self, prompt_len: int, request_id: str = "req1"):
         return MockRequest(

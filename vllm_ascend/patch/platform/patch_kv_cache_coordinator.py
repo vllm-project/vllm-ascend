@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM projectx
+import os
 import sys
 from collections.abc import Mapping
 from math import lcm
@@ -7,6 +8,7 @@ from math import lcm
 import vllm
 import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
@@ -32,6 +34,7 @@ from vllm.v1.kv_cache_interface import (
 )
 
 USE_MULTI_GROUPS_KV_CACHE = True
+logger = init_logger(__name__)
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
 
@@ -474,3 +477,70 @@ vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator = get_kv_cache_coordi
 _kv_cache_manager = sys.modules.get("vllm.v1.core.kv_cache_manager")
 if _kv_cache_manager is not None:
     _kv_cache_manager.get_kv_cache_coordinator = get_kv_cache_coordinator  # type: ignore[attr-defined]
+
+
+def _install_d2rh_manager_bridge() -> None:
+    """Enable per-group HBM hits for DeepSeek-V4 remote-prefill consumers.
+
+    The upstream manager only selects the independent per-group lookup for
+    Mamba hybrid caches. DeepSeek-V4 combines compressed MLA with
+    sliding-window MLA, so its all-group lookup can collapse a valid local HBM
+    hit to zero. Install this compatibility bridge in vllm-ascend so D2RH
+    consumers can reuse the resident attention groups without patching vLLM.
+    """
+    import vllm.v1.core.kv_cache_manager as kv_cache_manager_module
+    from vllm.v1.core.kv_cache_manager import KVCacheManager
+
+    # KVCacheManager imports the coordinator factory by value. Rebind it here
+    # as well so patch import order cannot leave the upstream factory cached.
+    kv_cache_manager_module.get_kv_cache_coordinator = get_kv_cache_coordinator
+
+    current_get_computed_blocks = KVCacheManager.get_computed_blocks
+    if getattr(current_get_computed_blocks, "_d2rh_partial_group_bridge", False):
+        return
+
+    original_get_computed_blocks = current_get_computed_blocks
+
+    def get_computed_blocks(self, request):
+        use_per_group_hit = (
+            os.environ.get("D2RH_EXTERNAL_PARTIAL_PREFIX_CACHE") == "1"
+            and self.enable_caching
+            and not request.skip_reading_prefix_cache
+            and isinstance(self.coordinator, AscendHybridKVCacheCoordinator)
+        )
+        if not use_per_group_hit:
+            return original_get_computed_blocks(self, request)
+
+        computed_blocks, per_group_hits = self.coordinator.find_longest_cache_hit_per_group(
+            request.block_hashes,
+            request.num_tokens - 1,
+        )
+        num_new_computed_tokens = max(per_group_hits, default=0)
+        logger.info(
+            "D2RH_HBM_PARTIAL_QUERY request_id=%s hit_tokens=%d group_hit_tokens=%s group_blocks=%s",
+            request.request_id,
+            num_new_computed_tokens,
+            list(per_group_hits),
+            [len(group) for group in computed_blocks],
+        )
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.record(
+                num_tokens=request.num_tokens,
+                num_hits=num_new_computed_tokens,
+                preempted=request.num_preemptions > 0,
+            )
+
+        # The independent-group path has no sparse junction to pin.
+        return (
+            self.create_kv_cache_blocks(computed_blocks),
+            num_new_computed_tokens,
+            0,
+        )
+
+    get_computed_blocks._d2rh_partial_group_bridge = True  # type: ignore[attr-defined]
+    KVCacheManager.get_computed_blocks = get_computed_blocks
+    logger.info("D2RH DeepSeek-V4 KVCacheManager per-group bridge installed")
+
+
+_install_d2rh_manager_bridge()

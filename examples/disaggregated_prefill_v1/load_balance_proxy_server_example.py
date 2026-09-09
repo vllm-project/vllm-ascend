@@ -121,6 +121,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -675,6 +676,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefiller-ports", type=int, nargs="+", default=[8001])
     parser.add_argument("--decoder-hosts", type=str, nargs="+", default=["localhost"])
     parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
+    parser.add_argument(
+        "--decode-rank-affinity",
+        action="store_true",
+        help="Pin decode to the prefill DP rank. Requires matching P/D DP rank layouts (e.g. D2RH on HIXL).",
+    )
     parser.add_argument("--max-retries", type=int, default=3, help="Maximum number of retries for HTTP requests")
     parser.add_argument(
         "--retry-delay", type=float, default=0.001, help="Base delay (seconds) for exponential backoff retries"
@@ -815,6 +821,18 @@ def auth_headers(request_id: str) -> dict[str, str]:
     }
 
 
+def decoder_data_parallel_rank(req_data: dict) -> int | None:
+    """Read the P-side DP rank from connector metadata, when available."""
+    params = req_data.get("kv_transfer_params")
+    if not isinstance(params, dict):
+        return None
+    engine_id = params.get("remote_engine_id")
+    if not isinstance(engine_id, str):
+        return None
+    match = re.search(r"_dp([0-9]+)$", engine_id)
+    return int(match.group(1)) if match else None
+
+
 def build_prefill_request(req_data: dict) -> dict:
     payload = req_data.copy()
     payload["kv_transfer_params"] = {
@@ -870,6 +888,9 @@ async def stream_service_response(
     base_delay: float = 0.2,
 ):
     headers = auth_headers(request_id)
+    if get_global_args().decode_rank_affinity:
+        if (dp_rank := decoder_data_parallel_rank(req_data)) is not None:
+            headers["X-data-parallel-rank"] = str(dp_rank)
     max_attempts = max(1, max_retries)
     for attempt in range(1, max_attempts + 1):
         first_chunk_sent = False

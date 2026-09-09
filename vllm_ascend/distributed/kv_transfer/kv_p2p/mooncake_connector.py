@@ -75,6 +75,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     get_kv_cache_tensor_layers,
     model_uses_sfa_sparse,
+    refresh_block_size,
 )
 
 # isort: off
@@ -1731,8 +1732,13 @@ class MooncakeConnectorScheduler:
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
         init_ascend_config(vllm_config)
+        # EngineCore may replace cache_config.block_size with the smallest
+        # physical hybrid-cache group size (2 for DSV4 C4 state). Restore the
+        # model's logical block size at the scheduler consumption boundary so
+        # Mooncake metadata agrees with the DSV4 attention KV layout.
+        refresh_block_size(vllm_config)
         self.ascend_config = get_ascend_config()
-        self.block_size = vllm_config.cache_config.block_size
+        self.block_size = self._get_scheduler_block_size()
         self.engine_id = engine_id
         self.local_ip = get_ip()
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
@@ -1769,6 +1775,16 @@ class MooncakeConnectorScheduler:
         self.use_compress = self._model_uses_compress()
         self.group_transfer_info = [self._get_group_transfer_info(group) for group in kv_cache_config.kv_cache_groups]
         self.need_truncate = self.use_compress or any(info.is_state_group for info in self.group_transfer_info)
+
+    def _get_scheduler_block_size(self) -> int:
+        # Hybrid KV cache initialization stores the smallest physical group
+        # block size in cache_config. The resolved DSV4 SWA spec retains the
+        # logical block size needed by Mooncake transfer metadata.
+        for group in self.kv_cache_config.kv_cache_groups:
+            for spec in self._get_group_unique_specs(group):
+                if isinstance(spec, AscendSlidingWindowMLASpec) and spec.model_version == "deepseek_v4":
+                    return spec.block_size
+        return self.vllm_config.cache_config.block_size
 
     def _model_uses_compress(self) -> bool:
         hf_config = getattr(self.vllm_config.model_config, "hf_config", None)

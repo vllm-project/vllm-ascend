@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHashListWithBlockSize,
     get_block_hash,
@@ -380,3 +381,34 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
 
     assert hit_length == 6
     assert [len(blocks) for blocks in hit_blocks] == [2, 1, 2]
+
+
+def test_d2rh_manager_bridge_uses_deepseek_per_group_hit(monkeypatch) -> None:
+    coordinator = AscendHybridKVCacheCoordinator.__new__(AscendHybridKVCacheCoordinator)
+
+    def find_per_group(self, block_hashes, max_cache_hit_length):
+        assert block_hashes == [b"hash"]
+        assert max_cache_hit_length == 131071
+        return ([object()], []), (126976, 0)
+
+    coordinator.find_longest_cache_hit_per_group = MethodType(find_per_group, coordinator)
+    manager = SimpleNamespace(
+        enable_caching=True,
+        coordinator=coordinator,
+        log_stats=False,
+        create_kv_cache_blocks=lambda blocks: blocks,
+    )
+    request = SimpleNamespace(
+        request_id="d2rh-test",
+        block_hashes=[b"hash"],
+        num_tokens=131072,
+        num_preemptions=0,
+        skip_reading_prefix_cache=False,
+    )
+    monkeypatch.setenv("D2RH_EXTERNAL_PARTIAL_PREFIX_CACHE", "1")
+
+    blocks, hit_tokens, shared_prefix_boundary = KVCacheManager.get_computed_blocks(manager, request)
+
+    assert [len(group) for group in blocks] == [1, 0]
+    assert hit_tokens == 126976
+    assert shared_prefix_boundary == 0
