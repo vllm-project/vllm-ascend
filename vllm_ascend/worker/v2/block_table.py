@@ -25,13 +25,6 @@ from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
 
-# Staging a complete block-table row gives substantially faster contiguous GM
-# access on Ascend, but the staged fp32 row must fit in UB together with the
-# per-token temporaries. PR #15212 validated rows through 16K entries on A3.
-# Larger rows use the direct-load path in the same kernel to keep compilation
-# resource usage bounded.
-_MAX_STAGED_BLOCK_TABLE_PAD_SIZE = 16384
-
 
 class AscendBlockTables(BlockTables):
     """Block table for Ascend NPUs."""
@@ -61,13 +54,14 @@ class AscendBlockTables(BlockTables):
             cp_rank,
             cp_interleave,
         )
-        # The kernel block-table row can be wider than
-        # max_num_blocks_per_group when one KV block maps to multiple kernel
-        # blocks. Use the allocated row stride so the staged row is complete.
-        max_block_table_stride = max(block_table.gpu.stride(0) for block_table in self.block_tables)
-        # tl.arange needs a compile-time power-of-two size. This value is
-        # passed as a constexpr and covers every KV cache group's row.
-        self._block_table_pad_size = triton.next_power_of_2(max_block_table_stride)
+        self._triton_block_size = 1024
+        # kernel_block_sizes determine the number of block-table entries
+        # touched by one token tile. Use the smallest kernel block size to form
+        # one safe constexpr window for all groups, without staging a whole
+        # row.
+        min_kernel_block_size = min(kernel_block_sizes)
+        window_size = (self._triton_block_size + min_kernel_block_size - 1) // min_kernel_block_size + 1
+        self._block_table_window_size = triton.next_power_of_2(window_size)
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
@@ -99,14 +93,14 @@ class AscendBlockTables(BlockTables):
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
+            self.kernel_block_sizes_tensor,
             slot_mappings,
             slot_mappings.stride(0),
             self.cp_rank,
             CP_SIZE=self.cp_size,
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
-            TRITON_BLOCK_SIZE=1024,
-            BLOCK_TABLE_PAD_SIZE=self._block_table_pad_size,
-            USE_BLOCK_TABLE_STAGING=(self._block_table_pad_size <= _MAX_STAGED_BLOCK_TABLE_PAD_SIZE),
+            TRITON_BLOCK_SIZE=self._triton_block_size,
+            BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
         )
         return slot_mappings[:, :num_tokens_padded]
