@@ -11,10 +11,52 @@ from vllm.v1.worker.gpu.block_table import (
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel,
 )
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.block_table import (
     _MAX_STAGED_BLOCK_TABLE_PAD_SIZE,
     AscendBlockTables,
 )
+
+
+@pytest.mark.parametrize("use_staging", [True, False])
+@pytest.mark.parametrize("cp_size,cp_rank,cp_interleave", [(1, 0, 1), (2, 0, 1), (2, 1, 256)])
+def test_ascend_slot_mapping_uses_kernel_block_size(use_staging, cp_size, cp_rank, cp_interleave):
+    """A 384-token storage block expands to three 128-token kernel blocks."""
+    device = torch.device("npu")
+    storage_size, kernel_size = 384, 128
+    kernel_blocks = [3, 4, 5, 21, 22, 23]
+    table = torch.tensor([kernel_blocks], dtype=torch.int32, device=device)
+    positions = [0, 1, 126, 127, 128, 255, 256, 383, 384, 511, 767]
+    tables = object.__new__(AscendBlockTables)
+    tables.num_kv_cache_groups = 1
+    tables.slot_mappings = torch.empty((1, 16), dtype=torch.int32, device=device)
+    tables.block_table_ptrs = torch.tensor([table.data_ptr()], dtype=torch.uint64, device=device)
+    tables.block_table_strides = torch.tensor([table.stride(0)], dtype=torch.int64, device=device)
+    tables.block_sizes_tensor = torch.tensor([storage_size], dtype=torch.int32, device=device)
+    tables.kernel_block_sizes_tensor = torch.tensor([kernel_size], dtype=torch.int32, device=device)
+    tables.cp_size, tables.cp_rank, tables.cp_interleave = cp_size, cp_rank, cp_interleave
+    tables._block_table_pad_size = (
+        triton.next_power_of_2(table.stride(0)) if use_staging else 2 * _MAX_STAGED_BLOCK_TABLE_PAD_SIZE
+    )
+    actual = tables.compute_slot_mappings(
+        torch.tensor([0], dtype=torch.int32, device=device),
+        torch.tensor([0, len(positions)], dtype=torch.int32, device=device),
+        torch.tensor(positions, dtype=torch.int64, device=device),
+        num_tokens_padded=16,
+    )
+    expected = []
+    for position in positions:
+        virtual_block, offset = divmod(position, storage_size * cp_size)
+        if offset // cp_interleave % cp_size != cp_rank:
+            expected.append(-1)
+            continue
+        local_position = (
+            virtual_block * storage_size + offset // (cp_interleave * cp_size) * cp_interleave + offset % cp_interleave
+        )
+        block_index, block_offset = divmod(local_position, kernel_size)
+        expected.append(kernel_blocks[block_index] * kernel_size + block_offset)
+    expected.extend([-1] * (16 - len(positions)))
+    torch.testing.assert_close(actual.cpu(), torch.tensor([expected], dtype=torch.int32))
 
 
 @pytest.mark.parametrize(
@@ -71,6 +113,7 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
     }
     ascend_compute_slot_mappings_kernel[grid](
         *kernel_args,
+        block_sizes,
         slot_mappings,
         slot_mappings.stride(0),
         cp_rank,
@@ -80,6 +123,7 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
     )
     ref_compute_slot_mappings_kernel[grid](
         *kernel_args,
+        *(() if vllm_version_is("0.28.0") else (block_sizes,)),
         ref_slot_mappings,
         ref_slot_mappings.stride(0),
         cp_rank,
@@ -130,6 +174,7 @@ def test_compute_slot_mapping_npu_kernel_long_block_table(
 
     ascend_compute_slot_mappings_kernel[grid](
         *kernel_args,
+        block_sizes,
         slot_mappings,
         slot_mappings.stride(0),
         0,
@@ -139,6 +184,7 @@ def test_compute_slot_mapping_npu_kernel_long_block_table(
     )
     ref_compute_slot_mappings_kernel[grid](
         *kernel_args,
+        *(() if vllm_version_is("0.28.0") else (block_sizes,)),
         ref_slot_mappings,
         ref_slot_mappings.stride(0),
         0,
@@ -164,6 +210,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.uint64, device=device)
     block_tables.block_table_strides = torch.tensor([block_table.stride(0)], dtype=torch.int64, device=device)
     block_tables.block_sizes_tensor = torch.tensor([4], dtype=torch.int32, device=device)
+    block_tables.kernel_block_sizes_tensor = block_tables.block_sizes_tensor
     block_tables.cp_rank = 0
     block_tables.cp_size = 1
     block_tables.cp_interleave = 1
