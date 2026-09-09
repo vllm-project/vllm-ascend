@@ -648,6 +648,7 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("model_state", CUDAGraphMode.NONE, False, 1, 5),
         ("model_state", CUDAGraphMode.FULL, False, 1, 8),
         ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
+        ("pcp_runtime", CUDAGraphMode.NONE, False, 2, 8),
     ],
 )
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
@@ -667,7 +668,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         [2, 1, 0, 0],
         dtype=torch.int32,
     )
-    pcp_context = object() if caller == "pcp_capture" else None
+    pcp_context = object() if pcp_size > 1 else None
     pcp_manager = (
         SimpleNamespace(
             build_attention_context=MagicMock(return_value=pcp_context),
@@ -749,7 +750,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     if pcp_context is not None:
         assert [call["pcp_cache_group_idx"] for call in calls] == [0, 1]
         assert pcp_manager is not None
-        pcp_manager.build_attention_context.assert_called_once_with(input_batch)
+        pcp_manager.build_attention_context.assert_called_once_with(input_batch, block_tables, slot_mappings)
     else:
         assert all(call["pcp_cache_group_idx"] is None for call in calls)
 

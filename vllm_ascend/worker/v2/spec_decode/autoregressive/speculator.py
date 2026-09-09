@@ -241,7 +241,12 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         generate_draft.
         """
         self.input_batch = input_batch
-        sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if vllm_version_is("0.28.0"):
+            sync_state = num_tokens_across_dp
+        else:
+            # Replicated drafts use global tokens, unlike the PCP-local target.
+            # Every DP rank must take the draft sync, including decode and idle ranks.
+            sync_state = None if self.replicated_pcp else dp_sync
         # wrap build_attn_metadata to use Ascend attention metadata building.
         # so we can call super().propose() directly.
         with (
