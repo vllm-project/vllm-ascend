@@ -218,7 +218,7 @@ settings; enabling both selects the combined DyntraLB recompute scheduler.
 | `enable_sfa_fia_shared_prefill` | bool | `False` | Experimental grouped FIA fast path for the shared/index-cache SFA consumer. |
 
 - Enable with `--additional-config '{"enable_sfa_fia_shared_prefill": true}'`.
-- Admission is intentionally narrow: the packed full-visible rows must total exactly `2048` (the current TopK width) and at least one sparse-tail row must remain.
+- Admission is intentionally narrow. The general grouped path requires packed full-visible rows to total exactly `2048` (the current TopK width) with at least one sparse-tail row remaining. In addition, the directly validated `PrefillNoCache` geometry with exactly three requests of `query_len=kv_len=2267` is admitted as three independent `2048`-row FIA calls plus one packed `657`-row sparse tail (`219` rows per request). The aggregate `6144` dense rows are never submitted as one FIA call; each FIA invocation remains bounded to `2048`.
 - Current fixed geometry is local query heads `4`, KV heads `1`, `kv_lora_rank=512`, `qk_rope_head_dim=64`, block size `128`, and TopK width `2048`.
 - The path is eager-only, requires the base `AscendSFAImpl` shared/index-cache consumer, no speculative decoding, no DSA-CP, no sparse KV offload, no sparse SFA/LI C8, and no PP/DP/DCP/PCP token sharding. Ordinary tensor parallelism may still shard heads.
 - Supported prefill states are `PrefillNoCache` and `PrefillCacheHit`; an all-prefill `ChunkedPrefill` batch is also eligible only when every request contributes more than one query token and it contains no decode tokens.
