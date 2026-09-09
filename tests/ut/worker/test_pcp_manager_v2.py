@@ -288,10 +288,11 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
     build_attn_state.assert_called_once()
     args = build_attn_state.call_args.args
     assert args[0] is manager.vllm_config
-    np.testing.assert_array_equal(args[1], expected_seq_lens)
-    assert args[2] == result.num_reqs
-    np.testing.assert_array_equal(args[3], result.num_scheduled_tokens)
+    assert args[1] is manager.kv_cache_config
+    np.testing.assert_array_equal(args[2], expected_seq_lens)
+    assert args[3] == result.num_reqs
     np.testing.assert_array_equal(args[4], result.num_scheduled_tokens)
+    np.testing.assert_array_equal(args[5], result.num_scheduled_tokens)
 
 
 def test_full_decode_request_layout_is_token_sized_only_without_drafts():
