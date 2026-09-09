@@ -398,7 +398,7 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
         if cache.dim() == 3:
             return cache
         if cache.dim() == 4:
-            return cache.reshape(cache.shape[0], cache.shape[1], cache.shape[2] * cache.shape[3])
+            return cache.view(cache.shape[0], cache.shape[1], cache.shape[2] * cache.shape[3])
         raise RuntimeError(f"PA cache must be 3D or 4D, got shape={tuple(cache.shape)}")
 
     @staticmethod
@@ -909,8 +909,8 @@ class AscendSFAKVOffloadImpl(AscendSFAImpl):
             )
 
         full_kv_cache_cpu, full_k_rope_cpu = manager.get_fused_overlap_cpu_kv_inputs(layer_name)
-        full_kv_cache = self._flatten_pa_cache(full_kv_cache_cpu).contiguous()
-        full_k_rope = self._flatten_pa_cache(full_k_rope_cpu).contiguous()
+        full_kv_cache = self._flatten_pa_cache(full_kv_cache_cpu)
+        full_k_rope = self._flatten_pa_cache(full_k_rope_cpu)
         full_kv_block_table = common_inputs.full_kv_block_table
         full_kv_actual_seq = common_inputs.full_kv_actual_seq
         full_q_actual_seq = common_inputs.full_q_actual_seq
