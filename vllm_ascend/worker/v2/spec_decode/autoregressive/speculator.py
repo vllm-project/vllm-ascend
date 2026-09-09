@@ -68,7 +68,6 @@ def _prepare_replicated_pcp_config(
             parallel_config=replace(
                 target_parallel_config,
                 prefill_context_parallel_size=1,
-                cp_kv_cache_interleave_size=1,
             ),
         )
     return vllm_config, replicated_pcp

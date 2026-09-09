@@ -114,7 +114,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     execution_config = captured["execution_config"]
     execution_parallel_config = execution_config.parallel_config
     assert execution_parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
-    assert execution_parallel_config.cp_kv_cache_interleave_size == (1 if target_pcp_size > 1 else 128)
+    assert execution_parallel_config.cp_kv_cache_interleave_size == 128
     assert execution_parallel_config.enable_expert_parallel
     assert execution_parallel_config.enable_eplb
     assert execution_parallel_config.rank == target_parallel_config.rank
@@ -132,7 +132,7 @@ def test_draft_runtime_config_preserves_target_worker_topology(
     assert not draft_parallel_config.enable_eplb
     assert draft_config.model_config is draft_model_config
     assert draft_config.parallel_config.prefill_context_parallel_size == expected_execution_pcp_size
-    assert draft_config.parallel_config.cp_kv_cache_interleave_size == (1 if target_pcp_size > 1 else 128)
+    assert draft_config.parallel_config.cp_kv_cache_interleave_size == 128
     assert draft_config.parallel_config.pipeline_parallel_size == 1
 
 

@@ -50,18 +50,6 @@ else:
 M = TypeVar("M", bound=AscendSFAMetadata)
 
 
-class AscendSFAReplicatedMTPImpl(AscendSFAImpl):
-    """SFA implementation for an MTP draft replicated across PCP ranks.
-
-    The draft uses logical PCP size 1 and interleave size 1, but vLLM checks
-    all layers in the target and draft shared forward context against the
-    target PCP configuration. This marker keeps that validation local to the
-    replicated draft without claiming support on every ordinary SFA instance.
-    """
-
-    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
-
-
 class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     """SFA PCP implementation with PCP-sharded O-proj weights.
 
@@ -70,8 +58,6 @@ class AscendSFAPCPImpl(OProjWeightSwitchMixin, AscendSFAImpl):
     slices that TP-local weight, and the original TP output reduction remains
     part of the row-parallel layer semantics.
     """
-
-    supports_mtp_with_cp_non_trivial_interleave_size: bool = True
 
     o_proj_full_pools: dict[Any, torch.Tensor] = {}
     o_proj_weight_switch_pool_key = "sfa_pcp_o_proj"
@@ -1562,11 +1548,4 @@ def resolve_sfa_impl(vllm_config: VllmConfig | None = None) -> type[AscendSFAImp
         return AscendSFADCPImpl
     if pcp_enabled:
         return AscendSFAPCPImpl
-    if (
-        vllm_config is not None
-        and vllm_config.speculative_config is not None
-        and vllm_config.parallel_config.prefill_context_parallel_size == 1
-        and vllm_config.parallel_config.cp_kv_cache_interleave_size == 1
-    ):
-        return AscendSFAReplicatedMTPImpl
     return AscendSFAImpl
