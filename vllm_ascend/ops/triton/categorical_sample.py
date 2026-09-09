@@ -203,7 +203,9 @@ def _categorical_kernel(
         target = uniform * total
         prefix = tl.full((), 0.0, tl.float32)
     selected_tile = tl.full((), TILES - 1, tl.int32)
-    for tile in range(TILES):
+    tile = tl.full((), 0, tl.int32)
+    selected = tl.full((), False, tl.int1)
+    while (tile < TILES) & ~selected:
         if FP64:
             next_prefix = prefix + _element(masses, tile)
             selected = target < next_prefix
@@ -212,14 +214,18 @@ def _categorical_kernel(
             selected = target <= next_prefix
         if selected | (tile + 1 == TILES):
             selected_tile = tile
-            break
-        prefix = next_prefix
+            selected = tl.full((), True, tl.int1)
+        else:
+            prefix = next_prefix
+        tile += 1
     indices = selected_tile * TILE + offsets
     values = _load_logits(logits, row_offset, indices, VOCAB, temperature, APPLY)
     weights = tl.exp(values - row_max)
     length = tl.minimum(TILE, VOCAB - selected_tile * TILE)
     chosen = selected_tile * TILE
-    for index in range(length):
+    index = tl.full((), 0, tl.int32)
+    selected = tl.full((), False, tl.int1)
+    while (index < length) & ~selected:
         weight = _element(weights, index)
         if FP64:
             mass = _fixed_mass(weight)
@@ -232,7 +238,7 @@ def _categorical_kernel(
             selected = prefix >= target
         if selected:
             chosen = selected_tile * TILE + index
-            break
+        index += 1
     tl.store(output + row, chosen)
 
 
