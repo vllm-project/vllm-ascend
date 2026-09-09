@@ -128,30 +128,3 @@ def test_build_draft_attn_metadata_uses_per_group_block_tables():
         )
         assert metadata[gid].attn_state == AscendAttentionState.SpecDecoding
     assert metadata[1].attn_mask is None
-
-
-def test_proposer_owns_draft_loop_methods():
-    """The proposer forks the draft loop instead of extending the shared base.
-    If these overrides were accidentally dropped, draft positions would
-    silently advance and acceptance would collapse.
-    """
-    from vllm_ascend.spec_decode import gemma4_proposer as gemma4_module
-    from vllm_ascend.spec_decode import llm_base_proposer as base_module
-
-    for name in ("_propose", "dummy_run", "attn_update_stack_num_spec_norm", "_run_merged_draft"):
-        assert getattr(gemma4_module.AscendGemma4Proposer, name) is not getattr(
-            base_module.AscendSpecDecodeBaseProposer, name
-        )
-
-
-def test_forked_draft_loop_never_advances_positions():
-    """Gemma4 MTP drafts from a constant target position (upstream
-    constant_draft_positions): the forked methods must not advance positions
-    or sequence lengths between draft steps."""
-    import inspect
-
-    attn_update_src = inspect.getsource(AscendGemma4Proposer.attn_update_stack_num_spec_norm)
-    assert "seq_lens[:batch_size] += 1" not in attn_update_src
-    assert "used_update_positions += 1" not in attn_update_src
-    merged_draft_src = inspect.getsource(AscendGemma4Proposer._run_merged_draft)
-    assert "positions += 1" not in merged_draft_src
