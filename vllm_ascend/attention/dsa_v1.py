@@ -1895,6 +1895,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # communication status, their quantize() outputs are equivalent.
         # Share the result instead of calling quantize() twice on the same input.
         # - W8A8 no-comm: saves one npu_dynamic_quant (full-tensor read + absmax).
+        # - MXFP8 no-comm: saves one npu_dynamic_mx_quant (full-tensor read +
+        #   per-group scale).
         # - W4A8 no-comm: saves one no-op pass-through (kernel launch + ref).
         # - TP comm: both return (hidden_states, None); shareable when custom_op
         #   types match (same communication path).
@@ -1936,9 +1938,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
         else:
-            qr = self.q_norm(wq_a_result)
-            q_b_quant, q_b_scale = qr, None
-            qr_pertoken_scale = None
+            # MXFP8: the split-out quantize() (Vector) overlaps with kv_matmul
+            # (Cube) in Part2, and the pair is returned for the Indexer to
+            # reuse. Non-splittable schemes (W4A8, bf16) keep the pass-through
+            # (scale stays None).
+            q_b_quant, q_b_scale = self.cv_wq_b.quantize(self.q_norm(wq_a_result))
+            qr, qr_pertoken_scale = q_b_quant, q_b_scale
 
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()
