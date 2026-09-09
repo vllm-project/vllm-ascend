@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 
+from prometheus_client import Counter, Gauge, Histogram
+
 # ---------------------------------------------------------------------------
 # Mock torch / torch_npu
 # ---------------------------------------------------------------------------
@@ -139,10 +141,9 @@ class _MockKVConnectorPromMetrics:
         labelnames,
         per_engine_labelvalues,
     ):
-        metric_classes = list(metric_types.values())
-        self._gauge_cls = metric_classes[0]
-        self._counter_cls = metric_classes[1]
-        self._histogram_cls = metric_classes[2]
+        self._gauge_cls = metric_types[Gauge]
+        self._counter_cls = metric_types[Counter]
+        self._histogram_cls = metric_types[Histogram]
         self.per_engine_labelvalues = per_engine_labelvalues
 
 

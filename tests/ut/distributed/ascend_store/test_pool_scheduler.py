@@ -641,6 +641,7 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
                 for req_id, num_blocks in sending_initial.items():
                     scheduler._set_delayed_free(req_id, num_blocks)
                 scheduler.update_finished_sending(finished)
+                self.assertEqual(scheduler._delayed_free_req_ids, set(sending_expected))
                 self.assertEqual(scheduler._delayed_free_blocks_by_req, sending_expected)
                 self.assertEqual(
                     scheduler._num_delayed_free_blocks,

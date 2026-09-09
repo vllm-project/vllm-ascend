@@ -11,7 +11,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
+from vllm.logger import init_logger
 from vllm.v1.metrics.utils import create_metric_per_engine
+
+logger = init_logger(__name__)
 
 LOAD_GET_HISTOGRAM_BUCKETS = (
     1e-3,
@@ -60,11 +63,13 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
         if durations := self.data.get("load_get_duration_seconds"):
             reduced["load_get_count"] = len(durations)
             reduced["load_get_avg_ms"] = round(sum(durations) / len(durations) * 1e3, 3)
-            reduced["load_get_total_keys"] = self.data.get("load_get_keys", 0)
+            reduced["load_get_keys"] = self.data.get("load_get_keys", 0)
         return reduced
 
     def record_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
-        assert operation == "load_get"
+        if operation != "load_get":
+            logger.warning_once("Ignoring unsupported AscendStore metrics operation: %s", operation)
+            return
         self.data.setdefault("load_get_duration_seconds", []).append(duration_seconds)
         self.data["load_get_keys"] = self.data.get("load_get_keys", 0) + num_keys
 
@@ -85,7 +90,10 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         self._delayed_release_requests = create_metric_per_engine(
             self._gauge_cls(
                 name="vllm:ascend_store_delayed_release_requests",
-                documentation=("Requests whose KV blocks are waiting for AscendStore save."),
+                documentation=(
+                    "Number of finished requests whose KV cache block release is "
+                    "delayed by an asynchronous AscendStore save."
+                ),
                 labelnames=labelnames,
             ),
             per_engine_labelvalues,
@@ -93,7 +101,10 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         self._delayed_release_blocks = create_metric_per_engine(
             self._gauge_cls(
                 name="vllm:ascend_store_delayed_release_blocks",
-                documentation=("KV block references held by requests waiting for AscendStore save."),
+                documentation=(
+                    "Number of KV cache block references retained for finished "
+                    "requests while asynchronous AscendStore saves complete."
+                ),
                 labelnames=labelnames,
             ),
             per_engine_labelvalues,
