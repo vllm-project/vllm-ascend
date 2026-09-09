@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, call, patch
 import torch
 from transformers import DeepseekV2Config
 
+from vllm_ascend.ascend_config import EplbConfig
 from vllm_ascend.eplb.adaptor.vllm_adaptor import EPLB_EXPERT_WEIGHT_NAMES, VllmEplbAdaptor
 from vllm_ascend.quantization.quant_type import QuantType
 
@@ -44,7 +45,7 @@ class TestVllmAdaptor(unittest.TestCase):
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_init_fp16(self, mock_get_config, mock_func):
-        mock_config = MagicMock()
+        mock_config = MagicMock(eplb_config=EplbConfig())
         mock_config.enable_fused_mc2 = 1
         mock_get_config.return_value = mock_config
         self.model.quant_config = None
@@ -56,7 +57,7 @@ class TestVllmAdaptor(unittest.TestCase):
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_init_fp16_with_parameter_accessor(self, mock_get_config, mock_func):
-        mock_config = MagicMock()
+        mock_config = MagicMock(eplb_config=EplbConfig())
         mock_config.enable_fused_mc2 = 1
         mock_get_config.return_value = mock_config
         self.model.quant_config = None
@@ -71,7 +72,7 @@ class TestVllmAdaptor(unittest.TestCase):
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_init_w8a8(self, mock_get_config, mock_func):
-        mock_config = MagicMock()
+        mock_config = MagicMock(eplb_config=EplbConfig())
         mock_config.enable_fused_mc2 = 0
         mock_get_config.return_value = mock_config
         VllmEplbAdaptor(self.model)
@@ -79,7 +80,7 @@ class TestVllmAdaptor(unittest.TestCase):
     @patch("torch.empty_like", return_value=torch.zeros(16, 32))
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_language_model_w8a8(self, mock_get_config, mock_func):
-        mock_config = MagicMock()
+        mock_config = MagicMock(eplb_config=EplbConfig())
         mock_config.enable_fused_mc2 = 0
         mock_get_config.return_value = mock_config
         model = MagicMock()
@@ -104,7 +105,7 @@ class TestVllmAdaptor(unittest.TestCase):
         VllmEplbAdaptor.register_layer(layer)
 
         with patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config") as mock_get_config:
-            mock_config = MagicMock()
+            mock_config = MagicMock(eplb_config=EplbConfig())
             mock_config.enable_fused_mc2 = 0
             mock_get_config.return_value = mock_config
             model = MagicMock()
@@ -119,7 +120,7 @@ class TestVllmAdaptor(unittest.TestCase):
 
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_init_mixed_quant_type_per_layer(self, mock_get_config):
-        mock_config = MagicMock()
+        mock_config = MagicMock(eplb_config=EplbConfig())
         mock_config.enable_fused_mc2 = 1
         mock_get_config.return_value = mock_config
 
@@ -171,7 +172,7 @@ class TestVllmAdaptor(unittest.TestCase):
 
     @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
     def test_reused_buffer_requires_same_expert_weight_shape(self, mock_get_config):
-        mock_config = MagicMock()
+        mock_config = MagicMock(eplb_config=EplbConfig())
         mock_config.enable_fused_mc2 = 0
         mock_get_config.return_value = mock_config
 
@@ -198,6 +199,16 @@ class TestVllmAdaptor(unittest.TestCase):
 
         with self.assertRaisesRegex(AssertionError, "EPLB expert weight shapes mismatch"):
             VllmEplbAdaptor(model)
+
+    @patch("vllm_ascend.eplb.adaptor.vllm_adaptor.get_ascend_config")
+    def test_global_pool_rejects_fused_mc2(self, mock_get_config):
+        with patch.dict("os.environ", {"DYNAMIC_EPLB": "true"}):
+            eplb_config = EplbConfig(dynamic_eplb=True, eplb_policy_type=4, num_redundant_experts=1)
+        mock_get_config.return_value = MagicMock(enable_fused_mc2=1, eplb_config=eplb_config)
+        self.model.quant_config = None
+
+        with self.assertRaisesRegex(NotImplementedError, "fused MC2 disabled"):
+            VllmEplbAdaptor(self.model)
 
     def tearDown(self):
         self.mock_rank.stop()
