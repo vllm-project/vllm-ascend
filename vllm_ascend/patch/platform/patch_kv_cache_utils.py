@@ -88,7 +88,28 @@ def _ascend_resolve_kv_cache_block_sizes(
         hash_block_size = math.gcd(*group_block_sizes)
         return scheduler_block_size, hash_block_size
 
-    return _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    resolved = _orig_resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
+    mamba_specs = [g.kv_cache_spec for g in groups if isinstance(g.kv_cache_spec, MambaSpec)]
+    group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    if (
+        cache_config.enable_prefix_caching
+        and mamba_specs
+        and all(spec.mamba_cache_mode == "align" for spec in mamba_specs)
+        and any(bs % resolved[1] != 0 for bs in group_block_sizes)
+    ):
+        # Ascend can retain a larger aligned recurrent block after attention
+        # kernels select a smaller block. The upstream cache-config equality
+        # guard then falls back to LCM hashing, which cannot hash the smaller
+        # attention blocks. Keep scheduler alignment, but use a common divisor
+        # for hashing, as AscendHybridKVCacheCoordinator requires.
+        requested = cache_config.prefix_match_unit
+        hash_block_size = requested if requested is not None else math.gcd(*group_block_sizes)
+        if any(bs % hash_block_size != 0 for bs in group_block_sizes):
+            raise ValueError(
+                f"Invalid prefix_match_unit={hash_block_size}; KV cache group block sizes={group_block_sizes}."
+            )
+        resolved = resolved[0], hash_block_size
+    return resolved
 
 
 def _get_kimi_k3_dspark_mixed_kv_cache_groups(
