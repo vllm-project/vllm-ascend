@@ -4237,6 +4237,7 @@ class TestDeepSeekMTPIndicesSharing(unittest.TestCase):
         proposer.supports_mm_inputs = False
         proposer.uses_mrope = False
         proposer.use_cuda_graph = False
+        proposer.use_compress = False
         proposer.device = torch.device("cpu")
         proposer.input_ids = torch.arange(8, dtype=torch.int32)
         proposer.positions = torch.arange(8, dtype=torch.int64)
