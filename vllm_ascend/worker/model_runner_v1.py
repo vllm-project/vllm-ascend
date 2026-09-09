@@ -736,12 +736,16 @@ class NPUModelRunner(GPUModelRunner):
         # Create a tensor for num_tokens_after_padding
         comm_method = select_moe_comm_method(max_tokens_across_dp, self.vllm_config, is_draft_model)
         is_finegrained_tp = self.ascend_config.finegrained_tp_config.max_finegrained_tp_size > 1
-        # There are three cases where padding between DPs is required:
+        # There are 4 cases where padding between DPs is required:
         # 1. comm_method == ALLGATHER, ensure the input tensor shape of allgather is consistent;
         # 2. comm_method == MC2, reduce communication and computation through active_mask to enhance performance;
         # 3. when finegrained_tp is open, we need to ensure num_tokens remains consistent within finegrained_tp_group.
         #    TODO(zzzzwwjj): We can do dp padding in finegrained_tp_group, instead of world_group.
-        if comm_method in {MoECommType.ALLGATHER, MoECommType.MC2} or is_finegrained_tp:
+        # 4. FIXME(zzzzwwjj): currently, there are some bugs can lead to worker crashes when not do dp_padding in
+        #    graph mode. Therefore, dp_padding is currently enforced in graph mode.
+        if (synced_cudagraph_mode != CUDAGraphMode.NONE or
+                comm_method in {MoECommType.ALLGATHER, MoECommType.MC2} or
+                is_finegrained_tp):
             num_tokens_after_padding = torch.tensor(
                 [max_tokens_across_dp] * self.dp_size, device="cpu", dtype=torch.int32
             )

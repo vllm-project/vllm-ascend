@@ -492,18 +492,21 @@ def test_stateful_handoff_preserves_decode_graph(
     assert mode == expected_mode
     assert descriptor.uniform == (expected_mode == CUDAGraphMode.FULL)
     if dp_size > 1:
-        padded_num_tokens = num_tokens
-        for capture_size in cudagraph_capture_sizes:
-            if num_tokens <= capture_size:
-                padded_num_tokens = capture_size
-                break
-        # v0.26 backport: vllm 0.26.0's CudagraphDispatcher only pads the
-        # BatchDescriptor when a graph (FULL) key is selected; the NONE fallback
-        # returns the unpadded token count (vllm/v1/cudagraph_dispatcher.py).
-        # FULL pads before the DP sync, so the sync carries the captured size;
-        # NONE keeps the local count. Either way this rank keeps its own count
-        # in the across-DP metadata instead of adopting the global max.
-        assert descriptor.num_tokens == (padded_num_tokens if expected_mode == CUDAGraphMode.FULL else num_tokens)
         expected_tokens_across_dp = torch.full((dp_size,), 32, dtype=torch.int32)
-        expected_tokens_across_dp[0] = descriptor.num_tokens
-        torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)
+        if mode != CUDAGraphMode.NONE:
+            # PR #16167: DP padding is now enforced in graph mode, so every
+            # rank (including this one) pads to the global max (32) and
+            # re-dispatches on the synced mode; 32 is a capture size.
+            assert descriptor.num_tokens == 32
+            torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)
+        else:
+            # Synced mode is the min across ranks, so it is NONE here: no DP
+            # padding is enforced and this rank keeps its own count in the
+            # across-DP metadata instead of adopting the global max.
+            # v0.26 backport: vllm 0.26.0's CudagraphDispatcher only pads the
+            # BatchDescriptor when a graph (FULL) key is selected; the NONE
+            # fallback returns the unpadded token count
+            # (vllm/v1/cudagraph_dispatcher.py).
+            assert descriptor.num_tokens == num_tokens
+            expected_tokens_across_dp[0] = num_tokens
+            torch.testing.assert_close(tokens_across_dp, expected_tokens_across_dp)
