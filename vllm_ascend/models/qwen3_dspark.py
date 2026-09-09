@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.models.qwen3_dspark import Qwen3DSparkForCausalLM
 
 from vllm_ascend.models.llama_eagle3 import load_quarot_target_layer
@@ -73,7 +74,8 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
         # Upstream load_weights already manages confidence_head (vllm#47808).
         result = super().load_weights(all_weights)
 
-        if rotation_weight is not None:
+        if rotation_weight is not None or get_pp_group().world_size > 1:
+            # A PP-local draft cannot share the target's missing embedding.
             if not includes_embed_tokens:
                 load_quarot_target_layer(
                     self.model.embed_tokens,
@@ -83,7 +85,7 @@ class AscendQwen3DSparkForCausalLM(Qwen3DSparkForCausalLM):
                     "draft embed_tokens.weight",
                 )
                 self.has_own_embed_tokens = True
-            if not includes_lm_head:
+            if rotation_weight is not None and not includes_lm_head:
                 load_quarot_target_layer(
                     self.lm_head,
                     self.target_model_path,

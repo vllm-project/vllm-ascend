@@ -180,6 +180,9 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.input_batch = input_batch
         assert self.input_batch is not None
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        # Remove once verified vLLM includes #54856: profiling uses draft counts.
+        if dummy_run and skip_attn_for_dummy_run:
+            sync_state = None
         with (
             build_attn_metadata_wrapper(),
             build_draft_attn_metadata_factory(

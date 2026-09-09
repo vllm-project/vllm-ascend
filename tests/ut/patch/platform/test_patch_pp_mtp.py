@@ -16,18 +16,22 @@ from vllm_ascend.patch.platform.patch_pp_mtp import (
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-def test_model_config_validates_local_mtp_drafter_as_single_pp_rank(monkeypatch):
+@pytest.mark.parametrize(
+    "model_type,architecture",
+    [("qwen3_5_mtp", "Qwen3_5MTP"), ("qwen3", "DSparkDraftModel"), ("qwen3", "Qwen3DSparkModel")],
+)
+def test_model_config_validates_local_drafter_as_single_pp_rank(monkeypatch, model_type, architecture):
     fake_registry = SimpleNamespace(
         is_pp_supported_model=lambda _architectures, _model_config: False,
     )
     monkeypatch.setattr(ModelConfig, "registry", property(lambda _self: fake_registry))
 
     model_config = ModelConfig.__new__(ModelConfig)
-    model_config.hf_config = SimpleNamespace(model_type="qwen3_5_mtp")
+    model_config.hf_config = SimpleNamespace(model_type=model_type)
     model_config.runner = "draft"
     model_config.model_arch_config = SimpleNamespace(
         total_num_attention_heads=1,
-        architectures=["Qwen3_5MTP"],
+        architectures=[architecture],
     )
     model_config.multimodal_config = None
 
