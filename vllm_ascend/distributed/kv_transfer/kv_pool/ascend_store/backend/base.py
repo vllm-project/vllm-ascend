@@ -50,7 +50,10 @@ def fetch_qos_from_current_config() -> int | None:
         vllm_config = None
     if vllm_config is None:
         return None
-    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+    if kv_transfer_config is None:
+        return None
+    extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
     return parse_qos_from_extra_config(extra_config)
 
 

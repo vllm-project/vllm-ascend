@@ -1598,7 +1598,7 @@ For the temporary DSv4 known issue, see:
 
 Store/PD traffic separation requires **CANN >= 9.1.0**. It is intended for A3 and Ascend 950 Products deployments where PD transfer traffic can use HCCS and Mooncake Store traffic can use ROCE, so the two traffic classes do not compete on the same physical link. For more HIXL deployment patterns, see the [Mooncake + HIXL pooling overview](https://gitcode.com/cann/hixl/wiki/Mooncake%20+%20HIXL%20%E6%B1%A0%E5%8C%96%E6%96%B9%E6%A1%88%E6%80%BB%E8%A7%88%EF%BC%88A2%20-%20A3%EF%BC%89.md).
 
-#### 5.7. QoS Configuration
+### 5.7. QoS Configuration
 
 Both the Mooncake and Memcache backends support configuring the transfer
 QoS. The valid range is **0-4 (integers only)**, and the **default value is 0**
@@ -1611,8 +1611,8 @@ into the backend-specific configuration automatically before the store is
 initialized:
 
 ```json
-    --kv-transfer-config \
-    '{
+--kv-transfer-config \
+'{
     "kv_connector": "AscendStoreConnector",
     "kv_role": "kv_both",
     "kv_connector_extra_config": {
@@ -1621,9 +1621,10 @@ initialized:
         "backend": "mooncake",
         "use_layerwise": false
     }
+}'
 ```
 
-Notes:
+#### Notes
 
 * The `kv_connector_extra_config` value takes precedence over values already
   set in the environment; a warning is logged when it overrides a different
