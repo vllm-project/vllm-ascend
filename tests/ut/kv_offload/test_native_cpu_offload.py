@@ -33,6 +33,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.kv_offload.native.offloading_co
     AscendOffloadingConnectorWorker,
     _canonicalize_split_cache,
 )
+from vllm_ascend.utils import vllm_version_is
 
 
 def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
@@ -64,8 +65,14 @@ def _make_config(extra_config: dict[str, object]) -> OffloadingConfig:
             dcp_size=1,
             data_parallel_index=0,
             is_parallelism_agnostic=True,
-            data_parallel_size=1,
-            data_parallel_rank_local=None,
+            **(
+                {}
+                if vllm_version_is("0.28.0")
+                else {
+                    "data_parallel_size": 1,
+                    "data_parallel_rank_local": None,
+                }
+            ),
         ),
     )
 
