@@ -9,6 +9,7 @@ if not hasattr(torch, "npu") or not torch.npu.is_available():
     pytest.skip("Trace replay kernel test requires an available Ascend NPU", allow_module_level=True)
 
 from vllm.v1.worker.gpu.sample import trace_replay as upstream_trace_replay  # noqa: E402
+
 import vllm_ascend.patch.worker  # noqa: E402,F401
 
 

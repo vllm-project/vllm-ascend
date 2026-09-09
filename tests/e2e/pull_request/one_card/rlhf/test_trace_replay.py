@@ -23,7 +23,6 @@ from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 
-
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 PROMPT = "Hello, my name is"
 TRACE_TOKEN_IDS = [444, 2210, 13, 358, 2776, 264, 220, 17]

@@ -9,7 +9,6 @@ from functools import wraps
 
 from vllm.v1.worker.gpu.sample import trace_replay
 
-
 _upstream_apply_trace_tokens = trace_replay.apply_trace_tokens
 
 
