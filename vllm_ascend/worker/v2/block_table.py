@@ -54,13 +54,12 @@ class AscendBlockTables(BlockTables):
             cp_rank,
             cp_interleave,
         )
-        # The kernel block-table row can be wider than
-        # max_num_blocks_per_group when one KV block maps to multiple kernel
-        # blocks. Use the allocated row stride so the staged row is complete.
-        max_block_table_stride = max(block_table.gpu.stride(0) for block_table in self.block_tables)
-        # tl.arange needs a compile-time power-of-two size. This value is
-        # passed as a constexpr and covers every KV cache group's row.
-        self._block_table_pad_size = triton.next_power_of_2(max_block_table_stride)
+        # Each token tile spans at most ceil(1024 / block_size) adjacent block
+        # indices. Use the smallest group's block size to form one constexpr
+        # window that is safe for every group, without staging a whole row.
+        min_block_size = min(block_sizes)
+        window_size = (1024 + min_block_size - 1) // min_block_size + 1
+        self._block_table_window_size = triton.next_power_of_2(window_size)
         # because we will override these attribute, delete these attribute to
         # make sure it's collected by python gc immediately.
         del self.slot_mappings
@@ -99,6 +98,6 @@ class AscendBlockTables(BlockTables):
             CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,
-            BLOCK_TABLE_PAD_SIZE=self._block_table_pad_size,
+            BLOCK_TABLE_WINDOW_SIZE=self._block_table_window_size,
         )
         return slot_mappings[:, :num_tokens_padded]

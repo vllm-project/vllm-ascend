@@ -40,10 +40,10 @@
      padding program per group.
   2. Resolve the selected request through `idx_mapping`, then read its token
      interval from `query_start_loc`.
-  3. Load the selected request's block-table row once with a contiguous GM
-     load, then process the interval in `TRITON_BLOCK_SIZE` tiles. Convert
-     positions to INT32, calculate block indices and offsets, and gather the
-     physical block number from the staged row.
+  3. For each `TRITON_BLOCK_SIZE` token tile, load only the contiguous
+     block-table window covering that tile. Convert positions to INT32,
+     calculate block indices and offsets, and gather the physical block number
+     from the staged window.
   4. Calculate slot IDs directly for non-CP execution. For CP execution,
      convert virtual offsets to rank-local offsets and replace non-local slots
      with `PAD_ID`.
@@ -75,7 +75,7 @@
 | `CP_INTERLEAVE` | Attribute | Number of consecutive token positions assigned to one CP rank before interleaving to the next rank. | constexpr INT | scalar |
 | `PAD_ID` | Attribute | Value written for padding and token positions owned by another CP rank; production uses `PAD_SLOT_ID`. | constexpr INT | scalar |
 | `TRITON_BLOCK_SIZE` | Attribute | Number of token positions processed per loop tile; production uses 1024. | constexpr INT | scalar |
-| `BLOCK_TABLE_PAD_SIZE` | Attribute | Power-of-two upper bound for the allocated row stride. The load is masked by the runtime row stride. | constexpr INT | scalar |
+| `BLOCK_TABLE_WINDOW_SIZE` | Attribute | Power-of-two number of adjacent block-table entries staged for one token tile. | constexpr INT | scalar |
 
 ## Constraints
 
@@ -89,13 +89,17 @@
   launch. `block_table_strides` and `block_sizes` must describe the matching
   group in the same order.
 - `query_start_loc` must be non-decreasing, start at zero, and end at a value no
-  greater than `max_num_tokens`. Every value in `idx_mapping` and every derived
-  block index must be within the corresponding block-table bounds.
+  greater than `max_num_tokens`. An empty request may use `-1` as its
+  `idx_mapping` sentinel; it is not dereferenced. Every non-empty request's
+  `idx_mapping` and every derived block index must be within the corresponding
+  block-table bounds.
 - `CP_SIZE >= 1`, `0 <= cp_rank < CP_SIZE`, and `CP_INTERLEAVE >= 1`.
 - `slot_mappings_ptr` must be INT32 with at least `max_num_tokens` entries per
   group. `TRITON_BLOCK_SIZE` must be a positive compile-time constant.
-- Every derived block index must be smaller than its group's runtime row stride,
-  which in turn must not exceed `BLOCK_TABLE_PAD_SIZE`.
+- For each token tile, the span from its minimum to maximum derived block index
+  must be smaller than `BLOCK_TABLE_WINDOW_SIZE`. Normal MRV2 positions are
+  contiguous within a request, so the launch-side window calculation satisfies
+  this bound.
 - Graph capture requires the number of groups, request capacity, output
   capacity, and compile-time CP attributes to remain compatible with the
   captured launch.
@@ -109,9 +113,9 @@
     - Converts logical positions from INT64 to INT32 before block-index,
     block-offset, and address calculations, reducing INT64 scalar arithmetic
     on Ascend NPU.
-    - Stages one complete request row with a contiguous masked GM load and uses
-    `tl.gather` for token-to-block lookup, avoiding per-token non-contiguous GM
-    loads.
+    - Stages only the contiguous block-table window needed by each token tile
+    with a masked GM load, then uses `tl.gather` for token-to-block lookup.
+    This bounds UB usage independently of a request's total context length.
     - Replaces the INT32 remainder used for the block offset with
     multiply/subtract to avoid scalar fallback on Ascend.
     - Preserves the upstream launch grid, CP mapping, padding behavior, and

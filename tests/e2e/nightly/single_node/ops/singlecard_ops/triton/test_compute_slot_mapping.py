@@ -28,12 +28,22 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
     """Check the Ascend V2 kernel against the upstream kernel."""
     device = "npu"
     max_num_tokens = 8192
-    idx_mapping = torch.tensor([2, 0], dtype=torch.int32, device=device)
-    query_start_loc = torch.tensor([0, 5, 10], dtype=torch.int32, device=device)
-    positions = torch.tensor(
-        [0, 1, 63, 64, 127, 0, 2, 64, 128, 255],
-        dtype=torch.int64,
+    # Empty requests use -1 as their mapping sentinel. The Ascend kernel must
+    # skip that row rather than resolving it while staging a block-table window.
+    idx_mapping = torch.tensor([2, -1, 0], dtype=torch.int32, device=device)
+    # Each non-empty request crosses a 1024-token tile boundary and starts one
+    # token before a block boundary. This exercises the window's largest span.
+    tokens_per_request = 1025
+    query_start_loc = torch.tensor(
+        [0, tokens_per_request, tokens_per_request, 2 * tokens_per_request],
+        dtype=torch.int32,
         device=device,
+    )
+    positions = torch.cat(
+        (
+            torch.arange(63, 63 + tokens_per_request, dtype=torch.int64, device=device),
+            torch.arange(127, 127 + tokens_per_request, dtype=torch.int64, device=device),
+        )
     )
 
     num_groups = 2
@@ -49,6 +59,8 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         device=device,
     )
     block_sizes = torch.tensor([64, 128], dtype=torch.int32, device=device)
+    min_block_size = min(block_sizes.tolist())
+    block_table_window_size = triton.next_power_of_2((1024 + min_block_size - 1) // min_block_size + 1)
     slot_mappings = torch.zeros((num_groups, max_num_tokens), dtype=torch.int32, device=device)
     ref_slot_mappings = torch.zeros_like(slot_mappings)
 
@@ -74,7 +86,7 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         slot_mappings.stride(0),
         cp_rank,
         **kernel_kwargs,
-        BLOCK_TABLE_PAD_SIZE=triton.next_power_of_2(max(table.stride(0) for table in block_tables)),
+        BLOCK_TABLE_WINDOW_SIZE=block_table_window_size,
     )
     ref_compute_slot_mappings_kernel[grid](
         *kernel_args,
@@ -106,7 +118,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.cp_rank = 0
     block_tables.cp_size = 1
     block_tables.cp_interleave = 1
-    block_tables._block_table_pad_size = triton.next_power_of_2(block_table.stride(0))
+    block_tables._block_table_window_size = 512
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(
