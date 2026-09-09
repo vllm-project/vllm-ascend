@@ -231,6 +231,7 @@ def test_token_concat_parent_descriptor_preserves_unordered_blocks():
     assert lengths == [48, 48]
     assert info is not None
     assert info["n_main"] == 2
+    assert info["atomic_transfers"] == 2
 
 
 @pytest.mark.parametrize(
@@ -238,6 +239,7 @@ def test_token_concat_parent_descriptor_preserves_unordered_blocks():
     [
         ({"main_cache_layout": "separate_nope_rope"}, "token_concat"),
         ({"main_cache_dtype": "float16"}, "dtype mismatch"),
+        ({"main_cache_dtype": "float32"}, "dtype mismatch"),
         ({"main_cache_num_heads": 2}, "head geometry mismatch"),
         ({"main_cache_nope_dim": 7}, "head geometry mismatch"),
         ({"main_cache_rope_dim": 5}, "head geometry mismatch"),
@@ -252,6 +254,22 @@ def test_token_concat_layout_mismatch_fails_before_descriptor_build(override, me
             "model.layers.0.self_attn",
             _token_concat_wire_meta(**override),
         )
+
+
+def test_missing_wire_layout_label_falls_back_to_legacy_default():
+    """A wire frame without the layout tag is legacy metadata, and legacy
+    metadata must be rejected -- never silently accepted."""
+    thread = _make_parent_read_thread()
+
+    meta = _token_concat_wire_meta()
+    del meta["model.layers.0.self_attn"]["main_cache_layout"]
+    with pytest.raises(RuntimeError, match="token_concat"):
+        thread._resolve_read_layer("model.layers.0.self_attn", meta)
+
+    meta = _token_concat_wire_meta()
+    del meta["model.layers.0.self_attn"]["main_tensor_count"]
+    with pytest.raises(RuntimeError, match="one parent main tensor"):
+        thread._resolve_read_layer("model.layers.0.self_attn", meta)
 
 
 def test_send_metadata_serializes_token_concat_geometry():
@@ -630,6 +648,53 @@ def test_owned_component_without_descriptors_still_fails():
         )
 
     thread.engine.batch_transfer_sync_read.assert_not_called()
+
+
+def _make_consumer_registration_worker(
+    tp_rank=0,
+    *,
+    offload_layer_names=("model.layers.0.self_attn",),
+    gvas_parent_bases=None,
+    cpu_block_lens=None,
+    cpu_parent_caches=None,
+):
+    worker = SFAPDRD2HConsumerWorker.__new__(SFAPDRD2HConsumerWorker)
+    worker.tp_rank = tp_rank
+    worker.kv_cache_config = SimpleNamespace(num_blocks=8)
+    worker.offload_manager = SimpleNamespace(
+        offload_layer_names=list(offload_layer_names),
+        gvas_parent_bases=[3000] if gvas_parent_bases is None else gvas_parent_bases,
+        cpu_block_lens=[48] if cpu_block_lens is None else cpu_block_lens,
+        cpu_parent_caches=[object()] if cpu_parent_caches is None else cpu_parent_caches,
+    )
+    return worker
+
+
+@pytest.mark.parametrize(
+    ("field", "message"),
+    [
+        ("gvas_parent_bases", "GVA/layer count mismatch"),
+        ("cpu_block_lens", "block-size/layer count mismatch"),
+        ("cpu_parent_caches", "CPU parent pool/layer count mismatch"),
+    ],
+)
+def test_consumer_registration_rejects_layer_count_mismatch(field, message):
+    fields = {"gvas_parent_bases": [3000], "cpu_block_lens": [48], "cpu_parent_caches": [object()]}
+    fields[field] = []
+    worker = _make_consumer_registration_worker(tp_rank=0, **fields)
+
+    with pytest.raises(RuntimeError, match=message):
+        worker._register_memfabric_pull({})
+
+
+def test_non_owner_rank_tolerates_missing_cpu_parent_pool():
+    """Non-owner ranks consume broadcast GVA bases only, so an empty local CPU
+    parent pool must pass the owner-rank guard and fail later, on the missing
+    top-k workspace, instead of tripping the count guard."""
+    worker = _make_consumer_registration_worker(tp_rank=1, cpu_parent_caches=[])
+
+    with pytest.raises(AttributeError):
+        worker._register_memfabric_pull({})
 
 
 def test_read_descriptor_rejects_missing_destination_blocks():
