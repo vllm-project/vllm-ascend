@@ -307,7 +307,7 @@ benchmarks:
     max_out_len: 1500
     batch_size: 4
     request_rate: 0
-    baseline: 170.83
+    baseline: 138.5562
     threshold: 0.95
   perf_TPOT50_64_1:
     case_type: performance
@@ -318,5 +318,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 16
     request_rate: 0.25
-    baseline: 223.8
+    baseline: 177.9478
     threshold: 0.95
