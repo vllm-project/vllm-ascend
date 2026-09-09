@@ -224,8 +224,10 @@ def get_quant_type_for_layer(
     proj_name = prefix.split(".")[-1]
     if proj_name in packed_modules_mapping:
         quant_type = None
+        # Replace only the trailing component; str.replace would also rewrite
+        # any earlier occurrence of proj_name inside the prefix.
         shard_prefixes = [
-            prefix.replace(proj_name, shard_proj_name) for shard_proj_name in packed_modules_mapping[proj_name]
+            prefix.removesuffix(proj_name) + shard_proj_name for shard_proj_name in packed_modules_mapping[proj_name]
         ]
         for shard_prefix in shard_prefixes:
             shard_key = shard_prefix + ".weight"
@@ -433,7 +435,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         proj_name = prefix.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
             return all(
-                f"{prefix.replace(proj_name, shard_proj_name)}.weight" in self.quant_description
+                f"{prefix.removesuffix(proj_name) + shard_proj_name}.weight" in self.quant_description
                 for shard_proj_name in self.packed_modules_mapping[proj_name]
             )
         return f"{prefix}.weight" in self.quant_description
