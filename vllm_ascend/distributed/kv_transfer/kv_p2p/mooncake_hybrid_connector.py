@@ -53,7 +53,7 @@ from vllm.v1.request import RequestStatus
 
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
-from vllm_ascend.distributed.kv_transfer.utils.utils import get_transfer_timeout_value
+from vllm_ascend.distributed.kv_transfer.utils.utils import PD_QOS_DEFAULT, get_transfer_timeout_value, inject_qos
 from vllm_ascend.utils import enable_custom_op, get_kv_cache_tensor_layers, is_vl_model
 
 # isort: off
@@ -1619,6 +1619,7 @@ class MooncakeConnectorWorker:
         device_index = self.pp_rank * self.tp_size + self.tp_rank
         self.handshake_port = self.side_channel_port + device_index
         self.sockets: dict = {}
+        inject_qos(vllm_config.kv_transfer_config.get_from_extra_config("qos_priority", PD_QOS_DEFAULT))
         self.engine = global_te.get_transfer_engine(self.side_channel_host, device_name=None)
         self.te_rpc_port = self.engine.get_rpc_port()
 
