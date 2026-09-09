@@ -549,10 +549,21 @@ class NPUModelRunner(GPUModelRunner):
 
         return input_batch
 
-    def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    def prepare_dummy_attn(
+        self, input_batch: AscendInputBatch, valid_state_slots: bool = False
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         if self.pcp_manager is None:
-            return super().prepare_dummy_attn(input_batch)
-        return self.pcp_manager.prepare_dummy_attn(input_batch)
+            return super().prepare_dummy_attn(
+                input_batch,
+                **({} if vllm_version_is("0.28.0") else {"valid_state_slots": valid_state_slots}),
+            )
+        block_tables, slot_mappings = self.pcp_manager.prepare_dummy_attn(input_batch)
+        if not vllm_version_is("0.28.0") and valid_state_slots:
+            # Match the upstream state-slot contract in the persistent PCP views.
+            for block_table in block_tables:
+                state_slots = torch.arange(1, block_table.shape[0] + 1, dtype=torch.int32, device=block_table.device)
+                block_table[:, 0].copy_(state_slots)
+        return block_tables, slot_mappings
 
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity shared by every rank of the lmhead-TP group.
