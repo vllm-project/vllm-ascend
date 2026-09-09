@@ -85,8 +85,9 @@ def test_full_parent_transfer_updates_both_views_without_copy(reader):
     thread, source, target, meta = make_transfer(reader)
     nope, rope = target[..., :8], target[..., 8:]
     layer = thread._resolve_read_layer("layer", meta)
-    local, peer, lengths, _ = thread._build_req_descriptors(layer, "req", [2, 5, 1], [], True)
+    local, peer, lengths, info = thread._build_req_descriptors(layer, "req", [2, 5, 1], [], True)
     assert lengths == [96, 96, 96]
+    assert info["atomic_transfers"] == 3
     for dst, src, size in zip(local, peer, lengths):
         ctypes.memmove(dst, src, size)
     for dst_block, src_block in zip([4, 0, 3], [2, 5, 1]):
@@ -111,22 +112,23 @@ def test_tp_partition_covers_parent_pages_once(reader, tp_size):
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    "overrides,message",
     [
-        {"main_cache_layout": "separate_nope_rope"},
-        {"main_tensor_count": 2},
-        {"main_cache_dtype": "float16"},
-        {"main_cache_dtype": None},
-        {"main_cache_nope_dim": 7},
-        {"block_len": []},
-        {"block_len": [0]},
-        {"block_size_scale": [1]},
-        {"base_addrs": [1, 2], "block_len": [48, 48], "block_size_scale": [2, 2]},
+        ({"main_cache_layout": "separate_nope_rope"}, "token_concat main cache layout"),
+        ({"main_tensor_count": 2}, "one parent main tensor"),
+        ({"main_cache_dtype": "float16"}, "main cache dtype mismatch"),
+        ({"main_cache_dtype": None}, "main cache dtype mismatch"),
+        ({"main_cache_dtype": "float32"}, "main cache dtype mismatch"),
+        ({"main_cache_nope_dim": 7}, "head geometry mismatch"),
+        ({"block_len": []}, "array lengths mismatch"),
+        ({"block_len": [0]}, "invalid page geometry"),
+        ({"block_size_scale": [1]}, "main parent page bytes mismatch"),
+        ({"base_addrs": [1, 2], "block_len": [48, 48], "block_size_scale": [2, 2]}, "unexpected tensor count"),
     ],
 )
-def test_invalid_metadata_rejected_before_transfer(reader, overrides):
+def test_invalid_metadata_rejected_before_transfer(reader, overrides, message):
     thread, source, target, meta = make_transfer(reader)
     meta["layer"].update(overrides)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match=message):
         thread._resolve_read_layer("layer", meta)
     assert torch.all(target == -1)
