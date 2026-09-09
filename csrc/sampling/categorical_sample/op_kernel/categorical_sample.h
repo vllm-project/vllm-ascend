@@ -607,6 +607,7 @@ private:
 
     __aicore__ inline int64_t SelectPositiveInfinity(uint32_t row, float rank)
     {
+        int64_t lastIndex = 0;
         for (uint32_t tile = 0; tile < tileCount_; ++tile) {
             const uint32_t validElements = TileLength(tile);
             const uint32_t vectorElements = TileVectorLength(tile);
@@ -614,14 +615,17 @@ private:
             PipeVToS();
             for (uint32_t index = 0; index < validElements; ++index) {
                 if (logitsFloat.GetValue(index) == POS_INFINITY) {
+                    lastIndex = static_cast<int64_t>(tile) * tileElements_ + index;
                     if (rank < 1.0f) {
-                        return static_cast<int64_t>(tile) * tileElements_ + index;
+                        return lastIndex;
                     }
                     rank -= 1.0f;
                 }
             }
         }
-        return 0;
+        // The FP32 midpoint draw can round up to 1.0. Keep its endpoint
+        // on the positive-infinity support instead of returning token zero.
+        return lastIndex;
     }
 
     __aicore__ inline int64_t SelectPositiveInfinityFp64(uint32_t row, uint64_t rank)

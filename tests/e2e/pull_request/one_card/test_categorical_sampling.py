@@ -475,6 +475,33 @@ def test_categorical_sampling_positive_infinity_lse_and_padding(dtype: torch.dty
     assert float(lse[1]) == 0.0
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("execution", ["eager", "aclgraph"])
+def test_categorical_sampling_positive_infinity_rounded_uniform_endpoint(dtype: torch.dtype, execution: str) -> None:
+    """A draw rounded to 1.0 must not select a token outside the support."""
+    seed_value, position = 17, 1_217_933
+    assert _philox_uniform(seed_value, position) == 1.0
+    supports = [[5], [3, 17], [5, 10, 31]]
+    logits = torch.zeros((len(supports), 33), dtype=dtype, device=DEVICE)
+    for row, support in enumerate(supports):
+        logits[row, support] = float("inf")
+    inputs = (
+        logits,
+        torch.zeros(len(supports), dtype=torch.int32, device=DEVICE),
+        torch.ones(1, dtype=torch.float32, device=DEVICE),
+        torch.tensor([seed_value], dtype=torch.int64, device=DEVICE),
+        torch.full((len(supports),), position, dtype=torch.int64, device=DEVICE),
+    )
+    outputs = _run_categorical_sampling(*inputs)
+    if execution == "aclgraph":
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            outputs = _run_categorical_sampling(*inputs)
+        graph.replay()
+    _assert_tensor_equal(outputs[0], torch.tensor([support[-1] for support in supports], dtype=torch.int64))
+
+
 _ASSERTION_SUBPROCESS = textwrap.dedent(
     """
     import sys
