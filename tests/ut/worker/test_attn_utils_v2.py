@@ -453,7 +453,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     # The layer cache is replaced by the freshly allocated views, so the
     # returned structure is validated by the checks below instead.
     assert [component.shape for component in cache_components] == [
-        (num_blocks, spec.storage_block_size, 1, dim) for dim in component_dims
+        (num_blocks, get_storage_block_size(spec), 1, dim) for dim in component_dims
     ]
     assert [component.dtype for component in cache_components] == [
         cache_dtype,
