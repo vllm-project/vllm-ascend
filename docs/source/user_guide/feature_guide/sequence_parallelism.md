@@ -39,10 +39,12 @@ token size. This keeps tokens sequence-sharded during expert computation and
 reduces duplicate computation and unnecessary communication.
 
 ## How to use
-Steps to follow to enable SP currently：
+
+Steps to follow to enable SP currently:
+
 - `tensor_parallel_size > 1` and `data_parallel_size > 1`.
 - `enable_expert_parallel` is set (MoE models only).
-- `--additional-config '{"enable_flashcomm1": true}'` set `flashcomm1` 
+- `--additional-config '{"enable_flashcomm1": true}'` set `flashcomm1`
 
 ### Temporary FlashComm switch (Ascend only)
 
@@ -71,4 +73,4 @@ VLLM_ASCEND_ENABLE_FLASHCOMM1=1 vllm serve <moe-model> \
 This switch is temporary and deprecated. Referencing either form logs a
 `FlashComm is deprecated` warning from `init_ascend_config`, and the override
 carries a `TODO` to remove it once SP is supported — after that, the upstream
-configuration above takes effect directly. 
+configuration above takes effect directly.
