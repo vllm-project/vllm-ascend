@@ -482,11 +482,12 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             "linear_attn": torch.zeros(2 * mamba_spec.page_size_bytes, dtype=torch.uint8),
         }
 
-        caches = runner._reshape_kv_cache_tensors(
-            kv_cache_config,
-            raw_caches,
-            [4, 8],
-        )
+        with patch("vllm_ascend.worker.model_runner_v1.logger.debug") as debug_log:
+            caches = runner._reshape_kv_cache_tensors(
+                kv_cache_config,
+                raw_caches,
+                [4, 8],
+            )
 
         assert caches["full_attn"].shape == (2, 4, 4, 1, 2)
         assert caches["full_attn"].stride() == (8, 16, 2, 2, 1)
@@ -502,6 +503,15 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             4,
             1,
             2,
+        )
+        assert any(
+            call.args[0].startswith("[non-contiguous-kv-cache] attention")
+            and call.args[1] == "hybrid"
+            for call in debug_log.call_args_list
+        )
+        assert any(
+            call.args[0].startswith("[non-contiguous-kv-cache] mamba")
+            for call in debug_log.call_args_list
         )
 
     def test_pure_gqa_uses_noncontiguous_block_major_kv_cache(self):
@@ -550,15 +560,21 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
         assert isinstance(raw_caches[layer_name], torch.Tensor)
-        cache = runner._reshape_kv_cache_tensors(
-            kv_cache_config,
-            raw_caches,
-            [spec.block_size],
-        )[layer_name]
+        with patch("vllm_ascend.worker.model_runner_v1.logger.debug") as debug_log:
+            cache = runner._reshape_kv_cache_tensors(
+                kv_cache_config,
+                raw_caches,
+                [spec.block_size],
+            )[layer_name]
         assert cache.shape == (2, 2, 8, 2, 2)
         assert cache.stride() == (32, 64, 4, 2, 1)
         assert not cache[0].is_contiguous()
         assert not cache[1].is_contiguous()
+        debug_log.assert_called_once()
+        assert debug_log.call_args.args[0].startswith(
+            "[non-contiguous-kv-cache] attention"
+        )
+        assert debug_log.call_args.args[1] == "gqa"
 
     def test_hybrid_reshape_skips_groups_without_kernel_size(self):
         runner = self._build_runner()
