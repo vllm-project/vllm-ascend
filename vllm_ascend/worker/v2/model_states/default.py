@@ -69,7 +69,7 @@ class AscendModelState(DefaultModelState):
 
         num_actual_reqs = input_batch.num_reqs
         num_actual_tokens = input_batch.num_tokens
-        if self.kvpp_runtime is not None:
+        if self.kvpp_runtime is not None and self.kvpp_runtime.scheduler is not None:
             self.kvpp_runtime.prepare_forward(
                 not self.kvpp_is_dummy_run and bool(np.any(input_batch.num_computed_tokens_np[:num_actual_reqs] > 0))
             )

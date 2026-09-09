@@ -129,6 +129,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
         events: list[object] = []
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.kvpp = SimpleNamespace(
+            scheduler=object(),
             prepare_forward=lambda history: events.append(("prepare", history)),
             complete_forward=lambda: events.append("complete"),
         )
@@ -2102,7 +2103,7 @@ class TestKVPPExecute(unittest.TestCase):
 
         events: list[object] = []
         result = SimpleNamespace()
-        for computed, expected in (([0, 0, 99, 99], False), ([0, 4, 0, 0], True)):
+        for computed, expected in (([0, 0, 99, 99], False), ([0, 4, 0, 0], True), (None, None)):
             with self.subTest(computed=computed):
                 events.clear()
                 runner = NPUModelRunner.__new__(NPUModelRunner)
@@ -2146,6 +2147,7 @@ class TestKVPPExecute(unittest.TestCase):
                 runner._prepare_device_metadata_for_forward = lambda _: None
                 runner.maybe_get_kv_connector_output = lambda *_args, **_kwargs: nullcontext()
                 runner.kvpp = SimpleNamespace(
+                    scheduler=object() if computed is not None else None,
                     prepare_forward=lambda history: events.append(("prepare", history)),
                     complete_forward=lambda: events.append("complete"),
                 )
@@ -2172,7 +2174,9 @@ class TestKVPPExecute(unittest.TestCase):
                     patch.object(module, "update_cos_sin"),
                 ):
                     self.assertIs(runner.execute_model(scheduler_output), result)
-                self.assertEqual(events, [("prepare", expected), "forward", "complete"])
+                self.assertEqual(
+                    events, ([("prepare", expected)] if computed is not None else []) + ["forward", "complete"]
+                )
 
 
 if __name__ == "__main__":

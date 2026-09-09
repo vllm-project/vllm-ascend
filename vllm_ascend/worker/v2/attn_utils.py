@@ -593,7 +593,8 @@ def _allocate_kv_cache(
     """
     vllm_config = get_current_vllm_config()
     if KVPPConfig.from_vllm_config(vllm_config).size > 1:
-        return allocate_kvpp_cache(vllm_config, kv_cache_config, device)
+        caches = allocate_kvpp_cache(vllm_config, kv_cache_config, device)
+        return {name: parts[0] if len(parts) == 1 else parts for name, parts in caches.items()}
     is_dsv4_model = _is_dsv4_model(vllm_config)
     # init kv cache tensors
     kv_cache_raw_tensors: dict[str, torch.Tensor | tuple[torch.Tensor, torch.Tensor]] = {}
@@ -1028,8 +1029,6 @@ def _reshape_kv_cache_v2(
                 continue
 
             raw_cache = kv_cache_raw_tensors[layer_name]
-            if isinstance(raw_cache, tuple) and len(raw_cache) == 1:
-                (raw_cache,) = raw_cache
             if is_hidden_state_cache_spec(kv_cache_spec):
                 # Single tensor for extract_hidden_states (no K/V split).
                 # HiddenStateCacheSpec subclasses MLAAttentionSpec, so this

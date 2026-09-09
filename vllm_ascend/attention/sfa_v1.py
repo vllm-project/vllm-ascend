@@ -1400,8 +1400,8 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             wait_for_kv_layer_from_connector(layer_name)
             if self.layerwise_kv_cache_hook is not None:
-                # Q/KV and lightning-indexer projections above overlap the
-                # full-layer KV cache broadcast. Wait before the first cache write.
+                # Q/KV projections above overlap the full-layer broadcast.
+                # Wait before the first main or indexer cache access.
                 self.layerwise_kv_cache_hook.wait_for_layer(layer_name)
 
             kv_outputs = self.exec_kv(

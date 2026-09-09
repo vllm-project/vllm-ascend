@@ -504,7 +504,7 @@ class AscendConfig:
     dynamic_spec_config: DynamicSpecConfig = dataclasses.field(default_factory=lambda: DynamicSpecConfig())
     # Still factory-injected: construction depends on vllm_config.
     sparse_kv_offload_config: Any = dataclasses.field(kw_only=True)
-    kvpp_config: KVPPConfig = dataclasses.field(kw_only=True)
+    kvpp_config: KVPPConfig = dataclasses.field(default_factory=KVPPConfig, kw_only=True)
 
     # ---- derived fields: sentinel default, after-validator overwrites ----
     enable_shared_expert_dp: bool = False
@@ -1516,7 +1516,6 @@ def init_ascend_config(vllm_config):
         "sparse_kv_offload_config",
         # Factory-injected: derived from additional_config.enable_kvpp + TP.
         "enable_kvpp",
-        "kvpp_size",
         "kvpp_config",
         # Factory-only input: materialized by _resolve_dump_config_path and
         # replaced with the validated dump_config_path field below.

@@ -46,13 +46,14 @@ def init_ascend_model_parallel(
     kvpp_size = get_ascend_config().kvpp_config.size
     global _KVPP
     assert _KVPP is None, "KV layer parallel group is already initialized"
-    kvpp_group_ranks = all_ranks.reshape(-1, kvpp_size).unbind(0)
-    _KVPP = init_model_parallel_group(
-        [ranks.tolist() for ranks in kvpp_group_ranks],
-        get_world_group().local_rank,
-        backend,
-        group_name="kvpp",
-    )
+    if kvpp_size > 1:
+        kvpp_group_ranks = all_ranks.reshape(-1, kvpp_size).unbind(0)
+        _KVPP = init_model_parallel_group(
+            [ranks.tolist() for ranks in kvpp_group_ranks],
+            get_world_group().local_rank,
+            backend,
+            group_name="kvpp",
+        )
 
     pd_tp_ratio = get_ascend_config().pd_tp_ratio
     pd_head_ratio = get_ascend_config().pd_head_ratio

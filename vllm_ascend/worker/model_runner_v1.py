@@ -2431,7 +2431,8 @@ class NPUModelRunner(GPUModelRunner):
             # update global cos, sin
             update_cos_sin(positions)
 
-        self.kvpp.prepare_forward(bool(np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)))
+        if self.kvpp.scheduler is not None:
+            self.kvpp.prepare_forward(bool(np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)))
 
         if self.dynamic_eplb:
             self.eplb_updator.forward_before()

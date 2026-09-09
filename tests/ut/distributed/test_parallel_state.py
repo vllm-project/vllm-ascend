@@ -180,10 +180,14 @@ def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size):
             tensor_parallel_size=4, pipeline_parallel_size=2, data_parallel_size=1, prefill_context_parallel_size=1
         )
     )
-    expected = [[i] for i in range(8)] if size == 1 else [[0, 1, 2, 3], [4, 5, 6, 7]]
-    assert calls["kvpp"] == (expected, 4, "hccl")
-    assert parallel_state.get_kvpp_group() is groups["kvpp"]
-    assert groups["kvpp"] is not groups["mc2"]
+    if size == 1:
+        assert "kvpp" not in calls
+        assert parallel_state._KVPP is None
+    else:
+        assert calls["kvpp"] == ([[0, 1, 2, 3], [4, 5, 6, 7]], 4, "hccl")
+        assert parallel_state.get_kvpp_group() is groups["kvpp"]
+        assert groups["kvpp"] is not groups["mc2"]
     parallel_state.destroy_ascend_model_parallel()
-    groups["kvpp"].destroy.assert_called_once_with()
+    if size > 1:
+        groups["kvpp"].destroy.assert_called_once_with()
     assert parallel_state._KVPP is None

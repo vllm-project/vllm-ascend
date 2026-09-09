@@ -260,6 +260,7 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     parent.assert_called_once_with(dummy)
 
 
+@pytest.mark.parametrize("enabled", [False, True])
 @pytest.mark.parametrize(
     "computed,dummy_run,is_profile,expected",
     [
@@ -269,12 +270,13 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
         ([0, 4, 0, 0], False, True, False),
     ],
 )
-def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected):
+def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected, enabled):
     from vllm_ascend.worker.v2.model_states import default
 
     runner = _make_runner(need_timing=False)
     events: list[object] = []
     runner.kvpp = SimpleNamespace(
+        scheduler=object() if enabled else None,
         prepare_forward=lambda history: events.append(("prepare", history)),
         complete_forward=lambda: events.append("complete"),
     )
@@ -299,6 +301,8 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
         positions=torch.arange(2),
         attn_state=None,
     )
+    if not enabled:
+        batch.num_computed_tokens_np = None  # Disabled KVPP must not inspect history.
     metadata = object()
     monkeypatch.setattr(default, "build_attn_metadata", lambda **_kwargs: metadata)
 
@@ -310,5 +314,5 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
 
     monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
     assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
-    assert events == [("prepare", expected), "forward", "complete"]
+    assert events == ([("prepare", expected)] if enabled else []) + ["forward", "complete"]
     assert state.kvpp_is_dummy_run is False
