@@ -1,17 +1,21 @@
-# Mooncake Layerwise 适配与优化分析
+# Mooncake Layerwise Adaptation and Optimization Analysis
 
-## 1. 适配基线与结论
+## 1. Adaptation Baseline and Conclusion
 
-- 基线：`Eric-dot/vllm-ascend:mooncake`，本地提交 `0a023b094e9e88ffaca0b1fda02529cef6277f8e`。
-- 参考实现：`vllm-project/vllm-ascend#12418`。
-- 本地工作分支：`eric-mooncake-pr12418-port`。
-- 当前状态：核心代码、CPU mock 单测和静态检查已通过；尚未在真实昇腾 NPU、Mooncake Master/Metadata 服务和多 TP 进程上完成 E2E。
+- Baseline: `Eric-dot/vllm-ascend:mooncake` at local commit `0a023b094e9e88ffaca0b1fda02529cef6277f8e`.
+- Reference implementation: `vllm-project/vllm-ascend#12418`.
+- Local working branch: `eric-mooncake-pr12418-port`.
+- Current status: The core implementation, CPU mock unit tests, and static checks have passed. End-to-end testing
+  on real Ascend NPUs, Mooncake Master/Metadata services, and multiple TP processes has not yet been completed.
 
-这次适配不是直接套用旧 PR。个人分支已经有更新的 `metadata.py`、多 cache entry/MTP/SFA 布局、Memcache GVA layerwise、异步线程异常传播和 layer buffer reuse，因此 Mooncake 路径复用了这些新结构，并独立增加 key-major range/session 协议。
+This adaptation does not directly copy the earlier PR. The personal branch already contains an updated
+`metadata.py`, multi-cache-entry/MTP/SFA layouts, Memcache GVA layerwise transfer, asynchronous thread exception
+propagation, and layer-buffer reuse. The Mooncake path therefore reuses these newer structures and adds an
+independent key-major range/session protocol.
 
-## 2. 远端对象为什么从 `block × layer × rank` 降到 `block × rank`
+## 2. Why the Remote Object Count Drops from `block × layer × rank` to `block × rank`
 
-旧的逐层 key 方案把每一层当作一个远端对象：
+The earlier per-layer key scheme treats each layer as a separate remote object:
 
 ```text
 model@block_hash@layer_0@rank_0
@@ -19,19 +23,19 @@ model@block_hash@layer_1@rank_0
 ...
 ```
 
-若有 `B` 个 block、`L` 层、`R` 个实际保存 rank，对象数约为：
+For `B` blocks, `L` layers, and `R` ranks that actually store data, the approximate object count is:
 
 ```text
 B × L × R
 ```
 
-Mooncake layerwise 改成每个 block/rank 只创建一个对象：
+Mooncake layerwise transfer creates only one object for each block/rank pair:
 
 ```text
 model@block_hash@rank_0
 ```
 
-对象内部按真实 cache layout 连续放置所有层：
+All layers are placed contiguously inside the object according to the actual cache layout:
 
 ```text
 object(block, rank)
@@ -40,106 +44,123 @@ object(block, rank)
 └── ...
 ```
 
-每层计算完成后，只对同一对象写该层对应的 byte range。layerwise 改变的是传输时机和 range，并不要求每层成为独立对象，所以对象数变成：
+After each layer finishes computing, only the byte range for that layer is written to the same object. Layerwise
+transfer changes the transfer timing and ranges; it does not require every layer to be a separate object. The object
+count therefore becomes:
 
 ```text
 B × R
 ```
 
-减少的是 Mooncake 元数据对象、key、session 和 `exists` 查询项，不是 KV payload 总字节数。KV 数据仍然需要保存所有层。
+This reduces the number of Mooncake metadata objects, keys, sessions, and `exists` query items, but not the total KV
+payload size. KV data for every layer must still be stored.
 
-## 3. 当前实现的数据与控制流程
+## 3. Data and Control Flow in the Current Implementation
 
-### 3.1 保存
+### 3.1 Saving
 
-1. Scheduler 用每个 block 的所有保存 rank key 做 `batch_is_exist`。
-2. Worker 为未命中的 key 调用 `batch_put_session_start(keys, object_sizes, ReplicateConfig)`。
-3. `LayerBatchBuilder` 根据当前实际 cache entry layout 计算：
-   - NPU 本地 buffer 地址；
-   - 该层各 cache entry 的 size；
-   - 该层在远端全层对象内的 destination offset。
-4. 每完成一层 attention，发送线程调用 `batch_put_from_multi_buffer_ranges`。
-5. 单个 key 的 range 写失败时，只 revoke 该 key，其余 key 继续后续层。
-6. 最后一层成功后调用 `batch_put_session_end`；commit 失败的 key 调用 `batch_put_session_revoke`。
-7. 只有 commit 成功的 key 才进入 chunked-prefill 后续可读集合。
+1. The scheduler calls `batch_is_exist` with all storing-rank keys for each block.
+2. For missing keys, the worker calls `batch_put_session_start(keys, object_sizes, ReplicateConfig)`.
+3. `LayerBatchBuilder` calculates the following values from the actual cache-entry layout:
+   - The local NPU buffer address.
+   - The size of each cache entry in the layer.
+   - The destination offset of the layer within the remote all-layer object.
+4. After each attention layer finishes, the sending thread calls `batch_put_from_multi_buffer_ranges`.
+5. If a range write fails for one key, only that key is revoked; the remaining keys continue with subsequent layers.
+6. After the last layer succeeds, the worker calls `batch_put_session_end`. It calls `batch_put_session_revoke` for
+   keys that fail to commit.
+7. Only successfully committed keys enter the readable set for subsequent chunked-prefill steps.
 
-### 3.2 加载
+### 3.2 Loading
 
-1. Scheduler 只把从 block 0 开始、所有保存 rank 都为 COMPLETE 的连续前缀算作命中。
-2. Worker 对去重后的远端 key 调用 `batch_get_session_start`。
-3. 每层计算前，接收线程用 `batch_get_into_multi_buffer_ranges` 把该层 range 读到本地 block。
-4. 单行失败会记录对应本地 block id，交回 Scheduler 触发重算，避免消费不完整 KV。
-5. 最后一层或请求终止时调用 `batch_get_session_end`；异常路径按 retry/terminal 语义释放 owner。
+1. The scheduler counts only the contiguous prefix starting at block 0 for which every storing rank is `COMPLETE` as
+   a cache hit.
+2. The worker calls `batch_get_session_start` for the deduplicated remote keys.
+3. Before each layer computes, the receiving thread calls `batch_get_into_multi_buffer_ranges` to load that layer's
+   range into the local block.
+4. A failure in one row records the corresponding local block ID and returns it to the scheduler for recomputation,
+   preventing incomplete KV data from being consumed.
+5. The worker calls `batch_get_session_end` after the last layer or when the request terminates. Exceptional paths
+   release owners according to retry or terminal semantics.
 
-### 3.3 Chunked prefill
+### 3.3 Chunked Prefill
 
-`MooncakeSessionTracker` 维护三类关系：
+`MooncakeSessionTracker` maintains three types of relationships:
 
-- 尚未 commit 的 put key 与 request/block owner；
-- 已 commit、可供同一请求后续 chunk 加载的 key；
-- 已打开 get session 的 key 与 request owner。
+- Put keys that have not yet been committed and their request/block owners.
+- Committed keys that later chunks of the same request can load.
+- Open get-session keys and their request owners.
 
-它保证：
+It guarantees that:
 
-- commit 前不会把对象当成可读；
-- 后续 chunk 即使没有新的 `load_spec`，仍会续租并逐层恢复此前已 commit 的 prefix；
-- retry 释放 get session，但保留后续重试所需的 key/block 关系；
-- terminal/preempt 清除 request 状态；
-- 多个请求共享同一远端 key 时，最后一个 owner 释放后才执行 get-end。
+- An object is not considered readable before it is committed.
+- A later chunk renews the lease and restores the previously committed prefix layer by layer, even when it has no new
+  `load_spec`.
+- A retry releases the get session while retaining the key/block relationships required for a subsequent retry.
+- A terminal or preempt event clears request state.
+- When multiple requests share the same remote key, get-end is executed only after the last owner releases it.
 
-## 4. 相对原 PR 已做的适配/修正
+## 4. Adaptations and Corrections Relative to the Original PR
 
-### 4.1 真实 layout offset，而不是固定 `layer_id × page_size`
+### 4.1 Actual Layout Offsets Instead of a Fixed `layer_id × page_size`
 
-当前分支支持一个物理层包含多个 cache entry，也支持 MTP/SFA 布局。远端 offset 使用 `group_layer_cache_entry_offsets` 和实际 `block_len` 前缀和计算：
+The current branch supports multiple cache entries in one physical layer as well as MTP/SFA layouts. Remote offsets
+are calculated from `group_layer_cache_entry_offsets` and prefix sums of the actual `block_len` values:
 
 ```text
 layer_object_offset = sum(block_len before this layer)
 entry_offset = layer_object_offset + prefix_sum(entry sizes in this layer)
 ```
 
-因此远端对象大小直接等于当前 rank 所有层 cache entry 的总字节数，不再假设每层大小完全相同，也不会错误地再乘一次 `num_layers`。
+The remote object size therefore equals the total number of bytes across all cache entries for all layers on the
+current rank. The implementation no longer assumes that every layer has the same size or incorrectly multiplies the
+size by `num_layers` again.
 
-### 4.2 PutStart 继承 Mooncake 放置策略
+### 4.2 PutStart Inherits the Mooncake Placement Policy
 
-原 PR 的 session start 没有传 `ReplicateConfig`。当前实现和 whole-key put 一致，传递：
+The session-start path in the original PR did not pass `ReplicateConfig`. The current implementation matches the
+whole-key put path and passes:
 
-- `preferred_segment`；
-- `prefer_alloc_in_same_node`。
+- `preferred_segment`.
+- `prefer_alloc_in_same_node`.
 
-这样 layerwise 不会绕过已有的本地优先/同节点分配策略。
+This prevents layerwise transfer from bypassing the existing local-first and same-node placement policies.
 
-### 4.3 range 调用接入传输限流
+### 4.3 Transfer Throttling for Range Calls
 
-- `layerwise_max_transfer_blocks`：限制单次 range API 的 key/block 行数；
-- `layerwise_max_transfer_bytes`：把过大的单个连续 segment 拆成多个更小 range。
+- `layerwise_max_transfer_blocks` limits the number of key/block rows in a single range API call.
+- `layerwise_max_transfer_bytes` splits an oversized contiguous segment into smaller ranges.
 
-PutStart、GetStart、GetEnd 和 Scheduler 的 exists 查询也按 block 上限分批，避免大 prompt 产生超大 Python/C++ 参数列表和瞬时元数据峰值。
+PutStart, GetStart, GetEnd, and scheduler `exists` queries are also batched according to the block limit. This avoids
+oversized Python/C++ argument lists and transient metadata spikes for long prompts.
 
-### 4.4 启动期 fail-fast
+### 4.4 Fail Fast During Startup
 
-Mooncake layerwise 启动时检查所有 session/range 方法。缺少接口会直接报错，并提示需要包含 Mooncake PR #2881 的 client，而不是在首个请求的异步线程里才失败。
+Mooncake layerwise transfer checks all required session and range methods during startup. If an interface is missing,
+startup fails immediately and reports that the client must include Mooncake PR #2881, instead of failing in an
+asynchronous thread on the first request.
 
-当前 key schema 只编码 model、block hash、TP/head rank，因此明确拒绝：
+The current key schema encodes only the model, block hash, and TP/head rank, so the implementation explicitly rejects:
 
-- pipeline parallel size > 1；
-- prefill/decode context parallel size > 1；
-- hybrid/multi-group KV cache；
-- TP mismatch layerwise。
+- Pipeline parallel size greater than 1.
+- Prefill or decode context parallel size greater than 1.
+- Hybrid or multi-group KV cache layouts.
+- TP mismatch with layerwise transfer.
 
-### 4.5 异常与回退
+### 4.5 Exceptions and Fallbacks
 
-- batch 返回值必须与 key 一一对齐，拒绝缺项、布尔值和非整数结果；
-- range 异常先发布 invalid block/abort，再唤醒计算线程；
-- put 异常 revoke PROCESSING 对象；
-- get 异常在确认 range 调用退出后才结束 session；
-- 纯 consumer 在 load hook 中推进 layer cursor，不依赖不会被调用的 save hook。
+- Batch results must align one-to-one with keys. Missing items, Boolean values, and non-integer results are rejected.
+- A range exception publishes invalid-block and abort state before waking the compute thread.
+- A put exception revokes `PROCESSING` objects.
+- A get exception ends the session only after the range call is confirmed to have exited.
+- A consumer-only worker advances the layer cursor in the load hook instead of depending on a save hook that will
+  never be called.
 
-## 5. 如何运行
+## 5. Running the Feature
 
-### 5.1 Mooncake 版本
+### 5.1 Mooncake Version
 
-需要安装包含以下方法的 Mooncake Python client：
+Install a Mooncake Python client that provides the following methods:
 
 ```text
 batch_put_session_start
@@ -151,9 +172,10 @@ batch_get_into_multi_buffer_ranges
 batch_get_session_end
 ```
 
-如果当前发布 wheel 尚未包含这些接口，需要从合入 PR #2881 后的 Mooncake 源码构建。启动时会自动检查。
+If the currently published wheel does not provide these interfaces, build Mooncake from source after PR #2881 has
+been merged. The interfaces are checked automatically during startup.
 
-### 5.2 配置示例
+### 5.2 Configuration Example
 
 ```bash
 export MOONCAKE_CONFIG_PATH=/path/to/mooncake.json
@@ -175,64 +197,82 @@ python -m vllm.entrypoints.openai.api_server \
   }'
 ```
 
-第一轮真机验证建议先用 TP=1、`layerwise_prefetch_layers=1`、不开 hybrid/CP/PP，再逐步扩大 TP、block 数和 prefetch 深度。
+For the first hardware validation, start with TP=1, `layerwise_prefetch_layers=1`, and hybrid/CP/PP disabled. Then
+gradually increase the TP size, block count, and prefetch depth.
 
-联调时可临时设置 `VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1`，输出 whole-key、逐层 range 和 commit 的 JSON 审计日志；正常运行保持默认 `0`，避免逐层日志开销。
+During integration testing, temporarily set `VLLM_ASCEND_KVPOOL_RANGE_DEBUG=1` to emit JSON audit logs for whole-key
+operations, per-layer ranges, and commits. Keep the default value of `0` during normal operation to avoid per-layer
+logging overhead.
 
-## 6. 后续优化建议
+## 6. Follow-up Optimization Recommendations
 
-### P0：上线前应补齐
+### P0: Required Before Production
 
-1. **固定 Mooncake 最低 commit/version**
-   - 仅检查方法能避免旧 client，但不能发现 ABI/返回码语义不兼容。
-   - 建议在安装文档和 CI 镜像中固定包含 PR #2881 的确切 commit 或首个正式版本。
+1. **Pin a minimum Mooncake commit or version**
+   - Checking method availability prevents use of an outdated client but cannot detect incompatible ABI or return-code
+     semantics.
+   - Pin the exact commit containing PR #2881, or the first official release that contains it, in the installation
+     documentation and CI images.
 
-2. **key namespace 加 schema/layout fingerprint**
-   - 当前兼容原 PR，仍使用 model basename。
-   - 同 basename 的不同 revision、dtype、block size、KV layout 可能冲突。
-   - 建议 key 加入 tenant、model revision、dtype、block size、TP layout 和 schema version 的稳定摘要。
+2. **Add a schema/layout fingerprint to the key namespace**
+   - For compatibility with the original PR, the current implementation still uses the model basename.
+   - Different revisions, data types, block sizes, or KV layouts with the same basename can collide.
+   - Add a stable digest of the tenant, model revision, data type, block size, TP layout, and schema version to the key.
 
-3. **真实 NPU E2E 与故障注入**
-   - 至少覆盖 TP=1/2、kv_both、P/D、chunked prefill、请求 preempt、单 key range 失败、commit 失败、Master 重启。
-   - 校验加载 KV 与本地计算 logits/token 完全一致。
+3. **Add real-NPU E2E tests and fault injection**
+   - Cover at least TP=1/2, `kv_both`, P/D, chunked prefill, request preemption, single-key range failure,
+     commit failure, and Master restart.
+   - Verify that loading KV data produces exactly the same logits and tokens as local computation.
 
-### P1：性能收益较高
+### P1: High-Impact Performance Improvements
 
-1. **自适应 prefetch 深度**
-   - 固定 `layerwise_prefetch_layers` 不能适应不同层计算时间和网络抖动。
-   - 可根据最近 N 层的 `transfer_time / compute_time`、队列深度和可用 buffer 动态控制窗口。
+1. **Adaptive prefetch depth**
+   - A fixed `layerwise_prefetch_layers` value cannot adapt to different per-layer compute times or network jitter.
+   - Dynamically control the window using the recent `transfer_time / compute_time` ratio, queue depth, and available
+     buffers.
 
-2. **滑动 session 窗口**
-   - 当前一次为本批所有 block 打开 session；长 prompt 仍可能产生大量同时活跃 lease/session。
-   - 可只为未来若干层或若干 block window 开 session，完成后滚动推进，降低 Master 状态和超时压力。
+2. **Sliding session window**
+   - The current implementation opens sessions for every block in the batch at once. Long prompts can still create
+     many simultaneously active leases and sessions.
+   - Open sessions only for a future layer or block window, then advance the window after completion to reduce Master
+     state and timeout pressure.
 
-3. **减少每层 Python list 构造**
-   - 当前每层仍创建 `all_buffers/all_sizes/all_offsets`。
-   - 可预计算每层 range template，block id 只做向量化地址偏移；进一步可把描述符缓存到 C++/pybind 层。
+3. **Reduce per-layer Python list construction**
+   - The current implementation still creates `all_buffers`, `all_sizes`, and `all_offsets` for every layer.
+   - Precompute a range template for each layer and apply only vectorized block-ID address offsets. The descriptors
+     could eventually be cached in the C++/pybind layer.
 
-4. **Scheduler 增量命中查询**
-   - 当前查询全部候选 block 后再找第一个 miss。
-   - 可分 window 查询并在首个不完整 block 停止，长 prompt、低命中率时显著减少 Master RPC 和 key 数。
+4. **Incremental scheduler hit queries**
+   - The current implementation queries every candidate block before locating the first miss.
+   - Query in windows and stop at the first incomplete block to substantially reduce Master RPCs and key counts for
+     long prompts with low hit rates.
 
-5. **基于总字节和后端反馈的动态 batch**
-   - 当前 blocks/segment bytes 是静态上限。
-   - 可联合限制单次总 range 数、总 bytes，并根据队列延迟、返回码和带宽自动调整。
+5. **Dynamic batching based on total bytes and backend feedback**
+   - The current block and segment-byte limits are static.
+   - Jointly limit the total ranges and bytes per call, and adjust them automatically according to queue latency,
+     return codes, and bandwidth.
 
-6. **共享 key 的本地 fan-out**
-   - 多请求命中同一远端 block 时，现在同一个 key 可对应多行远端读取。
-   - 可先读入一个共享 staging buffer，再在本机复制到多个目标 block；是否收益取决于远端带宽与本地 H2D 带宽。
+6. **Local fan-out for shared keys**
+   - When multiple requests hit the same remote block, one key can currently produce multiple remote-read rows.
+   - Read into a shared staging buffer first, then copy to multiple target blocks locally. Whether this helps depends
+     on remote bandwidth relative to local H2D bandwidth.
 
-### P2：进一步演进
+### P2: Further Evolution
 
-1. 支持 hybrid/multi-group：key 和 object header 记录 group layout，每组独立 completeness bitmap。
-2. 支持 PP/PCP/DCP：key 编码并行坐标，Scheduler 按参与 rank 集合验证完整性。
-3. 支持 per-layer readiness bitmap：允许消费者在整个对象 COMPLETE 前读取已经完成的早期层；需要 Mooncake 提供可见性和一致性协议，复杂度较高。
-4. 用对象 header 记录 schema/version/checksum，加载前做廉价兼容性检查，避免静默读错布局。
+1. Support hybrid and multi-group layouts by recording the group layout in the key and object header, with an
+   independent completeness bitmap for each group.
+2. Support PP/PCP/DCP by encoding parallel coordinates in the key and having the scheduler validate the participating
+   rank set.
+3. Support a per-layer readiness bitmap so consumers can read completed early layers before the entire object becomes
+   `COMPLETE`. This requires visibility and consistency support from Mooncake and introduces substantial complexity.
+4. Record a schema, version, and checksum in the object header and perform an inexpensive compatibility check before
+   loading to prevent silent layout mismatches.
 
-## 7. 验证记录
+## 7. Validation Record
 
-- `py_compile`：核心改动文件通过。
-- Ruff lint/format：通过。
-- 相关 CPU mock pytest：`285 passed, 106 subtests passed`。
-- `VLLM_ASCEND_KVPOOL_RANGE_DEBUG` 严格 `0/1` 取值检查：通过。
-- 未完成：真实 NPU、真实 Mooncake client/Master、多节点网络和性能基准。
+- `py_compile`: Passed for the core changed files.
+- Ruff lint and format checks: Passed.
+- Relevant CPU mock pytest suite: `285 passed, 106 subtests passed`.
+- Strict `0`/`1` validation for `VLLM_ASCEND_KVPOOL_RANGE_DEBUG`: Passed.
+- Not yet completed: Tests with real NPUs, a real Mooncake client and Master, multi-node networking, and performance
+  benchmarks.
