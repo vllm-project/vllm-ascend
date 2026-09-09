@@ -1261,7 +1261,7 @@ class AscendSFAImpl(MLAAttentionImpl):
           indexer ``(indexer_k_cache, indexer_scale_cache)``
           -> ``(packed_kv_cache, indexer_k_cache, indexer_scale_cache)``
 
-        Layers that reuse another layer's top-k indices have no local indexer;
+        Static shared-index layers have no runtime indexer cache;
         for those layers, the main cache tuple is returned unchanged.
         """
         # TODO: Remove this recomposition once SFA kernels accept split
@@ -1299,7 +1299,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
     def _get_indexer_attn_metadata(self) -> Any | None:
         """Fetch the indexer cache layer's own metadata, built by the indexer
-        backend's builder; ``None`` when this layer has no indexer."""
+        backend's builder; ``None`` when this layer has no runtime indexer."""
         if not self.runtime_has_indexer:
             return None
         prefix = self.indexer.k_cache.prefix

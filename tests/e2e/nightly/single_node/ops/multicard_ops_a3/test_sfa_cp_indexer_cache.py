@@ -16,6 +16,7 @@ from vllm.distributed.parallel_state import (
 )
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 
 
 @torch.inference_mode()
@@ -38,12 +39,10 @@ def _check_cache(rank, sfa_c8, li_c8, is_mtp):
     k_li = torch.arange(4, device="npu").to(indexer_dtype)[:, None].expand(4, 128).contiguous()
     k_li_scale = torch.ones((4, 1), device="npu", dtype=torch.float16)
     local = slice(rank * 2, rank * 2 + 2)
-    indexer, indexer_scale, fused_kv, handles = impl._prepare_kv_for_parallel(
+    fused_kv, handles = impl._prepare_kv_for_parallel(
         k_pe[local],
         k_nope[local],
         scale[local],
-        k_li[local] if is_mtp else None,
-        k_li_scale[local] if is_mtp and li_c8 else None,
         False,
     )
     cache: tuple[torch.Tensor, ...]
@@ -55,11 +54,10 @@ def _check_cache(rank, sfa_c8, li_c8, is_mtp):
             torch.zeros((1, 128, 1, 64), device="npu", dtype=dtype),
         )
     slots = torch.tensor([1, 3, 5, 7], device="npu", dtype=torch.int64)
-    _, _, stored_indexer = impl._store_parallel_kv(
+    impl._store_parallel_kv(
         k_pe[local],
         k_nope[local],
         scale[local],
-        indexer,
         fused_kv,
         handles,
         cache,
@@ -68,20 +66,43 @@ def _check_cache(rank, sfa_c8, li_c8, is_mtp):
         False,
     )
     expected_parts = [k_nope, k_pe, scale] if sfa_c8 else [k_pe, k_nope]
-    if is_mtp and not (sfa_c8 or li_c8):
-        expected_parts.append(k_li)
     torch.testing.assert_close(fused_kv, torch.cat(expected_parts, dim=-1), atol=0, rtol=0)
     if sfa_c8:
         torch.testing.assert_close(cache[0].view(128, -1)[slots], fused_kv, atol=0, rtol=0)
     else:
         torch.testing.assert_close(cache[0].view(128, 512)[slots], k_nope, atol=0, rtol=0)
         torch.testing.assert_close(cache[1].view(128, 64)[slots], k_pe, atol=0, rtol=0)
-    if is_mtp:
-        torch.testing.assert_close(stored_indexer, k_li, atol=0, rtol=0)
+    # Indexer communication and cache writes now belong to the indexer backend.
+    # Run its real gather/write path for MTP, including compute_topk=False.
+    if impl.runtime_has_indexer:
+        indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        torch.nn.Module.__init__(indexer)
+        indexer.enable_sparse_li_c8 = li_c8
+        indexer._pcp_active = False
+        indexer._dsa_cp_active = True
+        indexer_cache: tuple[torch.Tensor, ...] = (torch.zeros((1, 128, 1, 128), device="npu", dtype=indexer_dtype),)
         if li_c8:
-            torch.testing.assert_close(indexer_scale, k_li_scale, atol=0, rtol=0)
+            indexer_cache += (torch.zeros((1, 128, 1, 1), device="npu", dtype=torch.float16),)
+        indexer.k_cache = SimpleNamespace(kv_cache=indexer_cache)
+        with (
+            patch.object(indexer, "forward_k", return_value=(k_li[local], k_li_scale[local] if li_c8 else None)),
+            patch.object(indexer, "_use_c8_reshape_optim", return_value=False),
+        ):
+            result = indexer(
+                k_li[local],
+                k_li[local],
+                k_pe[local],
+                k_pe[local],
+                k_li[local],
+                SimpleNamespace(slot_mapping=slots),
+                compute_topk=False,
+            )
+        assert result is None
+        torch.testing.assert_close(indexer_cache[0].view(128, 128)[slots], k_li, atol=0, rtol=0)
+        if li_c8:
+            torch.testing.assert_close(indexer_cache[1].view(128, 1)[slots], k_li_scale, atol=0, rtol=0)
     else:
-        assert stored_indexer is None and indexer_scale is None
+        assert not is_mtp
 
 
 def _worker(rank, port):
@@ -102,7 +123,10 @@ def _worker(rank, port):
             group_name="sfa_cp_indexer_test",
         )
         # Only select the test group; collectives and NPU cache writes are real.
-        with patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=group):
+        with (
+            patch("vllm_ascend.attention.context_parallel.sfa_cp.get_tp_group", return_value=group),
+            patch("vllm_ascend.attention.indexer.get_tp_group", return_value=group),
+        ):
             for sfa_c8, li_c8, is_mtp in itertools.product((False, True), repeat=3):
                 _check_cache(rank, sfa_c8, li_c8, is_mtp)
     finally:
