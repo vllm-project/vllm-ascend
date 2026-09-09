@@ -205,7 +205,7 @@ estimated_times:
   tests/e2e/pull_request/four_card/test_deepseek_v4.py: 600
   tests/e2e/pull_request/four_card/test_pipeline_parallel.py: 690
   tests/e2e/pull_request/four_card/test_profiling_chunk_performance.py: 190
-  tests/e2e/pull_request/four_card/test_qwen3_5.py: 670
+  tests/e2e/pull_request/four_card/test_qwen3_5.py: 420
   tests/e2e/pull_request/four_card/lora/test_qwen35_27b_multi_lora_mtp_eager.py: 1200
   tests/e2e/pull_request/four_card/test_qwen3_next.py: 480
   tests/e2e/pull_request/four_card/test_graph_mode.py: 480
