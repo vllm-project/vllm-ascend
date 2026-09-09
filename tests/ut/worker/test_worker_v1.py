@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
 from tests.ut.base import TestBase
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
+from vllm_ascend.utils import vllm_version_is
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
 kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
@@ -205,6 +206,7 @@ class TestNPUWorker(TestBase):
 
         self.assertEqual(memory_info, (3, 3, 1.0))
 
+    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_deepseek_v4_shared_tuple_layout_does_not_scale_budget(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -232,6 +234,7 @@ class TestNPUWorker(TestBase):
         with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
             self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), 12345)
 
+    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_hybrid_budget_scaling_follows_runner_backing_capability(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -270,6 +273,10 @@ class TestNPUWorker(TestBase):
                 with patch("vllm_ascend.worker.worker.get_kv_cache_groups", return_value=groups):
                     self.assertEqual(worker._scale_kv_cache_memory_for_multi_group(12345), expected_budget)
 
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
     def test_pure_attention_multi_group_budget_scales_for_private_layout(self):
         from vllm_ascend.worker.worker import NPUWorker
 
@@ -541,8 +548,15 @@ class TestNPUWorker(TestBase):
             mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
             worker.wake_up(tags=["kv_cache"])
-            mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+            if vllm_version_is("0.28.0"):
+                mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
+            else:
+                mock_model_runner.post_kv_cache_wake_up.assert_not_called()
 
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "The post-KV-cache wake hook is present on vLLM 0.28.0",
+    )
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
     @patch("vllm_ascend.worker.worker.get_ascend_config")
     def test_wake_up_without_post_kv_cache_hook(self, mock_get_config, mock_allocator_class):

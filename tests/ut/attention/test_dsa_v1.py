@@ -1608,7 +1608,6 @@ def test_a5_bf16_o_proj_uses_transpose_batchmatmul():
 
     with (
         patch("vllm_ascend.attention.dsa_v1.oproj_tp_enable", return_value=False),
-        patch("vllm_ascend.attention.dsa_v1.olora_tp_enable", return_value=False),
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_transpose_batchmatmul", return_value=projected) as batched,
         patch("vllm_ascend.attention.dsa_v1.torch_npu.npu_dynamic_mx_quant") as quant,
     ):
@@ -1724,6 +1723,8 @@ def test_pcp_metadata_builds_from_manager_global_view():
     )
     pcp_manager._global_batch_slot_mappings = global_slot_mappings
     pcp_manager._hidden_restore_idx = hidden_restore_idx
+    pcp_manager._padded_gather_idx = None
+    pcp_manager._gathered_kv_write_mask = None
     pcp_context = pcp_manager.build_attention_context()
     global_metadata = AscendDSAMetadata(
         num_actual_tokens=5,

@@ -28,6 +28,7 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
 from vllm.v1.worker.gpu.states import RequestState
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 
@@ -41,6 +42,8 @@ class AscendPCPAttentionContext:
     global_block_tables: tuple[torch.Tensor, ...]
     global_slot_mappings: torch.Tensor
     hidden_restore_idx: torch.Tensor
+    padded_gather_idx: torch.Tensor | None = None
+    gathered_kv_write_mask: torch.Tensor | None = None
 
 
 class AscendPCPManager(PCPManager):
@@ -212,6 +215,9 @@ class AscendPCPManager(PCPManager):
         global_batch = input_batch
         if global_batch.num_draft_tokens > 0:
             local_batch = self._partition_speculative_batch_compat(global_batch)
+        elif vllm_version_is("0.28.0"):
+            # vLLM #53515 added padded_num_tokens on main only.
+            local_batch = super().partition_batch(global_batch)
         else:
             local_batch = super().partition_batch(
                 global_batch,
@@ -268,6 +274,13 @@ class AscendPCPManager(PCPManager):
             # not initialize the corresponding hidden restore indices.
             assert self._hidden_restore_idx is not None
             self._hidden_restore_idx[global_batch.num_tokens : graph_num_tokens].zero_()
+            if local_batch.dcp_local_seq_lens is not None:
+                input_buffers.dcp_local_seq_lens[actual_reqs:graph_num_reqs].zero_()
+            dcp_local_seq_lens = (
+                input_buffers.dcp_local_seq_lens[:graph_num_reqs]
+                if local_batch.dcp_local_seq_lens is not None
+                else None
+            )
             seq_lens_cpu_upper_bound = torch.zeros(
                 graph_num_reqs,
                 dtype=local_batch.seq_lens_cpu_upper_bound.dtype,
@@ -281,6 +294,7 @@ class AscendPCPManager(PCPManager):
                 query_start_loc_np=graph_query_start_loc_np,
                 seq_lens=input_buffers.seq_lens[:graph_num_reqs],
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+                dcp_local_seq_lens=dcp_local_seq_lens,
                 input_ids=input_buffers.input_ids[:graph_num_tokens],
                 positions=input_buffers.positions[:graph_num_tokens],
                 is_padding=input_buffers.is_padding[:graph_num_tokens],
@@ -437,4 +451,6 @@ class AscendPCPManager(PCPManager):
             ),
             global_slot_mappings=self._global_batch_slot_mappings[:, : global_batch.num_tokens_after_padding],
             hidden_restore_idx=hidden_restore_idx,
+            padded_gather_idx=self._padded_gather_idx,
+            gathered_kv_write_mask=self._gathered_kv_write_mask,
         )
