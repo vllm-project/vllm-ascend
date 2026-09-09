@@ -937,6 +937,52 @@ def test_build_classifies_short_speculative_extends_as_decodes(
     assert metadata.num_prefills == 0
 
 
+@pytest.mark.parametrize("has_exact_cpu_lengths", [False, True])
+@pytest.mark.parametrize("use_upper_bound", [False, True])
+def test_build_uses_mrv2_upper_bound_for_planning_only(has_exact_cpu_lengths, use_upper_bound):
+    builder = AscendDSAMetadataBuilder.__new__(AscendDSAMetadataBuilder)
+    builder.set_num_actual_tokens = MagicMock()
+    builder.num_actual_tokens = 8
+    builder.decode_threshold = 4
+    builder.compressor_ratio = 4
+    builder.model_config = SimpleNamespace(get_head_size=lambda: 512)
+    builder.metadata_cls = SimpleNamespace
+    builder.hadamard = None
+    builder.build_req_metadata = MagicMock()
+    seq_lens = torch.tensor([106, 204], dtype=torch.int32)
+    upper_bound = torch.tensor([108, 208], dtype=torch.int32)
+    common = SimpleNamespace(
+        num_reqs=2,
+        num_actual_tokens=8,
+        num_input_tokens=8,
+        seq_lens=seq_lens,
+        _seq_lens_cpu=seq_lens if has_exact_cpu_lengths else None,
+        seq_lens_cpu=None,
+        positions=torch.arange(8),
+        block_table_tensor=torch.zeros((2, 1), dtype=torch.int32),
+        attn_state=None,
+    )
+    with (
+        patch("vllm_ascend.attention.dsa_v1.split_decodes_and_prefills", return_value=(2, 0, 8, 0)),
+        patch("vllm_ascend.attention.dsa_v1.get_cos_and_sin_dsa", return_value=(torch.ones(8), torch.zeros(8))),
+        patch.object(seq_lens, "cpu", return_value=seq_lens) as copy_to_cpu,
+    ):
+        cache = {}
+        for _ in range(2):
+            builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common,
+                common_ratio_to_sas_metadata=cache,
+                seq_lens_cpu_upper_bound=upper_bound if use_upper_bound else None,
+            )
+
+    # Exact kernel lengths never change, even when planning uses an upper bound.
+    torch.testing.assert_close(builder.seq_lens, seq_lens)
+    expected_cpu = upper_bound if use_upper_bound and not has_exact_cpu_lengths else seq_lens
+    torch.testing.assert_close(builder.build_req_metadata.call_args.kwargs["seq_lens_cpu"], expected_cpu)
+    assert copy_to_cpu.call_count == int(not has_exact_cpu_lengths and not use_upper_bound)
+
+
 def test_build_req_metadata_preserves_zero_max_sequence_lengths():
     builder = _make_builder(compressor_ratio=1)
     builder.common_ratio_to_sas_metadata = {}

@@ -834,6 +834,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 seq_lens_cpu = common_attn_metadata._seq_lens_cpu
             elif common_attn_metadata.seq_lens_cpu is not None:
                 seq_lens_cpu = common_attn_metadata.seq_lens_cpu
+            elif kwargs.get("seq_lens_cpu_upper_bound") is not None:
+                # MRV2 only needs a planning maximum here; kernels use self.seq_lens.
+                seq_lens_cpu = kwargs["seq_lens_cpu_upper_bound"]
             else:
                 seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
             self.common_ratio_to_sas_metadata["seq_lens_cpu"] = seq_lens_cpu

@@ -205,6 +205,7 @@ def build_attn_metadata(
     # extra attributes for ascend npus.
     seq_lens_np: np.ndarray | None = None,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+    seq_lens_cpu_is_upper_bound: bool = False,
     num_computed_tokens_cpu: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
     attn_state: Any | None = None,
@@ -218,15 +219,19 @@ def build_attn_metadata(
     causal: bool | Mapping[int, bool] = True,
 ) -> dict[str, Any]:
     """Build attention metadata for Ascend NPUs."""
-    # TODO(Ronald1995): optimize AscendCommonAttentionMetadata.
-    # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
-    # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
-    # an error.
-    if seq_lens_np is None:
-        seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
-    seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
+    # As in upstream MRV2, optimistic CPU counts must not become exact lengths.
+    seq_lens_cpu = None
+    if not seq_lens_cpu_is_upper_bound:
+        # Keep the existing draft/capture fallback outside speculative PP.
+        if seq_lens_np is None:
+            seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
+        seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
     if seq_lens_cpu_upper_bound is None:
-        seq_lens_cpu_upper_bound = seq_lens_cpu
+        seq_lens_cpu_upper_bound = (
+            seq_lens_cpu
+            if seq_lens_cpu is not None
+            else torch.full((num_reqs,), max_seq_len, dtype=torch.int32, device="cpu")
+        )
 
     # Upstream speculative-decoding callers do not provide Ascend's separate
     # scheduled-token and padded-input-token counts. Without these fields,
@@ -300,6 +305,7 @@ def build_attn_metadata(
                 attn_metadata_extra_kwargs.update(
                     num_actual_reqs=num_actual_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                    seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
                 )
                 if pcp_context is not None:
                     attn_metadata_extra_kwargs.update(

@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -18,7 +18,10 @@ from vllm.v1.worker.gpu import attn_utils as upstream_attn_utils
 from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.attention import dsa_v1
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend
+from vllm_ascend.attention.attention_v1 import (
+    AscendAttentionBackend,
+    AscendAttentionMetadataBuilder,
+)
 from vllm_ascend.attention.dsa_v1 import (
     AscendDSAC4Backend,
     AscendDSAC4StateBackend,
@@ -649,12 +652,14 @@ def test_dsv4_backends_declare_role_specific_logical_sizes(
         ("pcp_capture", CUDAGraphMode.NONE, True, 2, 8),
     ],
 )
+@pytest.mark.parametrize("cpu_lengths_are_upper_bounds", [False, True])
 def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     caller,
     cudagraph_mode,
     for_capture,
     pcp_size,
     expected_input_tokens,
+    cpu_lengths_are_upper_bounds,
 ):
     layer_names, specs, calls, attn_groups, kv_cache_config = _make_dsa_metadata_groups()
     block_tables = (
@@ -689,6 +694,8 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             seq_lens_np=np.array([2, 3], dtype=np.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([4, 5], dtype=torch.int32),
+            seq_lens_cpu_is_upper_bound=cpu_lengths_are_upper_bounds,
             positions=torch.arange(5, dtype=torch.int32),
             dcp_local_seq_lens=dcp_local_seq_lens[:2],
         )
@@ -711,6 +718,8 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             num_scheduled_tokens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens=torch.tensor([2, 3, 0, 0], dtype=torch.int32),
             seq_lens_np=np.array([2, 3, 0, 0], dtype=np.int32),
+            seq_lens_cpu_upper_bound=torch.tensor([4, 5, 0, 0], dtype=torch.int32),
+            seq_lens_cpu_is_upper_bound=cpu_lengths_are_upper_bounds,
             is_prefilling_np=np.array([True, True, False, False]),
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=torch.arange(8, dtype=torch.int32),
@@ -731,6 +740,13 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
     for call in calls:
         common_metadata = call["common_attn_metadata"]
         assert common_metadata.num_actual_tokens == 5
+        if cpu_lengths_are_upper_bounds:
+            assert common_metadata.seq_lens_cpu is None
+        else:
+            assert common_metadata.seq_lens_cpu is not None
+        torch.testing.assert_close(
+            common_metadata.seq_lens_cpu_upper_bound[:2], torch.tensor([4, 5], dtype=torch.int32)
+        )
         assert common_metadata.num_input_tokens == expected_input_tokens
         assert call["for_cudagraph_capture"] is for_capture
         assert call["num_actual_reqs"] == 2
@@ -787,3 +803,83 @@ def test_build_attn_metadata_propagates_prefill_state():
     )
 
     assert metadata["layer.0"] is is_prefilling
+
+
+@pytest.mark.parametrize("cpu_length_source", ["exact", "upper_bound", "legacy_draft"])
+@pytest.mark.parametrize("has_upper_bound", [False, True])
+def test_build_attn_metadata_keeps_exact_lengths_separate_from_upper_bounds(cpu_length_source, has_upper_bound):
+    builder = SimpleNamespace(build=lambda **kwargs: kwargs["common_attn_metadata"])
+    attn_group = SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)
+    seq_lens = torch.tensor([106, 1024, 264, 0], dtype=torch.int32)
+    upper_bound = torch.tensor([108, 1024, 264, 0], dtype=torch.int32)
+    metadata = attn_utils.build_attn_metadata(
+        attn_groups=[[attn_group]],
+        num_reqs=4,
+        num_tokens=524,
+        query_start_loc_gpu=torch.tensor([0, 4, 516, 524, 524], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 4, 516, 524, 524], dtype=torch.int32),
+        max_query_len=512,
+        seq_lens=seq_lens,
+        max_seq_len=2048,
+        block_tables=(torch.zeros((4, 1), dtype=torch.int32),),
+        slot_mappings=torch.zeros((1, 524), dtype=torch.int64),
+        kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+        seq_lens_np=None if cpu_length_source == "legacy_draft" else seq_lens.numpy(),
+        seq_lens_cpu_upper_bound=upper_bound if has_upper_bound else None,
+        seq_lens_cpu_is_upper_bound=cpu_length_source == "upper_bound",
+    )["layer.0"]
+
+    torch.testing.assert_close(metadata.seq_lens, seq_lens)
+    if cpu_length_source == "exact":
+        torch.testing.assert_close(metadata.seq_lens_cpu, seq_lens)
+    elif cpu_length_source == "upper_bound":
+        assert metadata.seq_lens_cpu is None
+        assert metadata._seq_lens_cpu is None
+    else:
+        torch.testing.assert_close(metadata.seq_lens_cpu, torch.full_like(seq_lens, 2048))
+    expected_bound = (
+        upper_bound
+        if has_upper_bound
+        else seq_lens
+        if cpu_length_source == "exact"
+        else torch.full_like(seq_lens, 2048)
+    )
+    torch.testing.assert_close(metadata.seq_lens_cpu_upper_bound, expected_bound)
+
+
+@pytest.mark.parametrize("cpu_lengths_are_upper_bounds", [False, True])
+def test_fia_consumes_exact_device_lengths_for_speculative_pp(cpu_lengths_are_upper_bounds):
+    builder = AscendAttentionMetadataBuilder.__new__(AscendAttentionMetadataBuilder)
+    builder.pcp_enabled = False
+    builder.device = torch.device("cpu")
+    builder.kv_cache_spec = None
+    builder.speculative_config = None
+    builder.model_config = SimpleNamespace(runner_type="generate")
+    builder.attn_mask_builder = MagicMock()
+    builder.metadata_cls = SimpleNamespace
+    builder._split_decodes_and_prefills = MagicMock(return_value=(2, 0, 8, 0))
+    builder._build_backend_metadata = MagicMock(return_value={})
+    seq_lens = torch.tensor([106, 204], dtype=torch.int32)
+    upper_bound = torch.tensor([108, 208], dtype=torch.int32)
+    group = SimpleNamespace(layer_names=["layer.0"], get_metadata_builder=lambda _: builder)
+
+    with patch.object(torch.Tensor, "pin_memory", lambda tensor: tensor):
+        metadata = attn_utils.build_attn_metadata(
+            attn_groups=[[group]],
+            num_reqs=2,
+            num_tokens=8,
+            query_start_loc_gpu=torch.tensor([0, 4, 8], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 4, 8], dtype=torch.int32),
+            max_query_len=4,
+            seq_lens=seq_lens,
+            max_seq_len=512,
+            block_tables=(torch.zeros((2, 1), dtype=torch.int32),),
+            slot_mappings=torch.zeros((1, 8), dtype=torch.int64),
+            kv_cache_config=SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=object())]),
+            seq_lens_np=(upper_bound if cpu_lengths_are_upper_bounds else seq_lens).numpy(),
+            seq_lens_cpu_upper_bound=upper_bound,
+            seq_lens_cpu_is_upper_bound=cpu_lengths_are_upper_bounds,
+        )["layer.0"]
+
+    assert metadata.seq_lens_list == [106, 204]
+    torch.testing.assert_close(metadata.seq_lens, seq_lens)

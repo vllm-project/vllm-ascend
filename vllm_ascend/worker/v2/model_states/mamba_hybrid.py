@@ -107,6 +107,8 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             seq_lens_np=input_batch.seq_lens_np,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            seq_lens_cpu_is_upper_bound=input_batch.seq_lens_cpu_is_upper_bound,
             positions=input_batch.positions,
             attn_state=input_batch.attn_state,
             model_specific_attn_metadata=model_specific_metadata,
