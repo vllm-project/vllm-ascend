@@ -18,6 +18,7 @@ import vllm_ascend.patch.platform.patch_stop_token_ids_validation  # noqa: F401
 def _make_model_config(vocab_size: int) -> MagicMock:
     model_config = MagicMock()
     model_config.get_vocab_size.return_value = vocab_size
+    model_config.is_diffusion = False
     return model_config
 
 
@@ -97,7 +98,10 @@ def test_verify_calls_validation(stop_token_ids, allowed_token_ids, match):
 def test_verify_accepts_in_vocab_ids():
     model_config = _make_model_config(129280)
     params = SamplingParams(stop_token_ids=[0, 129279], allowed_token_ids=[1, 2])
-    params.verify(model_config, None, None, None)
+    tokenizer = MagicMock()
+    tokenizer.__len__.return_value = 129280
+    tokenizer.get_vocab_size.return_value = 129280
+    params.verify(model_config, None, None, tokenizer)
 
 
 def test_patch_is_idempotent_when_upstream_has_fix():
