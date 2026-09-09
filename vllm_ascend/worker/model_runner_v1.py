@@ -5244,7 +5244,7 @@ class NPUModelRunner(GPUModelRunner):
                                 math.prod(kv_cache_shape[dim + 1 :])
                                 for dim in range(len(kv_cache_shape))
                             ]
-                            kv_caches[layer_name] = torch.as_strided(
+                            kv_cache = torch.as_strided(
                                 raw_typed,
                                 size=kv_cache_shape,
                                 stride=(
@@ -5253,6 +5253,24 @@ class NPUModelRunner(GPUModelRunner):
                                     *dense_strides[2:],
                                 ),
                                 storage_offset=raw_typed.storage_offset(),
+                            )
+                            kv_caches[layer_name] = kv_cache
+                            # TODO: Remove this temporary observation point once
+                            # the non-contiguous KV-cache layout is mature.
+                            logger.debug(
+                                "[non-contiguous-kv-cache] attention mode=%s "
+                                "layer=%s shape=%s stride=%s "
+                                "k_contiguous=%s v_contiguous=%s",
+                                (
+                                    "hybrid"
+                                    if self.hybrid_with_attn_and_mamba
+                                    else "gqa"
+                                ),
+                                layer_name,
+                                tuple(kv_cache.shape),
+                                kv_cache.stride(),
+                                kv_cache[0].is_contiguous(),
+                                kv_cache[1].is_contiguous(),
                             )
                             continue
                     should_trim_page_padding = (
@@ -5392,11 +5410,25 @@ class NPUModelRunner(GPUModelRunner):
                             (num_blocks, *shape)
                             for shape in current_kv_cache_spec.shapes
                         )
-                        kv_caches[layer_name] = self._adjust_kv_layout(
+                        state_tensors = self._adjust_kv_layout(
                             raw_tensor,
                             shapes_with_blocks,
                             current_kv_cache_spec.dtypes,
                             current_kv_cache_spec.page_size_bytes,
+                        )
+                        kv_caches[layer_name] = state_tensors
+                        # TODO: Remove this temporary observation point once
+                        # the non-contiguous KV-cache layout is mature.
+                        logger.debug(
+                            "[non-contiguous-kv-cache] mamba mode=hybrid "
+                            "layer=%s page_size_bytes=%s shapes=%s strides=%s "
+                            "storage_offsets=%s contiguous=%s",
+                            layer_name,
+                            current_kv_cache_spec.page_size_bytes,
+                            [tuple(tensor.shape) for tensor in state_tensors],
+                            [tensor.stride() for tensor in state_tensors],
+                            [tensor.storage_offset() for tensor in state_tensors],
+                            [tensor.is_contiguous() for tensor in state_tensors],
                         )
                         continue
 
