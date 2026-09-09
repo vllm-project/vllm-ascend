@@ -34,6 +34,7 @@ from vllm_ascend.ascend_config import (
     DyntraLBConfig,
     EplbConfig,
     FinegrainedTPConfig,
+    KVPPConfig,
     ProfilingChunkConfig,
     RejectionSamplerConfig,
     RlConfig,
@@ -180,7 +181,7 @@ class TestAscendConfig(TestBase):
         self.assertTrue(config.is_sparse_li_c8_layer("model.layers.2.self_attn.indexer.k_cache"))
 
     def test_vllm_independent_subconfigs_are_not_required(self):
-        config = AscendConfig(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+        config = AscendConfig(kvpp_config=KVPPConfig(), sparse_kv_offload_config=SimpleNamespace(enabled=False))
 
         self.assertFalse(config.xlite_graph_config.enabled)
         self.assertEqual(config.finegrained_tp_config.oproj_tensor_parallel_size, 0)
@@ -965,6 +966,7 @@ class TestUpstreamConfigCompatibility(TestBase):
     )
     def test_mc2_hierarchy_comm_rejects_more_than_512_experts(self, _mock_profile):
         config = AscendConfig(
+            kvpp_config=KVPPConfig(),
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="hierarchy",
         )
@@ -979,6 +981,7 @@ class TestUpstreamConfigCompatibility(TestBase):
     )
     def test_mc2_hierarchy_comm_rejects_unsupported_device(self, _mock_profile):
         config = AscendConfig(
+            kvpp_config=KVPPConfig(),
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="hierarchy",
         )
@@ -993,6 +996,7 @@ class TestUpstreamConfigCompatibility(TestBase):
     )
     def test_mc2_fullmesh_v2_rejects_unsupported_device(self, _mock_profile):
         config = AscendConfig(
+            kvpp_config=KVPPConfig(),
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="fullmesh_v2",
         )
@@ -1006,6 +1010,7 @@ class TestUpstreamConfigCompatibility(TestBase):
     )
     def test_mc2_fullmesh_uses_a3_operator_alias(self, _mock_profile):
         config = AscendConfig(
+            kvpp_config=KVPPConfig(),
             sparse_kv_offload_config=SimpleNamespace(enabled=False),
             mc2_comm_alg="fullmesh",
         )

@@ -972,6 +972,7 @@ class TestAscendSFAImpl(TestBase):
                 events.clear()
                 self.impl.preprocess_type = preprocess_type
                 self.impl.has_indexer = has_indexer
+                self.impl._get_indexer_attn_metadata = lambda: metadata if self.impl.has_indexer else None
                 self.impl.skip_topk = True
                 self.impl.vllm_config.parallel_config.prefill_context_parallel_size = 1
                 self.impl._compose_sfa_kv_cache = lambda cache: cache
