@@ -1,168 +1,169 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""KV cache spec and manager for the GLM-5.3-Flash kpool indexer tail.
+"""KV cache layers and metadata helpers for the GLM-Next pooled indexer."""
 
-The kpool indexer compresses whole pools of ``index_kpool`` tokens into one
-cached vector. The incomplete pool at the end of a sequence has no compressed
-form yet, so its raw K plus gate score lives in a separate one-block scratch
-cache. That block is overwritten in place by ``pos % kpool``, which makes it
-per-request transient state rather than a shareable prefix.
+from typing import Any
 
-Neither the spec nor the manager exists upstream while the GLM-5.3-Flash
-architecture lives downstream, so both are defined here. They are registered
-from ``vllm_ascend.core.kv_cache_interface.register_ascend_kv_cache_specs``,
-which vLLM invokes through the ``register_custom_kv_cache_specs`` platform hook
-after the built-in specs are in place.
-"""
+import torch
+from torch import nn
+from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
-from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import ClassVar
-
-from vllm.config import VllmConfig
-from vllm.v1.core.block_pool import BlockPool
-from vllm.v1.core.kv_cache_utils import BlockHashList, KVCacheBlock
-from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
-from vllm.v1.kv_cache_interface import KVCacheSpec, SlidingWindowSpec
-from vllm.v1.request import Request
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
+    AscendMLAAttentionSpec,
+)
+from vllm_ascend.utils import vllm_version_is
 
 
-class KpoolTailManager(FullAttentionManager):
-    """Fixed 1-block-per-request circular buffer for ``KpoolTailSpec``.
+def is_glm5_next_cache_spec(spec: KVCacheSpec) -> bool:
+    return getattr(spec, "model_version", None) == "glm5_next"
 
-    The tail cache holds the incomplete pool's raw K + gate score: exactly one
-    block of ``kpool`` slots per request, overwritten in place by ``pos % kpool``
-    as decode/spec-decode advances. Prefill seeds it; the connector transfers it
-    across PD; decode reads it to compress the boundary pool correctly.
 
-    This manager allocates that single block on first admission and reuses it
-    for the request's whole lifetime. It never skips, never prunes, never
-    prefix-caches. The no-prune guarantee is load-bearing:
-    ``SlidingWindowManager.remove_skipped_blocks`` would evict the in-progress
-    pool's earlier tokens mid-pool, before completion and before PD transfer,
-    which is fatal. Because the block is circularly reused, allocation is
-    independent of sequence length and of MTP size (MTP > kpool still fits in
-    one block, since completed pools flush mid-step).
-    """
+def format_indexer_kpool_slot_mapping(
+    slot_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    logical_block_size: int,
+    compress_ratio: int,
+) -> torch.Tensor:
+    """Map completed token pools onto the compressed indexer cache."""
+    if compress_ratio <= 1 or logical_block_size <= 0 or logical_block_size % compress_ratio:
+        raise ValueError(
+            f"logical_block_size={logical_block_size} must be divisible by compress_ratio={compress_ratio}."
+        )
+    valid = (slot_mapping >= 0) & (torch.remainder(positions + 1, compress_ratio) == 0)
+    safe_slots = slot_mapping.clamp_min(0)
+    block_ids = torch.div(safe_slots, logical_block_size, rounding_mode="floor")
+    offsets = torch.remainder(safe_slots, logical_block_size)
+    compressed_slots = block_ids * (logical_block_size // compress_ratio) + torch.div(
+        offsets,
+        compress_ratio,
+        rounding_mode="floor",
+    )
+    return torch.where(valid, compressed_slots, torch.full_like(compressed_slots, -1))
 
-    supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
-    @classmethod
-    def find_longest_cache_hit(
-        cls,
-        block_hashes: BlockHashList,
-        max_length: int,
-        kv_cache_group_ids: list[int],
-        block_pool: BlockPool,
-        kv_cache_spec: KVCacheSpec,
-        drop_eagle_block: bool,
-        alignment_tokens: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
-        # Tail state is per-request transient (circularly overwritten), so it is
-        # neither shareable nor a stable function of a shareable prefix.
-        return tuple([] for _ in range(len(kv_cache_group_ids))), 0
+class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
+    """Independently allocated compressed-K cache for the GLM-Next indexer."""
 
-    def cache_blocks(
+    # Auxiliary caches use the GLM-specific small-page class instead of the
+    # generic attention/Mamba page-size class.
+    align_kv_cache_with_mamba = False
+
+    def __init__(
         self,
-        request: Request,
-        num_tokens: int,
-        retention_interval: int | None = None,
+        *,
+        head_dim: int,
+        dtype: torch.dtype,
+        cache_role: str,
+        cache_config: CacheConfig,
+        prefix: str,
+        compress_ratio: int,
     ) -> None:
-        # Never hash tail blocks into the prefix cache.
-        return
+        super().__init__()
+        if compress_ratio <= 1 or cache_config.block_size % compress_ratio:
+            raise ValueError(
+                "GLM-Next indexer cache requires block_size divisible by a "
+                f"compress_ratio greater than one, got {cache_config.block_size} "
+                f"and {compress_ratio}."
+            )
+        self.head_dim = head_dim
+        self.dtype = dtype
+        self.cache_role = cache_role
+        self.cache_config = cache_config
+        self.compress_ratio = compress_ratio
+        self.prefix = prefix
+        current_config = get_current_vllm_config()
+        self.kv_cache = [torch.tensor([]) for _ in range(current_config.parallel_config.pipeline_parallel_size)]
+        static_context = current_config.compilation_config.static_forward_context
+        if prefix in static_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        static_context[prefix] = self
 
-    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
-        return 0
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        del vllm_config
+        ratio_kwargs: dict[str, Any] = (
+            {"compress_ratio": self.compress_ratio}
+            if vllm_version_is("0.28.0")
+            else {"tokens_per_state": self.compress_ratio}
+        )
+        return AscendMLAAttentionSpec(
+            block_size=self.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_dim,
+            dtype=self.dtype,
+            cache_dtype_str=None,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+            **ratio_kwargs,
+        )
 
-    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
-        # The single block holds the in-progress pool for the whole request; no
-        # token is ever out of window.
-        return 0
+    def get_attn_backend(self):
+        from vllm_ascend.attention.indexer_kpool import (
+            AscendIndexerKPoolBackend,
+        )
 
-    def remove_skipped_blocks(
+        return AscendIndexerKPoolBackend
+
+    def forward(self): ...
+
+
+class Glm5NextStateCache(nn.Module, AttentionLayerBase):
+    """Paged FP32 ``[K, gate]`` state for incomplete GLM-Next pools."""
+
+    align_kv_cache_with_mamba = False
+
+    def __init__(
         self,
-        request_id: str,
-        processed_computed_tokens: int,
-        num_prompt_tokens: int | None = None,
+        *,
+        state_dim: int,
+        dtype: torch.dtype,
+        compress_ratio: int,
+        cache_config: CacheConfig,
+        prefix: str,
     ) -> None:
-        # Never prune mid-request; the block is freed on request completion.
-        return
+        super().__init__()
+        if dtype != torch.float32:
+            raise ValueError(f"GLM-Next compressor state must use torch.float32, got {dtype}.")
+        if compress_ratio <= 1:
+            raise ValueError(
+                f"GLM-Next compressor state requires compress_ratio greater than one, got {compress_ratio}."
+            )
+        self.state_dim = state_dim
+        self.dtype = dtype
+        self.prefix = prefix
+        self.compress_ratio = compress_ratio
+        self.block_size = compress_ratio
+        self.sliding_window = compress_ratio
+        self.cache_config = cache_config
+        self.cache_role = "indexer_state"
+        current_config = get_current_vllm_config()
+        self.kv_cache = [torch.tensor([]) for _ in range(current_config.parallel_config.pipeline_parallel_size)]
+        static_context = current_config.compilation_config.static_forward_context
+        if prefix in static_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        static_context[prefix] = self
 
-    def get_num_blocks_to_allocate(
-        self,
-        request_id: str,
-        num_tokens: int,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        total_computed_tokens: int,
-        num_local_computed_tokens: int,
-        num_tokens_main_model: int,
-        apply_admission_cap: bool = False,
-    ) -> int:
-        # Exactly one block per request, reused circularly; never grow.
-        return max(1 - len(self.req_to_blocks.get(request_id, ())), 0)
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        del vllm_config
+        return AscendIndexerKPoolStateSpec(
+            block_size=self.block_size,
+            num_kv_heads=1,
+            head_size=self.state_dim,
+            dtype=self.dtype,
+            sliding_window=self.sliding_window,
+            cache_dtype_str=None,
+            model_version="glm5_next",
+            cache_role=self.cache_role,
+            indexes_kv_by_block_stride=True,
+        )
 
-    def allocate_new_blocks(self, request_id: str, num_tokens: int, num_tokens_main_model: int) -> list[KVCacheBlock]:
-        # Cap at one block regardless of num_tokens; the kernel reuses its slots
-        # via pos % kpool. No partial-hit CoW path (find_longest_cache_hit never
-        # hits, so _partial_hit_reqs is always empty).
-        req_blocks = self.req_to_blocks[request_id]
-        if len(req_blocks) >= 1:
-            return []
-        new_blocks = self.block_pool.get_new_blocks(1)
-        req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
-            self.new_block_ids.extend(b.block_id for b in new_blocks)
-        return new_blocks
+    def get_attn_backend(self):
+        from vllm_ascend.attention.indexer_kpool import (
+            AscendIndexerKPoolStateBackend,
+        )
 
-    def add_local_computed_blocks(
-        self,
-        request_id: str,
-        new_computed_blocks: Sequence[KVCacheBlock],
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> None:
-        # The tail never has local prefix-cache hits (find_longest_cache_hit
-        # returns none); external (PD-transferred) tokens are handled by
-        # allocate_external_computed_blocks below.
-        return
+        return AscendIndexerKPoolStateBackend
 
-    def allocate_external_computed_blocks(
-        self,
-        request_id: str,
-        num_local_computed_tokens: int,
-        num_external_computed_tokens: int,
-    ) -> None:
-        # The tail is a fixed 1-block circular buffer; PD-transferred (external)
-        # tokens do not grow it -- the kernel reuses the single block's slots via
-        # pos % kpool. The base FullAttention path would allocate
-        # cdiv(num_external, block_size) blocks (one per kpool tokens), which
-        # both wastes blocks and mismatches the producer's 1-block transfer,
-        # tripping the NIXL reconcile block-count assert. Cap at one block,
-        # matching allocate_new_blocks and the producer.
-        req_blocks = self.req_to_blocks[request_id]
-        if len(req_blocks) >= 1:
-            return
-        new_blocks = self.block_pool.get_new_blocks(1)
-        req_blocks.extend(new_blocks)
-        if self._record_new_block_ids:
-            self.new_block_ids.extend(b.block_id for b in new_blocks)
-
-
-@dataclass(frozen=True, kw_only=True)
-class KpoolTailSpec(SlidingWindowSpec):
-    """One-block circular scratch cache for a kpool indexer's raw tail."""
-
-    def max_admission_blocks_per_request(self, max_in_flight_tokens: int, max_model_len: int) -> int:
-        return 1
-
-    def max_num_blocks_per_req(self, vllm_config: VllmConfig, max_len: int) -> int:
-        return 1
-
-    def is_uniform_with_collection(self, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
-        return all(isinstance(spec, KpoolTailSpec) for spec in kv_cache_specs.values())
-
-    @property
-    def participates_in_prefix_caching(self) -> bool:
-        return False
+    def forward(self): ...
