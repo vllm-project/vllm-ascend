@@ -25,6 +25,7 @@ from vllm_ascend.ops.rotary_embedding import (
     AscendRotaryEmbedding,
     AscendYaRNRotaryEmbedding,
     rope_forward_oot,
+    rope_forward_query_only,
 )
 
 HEAD_SIZE = 64
@@ -176,6 +177,38 @@ def make_yarn_embedding(patch_init_side_effects):
 
 
 class TestAscendEmbeddingForwardOOT:
+    @patch("vllm_ascend.ops.rotary_embedding.rope_forward_triton_siso")
+    def test_query_only_rope_uses_single_input_kernel(self, mock_siso):
+        positions, query, _ = _make_tensors()
+        expected_query = torch.randn_like(query).view(SEQ_LEN, NUM_HEADS, HEAD_SIZE)
+        mock_siso.return_value = expected_query
+
+        output_query = rope_forward_query_only(
+            positions,
+            query,
+            torch.zeros(MAX_POS, ROTARY_DIM),
+            HEAD_SIZE,
+            ROTARY_DIM,
+            True,
+        )
+
+        assert output_query.shape == query.shape
+        mock_siso.assert_called_once()
+
+    @patch("vllm_ascend.ops.rotary_embedding.rope_forward_query_only")
+    @patch("vllm_ascend.ascend_forward_context.get_forward_context")
+    def test_forward_accepts_query_without_key(self, mock_get_forward_context, mock_query_only, make_embedding):
+        mock_get_forward_context.return_value = MagicMock(is_draft_model=False, flash_comm_v1_enabled=False)
+        emb = make_embedding()
+        positions, query, _ = _make_tensors()
+        mock_query_only.return_value = query
+
+        output_query, output_key = emb.forward_oot(positions, query, None)
+
+        assert output_query is query
+        assert output_key is None
+        mock_query_only.assert_called_once()
+
     @patch("torch.ops.vllm.npu_rotary_embedding")
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     def test_basic_call_delegates_to_npu_op(self, mock_get_forward_context, mock_npu_op, make_embedding):
