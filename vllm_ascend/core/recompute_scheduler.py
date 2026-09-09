@@ -36,7 +36,7 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.interface import PauseState
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
@@ -989,7 +989,23 @@ class RecomputeScheduler(Scheduler):
                 pending_partial_tail_offloads = self.kv_cache_manager.take_partial_tail_offloads() or None
         else:
             # #51358 drains boundary offers even without a connector.
-            kv_connector_block_state = self._take_kv_connector_block_state(new_reqs_data, cached_reqs_data)
+            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+            if self.connector is not None:
+                snapshot_req_ids = {req.req_id for req in new_reqs_data}
+                snapshot_req_ids.update(
+                    req_id
+                    for req_id, block_ids in zip(
+                        cached_reqs_data.req_ids,
+                        cached_reqs_data.new_block_ids,
+                        strict=True,
+                    )
+                    if block_ids
+                )
+                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                kv_connector_block_state = KVConnectorBlockState(
+                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    boundary_state_offloads=boundary_state_offloads,
+                )
 
         kv_cache_block_copies, cow_retained_blocks = self.kv_cache_manager.take_kv_cache_block_copies()
         if kv_cache_block_copies:
@@ -1063,25 +1079,6 @@ class RecomputeScheduler(Scheduler):
         if diagnostics_enabled(self.vllm_config):
             print_scheduler_summary(self, scheduler_output)
         return scheduler_output
-
-    def _take_kv_connector_block_state(
-        self, new_reqs_data: list[NewRequestData], cached_reqs_data: CachedRequestData
-    ) -> KVConnectorBlockState | None:
-        """Preserve the exact-block handoff introduced by vLLM #51358."""
-        boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
-        if self.connector is None:
-            return None
-        snapshot_req_ids = {req.req_id for req in new_reqs_data}
-        snapshot_req_ids.update(
-            req_id
-            for req_id, block_ids in zip(cached_reqs_data.req_ids, cached_reqs_data.new_block_ids, strict=True)
-            if block_ids
-        )
-        snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
-        return KVConnectorBlockState(
-            block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
-            boundary_state_offloads=boundary_state_offloads,
-        )
 
     def _build_kv_connector_meta(
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
