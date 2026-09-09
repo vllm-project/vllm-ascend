@@ -246,6 +246,35 @@ def test_categorical_sampling_greedy_accepted_special_values_are_exact(dtype: to
         assert outputs[1].numel() == 0
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("vocab_size", [33, 256, 4096, 4097, 151936])
+@pytest.mark.parametrize("execution", ["eager", "aclgraph"])
+def test_categorical_sampling_greedy_first_max_across_tiles(
+    dtype: torch.dtype, vocab_size: int, execution: str
+) -> None:
+    """Vector argmax must preserve ties and exclude padded tail elements."""
+    logits = torch.full((5, vocab_size), -4.0, dtype=dtype, device=DEVICE)
+    logits[0, -1] = -1.0
+    logits[1, [vocab_size // 2, vocab_size - 1]] = -1.0
+    logits[3, [63, 64] if vocab_size > 64 else [0, 32]] = -1.0
+    logits[4, [4095, 4096] if vocab_size > 4096 else [0, vocab_size - 1]] = -1.0
+    inputs = (
+        logits,
+        torch.arange(5, dtype=torch.int32, device=DEVICE),
+        torch.zeros(5, dtype=torch.float32, device=DEVICE),
+        torch.arange(5, dtype=torch.int64, device=DEVICE),
+        torch.arange(5, dtype=torch.int64, device=DEVICE),
+    )
+    outputs = _run_categorical_sampling(*inputs)
+    if execution == "aclgraph":
+        torch.npu.synchronize()
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            outputs = _run_categorical_sampling(*inputs)
+        graph.replay()
+    _assert_tensor_equal(outputs[0], logits.cpu().argmax(dim=-1))
+
+
 def test_categorical_sampling_is_invariant_to_batch_layout() -> None:
     vocab_size = 33
     logits = torch.zeros((4, vocab_size), dtype=torch.float32, device=DEVICE)

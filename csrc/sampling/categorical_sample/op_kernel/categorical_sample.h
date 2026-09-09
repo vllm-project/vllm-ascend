@@ -343,38 +343,16 @@ private:
         LocalTensor<float> nanValues = BuildNanIndicator(logitsFloat, vectorElements);
         LocalTensor<float> scalar = scalarBuf_.Get<float>();
 
-        if (validElements != vectorElements) {
-            PipeVToS();
-            bool hasNan = false;
-            for (uint32_t index = 0; index < validElements; ++index) {
-                hasNan = hasNan || nanValues.GetValue(index) != 0.0f;
-            }
-            CATEGORICAL_SAMPLE_CHECK(!hasNan, "CategoricalSample processed logits must not contain NaN\n");
-            float tileMax = NEG_INFINITY;
-            for (uint32_t index = 0; index < validElements; ++index) {
-                const float value = logitsFloat.GetValue(index);
-                if (value > tileMax) {
-                    tileMax = value;
-                    firstMaxIndex = index;
-                }
-            }
-            return tileMax;
-        }
-
-        ReduceMax(scalar[8], nanValues, work, vectorElements);
+        ReduceMax(scalar[8], nanValues, work, validElements);
         PipeVToS();
         CATEGORICAL_SAMPLE_CHECK(
             scalar.GetValue(8) == 0.0f, "CategoricalSample processed logits must not contain NaN\n");
-        ReduceMax(scalar, logitsFloat, work, vectorElements);
+        // ReduceMax returns the first maximum's index, including partial tiles.
+        ReduceMax(scalar, logitsFloat, work, validElements, needFirstMaxIndex);
         PipeVToS();
         const float tileMax = scalar.GetValue(0);
         if (needFirstMaxIndex) {
-            for (uint32_t index = 0; index < validElements; ++index) {
-                if (logitsFloat.GetValue(index) == tileMax) {
-                    firstMaxIndex = index;
-                    break;
-                }
-            }
+            firstMaxIndex = scalar.ReinterpretCast<uint32_t>().GetValue(1);
         }
         return tileMax;
     }
