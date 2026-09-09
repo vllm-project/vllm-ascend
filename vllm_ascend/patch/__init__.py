@@ -229,44 +229,6 @@
 #       a backend-neutral router configuration object or MoE factory extension
 #       hook that carries vision routing metadata into the Ascend runner.
 #
-# ** 7a. File: platform/patch_glm5next_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.transformers_utils.config._CONFIG_REGISTRY`
-#    Why:
-#       The GLM-5.3-Flash architecture is maintained in vllm-ascend
-#       (`vllm_ascend/models/glm5next/`) rather than upstream, so its config
-#       classes are not in vLLM's `model_type` lookup table. Without an entry,
-#       loading a GLM-5.3-Flash checkpoint fails to resolve `glm5_next`.
-#    How：
-#       Insert `Glm5NextConfig` / `Glm5NextTextConfig` / `Glm5NextVisionConfig`
-#       into `_CONFIG_REGISTRY`. The registry is a `LazyConfigDict` whose values
-#       may be either a module attribute name or the class itself, so the
-#       downstream classes are inserted directly.
-#    Related PR (if no, explain why):
-#       No. The upstream GLM-5.3-Flash PR (vllm-project/vllm#53906) is not
-#       merged, and vllm-ascend carries the architecture downstream instead of
-#       depending on it.
-#    Future Plan:
-#       Remove this patch once the supported vLLM version registers the
-#       GLM-5.3-Flash configs itself.
-#
-#   2. `vllm.config.model.ModelConfig.is_deepseek_mla`
-#    Why:
-#       GLM-5.3-Flash uses MLA, but upstream decides `is_deepseek_mla` from a
-#       hard-coded `model_type` tuple that cannot know about a downstream
-#       architecture. Answering False routes the model down the non-MLA KV cache
-#       and quantization paths.
-#    How：
-#       Wrap the property so it additionally returns True for `glm5_next` /
-#       `glm5_next_text` when the text config carries `kv_lora_rank`, preserving
-#       upstream behavior for every other model type.
-#    Related PR (if no, explain why):
-#       No, see above.
-#    Future Plan:
-#       Remove this patch once upstream either includes the GLM-5.3-Flash
-#       model types or resolves MLA from the config contents instead of a
-#       model_type whitelist.
-#
 # ** 8. File: platform/patch_kv_cache_coordinator.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.kv_cache_coordinator.HybridKVCacheCoordinator.find_longest_cache_hit_per_group`
