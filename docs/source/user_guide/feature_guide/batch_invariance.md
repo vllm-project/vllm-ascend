@@ -83,7 +83,7 @@ bash csrc/build_batch_invariant_ops.sh ascend950
 
 ### Use Docker images
 
-The A2, A3, and A5 (Ascend 950) Docker images for Ubuntu and openEuler build vllm-ascend from source with `VLLM_BATCH_INVARIANT=1`, so the image build installs both the AscendC operator run package and the `batch_invariant_ops` wheel. This build-time environment variable is not retained as a runtime setting. Set `VLLM_BATCH_INVARIANT=1` when starting the server or running offline inference to enable batch invariance.
+The A2, A3, and Ascend 950 Docker images for Ubuntu and openEuler build vllm-ascend from source with `VLLM_BATCH_INVARIANT=1`, so the image build installs both the AscendC operator run package and the `batch_invariant_ops` wheel. This build-time environment variable is not retained as a runtime setting. Set `VLLM_BATCH_INVARIANT=1` when starting the server or running offline inference to enable batch invariance.
 
 ### Quick Check
 
