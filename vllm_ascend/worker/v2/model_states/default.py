@@ -37,6 +37,14 @@ class AscendModelState(DefaultModelState):
 
     pcp_manager: "AscendPCPManager | None" = None
 
+    def gather_mm_embeddings(
+        self, input_batch: AscendInputBatch, draft_lookahead: int = 0
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        # Only the first PP stage owns an encoder; drafting runs on the last.
+        if not self.supports_mm_inputs:
+            return [], torch.zeros(input_batch.num_tokens, dtype=torch.bool, device="cpu")
+        return super().gather_mm_embeddings(input_batch, draft_lookahead)
+
     def prepare_attn(
         self,
         input_batch: AscendInputBatch,
