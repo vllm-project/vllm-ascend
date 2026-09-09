@@ -302,7 +302,11 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
     def _use_c8_reshape_optim(self) -> bool:
         """Whether this indexer can use the LI C8 cache-write operator."""
-        return self.enable_sparse_li_c8 and not getattr(self, "_dcp_active", False) and get_ascend_config().c8_reshape_optim_enabled
+        return (
+            self.enable_sparse_li_c8
+            and not getattr(self, "_dcp_active", False)
+            and get_ascend_config().c8_reshape_optim_enabled
+        )
 
     def forward_k(
         self,
