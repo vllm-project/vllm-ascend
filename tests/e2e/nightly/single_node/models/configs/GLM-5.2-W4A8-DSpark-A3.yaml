@@ -50,5 +50,5 @@ test_cases:
         max_out_len: 8192
         batch_size: 32
         temperature: 0
-        baseline: [0.89, 0.79, 0.69, 0.60, 0.53, 0.46, 0.38]
+        baseline: [0.89, 0.79, 0.69, 0.60, 0.53, 0.46, 0.40]
         threshold: 0.05
