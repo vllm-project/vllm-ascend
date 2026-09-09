@@ -544,7 +544,11 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
     if not enable_categorical_sample_op():
         raise RuntimeError("the categorical custom operator is unavailable")
 
-    case, execution = sys.argv[1:3]
+    case, execution, backend = sys.argv[1:4]
+    if backend == "triton":
+        from vllm_ascend.ops.triton.categorical_sample import categorical_sample as operator
+    else:
+        operator = torch.ops._C_ascend.npu_categorical_sample
     device = torch.device("npu")
     logits = torch.tensor([[0.0, 1.0, -1.0, 2.0]], dtype=torch.float32, device=device)
     mapping = torch.zeros(1, dtype=torch.int32, device=device)
@@ -558,7 +562,7 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
         cache_col = torch.zeros((), dtype=torch.int32, device=device)
 
     def sample():
-        return torch.ops._C_ascend.npu_categorical_sample(
+        return operator(
             logits,
             mapping,
             temperature,
@@ -599,6 +603,7 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
 )
 
 
+@pytest.mark.parametrize("backend", ["native", "triton"])
 @pytest.mark.parametrize("execution", ["eager", "aclgraph"])
 @pytest.mark.parametrize(
     "case,expected_message",
@@ -610,12 +615,13 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
     ],
 )
 def test_categorical_sampling_asserts_invalid_device_values(
+    backend: str,
     execution: str,
     case: str,
     expected_message: str,
 ) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", _ASSERTION_SUBPROCESS, case, execution],
+        [sys.executable, "-c", _ASSERTION_SUBPROCESS, case, execution, backend],
         capture_output=True,
         text=True,
         timeout=120,
