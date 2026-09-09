@@ -147,6 +147,13 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         if draft_vocab_size == target_vocab_size:
             draft_model.draft_id_to_target_id = None
 
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        super().load_model(target_model)
+        if self.vllm_config.parallel_config.pipeline_parallel_size > 1:
+            # The draft runs on the last PP stage without an encoder cache.
+            # Set this before profiling so compiled inputs stay consistent.
+            self.supports_mm_inputs = False
+
     def load_draft_model(
         self,
         target_model: torch.nn.Module,

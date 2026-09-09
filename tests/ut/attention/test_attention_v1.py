@@ -21,7 +21,7 @@ from vllm_ascend.attention.utils import (
     AscendCommonAttentionMetadata,
     PagedAttentionGraphParam,
     cache_graph_workspace,
-    needs_layer_aware_fia_graph_replay,
+    needs_max_fia_graph_workspace,
     using_paged_attention,
 )
 from vllm_ascend.device.device_op import A5DeviceAdaptor
@@ -338,8 +338,8 @@ class TestAscendAttentionBackendImpl(TestBase):
         )
         self.config_patcher.start()
         self.utils_config_patcher.start()
-        needs_layer_aware_fia_graph_replay.cache_clear()
-        self.addCleanup(needs_layer_aware_fia_graph_replay.cache_clear)
+        needs_max_fia_graph_workspace.cache_clear()
+        self.addCleanup(needs_max_fia_graph_workspace.cache_clear)
         self.addCleanup(self.utils_config_patcher.stop)
         self.addCleanup(self.config_patcher.stop)
 
