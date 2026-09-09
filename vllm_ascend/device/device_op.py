@@ -36,6 +36,12 @@ if HAS_TRITON:
 else:
     triton_q_rms = None  # type: ignore
 
+# QuantLightningIndexerV2 derives the accepted query/key, dequant scale and
+# weights dtypes from quant_mode: 1 is fp8 e4m3 with float32 scales and
+# weights, 2 is int8 with float16 scales and weights.
+QLI_QUANT_MODE_FP8_E4M3 = 1
+QLI_QUANT_MODE_INT8 = 2
+
 
 class BaseDeviceAdaptor:
     @classmethod
@@ -565,6 +571,10 @@ class BaseDeviceAdaptor:
         torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
+
+    # Must stay in sync with the dtypes produced below and by
+    # indexer_quantize_query, which the indexer op validates against it.
+    dsa_indexer_quant_mode = QLI_QUANT_MODE_INT8
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
@@ -1158,6 +1168,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     # ===== Lightning Indexer Dtype Prep =====
+
+    # The indexer query and KV are fp8 on A5 even when the attention KV is
+    # bfloat16, so the mode does not follow the attention KV dtype.
+    dsa_indexer_quant_mode = QLI_QUANT_MODE_FP8_E4M3
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
