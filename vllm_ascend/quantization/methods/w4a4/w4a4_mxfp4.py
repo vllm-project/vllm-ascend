@@ -251,8 +251,14 @@ class AscendW4A4MXFP4DynamicFusedMoEMethod(AscendMoEScheme):
         _rename_packed_weight_parameter(layer, "w2_weight")
 
         g_num, n_size, k_size = layer.w13_weight_scale.shape
+        if k_size % 2 != 0:
+            layer.w13_weight_scale.data = F.pad(layer.w13_weight_scale.data, (0, 1), value=0)
+            k_size += 1
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         g_num, n_size, k_size = layer.w2_weight_scale.shape
+        if k_size % 2 != 0:
+            layer.w2_weight_scale.data = F.pad(layer.w2_weight_scale.data, (0, 1), value=0)
+            k_size += 1
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.reshape(g_num, n_size, k_size // 2, 2)
         # The A5 MXFP4 fused grouped-matmul-swiglu op relies on the
         # transpose stride to interpret packed FP4 weights as logical K.

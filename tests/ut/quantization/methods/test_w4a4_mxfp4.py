@@ -118,6 +118,29 @@ class TestAscendW4A4MXFP4MoEMethod(TestBase):
             self.assertEqual(result["w13_weight_scale"].dtype, torch.uint8)
             self.assertEqual(result["w2_weight_scale"].dtype, torch.uint8)
 
+    def test_process_weights_preserves_scales_with_odd_group_counts(self):
+        for group_counts in [(4, 11), (3, 8), (3, 11), (4, 8)]:
+            with self.subTest(group_counts=group_counts):
+                layer = nn.Module()
+                original_scales = {}
+                for name, groups in zip(("w13", "w2"), group_counts):
+                    weight = torch.randint(0, 255, (2, 8, groups * 16), dtype=torch.uint8)
+                    scale = torch.randint(1, 255, (2, 8, groups), dtype=torch.uint8)
+                    setattr(layer, f"{name}_weight", nn.Parameter(weight, requires_grad=False))
+                    setattr(layer, f"{name}_weight_scale", nn.Parameter(scale.clone(), requires_grad=False))
+                    original_scales[name] = scale
+
+                self.scheme.process_weights_after_loading(layer)
+
+                for name, original in original_scales.items():
+                    groups = original.shape[-1]
+                    actual = getattr(layer, f"{name}_weight_scale")
+                    self.assertEqual(actual.shape, (2, (groups + 1) // 2, 8, 2))
+                    restored = actual.transpose(1, 2).flatten(-2)
+                    torch.testing.assert_close(restored[..., :groups], original)
+                    if groups % 2:
+                        self.assertEqual(torch.count_nonzero(restored[..., -1]).item(), 0)
+
     def test_process_weights_transposes_weights(self):
         layer = nn.Module()
         layer.w13_weight = nn.Parameter(torch.randint(0, 255, (8, 256, 64), dtype=torch.uint8), requires_grad=False)
