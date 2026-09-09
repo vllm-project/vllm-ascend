@@ -21,6 +21,7 @@ The following speculative decoding methods are supported:
 | `mtp` | Multi-Token Prediction with shared embedding head |
 | `dflash` | Block diffusion-based parallel draft model |
 | `dspark` | Semi-autoregressive block drafting with a sequential Markov logit-bias head |
+| `uno` | Parallel shared-model drafting with a draft-only LoRA adapter |
 | `draft_model` | Generic external draft LLM |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
 
@@ -62,6 +63,36 @@ vllm serve path/to/target/model \
 
 > [!NOTE]
 > On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
+
+## Speculating using Uno
+
+Uno runs a parallel draft pass through the target model and applies its LoRA
+adapter only to the noise-token rows. The target verification pass uses the
+base model and the standard rejection sampler, so accepted output tokens retain
+the target model distribution.
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=0 vllm serve Qwen/Qwen3-8B \
+  --enable-lora \
+  --max-lora-rank 128 \
+  --max-loras 2 \
+  --max-cpu-loras 2 \
+  --no-async-scheduling \
+  --max-num-seqs 4 \
+  --max-num-batched-tokens 256 \
+  --speculative-config '{"method":"uno","uno_lora_path":"/path/to/uno/adapter","uno_mask_token_id":151669,"num_speculative_tokens":8,"enforce_eager":true}'
+```
+
+The initial Ascend implementation has these requirements:
+
+- A vLLM revision that contains the upstream Uno implementation.
+- Model Runner V1 and one NPU (TP, PP, DP, PCP, and DCP sizes must all be 1).
+- A text-only decoder with homogeneous full attention.
+- Synchronous scheduling and eager draft execution.
+- LoRA enabled with a rank large enough for the Uno adapter. Request-specific
+  LoRA adapters cannot be combined with Uno.
+- `num_speculative_tokens <= 15`. Also ensure
+  `max_num_batched_tokens >= max_num_seqs * num_speculative_tokens`.
 
 ## Speculating by matching n-grams in the prompt
 

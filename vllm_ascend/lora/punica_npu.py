@@ -19,7 +19,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int, device: torch.device | str, **kwargs):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
+        # A token-level mapping can contain more contiguous LoRA segments than
+        # requests. Uno, for example, has two segments per request: one base
+        # seed row followed by adapter-backed noise rows. Size segment metadata
+        # by the token capacity so every valid mapping is representable.
+        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_num_batched_tokens, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
