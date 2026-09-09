@@ -96,10 +96,8 @@ class TestAscendStoreConnector(unittest.TestCase):
             role=KVConnectorRole.SCHEDULER,
             kv_cache_config=MagicMock(),
         )
-        stats = MagicMock()
-        mock_scheduler_cls.return_value.get_stats.return_value = stats
         mock_scheduler_cls.assert_called_once()
-        self.assertIs(connector.get_kv_connector_stats(), stats)
+        self.assertIsNone(connector.get_kv_connector_stats())
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.LookupKeyServer")
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.ascend_store_connector.KVPoolWorker")

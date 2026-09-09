@@ -771,7 +771,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_stored_request.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
-    def test_get_finished_producer(self):
+    def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 
         send_thread = MagicMock()
@@ -779,14 +779,15 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread = send_thread
 
         meta = AscendConnectorMetadata(set(), set())
-        done_s, done_r = worker.get_finished({"r1"}, meta)
-        self.assertIn("r1", done_s)
+        done_s, done_r = worker.get_finished(meta)
+        self.assertEqual(done_s, set())
         self.assertEqual(done_r, set())
+        send_thread.get_and_clear_finished_requests.assert_called_once_with()
 
     def test_get_finished_consumer(self):
         worker = self._make_worker(kv_role="kv_consumer")
         meta = AscendConnectorMetadata(set(), set())
-        done_s, done_r = worker.get_finished(set(), meta)
+        done_s, done_r = worker.get_finished(meta)
         self.assertEqual(done_s, set())
 
     def test_lookup_scheduler_all_cached(self):
@@ -914,7 +915,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
 
         loading_req_ids = {"r1"}
         meta = AscendConnectorMetadata(set(), loading_req_ids=loading_req_ids)
-        done_s, done_r = worker.get_finished(set(), meta)
+        done_s, done_r = worker.get_finished(meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, {"r1"})
         recv_thread.get_and_clear_finished_requests.assert_called_once_with(loading_req_ids)
@@ -922,7 +923,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         recv_thread.reset_mock()
         recv_thread.get_and_clear_finished_requests.return_value = set()
         meta = AscendConnectorMetadata({"r_preempted"}, loading_req_ids=set())
-        worker.get_finished(set(), meta)
+        worker.get_finished(meta)
         recv_thread.discard_finished_requests.assert_called_once_with({"r_preempted"})
 
     def test_get_finished_layerwise_send_thread(self):
@@ -935,7 +936,7 @@ class TestKVPoolWorkerGetFinishedAsync(unittest.TestCase):
         worker.kv_recv_thread = None
 
         meta = AscendConnectorMetadata(set())
-        done_s, done_r = worker.get_finished(set(), meta)
+        done_s, done_r = worker.get_finished(meta)
         self.assertEqual(done_s, set())
         self.assertEqual(done_r, set())
         send_thread.get_and_clear_finished_requests.assert_called_once_with()
