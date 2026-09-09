@@ -2753,7 +2753,18 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             num_kv_heads = value_scale_cache.shape[2]
             v_head_dim = value_scale_cache.shape[3]
             value_scale_cache.copy_(value_scale.view(1, 1, num_kv_heads, v_head_dim, 1))
-            filled_caches.add(value_scale_cache)
+            # Only claim the cache is filled when the copy actually ran. Graph
+            # capture records the copy without executing it, while this Python
+            # line runs for real -- so marking it there leaves the cache full of
+            # zeros forever and every later call skips the fill. V then
+            # dequantizes to zero and attention returns exactly zero. That is
+            # invisible for the target model, whose first execution of this
+            # path is an eager forward, but the draft's first execution is the
+            # capture itself, which is why MTP acceptance collapses as soon as
+            # the draft graph is enabled. The copy stays inside the captured
+            # graph and is idempotent, so replays keep writing the same value.
+            if not _EXTRA_CTX.capturing:
+                filled_caches.add(value_scale_cache)
         notify_kv_cache_written()
 
     def forward(
