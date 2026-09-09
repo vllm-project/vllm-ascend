@@ -106,6 +106,7 @@ def test_main_allocator_preserves_separate_ascend_kv_views(monkeypatch):
         num_heads=8,
     )
     vllm_config = SimpleNamespace(
+        additional_config={},
         cache_config=SimpleNamespace(cache_dtype="auto"),
         kv_transfer_config=None,
         model_config=SimpleNamespace(hf_config=SimpleNamespace()),
@@ -193,6 +194,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
         kv_cache_groups=groups,
     )
     vllm_config = SimpleNamespace(
+        additional_config={},
         kv_transfer_config=None,
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(compress_ratios=[1]),
@@ -256,6 +258,7 @@ def test_sfa_indexer_cache_spec_uses_dcp_replication(monkeypatch, replicated_ind
     )
 
     vllm_config = SimpleNamespace(
+        additional_config={},
         parallel_config=SimpleNamespace(decode_context_parallel_size=4),
         cache_config=SimpleNamespace(block_size=128, cache_dtype="auto"),
         model_config=SimpleNamespace(
@@ -324,6 +327,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         get_resolved_kv_cache_layout=lambda: None,
     )
     vllm_config = SimpleNamespace(
+        additional_config={},
         model_config=SimpleNamespace(
             hf_config=SimpleNamespace(
                 compress_ratios=[4],
@@ -881,3 +885,37 @@ def test_build_attn_metadata_propagates_prefill_and_pcp_context(monkeypatch, for
         "pcp_context": pcp_context,
         "pcp_cache_group_idx": 0,
     }
+
+
+@pytest.mark.parametrize("packed", [False, True], ids=["mla", "sfa-c8"])
+def test_main_entry_allocates_and_reshapes_kvpp_views(monkeypatch, packed):
+    from vllm.v1.worker.gpu import model_runner as upstream_model_runner
+
+    from tests.ut.kvpp_utils import assert_attention_cache_views, make_attention_cache_case, make_cache_config
+    from vllm_ascend.core import kv_cache_placement
+    from vllm_ascend.patch.worker.patch_v2 import patch_attn_utils
+    from vllm_ascend.worker import kvpp_cache
+
+    config, specs, layers = make_attention_cache_case(packed)
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: config)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *_args, **_kwargs: layers)
+    monkeypatch.setattr(kv_cache_placement, "get_layers_from_vllm_config", lambda *_args: layers)
+    for module in (attn_utils, kv_cache_placement):
+        monkeypatch.setattr(module, "enable_sfa", lambda _: packed)
+        monkeypatch.setattr(module, "enable_fa_quant", lambda _: False)
+    monkeypatch.setattr(kvpp_cache, "get_kvpp_group", lambda: SimpleNamespace(rank_in_group=1))
+    monkeypatch.setattr(attn_utils, "get_current_hardware_profile", lambda: SimpleNamespace(supports=lambda _: False))
+    raw = {}
+
+    def allocate(*args, **kwargs):
+        result = kvpp_cache.allocate_kvpp_cache(*args, **kwargs)
+        raw.update(result)
+        return result
+
+    monkeypatch.setattr(attn_utils, "allocate_kvpp_cache", allocate)
+    assert upstream_model_runner.get_kv_cache_spec is patch_attn_utils.get_kv_cache_spec
+    assert upstream_attn_utils.allocate_kv_cache is patch_attn_utils.allocate_kv_cache_main
+    caches = upstream_attn_utils.allocate_kv_cache(
+        make_cache_config(specs), device=torch.device("cpu"), layout=None, kernel_block_sizes=[2]
+    )
+    assert_attention_cache_views(caches, raw, packed)

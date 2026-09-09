@@ -1032,6 +1032,7 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         worker = NPUWorker.__new__(NPUWorker)
+        worker._kvpp_cache_allocation_plan = None
         worker.cache_config = SimpleNamespace(kv_cache_memory_bytes=8192)
         worker.model_runner = MagicMock()
         worker.init_snapshot = SimpleNamespace(free_memory=16384)
@@ -1087,6 +1088,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
@@ -1131,6 +1133,7 @@ class TestNPUWorker(TestBase):
 
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.cache_config = MagicMock()
             worker.cache_config.kv_cache_memory_bytes = None
@@ -1191,6 +1194,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.9
@@ -1241,6 +1245,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
             worker.model_runner = MagicMock()
@@ -1297,6 +1302,7 @@ class TestNPUWorker(TestBase):
         # Create worker mock
         with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
             worker = NPUWorker()
+            worker._kvpp_cache_allocation_plan = None
             worker.vllm_config = MagicMock(kv_transfer_config=None)
             worker.init_snapshot = mock_init_snapshot
             worker.requested_memory = 10000 * 0.8
@@ -2177,3 +2183,29 @@ class TestNPUWorkerWeightUpdate(TestBase):
         worker.shutdown()
 
         engine.shutdown.assert_called_once()
+
+
+class TestKVPPWorkerBudget(TestBase):
+    def test_complete_spec_and_logical_planner_budget(self):
+        from tests.ut.kvpp_utils import make_kvpp_config, make_kvpp_specs
+        from vllm_ascend.worker import worker as worker_module
+
+        specs = make_kvpp_specs()
+        worker = worker_module.NPUWorker.__new__(worker_module.NPUWorker)
+        worker.vllm_config = make_kvpp_config()
+        worker.model_runner = SimpleNamespace(get_kv_cache_spec=lambda: specs)
+        worker._kvpp_cache_allocation_plan = None
+        ascend_config = SimpleNamespace(sparse_kv_offload_config=SimpleNamespace(enabled=False))
+        with (
+            patch.object(worker_module, "get_tp_group", return_value=SimpleNamespace(rank_in_group=1)),
+            patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
+        ):
+            self.assertEqual(worker.get_kv_cache_spec(), specs)
+        self.assertEqual(worker._kvpp_cache_allocation_plan.logical_cache_spec, specs)
+        for available, expected in ((1175, 952), (1176, 1428)):
+            with self.subTest(available=available):
+                self.assertEqual(worker._apply_kvpp_memory_budget(available), expected)
+                self.assertEqual(worker.available_kv_cache_memory_bytes, available)
+        worker._kvpp_cache_allocation_plan = None
+        self.assertEqual(worker._apply_kvpp_memory_budget(1176), 1176)
+        self.assertEqual(worker.available_kv_cache_memory_bytes, 1176)

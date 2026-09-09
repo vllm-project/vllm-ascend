@@ -43,6 +43,7 @@ def mock_distributed():
 
 def test_init_ascend_model_parallel(mock_distributed, parallel_config):
     mock_ascend_config = MagicMock()
+    mock_ascend_config.kvpp_config.size = 1
     mock_ascend_config.finegrained_tp_config.lmhead_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.oproj_tensor_parallel_size = 2
     mock_ascend_config.finegrained_tp_config.embedding_tensor_parallel_size = 2
@@ -141,3 +142,48 @@ def test_get_global_rank_defaults_to_current_config():
         mock_group.return_value.rank_in_group = 3
         # data_parallel_index(1) * replica_size(4) + 3 == 7
         assert get_global_rank() == 7
+
+
+@pytest.mark.parametrize("size", [1, 4])
+def test_kvpp_group_stays_inside_pipeline_stage(monkeypatch, size):
+    from vllm_ascend.distributed import parallel_state
+
+    for name in ("_KVPP", "_MC2", "_P_TP", "_OTP", "_LMTP", "_EMBED_TP", "_MLP_TP", "_DYNAMIC_EPLB"):
+        monkeypatch.setattr(parallel_state, name, None)
+    config = SimpleNamespace(
+        kvpp_config=SimpleNamespace(size=size),
+        pd_tp_ratio=1,
+        pd_head_ratio=1,
+        eplb_config=SimpleNamespace(dynamic_eplb=False),
+        finegrained_tp_config=SimpleNamespace(
+            oproj_tensor_parallel_size=0,
+            lmhead_tensor_parallel_size=0,
+            embedding_tensor_parallel_size=0,
+            mlp_tensor_parallel_size=0,
+        ),
+    )
+    calls, groups = {}, {}
+
+    def init_group(ranks, local_rank, backend, *, group_name):
+        calls[group_name] = (ranks, local_rank, backend)
+        groups[group_name] = MagicMock()
+        return groups[group_name]
+
+    monkeypatch.setattr(parallel_state.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_world_size", lambda: 8)
+    monkeypatch.setattr(parallel_state.torch.distributed, "get_backend", lambda _: "hccl")
+    monkeypatch.setattr(parallel_state, "get_world_group", lambda: SimpleNamespace(local_rank=4, device_group=object()))
+    monkeypatch.setattr(parallel_state, "get_ascend_config", lambda: config)
+    monkeypatch.setattr(parallel_state, "init_model_parallel_group", init_group)
+    parallel_state.init_ascend_model_parallel(
+        SimpleNamespace(
+            tensor_parallel_size=4, pipeline_parallel_size=2, data_parallel_size=1, prefill_context_parallel_size=1
+        )
+    )
+    expected = [[i] for i in range(8)] if size == 1 else [[0, 1, 2, 3], [4, 5, 6, 7]]
+    assert calls["kvpp"] == (expected, 4, "hccl")
+    assert parallel_state.get_kvpp_group() is groups["kvpp"]
+    assert groups["kvpp"] is not groups["mc2"]
+    parallel_state.destroy_ascend_model_parallel()
+    groups["kvpp"].destroy.assert_called_once_with()
+    assert parallel_state._KVPP is None

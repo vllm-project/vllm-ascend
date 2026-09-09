@@ -20,6 +20,8 @@ def _make_runner(need_timing: bool = True):
         scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=need_timing))
     )
     runner.vllm_config = SimpleNamespace()
+    runner.kvpp = SimpleNamespace(complete_forward=lambda: None)
+    runner.model_state = SimpleNamespace(kvpp_is_dummy_run=False)
     runner.execute_model_state = None
     runner.is_last_pp_rank = False
     return runner
@@ -256,3 +258,57 @@ def test_prepare_dummy_attn_without_pcp_uses_upstream():
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
         assert runner.prepare_dummy_attn(dummy) == ((), None)
     parent.assert_called_once_with(dummy)
+
+
+@pytest.mark.parametrize(
+    "computed,dummy_run,is_profile,expected",
+    [
+        ([0, 0, 99, 99], False, False, False),
+        ([0, 4, 0, 0], False, False, True),
+        ([0, 4, 0, 0], True, False, False),
+        ([0, 4, 0, 0], False, True, False),
+    ],
+)
+def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dummy_run, is_profile, expected):
+    from vllm_ascend.worker.v2.model_states import default
+
+    runner = _make_runner(need_timing=False)
+    events = []
+    runner.kvpp = SimpleNamespace(
+        prepare_forward=lambda history: events.append(("prepare", history)),
+        complete_forward=lambda: events.append("complete"),
+    )
+    state = default.AscendModelState.__new__(default.AscendModelState)
+    state.vllm_config = SimpleNamespace(parallel_config=SimpleNamespace(prefill_context_parallel_size=1))
+    state.max_model_len = 32
+    state.kvpp_runtime = runner.kvpp
+    runner.model_state = state
+    batch = SimpleNamespace(
+        num_reqs=2,
+        num_reqs_after_padding=4,
+        num_tokens=2,
+        num_tokens_after_padding=4,
+        num_computed_tokens_np=np.array(computed),
+        query_start_loc_np=np.array([0, 1, 2, 2, 2], dtype=np.int32),
+        query_start_loc=torch.tensor([0, 1, 2, 2, 2]),
+        num_scheduled_tokens=torch.tensor([1, 1]),
+        is_prefilling_np=np.array([True, False, False, False]),
+        seq_lens=torch.tensor([1, 5]),
+        seq_lens_np=np.array([1, 5]),
+        dcp_local_seq_lens=None,
+        positions=torch.arange(2),
+        attn_state=None,
+    )
+    metadata = object()
+    monkeypatch.setattr(default, "build_attn_metadata", lambda **_kwargs: metadata)
+
+    def forward(_self, _scheduler_output, **_kwargs):
+        assert state.kvpp_is_dummy_run is (dummy_run or is_profile)
+        assert state.prepare_attn(batch, CUDAGraphMode.NONE, (), torch.empty(0), [], None) is metadata
+        events.append("forward")
+        return metadata
+
+    monkeypatch.setattr(GPUModelRunner, "execute_model", forward)
+    assert runner.execute_model(SimpleNamespace(), dummy_run=dummy_run, is_profile=is_profile) is metadata
+    assert events == [("prepare", expected), "forward", "complete"]
+    assert state.kvpp_is_dummy_run is False

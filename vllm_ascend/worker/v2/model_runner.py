@@ -63,6 +63,7 @@ from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.eplb import AscendEPLBController
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
+from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 from vllm_ascend.worker.v2.pp_utils import (
     bypass_upstream_spec_pp_guard,
@@ -88,6 +89,7 @@ class NPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
+        self.kvpp = KVPPRuntime()
         # FusedMoE can be constructed by the parent initializer and reads this
         # capacity while setting up MC2 communication.
         set_potential_max_tokens(vllm_config)
@@ -251,6 +253,13 @@ class NPUModelRunner(GPUModelRunner):
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
 
+        self.kvpp = KVPPRuntime.create_from_kv_cache(
+            vllm_config=self.vllm_config,
+            kv_cache_config=self.kv_cache_config,
+            static_forward_context=self.compilation_config.static_forward_context,
+        )
+        self.model_state.kvpp_runtime = self.kvpp
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -268,6 +277,7 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
+        self.model_state.kvpp_is_dummy_run = dummy_run or is_profile
         output = super().execute_model(
             scheduler_output,
             intermediate_tensors=intermediate_tensors,
@@ -276,6 +286,8 @@ class NPUModelRunner(GPUModelRunner):
             is_profile=is_profile,
             context_len=context_len,
         )
+        self.model_state.kvpp_is_dummy_run = False
+        self.kvpp.complete_forward()
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
