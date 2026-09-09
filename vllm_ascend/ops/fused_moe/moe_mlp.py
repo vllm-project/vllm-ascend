@@ -792,6 +792,15 @@ def unified_apply_mlp(*, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
     topk_scales = mlp_compute_input.topk_scales
     w1 = mlp_compute_input.weights.w1
     w2 = mlp_compute_input.weights.w2
+    if os.environ.get("DSV4_MOE_DEBUG") == "1":
+        gl = group_list.tolist() if hasattr(group_list, "tolist") else group_list
+        w1_shape = tuple(w1.shape) if not isinstance(w1, list) else "list"
+        print(
+            f"[MoE-DEBUG] unified_apply_mlp：quant={mlp_compute_input.quant.is_quant} "
+            f"x {tuple(hidden_states.shape)} w1 {w1_shape} "
+            f"group_list_type={group_list_type} group_list={gl}",
+            flush=True,
+        )
     w1_bias = mlp_compute_input.weights.w1_bias
     w2_bias = mlp_compute_input.weights.w2_bias
     w1_scale = mlp_compute_input.weights.w1_scale

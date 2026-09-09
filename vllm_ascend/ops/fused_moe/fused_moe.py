@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 import torch
 import torch.nn.functional as F
 from vllm.distributed import (
@@ -244,6 +245,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                     before_routed_experts = torch.npu.current_stream().record_event()
                     # v0.27.1: weight_fp32 is guaranteed by is_internal_router.
                     router_logits = F.linear(hidden_states_fp32, gate.weight_fp32)
+                    if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                        print(
+                            f"[MoE-DEBUG] gate 打分（internal router）: ep_rank={self.ep_rank} "
+                            f"router_logits {tuple(router_logits.shape)}",
+                            flush=True,
+                        )
                     after_routed_experts = torch.npu.current_stream().record_event()
                 else:
                     before_routed_experts = torch.npu.current_stream().record_event()
@@ -288,6 +295,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                             hidden_states_fp32,
                             gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
                         )
+                        if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                            print(
+                                f"[MoE-DEBUG] gate 打分（internal router, 无共享专家）: ep_rank={self.ep_rank} "
+                                f"router_logits {tuple(router_logits.shape)}",
+                                flush=True,
+                            )
                     return self.routed_experts.forward_impl(
                         hidden_states=hidden_states,
                         router_logits=router_logits,
@@ -311,6 +324,12 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
                         hidden_states_fp32,
                         gate.weight_fp32 if hasattr(gate, "weight_fp32") else gate.weight.to(torch.float32),
                     )
+                    if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                        print(
+                            f"[MoE-DEBUG] gate 打分（internal router）: ep_rank={self.ep_rank} "
+                            f"router_logits {tuple(router_logits.shape)}",
+                            flush=True,
+                        )
                     after_routed_experts = torch.npu.current_stream().record_event()
                 else:
                     before_routed_experts = torch.npu.current_stream().record_event()

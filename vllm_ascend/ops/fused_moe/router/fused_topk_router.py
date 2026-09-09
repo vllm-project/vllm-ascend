@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from collections.abc import Callable
 
 import torch
@@ -138,6 +139,13 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
                 norm_type=2,
                 out_flag=False,
             )
+            if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                _n = min(8, topk_ids.shape[0])
+                print(
+                    f"[MoE-DEBUG] router（hash={self.tid2eid is not None}, sqrtsoftplus）："
+                    f"topk_ids {tuple(topk_ids.shape)} 前 {_n} 行 = {topk_ids[:_n].tolist()}",
+                    flush=True,
+                )
             return topk_weights, topk_ids
         norm_type = 0 if self.scoring_func == "softmax" else 1
         if self.e_score_correction_bias is not None and self.e_score_correction_bias.dtype != router_logits.dtype:
@@ -156,4 +164,11 @@ class AscendFusedTopKRouter(AscendGroupedTopKRouter):
             bias_opt=self.e_score_correction_bias,
         )
 
+        if os.environ.get("DSV4_MOE_DEBUG") == "1":
+            _n = min(8, topk_ids.shape[0])
+            print(
+                f"[MoE-DEBUG] router（score, {self.scoring_func}）："
+                f"topk_ids {tuple(topk_ids.shape)} 前 {_n} 行 = {topk_ids[:_n].tolist()}",
+                flush=True,
+            )
         return topk_weights, topk_ids
