@@ -171,6 +171,7 @@ class AscendEplbState(_eplb_state.EplbState):
         super().step(is_dummy=is_dummy, is_profile=is_profile, log_stats=log_stats)
 
     def _compress_stair_window(self, model_state: Any) -> tuple[torch.Tensor, np.ndarray]:
+        assert self._stair_config is not None
         valid_size = model_state._stair_valid_size
         if valid_size < 1:
             raise RuntimeError("STAIR cannot compress an empty load window")

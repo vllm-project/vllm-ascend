@@ -390,7 +390,7 @@ def unconstrained_lpt(
     if total_slots % num_ranks:
         raise ValueError("STAIR physical slots must divide evenly across ranks")
     slots_per_rank = total_slots // num_ranks
-    ranks = [set() for _ in range(num_ranks)]
+    ranks: list[set[int]] = [set() for _ in range(num_ranks)]
     for expert in _ordered_copies(mean, moments, replicas, z_score):
         candidates = [
             rank for rank in range(num_ranks) if len(ranks[rank]) < slots_per_rank and expert not in ranks[rank]
@@ -420,7 +420,7 @@ def constrained_lpt(
     old = np.asarray(old_placement, dtype=np.int64)
     if int(np.sum(replicas)) != old.size or len(node_by_rank) != old.shape[0]:
         raise ValueError("STAIR replica, placement, and topology sizes disagree")
-    ranks = [set() for _ in range(old.shape[0])]
+    ranks: list[set[int]] = [set() for _ in range(old.shape[0])]
     copies = _ordered_copies(mean, moments, replicas, z_score)
     backtracks = 0
 
