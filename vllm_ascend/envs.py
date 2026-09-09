@@ -71,14 +71,6 @@ env_variables: dict[str, Callable[[], Any]] = {
     # Control the aclrtMemcpyBatchAsync compile path for KV cache offloading.
     # "1": force enable, "0": force disable, None: auto-detect from CANN headers.
     "VLLM_ASCEND_ENABLE_BATCH_MEMCPY": lambda: os.getenv("VLLM_ASCEND_ENABLE_BATCH_MEMCPY", None),
-    # "1" re-enables the permute + contiguous materialization in
-    # _finish_dcp_gather (the per-layer copy the layout optimization skips).
-    # Both layouts hand npu_sparse_flash_attention strided split views; the
-    # flag changes only the physical (t, h) row ordering behind those views
-    # (t-major materialized copy vs. the h-major all-gather output). Only
-    # affects the dim-1 native-DCP head gather; dim-0 gathers have no
-    # restore copy to skip.
-    "VLLM_ASCEND_SFA_DCP_FORCE_TMAJOR_RESTORE": lambda: os.getenv("VLLM_ASCEND_SFA_DCP_FORCE_TMAJOR_RESTORE", "0") == "1",
 }
 
 # end-env-vars-definition

@@ -12,7 +12,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-import vllm_ascend.envs as envs_ascend
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -34,6 +33,7 @@ from vllm_ascend.utils import (
     enable_dsa_cp,
     enable_dsa_cp_full_o_proj,
     enable_pcp_o_proj_weight_sharding,
+    enable_sfa_dcp_force_tmajor_restore,
     enable_sfa_dcp_replicated_indexer,
 )
 from vllm_ascend.weight_switch import (
@@ -1315,11 +1315,11 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # attention have always been strided views (torch.split never copies),
         # so the old permute+contiguous call only materialized the t-major
         # [T, H, D] storage behind the views;
-        # VLLM_ASCEND_SFA_DCP_FORCE_TMAJOR_RESTORE=1 keeps the t-major
-        # materialization selectable for comparison runs.
+        # additional-config sfa_dcp_force_tmajor_restore=true keeps the
+        # t-major materialization selectable for comparison runs.
         ql_nope, q_pe = self._finish_dcp_gather(
             gather_context,
-            keep_view=not envs_ascend.VLLM_ASCEND_SFA_DCP_FORCE_TMAJOR_RESTORE,
+            keep_view=not enable_sfa_dcp_force_tmajor_restore(),
         )
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
