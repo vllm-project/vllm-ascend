@@ -99,6 +99,7 @@ def test_verify_accepts_in_vocab_ids():
     params = SamplingParams(stop_token_ids=[0, 129279], allowed_token_ids=[1, 2])
     tokenizer = MagicMock()
     tokenizer.__len__.return_value = 129280
+    tokenizer.get_vocab_size.return_value = 129280
     params.verify(model_config, None, None, tokenizer)
 
 
