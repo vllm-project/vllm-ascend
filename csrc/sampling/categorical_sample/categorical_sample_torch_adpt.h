@@ -56,7 +56,10 @@ std::tuple<at::Tensor, at::Tensor> npu_categorical_sample(
         processed_logits.stride(0) == 0 || processed_logits.stride(0) >= processed_logits.size(1),
         "processed_logits row stride is invalid");
 
-    check_categorical_sample_metadata(expanded_idx_mapping, processed_logits, at::kInt, "expanded_idx_mapping");
+    check_categorical_sample_metadata(
+        expanded_idx_mapping, processed_logits,
+        expanded_idx_mapping.scalar_type() == at::kLong ? at::kLong : at::kInt,
+        "expanded_idx_mapping");
     check_categorical_sample_metadata(temperature, processed_logits, at::kFloat, "temperature");
     check_categorical_sample_metadata(seed, processed_logits, at::kLong, "seed");
     check_categorical_sample_metadata(pos, processed_logits, at::kLong, "pos");

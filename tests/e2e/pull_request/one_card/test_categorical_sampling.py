@@ -137,7 +137,10 @@ def _assert_tensor_equal(actual: torch.Tensor, expected: torch.Tensor) -> None:
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_categorical_sampling_stateless_philox_matches_cpu_reference(dtype: torch.dtype) -> None:
+@pytest.mark.parametrize("mapping_dtype", [torch.int32, torch.int64])
+def test_categorical_sampling_stateless_philox_matches_cpu_reference(
+    dtype: torch.dtype, mapping_dtype: torch.dtype
+) -> None:
     """Seed and logical position fully define sampling, including padding."""
     supports = [
         [0, 3, 7, 19, 32],
@@ -149,7 +152,7 @@ def test_categorical_sampling_stateless_philox_matches_cpu_reference(dtype: torc
         [],
         [0, 3, 7, 19, 32],
     ]
-    mapping_cpu = torch.tensor([0, 1, 2, 0, 1, 2, -1, 0], dtype=torch.int32)
+    mapping_cpu = torch.tensor([0, 1, 2, 0, 1, 2, -1, 0], dtype=mapping_dtype)
     seed_values = [0x0123456789ABCDEF, -37, (1 << 40) + 17]
     positions = [0, 1, 2, (1 << 32) + 3, (1 << 32) + 9, 99, 123, (1 << 40) + 5]
 
@@ -539,6 +542,7 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
     import torch_npu  # noqa: F401
 
     from vllm_ascend.utils import enable_categorical_sample_op
+    from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample
 
     if not enable_categorical_sample_op():
         raise RuntimeError("the categorical custom operator is unavailable")
@@ -546,7 +550,8 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
     case, execution = sys.argv[1:3]
     device = torch.device("npu")
     logits = torch.tensor([[0.0, 1.0, -1.0, 2.0]], dtype=torch.float32, device=device)
-    mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    mapping_dtype = torch.int64 if case == "mapping_int64" else torch.int32
+    mapping = torch.zeros(1, dtype=mapping_dtype, device=device)
     temperature = torch.ones(1, dtype=torch.float32, device=device)
     seed = torch.ones(1, dtype=torch.int64, device=device)
     pos = torch.zeros(1, dtype=torch.int64, device=device)
@@ -557,6 +562,8 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
         cache_col = torch.zeros((), dtype=torch.int32, device=device)
 
     def sample():
+        if case == "mapping_int64" and sys.argv[4] == "wrapper":
+            return gumbel_sample(logits, mapping, temperature, seed, pos, False)
         return torch.ops._C_ascend.npu_categorical_sample(
             logits,
             mapping,
@@ -584,6 +591,8 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
         logits.fill_(-float("inf"))
     elif case == "mapping":
         mapping.fill_(-2)
+    elif case == "mapping_int64":
+        mapping.fill_(int(sys.argv[3]))
     elif case == "cache_column":
         cache_col.fill_(2)
     else:
@@ -622,6 +631,24 @@ def test_categorical_sampling_asserts_invalid_device_values(
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode != 0, f"{case}/{execution} unexpectedly succeeded"
     assert expected_message in output, output
+
+
+@pytest.mark.parametrize("execution", ["eager", "aclgraph"])
+@pytest.mark.parametrize("entrypoint", ["native", "wrapper"])
+@pytest.mark.parametrize("mapping_value", [2**31, -(2**31) - 1, 2**32, -(2**32), 2**32 - 1, 2**63 - 1, -(2**63)])
+def test_categorical_sampling_rejects_out_of_range_int64_mapping(
+    execution: str, entrypoint: str, mapping_value: int
+) -> None:
+    """Reject original INT64 values, including values that narrow to 0 or -1."""
+    result = subprocess.run(
+        [sys.executable, "-c", _ASSERTION_SUBPROCESS, "mapping_int64", execution, str(mapping_value), entrypoint],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode != 0, f"{mapping_value}/{entrypoint}/{execution} unexpectedly succeeded"
+    assert "CategoricalSample expanded index mapping is outside request state" in output, output
 
 
 @dataclass(frozen=True)

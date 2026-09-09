@@ -549,12 +549,14 @@ class TestGumbelSampling:
     @pytest.mark.parametrize("per_token_col", [False, True])
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
     @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.float16, torch.bfloat16])
-    def test_gumbel_sample_strided_logits_cache(self, per_token_col, dtype, cache_dtype):
+    @pytest.mark.parametrize("mapping_dtype", [torch.int32, torch.int64])
+    @pytest.mark.parametrize("execution", ["eager", "aclgraph"])
+    def test_gumbel_sample_strided_logits_cache(self, per_token_col, dtype, cache_dtype, mapping_dtype, execution):
         """Cache raw logits at mapped request/step slots, preserving padding."""
         torch.manual_seed(202)
         vocab_size = 1031
         logits = torch.randn(4, vocab_size, dtype=dtype, device=DEVICE)
-        mapping = torch.tensor([2, 0, 2, -1], dtype=torch.int32, device=DEVICE)
+        mapping = torch.tensor([2, 0, 2, -1], dtype=mapping_dtype, device=DEVICE)
         if not per_token_col:
             mapping[2] = 1
         # Exercise non-contiguous index inputs as used by expanded batches.
@@ -573,18 +575,29 @@ class TestGumbelSampling:
                 col = cols[token].item() if per_token_col else cols.item()
                 expected[req, 2 * col, :vocab_size] = logits[token]
 
-        gumbel_sample(
-            logits,
-            mapping,
-            temperature,
-            seed,
-            pos,
-            apply_temperature=True,
-            is_drafting=True,
-            logits_cache=cache,
-            logits_cache_col=cols,
-        )
+        def sample():
+            return gumbel_sample(
+                logits,
+                mapping,
+                temperature,
+                seed,
+                pos,
+                apply_temperature=True,
+                is_drafting=True,
+                logits_cache=cache,
+                logits_cache_col=cols,
+            )
+
+        sampled = sample()
+        if execution == "aclgraph":
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                sampled = sample()
+            storage.fill_(42)
+            graph.replay()
         torch.testing.assert_close(storage, expected, rtol=0, atol=0)
+        assert sampled[-1].item() == 0
 
     def test_gumbel_sample_draft_noise(self):
         """Draft sampling uses the upstream position salt for an independent stream."""

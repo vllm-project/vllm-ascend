@@ -60,7 +60,7 @@ The implementation preserves these layout rules:
 - The logits cache is FP16, BF16, or FP32 and has shape `[requests, vocab]` or `[requests, columns, vocab]`.
 - The supported vocabulary range is from 1 through 1,048,576 entries.
 
-The Python wrapper makes the expanded mapping, logical positions, and optional cache-column metadata contiguous. Mappings are normalized to int32 and positions to int64 for the native operator; drafting applies the upstream position salt. Cache columns use their actual stride, and a cache vocabulary dimension wider than the sampled logits is supported. It does not silently copy or cast logits, temperature, seed, or cache tensors.
+The Python wrapper makes the expanded mapping, logical positions, and optional cache-column metadata contiguous. The native operator accepts int32 or int64 mappings and validates their original values before converting to internal request indices; positions are normalized to int64, and drafting applies the upstream position salt. Cache columns use their actual stride, and a cache vocabulary dimension wider than the sampled logits is supported. It does not silently copy or cast logits, temperature, seed, or cache tensors.
 
 ## Hardware registration
 

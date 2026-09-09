@@ -144,7 +144,7 @@ __aicore__ inline uint64_t MulHigh64(uint64_t lhs, uint64_t rhs)
     return lhsHigh * rhsHigh + middleHigh + (upperMiddle >> 32U);
 }
 
-template <typename T>
+template <typename T, typename MappingType>
 class CategoricalSampleKernel {
 public:
     __aicore__ inline CategoricalSampleKernel() {}
@@ -182,7 +182,7 @@ public:
 
         processedLogitsGm_.SetGlobalBuffer(
             reinterpret_cast<__gm__ T*>(processedLogits), (numRows_ - 1) * rowStride_ + vocabSize_);
-        expandedIdxMappingGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(expandedIdxMapping), numRows_);
+        expandedIdxMappingGm_.SetGlobalBuffer(reinterpret_cast<__gm__ MappingType*>(expandedIdxMapping), numRows_);
         temperatureGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(temperature), numRequests_);
         seedGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(seed), numRequests_);
         posGm_.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t*>(pos), numRows_);
@@ -659,13 +659,13 @@ private:
 
     __aicore__ inline void ProcessRow(uint32_t row)
     {
-        const int32_t requestIndex = expandedIdxMappingGm_.GetValue(row);
+        const int64_t requestIndex = expandedIdxMappingGm_.GetValue(row);
         if (requestIndex == -1) {
             WritePaddingRow(row);
             return;
         }
         CATEGORICAL_SAMPLE_CHECK(
-            requestIndex >= 0 && static_cast<uint32_t>(requestIndex) < numRequests_,
+            requestIndex >= 0 && requestIndex < static_cast<int64_t>(numRequests_),
             "CategoricalSample expanded index mapping is outside request state\n");
 
         activeRequestIndex_ = static_cast<uint32_t>(requestIndex);
@@ -755,7 +755,7 @@ private:
     TBuf<QuePosition::VECCALC> lseOutputBuf_;
 
     GlobalTensor<T> processedLogitsGm_;
-    GlobalTensor<int32_t> expandedIdxMappingGm_;
+    GlobalTensor<MappingType> expandedIdxMappingGm_;
     GlobalTensor<float> temperatureGm_;
     GlobalTensor<int64_t> seedGm_;
     GlobalTensor<int64_t> posGm_;
