@@ -40,11 +40,14 @@ def _resample_kernel(
     expanded_idx_mapping_ptr,
     draft_sampled_ptr,
     temp_ptr,
+    # [num_logits]
+    cumulative_log_p_ptr,
     num_reqs,
     num_blocks,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
     """Compute one probability-mass statistic per request/vocabulary block."""
     worker_id = tl.program_id(0)
@@ -91,21 +94,48 @@ def _resample_kernel(
                 tl.store(local_max_ptr + req_idx * local_max_stride + block_idx, block_max)
                 tl.store(local_mass_ptr + req_idx * local_mass_stride + block_idx, block_sumexp)
             else:
+                rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
+                is_valid_rejected_draft = rejected_draft_token >= 0
                 target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
                 target_prob = tl.exp(target_block_logits - target_lse)
 
-                if HAS_DRAFT_LOGITS:
-                    draft_block_logits = tl.load(
-                        draft_logits_ptr
-                        + req_state_idx * draft_logits_stride_0
-                        + resample_idx * draft_logits_stride_1
-                        + vocab_offsets,
-                        mask=vocab_mask,
-                        other=float("-inf"),
-                    ).to(tl.float32)
-                    draft_block_logits = draft_block_logits / temperature
+                if not is_valid_rejected_draft:
+                    # -1 placeholder draft token: verification stopped at the
+                    # placeholder, so the residual is the full target
+                    # distribution (no draft subtraction; the draft logits at
+                    # a placeholder step are stale).
+                    token_mass = target_prob
+                elif HAS_DRAFT_LOGITS:
+                    # draft_logits is stored pre-temperature, so apply scale
+                    # first (matches the block-stats kernel and the upstream
+                    # rejection helpers, which all divide by temp).
+                    draft_block_logits = (
+                        tl.load(
+                            draft_logits_ptr
+                            + req_state_idx * draft_logits_stride_0
+                            + resample_idx * draft_logits_stride_1
+                            + vocab_offsets,
+                            mask=vocab_mask,
+                            other=float("-inf"),
+                        ).to(tl.float32)
+                        / temperature
+                    )
                     draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
                     draft_prob = tl.exp(draft_block_logits - draft_lse)
+                    if USE_BLOCK_VERIFICATION:
+                        # Block verification (Sun et al., 2024,
+                        # https://arxiv.org/abs/2403.10444): the residual is
+                        #   max(p_tau * p(x) - q(x), 0) / Z,
+                        # where p_tau is the joint ratio of the accepted
+                        # prefix. Scale the target probabilities by p_tau
+                        # before subtracting the draft distribution.
+                        # cumulative_log_p[start + i] = log(p_{i+1}), so the
+                        # ratio after tau = resample_idx accepted tokens
+                        # lives at resample_token_idx - 1. p_0 = 1 (nothing
+                        # accepted), so skip the load when resample_idx == 0.
+                        if resample_idx > 0:
+                            log_p_tau = tl.load(cumulative_log_p_ptr + resample_token_idx - 1).to(tl.float32)
+                            target_prob = target_prob * tl.exp(log_p_tau)
                     # NPU: upstream #46665 computes this residual in log space
                     # with tldevice.log1p(-ratio); that extern is unavailable
                     # on triton-ascend, and this kernel works in mass space.
@@ -116,7 +146,10 @@ def _resample_kernel(
                     # occurs when the draft closely matches the target.
                     token_mass = tl.maximum(target_prob - draft_prob, 0.0)
                 else:
-                    rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
+                    # One-hot draft. NOTE: during block verification the
+                    # residual becomes p_tau * p(x) / Z for x != draft token,
+                    # so the constant p_tau cancels under normalization and
+                    # does not need to be applied.
                     token_mass = tl.where(vocab_offsets != rejected_draft_token, target_prob, 0.0)
 
                 token_mass = tl.where(vocab_mask, token_mass, 0.0)
@@ -148,11 +181,14 @@ def _categorical_finalize_kernel(
     temp_ptr,
     seed_ptr,
     pos_ptr,
+    # [num_logits]
+    cumulative_log_p_ptr,
     vocab_size,
     num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
     """Select the final token using one global categorical threshold per request."""
     req_idx = tl.program_id(0)
@@ -258,7 +294,16 @@ def _categorical_finalize_kernel(
     )
     target_prob = tl.exp(residual_target_logits - target_lse)
 
+    rejected_draft_token = tl.load(
+        draft_sampled_ptr + resample_token_idx + 1, mask=is_random_residual & has_total_mass, other=-1
+    )
+    is_valid_rejected_draft = rejected_draft_token >= 0
+
     if HAS_DRAFT_LOGITS:
+        # draft_logits is stored pre-temperature, so apply scale first
+        # (matches the block-stats kernel and the upstream rejection helpers,
+        # which all divide by temp). Greedy lanes hold no draft mass anyway;
+        # dividing by 1.0 there keeps the arithmetic finite.
         draft_block_logits = tl.load(
             draft_logits_ptr + req_state_idx * draft_logits_stride_0 + resample_idx * draft_logits_stride_1 + token_ids,
             mask=valid_token_mask & is_random_residual & has_total_mass,
@@ -269,11 +314,31 @@ def _categorical_finalize_kernel(
             draft_rejected_logsumexp_ptr + req_idx, mask=is_random_residual & has_total_mass, other=0.0
         ).to(tl.float32)
         draft_prob = tl.exp(draft_block_logits - draft_lse)
-        residual_token_mass = tl.maximum(target_prob - draft_prob, 0.0)
-    else:
-        rejected_draft_token = tl.load(
-            draft_sampled_ptr + resample_token_idx + 1, mask=is_random_residual & has_total_mass, other=-1
+        if USE_BLOCK_VERIFICATION:
+            # Block verification (Sun et al., 2024): the residual is
+            #   max(p_tau * p(x) - q(x), 0) / Z.
+            # Scale the target probabilities by the accepted prefix's joint
+            # ratio p_tau, mirroring _resample_kernel so the block selection
+            # and the within-block token selection stay consistent.
+            # cumulative_log_p[start + i] = log(p_{i+1}), so the ratio after
+            # tau = resample_idx accepted tokens lives at
+            # resample_token_idx - 1. p_0 = 1 (nothing accepted), so skip
+            # the load when resample_idx == 0.
+            if resample_idx > 0:
+                log_p_tau = tl.load(cumulative_log_p_ptr + resample_token_idx - 1).to(tl.float32)
+                target_prob = target_prob * tl.exp(log_p_tau)
+        # A -1 placeholder draft token means verification stopped at the
+        # placeholder; the residual is then the full target distribution
+        # (the draft logits at a placeholder step are stale).
+        residual_token_mass = tl.where(
+            is_valid_rejected_draft,
+            tl.maximum(target_prob - draft_prob, 0.0),
+            target_prob,
         )
+    else:
+        # One-hot draft. NOTE: during block verification the residual becomes
+        # p_tau * p(x) / Z for x != draft token, so the constant p_tau cancels
+        # under normalization and does not need to be applied.
         residual_token_mass = tl.where(token_ids != rejected_draft_token, target_prob, 0.0)
 
     token_mass = tl.where(is_bonus, bonus_token_mass, residual_token_mass)
@@ -315,6 +380,8 @@ def resample(
     seed: torch.Tensor,
     pos: torch.Tensor,
     has_draft_logits: bool | None = None,
+    cumulative_log_p: torch.Tensor | None = None,
+    use_block_verification: bool = False,
 ) -> None:
     """Resample the first rejected token or the bonus token in place.
 
@@ -332,6 +399,12 @@ def resample(
     contiguous. ``draft_logits=None`` selects the one-hot draft path. Callers
     that already replaced ``None`` with a dummy tensor can pass
     ``has_draft_logits=False`` explicitly to preserve the same semantics.
+
+    ``use_block_verification=True`` (Sun et al., 2024) resamples the rejected
+    token from ``max(p_tau * p(x) - q(x), 0) / Z`` instead of the token-wise
+    residual, where ``p_tau`` is the joint ratio of the accepted prefix read
+    from ``cumulative_log_p`` (``cumulative_log_p[start + i] = log(p_{i+1})``,
+    as produced by the upstream ``_compute_cumulative_log_p_kernel``).
     """
     num_reqs = cu_num_logits.shape[0] - 1
     if num_reqs == 0:
@@ -359,6 +432,13 @@ def resample(
     elif draft_logits is None:
         draft_logits = target_logits.new_empty(1, 1, 1)
 
+    if use_block_verification and cumulative_log_p is None:
+        raise ValueError("cumulative_log_p cannot be None when use_block_verification=True")
+    if cumulative_log_p is None:
+        # Dummy tensor so the kernel signature receives a valid pointer; it is
+        # never read when USE_BLOCK_VERIFICATION=False.
+        cumulative_log_p = target_logits.new_empty(1, dtype=torch.float32)
+
     num_blocks = triton.cdiv(vocab_size, _RESAMPLE_BLOCK_SIZE)
     local_argmax = torch.empty((num_reqs, num_blocks), dtype=torch.int64, device=target_logits.device)
     local_max = torch.empty((num_reqs, num_blocks), dtype=torch.float32, device=target_logits.device)
@@ -384,11 +464,13 @@ def resample(
         expanded_idx_mapping,
         draft_sampled,
         temperature,
+        cumulative_log_p,
         num_reqs,
         num_blocks,
         vocab_size,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        USE_BLOCK_VERIFICATION=use_block_verification,
         has_auto_blockify_blacklist_op=True,
     )
 
@@ -416,9 +498,11 @@ def resample(
         temperature,
         seed,
         pos,
+        cumulative_log_p,
         vocab_size,
         num_blocks,
         BLOCK_SIZE=_RESAMPLE_BLOCK_SIZE,
         PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
         HAS_DRAFT_LOGITS=has_draft_logits,
+        USE_BLOCK_VERIFICATION=use_block_verification,
     )
