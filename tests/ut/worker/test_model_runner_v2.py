@@ -96,6 +96,40 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
     np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
 
 
+@pytest.mark.parametrize(
+    "decode_query_len, query_lens, num_tokens_padded, descriptor_num_reqs, expected_query_start_loc",
+    [
+        (1, [4], 8, 8, [0, 4, 8]),
+        (4, [4, 5], 16, 4, [0, 4, 9, 16]),
+        (4, [2, 6], 16, 4, [0, 2, 8, 16]),
+        (4, [2, 4], 8, 2, [0, 2, 6, 8]),
+    ],
+    ids=["non-mtp-prefill", "mtp-mixed", "mtp-uniform-average", "mtp-no-request-padding"],
+)
+def test_full_graph_non_uniform_queries_use_mixed_padding(
+    decode_query_len, query_lens, num_tokens_padded, descriptor_num_reqs, expected_query_start_loc
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.decode_query_len = decode_query_len
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    num_reqs = len(query_lens)
+    query_start_loc = np.full(descriptor_num_reqs + 2, sum(query_lens), dtype=np.int32)
+    query_start_loc[: num_reqs + 1] = np.cumsum([0, *query_lens])
+
+    padded_query_start_loc, num_reqs_padded = runner._pad_query_start_loc_for_fia(
+        num_tokens_padded=num_tokens_padded,
+        num_reqs_padded=descriptor_num_reqs,
+        num_reqs=num_reqs,
+        query_start_loc_np=query_start_loc,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_desc_num_reqs=descriptor_num_reqs,
+    )
+
+    assert num_reqs_padded == num_reqs + 1
+    np.testing.assert_array_equal(padded_query_start_loc[: num_reqs_padded + 1], expected_query_start_loc)
+    assert padded_query_start_loc[num_reqs_padded] == num_tokens_padded
+
+
 def test_sample_tokens_restores_replicated_draft_hidden_states():
     runner = _make_runner(need_timing=False)
     runner.is_last_pp_rank = True
