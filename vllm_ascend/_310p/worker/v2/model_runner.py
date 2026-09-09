@@ -122,9 +122,11 @@ class NPUModelRunner310V2(NPUModelRunner):
             raise NotImplementedError("Expert parallelism is not supported by model runner v2 on 310P.")
         if vllm_config.speculative_config is not None:
             spec = vllm_config.speculative_config
-            if spec.method != "mtp":
+            # Bare objects (UT fixtures) and non-MTP methods are out of scope.
+            method = getattr(spec, "method", None)
+            if method != "mtp":
                 raise NotImplementedError(
-                    f"310P model runner v2 only supports MTP speculative decoding, got {spec.method!r}."
+                    f"Speculative decoding is only supported via MTP on 310P model runner v2, got {method!r}."
                 )
         if vllm_config.kv_transfer_config is not None:
             raise NotImplementedError("KV cache transfer is not supported by model runner v2 on 310P.")
@@ -785,6 +787,11 @@ class NPUModelRunner310V2(NPUModelRunner):
         shared_layers: dict[str, str],
     ) -> dict[str, Any]:
         """Allocate attention caches as NZ and hybrid Mamba state as ND."""
+        # UT fixtures may construct via ``object.__new__`` without ``__init__``.
+        if not hasattr(self, "_attn_kv_copy_params"):
+            self._attn_kv_copy_params = []
+        if not hasattr(self, "_attn_kv_storage_ptrs"):
+            self._attn_kv_storage_ptrs = set()
         layer_specs: dict[str, KVCacheSpec] = {}
         layer_group_ids: dict[str, int] = {}
         for group_id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):

@@ -127,14 +127,18 @@ class _Ascend310PModelStateMixin:
     def custom_sampler(self, sampler):
         del sampler
         # MTP propose/_dummy_run reads sampler.sampling_states.temperature/seeds.
-        base_sampler = Ascend310PSampler(self.max_num_reqs, self.device)
+        # ``object.__new__`` UT fixtures may omit attrs set in real ``__init__``.
+        max_num_reqs = int(getattr(self, "max_num_reqs", 1) or 1)
+        device = getattr(self, "device", torch.device("cpu"))
+        base_sampler = Ascend310PSampler(max_num_reqs, device)
         vllm_config = getattr(self, "vllm_config", None)
         spec_config = None if vllm_config is None else vllm_config.speculative_config
         if spec_config is None:
             return base_sampler, None
-        if spec_config.method != "mtp":
-            raise NotImplementedError(f"310P MRv2 only supports MTP speculative decoding, got {spec_config.method!r}.")
-        return base_sampler, RejectionSampler310V2(base_sampler, spec_config, self.device)
+        method = getattr(spec_config, "method", None)
+        if method != "mtp":
+            raise NotImplementedError(f"310P MRv2 only supports MTP speculative decoding, got {method!r}.")
+        return base_sampler, RejectionSampler310V2(base_sampler, spec_config, device)
 
 
 class Ascend310PModelState(_Ascend310PModelStateMixin, AscendModelState):
@@ -240,12 +244,17 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                     num_draft_tokens_per_req,
                     -1,
                 )
-            # FULL SpecDecoding graphs are captured as uniform (every row Spec).
-            # Pad rows must stay SpecDecoding (draft=K), not Prefill via draft=-1.
-            attn_state = input_batch.attn_state
-            is_spec = attn_state is not None and getattr(attn_state, "name", "") == "SpecDecoding"
-            if cudagraph_mode == CUDAGraphMode.FULL and is_spec and num_reqs > num_actual_reqs:
-                num_decode_draft_tokens_np[num_actual_reqs:] = int(self.vllm_config.num_speculative_tokens)
+                # Align with upstream #15707: only promote pad rows to Spec when
+                # every real request is SpecDecoding and pad query lens == 1+K.
+                # Also keep pad rows Spec when attn_state is already SpecDecoding
+                # (310P target FULL capture / concurrent pad), matching MRv1.
+                if cudagraph_mode == CUDAGraphMode.FULL and num_reqs > num_actual_reqs:
+                    expected_query_len = int(self.vllm_config.num_speculative_tokens) + 1
+                    padded_query_lens = np.diff(input_batch.query_start_loc_np[: num_reqs + 1])[num_actual_reqs:]
+                    attn_state = input_batch.attn_state
+                    is_spec = attn_state is not None and getattr(attn_state, "name", "") == "SpecDecoding"
+                    if (spec_decode_mask.all() or is_spec) and np.all(padded_query_lens == expected_query_len):
+                        num_decode_draft_tokens_np[num_actual_reqs:] = padded_query_lens - 1
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
         # Host seq_lens for pad rows must be 0 (GPU already zeroed in prepare_inputs).

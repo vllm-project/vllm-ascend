@@ -18,7 +18,7 @@
 from types import SimpleNamespace
 
 import torch
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 from vllm_ascend._310p.ops.fla.gdn_310 import (
     AscendGatedDeltaNetAttention310,
@@ -85,15 +85,17 @@ def test_builder310_pads_spec_decode_metadata_with_dummy_requests():
 
     builder._pad_spec_decode_metadata(attn_metadata, graph_batch_size=4)
 
+    # 310P pads with PAD_SLOT_ID (-1), not NULL_BLOCK_ID (0), so FULL replay
+    # does not write into mamba block 0. Pad accepted tokens stay 1 (not 0).
     assert attn_metadata.spec_state_indices_tensor.tolist() == [
         [3, 30],
         [4, 40],
-        [NULL_BLOCK_ID, NULL_BLOCK_ID],
-        [NULL_BLOCK_ID, NULL_BLOCK_ID],
+        [PAD_SLOT_ID, PAD_SLOT_ID],
+        [PAD_SLOT_ID, PAD_SLOT_ID],
     ]
     assert attn_metadata.spec_sequence_masks.tolist() == [True, True, False, False]
     assert attn_metadata.spec_query_start_loc.tolist() == [0, 4, 8, 8, 8]
-    assert attn_metadata.num_accepted_tokens.tolist() == [2, 3, 0, 0]
+    assert attn_metadata.num_accepted_tokens.tolist() == [2, 3, 1, 1]
     spec_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
     assert spec_meta.query_start_loc.data_ptr() == attn_metadata.spec_query_start_loc.data_ptr()
     assert spec_meta.cache_indices.data_ptr() == attn_metadata.spec_state_indices_tensor.data_ptr()
