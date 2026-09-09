@@ -79,6 +79,7 @@ class _Ascend310PModelStateMixin:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         for_capture: bool = False,
+        ubatch_idx: int = 0,
     ) -> dict[str, Any]:
         if for_capture:
             self._record_capture_seq_lens(input_batch.seq_lens)

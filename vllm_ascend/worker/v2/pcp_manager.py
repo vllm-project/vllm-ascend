@@ -263,10 +263,15 @@ class AscendPCPManager(PCPManager):
             # FULL-graph query layout is also the authoritative rank-local
             # layout, including any FIA dummy request.
             graph_query_start_loc_np = global_batch.query_start_loc_np[: graph_num_reqs + 1]
-            async_copy_to_gpu(
-                graph_query_start_loc_np,
-                out=input_buffers.query_start_loc[: graph_num_reqs + 1],
-            )
+            query_start_loc = input_buffers.query_start_loc[: graph_num_reqs + 1]
+            if query_start_loc.is_cpu:
+                # CPU runners need no pinned-memory staging for the copy.
+                query_start_loc.copy_(torch.from_numpy(graph_query_start_loc_np))
+            else:
+                async_copy_to_gpu(
+                    graph_query_start_loc_np,
+                    out=query_start_loc,
+                )
 
             # Graph padding has no RankSegment, so _build_batch_layout does
             # not initialize the corresponding hidden restore indices.

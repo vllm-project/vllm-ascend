@@ -32,6 +32,11 @@ def _scheduler(*, is_kv_consumer: bool | None):
     scheduler_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         scheduler_kwargs["mamba_has_prefill_checkpoint_blocks"] = False
+        # vLLM #53388 added use_eagle_block_drop to the boundary split; with
+        # use_eagle=True (default drop behavior) it stays enabled.
+        scheduler_kwargs["use_eagle_block_drop"] = True
+        # vLLM #53945 reads the opt-in fine-grained Mamba prefix-cache flag.
+        scheduler_kwargs["mamba_fine_grained_prefix_cache"] = False
     return SimpleNamespace(
         vllm_config=SimpleNamespace(kv_transfer_config=kv_transfer_config),
         cache_config=SimpleNamespace(block_size=384),

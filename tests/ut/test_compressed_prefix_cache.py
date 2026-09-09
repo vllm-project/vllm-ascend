@@ -43,6 +43,13 @@ def _init_hash_seed():
     init_none_hash(sha256)
 
 
+def _cache_blocks_replay_kwargs(boundary: int) -> dict[str, int]:
+    """cache_blocks gains a required replay_boundary kwarg on vLLM main only."""
+    if vllm_version_is("0.28.0"):
+        return {}
+    return {"replay_boundary": boundary}
+
+
 def _make_request(request_id: str, token_ids: list[int], hash_block_size: int) -> Request:
     sampling_params = SamplingParams(max_tokens=1)
     sampling_params.update_from_generation_config({}, eos_token_id=100)
@@ -69,7 +76,7 @@ def _make_full_manager(
         head_size=1,
         dtype=torch.float32,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        **ratio_kwargs,  # type: ignore[arg-type]
     )
     block_pool = BlockPool(
         num_gpu_blocks=8,
@@ -163,7 +170,11 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         num_tokens=logical_block_size,
         num_tokens_main_model=logical_block_size,
     )
-    manager.cache_blocks(request_a, num_tokens=logical_block_size)
+    manager.cache_blocks(
+        request_a,
+        num_tokens=logical_block_size,
+        **_cache_blocks_replay_kwargs(logical_block_size),
+    )
 
     cached_hash = get_block_hash(manager.req_to_blocks[request_a.request_id][0].block_hash)
     expected_hash = BlockHashListWithBlockSize(
@@ -207,7 +218,11 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         num_tokens=logical_block_size,
         num_tokens_main_model=logical_block_size,
     )
-    manager.cache_blocks(request, num_tokens=logical_block_size)
+    manager.cache_blocks(
+        request,
+        num_tokens=logical_block_size,
+        **_cache_blocks_replay_kwargs(logical_block_size),
+    )
 
     logical_hashes = BlockHashListWithBlockSize(
         request.block_hashes,
@@ -278,7 +293,11 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
             num_tokens=logical_block_size,
             num_tokens_main_model=logical_block_size,
         )
-        manager.cache_blocks(request_a, num_tokens=logical_block_size)
+        manager.cache_blocks(
+            request_a,
+            num_tokens=logical_block_size,
+            **_cache_blocks_replay_kwargs(logical_block_size),
+        )
 
     per_group_blocks, per_group_hits = coordinator.find_longest_cache_hit_per_group(
         request_a.block_hashes,
@@ -292,7 +311,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
         request_b.block_hashes,
         max_cache_hit_length=logical_block_size,
     )
-    hit_blocks, hit_length, _ = hit_result
+    hit_blocks, hit_length, _ = hit_result  # type: ignore[misc]
 
     assert hit_length == 0
     assert hit_blocks == ([], [])
@@ -373,7 +392,7 @@ def test_hybrid_coordinator_truncates_every_full_attention_group() -> None:
         block_size=block_size,
     )
 
-    hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(
+    hit_blocks, hit_length, _ = coordinator.find_longest_cache_hit(  # type: ignore[misc]
         request.block_hashes,
         max_cache_hit_length=len(request.prompt_token_ids),
     )

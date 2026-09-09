@@ -18,6 +18,7 @@
 #
 
 from contextlib import contextmanager
+from typing import Any
 
 import numpy as np
 import torch
@@ -467,10 +468,15 @@ class NPUModelRunner(GPUModelRunner):
         )
         seq_lens_cpu_upper_bound = torch.from_numpy(seq_lens_cpu_upper_bound_np)
 
-        max_seq_len_np = None
-        if self.use_pp:
-            # max_seq_len is only consumed by the PP `compute_need_sampled_mask`
-            max_seq_len_np = self.req_states.max_seq_len[idx_mapping_np]
+        max_seq_len_kwargs: dict[str, Any] = {}
+        if vllm_version_is("0.28.0"):
+            # vLLM #54505 removed InputBatch.max_seq_len_np on main; on the
+            # 0.28.0 lane it is a required field (consumed by the PP
+            # `compute_need_sampled_mask` to predict request end).
+            pp_max_seq_len: np.ndarray | None = None
+            if self.use_pp:
+                pp_max_seq_len = self.req_states.max_seq_len[idx_mapping_np]
+            max_seq_len_kwargs["max_seq_len_np"] = pp_max_seq_len
 
         prompt_lens = None
         if self.model_config.rswa_window is not None:
@@ -500,7 +506,7 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
-            max_seq_len_np=max_seq_len_np,
+            **max_seq_len_kwargs,
             input_ids=self.input_buffers.input_ids[:num_tokens_after_padding],
             positions=self.input_buffers.positions[:num_tokens_after_padding],
             is_padding=self.input_buffers.is_padding[:num_tokens_after_padding],

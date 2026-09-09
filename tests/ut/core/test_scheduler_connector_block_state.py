@@ -57,10 +57,14 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
     if with_connector:
         assert first_output.kv_connector_metadata is metadata
         assert second_output.kv_connector_metadata is metadata
-        assert seen_states[0].block_ids == {"cached": ([1, 9],), "boundary": ([42],)}
+        assert seen_states[0].req_ids == {"cached", "boundary"}
         assert seen_states[0].boundary_state_offloads is offers
-        assert seen_states[1].block_ids == {"cached": ([1, 9],)}
+        assert seen_states[0].get_block_ids("cached") == ([1, 9],)
+        assert seen_states[0].get_block_ids("boundary") == ([42],)
+        assert seen_states[0].get_block_ids("unoffered") is None
+        assert seen_states[1].req_ids == {"cached"}
         assert seen_states[1].boundary_state_offloads == {}
+        assert seen_states[1].get_block_ids("cached") == ([1, 9],)
         assert get_blocks.call_count == 3
     else:
         assert seen_states == []

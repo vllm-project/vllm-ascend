@@ -19,6 +19,7 @@
 from dataclasses import replace
 from inspect import signature
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -176,7 +177,7 @@ def _make_local_pcp_batch():
     return AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([101, 102], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state=cast(Any, "global-attn-state"),
     )
 
 
@@ -212,7 +213,7 @@ def _make_global_pcp_batch():
     return AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([18], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state=cast(Any, "global-attn-state"),
     )
 
 
@@ -294,9 +295,9 @@ def test_partition_batch_refreshes_local_ascend_input_batch_metadata():
 
 def test_full_decode_request_layout_is_token_sized_only_without_drafts():
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=0)
-    draft_decode_batch = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=8)
-    prefill_batch = SimpleNamespace(is_prefilling_np=np.ones(2, dtype=np.bool_), num_draft_tokens=0)
+    decode_batch: Any = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=0)
+    draft_decode_batch: Any = SimpleNamespace(is_prefilling_np=np.zeros(4, dtype=np.bool_), num_draft_tokens=8)
+    prefill_batch: Any = SimpleNamespace(is_prefilling_np=np.ones(2, dtype=np.bool_), num_draft_tokens=0)
 
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.FULL_DECODE_ONLY)
     assert manager._full_decode_requests_are_token_sized(decode_batch) is True
@@ -326,7 +327,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     local_batch = AscendInputBatch(
         **base_batch.__dict__,
         seq_lens_np=np.array([11, 21, 31], dtype=np.int32),
-        attn_state="local-attn-state",
+        attn_state=cast(Any, "local-attn-state"),
     )
     local_batch.is_dummy = False
     local_batch.num_reqs = 3
@@ -353,7 +354,7 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     global_batch = AscendInputBatch(
         **global_base_batch.__dict__,
         seq_lens_np=np.array([11, 21, 31], dtype=np.int32),
-        attn_state="global-attn-state",
+        attn_state=cast(Any, "global-attn-state"),
     )
     global_batch.num_reqs_after_padding = 4
     global_batch.num_tokens_after_padding = 4
@@ -421,7 +422,7 @@ def test_partition_batch_keeps_piecewise_request_extent():
     batch.query_start_loc_np = np.array([0, 1, 2], dtype=np.int32)
 
     manager = AscendPCPManager.__new__(AscendPCPManager)
-    manager._input_buffers = None
+    manager._input_buffers = None  # type: ignore[assignment]
     manager.vllm_config = _make_pcp_config(CUDAGraphMode.PIECEWISE)
 
     with (
@@ -480,7 +481,7 @@ def test_attention_context_collects_global_pcp_data():
 def test_prepare_slot_mappings_pads_each_pcp_rank_for_full_decode_graph() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.pcp_world_size = 2
-    manager._global_batch = SimpleNamespace(
+    manager._global_batch = SimpleNamespace(  # type: ignore[assignment]
         num_tokens_after_padding=8,
         num_tokens=4,
         is_prefilling_np=np.array([False, False, False, False]),
@@ -699,7 +700,7 @@ def test_pcp_manager_restores_model_owned_hidden_buffer() -> None:
     manager = AscendPCPManager.__new__(AscendPCPManager)
     manager.pcp_world_size = 2
     manager._padded_gather_idx = torch.empty(6, dtype=torch.int64)
-    manager._global_batch = SimpleNamespace(
+    manager._global_batch = SimpleNamespace(  # type: ignore[assignment]
         num_tokens=3,
         num_tokens_after_padding=4,
     )
@@ -898,10 +899,12 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
-    # vLLM main added the `dp_sync` field to ExecuteModelState; v0.28.0 lacks it.
+    # vLLM main added the `dp_sync` and `cudagraph_stats` fields to
+    # ExecuteModelState; v0.28.0 lacks them.
     state_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         state_kwargs["dp_sync"] = None
+        state_kwargs["cudagraph_stats"] = None
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,

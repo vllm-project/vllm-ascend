@@ -58,9 +58,22 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         ``AttentionSpec.tokens_per_state`` on main. Both express how many
         logical tokens one physical stored state covers.
         """
+        override = getattr(self, "_storage_block_size_override", None)
+        if override is not None:
+            return override
         if vllm_version_is("0.28.0"):
             return self.block_size // self.compress_ratio
         return self.block_size // self.tokens_per_state
+
+    @storage_block_size.setter
+    def storage_block_size(self, value: int | None) -> None:
+        # vLLM #53906 added a ``storage_block_size`` dataclass field to the
+        # upstream MLAAttentionSpec, so the frozen-dataclass ``__init__``
+        # assigns it on the main lane. Ascend derives the value instead, so
+        # keep that assignment from clobbering the derived property; honor an
+        # explicit non-None override only.
+        if value is not None:
+            object.__setattr__(self, "_storage_block_size_override", value)
 
     @property
     def real_page_size_bytes(self) -> int:

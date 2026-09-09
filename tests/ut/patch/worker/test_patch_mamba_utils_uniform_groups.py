@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 from vllm.v1.kv_cache_interface import (
@@ -12,6 +13,7 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 
 from vllm_ascend.patch.worker.patch_mamba_utils import _get_mamba_groups
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
@@ -47,10 +49,18 @@ def test_uniform_mamba_groups_are_visible_to_all_mamba_buffers() -> None:
     def make_buffer(n: int, dtype: torch.dtype) -> SimpleNamespace:
         return SimpleNamespace(n=n, dtype=dtype)
 
+    # vLLM #53896: MambaCopyBuffers.create dispatches state copy funcs by
+    # MambaSpec.mamba_type on main; the 0.28.0 release lane passes them as a
+    # flat per-state tuple.
+    if vllm_version_is("0.28.0"):
+        copy_funcs: Any = (object(), object())
+    else:
+        copy_funcs = {mamba_spec.mamba_type: (object(), object())}
+
     copy_bufs = MambaCopyBuffers.create(
         max_num_reqs=2,
         kv_cache_config=kv_cache_config,
-        copy_funcs=(object(), object()),
+        copy_funcs=copy_funcs,
         make_buffer=make_buffer,
     )
     assert copy_bufs.mamba_group_ids == [0, 1, 2]

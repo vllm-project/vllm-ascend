@@ -23,6 +23,11 @@ from vllm_ascend.models.deepseek_v4.mm_preprocess import (
 
 
 class _StubInfo:
+    def __init__(self):
+        # vLLM main's BaseMultiModalProcessor reads info.ctx.tokenizer at init
+        # and requires it to be set; the tests below never tokenize prompts.
+        self.ctx = SimpleNamespace(tokenizer=SimpleNamespace())
+
     def get_data_parser(self):
         return MultiModalDataParser()
 
@@ -59,7 +64,9 @@ class _NonThreadSafeTokenizer:
 
 class _ConcurrentStubInfo(_StubInfo):
     def __init__(self):
+        super().__init__()
         self.tokenizer = _NonThreadSafeTokenizer()
+        self.ctx.tokenizer = self.tokenizer
 
     def get_hf_processor(self, **kwargs):
         return lambda **processor_kwargs: BatchFeature({})

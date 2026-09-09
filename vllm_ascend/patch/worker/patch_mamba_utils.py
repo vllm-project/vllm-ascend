@@ -21,6 +21,7 @@ from vllm.v1.worker.mamba_utils import MambaCopyBuffers
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.ops.triton.batch_memcpy import batch_memcpy_kernel
 from vllm_ascend.ops.triton.mamba.postprocess import postprocess_mamba_fused_kernel
+from vllm_ascend.utils import vllm_version_is
 
 # Upstream uses 16 temporal-copy tiles to saturate H100/GB200. K3 already
 # exposes 138 independent state programs per request, while Triton-Ascend
@@ -396,8 +397,11 @@ else:
 
 # Worker KV configs retain UniformTypeKVCacheSpecs so per-layer physical page
 # layouts are available while the scheduler receives unwrapped representative
-# specs. Teach all upstream Mamba buffer/context helpers to see those groups.
-mamba_utils.get_mamba_groups = _get_mamba_groups
+# specs. vLLM #53896 reworked get_mamba_groups on main to return
+# dict[MambaSpec, list[int]] and to unwrap UniformType group wrappers itself,
+# so the tuple override is only needed on the 0.28.0 release lane.
+if vllm_version_is("0.28.0"):
+    mamba_utils.get_mamba_groups = _get_mamba_groups
 
 # Ascend NPU does not support DT_UINT64 in aclnnInplaceZero.
 # MambaCopyBuffers.create() uses torch.uint64 for src_ptrs/dst_ptrs,

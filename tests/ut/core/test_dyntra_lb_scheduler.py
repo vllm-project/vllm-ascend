@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from typing import TypeVar
+from typing import TypeVar, cast
 from unittest.mock import patch
 
 import pytest
@@ -395,7 +395,10 @@ def test_dyntra_lb_does_not_resume_deliverable_stale_output():
 
 
 def test_dyntra_lb_v026_waits_for_paused_in_flight_output():
-    scheduler = SimpleNamespace(_lb_paused_req_ids={"paused"})
+    scheduler = cast(
+        DyntraLBPolicyMixin,
+        SimpleNamespace(_lb_paused_req_ids={"paused"}),
+    )
     paused_request = SimpleNamespace(
         request_id="paused",
         num_in_flight_tokens=1,
@@ -570,7 +573,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
 
     assert len(block_states) == 1
     assert block_states[0].boundary_state_offloads is boundary_state_offloads
-    assert block_states[0].block_ids == {}
+    assert block_states[0].req_ids == set()
     assert scheduler_output.kv_connector_block_state is None
     assert scheduler_output.ec_manager_metadata is encoder_cache_metadata
 

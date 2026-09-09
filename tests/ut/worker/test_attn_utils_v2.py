@@ -69,7 +69,7 @@ def _make_dsv4_mla_spec(block_size: int, compress_ratio: int) -> AscendMLAAttent
         head_size=128,
         dtype=torch.bfloat16,
         model_version="deepseek_v4",
-        **ratio_kwargs,
+        **ratio_kwargs,  # type: ignore[arg-type]
     )
 
 
@@ -455,8 +455,10 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             forward_context: dict[str, Any],
             runner_kv_caches_: list[Any],
             num_attn_module: int = 1,
+            kv_cache_groups: Any = None,
         ) -> None:
             del num_attn_module
+            del kv_cache_groups
             assert len(runner_kv_caches_) == 0
             for kv_cache in kv_caches.values():
                 runner_kv_caches_.append(kv_cache)
@@ -667,7 +669,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
         dtype=torch.int32,
     )
     pcp_context = object() if caller == "pcp_capture" else None
-    pcp_manager = (
+    pcp_manager: Any = (
         SimpleNamespace(
             build_attention_context=MagicMock(return_value=pcp_context),
         )
@@ -701,7 +703,7 @@ def test_mrv2_builds_shared_dsa_metadata_for_each_execution_mode(
             ),
         )
         model_state.pcp_manager = pcp_manager
-        input_batch = SimpleNamespace(
+        input_batch: Any = SimpleNamespace(
             num_reqs=2,
             num_reqs_after_padding=4,
             num_tokens=5,

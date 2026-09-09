@@ -510,8 +510,10 @@ def _ascend_max_memory_usage_bytes_from_groups(
     full_mla_spec = kv_cache_groups[0].kv_cache_spec
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
+    # vLLM #53896 renamed UniformTypeKVCacheSpecs.get_num_layer_tuples to
+    # get_max_layers_per_page_size on main; this DSV4 path only runs on main.
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        group.kv_cache_spec.get_max_layers_per_page_size()
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )

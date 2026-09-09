@@ -69,6 +69,8 @@ class KpoolTailManager(FullAttentionManager):
         request: Request,
         num_tokens: int,
         retention_interval: int | None = None,
+        *,
+        replay_boundary: int = 0,
     ) -> None:
         # Never hash tail blocks into the prefix cache.
         return
