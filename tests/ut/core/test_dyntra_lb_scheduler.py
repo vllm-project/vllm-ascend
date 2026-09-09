@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from typing import TypeVar
+from typing import Any, TypeVar
 from unittest.mock import patch
 
 import pytest
@@ -534,7 +534,7 @@ def test_dyntra_lb_forwards_block_state_and_encoder_cache_metadata(monkeypatch):
     )
     boundary_state_offloads: dict[str, list[tuple[int, int, int]]] = {}
     encoder_cache_metadata = object()
-    block_states = []
+    block_states: list[Any] = []
     connector_metadata = object()
     output_fields = dyntra_lb_scheduler_module.SchedulerOutput.__dataclass_fields__
 

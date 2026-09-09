@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import pytest
@@ -36,7 +37,7 @@ def test_boundary_state_is_drained_consumed_and_not_dispatched(monkeypatch, sche
     if not vllm_version_is("0.28.0"):
         monkeypatch.setattr(scheduler.kv_cache_manager, "take_boundary_state_offloads", drain)
     monkeypatch.setattr(scheduler.kv_cache_manager, "get_block_ids", get_blocks)
-    seen_states = []
+    seen_states: list[Any] = []
     metadata = object()
 
     def build_metadata(connector, output):
