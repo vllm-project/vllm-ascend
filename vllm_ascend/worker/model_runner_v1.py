@@ -853,6 +853,11 @@ class NPUModelRunner(GPUModelRunner):
             for cache_tensor in tensors:
                 if cache_tensor is None or cache_tensor.dim() == 0:
                     continue
+                # aclnnIndex rejects FP8 dtypes (EZ1001); copy through a uint8
+                # byte view instead -- same storage, same rows, same bytes
+                # (same workaround as scatter_mxfp_k_scale_cache).
+                if cache_tensor.dtype == torch.float8_e4m3fn:
+                    cache_tensor = cache_tensor.view(torch.uint8)
                 cache_tensor[dst_ids] = cache_tensor[src_ids]
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
