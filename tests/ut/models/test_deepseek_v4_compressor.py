@@ -128,7 +128,10 @@ class TestCompressorForward:
         compress_cos = torch.ones((1, 1, 2))
         compress_sin = torch.zeros((1, 1, 2))
         slot_mapping = torch.tensor([[0, 1]], dtype=torch.int32)
-        compressed_kv = torch.ones((1, 1, 4))
+        # Formal CANN output can include extra graph-padding rows.
+        compressed_kv = torch.ones((2, 4))
+        processed_kv = torch.full((1, 4), 3.0)
+        compressor._postprocess = MagicMock(return_value=processed_kv)
         compute_metadata = MagicMock(return_value=(compress_cos, compress_sin, slot_mapping))
         compressor._compute_metadata = compute_metadata
 
@@ -144,17 +147,87 @@ class TestCompressorForward:
                 metadata=metadata,
             )
 
-        assert actual_kv is compressed_kv
+        assert actual_kv is processed_kv
         assert actual_slot_mapping is slot_mapping
         compute_metadata.assert_called_once_with(cache_req_metadata)
         call = compressor_op.call_args
         assert call.args[0] is hidden_states
+        assert len(call.args) == 5
         assert torch.equal(call.args[3], state_cache.squeeze(-2))
         assert call.kwargs["state_block_table"] is state_req_metadata.block_table
         assert call.kwargs["cu_seqlens"] is cache_req_metadata.query_start_loc
         assert call.kwargs["start_pos"] is cache_req_metadata.start_pos
         assert call.kwargs["cmp_ratio"] == compress_ratio
         assert call.kwargs["coff"] == expected_coff
+        assert "norm_eps" not in call.kwargs
+        assert "rotary_mode" not in call.kwargs
+        compressor._postprocess.assert_called_once()
+        raw, cos, sin = compressor._postprocess.call_args.args
+        torch.testing.assert_close(raw, compressed_kv[:1])
+        assert cos is compress_cos
+        assert sin is compress_sin
+
+
+class TestCompressorPostprocess:
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("head_dim", [128, 512])
+    def test_fp32_norm_then_partial_interleave_rope(self, dtype, head_dim):
+        torch.manual_seed(19)
+        compressor = Compressor.__new__(Compressor)
+        torch.nn.Module.__init__(compressor)
+        compressor.rope_head_dim = 64
+        compressor.norm_eps = 1e-6
+        compressor.norm = SimpleNamespace(weight=torch.randn(head_dim))
+        raw = torch.randn(3, head_dim, dtype=dtype)
+        raw_before = raw.clone()
+        angles = torch.randn(3, 1, compressor.rope_head_dim // 2)
+        cos = angles.cos().repeat_interleave(2, dim=-1)
+        sin = angles.sin().repeat_interleave(2, dim=-1)
+        normalized = torch.nn.functional.rms_norm(raw.float(), (head_dim,), compressor.norm.weight, 1e-6)
+        expected = normalized.clone()
+        rope = normalized[:, -compressor.rope_head_dim :].reshape(3, -1, 2)
+        complex_rope = torch.view_as_complex(rope.contiguous())
+        rotated = complex_rope * torch.polar(torch.ones_like(angles[:, 0]), angles[:, 0])
+        expected[:, -compressor.rope_head_dim :] = torch.view_as_real(rotated).flatten(1)
+
+        def rms_norm(x, weight, eps):
+            assert x.dtype == weight.dtype == torch.float32
+            assert weight is compressor.norm.weight
+            assert eps == compressor.norm_eps
+            return normalized.clone(), None
+
+        def rotary(x, actual_cos, actual_sin, *, rotary_mode, partial_slice):
+            assert x.dtype == torch.float32
+            assert rotary_mode == "interleave"
+            assert partial_slice == [head_dim - compressor.rope_head_dim, head_dim]
+            torch.testing.assert_close(actual_cos, cos)
+            torch.testing.assert_close(actual_sin, sin)
+            torch.testing.assert_close(x[:, 0], normalized)
+            tail = x[..., partial_slice[0] :].clone()
+            interleaved = torch.stack((-tail[..., 1::2], tail[..., ::2]), dim=-1).flatten(-2)
+            x[..., partial_slice[0] :] = tail * actual_cos + interleaved * actual_sin
+
+        with (
+            patch("vllm_ascend.models.deepseek_v4.compressor.torch_npu.npu_rms_norm", rms_norm, create=True),
+            patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", rotary, create=True),
+        ):
+            actual = compressor._postprocess(raw, cos, sin)
+        assert actual.dtype == dtype
+        torch.testing.assert_close(actual, expected.to(dtype))
+        torch.testing.assert_close(raw, raw_before)
+
+    def test_empty_output_does_not_launch_postprocessing(self):
+        compressor = Compressor.__new__(Compressor)
+        torch.nn.Module.__init__(compressor)
+        raw = torch.empty(0, 512, dtype=torch.bfloat16)
+        cos = sin = torch.empty(0, 1, 64)
+        with (
+            patch("vllm_ascend.models.deepseek_v4.compressor.torch_npu.npu_rms_norm", create=True) as norm,
+            patch.object(torch.ops._C_ascend, "inplace_partial_rotary_mul", create=True) as rope,
+        ):
+            assert compressor._postprocess(raw, cos, sin) is raw
+        norm.assert_not_called()
+        rope.assert_not_called()
 
 
 class TestCompressorStateCache:
