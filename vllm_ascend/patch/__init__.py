@@ -268,6 +268,15 @@
 #       Remove this patch once upstream vLLM supports hybrid KV cache + CP for
 #       non-CUDA backends, or exposes a platform hook for this behavior.
 #
+#    Note (vLLM PR #53558, pluggable KVCacheConfigBuilder):
+#       The DeepSeekV4 KV cache planning (group_and_unify_kv_cache_specs /
+#       _get_kv_cache_groups_uniform_groups / shared-tuple tensor layout) that
+#       used to be patched here has moved to AscendKVCacheConfigBuilder
+#       (vllm_ascend.worker.kv_cache_config_builder), wired via
+#       NPUPlatform.get_kv_cache_config_builder_cls. Only resolve_kv_cache_block_sizes,
+#       the Kimi K3 DSpark grouping (_get_kv_cache_groups_uniform_page_size) and
+#       KVCacheConfig.has_mamba_layers are still monkey-patched here.
+#
 # ** 10. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.core.sched.scheduler.Scheduler._mamba_block_aligned_split`

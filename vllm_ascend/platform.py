@@ -136,6 +136,11 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
+    def get_kv_cache_config_builder_cls(cls, vllm_config) -> str | None:
+        """Return the Ascend KV cache planner (vLLM PR #53558 platform hook)."""
+        return "vllm_ascend.worker.kv_cache_config_builder.AscendKVCacheConfigBuilder"
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
 
