@@ -180,7 +180,12 @@ def _categorical_kernel(
                     for index in range(length):
                         tile_sum += _element(weights, index)
                 else:
-                    tile_sum = tl.sum(weights, 0)
+                    # C220 calcount ReduceSum reduces each 64-float repeat,
+                    # then accumulates repeat results in order (get_acc_val).
+                    # A single tl.sum uses a different floating-point tree.
+                    repeats = tl.sum(tl.reshape(weights, (BLOCK // 64, 64)), 1)
+                    for repeat in range(length // 64):
+                        tile_sum += _element(repeats, repeat)
                 sums = tl.where(tile_ids == tile, tile_sum, sums)
                 total += tile_sum
             if FP64:
