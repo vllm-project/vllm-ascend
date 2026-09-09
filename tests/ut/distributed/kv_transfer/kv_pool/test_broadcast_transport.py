@@ -12,7 +12,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool import broadcast_transport
 
 @pytest.mark.parametrize("local_rank", [0, 1], ids=["receiver", "owner"])
 def test_full_layer_broadcast_completes_before_future(monkeypatch, local_rank):
-    events = []
+    events: list[object] = []
     group = SimpleNamespace(ranks=[4, 9], rank_in_group=local_rank, device_group=object())
     backing = torch.zeros(40, dtype=torch.int8)
     payload = backing[2:38]

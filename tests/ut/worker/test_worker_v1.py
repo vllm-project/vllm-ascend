@@ -2201,7 +2201,9 @@ class TestKVPPWorkerBudget(TestBase):
             patch.object(worker_module, "get_ascend_config", return_value=ascend_config),
         ):
             self.assertEqual(worker.get_kv_cache_spec(), specs)
-        self.assertEqual(worker._kvpp_cache_allocation_plan.logical_cache_spec, specs)
+        plan = worker._kvpp_cache_allocation_plan
+        assert plan is not None
+        self.assertEqual(plan.logical_cache_spec, specs)
         for available, expected in ((1175, 952), (1176, 1428)):
             with self.subTest(available=available):
                 self.assertEqual(worker._apply_kvpp_memory_budget(available), expected)

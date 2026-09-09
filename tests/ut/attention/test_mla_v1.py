@@ -2279,7 +2279,12 @@ class TestAscendMLAImpl(TestBase):
 
         hidden = torch.zeros(2, 4)
         kv_cache = (torch.zeros(2, 1, 2), torch.zeros(2, 1, 2))
-        events = []
+        events: list[object] = []
+
+        def record_event(name, result):
+            events.append(name)
+            return result
+
         width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
         decode, prefill = object(), object()
         for decodes, prefills in ((1, 0), (0, 1), (1, 1)):
@@ -2296,10 +2301,10 @@ class TestAscendMLAImpl(TestBase):
                     wait_for_layer=lambda name: events.append(("wait", name))
                 )
                 self.impl.mla_preprocess_decode = MagicMock(
-                    side_effect=lambda *_args: (events.append("decode_cache"), decode)[1]
+                    side_effect=lambda *_args: record_event("decode_cache", decode)
                 )
                 self.impl.mla_preprocess_prefill = MagicMock(
-                    side_effect=lambda *_args: (events.append("prefill_cache"), prefill)[1]
+                    side_effect=lambda *_args: record_event("prefill_cache", prefill)
                 )
                 metadata = SimpleNamespace(num_decodes=decodes, num_prefills=prefills)
                 with (
@@ -2318,7 +2323,12 @@ class TestAscendMLAImpl(TestBase):
     def test_kvpp_fused_decode_and_profile_hook(self):
         from vllm_ascend.attention import mla_v1
 
-        events = []
+        events: list[object] = []
+
+        def record_event(name, result):
+            events.append(name)
+            return result
+
         self.impl.num_heads = 1
         self.impl.v_head_dim = 2
         self.impl.use_output_gate = False
@@ -2328,7 +2338,7 @@ class TestAscendMLAImpl(TestBase):
         self.impl.layerwise_kv_cache_hook = SimpleNamespace(wait_for_layer=lambda name: events.append(("wait", name)))
         result = SimpleNamespace(ql_nope=None, q_pe=None, k_nope=None, k_pe=None, dequant_scale_q_nope=None)
         self.impl.mla_preprocess_only_decode = MagicMock(
-            side_effect=lambda *_args: (events.append("fused_cache"), (result, None))[1]
+            side_effect=lambda *_args: record_event("fused_cache", (result, None))
         )
         self.impl._forward_decode = MagicMock(return_value=torch.ones(2, 2))
         self.impl.o_proj = MagicMock(side_effect=lambda x, **_kwargs: (x,))

@@ -273,7 +273,7 @@ def test_kvpp_history_ignores_padding_and_dummy_work(monkeypatch, computed, dumm
     from vllm_ascend.worker.v2.model_states import default
 
     runner = _make_runner(need_timing=False)
-    events = []
+    events: list[object] = []
     runner.kvpp = SimpleNamespace(
         prepare_forward=lambda history: events.append(("prepare", history)),
         complete_forward=lambda: events.append("complete"),

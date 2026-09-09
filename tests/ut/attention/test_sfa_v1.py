@@ -960,7 +960,12 @@ class TestAscendSFAImpl(TestBase):
             (PreprocessType.PROLOG_V3, True),
             (PreprocessType.MLAPO, True),
         )
-        events = []
+        events: list[object] = []
+
+        def record_event(name, result):
+            events.append(name)
+            return result
+
         width = self.impl.q_lora_rank + self.impl.kv_lora_rank + self.impl.qk_rope_head_dim
         for preprocess_type, has_indexer in cases:
             with self.subTest(preprocess_type=preprocess_type, has_indexer=has_indexer):
@@ -973,25 +978,23 @@ class TestAscendSFAImpl(TestBase):
                 self.impl._get_sfa_kv_slot_mapping = lambda _: metadata.slot_mapping
                 self.impl._get_parallel_forward_context = lambda *_args: context
                 self.impl._prepare_native_hidden_states = lambda x, _: x
-                self.impl.fused_qkv_a_proj = lambda _: (events.append("projection"), (torch.zeros(2, width),))[1]
+                self.impl.fused_qkv_a_proj = lambda _: record_event("projection", (torch.zeros(2, width),))
                 self.impl.q_a_layernorm = torch.nn.Identity()
-                self.impl.indexer_select_pre_process = lambda **_kwargs: (
-                    events.append("indexer_projection"),
-                    (hidden, None),
-                )[1]
+                self.impl.indexer_select_pre_process = lambda **_kwargs: record_event(
+                    "indexer_projection", (hidden, None)
+                )
                 self.impl.layerwise_kv_cache_hook = SimpleNamespace(
                     wait_for_layer=lambda name: events.append(("wait", name))
                 )
-                self.impl.exec_kv = lambda *_args: (events.append("cache"), (hidden, hidden))[1]
+                self.impl.exec_kv = lambda *_args: record_event("cache", (hidden, hidden))
                 self.impl._prepare_kv_for_parallel = lambda *_args: (hidden, None, None, [])
                 self.impl._q_proj_and_k_up_proj = lambda _: (hidden, hidden)
                 self.impl.rope_single = lambda x, *_args: x
                 self.impl._record_query_gather_context = lambda *_args: None
                 self.impl._store_parallel_kv = lambda *_args: (hidden, hidden, hidden)
-                self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: (
-                    events.append("cache"),
-                    (hidden, hidden, hidden, hidden),
-                )[1]
+                self.impl._sfa_preprocess_prolog_v3 = lambda **_kwargs: record_event(
+                    "cache", (hidden, hidden, hidden, hidden)
+                )
                 self.impl._sfa_preprocess_mlapo = self.impl._sfa_preprocess_prolog_v3
                 self.impl._write_indexer_cache = lambda *_args: events.append("indexer_cache")
                 self.impl._get_indexcache_topk_indices = lambda _: torch.zeros(2, 1, dtype=torch.int64)
@@ -1007,7 +1010,7 @@ class TestAscendSFAImpl(TestBase):
                 ):
                     self.assertIs(self.impl.forward("layer", hidden, (hidden,), metadata, output), output)
                     self.assertTrue(torch.all(output == 1))
-                    expected = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
+                    expected: list[object] = ["projection"] if preprocess_type == PreprocessType.NATIVE else []
                     if has_indexer:
                         expected.append("indexer_projection")
                     expected.extend([("wait", "layer"), "cache"])

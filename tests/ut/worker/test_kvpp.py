@@ -19,7 +19,7 @@ from vllm_ascend.worker.v2 import kvpp
 
 @pytest.fixture
 def scheduler_device(monkeypatch):
-    events = []
+    events: list[object] = []
     compute, transfer = object(), object()
 
     def make_event():

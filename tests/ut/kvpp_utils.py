@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import Future
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheGroupSpec, KVCacheTensor, UniformTypeKVCacheSpecs
@@ -85,11 +87,11 @@ class ManualExecutor:
     """Execute submitted work explicitly, without threads or fake Future.result."""
 
     def __init__(self, **_kwargs):
-        self.pending = deque()
+        self.pending: deque[tuple[Future[None], Callable[..., None], tuple[Any, ...]]] = deque()
         self.submitted = []
 
     def submit(self, fn, *args):
-        future = Future()
+        future: Future[None] = Future()
         self.pending.append((future, fn, args))
         self.submitted.append((future, args))
         return future

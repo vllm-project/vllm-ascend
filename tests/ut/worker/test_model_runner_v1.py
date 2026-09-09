@@ -126,7 +126,7 @@ class TestDeviceMetadataFullGraphEvents(unittest.TestCase):
     def test_dummy_full_uses_external_events_without_global_wait(self):
         from contextlib import contextmanager, nullcontext
 
-        events = []
+        events: list[object] = []
         runner = NPUModelRunner.__new__(NPUModelRunner)
         runner.kvpp = SimpleNamespace(
             prepare_forward=lambda history: events.append(("prepare", history)),
@@ -2100,7 +2100,7 @@ class TestKVPPExecute(unittest.TestCase):
     def test_history_gate_uses_only_actual_requests(self):
         from vllm_ascend.worker import model_runner_v1 as module
 
-        events = []
+        events: list[object] = []
         result = SimpleNamespace()
         for computed, expected in (([0, 0, 99, 99], False), ([0, 4, 0, 0], True)):
             with self.subTest(computed=computed):
