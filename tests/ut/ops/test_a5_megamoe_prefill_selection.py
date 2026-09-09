@@ -109,6 +109,52 @@ def _implementation():
     return impl
 
 
+@pytest.mark.parametrize("chunk_size, expected", [(4096, 12288), (8192, 24576), (16384, 49152)])
+@pytest.mark.parametrize("decode_only", [False, True])
+def test_a5_receive_capacity_is_three_chunks_on_all_dp_ranks(monkeypatch, chunk_size, expected, decode_only):
+    monkeypatch.setattr(
+        comm,
+        "get_current_vllm_config",
+        lambda: SimpleNamespace(scheduler_config=SimpleNamespace(max_num_batched_tokens=chunk_size)),
+    )
+    monkeypatch.setattr(comm, "get_mc2_group", lambda: SimpleNamespace(device_group=object()))
+    for ep_rank in (0, 8, 16, 24):
+        impl = _implementation()
+        impl.token_dispatcher.a5_need_extra_args = True
+        impl.token_dispatcher.ep_world_size = 32
+        impl.token_dispatcher.ep_rank_id = ep_rank
+        impl.token_dispatcher.max_num_tokens_per_rank = chunk_size // 8
+        impl.moe_config = SimpleNamespace(
+            experts_per_token=16,
+            num_experts=896,
+            hidden_dim=3584,
+            intermediate_size_per_partition=3072,
+        )
+        impl.get_symm_buffer_for_mega_moe = MagicMock()
+        result = impl._init_mega_moe_symm_buffer(is_decode_only_node=decode_only)
+        assert result is impl.get_symm_buffer_for_mega_moe.return_value
+        assert impl.get_symm_buffer_for_mega_moe.call_args.kwargs["max_recv_token_num"] == expected
+
+
+@pytest.mark.parametrize("decode_only, expected", [(False, 65536), (True, 1048576)])
+def test_non_a5_receive_capacity_policy_is_preserved(monkeypatch, decode_only, expected):
+    monkeypatch.setattr(comm, "get_mc2_group", lambda: SimpleNamespace(device_group=object()))
+    monkeypatch.setattr(comm, "get_ascend_config", lambda: SimpleNamespace(mega_moe_max_tokens=65536))
+    impl = _implementation()
+    impl.token_dispatcher.a5_need_extra_args = False
+    impl.token_dispatcher.ep_world_size = 32
+    impl.token_dispatcher.max_num_tokens_per_rank = 2048
+    impl.moe_config = SimpleNamespace(
+        experts_per_token=16,
+        num_experts=896,
+        hidden_dim=3584,
+        intermediate_size_per_partition=3072,
+    )
+    impl.get_symm_buffer_for_mega_moe = MagicMock()
+    impl._init_mega_moe_symm_buffer(is_decode_only_node=decode_only)
+    assert impl.get_symm_buffer_for_mega_moe.call_args.kwargs["max_recv_token_num"] == expected
+
+
 def test_fused_mc2_routes_supported_situ_to_mega_moe():
     impl = _implementation()
     request = _request()

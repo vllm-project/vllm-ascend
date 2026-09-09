@@ -19,6 +19,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
 
@@ -349,8 +350,15 @@ class FusedMC2CommImpl(MoECommMethod):
         )
 
         if self.token_dispatcher.a5_need_extra_args:
-            # A5 uses the operator automatic receive-buffer mode.
-            max_recv_token_num = 0
+            # Use the same configured chunk capacity on every EP rank,
+            # including decode and idle dummy batches.
+            chunk_prefill_size = get_current_vllm_config().scheduler_config.max_num_batched_tokens
+            max_recv_token_num = 3 * chunk_prefill_size
+            logger.info(
+                "A5 MegaMoe receive capacity: chunk_prefill_size=%d recv_factor=3 max_recv_token_num=%d",
+                chunk_prefill_size,
+                max_recv_token_num,
+            )
         elif is_decode_only_node:
             max_recv_token_num = absolute_safe_max_recv_token_num
         else:
