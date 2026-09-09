@@ -647,6 +647,11 @@ class NPUModelRunner(GPUModelRunner):
 
         return input_batch
 
+    def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        if self.pcp_manager is None:
+            return super().prepare_dummy_attn(input_batch)
+        return self.pcp_manager.prepare_dummy_attn(input_batch)
+
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity shared by every rank of the lmhead-TP group.
 
