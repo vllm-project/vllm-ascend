@@ -71,6 +71,9 @@ def test_punica_init_selects_kernel_backend(device_type, max_lora_rank, expect_t
             lora_config=SimpleNamespace(max_lora_rank=max_lora_rank),
         )
     refresh.assert_called_once()
+    assert wrapper._seq_start_locs.shape == (8,)
+    assert wrapper._seq_lengths.shape == (8,)
+    assert wrapper._lora_indices_per_batch.shape == (8,)
     if expect_torch_ops:
         from vllm.lora.ops.torch_ops import bgmv_shrink
 

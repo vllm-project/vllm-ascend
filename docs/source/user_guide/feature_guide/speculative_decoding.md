@@ -21,6 +21,7 @@ The following speculative decoding methods are supported:
 | `mtp` | Multi-Token Prediction with shared embedding head |
 | `dflash` | Block diffusion-based parallel draft model |
 | `dspark` | Semi-autoregressive block drafting with a sequential Markov logit-bias head |
+| `uno` | Shared-target parallel drafting with a noise-row LoRA adapter |
 | `draft_model` | Generic external draft LLM |
 | `extract_hidden_states` | Extract hidden states for EAGLE training |
 
@@ -62,6 +63,27 @@ vllm serve path/to/target/model \
 
 > [!NOTE]
 > On Ascend NPUs, the `npu_fused_infer_attention_score` operator supports a maximum of 16 tokens per decode round. Therefore, `(num_speculative_tokens + 1)` must be ≤ 16.
+
+## Speculating using UNO
+
+UNO runs one eager parallel draft pass through the target model. The configured
+LoRA adapter is active only for the noisy draft rows; target verification uses
+the base model and MRV2's standard rejection sampler.
+
+```shell
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve Qwen/Qwen3-8B \
+  --enable-lora \
+  --max-lora-rank 128 \
+  --no-async-scheduling \
+  --speculative-config \
+  '{"method":"uno","uno_lora_path":"/path/to/uno/adapter","uno_mask_token_id":151669,"num_speculative_tokens":8}'
+```
+
+This initial MRV2 implementation requires a vLLM revision containing UNO, one
+NPU, a text-only decoder with one homogeneous full-attention KV group, eager
+draft execution, and `num_speculative_tokens <= 15`. Request-specific LoRA,
+dual batch overlap, and KV transfer are unsupported. Configure
+`max_num_batched_tokens >= max_num_seqs * num_speculative_tokens`.
 
 ## Speculating by matching n-grams in the prompt
 

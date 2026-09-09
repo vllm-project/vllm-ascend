@@ -1,10 +1,12 @@
 from dataclasses import replace
 
 from transformers import DeepseekV2Config, PretrainedConfig
+from vllm.config import VllmConfig
 from vllm.config.speculative import SpeculativeConfig
 
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
+_orig_validate_uno_config = getattr(VllmConfig, "_validate_uno_config", None)
 
 
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
@@ -89,3 +91,37 @@ def _dspark_post_init(self):
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
 SpeculativeConfig.__post_init__ = _dspark_post_init
+
+
+def _validate_ascend_uno_config(self: VllmConfig) -> None:
+    """Allow UNO on Ascend MRV2 while retaining the upstream safeguards."""
+    speculative_config = self.speculative_config
+    if speculative_config is None or not speculative_config.use_uno():
+        if _orig_validate_uno_config is not None:
+            _orig_validate_uno_config(self)
+        return
+
+    if self.scheduler_config.async_scheduling:
+        raise ValueError("Uno requires synchronous scheduling (--no-async-scheduling)")
+    if self.lora_config is None:
+        raise ValueError(
+            "Uno requires --enable-lora and --max-lora-rank large enough "
+            "for the Uno adapter"
+        )
+    if self.parallel_config.use_ubatching:
+        raise ValueError("Uno does not support dual batch overlap")
+    if self.kv_transfer_config is not None:
+        raise ValueError("Uno does not support KV cache transfer")
+    required_tokens = (
+        self.scheduler_config.max_num_seqs
+        * speculative_config.num_speculative_tokens
+    )
+    if self.scheduler_config.max_num_batched_tokens < required_tokens:
+        raise ValueError(
+            "Uno requires max_num_batched_tokens >= max_num_seqs * "
+            f"num_speculative_tokens ({required_tokens}) for draft LoRA routing"
+        )
+
+
+if _orig_validate_uno_config is not None:
+    VllmConfig._validate_uno_config = _validate_ascend_uno_config
