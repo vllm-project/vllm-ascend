@@ -795,6 +795,7 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
         attn_utils,
         "get_current_vllm_config",
         lambda: SimpleNamespace(
+            additional_config={},
             kv_transfer_config=None,
             model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3")),
             quant_config=None,
