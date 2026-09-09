@@ -165,7 +165,7 @@ def test_main_dsv4_materializes_real_planner_geometry_once(monkeypatch):
     tuple_stride = (small_spec.page_size_bytes + large_spec.page_size_bytes) * num_blocks
     backing_size = tuple_stride * 2
     monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_planning._may_override_num_blocks",
+        "vllm.v1.core.kv_cache_planning.may_override_num_blocks",
         lambda _config, value: value,
     )
     planned_num_blocks, descriptors = _get_kv_cache_config_deepseek_v4_main(
