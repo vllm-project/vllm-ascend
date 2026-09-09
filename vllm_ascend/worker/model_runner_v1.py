@@ -832,6 +832,29 @@ class NPUModelRunner(GPUModelRunner):
             device=self.device,
         ).unsqueeze(1)
 
+    def _copy_kv_cache_blocks_by_layer_views(self, block_copies: list) -> None:
+        """Apply prefix-cache CoW block copies through the per-layer views.
+
+        The generic runner views each cache tensor's whole untyped_storage()
+        as (num_blocks, page_bytes) and copies whole pages. That breaks on
+        Ascend twice: PD deployments over-allocate 2 MiB-aligned buffers
+        (storage = num_blocks * page + alignment, so the divisibility assert
+        fires), and hybrid buffers are sectioned ([pad|conv|..|k|ssm|..|v|pad])
+        rather than block-major, so a whole-storage block view would copy
+        across section boundaries even when the assert passes. Every per-layer
+        cache view is (num_blocks, ...) indexed by the global block id, so
+        copying through the views is correct for every layout -- mirroring
+        KVBlockZeroer's approach.
+        """
+        ids = torch.tensor(block_copies, dtype=torch.long, device=self.device)
+        src_ids, dst_ids = ids.unbind(dim=1)
+        for layer_cache in self.kv_caches.values():
+            tensors = layer_cache if isinstance(layer_cache, (list, tuple)) else (layer_cache,)
+            for cache_tensor in tensors:
+                if cache_tensor is None or cache_tensor.dim() == 0:
+                    continue
+                cache_tensor[dst_ids] = cache_tensor[src_ids]
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         # Temporary rewind guard for KV-load-failure recompute.
         # This can be removed after the upstream fix is merged.
@@ -846,6 +869,11 @@ class NPUModelRunner(GPUModelRunner):
                 num_computed_tokens = req_data.num_computed_tokens[i]
                 if num_computed_tokens < req_state.num_computed_tokens:
                     req_state.prev_num_draft_len = 0
+
+        block_copies = scheduler_output.kv_cache_block_copies
+        if block_copies:
+            scheduler_output.kv_cache_block_copies = None
+            self._copy_kv_cache_blocks_by_layer_views(block_copies)
 
         self._apply_pp_sampled_tokens_from_scheduler_output(scheduler_output)
         sampling_metadata = super()._update_states(scheduler_output)
