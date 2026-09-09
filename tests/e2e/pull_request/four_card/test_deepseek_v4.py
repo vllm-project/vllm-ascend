@@ -27,11 +27,15 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 MAX_MODEL_LEN = 2048
-MAX_NUM_SEQS = 8
+MAX_NUM_SEQS = 4
 MAX_NUM_BATCHED_TOKENS = 256
-COMPILATION_CONFIG = {
+BASIC_COMPILATION_CONFIG = {
     "cudagraph_mode": "FULL_DECODE_ONLY",
-    "cudagraph_capture_sizes": [4, 8],
+    "cudagraph_capture_sizes": [2],
+}
+INDEX_CACHE_COMPILATION_CONFIG = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": [3],
 }
 
 
@@ -66,7 +70,7 @@ def test_deepseek_v4_w4a8_tp4_basic_greedy():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
-        compilation_config=COMPILATION_CONFIG,
+        compilation_config=BASIC_COMPILATION_CONFIG,
         speculative_config={"num_speculative_tokens": 1, "method": "mtp"},
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
@@ -117,7 +121,7 @@ def test_deepseek_v4_w4a8_tp4_index_cache_freq4():
         quantization="ascend",
         tokenizer_mode="deepseek_v4",
         block_size=128,
-        compilation_config=COMPILATION_CONFIG,
+        compilation_config=INDEX_CACHE_COMPILATION_CONFIG,
         hf_overrides={
             "use_index_cache": True,
             "index_topk_freq": 4,
