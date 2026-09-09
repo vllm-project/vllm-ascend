@@ -11,6 +11,7 @@ from vllm.v1.sample.sampler import Sampler
 from tests.ut.base import TestBase
 from vllm_ascend.sample.rejection_sampler import (
     AscendRejectionSampler,
+    _compute_fly_greedy_stats,
     apply_sampling_constraints,
     expand_batch_to_tokens,
     expand_pytorch,
@@ -956,14 +957,30 @@ def _pin_memory_stack() -> ExitStack:
     return stack
 
 
-def _ascend_cfg(reduce_sample=False, block_verify=False, entropy_verify=False):
+def _ascend_cfg(
+    reduce_sample=False,
+    block_verify=False,
+    entropy_verify=False,
+    fly_verify=False,
+):
     cfg = MagicMock()
     cfg.enable_reduce_sample = reduce_sample
     cfg.rejection_sampler_config.enable_block_verify = block_verify
     cfg.rejection_sampler_config.enable_entropy_verify = entropy_verify
     cfg.rejection_sampler_config.posterior_threshold = 0.95
     cfg.rejection_sampler_config.posterior_alpha = 0.4
+    cfg.rejection_sampler_config.enable_fly_verify = fly_verify
+    cfg.rejection_sampler_config.fly_entropy_top_k = 2
+    cfg.rejection_sampler_config.fly_entropy_threshold = 0.5
+    cfg.rejection_sampler_config.fly_window_size = 1
     return cfg
+
+
+def _set_fly_state(sampler, *, enabled=False):
+    sampler._fly_verify = enabled
+    sampler._fly_entropy_top_k = 2
+    sampler._fly_entropy_threshold = 0.5
+    sampler._fly_window_size = 1
 
 
 def _tp_group():
@@ -977,6 +994,111 @@ def _replace(obj, **kwargs):
     data = dict(vars(obj))
     data.update(kwargs)
     return SimpleNamespace(**data)
+
+
+def _reference_fly_entropy(logits, top_k):
+    probs = logits.softmax(dim=-1)
+    top_probs = torch.topk(
+        probs,
+        k=min(top_k, probs.shape[-1]),
+        dim=-1,
+    ).values
+    return -(top_probs * top_probs.log()).sum(dim=-1)
+
+
+def test_compute_fly_greedy_stats():
+    logits = torch.tensor(
+        [
+            [2.0, 1.0, 0.0, float("-inf")],
+            [0.0, 3.0, 1.0, 2.0],
+        ]
+    )
+    draft_token_ids = torch.tensor([3, 1], dtype=torch.int32)
+
+    with patch(
+        "vllm_ascend.sample.rejection_sampler.get_ascend_config",
+        return_value=_ascend_cfg(),
+    ):
+        target_argmax, entropy, draft_allowed = _compute_fly_greedy_stats(
+            logits,
+            draft_token_ids,
+            entropy_top_k=2,
+        )
+
+    assert torch.equal(target_argmax, torch.tensor([0, 1]))
+    assert torch.equal(
+        draft_allowed,
+        torch.tensor([False, True]),
+    )
+    torch.testing.assert_close(
+        entropy,
+        _reference_fly_entropy(logits, top_k=2),
+    )
+
+
+def test_compute_fly_greedy_stats_reduce_sample():
+    local_logits = torch.tensor(
+        [
+            [1.0, 4.0, 0.0],
+            [3.0, 0.0, 1.0],
+        ]
+    )
+    remote_logits = torch.tensor(
+        [
+            [5.0, 2.0, 3.0],
+            [3.0, 2.0, 1.0],
+        ]
+    )
+    draft_token_ids = torch.tensor([4, 1], dtype=torch.int32)
+    local_vocab_size = local_logits.shape[-1]
+
+    def all_gather(local_stats, dim=-1):
+        remote_draft_logits = torch.tensor(
+            [remote_logits[0, 1], float("-inf")],
+            dtype=remote_logits.dtype,
+        )
+        remote_argmax_ids = remote_logits.argmax(dim=-1) + local_vocab_size
+        remote_stats = torch.cat(
+            (
+                torch.topk(remote_logits, k=2, dim=-1).values,
+                torch.logsumexp(remote_logits, dim=-1).unsqueeze(-1),
+                remote_draft_logits.unsqueeze(-1),
+                remote_argmax_ids.float().unsqueeze(-1),
+            ),
+            dim=-1,
+        )
+        return torch.cat((local_stats, remote_stats), dim=dim)
+
+    tp_group = MagicMock()
+    tp_group.rank_in_group = 0
+    tp_group.world_size = 2
+    tp_group.all_gather.side_effect = all_gather
+
+    with (
+        patch(
+            "vllm_ascend.sample.rejection_sampler.get_ascend_config",
+            return_value=_ascend_cfg(reduce_sample=True),
+        ),
+        patch(
+            "vllm_ascend.sample.rejection_sampler.get_tp_group",
+            return_value=tp_group,
+        ),
+    ):
+        target_argmax, entropy, draft_allowed = _compute_fly_greedy_stats(
+            local_logits,
+            draft_token_ids,
+            entropy_top_k=2,
+        )
+
+    assert torch.equal(target_argmax, torch.tensor([3, 0]))
+    assert torch.equal(draft_allowed, torch.tensor([True, True]))
+    torch.testing.assert_close(
+        entropy,
+        _reference_fly_entropy(
+            torch.cat((local_logits, remote_logits), dim=-1),
+            top_k=2,
+        ),
+    )
 
 
 def test_ascend_rejection_sampler_methods():
@@ -1016,6 +1138,7 @@ def test_ascend_rejection_sampler_methods():
         apply_penalties.assert_called_once()
 
     rs = AscendRejectionSampler.__new__(AscendRejectionSampler)
+    _set_fly_state(rs, enabled=True)
     rs._combine_outputs_with_spec_tokens = lambda output_token_ids, spec_token_ids: output_token_ids
     min_tokens = MagicMock(spec=MinTokensLogitsProcessor)
     min_tokens.apply_with_spec_decode.side_effect = lambda values, num_draft: values
@@ -1059,44 +1182,79 @@ def test_ascend_rejection_sampler_methods():
     rs.is_processed_logprobs_mode = False
     rs.apply_logits_processors = lambda values, *args, **kwargs: values
     rs._get_logprobs_tensors = MagicMock(return_value="lp")
-    forward_logits = torch.tensor([[0.1, 0.9], [0.2, 0.8]])
-    forward_meta = SimpleNamespace(
-        max_spec_len=1,
-        bonus_logits_indices=torch.tensor([1]),
-        target_logits_indices=torch.tensor([0]),
-        draft_token_ids=torch.tensor([1]),
-        num_draft_tokens=[1],
-        cu_num_draft_tokens=torch.tensor([1]),
+    forward_logits = torch.tensor(
+        [
+            [0.1, 0.9],
+            [0.2, 0.8],
+            [0.7, 0.3],
+        ]
     )
-    forward_sampling = SimpleNamespace(max_num_logprobs=1)
+    forward_meta = SimpleNamespace(
+        max_spec_len=2,
+        bonus_logits_indices=torch.tensor([2]),
+        target_logits_indices=torch.tensor([0, 1]),
+        draft_token_ids=torch.tensor([1, 1]),
+        num_draft_tokens=[2],
+        cu_num_draft_tokens=torch.tensor([2]),
+    )
+    forward_sampling = SimpleNamespace(
+        max_num_logprobs=1,
+        all_random=False,
+    )
+    fly_target_argmax = torch.tensor([1, 1])
+    fly_entropy = torch.tensor([0.8, 0.1])
+    fly_draft_allowed = torch.tensor([True, True])
+
     with (
         patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
         patch(
+            "vllm_ascend.sample.rejection_sampler._compute_fly_greedy_stats",
+            return_value=(
+                fly_target_argmax,
+                fly_entropy,
+                fly_draft_allowed,
+            ),
+        ) as mock_fly_stats,
+        patch(
             "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
-            return_value=(forward_logits[:1], None),
+            return_value=(forward_logits[:2], None),
         ),
         patch(
             "vllm_ascend.sample.rejection_sampler.rejection_sample",
-            return_value=torch.tensor([[1, 9]], dtype=torch.int32),
-        ),
+            return_value=torch.tensor([[1, 1, 9]], dtype=torch.int32),
+        ) as mock_rejection_sample,
     ):
         output = rs.forward(forward_meta, None, forward_logits.clone(), forward_sampling)
     assert output.logprobs_tensors == "lp"
+    mock_fly_stats.assert_called_once()
+    rejection_kwargs = mock_rejection_sample.call_args.kwargs
+    assert rejection_kwargs["fly_target_argmax"] is fly_target_argmax
+    assert rejection_kwargs["fly_entropy"] is fly_entropy
+    assert rejection_kwargs["fly_draft_allowed"] is fly_draft_allowed
+    assert rejection_kwargs["fly_entropy_threshold"] == 0.5
+    assert rejection_kwargs["fly_window_size"] == 1
 
+    rs._fly_verify = False
     rs.is_processed_logprobs_mode = True
     with (
         patch("vllm_ascend.sample.rejection_sampler.replace", _replace),
         patch(
             "vllm_ascend.sample.rejection_sampler.apply_sampling_constraints",
-            return_value=(forward_logits[:1], None),
+            return_value=(forward_logits[:2], None),
         ),
         patch(
             "vllm_ascend.sample.rejection_sampler.rejection_sample",
-            return_value=torch.tensor([[1, 9]], dtype=torch.int32),
+            return_value=torch.tensor([[1, 1, 9]], dtype=torch.int32),
         ),
     ):
         processed_output = rs.forward(
-            forward_meta, None, forward_logits.clone(), SimpleNamespace(max_num_logprobs=None)
+            forward_meta,
+            None,
+            forward_logits.clone(),
+            SimpleNamespace(
+                max_num_logprobs=None,
+                all_random=False,
+            ),
         )
     assert processed_output.logprobs_tensors is None
 
@@ -1175,6 +1333,46 @@ def test_rejection_sample_constraint_and_helper_paths():
             assert empty.shape == (1, 1)
             greedy = run_sample()
             assert greedy.shape == (1, 3)
+
+            fly_draft_token_ids = torch.tensor(
+                [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1],
+                dtype=torch.int32,
+            )
+            fly_target_argmax = torch.tensor([9, 2, 3, 9, 2, 3, 9, 2, 3, 9, 8, 3, 9])
+            fly_entropy = torch.ones(13)
+            fly_entropy[3] = 0.0
+            fly_draft_allowed = torch.ones(13, dtype=torch.bool)
+            fly_draft_allowed[6] = False
+
+            fly_output = run_sample(
+                draft_token_ids=fly_draft_token_ids,
+                num_draft_tokens=[3, 3, 3, 3, 1],
+                max_spec_len=3,
+                cu_num_draft_tokens=torch.tensor([3, 6, 9, 12, 13]),
+                target_logits_or_tuple=torch.zeros(13, 2),
+                bonus_token_ids=torch.tensor(
+                    [[10], [11], [12], [13], [14]],
+                    dtype=torch.int32,
+                ),
+                fly_target_argmax=fly_target_argmax,
+                fly_entropy=fly_entropy,
+                fly_draft_allowed=fly_draft_allowed,
+                fly_entropy_threshold=0.5,
+                fly_window_size=1,
+            )
+            assert torch.equal(
+                fly_output,
+                torch.tensor(
+                    [
+                        [1, 2, 3, 10],
+                        [9, -1, -1, -1],
+                        [9, -1, -1, -1],
+                        [9, -1, -1, -1],
+                        [9, -1, -1, -1],
+                    ],
+                    dtype=torch.int32,
+                ),
+            )
 
         with (
             patch("vllm_ascend.sample.rejection_sampler.HAS_TRITON", False),
