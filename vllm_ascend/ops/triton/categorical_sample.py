@@ -115,6 +115,8 @@ def _categorical_kernel(
         if RETURN_LSE:
             tl.store(lse + row, 0.0)
         return
+    # Keep assertion machinery off the valid path: unconditional scalar
+    # device_assert calls break ACLGraph/native-op interleaving on C220.
     if (request < 0) | (request >= REQUESTS):
         tl.device_assert(False, "CategoricalSample expanded index mapping is outside request state")
     temperature = tl.load(temperatures + request)

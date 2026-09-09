@@ -765,10 +765,13 @@ def _compare_triton_native(logits, mapping, temperature, seed, pos, **kwargs):
 
 
 @pytest.mark.parametrize("use_fp64", [False, True])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("vocab", [1, 33, 256, 4096, 4097, 32768, 151936, 1_048_576])
-def test_triton_same_input_matches_native(vocab, use_fp64):
+def test_triton_same_input_matches_native(vocab, dtype, use_fp64):
     generator = torch.Generator().manual_seed(17)
-    logits = torch.randn(8, vocab, generator=generator, dtype=torch.float32).to("npu")
+    logits = torch.randn(8, vocab + 13, generator=generator, dtype=torch.float32).to(device="npu", dtype=dtype)[
+        :, :vocab
+    ]
     mapping = torch.tensor([0, 1, 2, 3, 0, 1, 2, -1], dtype=torch.int32, device="npu")
     temperature = torch.tensor([0.0, 0.7, 1.0, -2.0], device="npu")
     seeds = torch.tensor([17, -37, (1 << 40) + 17, -(1 << 63)], dtype=torch.int64, device="npu")
@@ -845,15 +848,16 @@ def test_triton_fp64_rare_probability_interval():
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_triton_raw_cache_bits(dtype):
+@pytest.mark.parametrize("cache_dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_triton_raw_cache_bits(dtype, cache_dtype):
     logits = torch.tensor([[-0.0, 0.0, 1.0625, -2.25]], dtype=dtype, device=DEVICE)
     mapping = torch.zeros(1, dtype=torch.int32, device=DEVICE)
     args = logits, mapping, torch.zeros(1, device=DEVICE), mapping.long(), mapping.long(), False, False
-    native_cache = torch.empty((1, 4), dtype=dtype, device=DEVICE)
+    native_cache = torch.empty((1, 4), dtype=cache_dtype, device=DEVICE)
     triton_cache = torch.empty_like(native_cache)
     torch.ops._C_ascend.npu_categorical_sample(*args, logits_cache=native_cache)
     categorical_sample(*args, logits_cache=triton_cache)
-    bit_dtype = torch.int32 if dtype == torch.float32 else torch.int16
+    bit_dtype = torch.int32 if cache_dtype == torch.float32 else torch.int16
     assert torch.equal(triton_cache.cpu().view(bit_dtype), native_cache.cpu().view(bit_dtype))
 
 
