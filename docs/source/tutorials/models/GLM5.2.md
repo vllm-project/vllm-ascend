@@ -715,7 +715,7 @@ Only the key parameters specific to this model/scenario are described below. `ma
 
 - `VLLM_PP_LAYER_PARTITION="41,37"` / `--pipeline-parallel-size 2` / `--nnodes 2` / `--node-rank`: The prefill engine is split as PP2 over the two prefill nodes — the 78 layers are partitioned as `41/37`. `--node-rank` is `0` on prefill node 0 (p0) and `1` on prefill node 1 (p1).
 - `--distributed-executor-backend mp` / `--master-addr` / `--master-port 7060`: PP runs over two nodes with the `mp` executor (no Ray required). `--master-addr` is `$local_ip` on prefill node 0 (p0, PP master) and `$node_p0_ip` on prefill node 1 (p1).
-- `enable_fused_mc2`: Enables the fused `dispatch_ffn_combine`/`mega_moe` operators.
+- `enable_fused_mc2`: `1` uses `dispatch_ffn_combine`; `2` opts into CANN `mega_moe` for testing. Existing model, hardware, and parallel-configuration constraints still apply.
 - `enable_flashcomm1`: Enables FlashComm optimization to reduce communication and computation overhead on prefill nodes.
 - `--enforce-eager`: The prefill side runs in eager mode (the `FULL_DECODE_ONLY` graph capture is used on the decode side instead).
 - `--speculative-config '{"num_speculative_tokens": 1, ...}'`: Minimal MTP speculation during prefill (decode nodes use a higher count, see below).
@@ -983,7 +983,7 @@ python load_balance_proxy_server_example.py \
 Some configurations for optimization are shown below:
 
 - `enable_flashcomm1`: Enable FlashComm optimization to reduce communication and computation overhead on prefill node. With FlashComm enabled, layer_sharding list cannot include o_proj as an element.
-- `enable_fused_mc2`: Enable the dispatch_ffn_combine/mega_moe fused operator.
+- `enable_fused_mc2`: `1` uses `dispatch_ffn_combine`; `2` opts into CANN `mega_moe` for testing. Existing model, hardware, and parallel-configuration constraints still apply.
 
 Please refer to the following python file for further explanation and restrictions of the environment variables above: [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py)
 
@@ -1602,7 +1602,7 @@ Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for more
 |Optimization|Scenario|Enablement|Principle (Benefits)|Notes|
 |------------|--------|----------|---------------------|-----|
 |FlashComm_v1|A3 prefill nodes / co-located nodes|`--additional-config '{"enable_flashcomm1": true}'`|Splits AllReduce into Reduce-Scatter and All-Gather, improving prefill throughput and reducing communication latency|Not available when `layer_sharding` includes `o_proj`|
-|Fused MC2|A3 prefill nodes|`--additional-config '{"enable_fused_mc2": 1}'`|Replaces ALLTOALL+MC2 with the `dispatch_ffn_combine`/`dispatch_gmm_combine_decode` operators, reducing MoE communication overhead and improving MoE inference performance|`dispatch_ffn_combine` only for w8a8, EP≤32, non-MTP, non-dynamic-EPLB; conflicts with `multistream_overlap_shared_expert` (the latter is auto-disabled)|
+|Fused MC2|A3 prefill nodes|`--additional-config '{"enable_fused_mc2": 1}'`|Uses `dispatch_ffn_combine` with `1`; `2` opts into CANN `mega_moe` for testing, reducing MoE communication overhead|`dispatch_ffn_combine` only for w8a8, EP≤32, non-MTP, non-dynamic-EPLB; conflicts with `multistream_overlap_shared_expert` (the latter is auto-disabled). MegaMoE remains subject to its model, hardware, and parallel-configuration constraints.|
 |MLAPO|A3 co-located / PD decode nodes; A2 P/D nodes|`--additional-config '{"enable_mlapo": true}'`|Fuses the MLA preprocess operations, significantly improving decode performance|Consumes more NPU memory; in PD scenarios enable on decode nodes only|
 |DSA CP|A3 prefill nodes; long context|`--additional-config '{"enable_dsa_cp": true}'`|DSA context parallelism accelerates long-context prefill, reducing TTFT for long prompts|In the reference configs, enabled on co-located nodes and PD prefill nodes; PD decode nodes use decode context parallelism instead|
 |Sparse SFA C8|A3 (w8a8c8); long-context prefill|`--additional-config '{"enable_sparse_sfa_c8": true}'`|Sparse Flash Attention skips unnecessary attention computation of the C8 quantized model, accelerating long-context prefill|Experimental in v0.23.0. On the w8a8c8 weights it can be combined with DCP/context parallelism (as in the reference configs in this document); on the w4a8c8 weights enabling both together has known issues and is not recommended|

@@ -24,6 +24,7 @@ class TestMoECommMethod(TestBase):
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.ascend_fusion_config.fusion_ops_gmmswigluquant = False
         self.mock_ascend_config.enable_fused_mc2 = False
+        self.mock_ascend_config._use_mega_moe = False
         self.mock_ascend_config.mega_moe_max_tokens = 65536
         self.mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         self._patch_get_ascend_config = patch(
@@ -339,3 +340,65 @@ class TestMoECommMethod(TestBase):
             hidden_states=mock_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.zeros")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithMC2")
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils.load_cann_mega_moe_ops")
+    def test_fused_mc2_loads_cann_only_for_opt_in(self, mock_load, mock_dispatcher, mock_prepare_finalize, mock_zeros):
+        self.mock_ascend_config.enable_fused_mc2 = 1
+        mock_load.return_value = (MagicMock(), MagicMock())
+        for use_mega_moe in (False, True):
+            with self.subTest(use_mega_moe=use_mega_moe):
+                self.mock_ascend_config._use_mega_moe = use_mega_moe
+                mock_load.reset_mock()
+
+                FusedMC2CommImpl(self.moe_config)
+
+                if use_mega_moe:
+                    mock_load.assert_called_once_with()
+                else:
+                    mock_load.assert_not_called()
+
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method.torch.ops._C_ascend.dispatch_ffn_combine", create=True)
+    @patch("vllm_ascend.ops.fused_moe.moe_comm_method._EXTRA_CTX")
+    def test_fused_mc2_preserves_legacy_and_megamoe_calls(self, mock_ctx, mock_legacy):
+        comm_impl = FusedMC2CommImpl.__new__(FusedMC2CommImpl)
+        comm_impl.enable_fused_mc2 = 1
+        comm_impl.swiglu_limit = 0.0
+        comm_impl.token_dispatcher = TokenDispatcherWithMC2.__new__(TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.moe_all_to_all_group_name = "mc2_group"
+        comm_impl.expert_token_nums = torch.zeros(2, dtype=torch.int32)
+        routed_out = torch.randn(4, 8)
+        expert_tokens = torch.tensor([2, 2], dtype=torch.int32)
+        comm_impl._apply_cann_mega_moe = MagicMock(return_value=(routed_out, expert_tokens))
+        fused_experts_input = MagicMock(spec=MoEFusedExpertsInput)
+        fused_experts_input.hidden_states = torch.randn(4, 8)
+        fused_experts_input.topk_weights = torch.ones(4, 1)
+        fused_experts_input.weights = MagicMock(spec=MoEWeights)
+        mock_ctx.is_decode_only_node = False
+
+        for use_mega_moe in (False, True):
+            with self.subTest(use_mega_moe=use_mega_moe):
+                mock_ctx.use_mega_moe = use_mega_moe
+                mock_legacy.reset_mock()
+                comm_impl._apply_cann_mega_moe.reset_mock()
+
+                result = comm_impl.fused_experts(fused_experts_input)
+
+                if use_mega_moe:
+                    mock_legacy.assert_not_called()
+                    comm_impl._apply_cann_mega_moe.assert_called_once_with(
+                        fused_experts_input, fused_experts_input.weights, is_decode_only_node=False
+                    )
+                    self.assertIs(result.routed_out, routed_out)
+                    self.assertIs(result.expert_tokens, expert_tokens)
+                else:
+                    comm_impl._apply_cann_mega_moe.assert_not_called()
+                    mock_legacy.assert_called_once()
+                    kwargs = mock_legacy.call_args.kwargs
+                    self.assertIs(kwargs["weight1"], fused_experts_input.weights.w1)
+                    self.assertIs(kwargs["bias1"], fused_experts_input.weights.w1_scale_bias)
+                    self.assertIs(kwargs["expert_token_nums"], comm_impl.expert_token_nums)
+                    self.assertIs(result.routed_out, kwargs["out"])
+                    self.assertIs(result.expert_tokens, comm_impl.expert_token_nums)
