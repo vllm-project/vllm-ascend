@@ -25,6 +25,8 @@ states are correctly extracted and saved on the Ascend NPU. Parametrized over:
   mirrors upstream vLLM PR #39949.
 * Model Runner V1 (Ascend default) and Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`),
   covering the Ascend adaptation of upstream vLLM PR #49811 on the 0828 pin.
+* token-in / token-out via ``skip_tokenizer_init`` + ``TokensPrompt`` (dummy
+  hybrid), which is the typical EAGLE dump collection path.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ import pytest
 import torch
 from vllm import LLM, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import example_hidden_states_connector
+from vllm.inputs import TokensPrompt
 
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -47,13 +50,20 @@ DENSE_AUX_HIDDEN_STATE_LAYER_IDS = [2, 18, 34]
 HYBRID_MODEL = "Qwen/Qwen3.5-0.8B"
 HYBRID_AUX_HIDDEN_STATE_LAYER_IDS = [5, 11, 17]
 
+# In-vocab dummy sequences for skip_tokenizer_init (Qwen3 vocab >> 500).
+TOKEN_IN_PROMPTS = [
+    [100, 200, 300, 400, 500],
+    [7, 8, 9, 10, 11, 12, 13, 14],
+]
+
 
 @dataclass
 class ExtractHiddenStatesCase:
     model_name: str
     aux_hidden_state_layer_ids: list[int]
-    prompts: list[str]
     enforce_eager: bool
+    prompts: list[str] | None = None
+    token_prompts: list[list[int]] | None = None
     # ``None`` means "do not pass the argument", preserving each model's
     # original defaults.
     gpu_memory_utilization: float | None = None
@@ -66,6 +76,8 @@ class ExtractHiddenStatesCase:
     verify_token_ids: bool = False
     # When True, force Model Runner V2 via VLLM_USE_V2_MODEL_RUNNER.
     use_v2_model_runner: bool = False
+    # Token-in / token-out: skip tokenizer init and pass TokensPrompt.
+    skip_tokenizer_init: bool = False
 
 
 CASES = [
@@ -147,6 +159,37 @@ CASES = [
         ),
         id="hybrid_dummy_eager_mrv2",
     ),
+    pytest.param(
+        ExtractHiddenStatesCase(
+            model_name=HYBRID_MODEL,
+            aux_hidden_state_layer_ids=HYBRID_AUX_HIDDEN_STATE_LAYER_IDS,
+            token_prompts=TOKEN_IN_PROMPTS,
+            enforce_eager=True,
+            gpu_memory_utilization=0.4,
+            max_model_len=256,
+            load_format="dummy",
+            verify_nonzero=False,
+            verify_token_ids=True,
+            skip_tokenizer_init=True,
+        ),
+        id="hybrid_dummy_token_in_token_out",
+    ),
+    pytest.param(
+        ExtractHiddenStatesCase(
+            model_name=HYBRID_MODEL,
+            aux_hidden_state_layer_ids=HYBRID_AUX_HIDDEN_STATE_LAYER_IDS,
+            token_prompts=TOKEN_IN_PROMPTS,
+            enforce_eager=True,
+            gpu_memory_utilization=0.4,
+            max_model_len=256,
+            load_format="dummy",
+            verify_nonzero=False,
+            verify_token_ids=True,
+            use_v2_model_runner=True,
+            skip_tokenizer_init=True,
+        ),
+        id="hybrid_dummy_token_in_token_out_mrv2",
+    ),
 ]
 
 
@@ -179,6 +222,21 @@ def _verify_output(output, expected_shape, *, verify_nonzero, verify_token_ids):
         example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
 
 
+def _generate_inputs(case: ExtractHiddenStatesCase):
+    if case.skip_tokenizer_init:
+        assert case.token_prompts is not None
+        return [TokensPrompt(prompt_token_ids=ids) for ids in case.token_prompts]
+    assert case.prompts is not None
+    return case.prompts
+
+
+def _verify_token_in_token_out(output, token_prompt: list[int], *, max_tokens: int):
+    """Input token ids round-trip; generated ids are present without detokenizing."""
+    assert list(output.prompt_token_ids) == token_prompt
+    assert not output.outputs[0].text
+    assert len(output.outputs[0].token_ids) == max_tokens
+
+
 @pytest.mark.parametrize("case", CASES)
 def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, monkeypatch):
     """Extract hidden states from the target model and validate the dump."""
@@ -186,6 +244,12 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, m
         monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     else:
         monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
+
+    generate_inputs = _generate_inputs(case)
+    if case.skip_tokenizer_init:
+        sampling = SamplingParams(temperature=0, max_tokens=1, detokenize=False)
+    else:
+        sampling = sampling_config
 
     with tempfile.TemporaryDirectory() as tmpdirname:
         llm_kwargs = dict(
@@ -218,18 +282,30 @@ def test_extract_hidden_states(case: ExtractHiddenStatesCase, sampling_config, m
             llm_kwargs["max_model_len"] = case.max_model_len
         if case.load_format is not None:
             llm_kwargs["load_format"] = case.load_format
+        if case.skip_tokenizer_init:
+            llm_kwargs["skip_tokenizer_init"] = True
 
         llm = LLM(**llm_kwargs)
 
-        outputs = llm.generate(case.prompts, sampling_config)
+        outputs = llm.generate(generate_inputs, sampling)
         hidden_size = llm.llm_engine.model_config.get_hidden_size()
         num_layers = len(case.aux_hidden_state_layer_ids)
+        vocab_size = llm.llm_engine.model_config.get_vocab_size()
 
-        assert len(outputs) == len(case.prompts)
+        assert len(outputs) == len(generate_inputs)
 
-        for output in outputs:
+        for idx, output in enumerate(outputs):
             num_tokens = len(output.prompt_token_ids)
             expected_shape = (num_tokens, num_layers, hidden_size)
+            if case.skip_tokenizer_init:
+                assert case.token_prompts is not None
+                assert sampling.max_tokens is not None
+                _verify_token_in_token_out(
+                    output,
+                    case.token_prompts[idx],
+                    max_tokens=sampling.max_tokens,
+                )
+                assert all(0 <= token_id < vocab_size for token_id in output.outputs[0].token_ids)
             _verify_output(
                 output,
                 expected_shape,
