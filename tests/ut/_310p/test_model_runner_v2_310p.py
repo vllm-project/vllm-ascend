@@ -86,14 +86,14 @@ def test_310p_v2_does_not_advertise_shared_kv_backing() -> None:
     assert NPUModelRunner310V2.supports_standardized_shared_kv_backing is False
 
 
-@pytest.mark.parametrize("is_vllm_0_27_1", [True, False])
-def test_execute_model_forwards_valid_dummy_state_slots_on_main(is_vllm_0_27_1: bool) -> None:
+@pytest.mark.parametrize("is_vllm_0_28_0", [True, False])
+def test_execute_model_forwards_valid_dummy_state_slots_to_ascend_parent(is_vllm_0_28_0: bool) -> None:
     runner = object.__new__(NPUModelRunner310V2)
     scheduler_output = object()
     expected = object()
 
     with (
-        patch.object(model_runner_module, "vllm_version_is", return_value=is_vllm_0_27_1),
+        patch.object(model_runner_module, "vllm_version_is", return_value=is_vllm_0_28_0),
         patch.object(NPUModelRunner, "execute_model", return_value=expected) as parent_execute,
     ):
         output = runner.execute_model(
@@ -107,12 +107,11 @@ def test_execute_model_forwards_valid_dummy_state_slots_on_main(is_vllm_0_27_1: 
         "dummy_run": True,
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
+        "context_len": 0,
+        "valid_dummy_state_slots": True,
     }
-    if not is_vllm_0_27_1:
-        expected_kwargs.update(
-            context_len=0,
-            valid_dummy_state_slots=True,
-        )
+    # This parent is Ascend's replacement in both lanes, not the upstream
+    # GPU runner; the Ascend parent owns version-gating its upstream call.
     parent_execute.assert_called_once_with(scheduler_output, **expected_kwargs)
     assert output is expected
     assert runner._force_eager_pc_batch is False

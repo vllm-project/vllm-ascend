@@ -931,6 +931,9 @@ def test_schedule_admits_waiting_lora_request():
 @pytest.mark.parametrize("with_kv_connector", [False, True])
 def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields(with_kv_connector):
     _, scheduler = _create_live_recompute_scheduler()
+    # The shared live fixture already installs a producer connector. Make the
+    # connector-absent parameter exercise a genuinely absent connector.
+    scheduler.connector = None
     scheduler.need_mamba_block_aligned_split = True
     scheduler._mamba_block_aligned_split = MagicMock(
         side_effect=lambda _request, num_new_tokens, *args, **kwargs: num_new_tokens

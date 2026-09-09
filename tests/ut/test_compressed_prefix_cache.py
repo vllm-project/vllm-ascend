@@ -163,7 +163,11 @@ def test_compressed_prefix_cache_uses_logical_block_hash() -> None:
         num_tokens=logical_block_size,
         num_tokens_main_model=logical_block_size,
     )
-    manager.cache_blocks(request_a, num_tokens=logical_block_size)
+    manager.cache_blocks(
+        request_a,
+        num_tokens=logical_block_size,
+        **({} if vllm_version_is("0.28.0") else {"replay_boundary": logical_block_size}),
+    )
 
     cached_hash = get_block_hash(manager.req_to_blocks[request_a.request_id][0].block_hash)
     expected_hash = BlockHashListWithBlockSize(
@@ -207,7 +211,11 @@ def test_compressed_prefix_cache_hits_identical_logical_block() -> None:
         num_tokens=logical_block_size,
         num_tokens_main_model=logical_block_size,
     )
-    manager.cache_blocks(request, num_tokens=logical_block_size)
+    manager.cache_blocks(
+        request,
+        num_tokens=logical_block_size,
+        **({} if vllm_version_is("0.28.0") else {"replay_boundary": logical_block_size}),
+    )
 
     logical_hashes = BlockHashListWithBlockSize(
         request.block_hashes,
@@ -278,7 +286,11 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
             num_tokens=logical_block_size,
             num_tokens_main_model=logical_block_size,
         )
-        manager.cache_blocks(request_a, num_tokens=logical_block_size)
+        manager.cache_blocks(
+            request_a,
+            num_tokens=logical_block_size,
+            **({} if vllm_version_is("0.28.0") else {"replay_boundary": logical_block_size}),
+        )
 
     per_group_blocks, per_group_hits = coordinator.find_longest_cache_hit_per_group(
         request_a.block_hashes,

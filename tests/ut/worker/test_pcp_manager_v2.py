@@ -911,10 +911,11 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
     runner.is_last_pp_rank = is_last_pp_rank
     runner.speculator = None
     runner.use_spec_pp = False
-    # vLLM main added the `dp_sync` field to ExecuteModelState; v0.28.0 lacks it.
+    # vLLM main added these ExecuteModelState fields; v0.28.0 lacks them.
     state_kwargs: dict = {}
     if not vllm_version_is("0.28.0"):
         state_kwargs["dp_sync"] = None
+        state_kwargs["cudagraph_stats"] = None
     runner.execute_model_state = vllm_model_runner.ExecuteModelState(
         input_batch=local_batch,
         attn_metadata=None,
@@ -924,7 +925,6 @@ def test_sample_tokens_uses_global_batch_only_on_non_last_pp_rank(
         finished_req_ids=set(),
         ec_connector_output=None,
         routed_experts=None,
-        cudagraph_stats=None,
         **state_kwargs,
     )
     grammar_output = object()
