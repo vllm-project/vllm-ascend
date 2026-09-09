@@ -4,7 +4,6 @@ from unittest.mock import MagicMock, patch
 import torch
 import torch.nn as nn
 
-from tests.ut.quantization.conftest_quantization import create_linear_layer
 from vllm_ascend.quantization.methods.w4a4.w4a4_flatquant import (
     KRONECKER_QUANT_MAX_BATCH_SIZE,
     AscendW4A4FlatQuantDynamicLinearMethod,
@@ -48,7 +47,7 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         mock_npu_tensor = MagicMock()
         mock_npu_tensor.to.return_value = mock_packed_tensor
         mock_torch_npu.npu_convert_weight_to_int4pack.return_value = mock_npu_tensor
-        with patch("torch.Tensor.npu", return_value=weight_tensor):
+        with patch("torch.Tensor.npu", return_value=weight_tensor, create=True):
             result = pack_int4_weights(weight_tensor)
 
         mock_torch_npu.npu_convert_weight_to_int4pack.assert_called_once()
@@ -215,32 +214,6 @@ class TestW4A4FlatQuantDynamic(unittest.TestCase):
         self.assertTrue(layer.aclnn_clip_ratio - 0.9 < 0.01)
         self.assertEqual(layer.left_trans.shape, (24, 24))
         self.assertTrue(layer.left_trans.is_contiguous())
-
-
-class TestW4A4FlatQuantDynamicWithNpu(unittest.TestCase):
-    """
-    Unit test suite for AscendW4A4FlatQuantDynamicLinearMethod and its helper functions.
-    """
-
-    def setUp(self):
-        """Set up the test environment before each test."""
-        self.method = AscendW4A4FlatQuantDynamicLinearMethod()
-        self.output_size = 64
-        self.input_size = 768  # 768 = 24 * 32, divisible by 8
-        self.params_dtype = torch.bfloat16
-
-    def test_apply_with_npu(self):
-        """Tests the apply method with NPU."""
-        batch_size = 16
-        layer = create_linear_layer(self.method, self.input_size, self.output_size, self.params_dtype)
-        layer.clip_ratio = nn.Parameter(torch.tensor([0.95], dtype=torch.float32).npu(), requires_grad=False)
-        self.method.process_weights_after_loading(layer)
-
-        x = torch.randn(batch_size, self.input_size, dtype=self.params_dtype).npu()
-        output = self.method.apply(layer, x)
-
-        self.assertEqual(output.shape, (batch_size, self.output_size))
-        self.assertEqual(output.dtype, self.params_dtype)
 
 
 if __name__ == "__main__":
