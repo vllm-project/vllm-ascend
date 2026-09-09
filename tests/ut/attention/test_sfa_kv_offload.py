@@ -176,8 +176,8 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
     ql_nope = torch.arange(12, dtype=torch.float32).reshape(2, 2, 3)
     q_pe = torch.ones((2, 2, 1), dtype=torch.float32)
     topk = torch.tensor([[0, -1, 2, 5], [3, 7, 1, -1]], dtype=torch.int64)
-    full_kv_cpu = torch.zeros((3, 4, 1, 3), dtype=torch.float32)
-    full_rope_cpu = torch.zeros((3, 4, 1, 1), dtype=torch.float32)
+    full_parent_cpu = torch.zeros((3, 4, 1, 4), dtype=torch.float32)
+    full_kv_cpu, full_rope_cpu = full_parent_cpu[..., :3], full_parent_cpu[..., 3:]
     metadata = SimpleNamespace(
         num_decodes=2,
         token_to_req=torch.tensor([0, 1], dtype=torch.int32),
@@ -265,6 +265,10 @@ def test_fused_overlap_external_plan_passes_raw_topk_and_full_selection_state():
         "wait_writeback",
     ]
     assert fused_inputs["selection_kv_cache"].shape == (8, 4, 3)
+    assert fused_inputs["full_kv_cache"].data_ptr() == full_kv_cpu.data_ptr()
+    assert fused_inputs["full_k_rope"].data_ptr() == full_rope_cpu.data_ptr()
+    assert fused_inputs["full_kv_cache"].stride(1) == 4
+    assert fused_inputs["full_k_rope"].stride(1) == 4
     assert fused_inputs["selection_k_rope"].shape == (8, 4, 1)
     assert fused_inputs["selection_kv_block_table"].shape == (4, 2)
     assert fused_inputs["selection_kv_block_status"].shape == (4, 1, 8)
