@@ -44,6 +44,19 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 from vllm_ascend.core.kv_cache_interface import is_deepseek_v4_kv_cache_spec
 
+# The #53558 head rebased onto the September-9 vLLM main renamed two
+# kv_cache_planning helpers. Alias them so the DeepSeekV4 builder runs on both
+# old and new names; drop the aliases and call the new names once vllm-ascend
+# adopts upstream #16009.
+if not hasattr(kv_cache_planning, "_may_override_num_blocks"):
+    kv_cache_planning._may_override_num_blocks = kv_cache_planning.may_override_num_blocks
+if not hasattr(kv_cache_planning, "_annotate_eagle_groups_deepseek_v4"):
+    kv_cache_planning._annotate_eagle_groups_deepseek_v4 = (
+        lambda vllm_config, kv_cache_spec, kv_cache_groups: kv_cache_planning._annotate_eagle_groups(
+            vllm_config, kv_cache_spec, kv_cache_groups, use_deepseek_v4_fallback=True
+        )
+    )
+
 
 def _has_deepseek_v4(kv_cache_specs: list[dict[str, KVCacheSpec]]) -> bool:
     """Whether any worker spec contains a DeepSeekV4 (SWA-MLA) layout."""
@@ -116,7 +129,7 @@ def _ascend_get_kv_cache_groups_uniform_groups(
     # The other uniform KV cache specs will be similarly partitioned into layer tuples.
     # Say we have 21 SWA layers, all with the same page size, then we will have "21"
     # layer tuples.
-    num_layer_tuples_per_group: list[int] = [g_spec.get_num_layer_tuples() for g_spec in grouped_specs]
+    num_layer_tuples_per_group: list[int] = [g_spec.get_max_layers_per_page_size() for g_spec in grouped_specs]
     # Choose `num_layer_tuples` to minimize total padding across groups.
     num_layer_tuples = kv_cache_planning._approximate_gcd(
         num_layer_tuples_per_group, lower_bound=num_layer_tuples_per_group[0]
@@ -339,7 +352,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        group.kv_cache_spec.get_max_layers_per_page_size()
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )

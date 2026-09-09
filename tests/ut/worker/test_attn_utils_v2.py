@@ -426,6 +426,7 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
         forward_context: dict[str, Any],
         runner_kv_caches_: list[Any],
         num_attn_module: int = 1,
+        kv_cache_groups=None,  # vLLM #52506: upstream metadata; unused in this mock
     ) -> None:
         del num_attn_module
         assert len(runner_kv_caches_) == 0

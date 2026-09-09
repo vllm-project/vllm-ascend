@@ -31,25 +31,25 @@ from vllm_ascend.worker.kv_cache_config_builder import (
 
 
 def _make_c4_spec() -> MLAAttentionSpec:
-    """DeepSeekV4 C4 (compress_ratio=4) MLA cache spec on Ascend."""
+    """DeepSeekV4 C4 (tokens_per_state=4) MLA cache spec on Ascend."""
     return MLAAttentionSpec(
         block_size=128 * 4,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=4,
+        tokens_per_state=4,
         model_version="deepseek_v4",
     )
 
 
 def _make_c128_spec() -> MLAAttentionSpec:
-    """DeepSeekV4 C128 (compress_ratio=128) MLA cache spec on Ascend."""
+    """DeepSeekV4 C128 (tokens_per_state=128) MLA cache spec on Ascend."""
     return MLAAttentionSpec(
         block_size=128 * 128,
         num_kv_heads=1,
         head_size=128,
         dtype=torch.float16,
-        compress_ratio=128,
+        tokens_per_state=128,
         model_version="deepseek_v4",
     )
 

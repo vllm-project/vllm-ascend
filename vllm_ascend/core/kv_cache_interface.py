@@ -80,6 +80,12 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
             return self.block_size // self.compress_ratio
         return self.block_size // self.tokens_per_state
 
+    @storage_block_size.setter
+    def storage_block_size(self, value: int) -> None:
+        # vLLM #53906 adds a nullable dataclass field with this name on main;
+        # keep Ascend's derived layout and ignore the upstream value.
+        pass
+
     @property
     def real_page_size_bytes(self) -> int:
         return (
@@ -222,6 +228,11 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
+
+    @storage_block_size.setter
+    def storage_block_size(self, value: int) -> None:
+        # vLLM #53906 adds a nullable dataclass field with this name on main.
+        pass
 
     @property
     def real_page_size_bytes(self) -> int:
