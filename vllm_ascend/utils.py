@@ -39,7 +39,7 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, is_mega_moe_supported
 from vllm_ascend.device.device_config import (  # noqa: F401
     AscendDeviceType,
     check_ascend_device_type,
@@ -1174,9 +1174,11 @@ def should_skip_allreduce_across_dp_group(vllm_config: VllmConfig, is_draft_mode
     this is cheap and avoids id-reuse / stale-cache / init-ordering hazards.
     """
     ascend_config = get_ascend_config()
-    # When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic global_bs,
+    # 1. When mc2_comm_alg == "hierarchy", dispatch/combine op don't support dynamic bs;
+    # 2. When use mega_moe, op don't support dynamic global_bs;
     # we need to do allreduce and pad token across dp every step.
-    if ascend_config.get_mc2_comm_alg() == "hierarchy":
+    # TODO(zzzzwwjj): remove it when op can support dynamic bs.
+    if ascend_config.get_mc2_comm_alg() == "hierarchy" or is_mega_moe_supported():
         return False
 
     # For dense models, since we don't actually need dp communication, we simply skip it.
