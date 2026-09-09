@@ -505,6 +505,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         )
         self._use_layer_aware_fia_graph_replay = needs_layer_aware_fia_graph_replay()
         self._use_max_workspace_for_fia_graph = self._use_layer_aware_fia_graph_replay
+        # V2 metadata can include draft layers; bind replay to each captured layer.
+        self._use_layer_aware_fia_graph_replay |= self.vllm_config.use_v2_model_runner
         self.sinks = sinks
         self.layerIndex = 0
         # Some mixed-attention models cannot rely on the iteration order of
@@ -527,7 +529,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         speculative_config=None,
         draft_attn_metadatas=None,
     ):
-        use_layer_aware_replay = needs_layer_aware_fia_graph_replay()
+        use_layer_aware_replay = needs_layer_aware_fia_graph_replay() or vllm_config.use_v2_model_runner
         if using_paged_attention(num_tokens, vllm_config):
             # Paged Attention update logic
             if _EXTRA_CTX.is_draft_model:
