@@ -81,12 +81,6 @@ plugins:
         - "**/*.inc.md"
         - "release.template.md"
         - "zh/*"
-        # Internal helpers that should never be served as static files.
-        # docs/source/conf.py is a JSON-output shim for tooling (e.g.
-        # tests/e2e/common.sh, .github/workflows/labeled_doctest.yaml);
-        # publishing it to the docs site would leak the version-source
-        # helper to readers.
-        - "conf.py"
         - "__pycache__/*"
 
 # ---- Hooks ----

@@ -50,6 +50,7 @@ The following sections provide offline inference and online serving examples. Ch
 
     If your environment cannot reliably access Hugging Face, model downloads may fail due to connection timeouts, DNS errors, or other network issues. You can switch to ModelScope:
 
+    <!-- doctest: quickstart-modelscope -->
     ```bash
     export VLLM_USE_MODELSCOPE=True
     pip install "modelscope>=1.18.1,<1.38"

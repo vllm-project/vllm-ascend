@@ -308,15 +308,24 @@ The CI resource is limited, and you might need to reduce the number of layers of
 
 ### Run doctest
 
-vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to run all doctests in the doc files.
-The doctest is a good way to make sure docs stay current and examples remain executable, which can be run locally as follows:
+Doctests validate fixed, marked Quick Start and Installation code blocks, not every code block in the documentation. Quick Start covers A2 and 310P (Atlas 300I DUO), running offline and online examples sequentially. Installation covers `pip`, `uv`, and `source` on A2, followed by offline inference verification. Both support Ubuntu and openEuler.
+
+Run one of these commands from the repository root in a prepared NPU environment:
 
 ```bash
-# Run doctest
-/vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart a2
+./tests/e2e/doctests/scripts/run_doctests.sh quickstart 310p
+
+./tests/e2e/doctests/scripts/run_doctests.sh installation pip
+./tests/e2e/doctests/scripts/run_doctests.sh installation uv
+./tests/e2e/doctests/scripts/run_doctests.sh installation source
 ```
 
-This will reproduce the same environment as the CI. See [labeled_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/labeled_doctest.yaml).
+The entrypoint does not create a container. Use a matching vLLM Ascend image for Quick Start or a disposable CANN container for Installation, which changes system and Python packages. Prepare the examples' model cache in advance; the workers enable Hugging Face offline mode.
+
+In CI, `.github/workflows/schedule_doctest.yaml` appears as **Doc Test**. Relevant PR changes targeting `main` or `releases/v*` select affected cases automatically. You can also run it manually with `quickstart_device` and/or `installation_method`; `none` skips that case. Each selected case runs on both operating systems. There is no scheduled trigger.
+
+For block extraction, plan preview, and selection rules, see the usage notes and function comments in `tests/e2e/doctests/scripts/doctest_helper.py` on the corresponding branch.
 
 ### Run docs link check
 

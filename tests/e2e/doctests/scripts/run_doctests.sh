@@ -17,18 +17,30 @@
 # This file is a part of the vllm-ascend project.
 #
 
-set -eo errexit
+set -Eeuo pipefail
 
-. $(dirname "$0")/common.sh
+DOCTEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-export VLLM_USE_MODELSCOPE=True
-export MODELSCOPE_HUB_FILE_LOCK=false
-export HF_HUB_OFFLINE=1
+# Print the supported doctest commands and arguments.
+function usage() {
+  echo "Usage:"
+  echo "  $0 quickstart {a2|310p}"
+  echo "  $0 installation {pip|uv|source}"
+}
 
-_info "====> Start Quickstart test"
-. "${SCRIPT_DIR}/doctests/001-quickstart-test.sh"
+[[ $# -eq 2 ]] || { usage; exit 1; }
 
-_info "====> Start pip binary installation test"
-. "${SCRIPT_DIR}/doctests/002-pip-binary-installation-test.sh"
+case "$1:$2" in
+  quickstart:a2|quickstart:310p)
+    worker=001-quickstart-test.sh
+    ;;
+  installation:pip|installation:uv|installation:source)
+    worker=002-installation-test.sh
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac
 
-_info "Doctest passed."
+exec bash "${DOCTEST_DIR}/${worker}" "$2"
