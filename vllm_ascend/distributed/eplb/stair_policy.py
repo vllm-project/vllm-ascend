@@ -11,6 +11,8 @@ import numpy as np
 
 from vllm_ascend.ascend_config import StairConfig
 
+_SCORE_TIE_TOLERANCE = 1e-9
+
 
 @dataclass(frozen=True)
 class BalanceScore:
@@ -515,18 +517,13 @@ def _plan_layer(
             continue
         placement, source_rank, source_slot, cross_node, same_node = result
         score = placement_score(samples, weights, placement)
-        relative_gain = (current.mean - score.mean) / current.mean
-        if (
-            relative_gain >= config.min_relative_score_improvement
-            and current.mean - score.mean >= config.min_absolute_score_improvement
-            and score.p95 <= current.p95 * (1 + config.p95_regression_tolerance)
-        ):
+        if score.mean <= current.mean and score.p95 <= current.p95 * (1 + config.p95_regression_tolerance):
             key = (cross_node, same_node, tuple(placement.ravel()), tuple(source_rank.ravel()))
             candidates.append((score.mean, key, LayerPlan(placement, source_rank, source_slot, score)))
     if not candidates:
         return None
     minimum = min(score for score, _, _ in candidates)
-    tied = [item for item in candidates if item[0] <= minimum + config.score_tie_tolerance]
+    tied = [item for item in candidates if item[0] <= minimum + _SCORE_TIE_TOLERANCE]
     return min(tied, key=lambda item: item[1])[2]
 
 

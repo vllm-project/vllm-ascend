@@ -115,14 +115,11 @@ class StairConfig:
     hysteresis_relative: float = 0.90
     hysteresis_absolute: float = 0.85
     max_expert_transfers_per_rank_pair: int = 1
-    min_relative_score_improvement: float = 0.01
-    min_absolute_score_improvement: float = 0.0
     p95_regression_tolerance: float = 0.0
     flash_tree_depth: int = 4
     flash_tree_width: int = 8
     max_candidates_per_layer: int = 64
     lpt_max_backtracks: int = 8
-    score_tie_tolerance: float = 1e-9
 
     @model_validator(mode="after")
     def _validate(self):
@@ -138,9 +135,7 @@ class StairConfig:
             raise ValueError("STAIR search limits must be non-negative")
         finite_non_negative = (
             "z_score",
-            "min_absolute_score_improvement",
             "p95_regression_tolerance",
-            "score_tie_tolerance",
         )
         if any(not math.isfinite(getattr(self, name)) or getattr(self, name) < 0 for name in finite_non_negative):
             raise ValueError(f"stair_config fields {finite_non_negative} must be finite and non-negative")
@@ -150,8 +145,6 @@ class StairConfig:
             value = getattr(self, name)
             if not math.isfinite(value) or not 0 < value <= 1:
                 raise ValueError(f"stair_config.{name} must be between zero and one")
-        if not math.isfinite(self.min_relative_score_improvement) or not 0 <= self.min_relative_score_improvement < 1:
-            raise ValueError("stair_config.min_relative_score_improvement must be in [0, 1)")
         return self
 
 

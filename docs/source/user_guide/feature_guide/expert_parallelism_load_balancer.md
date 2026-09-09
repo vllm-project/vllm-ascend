@@ -125,8 +125,9 @@ They must not be placed in `--additional-config` for MRv2.
 STAIR combines FlashLB-style temporal load statistics, bounded replica search,
 and risk-aware LPT placement with Swift's hard directed rank-pair transfer
 limit. It then aligns retained experts to their old slots and executes the
-planner-selected source for every incoming expert. Candidate validity, minimum
-mean-score improvement, and p95 regression are checked before admission.
+planner-selected source for every incoming expert. Candidates must be valid,
+must not worsen mean imbalance (equal scores are allowed), and must satisfy
+the p95 regression guard before admission.
 
 Enable STAIR through the Ascend extension while leaving the upstream
 `--eplb-config.policy` at `default`:
@@ -158,14 +159,11 @@ an advanced interface for workload-specific experiments:
 | `hysteresis_relative` | `0.90` | Search after balance falls to this fraction of the committed anchor. |
 | `hysteresis_absolute` | `0.85` | Search when absolute balance falls below this value. |
 | `max_expert_transfers_per_rank_pair` | `1` | Per-layer cap for each directed source/destination rank pair. |
-| `min_relative_score_improvement` | `0.01` | Minimum relative mean-score improvement for admission. |
-| `min_absolute_score_improvement` | `0.0` | Optional absolute mean-score improvement floor. |
 | `p95_regression_tolerance` | `0.0` | Allowed relative p95 imbalance regression. |
 | `flash_tree_depth` | `4` | Number of expert groups in bounded replica search. |
 | `flash_tree_width` | `8` | Replica-budget neighborhood on each side of the baseline. |
 | `max_candidates_per_layer` | `64` | Beam and complete-candidate limit per layer. |
 | `lpt_max_backtracks` | `8` | Maximum constrained-LPT backtracks per replica candidate. |
-| `score_tie_tolerance` | `1e-9` | Numerical tolerance used only for deterministic tie selection. |
 
 For example, a deep user can permit two transfers per directed pair and enable
 covariance modeling:
