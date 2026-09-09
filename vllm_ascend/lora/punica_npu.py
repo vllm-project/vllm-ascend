@@ -5,6 +5,7 @@ from collections.abc import Callable
 import torch
 from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.lora.utils import refresh_all_lora_classes
 
@@ -22,9 +23,9 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
-        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
-            self.lora_config is not None and self.lora_config.max_lora_rank >= 128
-        ):
+        hardware_profile = get_current_hardware_profile()
+        supports_custom_lora_ops = hardware_profile.supports(HardwareCapability.LORA_CUSTOM_OPS)
+        if not supports_custom_lora_ops or (self.lora_config is not None and self.lora_config.max_lora_rank >= 128):
             from vllm.lora.ops.torch_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
@@ -48,6 +49,39 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        self._single_lora_slot = (
+            supports_custom_lora_ops
+            and hardware_profile._device_type in {AscendDeviceType.A2, AscendDeviceType.A3}
+            and self.lora_config is not None
+            and self.lora_config.max_loras == 1
+            and not self.lora_config.fully_sharded_loras
+        )
+        self._single_lora_mask = None
+        if self._single_lora_slot:
+            assert self.lora_config is not None
+            lora_dtype = self.lora_config.lora_dtype
+            if not isinstance(lora_dtype, torch.dtype):
+                raise ValueError(f"LoRA dtype must be resolved before creating the Punica wrapper, got {lora_dtype!r}")
+            self._single_lora_mask = torch.empty(
+                (max_num_batched_tokens, 1),
+                dtype=lora_dtype,
+                device=device,
+            )
+
+    def _update_base_metadata(
+        self,
+        mapping,
+        lora_index_to_id: list[int | None],
+        max_loras: int,
+        vocab_size: int,
+    ) -> None:
+        super()._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+        if self._single_lora_mask is None:
+            return
+
+        token_count = self.indices_len[0]
+        assert token_count is not None
+        self._single_lora_mask[:token_count].copy_(self._token_lora_indices[:token_count].eq(0).unsqueeze(1))
 
     def update_metadata(
         self,
@@ -330,6 +364,18 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
+        if self._apply_single_lora_linear(
+            y,
+            x,
+            lora_a_stacked,
+            lora_b_stacked,
+            scale,
+            output_slices,
+            packed_lora_a=kwargs.get("packed_lora_a"),
+            add_inputs=kwargs.get("add_inputs", True),
+        ):
+            return
+
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
@@ -339,6 +385,71 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             )
         self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
+
+    def _apply_single_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        scale: float,
+        output_slices: tuple[int, ...],
+        *,
+        packed_lora_a: torch.Tensor | None = None,
+        add_inputs: bool,
+    ) -> bool:
+        if not self._single_lora_slot:
+            return False
+
+        x = x.view(-1, x.shape[-1])
+        y = y.view(-1, y.shape[-1])
+        assert self._single_lora_mask is not None
+        adapter_mask = self._single_lora_mask[: x.size(0)]
+        deltas = []
+        if packed_lora_a is not None and len(lora_a_stacked) > 1:
+            rank = lora_b_stacked[0].size(-1)
+            shrink = torch.matmul(x, packed_lora_a[0, 0].transpose(0, 1))
+            shrink.mul_(adapter_mask)
+            shrink_slices = tuple(
+                shrink.narrow(1, slice_index * rank, rank) for slice_index in range(len(lora_a_stacked))
+            )
+        else:
+            shrink_slices = tuple(
+                torch.matmul(x, lora_a[0, 0].transpose(0, 1)).mul_(adapter_mask) for lora_a in lora_a_stacked
+            )
+
+        for shrink, lora_b, output_size in zip(shrink_slices, lora_b_stacked, output_slices, strict=True):
+            b_weight = lora_b[0, 0, :output_size]
+            deltas.append(torch.matmul(shrink, b_weight.transpose(0, 1)))
+
+        if len(deltas) > 1 and sum(output_slices) == y.shape[1]:
+            delta = torch.cat(deltas, dim=1)
+            PunicaWrapperNPU._update_single_lora_output(y, delta, scale, add_inputs)
+            return True
+
+        offset = 0
+        for delta, output_size in zip(deltas, output_slices, strict=True):
+            y_slice = y.narrow(1, offset, output_size)
+            PunicaWrapperNPU._update_single_lora_output(y_slice, delta, scale, add_inputs)
+            offset += output_size
+        return True
+
+    @staticmethod
+    def _update_single_lora_output(
+        y: torch.Tensor,
+        delta: torch.Tensor,
+        scale: float,
+        add_inputs: bool,
+    ) -> None:
+        if add_inputs:
+            if scale == 1.0:
+                y.add_(delta)
+            else:
+                y.add_(delta, alpha=scale)
+        elif scale == 1.0:
+            y.copy_(delta)
+        else:
+            torch.mul(delta, scale, out=y)
 
     def add_lora_fused_moe(
         self,
