@@ -205,6 +205,12 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         model = ModelWithContext(model)
         pcp_manager = getattr(self.model_runner, "pcp_manager", None)
         if pcp_manager is not None:
+            if vllm_version_is("0.28.0"):
+                # Release capture_model still passes the global buffers. PCP
+                # prepares the persistent local buffers for graph replay.
+                # Main already selects these buffers in the upstream runner.
+                assert pcp_manager._input_buffers is not None
+                input_buffers = pcp_manager._input_buffers
             cudagraph_utils.prepare_inputs_to_capture = partial(
                 _prepare_pcp_inputs_to_capture,
                 pcp_manager=pcp_manager,
