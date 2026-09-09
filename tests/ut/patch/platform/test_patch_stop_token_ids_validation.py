@@ -18,7 +18,7 @@ import vllm_ascend.patch.platform.patch_stop_token_ids_validation  # noqa: F401
 def _make_model_config(vocab_size: int) -> MagicMock:
     model_config = MagicMock()
     model_config.get_vocab_size.return_value = vocab_size
-    model_config.is_diffusion_model = False
+    model_config.is_diffusion = False
     return model_config
 
 
