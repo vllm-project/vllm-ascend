@@ -314,8 +314,7 @@ class AscendConfig:
                 "oproj_tensor_parallel_size": 0,
                 "lmhead_tensor_parallel_size": 0,
                 "embedding_tensor_parallel_size": 0,
-                "mlp_tensor_parallel_size": 0,
-                "olora_tensor_parallel_size": 0
+                "mlp_tensor_parallel_size": 0
             },
             "scheduler_config": {
                 "enable_balance_scheduling": false,
@@ -968,7 +967,7 @@ class DynamicSpecConfig:
 class FinegrainedTPConfig:
     """Configuration Object for ``additional_config["finegrained_tp_config"]``.
 
-    Migrated to ``@config`` (pydantic dataclass). 5 int fields get lax coercion
+    Migrated to ``@config`` (pydantic dataclass). 4 int fields get lax coercion
     ('2'→2). vllm_config-dependent preconditions (TP/eager/kv_consumer/is_moe/
     data_parallel divisibility) are validated in ``_validate_preconditions()``,
     a plain method invoked explicitly by ``init_ascend_config`` (Plan B:
@@ -980,7 +979,6 @@ class FinegrainedTPConfig:
     lmhead_tensor_parallel_size: int = 0
     embedding_tensor_parallel_size: int = 0
     mlp_tensor_parallel_size: int = 0
-    olora_tensor_parallel_size: int = 0
 
     @model_validator(mode="after")
     def _validate_sizes(self):
@@ -989,7 +987,6 @@ class FinegrainedTPConfig:
             "lmhead_tensor_parallel_size",
             "embedding_tensor_parallel_size",
             "mlp_tensor_parallel_size",
-            "olora_tensor_parallel_size",
         )
         self.max_finegrained_tp_size = 1
         for field_name in size_fields:
@@ -1027,16 +1024,6 @@ class FinegrainedTPConfig:
                 raise AssertionError(
                     "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
                 )
-        if self.olora_tensor_parallel_size > 0:
-            enabled_configs.append(f"olora_tensor_parallel_size={self.olora_tensor_parallel_size}")
-            # dummy_run does not run the entire attention module in eager mode,
-            # so the o_lora tp split can only be used in graph mode.
-            if vc.model_config and vc.model_config.enforce_eager:
-                raise AssertionError("olora_tensor_parallel_size is only supported in graph mode")
-            if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
-                raise AssertionError(
-                    "olora_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
-                )
         if self.lmhead_tensor_parallel_size > 0:
             enabled_configs.append(f"lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size}")
         if self.embedding_tensor_parallel_size > 0:
@@ -1048,7 +1035,6 @@ class FinegrainedTPConfig:
             self.lmhead_tensor_parallel_size,
             self.embedding_tensor_parallel_size,
             self.mlp_tensor_parallel_size,
-            self.olora_tensor_parallel_size,
         ]
         for module_tp_size in module_tp_sizes:
             # If it is a dense model, then expert parallel is not needed,

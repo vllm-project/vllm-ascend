@@ -39,7 +39,7 @@ from vllm_ascend._310p.worker.v2.block_table import Ascend310PBlockTables
 from vllm_ascend._310p.worker.v2.kv_block_zeroer import AscendKVBlockZeroer310V2
 from vllm_ascend._310p.worker.v2.states import Ascend310PRequestState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, get_kv_cache_tensor_layers, vllm_version_is
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
@@ -600,11 +600,19 @@ class NPUModelRunner310V2(NPUModelRunner):
             for cache_key, cache_layer_names in cache_groups.items():
                 layer_name = cache_layer_names[0]
                 kv_cache_spec = layer_specs[layer_name]
-                # On main, descriptor.size is the complete standardized
-                # backing size. 310P does not materialize that backing;
-                # its private tensors must use the manager's per-layer
-                # block count instead.
-                num_blocks = kv_cache_config.num_blocks
+                legacy_shared_by = vllm_version_is("0.28.0")
+                if legacy_shared_by:
+                    if kv_cache_tensor.size % kv_cache_spec.page_size_bytes != 0:
+                        raise ValueError("KV cache allocation is not page aligned.")
+                    num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                    if num_blocks < kv_cache_config.num_blocks:
+                        raise ValueError("KV cache allocation contains fewer blocks than requested.")
+                else:
+                    # On main, descriptor.size is the complete standardized
+                    # backing size. 310P does not materialize that backing;
+                    # its private tensors must use the manager's per-layer
+                    # block count instead.
+                    num_blocks = kv_cache_config.num_blocks
 
                 if isinstance(kv_cache_spec, AttentionSpec):
                     backend = cache_key[1]
@@ -623,11 +631,8 @@ class NPUModelRunner310V2(NPUModelRunner):
                         raise NotImplementedError("310P MRV2 does not support asymmetric K/V head sizes.")
                     # Symmetric NZ only: K/V share the 4D view ``kv_cache_shape[1:]``.
                     kv_view_shape = kv_cache_shape[1:]
-                    # Standardized descriptors list distinct layer
-                    # regions. Allocate one private NZ K/V pair per layer;
-                    # only explicit shared_layers below may alias.
-                    for name in cache_layer_names:
-                        kv_caches[name] = (
+                    if legacy_shared_by:
+                        cache: Any = (
                             torch_npu.empty_with_format(
                                 size=kv_view_shape,
                                 dtype=kv_cache_spec.dtype,
@@ -641,11 +646,32 @@ class NPUModelRunner310V2(NPUModelRunner):
                                 acl_format=ACL_FORMAT_FRACTAL_NZ,
                             ),
                         )
+                        for name in cache_layer_names:
+                            kv_caches[name] = cache
+                    else:
+                        # Standardized descriptors list distinct layer
+                        # regions. Allocate one private NZ K/V pair per layer;
+                        # only explicit shared_layers below may alias.
+                        for name in cache_layer_names:
+                            kv_caches[name] = (
+                                torch_npu.empty_with_format(
+                                    size=kv_view_shape,
+                                    dtype=kv_cache_spec.dtype,
+                                    device=self.device,
+                                    acl_format=ACL_FORMAT_FRACTAL_NZ,
+                                ),
+                                torch_npu.empty_with_format(
+                                    size=kv_view_shape,
+                                    dtype=kv_cache_spec.dtype,
+                                    device=self.device,
+                                    acl_format=ACL_FORMAT_FRACTAL_NZ,
+                                ),
+                            )
                 elif isinstance(kv_cache_spec, MambaSpec):
                     # Hybrid recurrent state stays ND (int8 raw plus views).
                     # Main's descriptor.size is the entire virtual backing;
                     # private 310P state uses only this layer's pages.
-                    raw_size = num_blocks * kv_cache_spec.page_size_bytes
+                    raw_size = kv_cache_tensor.size if legacy_shared_by else num_blocks * kv_cache_spec.page_size_bytes
 
                     def allocate_mamba_cache(
                         raw_size: int = raw_size,
@@ -677,8 +703,13 @@ class NPUModelRunner310V2(NPUModelRunner):
                             storage_offset_bytes += target_shape[0] * stride[0] * dtype_size
                         return state_tensors
 
-                    for name in cache_layer_names:
-                        kv_caches[name] = allocate_mamba_cache()
+                    if legacy_shared_by:
+                        cache = allocate_mamba_cache()
+                        for name in cache_layer_names:
+                            kv_caches[name] = cache
+                    else:
+                        for name in cache_layer_names:
+                            kv_caches[name] = allocate_mamba_cache()
                 else:
                     raise NotImplementedError(f"Unsupported 310P KV cache spec: {type(kv_cache_spec).__name__}.")
 

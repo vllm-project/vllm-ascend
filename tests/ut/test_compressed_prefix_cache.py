@@ -32,6 +32,7 @@ from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
 )
+from vllm_ascend.utils import vllm_version_is
 
 pytestmark = pytest.mark.cpu_test
 
@@ -59,7 +60,9 @@ def _make_full_manager(
     compress_ratio: int = 4,
 ) -> tuple[AscendMLAAttentionSpec, BlockPool, FullAttentionManager]:
     logical_block_size = physical_block_size * compress_ratio
-    ratio_kwargs = {"tokens_per_state": compress_ratio}
+    ratio_kwargs = (
+        {"compress_ratio": compress_ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": compress_ratio}
+    )
     spec = AscendMLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,
@@ -234,7 +237,7 @@ def test_hybrid_coordinator_rejects_partial_compressed_prefix_hit() -> None:
 
     request_a = _make_request("a", request_a_tokens, physical_block_size)
     request_b = _make_request("b", request_b_tokens, physical_block_size)
-    ratio_kwargs = {"tokens_per_state": 4}
+    ratio_kwargs = {"compress_ratio": 4} if vllm_version_is("0.28.0") else {"tokens_per_state": 4}
     compressed_spec = MLAAttentionSpec(
         block_size=logical_block_size,
         num_kv_heads=1,

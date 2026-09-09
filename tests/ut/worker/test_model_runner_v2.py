@@ -163,15 +163,19 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
     # prepare_inputs keeps the real global PCP batch when it is larger than the
     # graph descriptor, and forwards the descriptor as an explicit rank-local
-    # padded extent (upstream vLLM #53515).
+    # padded extent on main (upstream vLLM #53515). v0.28.0 omits the kwarg.
     assert len(padding_assignments) == 1
     assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
 
-    assert len(partition_calls) == 1
-    padded_num_tokens = next(
-        (keyword.value for keyword in partition_calls[0].keywords if keyword.arg == "padded_num_tokens"),
-        None,
+    assert len(partition_calls) == 2
+    padded_call = next(
+        call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
     )
+    unpadded_call = next(
+        call for call in partition_calls if not any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
+    )
+    assert unpadded_call is not None
+    padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
     assert isinstance(padded_num_tokens, ast.Attribute)
     assert padded_num_tokens.attr == "num_tokens"
     assert isinstance(padded_num_tokens.value, ast.Name)

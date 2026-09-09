@@ -60,10 +60,13 @@ def _resample_kernel(
         req_idx = task_idx // num_blocks
         block_idx = task_idx - req_idx * num_blocks
         resample_idx = tl.load(rejected_step_ptr + req_idx)
-        start_idx = tl.load(cu_num_logits_ptr + req_idx)
+        # Cast to int64 before pointer arithmetic: triton-ascend computes
+        # offsets in int32, which overflows when num_logits exceeds INT32_MAX
+        # (upstream vllm #46560).
+        start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
         end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
         resample_token_idx = start_idx + resample_idx
-        req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+        req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
         temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
         is_bonus = resample_token_idx == end_idx - 1
         needs_resample = (temperature != 0.0) | is_bonus
@@ -102,6 +105,14 @@ def _resample_kernel(
                     ).to(tl.float32)
                     draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
                     draft_prob = tl.exp(draft_block_logits - draft_lse)
+                    # NPU: upstream #46665 computes this residual in log space
+                    # with tldevice.log1p(-ratio); that extern is unavailable
+                    # on triton-ascend, and this kernel works in mass space.
+                    # The subtraction is still exact where it matters: by the
+                    # Sterbenz lemma, target_prob - draft_prob is exactly
+                    # representable in fp32 when the two probabilities are
+                    # within a factor of 2, so no catastrophic cancellation
+                    # occurs when the draft closely matches the target.
                     token_mass = tl.maximum(target_prob - draft_prob, 0.0)
                 else:
                     rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
@@ -145,10 +156,13 @@ def _categorical_finalize_kernel(
     """Select the final token using one global categorical threshold per request."""
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    # Cast to int64 before pointer arithmetic: triton-ascend computes
+    # offsets in int32, which overflows when num_logits exceeds INT32_MAX
+    # (upstream vllm #46560).
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     resample_token_idx = start_idx + resample_idx
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + resample_token_idx).to(tl.int64)
 
     temperature = tl.load(temp_ptr + req_state_idx).to(tl.float32)
     is_greedy = temperature == 0.0
@@ -331,6 +345,12 @@ def resample(
             raise ValueError("draft_logits cannot be None when has_draft_logits=True")
         if draft_logits.stride(-1) != 1:
             raise ValueError("draft_logits vocabulary dimension must be contiguous")
+        # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
+        # vocab size is larger than the draft's due to padding. Clamp so the
+        # kernels only read the draft logits within their valid range; the
+        # target padding columns are never sampled anyway because their
+        # logits are dominated by real tokens.
+        vocab_size = min(vocab_size, draft_logits.size(-1))
     elif draft_logits is None:
         draft_logits = target_logits.new_empty(1, 1, 1)
 

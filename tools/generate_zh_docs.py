@@ -6,7 +6,7 @@ the .po files in docs/source/locale/zh_CN/LC_MESSAGES/ to produce
 Chinese markdown files under docs/source/zh/.
 
 Usage:
-    python tools/generate_zh_docs.py
+    python -m tools.generate_zh_docs
 """
 
 import sys

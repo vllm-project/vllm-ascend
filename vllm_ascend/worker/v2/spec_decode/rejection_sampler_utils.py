@@ -82,8 +82,11 @@ def _probabilistic_rejection_kernel(
     SYNTHETIC_MODE: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    start_idx = tl.load(cu_num_logits_ptr + req_idx)
+    # Cast to int64 before pointer arithmetic: triton-ascend computes
+    # offsets in int32, which overflows when num_logits exceeds INT32_MAX
+    # (upstream vllm #46560).
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
+    start_idx = tl.load(cu_num_logits_ptr + req_idx).to(tl.int64)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
     num_tokens = end_idx - start_idx
     seed = tl.load(seed_ptr + req_state_idx)  # noqa: F841
@@ -133,6 +136,11 @@ def _probabilistic_rejection_kernel(
                     accepted &= target_argmax == draft_sampled
                     tl.store(sampled_ptr + req_idx * sampled_stride + i, target_argmax)
             else:
+                # -1 is used for placeholder draft token ids that should be
+                # rejected.
+                is_valid_draft = draft_sampled >= 0
+                # Avoid possible OOB ptr access.
+                draft_sampled = tl.maximum(0, draft_sampled)
                 target_logit = tl.load(target_logits_ptr + logit_idx * target_logits_stride + draft_sampled).to(
                     tl.float32
                 )
@@ -187,6 +195,8 @@ def _probabilistic_rejection_kernel(
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
                     accepted &= target_log_prob > tl.log(u) + draft_log_prob
+                # -1 placeholder draft tokens can never be accepted.
+                accepted &= is_valid_draft
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
@@ -236,6 +246,10 @@ def rejection_sample(
         # kernel signatures receive valid pointers/strides. The kernels
         # will never read from it when HAS_DRAFT_LOGITS=False.
         draft_logits = target_logits.new_empty(1, 1, 1)
+    else:
+        # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
+        # vocab size is larger than the draft's due to padding.
+        vocab_size = min(vocab_size, draft_logits.size(-1))
 
     # Compute the block-level logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
