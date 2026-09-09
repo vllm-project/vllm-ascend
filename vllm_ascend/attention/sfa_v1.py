@@ -38,7 +38,7 @@ from vllm_ascend.attention.utils import (
     transdata,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.device.device_op import SFA_INDEXER_SPARSE_COUNT, DeviceOperator
+from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import DeviceAdaptorFamily, HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
     record_attention_compute_start,
@@ -238,6 +238,7 @@ SFA_FIA_DENSE_PREFILL_KV_HEADS = 1
 SFA_FIA_DENSE_PREFILL_LATENT_DIM = 512
 SFA_FIA_DENSE_PREFILL_ROPE_DIM = 64
 SFA_FIA_DENSE_PREFILL_BLOCK_SIZE = 128
+SFA_FIA_SHARED_PREFILL_TOPK_WIDTH = 2048
 
 
 class PreprocessType(enum.Enum):
@@ -1478,17 +1479,17 @@ class AscendSFAImpl(MLAAttentionImpl):
             return None
         query_lengths, kv_lengths = lengths
         max_kv_length = max(kv_lengths)
-        # The baseline indexer returns at most SFA_INDEXER_SPARSE_COUNT KV
+        # The baseline indexer returns at most 2048 KV
         # positions per query row. Dense FIA is consumer-equivalent only when
         # that TopK can contain every visible KV position. Query length alone
         # is insufficient here: a cache-hit prefill may have few new queries
         # but a much longer visible prefix.
-        if max_kv_length > SFA_INDEXER_SPARSE_COUNT:
+        if max_kv_length > SFA_FIA_SHARED_PREFILL_TOPK_WIDTH:
             return None
         attn_mask = attn_metadata.attn_mask
         if (
             query_lengths[-1] != ql_nope.shape[0]
-            or query_lengths[-1] > SFA_INDEXER_SPARSE_COUNT
+            or query_lengths[-1] > SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
             or len(query_lengths) != block_table.shape[0]
             or block_table.shape[1]
             < (max_kv_length + SFA_FIA_DENSE_PREFILL_BLOCK_SIZE - 1) // SFA_FIA_DENSE_PREFILL_BLOCK_SIZE
@@ -1569,8 +1570,9 @@ class AscendSFAImpl(MLAAttentionImpl):
             AscendAttentionState.ChunkedPrefill,
         ):
             return None
-        for name in ("cum_query_lens_cpu", "seq_lens_cpu"):
-            lengths_cpu = getattr(attn_metadata, name, None)
+        cum_query_lens_cpu = getattr(attn_metadata, "cum_query_lens_cpu", None)
+        seq_lens_cpu = getattr(attn_metadata, "seq_lens_cpu", None)
+        for lengths_cpu in (cum_query_lens_cpu, seq_lens_cpu):
             if (
                 not isinstance(lengths_cpu, torch.Tensor)
                 or lengths_cpu.device.type != "cpu"
@@ -1578,18 +1580,23 @@ class AscendSFAImpl(MLAAttentionImpl):
                 or lengths_cpu.dtype not in (torch.int32, torch.int64)
             ):
                 return None
+        assert isinstance(cum_query_lens_cpu, torch.Tensor)
+        assert isinstance(seq_lens_cpu, torch.Tensor)
         lengths = self._sfa_fia_dense_prefill_lengths(attn_metadata)
         if lengths is None:
             return None
         query_ends, kv_lengths = lengths
-        for name in ("cum_query_lens", "seq_lens"):
-            device_lengths = getattr(attn_metadata, name, None)
+        cum_query_lens = getattr(attn_metadata, "cum_query_lens", None)
+        seq_lens = getattr(attn_metadata, "seq_lens", None)
+        for lengths_tensor in (cum_query_lens, seq_lens):
             if (
-                not isinstance(device_lengths, torch.Tensor)
-                or device_lengths.shape != (len(query_ends),)
-                or device_lengths.dtype not in (torch.int32, torch.int64)
+                not isinstance(lengths_tensor, torch.Tensor)
+                or lengths_tensor.shape != (len(query_ends),)
+                or lengths_tensor.dtype not in (torch.int32, torch.int64)
             ):
                 return None
+        assert isinstance(cum_query_lens, torch.Tensor)
+        assert isinstance(seq_lens, torch.Tensor)
         num_tokens = query_ends[-1]
         if (
             getattr(attn_metadata, "num_actual_tokens", None) != num_tokens
@@ -1616,12 +1623,12 @@ class AscendSFAImpl(MLAAttentionImpl):
         plan = getattr(attn_metadata, "_sfa_fia_shared_prefill_plan", None)
         if plan is None or plan[0] != signature:
             eligible_lengths = tuple(
-                min(query_length, max(0, SFA_INDEXER_SPARSE_COUNT - (kv_length - query_length)))
+                min(query_length, max(0, SFA_FIA_SHARED_PREFILL_TOPK_WIDTH - (kv_length - query_length)))
                 for query_length, kv_length in zip(query_lengths, kv_lengths, strict=True)
             )
             dense_total = sum(eligible_lengths)
             # Only a full packed group is admitted; low-fill and whole-dense fall back.
-            if dense_total != SFA_INDEXER_SPARSE_COUNT or dense_total >= num_tokens:
+            if dense_total != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH or dense_total >= num_tokens:
                 return None
             dense_requests = tuple(i for i, eligible in enumerate(eligible_lengths) if eligible)
             tail_requests = tuple(
@@ -1631,20 +1638,20 @@ class AscendSFAImpl(MLAAttentionImpl):
             )
             dense_spans = tuple((query_starts[i], query_starts[i] + eligible_lengths[i]) for i in dense_requests)
             tail_spans = tuple((query_starts[i] + eligible_lengths[i], query_ends[i]) for i in tail_requests)
-            dense_query_ends: list[int] = []
-            dense_kv_lengths: list[int] = []
+            dense_query_ends_list: list[int] = []
+            dense_kv_lengths_list: list[int] = []
             running = 0
             for request in dense_requests:
                 running += eligible_lengths[request]
-                dense_query_ends.append(running)
-                dense_kv_lengths.append(kv_lengths[request] - query_lengths[request] + eligible_lengths[request])
-            tail_query_ends: list[int] = []
-            tail_kv_lengths: list[int] = []
+                dense_query_ends_list.append(running)
+                dense_kv_lengths_list.append(kv_lengths[request] - query_lengths[request] + eligible_lengths[request])
+            tail_query_ends_list: list[int] = []
+            tail_kv_lengths_list: list[int] = []
             running = 0
             for request in tail_requests:
                 running += query_lengths[request] - eligible_lengths[request]
-                tail_query_ends.append(running)
-                tail_kv_lengths.append(kv_lengths[request])
+                tail_query_ends_list.append(running)
+                tail_kv_lengths_list.append(kv_lengths[request])
             plan = (
                 signature,
                 tuple(eligible_lengths),
@@ -1652,10 +1659,10 @@ class AscendSFAImpl(MLAAttentionImpl):
                 tail_requests,
                 dense_spans,
                 tail_spans,
-                tuple(dense_query_ends),
-                tuple(dense_kv_lengths),
-                tuple(tail_query_ends),
-                tuple(tail_kv_lengths),
+                tuple(dense_query_ends_list),
+                tuple(dense_kv_lengths_list),
+                tuple(tail_query_ends_list),
+                tuple(tail_kv_lengths_list),
             )
         (
             _,
@@ -1681,8 +1688,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         dense_metadata = copy(attn_metadata)
         dense_metadata.attn_state = AscendAttentionState.PrefillCacheHit
         dense_metadata.block_table = attn_metadata.block_table[list(dense_requests)]
-        dense_metadata.cum_query_lens_cpu = attn_metadata.cum_query_lens_cpu.new_tensor(list(dense_query_ends))
-        dense_metadata.seq_lens_cpu = attn_metadata.seq_lens_cpu.new_tensor(list(dense_kv_lengths))
+        dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(list(dense_query_ends))
+        dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor(list(dense_kv_lengths))
         dense_metadata.num_actual_tokens = dense_q.shape[0]
         dense_metadata.num_input_tokens = dense_q.shape[0]
         if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
@@ -1692,7 +1699,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             topk_indices.ndim != 3
             or topk_indices.shape[0] != num_tokens
             or topk_indices.shape[1] != 1
-            or topk_indices.shape[2] != SFA_INDEXER_SPARSE_COUNT
+            or topk_indices.shape[2] != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
             or topk_indices.dtype != torch.int32
             or topk_indices.device != ql_nope.device
         ):
@@ -1705,8 +1712,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         tail_indices = pack_rows(topk_indices, tail_spans)
         tail_metadata = copy(attn_metadata)
         tail_metadata.block_table = attn_metadata.block_table[list(tail_requests)]
-        tail_metadata.cum_query_lens = attn_metadata.cum_query_lens.new_tensor(list(tail_query_ends))
-        tail_metadata.seq_lens = attn_metadata.seq_lens.new_tensor(list(tail_kv_lengths))
+        tail_metadata.cum_query_lens = cum_query_lens.new_tensor(list(tail_query_ends))
+        tail_metadata.seq_lens = seq_lens.new_tensor(list(tail_kv_lengths))
         tail_output = self._execute_sparse_flash_attention_process(
             tail_q,
             tail_rope,
