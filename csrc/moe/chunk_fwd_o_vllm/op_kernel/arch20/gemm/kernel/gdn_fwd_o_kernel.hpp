@@ -209,24 +209,25 @@ public:
     }
 
     __aicore__ inline void InitCausalMask() {
-        AscendC::LocalTensor<float> maskUbTensor = resource.ubBuf.template GetBufferByByte<float>(0);
-        // 310P: Duplicate count must be >= 8 (vector width = 8 floats).
-        // Build lower-triangular mask: row i has 1.0 in cols [0..i], 0.0 elsewhere.
-        // Fill all 1.0 first, then zero the upper triangle with count >= 8.
-        AscendC::Duplicate<float>(maskUbTensor, (float)1.0, 64 * 64);
+        constexpr uint32_t kMaskSize = 64;
+        auto mask = resource.ubBuf.template GetBufferByByte<float>(0);
+
+        AscendC::SetMaskNorm();
+        AscendC::Duplicate<float>(mask, 0.0f, kMaskSize * kMaskSize);
         AscendC::PipeBarrier<PIPE_V>();
-        for (uint32_t i = 0; i < 64; ++i) {
-            uint32_t zeroStart = i + 1;
-            uint32_t zeroLen = 64 - zeroStart;
-            if (zeroLen >= 8) {
-                AscendC::Duplicate<float>(maskUbTensor[i * 64 + zeroStart], (float)0.0, zeroLen);
-            } else {
-                for (uint32_t j = 0; j < zeroLen; ++j) {
-                    maskUbTensor.SetValue(i * 64 + zeroStart + j, (float)0.0);
-                }
-            }
+        AscendC::SetMaskNorm();
+        for (uint32_t row = 0; row < kMaskSize; ++row) {
+            // Aligned row start; contiguous mask also handles rows shorter than 8.
+            // Keep all UB writes on the vector pipeline, including the last rows.
+            AscendC::Duplicate<float, true>(
+                mask[row * kMaskSize], 1.0f,
+                static_cast<uint64_t>(row + 1),
+                static_cast<uint8_t>(1),
+                static_cast<uint16_t>(1),
+                static_cast<uint8_t>(8));
         }
         AscendC::PipeBarrier<PIPE_V>();
+        AscendC::ResetMask();
     }
 
     __aicore__ inline void ProcessUnifiedCore() {
