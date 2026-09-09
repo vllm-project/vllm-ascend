@@ -647,6 +647,7 @@ class NPUModelRunner(GPUModelRunner):
 
         return input_batch
 
+    
     def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
         if self.pcp_manager is None:
             return super().prepare_dummy_attn(input_batch)
