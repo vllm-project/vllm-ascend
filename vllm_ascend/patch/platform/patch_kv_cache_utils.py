@@ -130,7 +130,10 @@ def _get_kimi_k3_dspark_mixed_kv_cache_groups(
     all_specs = [*attention_specs, *mamba_specs.values()]
     # Only attention layers share a scheduler block table. Mamba keeps its
     # own groups and may use max_model_len as block_size when cache_mode=none.
-    if len({spec.block_size for spec in attention_specs}) != 1 or len({spec.page_size_bytes for spec in all_specs}) != 1:
+    if (
+        len({spec.block_size for spec in attention_specs}) != 1
+        or len({spec.page_size_bytes for spec in all_specs}) != 1
+    ):
         return None
 
     first_mamba_spec = next(iter(mamba_specs.values()))
