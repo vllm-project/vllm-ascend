@@ -297,16 +297,27 @@ def test_mtp_spec_decoding(
     assert len(outputs) == len(prompts)
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("enforce_eager", [False])
+# The W8A8 model only serves as a crash smoke test here (no output assertion),
+# so it keeps a single default compilation config to avoid paying a full
+# engine cold start for an unasserted session.
 @pytest.mark.parametrize(
-    "compilation_config",
+    "model, compilation_config",
     [
-        pytest.param({"cudagraph_mode": "FULL_DECODE_ONLY"}, id="full_decode_only"),
-        pytest.param({}, id="default_full_and_piecewise"),
+        pytest.param(
+            "Qwen/Qwen3-0.6B",
+            {"cudagraph_mode": "FULL_DECODE_ONLY"},
+            id="qwen3-0.6b-full_decode_only",
+        ),
+        pytest.param("Qwen/Qwen3-0.6B", {}, id="qwen3-0.6b-default_full_and_piecewise"),
+        pytest.param(
+            "vllm-ascend/DeepSeek-V2-Lite-W8A8",
+            {},
+            id="dsv2-lite-w8a8-default_full_and_piecewise",
+        ),
     ],
 )
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("enforce_eager", [False])
 @patch.dict(os.environ, {"VLLM_USE_V2_MODEL_RUNNER": "1"})
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_qwen3_dense_graph_mode(
