@@ -38,6 +38,7 @@ def test_model_runner_v2_random_sampling() -> None:
         MODEL,
         max_model_len=256,
         max_num_seqs=len(prompts),
+        gpu_memory_utilization=0.2,
         enforce_eager=True,
         use_fp64_gumbel=True,
     ) as runner:
