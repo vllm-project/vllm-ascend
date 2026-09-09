@@ -1583,6 +1583,34 @@ at::Tensor npu_hc_pre_inv_rms_npu(const at::Tensor& x, double epsilon=1e-20)
     return yOut;
 }
 
+void npu_matmul_out_npu(
+    at::Tensor& out,
+    const at::Tensor& x1,
+    const at::Tensor& weight)
+{
+    TORCH_CHECK(
+        out.device().type() == c10::DeviceType::PrivateUse1 &&
+            x1.device().type() == c10::DeviceType::PrivateUse1 &&
+            weight.device().type() == c10::DeviceType::PrivateUse1,
+        "npu_matmul_out expects NPU tensors.");
+    TORCH_CHECK(
+        x1.dtype() == at::kBFloat16 && weight.dtype() == at::kBFloat16 &&
+            out.dtype() == at::kBFloat16,
+        "npu_matmul_out expects BF16 tensors.");
+    TORCH_CHECK(
+        out.dim() == 2 && x1.dim() == 2 && weight.dim() == 2,
+        "npu_matmul_out expects rank-2 tensors.");
+    TORCH_CHECK(
+        x1.size(1) == weight.size(1),
+        "npu_matmul_out expects matching reduction dimensions.");
+    TORCH_CHECK(
+        out.size(0) == x1.size(0) && out.size(1) == weight.size(0),
+        "npu_matmul_out output shape mismatch.");
+    const auto weight_transposed = weight.transpose(0, 1);
+    constexpr int8_t cube_math_type = 0;
+    EXEC_NPU_CMD(aclnnMatmul, x1, weight_transposed, out, cube_math_type);
+}
+
 std::tuple<at::Tensor, at::Tensor, at::Tensor> construct_hc_pre_sinkhorn_output_tensor(const at::Tensor& mixes, const at::Tensor& x, int64_t hc_mult)
 {
     auto xDims = x.dim();
@@ -3076,6 +3104,10 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor out)"
         );
     ops.impl("npu_hc_pre_inv_rms", torch::kPrivateUse1, &vllm_ascend::npu_hc_pre_inv_rms_npu);
+
+    ops.def("npu_matmul_out(Tensor(a!) out, Tensor x1, Tensor weight) -> ()");
+    ops.impl("npu_matmul_out", torch::kPrivateUse1,
+             &vllm_ascend::npu_matmul_out_npu);
 
     ops.def(
         "npu_hc_pre_sinkhorn("
