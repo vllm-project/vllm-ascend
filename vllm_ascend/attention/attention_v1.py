@@ -64,7 +64,7 @@ from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.device.mxfp_kv_cache import scatter_mxfp_k_scale_cache
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import uses_mooncake_connector, vllm_version_is, weak_ref_tensors
 
 if vllm_version_is("0.27.1"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -2754,6 +2754,7 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             v_head_dim = value_scale_cache.shape[3]
             value_scale_cache.copy_(value_scale.view(1, 1, num_kv_heads, v_head_dim, 1))
             filled_caches.add(value_scale_cache)
+        notify_kv_cache_written()
 
     def forward(
         self,
@@ -2776,8 +2777,16 @@ class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
             return output.fill_(0)
         if getattr(self, "enable_hamming_sparse", False):
             raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
-        if self.vllm_config.kv_transfer_config is not None:
-            raise NotImplementedError("C8_MXFP v1 does not support PD disaggregation (kv_transfer) yet.")
+        if self.vllm_config.kv_transfer_config is not None and not uses_mooncake_connector(
+            self.vllm_config.kv_transfer_config
+        ):
+            raise NotImplementedError(
+                "C8_MXFP v1 PD disaggregation (kv_transfer) is only supported with "
+                "MooncakeConnectorV1, whose block-level transfer registers and moves "
+                "every per-layer cache tensor (FP8 K/V plus both E8M0 scale caches) "
+                "as raw blocks. Connectors that only move the K/V pair would "
+                "silently drop the scale caches."
+            )
         if kv_cache is None or len(kv_cache) < 4:
             raise RuntimeError(
                 "C8_MXFP attention requires a (k, v, k_scale, v_scale) KV cache "
