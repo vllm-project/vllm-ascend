@@ -247,3 +247,23 @@ class TestPrepareAndFinalize(unittest.TestCase):
 
         result_with_tp = layer.finalize(h_out, reduce_results=True)
         self.assertEqual(result_with_tp.shape[0], 3)
+
+    def test_all_gather_input_ids_with_ep_group(self):
+        self.moe_config.is_sequence_parallel = True
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        input_ids = torch.tensor([11, 22])
+        with patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", create=True) as mock_gather:
+            mock_gather.side_effect = lambda x: x.repeat(2, 1)
+            gathered = layer.all_gather_input_ids(input_ids)
+        mock_gather.assert_called_once()
+        self.moe_config.dp_group.all_gather.assert_not_called()
+        torch.testing.assert_close(gathered, torch.tensor([11, 22, 11, 22]))
+
+    def test_all_gather_input_ids_with_dp_group_no_sp(self):
+        self.moe_config.is_sequence_parallel = False
+        layer = PrepareAndFinalizeWithAllGather(self.moe_config)
+        input_ids = torch.tensor([11, 22])
+        with patch("torch.ops.vllm.maybe_all_gather_and_maybe_unpad", create=True) as mock_gather:
+            gathered = layer.all_gather_input_ids(input_ids)
+        mock_gather.assert_not_called()
+        torch.testing.assert_close(gathered, input_ids)
