@@ -116,13 +116,14 @@ Notes for A5:
   contains that vendor directory. vLLM Ascend prepends its own bundled vendors
   path at startup, which otherwise shadows the installed package and makes the
   call fall back to the built-in older operator.
-- The receive capacity is `max_recv_token_num = 3 * max_num_batched_tokens`:
-  a 16384-token prefill chunk reserves 49152 received token rows per rank.
-  The configured chunk size is shared by prefill, decode and idle dummy
-  batches; it must match across all EP ranks. `mega_moe_max_tokens` is not
-  used on A5. This fixed capacity replaces the operator's worst-case automatic
-  allocation; it is not a guarantee against arbitrary expert-load imbalance.
-  The actual per-rank received token count must fit within this capacity.
+- The receive capacity is fixed at `max_recv_token_num=65536` received token
+  rows per rank, independently of chunk size. Prefill, decode and idle dummy
+  batches use the same capacity. `mega_moe_max_tokens` is not used on A5.
+  This replaces the operator's worst-case automatic allocation; the actual
+  per-rank received token count must fit within 65536 rows. For Kimi K3 with
+  DP4/TP8/EP32, top-k 16 and a 16384-token chunk per DP group, the average
+  received load is 32768 rows per rank, so this capacity provides 2x the
+  average load, not a guarantee against arbitrary expert-load imbalance.
 - The MegaMoe path is mutually exclusive with
   `multistream_overlap_shared_expert`; the latter is force-disabled when
   `enable_fused_mc2=2`.

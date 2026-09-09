@@ -109,14 +109,9 @@ def _implementation():
     return impl
 
 
-@pytest.mark.parametrize("chunk_size, expected", [(4096, 12288), (8192, 24576), (16384, 49152)])
+@pytest.mark.parametrize("chunk_size", [4096, 8192, 16384])
 @pytest.mark.parametrize("decode_only", [False, True])
-def test_a5_receive_capacity_is_three_chunks_on_all_dp_ranks(monkeypatch, chunk_size, expected, decode_only):
-    monkeypatch.setattr(
-        comm,
-        "get_current_vllm_config",
-        lambda: SimpleNamespace(scheduler_config=SimpleNamespace(max_num_batched_tokens=chunk_size)),
-    )
+def test_a5_receive_capacity_is_fixed_on_all_dp_ranks(monkeypatch, chunk_size, decode_only):
     monkeypatch.setattr(comm, "get_mc2_group", lambda: SimpleNamespace(device_group=object()))
     for ep_rank in (0, 8, 16, 24):
         impl = _implementation()
@@ -133,7 +128,7 @@ def test_a5_receive_capacity_is_three_chunks_on_all_dp_ranks(monkeypatch, chunk_
         impl.get_symm_buffer_for_mega_moe = MagicMock()
         result = impl._init_mega_moe_symm_buffer(is_decode_only_node=decode_only)
         assert result is impl.get_symm_buffer_for_mega_moe.return_value
-        assert impl.get_symm_buffer_for_mega_moe.call_args.kwargs["max_recv_token_num"] == expected
+        assert impl.get_symm_buffer_for_mega_moe.call_args.kwargs["max_recv_token_num"] == 65536
 
 
 @pytest.mark.parametrize("decode_only, expected", [(False, 65536), (True, 1048576)])
