@@ -79,6 +79,7 @@ function(op_add_subdirectory OP_LIST OP_DIR_LIST)
         file(GLOB OP_HOST_CMAKE_FILES
         "${CMAKE_CURRENT_SOURCE_DIR}/gmm/**/op_host/CMakeLists.txt"
         "${CMAKE_CURRENT_SOURCE_DIR}/gmm/**/CMakeLists.txt"
+        "${CMAKE_CURRENT_SOURCE_DIR}/sampling/**/op_host/CMakeLists.txt"
         )
         if(BUILD_OPEN_PROJECT AND (NOT BUILD_OPS_RTY_KERNEL))
             file(GLOB CANNDEV_OPS_HOST_CMAKE_FILES

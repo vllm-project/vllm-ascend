@@ -59,6 +59,7 @@
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
 #include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
+#include "sampling/categorical_sample/categorical_sample_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
 #include <c10/util/Exception.h>
@@ -3116,6 +3117,15 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         " -> (Tensor y, Tensor y_fp32)"
     );
     ops.impl("npu_rms_norm_cast", torch::kPrivateUse1, &vllm_ascend::npu_rms_norm_cast);
+
+    ops.def(
+        "npu_categorical_sample("
+        "Tensor processed_logits, Tensor expanded_idx_mapping, Tensor temperature, Tensor seed, Tensor pos, "
+        "bool return_lse=False, bool apply_temperature=False, "
+        "Tensor(a!)? logits_cache=None, Tensor? logits_cache_col=None, bool use_fp64=False"
+        ") -> (Tensor sampled_token_ids, Tensor lse)"
+    );
+    ops.impl("npu_categorical_sample", torch::kPrivateUse1, &vllm_ascend::npu_categorical_sample);
 
     ops.def("npu_sign_bits_pack(Tensor input, int size) -> Tensor");
     ops.impl("npu_sign_bits_pack", torch::kPrivateUse1, &vllm_ascend::npu_sign_bits_pack);
