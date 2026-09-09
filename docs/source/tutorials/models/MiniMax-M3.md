@@ -379,7 +379,7 @@ We'd like to show the deployment guide of MiniMax-M3 on a multi-node environment
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. MiniMax-M3 Prefill uses pipeline parallel (`PP=2`) with a `30,30` split of the 60 transformer layers, so the launcher below extends the repository example with `--pp-size`. Each DP rank occupies `tp_size * pp_size` NPUs.
+The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. The launcher below extends the repository example with `--pp-size`: on A3, Prefill uses pipeline parallel (`PP=2`) with a `30,30` split of the 60 transformer layers, while the Ascend 950DT MXFP8 launch uses `PP=1` with `DP=2` on both roles. Each DP rank occupies `tp_size * pp_size` NPUs.
 
 **Common Issues Tip:** For PD disaggregation issues such as KV transfer timeouts or Mooncake connection errors, refer to the [Public FAQs](../../faqs.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
@@ -695,19 +695,17 @@ Prefill-Decode disaggregation can be deployed on 2 Ascend 950DT (96GB × 8) for 
 
 | Node group | Nodes | Parallelism | Engine ports |
 | ---------- | ----- | ----------- | ------------ |
-| Prefill | 1 | `DP1 TP4 PP2` (1 rank, 8 NPUs) | 31050 |
+| Prefill | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31050/31051 |
 | Decode | 1 | `DP2 TP4 PP1` (2 ranks, 4 NPUs each) | 31060/31061 |
 
-Prefill is a single API process (`DP=1`). Decode launches one process per DP rank. Both sides must declare the same topology in `kv_connector_extra_config`:
+Each node launches one API process per DP rank: 2 Prefill ranks on ports 31050/31051 and 2 Decode ranks on ports 31060/31061. Both roles use `PP=1` (no pipeline parallel), so no `VLLM_PP_LAYER_PARTITION` setting is required. Both sides must declare the same topology in `kv_connector_extra_config`:
 
 ```json
 {
-  "prefill": {"dp_size": 1, "tp_size": 4, "pp_size": 2},
+  "prefill": {"dp_size": 2, "tp_size": 4, "pp_size": 1},
   "decode": {"dp_size": 2, "tp_size": 4, "pp_size": 1}
 }
 ```
-
-Leave `VLLM_PP_LAYER_PARTITION` unset so vLLM uses the automatic `30,30` partition.
 
 1. Prefill node
 
@@ -731,9 +729,6 @@ export PYTHONHASHSEED=0
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
 
-# Use the automatic 60-layer PP partition: 30,30.
-unset VLLM_PP_LAYER_PARTITION
-
 vllm serve "$model_path" \
     --host 0.0.0.0 \
     --port $2 \
@@ -754,14 +749,13 @@ vllm serve "$model_path" \
     --gpu-memory-utilization 0.92 \
     --distributed-executor-backend mp \
     --kv-cache-dtype fp8 \
-    --no-enable-prefix-caching \
     --reasoning-parser minimax_m3 \
     --safetensors-load-strategy prefetch \
     --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
     --enforce-eager \
     --no-async-scheduling \
     --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_qknorm_rope":false,"fuse_norm_quant":false,"enable_static_kernel":false},"multistream_overlap_shared_expert":false,"enable_shared_expert_dp":false,"enable_reduce_sample":false}' \
-    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_producer","kv_port":"30000","engine_id":"0","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
 ```
 
 2. Decode node
@@ -803,7 +797,6 @@ vllm serve "$model_path" \
     --max-model-len 132000 \
     --max-num-batched-tokens 32768 \
     --trust-remote-code \
-    --no-enable-prefix-caching \
     --max-num-seqs 64 \
     --gpu-memory-utilization 0.90 \
     --dtype bfloat16 \
@@ -812,7 +805,7 @@ vllm serve "$model_path" \
     --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative-config '{"method":"eagle3","model":"'"$draft_model_path"'","num_speculative_tokens":3,"kv_cache_dtype":"bfloat16"}' \
     --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"enable_static_kernel":false,"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"enable_shared_expert_dp":true,"enable_reduce_sample":false}' \
-    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":1,"tp_size":4,"pp_size":2},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
+    --kv-transfer-config '{"kv_connector":"MooncakeConnectorV1","kv_role":"kv_consumer","kv_port":"26900","engine_id":"1","kv_connector_extra_config":{"use_ascend_direct":true,"ascend_local_comm_res_path":"/etc/hixlep","prefill":{"dp_size":2,"tp_size":4,"pp_size":1},"decode":{"dp_size":2,"tp_size":4,"pp_size":1}}}'
 ```
 
 Once the preparation is done, start the server with the following command on each node:
@@ -821,13 +814,13 @@ Once the preparation is done, start the server with the following command on eac
 
 ```bash
 python launch_online_dp.py \
-    --dp-size 1 --tp-size 4 --pp-size 2 \
-    --dp-size-local 1 --dp-rank-start 0 \
+    --dp-size 2 --tp-size 4 --pp-size 1 \
+    --dp-size-local 2 --dp-rank-start 0 \
     --dp-address $node_p_ip --dp-rpc-port 6884 \
     --vllm-start-port 31050
 ```
 
-This starts one Prefill API server on port `31050`. Wait until the log prints `Application startup complete`.
+This starts two Prefill API servers on ports `31050` and `31051`. Wait until both ranks print `Application startup complete`.
 
 2. Decode node
 
@@ -841,7 +834,7 @@ python launch_online_dp.py \
 
 This starts two Decode API servers on ports `31060` and `31061`.
 
-To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For Ascend 950DT 1P1D, the proxy forwards requests to 1 Prefill rank and 2 Decode ranks.
+To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For Ascend 950DT 1P1D, the proxy forwards requests to 2 Prefill ranks and 2 Decode ranks.
 
 ```bash
 unset ftp_proxy
@@ -852,9 +845,9 @@ python load_balance_proxy_server_example.py \
 --port 8009 \
 --host $node_p_ip \
 --prefiller-hosts \
-    $node_p_ip \
+    $node_p_ip $node_p_ip \
 --prefiller-ports \
-    31050 \
+    31050 31051 \
 --decoder-hosts \
     $node_d_ip $node_d_ip \
 --decoder-ports \
@@ -880,7 +873,7 @@ Key Parameter Descriptions:
 
 **Prefill node-specific configurations:**
 
-- `--pipeline-parallel-size 2`: Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. 950DT leaves the env unset and uses the automatic `30,30` partition.
+- `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The Ascend 950DT launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
 - `--speculative-config '{"method":"eagle3", ...}'`: Enables the MiniMax-M3 EAGLE3 draft model. Do not replace this with GLM MTP options.
 - `--no-async-scheduling` (950DT): Used by the verified MXFP8 Prefill launch.
@@ -889,7 +882,7 @@ Key Parameter Descriptions:
 **Decode node-specific configurations:**
 
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
-- `--no-enable-prefix-caching`: Disables prefix caching. For PD disaggregation, the D-node prefix-cache known issue is tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944).
+- `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The Ascend 950DT launch does not set this flag and keeps prefix caching enabled.
 - `--max-num-seqs 64`: Decode concurrency used by the verified 1P1D launches.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
@@ -899,7 +892,7 @@ Key Parameter Descriptions:
 - `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT `30000`/`26900`.
 - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
 - `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT only): Required for UBOE / Ascend direct communication on 950DT.
-- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT uses `prefill: dp1 tp4 pp2` and `decode: dp2 tp4 pp1`.
+- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
 
 **Request forwarding (proxy):**
 
