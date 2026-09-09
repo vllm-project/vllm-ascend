@@ -45,14 +45,21 @@ Mount or copy the checkpoint into the container and set `MODEL_PATH` to its loca
 export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8
 ```
 
-## 4 Installation
+## 4 Environment Preparation
 
-### 4.1 Docker Image Installation
+### 4.1 Pre-built Qwen3.8 Image
 
-Use the A3 image variant. The following command exposes all 16 devices on an Atlas 800 A3 node so that a group of eight can be selected inside the container.
+A pre-built Qwen3.8 image is available in the [vllm-atlas-temp repository](https://quay.io/repository/atlas-ci/vllm-atlas-temp?tab=tags&tag=latest). Select the image that matches the host CPU architecture:
+
+- AArch64: `quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-arm64-temp`
+- x86_64: `quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-amd64-temp`
+
+The following example uses the AArch64 image and exposes all 16 devices on an Atlas 800 A3 node so that a group of eight can be selected inside the container. Replace `IMAGE` with the x86_64 image on an x86_64 host.
 
 ```bash
-export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-a3
+export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a3-ubuntu-34178549844-2-arm64-temp
+
+docker pull "$IMAGE"
 
 docker run --rm \
     --name vllm-ascend-qwen38-flash-next \
@@ -95,12 +102,31 @@ pip show vllm vllm-ascend
 
 ### 4.2 Source Code Installation
 
-Alternatively, install the release branch from source. The vLLM version must match the version required by vLLM Ascend.
+Alternatively, build the validated source stack from the following exact components:
+
+- vLLM `v0.26.0`;
+- vLLM Ascend v0.26.0 release commit `3047bd476c77c8676231b39e5a1e6cffc9f29b5a`;
+- the complete change from [vLLM Ascend PR #15162](https://github.com/vllm-project/vllm-ascend/pull/15162) applied on top of that release commit.
+
+Install vLLM first:
 
 ```bash
-git clone --branch releases/v0.26.0rc https://github.com/vllm-project/vllm-ascend.git
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+git checkout v0.26.0
+VLLM_TARGET_DEVICE=empty pip install --no-deps -v -e .
+cd ..
+```
+
+Then install vLLM Ascend from the release commit with PR #15162 applied. The pull-request head is a descendant of the specified release commit, so `--ff-only` preserves the exact PR history and fails instead of silently creating an unintended merge if that relationship changes.
+
+```bash
+git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-pip install -e .
+git checkout -b qwen38-flash-next 3047bd476c77c8676231b39e5a1e6cffc9f29b5a
+git fetch origin pull/15162/head:pr-15162
+git merge --ff-only pr-15162
+pip install -v -e .
 pip show vllm vllm-ascend
 ```
 
