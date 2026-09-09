@@ -652,7 +652,8 @@ class TestGumbelSampling:
 
     def test_dspark_uses_ascend_gumbel(self):
         """Exercise the inherited DSpark entry point with real NPU sampling."""
-        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is gumbel_sample
+        # Check the installed implementation, not this test module's API wrapper.
+        assert DSparkSpeculator._sample_logits.__globals__["gumbel_sample"] is _sample_for_version
         speculator = DSparkSpeculator.__new__(DSparkSpeculator)
         speculator._d2t_scatter_index = None
         speculator.temperature = torch.tensor([0.5, 1.5], device=DEVICE)
