@@ -12,6 +12,8 @@ compute and communication under expert parallelism. SP MoE keeps the expert
 inputs sharded by sequence and restores the expected layout at the MoE output
 boundary instead.
 
+**The original flashcomm feature overlapped functionally with the SP feature and has been deprecated since v0.27.1.**
+
 ## Principle
 
 SP MoE shards the input along the token dimension at the MoE boundary in each
@@ -37,15 +39,10 @@ token size. This keeps tokens sequence-sharded during expert computation and
 reduces duplicate computation and unnecessary communication.
 
 ## How to use
-
-Upstream vLLM owns the SP MoE switch. `ParallelConfig.use_sequence_parallel_moe`
-is true only when all of the following hold:
-
+Steps to follow to enable SP currently：
 - `tensor_parallel_size > 1` and `data_parallel_size > 1`.
 - `enable_expert_parallel` is set (MoE models only).
-- `all2all_backend` is an SP-capable backend: `allgather_reducescatter`,
-  `deepep_high_throughput`, `deepep_low_latency`, `mori_high_throughput`,
-  `mori_low_latency`, or `nixl_ep`.
+- `--additional-config '{"enable_flashcomm1": true}'` set `flashcomm1` 
 
 ### Temporary FlashComm switch (Ascend only)
 
@@ -74,6 +71,4 @@ VLLM_ASCEND_ENABLE_FLASHCOMM1=1 vllm serve <moe-model> \
 This switch is temporary and deprecated. Referencing either form logs a
 `FlashComm is deprecated` warning from `init_ascend_config`, and the override
 carries a `TODO` to remove it once SP is supported — after that, the upstream
-configuration above takes effect directly. DSA-CP also depends on this switch
-(plus `pipeline_parallel_size == 1`); see the
-[Context Parallel Guide](context_parallel.md) for details.
+configuration above takes effect directly. 
