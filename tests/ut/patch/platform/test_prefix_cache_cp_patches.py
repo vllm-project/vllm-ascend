@@ -507,7 +507,7 @@ def test_deepseek_v4_main_planner_uses_shared_backing_geometry(monkeypatch) -> N
     expected_num_blocks = 7
     available_memory = page_size * expected_num_blocks
     monkeypatch.setattr(
-        "vllm.v1.core.kv_cache_planning._may_override_num_blocks",
+        "vllm.v1.core.kv_cache_planning.may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
     )
 
