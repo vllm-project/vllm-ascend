@@ -33,7 +33,7 @@ deployment:
         --enable-expert-parallel
         --enable-prefix-caching
         --max-num-seqs 16
-        --max-model-len 130k
+        --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
@@ -65,7 +65,7 @@ deployment:
         --enable-expert-parallel
         --enable-prefix-caching
         --max-num-seqs 16
-        --max-model-len 130k
+        --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
@@ -97,7 +97,7 @@ deployment:
         --enable-expert-parallel
         --enable-prefix-caching
         --max-num-seqs 16
-        --max-model-len 130k
+        --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
@@ -129,7 +129,7 @@ deployment:
         --enable-expert-parallel
         --enable-prefix-caching
         --max-num-seqs 16
-        --max-model-len 130k
+        --max-model-len 133120
         --max-num-batched-tokens 8192
         --gpu-memory-utilization 0.9
         --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
