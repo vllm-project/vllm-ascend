@@ -210,9 +210,6 @@ a3:
       - name: deepseek-r1-0528-w8a8-prefix-cache
         os: linux-aarch64-nightly-a3-16
         config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
-      - name: glm-4.7-w8a8
-        os: linux-aarch64-nightly-a3-16
-        config_file_path: GLM-4.7.yaml
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-nightly-a3-16
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
@@ -339,9 +336,6 @@ a3-560t:
       - name: deepseek-r1-0528-w8a8-prefix-cache
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Prefix-Cache-DeepSeek-R1-0528-W8A8.yaml
-      - name: glm-4.7-w8a8
-        os: linux-aarch64-a3-16-cn12-001
-        config_file_path: GLM-4.7.yaml
       - name: qwen3-vl-235b-a22b-instruct-w8a8
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: Qwen3-VL-235B-A22B-Instruct-W8A8.yaml
