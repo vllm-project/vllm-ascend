@@ -16,7 +16,7 @@ boundary instead.
 
 ## Principle
 
-SP MoE shards the input along the token dimension at the MoE boundary in each
+SP MoE shards the input along the token dimension in each
 Transformer layer. Different TP ranks therefore process different tokens,
 avoiding duplicate expert computation for the same tokens.
 
@@ -24,12 +24,13 @@ The main data flow of an MoE layer is:
 
 ```text
 Sequence-parallel input sharding
-  -> EP all-gather: collect tokens from all ranks
-  -> Unpad according to each rank's actual token count
-  -> Routing, dispatch, and expert computation
-  -> Zero-pad according to the actual token counts
-  -> EP reduce-scatter: redistribute tokens
-  -> TP all-gather: restore the layout required by subsequent layers
+  -> TP all-gather: collect tokens from all ranks
+  -> attention
+  -> TP reduce scatter
+  -> RMS Norm
+  -> Router
+  -> all-to-all
+  -> Moe
 ```
 
 Different DP ranks may have different numbers of valid tokens. Therefore, the
