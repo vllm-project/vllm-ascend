@@ -360,8 +360,8 @@ CASE_DS_ACLGRAPH = {
     "data_parallel_size": 2,
     "enable_expert_parallel": True,
     # Keep this ACL graph regression on the non-SP path used to generate its
-    # golden answers. Upstream SP has dedicated DP2/TP2 functional and
-    # precision coverage in test_sequence_parallel_linear.py.
+    # golden answers. Upstream SP has dedicated DP2/TP2 precision coverage in
+    # test_sequence_parallel_linear.py.
     "all2all_backend": "flashinfer_all2allv",
     "golden_answers": {
         "short": DEEPSEEK_V2_LITE_PROMPTS_SHORT_BASELINE,
