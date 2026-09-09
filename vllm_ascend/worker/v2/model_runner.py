@@ -42,7 +42,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
-
+from vllm.v1.worker.gpu.spec_decode.adaptive_verification import _assign_draft_token_budget
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
     MoECommType,
@@ -315,6 +315,67 @@ class NPUModelRunner(GPUModelRunner):
                     self._dummy_run(mc2_tokens_capacity, skip_attn=True, skip_eplb=True, is_profile=True)
             super().profile_run()
 
+    def _reallocate_drafts_ascend(
+        self,
+        adaptive_verification,
+        req_ids: list[str],
+        idx_mapping: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """
+        Ascend replacement for AdaptiveVerificationManager.reallocate_drafts().
+
+        vLLM's implementation uses async_copy_to_gpu() for temporary CPU->device
+        arrays. On Ascend those copies can execute on another stream while the
+        following cumsum/compiled allocator consumes the destination buffers.
+
+        Keep the upstream AV algorithm unchanged, but make these two H2D copies
+        synchronous/current-stream ordered.
+        """
+        batch_budget = adaptive_verification._batch_budget
+        adaptive_verification._batch_budget = None
+        assert batch_budget is not None
+
+        (num_drafts_per_req, num_non_draft_tokens_per_req, draft_budget) = batch_budget
+        num_reqs = idx_mapping.shape[0]
+        scheduled_drafts = np.fromiter((num_drafts_per_req[req_id] for req_id in req_ids), dtype=np.int32, count=num_reqs)
+        num_non_draft_tokens = np.fromiter((num_non_draft_tokens_per_req[req_id] for req_id in req_ids), dtype=np.int32, count=num_reqs)
+        num_tokens = (int(num_non_draft_tokens.sum()) + draft_budget)
+        # exact draft capacities
+        capacities = (adaptive_verification._batch_draft_capacity[:num_reqs])
+        if draft_budget == 0:
+            capacities.zero_()
+        else:
+            scheduled_drafts_cpu = torch.from_numpy(scheduled_drafts)
+            capacities.copy_(scheduled_drafts_cpu, non_blocking=False)
+
+            if draft_budget < int(scheduled_drafts.sum()):
+                _assign_draft_token_budget(
+                    adaptive_verification._confidence_probs,
+                    idx_mapping,
+                    capacities,
+                    draft_budget,
+                    adaptive_verification.num_speculative_steps,
+                )
+        capacities_cpu = capacities.cpu().numpy()
+        cap_sum = int(capacities_cpu.sum())
+
+        if cap_sum != draft_budget:
+            raise RuntimeError("[AV-CAPACITY] mismatch")
+        # non-draft token counts (scheduled_tokens - draft_tokens)
+        num_non_draft_tokens_gpu = (adaptive_verification._num_non_draft_tokens[:num_reqs])
+        num_non_draft_tokens_cpu = torch.from_numpy(num_non_draft_tokens)
+        num_non_draft_tokens_gpu.copy_(num_non_draft_tokens_cpu, non_blocking=False)
+        adaptive_verification._cu_num_logits[:1].zero_()
+
+        torch.cumsum(capacities + adaptive_verification.num_bonus_tokens, dim=0, out=adaptive_verification._cu_num_logits[1 : num_reqs + 1])
+
+        adaptive_verification.query_start_loc[:1].zero_()
+        torch.cumsum(capacities + num_non_draft_tokens_gpu, dim=0, out=adaptive_verification.query_start_loc[1 : num_reqs + 1])
+
+        adaptive_verification.query_start_loc[num_reqs + 1 :].fill_(num_tokens)
+
+        return (adaptive_verification._cu_num_logits[: num_reqs + 1], adaptive_verification.query_start_loc, draft_budget)
+
     def prepare_inputs(  # type: ignore[misc]
         self,
         scheduler_output: SchedulerOutput,
@@ -381,7 +442,17 @@ class NPUModelRunner(GPUModelRunner):
             np.cumsum(num_logits, out=cu_num_logits_np[1:])
             cu_num_logits = async_copy_to_gpu(cu_num_logits_np, device=self.device)
 
-        num_scheduled_tokens_upper_bound = num_scheduled_tokens_np
+        adaptive_verification = (self.adaptive_verification if num_draft_tokens_per_req is not None else None)
+        num_scheduled_tokens_upper_bound = num_scheduled_tokens_np.copy()
+        if adaptive_verification is not None:
+            (
+                num_scheduled_tokens_np,
+                cu_num_logits_np,
+            ) = adaptive_verification.compact_batch(
+                num_draft_tokens_per_req,
+                num_scheduled_tokens_np,
+                cu_num_logits_np,
+            )
         # Get query_start_loc.
         # NOTE: For FULL mode we change +1 to +2 to reserve extra space for padding.
         # See _pad_query_start_loc_for_fia.
@@ -393,7 +464,7 @@ class NPUModelRunner(GPUModelRunner):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+        if (adaptive_verification is None and batch_desc.cg_mode == CUDAGraphMode.FULL):
             # This is only required for vllm-ascend.
             query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
                 num_tokens_after_padding,
@@ -406,6 +477,37 @@ class NPUModelRunner(GPUModelRunner):
 
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
+
+        if adaptive_verification is not None:
+            cu_num_logits, query_start_loc, total_num_draft_tokens = self._reallocate_drafts_ascend(
+                adaptive_verification, 
+                req_ids, 
+                idx_mapping,
+                )
+            # exact number of verifier logits after device-side allocation
+            total_num_logits = (num_reqs * num_bonus_tokens + total_num_draft_tokens)
+            query_start_loc_np[: num_reqs + 1] = (query_start_loc[: num_reqs + 1].cpu().numpy())
+            exact_av_end = int(query_start_loc_np[num_reqs])
+            # remove the provisional CPU tail
+            query_start_loc_np[num_reqs + 1 :] = exact_av_end
+            # start again from the graph descriptor's request shape
+            num_reqs_padded = batch_desc.num_reqs or num_reqs
+
+            # Call _pad_query_start_loc_for_fia only after
+            if batch_desc.cg_mode == CUDAGraphMode.FULL:
+                (
+                    query_start_loc_np,
+                    num_reqs_padded,
+                ) = self._pad_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                    batch_desc.cg_mode,
+                    batch_desc.num_reqs,
+                )
+                async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+                query_start_loc = self.input_buffers.query_start_loc
 
         if draft_tokens:
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
@@ -436,8 +538,19 @@ class NPUModelRunner(GPUModelRunner):
             self.input_buffers.positions,
             self.input_buffers.seq_lens,
         )
+        # prepare_pos_seq_lens() operates only on the real requests and clears seq_lens[num_reqs:] to zero.
+        # _pad_query_start_loc_for_fia() may append one graph-only request for a mixed/AV FULL batch
+        # give that dummy row the corresponding query length as well.
+        if (adaptive_verification is not None and num_reqs_padded > num_reqs):
+            dummy_seq_lens_np = np.diff(query_start_loc_np[num_reqs : num_reqs_padded + 1]).astype(np.int32, copy=False)
+            self.input_buffers.seq_lens_np[num_reqs:num_reqs_padded] = dummy_seq_lens_np
+            self.input_buffers.seq_lens[num_reqs:num_reqs_padded].copy_(torch.from_numpy(dummy_seq_lens_np), non_blocking=False)
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
+        # ascend also consumes the CPU seq_lens metadata.
+        # scheduler-side values are only upper bounds for AV, copy the exact final real-request seq_lens back from the device
+        if adaptive_verification is not None:
+            self.input_buffers.seq_lens_np[:num_reqs] = seq_lens[:num_reqs].cpu().numpy()
         # Pad for full CUDA graph mode.
         self.input_buffers.seq_lens_np[num_reqs_padded:] = 0
 
@@ -746,7 +859,7 @@ class NPUModelRunner(GPUModelRunner):
         )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
-            and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
             and not matches_uniform_decode_graph_shape
         ):
             num_reqs_padded = num_reqs
