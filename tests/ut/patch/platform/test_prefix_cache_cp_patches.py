@@ -441,8 +441,8 @@ def test_replicated_draft_page_sizes_match_base_spec(replication_size, block_siz
         base = replace(base, page_size_padded=base.unpadded_page_size_bytes + 4096)
     spec = AscendDCPReplicatedDraftAttentionSpec.from_full_attention_spec(base, replication_size)
     assert spec.block_size == block_size
-    assert spec.lane_page_size_bytes == base.page_size_bytes
-    assert spec.page_size_bytes == replication_size * base.page_size_bytes
+    assert spec.lane_page_size_bytes == base.unpadded_page_size_bytes
+    assert spec.page_size_bytes == replication_size * base.unpadded_page_size_bytes
     assert spec.real_page_size_bytes == replication_size * base.real_page_size_bytes
     assert spec.unpadded_page_size_bytes == replication_size * base.unpadded_page_size_bytes
 
@@ -467,7 +467,8 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
     groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
     assert groups is not None
     expected_num_blocks = 100
-    bytes_per_block = page_size * (24 + 5 * replication_size)
+    draft_page_size = 384 * 1 * (64 + 64) * 2 * replication_size
+    bytes_per_block = page_size * 24 + draft_page_size * 5
     monkeypatch.setattr(
         "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
         lambda _config, num_blocks: num_blocks,
@@ -483,9 +484,7 @@ def test_kimi_k3_dcp_replicated_draft_uses_minimal_physical_layout(
     assert len(config.kv_cache_tensors) == 29
     assert [len(tensor.shared_by) for tensor in config.kv_cache_tensors] == ([4] * 23 + [1] * 6)
     assert [tensor.size for tensor in config.kv_cache_tensors[:24]] == [page_size * expected_num_blocks] * 24
-    assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [
-        page_size * replication_size * expected_num_blocks
-    ] * 5
+    assert [tensor.size for tensor in config.kv_cache_tensors[24:]] == [draft_page_size * expected_num_blocks] * 5
     assert sum(tensor.size for tensor in config.kv_cache_tensors) == (bytes_per_block * expected_num_blocks)
 
 
@@ -501,7 +500,7 @@ def test_kimi_k3_dcp_replicated_pages_bypass_rectangular_unification() -> None:
     assert {spec.block_size for spec in unified.values()} == {384}
     assert {
         spec.page_size_bytes for spec in unified.values() if isinstance(spec, AscendDCPReplicatedDraftAttentionSpec)
-    } == {4 * 488448}
+    } == {4 * 384 * 128 * 2}
 
 
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:

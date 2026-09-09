@@ -867,7 +867,7 @@ def test_one_token_prefill_selection_respects_recurrent_state(
         (16, 5, 384, True, CUDAGraphMode.FULL_DECODE_ONLY),
     ],
 )
-def test_spec_width_prompt_chunk_folds_only_without_dcp(
+def test_spec_width_prompt_chunk_keeps_prefill_state(
     monkeypatch: pytest.MonkeyPatch,
     dcp_size: int,
     num_spec: int,
@@ -905,15 +905,7 @@ def test_spec_width_prompt_chunk_folds_only_without_dcp(
     )
 
     assert accepted.tolist() == ([2, 1] if mixed_spec else [1])
-    if dcp_size == 1 and context_len > 0:
-        assert metadata.num_prefills == 0
-        assert metadata.num_prefill_tokens == 0
-        assert metadata.num_spec_decodes == 1 + int(mixed_spec)
-        assert metadata.spec_sequence_masks.tolist() == ([True, True] if mixed_spec else [True])
-        assert metadata.num_accepted_tokens.tolist() == ([2, width] if mixed_spec else [width])
-        return
-
-    # DCP retains prefill state semantics regardless of the prompt chunk width.
+    # Prompt chunks retain prefill state semantics for every DCP size.
     assert metadata.num_prefills == 1
     assert metadata.num_prefill_tokens == width
     assert metadata.num_spec_decodes == int(mixed_spec)

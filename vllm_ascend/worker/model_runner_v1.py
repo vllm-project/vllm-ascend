@@ -5302,9 +5302,9 @@ class NPUModelRunner(GPUModelRunner):
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 
-        # Apply DCP replication only after hybrid page-size alignment. The
-        # ordinary draft page is first padded to K3's target/Mamba page, then
-        # multiplied by DCP so one scheduler block backs every DCP lane.
+        # Preserve the non-DCP target/Mamba layout. Only effective draft K/V
+        # bytes are replicated; from_full_attention_spec removes the target
+        # padding because the mixed planner allocates draft tensors separately.
         for layer_name in replicated_draft_layer_names:
             spec = kv_cache_spec[layer_name]
             if not isinstance(spec, FullAttentionSpec):

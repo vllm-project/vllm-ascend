@@ -195,8 +195,8 @@ class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
 
     @property
     def lane_page_size_bytes(self) -> int:
-        """Padded bytes of one physical draft-DCP lane page."""
-        return self._lane_spec.page_size_bytes
+        """Effective K/V bytes of one physical lane, without target padding."""
+        return self._lane_spec.unpadded_page_size_bytes
 
     @property
     def page_size_bytes(self) -> int:
@@ -217,6 +217,9 @@ class AscendDCPReplicatedDraftAttentionSpec(FullAttentionSpec):
         dcp_replication_size: int,
     ) -> "AscendDCPReplicatedDraftAttentionSpec":
         kwargs = {field.name: getattr(spec, field.name) for field in fields(FullAttentionSpec)}
+        # Replicated GQA has an independent allocation in the K3 mixed plan.
+        # Target/Mamba page padding is not live GQA data and is not replicated.
+        kwargs["page_size_padded"] = None
         return cls(
             **kwargs,
             dcp_replication_size=dcp_replication_size,

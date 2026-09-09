@@ -629,10 +629,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             base_spec,
             replication_size,
         )
-        self.assertEqual(spec.lane_page_size_bytes, base_spec.page_size_bytes)
+        self.assertEqual(spec.lane_page_size_bytes, base_spec.unpadded_page_size_bytes)
         self.assertEqual(
             spec.page_size_bytes,
-            replication_size * base_spec.page_size_bytes,
+            replication_size * base_spec.unpadded_page_size_bytes,
         )
         mamba_spec = MambaSpec(
             block_size=16,
