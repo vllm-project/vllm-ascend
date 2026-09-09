@@ -12,6 +12,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+import vllm_ascend.envs as envs_ascend
 import vllm_ascend.ops.triton.sfa_cp  # noqa: F401
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.context_parallel.common_cp import (
@@ -1166,15 +1167,14 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
         # incomplete stream dependency on the first prefill. DSA-CP restores
         # token shards on dim 0; native DCP restores query shards on dim 1.
         if query_gather_dim == 1 and getattr(ql_nope, "is_npu", False):
-            # Native DCP head gather: assemble the fused query directly in the
-            # head-major layout the collective needs, skipping the
-            # cat -> permute -> contiguous chain. The context keeps the
-            # same restore_perm so _finish_dcp_gather(keep_view=True) yields
-            # the identical strided [T, H, D] views as today.
             try:
                 from vllm_ascend.ops.triton.query_gather_prep import prep_query_head_major
 
                 head_major = prep_query_head_major(ql_nope, q_pe)
+            except Exception:
+                # Hard kernel failure: route to the torch assembly below.
+                head_major = None
+            if head_major is not None:
                 gathered, handle = all_gather_async(head_major, self.dcp_group)
                 return DCPGatherContext(
                     gathered=gathered,
@@ -1182,10 +1182,8 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
                     restore_perm=(1, 0, 2),
                     split_sizes=(ql_nope.shape[-1], q_pe.shape[-1]),
                 )
-            except Exception:
-                # Fall back to the torch assembly below on any failure.
-                pass
-
+            # prep_query_head_major returned None (shape not provably legal
+            # for the fast kernel): fall back to the torch assembly below.
         fused_q = torch.cat([ql_nope, q_pe], dim=-1).contiguous()
         return self._start_dcp_gather(
             fused_q,
@@ -1312,11 +1310,17 @@ class AscendSFADCPImpl(DCPImplMixin, AscendSFAImpl):
             # DCP-local KV shard.
             topk_indices = self.dcp_group.all_gather(topk_indices.contiguous(), dim=0)
         topk_indices = self._remap_sparse_indices(topk_indices)
-        # Keep the gathered query as a strided view: npu_sparse_flash_attention
-        # accepts a non-contiguous TND query and produces bit-identical output
-        # to the contiguous layout (verified on-device), so the [H, T, D] ->
-        # [T, H, D] restore copy (one per decode SFA layer) can be skipped.
-        ql_nope, q_pe = self._finish_dcp_gather(gather_context, keep_view=True)
+        # Keep the gathered query as a strided view of the head-major gather
+        # output. The split query fragments handed to npu_sparse_flash_
+        # attention have always been strided views (torch.split never copies),
+        # so the old permute+contiguous call only materialized the t-major
+        # [T, H, D] storage behind the views;
+        # VLLM_ASCEND_SFA_DCP_FORCE_TMAJOR_RESTORE=1 keeps the t-major
+        # materialization selectable for comparison runs.
+        ql_nope, q_pe = self._finish_dcp_gather(
+            gather_context,
+            keep_view=not envs_ascend.VLLM_ASCEND_SFA_DCP_FORCE_TMAJOR_RESTORE,
+        )
         sfa_output, softmax_max, softmax_sum = DeviceOperator.execute_sparse_flash_attention_process(
             self,
             ql_nope,
