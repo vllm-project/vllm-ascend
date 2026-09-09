@@ -44,17 +44,25 @@ def _mul_high64(lhs, rhs):
 
 
 @triton.jit
-def _fixed_mass(weight):
+def _fixed_mass_words(weight):
     # exp(logit - max) is in [0, 1]. Scale its exact FP32 significand
     # by 2^42 and round half up, as FloatToFixedMass does in AscendC.
     bits = weight.to(tl.uint32, bitcast=True)
     exponent = (bits >> 23) & 255
-    mantissa = ((bits & 0x7FFFFF) | tl.where(exponent == 0, 0, 0x800000)).to(tl.uint64)
+    mantissa = (bits & 0x7FFFFF) | tl.where(exponent == 0, 0, 0x800000)
     shift = tl.where(exponent == 0, -107, exponent.to(tl.int32) - 108)
-    right = tl.minimum(tl.maximum(-shift, 1), 63)
-    rounded = (mantissa + (tl.full((), 1, tl.uint64) << (right - 1))) >> right
-    mass = tl.where(shift >= 0, mantissa << tl.maximum(shift, 0), rounded)
-    return tl.where((weight > 0) & (shift > -64), mass, 0).to(tl.uint64)
+    right = tl.minimum(tl.maximum(-shift, 1), 24)
+    rounded = (mantissa + (1 << (right - 1))) >> right
+    low = tl.where(shift >= 0, mantissa << tl.maximum(shift, 0), rounded)
+    low = tl.where((weight > 0) & (shift >= -24), low, 0).to(tl.uint32)
+    high = tl.where(shift > 0, mantissa >> tl.minimum(32 - shift, 31), 0).to(tl.uint32)
+    return low, high
+
+
+@triton.jit
+def _fixed_mass(weight):
+    low, high = _fixed_mass_words(weight)
+    return low.to(tl.uint64) | (high.to(tl.uint64) << 32)
 
 
 @triton.jit
@@ -139,7 +147,8 @@ def _categorical_kernel(
     total_mass = tl.full((), 0, tl.uint64)
     infinity_count = tl.full((), 0, tl.int32)
     sums = tl.full((SUM_BLOCK,), 0.0, tl.float32)
-    masses = tl.full((SUM_BLOCK,), 0, tl.uint64)
+    masses_low = tl.full((SUM_BLOCK,), 0, tl.uint32)
+    masses_high = tl.full((SUM_BLOCK,), 0, tl.uint32)
     tile_ids = tl.arange(0, SUM_BLOCK)
     for tile in range(TILES):
         indices = tile * TILE + offsets
@@ -170,9 +179,16 @@ def _categorical_kernel(
                 sums = tl.where(tile_ids == tile, tile_sum, sums)
                 total += tile_sum
             if FP64:
-                fixed = _fixed_mass(weights)
-                tile_mass = tl.sum(fixed, 0)
-                masses = tl.where(tile_ids == tile, tile_mass, masses)
+                # C220 has no vector uint64 select. Sum 16-bit limbs in
+                # uint32 (4096 * 65535 fits), then combine scalar uint64s.
+                low, high = _fixed_mass_words(weights)
+                tile_mass = (
+                    tl.sum(low & 0xFFFF, 0).to(tl.uint64)
+                    + (tl.sum(low >> 16, 0).to(tl.uint64) << 16)
+                    + (tl.sum(high, 0).to(tl.uint64) << 32)
+                )
+                masses_low = tl.where(tile_ids == tile, tile_mass.to(tl.uint32), masses_low)
+                masses_high = tl.where(tile_ids == tile, (tile_mass >> 32).to(tl.uint32), masses_high)
                 total_mass += tile_mass
 
     if RETURN_LSE:
@@ -214,9 +230,9 @@ def _categorical_kernel(
     selected = tl.full((), False, tl.int1)
     while (tile < TILES) & ~selected:
         if FP64:
-            # Ascend's gather does not accept uint64; only one nonzero lane
-            # participates, so this reduction is an exact integer lookup.
-            next_prefix = prefix + tl.sum(tl.where(tile_ids == tile, masses, 0), 0)
+            low = tl.sum(tl.where(tile_ids == tile, masses_low, 0), 0).to(tl.uint64)
+            high = tl.sum(tl.where(tile_ids == tile, masses_high, 0), 0).to(tl.uint64)
+            next_prefix = prefix + (low | (high << 32))
             selected = target < next_prefix
         else:
             next_prefix = prefix + _element(sums, tile)
