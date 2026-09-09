@@ -1670,9 +1670,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
                     return None
 
-            def pack_exact_rows(
-                tensor: torch.Tensor, spans: tuple[tuple[int, int], ...]
-            ) -> torch.Tensor:
+            def pack_exact_rows(tensor: torch.Tensor, spans: tuple[tuple[int, int], ...]) -> torch.Tensor:
                 if len(spans) == 1:
                     start, end = spans[0]
                     return tensor[start:end]
@@ -1684,8 +1682,7 @@ class AscendSFAImpl(MLAAttentionImpl):
             tail_metadata = copy(attn_metadata)
             tail_metadata.block_table = attn_metadata.block_table
             tail_query_ends = [
-                (request + 1)
-                * (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH - SFA_FIA_SHARED_PREFILL_TOPK_WIDTH)
+                (request + 1) * (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH - SFA_FIA_SHARED_PREFILL_TOPK_WIDTH)
                 for request in range(SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS)
             ]
             tail_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(tail_query_ends)
