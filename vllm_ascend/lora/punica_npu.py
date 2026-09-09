@@ -37,9 +37,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             from vllm_ascend.lora.lora_ops import (
                 bgmv_expand,
                 bgmv_expand_slice,
+                bgmv_lora,
                 bgmv_shrink,
                 sgmv_expand,
                 sgmv_expand_slice,
+                sgmv_lora,
                 sgmv_shrink,
             )
         self.bgmv_expand = bgmv_expand
@@ -48,6 +50,14 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         self.sgmv_expand = sgmv_expand
         self.sgmv_expand_slice = sgmv_expand_slice
         self.sgmv_shrink = sgmv_shrink
+        if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
+            self.lora_config is not None and self.lora_config.max_lora_rank >= 128
+        ):
+            self.sgmv_lora = None
+            self.bgmv_lora = None
+        else:
+            self.sgmv_lora = sgmv_lora
+            self.bgmv_lora = bgmv_lora
 
     def update_metadata(
         self,
@@ -330,6 +340,12 @@ class PunicaWrapperNPU(PunicaWrapperBase):
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
+        a_use = kwargs.get("full_rank_lora_a") or lora_a_stacked
+        if buffer is None:
+            fused = self.apply_fused_lora_linear(y, x, a_use, lora_b_stacked, output_slices=output_slices, scale=scale)
+            if fused is not None:
+                return
+
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
@@ -337,8 +353,73 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             buffer = tuple(
                 torch.zeros((x.size(0), r), dtype=torch.float32, device=x.device) for _ in range(len(output_slices))
             )
-        self.add_shrink(buffer, x, lora_a_stacked, scale, **kwargs)
+        self.add_shrink(buffer, x, a_use, scale, **kwargs)
         self.add_expand(y, buffer, lora_b_stacked, output_slices, add_inputs=True, **kwargs)
+
+    @staticmethod
+    def _fused_lora_rank_ok(lora_a: torch.Tensor, lora_b: torch.Tensor) -> bool:
+        r = int(lora_b.size(-1))
+        return r in (8, 16, 32, 64) and int(lora_a.size(-2)) == r
+
+    def can_fused_lora_linear(
+        self,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+    ) -> bool:
+        if self.sgmv_lora is None or self.bgmv_lora is None:
+            return False
+        if len(lora_a_stacked) != len(lora_b_stacked):
+            return False
+        return all(self._fused_lora_rank_ok(a, b) for a, b in zip(lora_a_stacked, lora_b_stacked))
+
+    def apply_fused_lora_linear(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: tuple[torch.Tensor, ...],
+        lora_b_stacked: tuple[torch.Tensor, ...],
+        output_slices: tuple[int, ...],
+        scale: float,
+    ) -> torch.Tensor | None:
+        """One kernel per slice: y += (x @ A) @ B. Returns y so ACL graphs keep the op."""
+        sgmv: Callable | None = self.sgmv_lora
+        bgmv: Callable | None = self.bgmv_lora
+        if sgmv is None or bgmv is None:
+            return None
+        if not self.can_fused_lora_linear(lora_a_stacked, lora_b_stacked):
+            return None
+        y_org = y
+        y2 = y.view(-1, y.shape[-1])
+        x2 = x.view(-1, x.shape[-1])
+        offset = 0
+        for i in range(len(lora_a_stacked)):
+            sl = output_slices[i]
+            if self.is_prefill:
+                if self.no_lora:
+                    return y_org
+                y2 = sgmv(
+                    x2,
+                    lora_a_stacked[i],
+                    lora_b_stacked[i],
+                    y2,
+                    *self.prefill_metadata,
+                    scale,
+                    offset,
+                    sl,
+                )
+            else:
+                y2 = bgmv(
+                    x2,
+                    lora_a_stacked[i],
+                    lora_b_stacked[i],
+                    y2,
+                    self._get_token_lora_indices(x2),
+                    scale,
+                    offset,
+                    sl,
+                )
+            offset += sl
+        return y2.view_as(y_org)
 
     def add_lora_fused_moe(
         self,

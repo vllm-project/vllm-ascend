@@ -120,3 +120,53 @@ def sgmv_expand_slice(
     return torch.ops._C_ascend.sgmv_expand(
         inputs, lora_b_weights, lora_indices_tensor, seq_len_tensor, output_tensor, slice_offset, slice_size
     )
+
+
+def sgmv_lora(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    scaling: float,
+    slice_offset: int,
+    slice_size: int,
+):
+    return torch.ops._C_ascend.sgmv_lora(
+        inputs,
+        lora_a_weights,
+        lora_b_weights,
+        lora_indices_tensor,
+        seq_len_tensor,
+        output_tensor,
+        scaling,
+        slice_offset,
+        slice_size,
+    )
+
+
+def bgmv_lora(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    scaling: float,
+    slice_offset: int,
+    slice_size: int,
+):
+    return torch.ops._C_ascend.bgmv_lora(
+        inputs,
+        lora_a_weights,
+        lora_b_weights,
+        lora_indices_tensor,
+        output_tensor,
+        scaling,
+        slice_offset,
+        slice_size,
+    )
