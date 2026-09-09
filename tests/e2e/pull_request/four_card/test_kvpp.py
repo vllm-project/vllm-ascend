@@ -27,19 +27,19 @@ def read_worker_state(worker):
 
     from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
     from vllm_ascend.core.kv_cache_placement import find_mtp_layers
-    from vllm_ascend.distributed.parallel_state import get_kvpp_group
+    from vllm_ascend.distributed import parallel_state
     from vllm_ascend.worker.kvpp_cache import get_kvpp_cache_specs
 
     runner = worker.model_runner
     config = worker.vllm_config
-    group = get_kvpp_group()
+    group = parallel_state._KVPP
     specs = get_kvpp_cache_specs(runner.kv_cache_config)
     mtp = find_mtp_layers(config, specs)
     scheduler = runner.kvpp.scheduler
     return {
         "stage": get_pp_group().rank_in_group,
-        "rank": group.rank_in_group,
-        "ranks": tuple(group.ranks),
+        "rank": group.rank_in_group if group is not None else None,
+        "ranks": tuple(group.ranks) if group is not None else (),
         "targets": set(scheduler.attention_layer_names) if scheduler is not None else set(),
         "expected_targets": {
             name for name, spec in specs.items() if name not in mtp and not isinstance(spec, AscendSFAIndexerCacheSpec)
@@ -68,7 +68,7 @@ def assert_worker_state(runner, enabled):
             assert {state["ranks"] for state in workers} == {tuple(range(stage * TP_SIZE, (stage + 1) * TP_SIZE))}
             assert all(state["targets"] and state["targets"] == state["expected_targets"] for state in workers)
         else:
-            assert all(not state["targets"] and len(state["ranks"]) == 1 for state in workers)
+            assert all(not state["targets"] and state["rank"] is None and not state["ranks"] for state in workers)
 
 
 def observe_prefill(runner, monkeypatch):
