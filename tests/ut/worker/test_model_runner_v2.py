@@ -231,13 +231,15 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     runner.pcp_manager = manager
     manager._local_block_tables = (torch.full((8, 2), 99, dtype=torch.int32),)
     manager._gathered_kv_slot_mappings = torch.full((1, 16), 99, dtype=torch.int64)
+    input_buffers = manager._input_buffers
+    assert input_buffers is not None
     captured = {
-        name: getattr(manager.input_buffers, name)
+        name: getattr(input_buffers, name)
         for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens")
     }
     for name, value in captured.items():
         value.fill_(False if name == "is_padding" else 99)
-    manager.input_buffers.seq_lens_np.fill(99)
+    input_buffers.seq_lens_np.fill(99)
     with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
@@ -246,7 +248,7 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     for name, value in captured.items():
         expected = getattr(dummy, name)
         torch.testing.assert_close(value[: len(expected)], expected)
-    np.testing.assert_array_equal(manager.input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
+    np.testing.assert_array_equal(input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
     assert block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
     assert torch.count_nonzero(block_tables[0]) == 0
     assert slots.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()

@@ -21,6 +21,8 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.utils import (
     zmq_ctx,
 )
 
+from .helpers import make_kv_cache_tensor
+
 
 def test_as_kv_cache_tensors_normalizes_supported_inputs() -> None:
     first = torch.empty(1)
@@ -47,14 +49,14 @@ def test_collect_register_regions_deduplicates_shared_storage() -> None:
     backing = torch.empty(128, dtype=torch.uint8)
     config = SimpleNamespace(
         kv_cache_tensors=[
-            SimpleNamespace(
+            make_kv_cache_tensor(
                 layers=["layer.0"],
                 layer_stride=64,
                 block_stride=64,
                 offset=0,
                 size=backing.nbytes,
             ),
-            SimpleNamespace(
+            make_kv_cache_tensor(
                 layers=["layer.1"],
                 layer_stride=64,
                 block_stride=64,
@@ -79,7 +81,7 @@ def test_collect_register_regions_handles_independent_storages() -> None:
     second = torch.empty(48, dtype=torch.uint8)
     config = SimpleNamespace(
         kv_cache_tensors=[
-            SimpleNamespace(
+            make_kv_cache_tensor(
                 layers=["layer.0", "layer.1"],
                 layer_stride=40,
                 block_stride=40,
@@ -106,7 +108,7 @@ def test_collect_register_regions_recovers_aligned_backing_before_view() -> None
     logical_view = backing[alignment + 64 :]
     config = SimpleNamespace(
         kv_cache_tensors=[
-            SimpleNamespace(
+            make_kv_cache_tensor(
                 layers=["layer.0"],
                 layer_stride=backing_size,
                 block_stride=alignment,
