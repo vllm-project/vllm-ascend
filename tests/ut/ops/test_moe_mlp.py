@@ -336,6 +336,30 @@ class TestUnquantizedFusedMoEMethod(unittest.TestCase):
         method._lora_routing = None
         return method
 
+    def test_shared_pool_weight_lists_in_both_projections(self):
+        method = self._make_method()
+        for need_trans in (False, True):
+            with self.subTest(need_trans=need_trans):
+                layer = SimpleNamespace(
+                    w13_weight_list=[torch.randn(8, 16) for _ in range(3)],
+                    w2_weight_list=[torch.randn(16, 8) for _ in range(3)],
+                )
+                mlp_input = _mlp_compute_input(layer=layer, need_trans=need_trans)
+                with patch("torch_npu.npu_grouped_matmul", return_value=[torch.randn(4, 8)], create=True) as gmm:
+                    gate_up = method.apply_gmm1(mlp_input)
+                    method.apply_gmm2(mlp_input, gate_up, None)
+                for call, weights in zip(gmm.call_args_list, (layer.w13_weight_list, layer.w2_weight_list)):
+                    actual = call.kwargs["weight"]
+                    self.assertEqual(len(actual), len(weights))
+                    for result, original in zip(actual, weights):
+                        expected = original.transpose(0, 1) if need_trans else original
+                        torch.testing.assert_close(result, expected)
+
+    def test_transpose_preserves_batched_weight_list_support(self):
+        weights = [torch.randn(1, 8, 16)]
+        result = self._make_method()._maybe_transpose(weights, True)
+        torch.testing.assert_close(result[0], weights[0].transpose(1, 2))
+
     def test_apply_gmm1_transposes_and_runs_grouped_matmul(self):
         method = self._make_method()
         layer = SimpleNamespace(
@@ -506,6 +530,17 @@ class TestApplyMoeMlp(unittest.TestCase):
 
 
 class TestUnifiedApplyActivation(unittest.TestCase):
+    def test_swigluoai_accepts_shared_pool_weight_lists(self):
+        quant_method = MagicMock()
+        quant_method.get_mlp_weights.return_value = ([torch.randn(8, 16)], [torch.randn(16, 8)])
+        hidden_states = torch.randn(4, 16)
+        with patch(f"{MOE_MLP}.AscendSwigluOAIAndMul.swiglu_oai_forward", return_value="out") as activation:
+            out = _unified_apply_activation(
+                _mlp_compute_input(activation=MoEActivation.SWIGLUOAI), hidden_states, quant_method
+            )
+        self.assertEqual(out, "out")
+        torch.testing.assert_close(activation.call_args.args[0], hidden_states)
+
     def _quant_method(self):
         quant_method = MagicMock()
         quant_method.get_mlp_weights.return_value = (torch.randn(2, 8, 16), torch.randn(2, 16, 8))
