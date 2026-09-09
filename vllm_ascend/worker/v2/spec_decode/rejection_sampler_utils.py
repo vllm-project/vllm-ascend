@@ -1,4 +1,4 @@
-﻿# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
+# Adapt from https://github.com/vllm-project/vllm/blob/main/vllm/v1/worker/gpu/spec_decode/rejection_sampler_utils.py
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
@@ -32,6 +32,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_local_logits_stats_kernel as _compute_block_stats_kernel,
 )
+
 from vllm_ascend.ops.triton.v2.spec_decode.resample import resample
 
 
