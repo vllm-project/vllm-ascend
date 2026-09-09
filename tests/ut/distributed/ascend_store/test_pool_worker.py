@@ -765,7 +765,7 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.kv_send_thread.add_stored_request.assert_not_called()
         worker.kv_send_thread.request_queue.join.assert_not_called()
 
-    def test_get_finished_producer(self):
+    def test_get_finished_producer_clears_synchronous_completions(self):
         worker = self._make_worker(kv_role="kv_producer")
 
         send_thread = MagicMock()
@@ -774,8 +774,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         meta = AscendConnectorMetadata(set(), set())
         done_s, done_r = worker.get_finished({"r1"}, meta)
-        self.assertIn("r1", done_s)
+        self.assertEqual(done_s, set())
         self.assertEqual(done_r, set())
+        send_thread.get_and_clear_finished_requests.assert_called_once_with()
 
     def test_get_finished_consumer(self):
         worker = self._make_worker(kv_role="kv_consumer")
