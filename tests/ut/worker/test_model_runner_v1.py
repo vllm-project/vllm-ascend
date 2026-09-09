@@ -28,10 +28,8 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
 from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.worker.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -655,7 +653,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                 )
 
     @patch(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm.v1.core.kv_cache_planning.may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,
     )
     def test_dsv4_main_materializes_real_planner_geometry_once(
