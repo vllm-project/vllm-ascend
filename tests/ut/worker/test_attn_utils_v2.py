@@ -30,6 +30,7 @@ from vllm_ascend.attention.dsa_v1 import (
 from vllm_ascend.core.kv_cache_interface import (
     AscendMLAAttentionSpec,
     AscendSFAIndexerCacheSpec,
+    get_storage_block_size,
 )
 from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import get_hardware_profile
@@ -364,10 +365,10 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
     spec = discovered_specs[layer_name]
     assert isinstance(spec, AscendMLAAttentionSpec)
     assert spec.block_size == cache_config.block_size * cache_layer.compress_ratio
-    assert spec.storage_block_size == cache_config.block_size
+    assert get_storage_block_size(spec) == cache_config.block_size
     merged_spec = spec.merge([spec])
     assert merged_spec.tokens_per_state == cache_layer.compress_ratio
-    assert merged_spec.storage_block_size == cache_config.block_size
+    assert get_storage_block_size(merged_spec) == cache_config.block_size
 
     num_blocks = 2
     kv_cache_config = KVCacheConfig(
@@ -561,7 +562,7 @@ def test_prepare_kernel_block_sizes_uses_logical_size_for_dsv4():
         ],
     )
 
-    assert spec.storage_block_size == 32
+    assert get_storage_block_size(spec) == 32
     assert upstream_attn_utils.prepare_kernel_block_sizes(kv_cache_config, attn_groups) == [spec.block_size]
 
 
