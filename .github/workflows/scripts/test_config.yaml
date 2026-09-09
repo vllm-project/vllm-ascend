@@ -72,8 +72,6 @@ skip_tests:
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   # Temporarily skipped: this test is currently broken
   - tests/e2e/pull_request/four_card/spec_decode/test_mtp_step3p5.py
-  # The use case is unstable and temporarily taken offline
-  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
 
 # === Accuracy Tests ===
 # The accuracy tests. When at least one of these files is selected,
@@ -92,6 +90,7 @@ accuracy_tests:
   - tests/e2e/pull_request/four_card/test_graph_mode.py
   - tests/e2e/pull_request/four_card/test_pipeline_parallel.py
   - tests/e2e/pull_request/four_card/context_parallel/test_accuracy.py
+  - tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py
   - tests/e2e/pull_request/four_card/context_parallel/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/model_runner_v2/test_deepseek_v4.py
   - tests/e2e/pull_request/four_card/spec_decode/test_dspark_deepseekv4.py
@@ -223,11 +222,7 @@ estimated_times:
   tests/e2e/pull_request/one_card/test_gdn_layerwise_kv.py: 70
   tests/e2e/pull_request/two_card/test_activation.py: 50
   tests/e2e/pull_request/two_card/test_kimi_kda_fused_norm_gate.py: 60
-  tests/e2e/pull_request/one_card/test_w4a4_flatquant.py: 40
-  tests/e2e/pull_request/one_card/test_w4a4_laos_dynamic.py: 40
-  tests/e2e/pull_request/one_card/test_w8a16.py: 40
-  tests/e2e/pull_request/one_card/test_w8a8_dynamic.py: 30
-  tests/e2e/pull_request/one_card/test_w8a8_static.py: 40
+  tests/e2e/pull_request/one_card/test_linear_quantization.py: 60
   tests/e2e/pull_request/one_card/test_gumbel_sampling.py: 110
   tests/e2e/pull_request/one_card/test_model_runner_v1_with_device.py: 70
 

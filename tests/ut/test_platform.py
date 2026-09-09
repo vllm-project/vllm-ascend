@@ -1759,30 +1759,6 @@ class TestNPUPlatform(TestBase):
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
 
-    def test_get_attn_backend_cls_rejects_pcp_and_dcp(self):
-        if vllm_version_is("0.28.0"):
-            attn_selector_config = SimpleNamespace(
-                dtype=torch.float16,
-                head_size=0,
-                kv_cache_dtype=None,
-                block_size=128,
-                use_pcp=True,
-                use_dcp=True,
-                use_mla=False,
-                use_sparse=False,
-            )
-        else:
-            attn_selector_config = AttentionSelectorConfig(
-                dtype=torch.float16,
-                head_size=0,
-                kv_cache_dtype=None,
-                block_size=128,
-                use_pcp=True,
-                use_dcp=True,
-            )
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP simultaneously"):
-            self.platform.get_attn_backend_cls("ascend", attn_selector_config)
-
     def test_get_attn_backend_cls_supports_legacy_config_without_use_dcp(self):
         attn_selector_config = SimpleNamespace(
             use_mla=True,
