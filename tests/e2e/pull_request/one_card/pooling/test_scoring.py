@@ -30,16 +30,18 @@ TEXTS_2 = [
 ]
 
 DTYPE = "half"
-# Short query/doc pairs; max_model_len=None lets the model default (up to 8k)
-# and inflates compile/capture. One VllmRunner per model is reused for
-# 1-to-1 / 1-to-N / N-to-N so we do not pay nine pooling cold starts.
+# Short query/doc pairs; leaving max_model_len unset lets some rerankers
+# default to 8k and inflates compile/capture. all-MiniLM-L12-v2 only
+# supports 128 (max_position_embeddings), so pin to that.
+# One VllmRunner per model is reused for 1-to-1 / 1-to-N / N-to-N so we
+# do not pay nine pooling cold starts.
 _VLLM_KWARGS: dict[str, Any] = {
     "runner": "pooling",
     "dtype": DTYPE,
     "cudagraph_capture_sizes": [4],
-    "max_model_len": 256,
+    "max_model_len": 128,
     "max_num_seqs": 8,
-    "max_num_batched_tokens": 256,
+    "max_num_batched_tokens": 128,
 }
 
 
