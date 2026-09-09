@@ -2836,6 +2836,97 @@ class MooncakeConnectorWorker:
             group_kernel_params[group_idx] = (local_scale, remote_scale, kernel_size)
         return group_kernel_params
 
+    def _uses_k3_p2d1_transfer(self, prefill_tp_size, remote_pcp_size, remote_dcp_size):
+        """Symmetric TP2 K3 heads, with two P context shards and one D shard."""
+        return (
+            self.use_mla
+            and prefill_tp_size == self.tp_size == 2
+            and remote_pcp_size == self.pcp_size == 1
+            and remote_dcp_size == 2
+            and self.dcp_size == 1
+            and any(
+                spec["kv_cache_spec_type"] == "AscendDCPReplicatedDraftAttentionSpec"
+                for spec, _ in self.kv_group2layeridx.values()
+            )
+        )
+
+    def _get_k3_p2d1_split_metadata(self, meta):
+        """Map global context blocks independently for MLA, draft and KDA.
+
+        Both D TP ranks pull once from each P TP rank, including empty
+        transfers. This gives every P allocation exactly two completion ACKs.
+        Draft/KDA head shards are read only from the matching TP rank.
+        """
+        if (meta.remote_block_size or self.block_size) != self.block_size or meta.num_computed_tokens != 0:
+            raise NotImplementedError("K3 P_DCP2 to D_DCP1 requires equal block sizes and a cold D prefix")
+        num_global_blocks = math.ceil(meta.num_external_tokens / self.block_size)
+        ports = [[meta.remote_port + rank] for rank in range(2)]
+        local_lists, remote_lists = [], []
+        self.remote_port_send_num[meta.remote_engine_id] = {
+            port[0]: {"num": self.tp_size, "host": meta.remote_host} for port in ports
+        }
+        for p_rank in range(2):
+            local_groups = [[] for _ in self.kv_group2layeridx]
+            remote_groups = [[] for _ in self.kv_group2layeridx]
+            for gid, (spec, layers) in self.kv_group2layeridx.items():
+                kgid = self._get_kv_cache_group_id(gid, spec)
+                local_blocks = list(meta.local_block_ids[kgid])
+                remote_blocks = list(meta.remote_block_ids[kgid])
+                kind = spec["kv_cache_spec_type"]
+                if kind == "MambaSpec":
+                    if p_rank == self.tp_rank:
+                        local_groups[gid] = local_blocks
+                        remote_groups[gid] = remote_blocks
+                    continue
+                if kind not in ("AscendMLAAttentionSpec", "AscendDCPReplicatedDraftAttentionSpec"):
+                    raise NotImplementedError(f"Unsupported K3 P2D1 cache group: {kind}")
+                draft = kind == "AscendDCPReplicatedDraftAttentionSpec"
+                if draft and p_rank != self.tp_rank:
+                    continue
+                scale = self._get_kernel_block_scale(layers)
+                if len(local_blocks) < num_global_blocks or len(remote_blocks) < math.ceil(num_global_blocks / 2):
+                    raise ValueError("K3 P2D1 block tables do not cover the external context")
+                for g in range(num_global_blocks):
+                    if not draft and g % 2 != p_rank:
+                        continue
+                    # P's replicated draft keeps both CP lanes in each logical
+                    # allocation; MLA keeps only this rank's context lane.
+                    remote_base = remote_blocks[g // 2] * scale * (2 if draft else 1)
+                    if draft:
+                        remote_base += (g % 2) * scale
+                    local_base = local_blocks[g] * scale
+                    remote_groups[gid].extend(range(remote_base, remote_base + scale))
+                    local_groups[gid].extend(range(local_base, local_base + scale))
+            local_lists.append(tuple(local_groups))
+            remote_lists.append(tuple(remote_groups))
+        return ports, local_lists, remote_lists
+
+    def _get_k3_p2d1_group_pulls(self, ports, remote_base_port):
+        result = []
+        for shard_ports in ports:
+            per_port = []
+            for port in shard_ports:
+                p_rank = port - remote_base_port
+                pulls = []
+                for gid, (spec, layers) in self.kv_group2layeridx.items():
+                    kind = spec["kv_cache_spec_type"]
+                    if not layers or (
+                        kind in ("MambaSpec", "AscendDCPReplicatedDraftAttentionSpec") and p_rank != self.tp_rank
+                    ):
+                        continue
+                    pulls.append(
+                        GroupPull(
+                            group_id=gid,
+                            remote_tp_offset=0,
+                            num_group_pulls=1,
+                            prefill_pp_rank=0,
+                            is_group_transfer_end=True,
+                        )
+                    )
+                per_port.append(pulls)
+            result.append(per_port)
+        return result
+
     def _get_local_remote_cp_params(self, meta: ReqMeta):
         """Resolve CP geometry: (remote_block_size, local_cp_rank, local_cp_size,
         remote_cp_size, r_blk), where r_blk = Bd/Bp (>=1) is the D/P block-size ratio.
@@ -2894,6 +2985,9 @@ class MooncakeConnectorWorker:
         by reducing the number of remote blocks that still need to be pulled.
         """
         prefill_tp_size: int = meta.remote_ptp_size if meta.remote_ptp_size is not None else self._prefill_tp_size
+
+        if self._uses_k3_p2d1_transfer(prefill_tp_size, meta.remote_pcp_size, meta.remote_dcp_size):
+            return self._get_k3_p2d1_split_metadata(meta)
 
         if meta.remote_pcp_size * meta.remote_dcp_size * self.pcp_size * self.dcp_size == 1:
             if self._is_hma_required:
@@ -3245,6 +3339,32 @@ class MooncakeConnectorWorker:
                         list(meta.local_block_ids[kv_cache_group_id]) if is_final_shard else []
                     )
                     continue
+                if group_spec["kv_cache_spec_type"] == "AscendDCPReplicatedDraftAttentionSpec":
+                    # The draft stores the full context on every DCP rank. Its
+                    # TP head shard comes from the matching P rank, even when
+                    # this rank owns no main-model context blocks.
+                    if not (
+                        meta.remote_pcp_size == self.pcp_size == 1
+                        and meta.remote_dcp_size == self.dcp_size
+                        and prefill_tp_size == self.tp_size
+                        and remote_block_size == self.block_size
+                        and len(remote_handshake_port_list) == 1
+                        and meta.num_computed_tokens == 0
+                    ):
+                        raise NotImplementedError(
+                            "Replicated draft PD transfer currently requires equal P/D TP/DCP, "
+                            "PCP=1, equal block size and a cold D prefix"
+                        )
+                    local_scale, remote_scale, _ = group_kernel_params[group_idx]
+                    local_ids = list(meta.local_block_ids[kv_cache_group_id])
+                    remote_ids = list(meta.remote_block_ids[kv_cache_group_id])
+                    if len(local_ids) < len(remote_ids):
+                        raise ValueError("Insufficient local replicated draft cache blocks")
+                    group_remote_block_ids[block_id_idx] = self._expand_block_ids(remote_ids, remote_scale)
+                    group_local_block_ids[block_id_idx] = self._expand_block_ids(
+                        local_ids[: len(remote_ids)], local_scale
+                    )
+                    continue
                 # Attention: expand to kernel blocks here. Remote is sliced from remote_first
                 # (skips this rank's prefix-cached blocks) then expanded; local kernels are
                 # located directly from CP rank + block index. This removes the need to pass
@@ -3372,6 +3492,9 @@ class MooncakeConnectorWorker:
             this pull is the final pull for the group. The final-pull flag is
             used by the receiver to decide when group reformatting can run.
         """
+        if self._uses_k3_p2d1_transfer(prefill_tp_size, remote_pcp_size, remote_dcp_size):
+            return self._get_k3_p2d1_group_pulls(remote_handshake_port_list, remote_base_port)
+
         cp_transfer = remote_pcp_size * remote_dcp_size * self.pcp_size * self.dcp_size > 1
         if self._is_hma_required:
             if not cp_transfer:
@@ -4036,6 +4159,13 @@ def transfer_groups_need_independent_block_ids(
     same logical block table. They only need independent block-id lists when
     their tensor layouts use different logical-to-kernel block scales.
     """
+    # Replicated drafts can share a manager with MLA while needing distinct
+    # source CP ownership, even when their local kernel scales are equal.
+    if any(
+        spec.get("kv_cache_spec_type") == "AscendDCPReplicatedDraftAttentionSpec"
+        for spec, _ in kv_group2layeridx.values()
+    ):
+        return True
     group_scales: dict[int, int] = {}
     for group_idx, (group_spec, layer_indices) in kv_group2layeridx.items():
         if group_spec.get("kv_cache_spec_type") == "MambaSpec":
