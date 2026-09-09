@@ -65,3 +65,20 @@ def test_wait_start_aborts_worker_when_master_publishes_verdict(tmp_path: Path):
     coord.publish_verdict(1, "SKIP")
 
     assert coord.wait_start(1, timeout_s=0.1) is False
+
+
+def test_any_foreign_ready_scans_all_rounds(tmp_path: Path):
+    coord = Coordinator(str(tmp_path), num_nodes=2, node_index=0)
+
+    assert coord.any_foreign_ready() is False
+
+    round_dir = tmp_path / "round_1"
+    round_dir.mkdir()
+    (round_dir / "ready_0.json").write_text(json.dumps({"node": 0, "head": "a"}), encoding="utf-8")
+    assert coord.any_foreign_ready() is False, "the master's own marker must not count"
+
+    # A foreign marker in an *earlier* round (late joiner) still counts.
+    other_round = tmp_path / "round_2"
+    other_round.mkdir()
+    (other_round / "ready_1.json").write_text(json.dumps({"node": 1, "head": "a"}), encoding="utf-8")
+    assert coord.any_foreign_ready() is True

@@ -98,6 +98,7 @@ def test_prepare_checkout_only_does_not_run_install_commands(
     checkouts = []
     manager = _build_manager(tmp_path)
     manager.last_built_commit = base
+    monkeypatch.setattr(git_ops, "resolve_commit", lambda repo, ref: ref)
     monkeypatch.setattr(git_ops, "commit_changed_files", lambda repo, commit: ["tests/test_only.py"])
     monkeypatch.setattr(git_ops, "checkout", lambda repo, commit: checkouts.append((repo, commit)))
     monkeypatch.setattr(manager, "_run", pytest.fail)
@@ -108,3 +109,21 @@ def test_prepare_checkout_only_does_not_run_install_commands(
     assert decision.rebuild is False
     assert decision.reinstall_reqs is False
     assert manager.last_built_commit == base
+
+
+def test_prepare_resolves_commit_missing_from_shallow_clone(tmp_path: Path, repo_with_commits, shallow_clone):
+    """Regression: the multi-node worker's repo is a depth-1 clone, so a
+    commanded bisect commit (an ancestor) is not present locally. prepare()
+    must recover it from origin instead of raising GitError."""
+    src, shas = repo_with_commits(3)
+    mid = shas[1]
+    worker_repo = shallow_clone(src, tmp_path / "worker_repo")
+
+    manager = BuildManager(BisectOptions(repo_dir=worker_repo, assume_built_head=True))
+
+    decision = manager.prepare(mid)
+
+    assert git_ops.current_commit(worker_repo) == mid
+    # c2 only touches a.py -> no native change -> checkout-only deploy.
+    assert decision.rebuild is False
+    assert decision.reinstall_reqs is False

@@ -3,8 +3,11 @@ from pathlib import Path
 
 import pytest
 
-from tools.bisect.auto_bisect import Bisector, _parse_args, _resolve_num_nodes
-from tools.bisect.config import SCENE_MULTI, BisectInput, BisectOptions
+from tools.bisect import git_ops
+from tools.bisect.auto_bisect import Bisector, _parse_args, _resolve_num_nodes, main
+from tools.bisect.config import SCENE_MULTI, BisectInput, BisectOptions, Candidate
+from tools.bisect.runner import BisectFatalError
+from tools.bisect.version_compat import PackageVersions
 
 
 def test_pick_mid_prefers_midpoint_then_nearest_unskipped_index():
@@ -165,3 +168,77 @@ def test_resolve_num_nodes_fails_when_multi_node_yaml_has_no_node_count(tmp_path
 
     with pytest.raises(SystemExit, match="Could not determine --num-nodes"):
         _resolve_num_nodes(args, tmp_path)
+
+
+def test_run_trial_maps_deploy_errors_to_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A git/build failure while deploying one candidate must become a SKIP
+    for that commit, not crash the whole search."""
+    monkeypatch.setattr("tools.bisect.runner.kill_stray_servers", lambda: None)
+    inp = BisectInput(scene="single_node", config_yaml="case.yaml", bad_commit="bad", soc="a2", good_commit="a" * 40)
+    opt = BisectOptions(repo_dir=tmp_path, work_dir=str(tmp_path / "work"), assume_built_head=False)
+    bisector = Bisector(inp, opt)
+
+    def boom(candidate, round_idx, log_dir):
+        raise git_ops.GitError("git checkout failed")
+
+    monkeypatch.setattr(bisector.runner, "validate", boom)
+
+    result = bisector._run_trial(Candidate(commit="b" * 40, pr_number=None, subject="bad"))
+
+    assert result.verdict == "SKIP"
+    assert result.note.startswith("build failed -> SKIP")
+
+
+def test_run_writes_report_when_aborting_on_fatal_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The fatal-abort path (e.g. no multi-node worker ever joined) must still
+    write report.json so the run is auditable, and re-raise to main()."""
+    monkeypatch.setattr("tools.bisect.runner.kill_stray_servers", lambda: None)
+    monkeypatch.setattr(git_ops, "describe", lambda repo, ref: Candidate(commit=ref, pr_number=None, subject="s"))
+    monkeypatch.setattr(
+        git_ops,
+        "candidate_list",
+        lambda repo, good, bad: [
+            Candidate(commit=good, pr_number=None, subject="good"),
+            Candidate(commit=bad, pr_number=None, subject="bad"),
+        ],
+    )
+    monkeypatch.setattr("tools.bisect.auto_bisect.expected_versions", lambda repo, commit=None: PackageVersions())
+    inp = BisectInput(scene="single_node", config_yaml="case.yaml", bad_commit="b" * 40, soc="a2", good_commit="a" * 40)
+    opt = BisectOptions(repo_dir=tmp_path, work_dir=str(tmp_path / "work"), assume_built_head=False)
+    bisector = Bisector(inp, opt)
+
+    def fatal(good, candidates, state):
+        raise BisectFatalError("no worker ever joined")
+
+    monkeypatch.setattr(bisector, "_verify_endpoints", fatal)
+
+    with pytest.raises(BisectFatalError, match="no worker"):
+        bisector.run()
+
+    assert bisector.report_path.exists()
+
+
+def test_main_returns_2_on_fatal_abort(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    def fatal(self):
+        raise BisectFatalError("no worker ever joined")
+
+    monkeypatch.setattr(Bisector, "run", fatal)
+
+    rc = main(
+        [
+            "--scene",
+            "single_node",
+            "--config-yaml",
+            "case.yaml",
+            "--soc",
+            "a2",
+            "--good-commit",
+            "a" * 40,
+            "--repo-dir",
+            str(tmp_path),
+            "--work-dir",
+            str(tmp_path / "work"),
+        ]
+    )
+
+    assert rc == 2

@@ -37,6 +37,19 @@ trigger (case FAIL)
 * **SKIP semantics**: a flaky/unconfirmed FAIL, a build failure, or a collection
   error (pytest rc 2/3/4/5, e.g. a conftest ImportError) becomes `SKIP` instead
   of a misleading FAIL — like `git bisect skip`.
+* **Shallow-clone safe deploy**: each commanded commit is resolved before
+  checkout. A multi-node worker (or any node whose repo is a nightly
+  `--depth 1` clone) recovers the ancestor commit from origin via
+  unshallow/fetch, exactly like the master does when resolving the endpoints;
+  the worker additionally unshallows once at agent startup so the slow fetch
+  stays out of the first barrier window.
+* **Abort on missing workers**: if a multi-node barrier times out and no worker
+  node has ever signalled ready (any round), the bisect aborts with exit code 2
+  instead of SKIP-scanning the whole range at the full barrier timeout per
+  round. A worker that merely joined late keeps the per-round SKIP. Known
+  limitation: this is a "has ever joined" check, not liveness -- a worker that
+  dies mid-run keeps its markers and the remaining rounds degrade to per-round
+  SKIPs (liveness/heartbeat detection is future work).
 * **Dependency adaptation**: the tool reads vLLM from
   `.github/vllm-release-tag.commit`, torch-npu from `requirements.txt` (with
   `pyproject.toml` as fallback). If the good and bad endpoints declare the same
@@ -136,4 +149,4 @@ Per run, under `$BISECT_WORK_DIR/<scene>__<config_yaml>/`:
 * `report.json` — final result (first bad commit/PR + full trial history)
 
 Exit code: `0` first-bad found; `2` not found (endpoint check failed / invalid
-range / environment error).
+range / environment error) or aborted (e.g. no multi-node worker ever joined).
