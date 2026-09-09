@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Ascend project
 
 from dataclasses import dataclass
+from statistics import fmean
 from typing import Any
 
 from vllm.config import VllmConfig
@@ -59,7 +60,7 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
         }
         if durations := self.data.get("load_get_duration_seconds"):
             reduced["ascend_store_load_get_count"] = len(durations)
-            reduced["ascend_store_load_get_avg_ms"] = round(sum(durations) / len(durations) * 1e3, 3)
+            reduced["ascend_store_load_get_avg_ms"] = round(fmean(durations) * 1e3, 3)
             reduced["ascend_store_load_get_keys"] = self.data.get("load_get_keys", 0)
         return reduced
 
