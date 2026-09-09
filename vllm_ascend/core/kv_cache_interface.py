@@ -256,9 +256,7 @@ class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
     def __post_init__(self) -> None:
         super().__post_init__()
         if self.dtype != torch.float32:
-            raise ValueError(
-                f"Indexer K-pool compressor state must use FP32, got {self.dtype}."
-            )
+            raise ValueError(f"Indexer K-pool compressor state must use FP32, got {self.dtype}.")
         if self.block_size != self.sliding_window:
             raise ValueError(
                 "Indexer K-pool compressor state requires block_size == "
@@ -269,8 +267,7 @@ class AscendIndexerKPoolStateSpec(AscendSlidingWindowMLASpec):
     def merge(cls, specs: list[Self]) -> Self:
         assert all(isinstance(spec, cls) for spec in specs)
         assert all(spec == specs[0] for spec in specs[1:]), (
-            "All indexer K-pool compressor-state layers in one cache group "
-            "must have the same layout and cache role."
+            "All indexer K-pool compressor-state layers in one cache group must have the same layout and cache role."
         )
         return copy.deepcopy(specs[0])
 

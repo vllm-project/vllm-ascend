@@ -30,11 +30,7 @@ MAMBA = "model.layers.0.linear_attn"
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return (
-        {"compress_ratio": ratio}
-        if vllm_version_is("0.28.0")
-        else {"tokens_per_state": ratio}
-    )
+    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
 class _AttentionBackend:
@@ -68,9 +64,7 @@ def _make_config():
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
-        scheduler_config=SimpleNamespace(
-            disable_hybrid_kv_cache_manager=False
-        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         max_in_flight_tokens=8,
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
@@ -171,9 +165,7 @@ def _make_plan(num_blocks=3, main_head_size=4):
     # Match production: vLLM registers built-in specs before the Ascend hook.
     register_all_kvcache_specs(None)
     config = _make_config()
-    groups = get_glm5_kv_cache_groups(
-        config, _make_specs(main_head_size)
-    )
+    groups = get_glm5_kv_cache_groups(config, _make_specs(main_head_size))
     bytes_per_block = get_glm5_pool_bytes_per_block(groups)
     plan = get_glm5_kv_cache_config(
         config,
@@ -194,9 +186,7 @@ def test_glm5_runner_allocates_contiguous_slot_backings():
 
     caches = runner._reshape_kv_cache_tensors(plan, raw_caches)
     descriptors = {
-        name: descriptor
-        for descriptor in plan.kv_cache_tensors
-        for name in get_kv_cache_tensor_layers(descriptor)
+        name: descriptor for descriptor in plan.kv_cache_tensors for name in get_kv_cache_tensor_layers(descriptor)
     }
     main_cache, main_rope_cache = caches[MAIN]
     (indexer_cache,) = caches[INDEXER]
@@ -217,16 +207,9 @@ def test_glm5_runner_allocates_contiguous_slot_backings():
         assert cache.data_ptr() == raw_caches[name].data_ptr()
     assert all(cache.is_contiguous() for cache in caches[MAMBA])
 
-    mamba_second_offset = (
-        caches[MAMBA][0].numel() * caches[MAMBA][0].element_size()
-    )
-    assert (
-        caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr()
-        == mamba_second_offset
-    )
-    mamba_payload_size = sum(
-        cache.numel() * cache.element_size() for cache in caches[MAMBA]
-    )
+    mamba_second_offset = caches[MAMBA][0].numel() * caches[MAMBA][0].element_size()
+    assert caches[MAMBA][1].data_ptr() - raw_caches[MAMBA].data_ptr() == mamba_second_offset
+    mamba_payload_size = sum(cache.numel() * cache.element_size() for cache in caches[MAMBA])
     assert mamba_payload_size < descriptors[MAMBA].size
 
     state_cache[2].fill_(7)
@@ -252,19 +235,12 @@ def test_glm5_runner_splits_main_mla_components_within_each_page():
     )
     assert kv_c_cache.stride(0) * kv_c_cache.element_size() == page_size
     assert k_pe_cache.stride(0) * k_pe_cache.element_size() == page_size
-    assert (
-        k_pe_cache.data_ptr() - raw_caches[MAIN].data_ptr()
-        == kv_c_cache[0].numel() * kv_c_cache.element_size()
-    )
+    assert k_pe_cache.data_ptr() - raw_caches[MAIN].data_ptr() == kv_c_cache[0].numel() * kv_c_cache.element_size()
 
 
 def test_standalone_mtp_uses_existing_compressed_cache_allocator():
     config = _make_config()
-    specs = {
-        name: spec
-        for name, spec in _make_specs().items()
-        if not isinstance(spec, MambaSpec)
-    }
+    specs = {name: spec for name, spec in _make_specs().items() if not isinstance(spec, MambaSpec)}
     groups = get_glm5_kv_cache_groups(config, specs)
     bytes_per_block = get_glm5_pool_bytes_per_block(groups)
     plan = get_glm5_kv_cache_config(config, groups, 3 * bytes_per_block)

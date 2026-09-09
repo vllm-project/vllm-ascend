@@ -28,11 +28,7 @@ from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return (
-        {"compress_ratio": ratio}
-        if vllm_version_is("0.28.0")
-        else {"tokens_per_state": ratio}
-    )
+    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
 def make_config():
@@ -42,9 +38,7 @@ def make_config():
             decode_context_parallel_size=1,
             prefill_context_parallel_size=1,
         ),
-        scheduler_config=SimpleNamespace(
-            disable_hybrid_kv_cache_manager=False
-        ),
+        scheduler_config=SimpleNamespace(disable_hybrid_kv_cache_manager=False),
         max_in_flight_tokens=32,
         cache_config=SimpleNamespace(
             num_gpu_blocks_override=None,
@@ -100,9 +94,7 @@ def register_cache_specs():
 def test_groups_share_block_ids_and_pack_two_page_classes(pool):
     config = make_config()
     specs = make_specs(pool)
-    groups = get_glm5_kv_cache_groups(
-        config, dict(reversed(list(specs.items())))
-    )
+    groups = get_glm5_kv_cache_groups(config, dict(reversed(list(specs.items()))))
     layout = _get_glm5_cache_layout(groups)
     assert layout is not None
     assert groups[0].layer_names == [
@@ -122,17 +114,11 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
         20 * layout.main_page_size,
         20 * layout.small_page_size,
     }
-    expected_strides = (
-        {0}
-        if vllm_version_is("0.28.0")
-        else {layout.main_page_size, layout.small_page_size}
-    )
+    expected_strides = {0} if vllm_version_is("0.28.0") else {layout.main_page_size, layout.small_page_size}
     assert {tensor.block_stride for tensor in plan.kv_cache_tensors} == expected_strides
 
     placements = {
-        layer_name: tensor
-        for tensor in plan.kv_cache_tensors
-        for layer_name in get_kv_cache_tensor_layers(tensor)
+        layer_name: tensor for tensor in plan.kv_cache_tensors for layer_name in get_kv_cache_tensor_layers(tensor)
     }
     main = placements[layout.mla_names[0]]
     indexer = placements[layout.indexer_names[0]]
@@ -151,27 +137,16 @@ def test_groups_share_block_ids_and_pack_two_page_classes(pool):
 
     # Scheduler groups consume disjoint IDs from the shared global BlockPool.
     required_blocks = sum(
-        (
-            group.kv_cache_spec.max_memory_usage_bytes(config)
-            + group.kv_cache_spec.page_size_bytes
-            - 1
-        )
+        (group.kv_cache_spec.max_memory_usage_bytes(config) + group.kv_cache_spec.page_size_bytes - 1)
         // group.kv_cache_spec.page_size_bytes
         for group in groups
     )
     assert get_glm5_pool_bytes_per_block(groups) == bytes_per_block
-    assert (
-        get_glm5_max_memory_usage(config, groups)
-        == required_blocks * bytes_per_block
-    )
+    assert get_glm5_max_memory_usage(config, groups) == required_blocks * bytes_per_block
 
 
 def test_standalone_mtp_layout_has_no_mamba_groups():
-    specs = {
-        name: spec
-        for name, spec in make_specs().items()
-        if not isinstance(spec, MambaSpec)
-    }
+    specs = {name: spec for name, spec in make_specs().items() if not isinstance(spec, MambaSpec)}
     groups = get_glm5_kv_cache_groups(make_config(), specs)
     layout = _get_glm5_cache_layout(groups)
     assert len(groups) == 2
@@ -198,14 +173,10 @@ def test_pipeline_projection_supports_a_mamba_only_worker():
     assert layout.small_slot_count == 0
 
     budget = 10 * layout.main_page_size
-    plan = get_glm5_kv_cache_config(
-        config, projected_groups, available_memory=budget
-    )
+    plan = get_glm5_kv_cache_config(config, projected_groups, available_memory=budget)
     assert plan.num_blocks == 10
     assert len(plan.kv_cache_tensors) == 1
-    assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [
-        local_mamba_name
-    ]
+    assert get_kv_cache_tensor_layers(plan.kv_cache_tensors[0]) == [local_mamba_name]
 
 
 def test_missing_paired_cache_is_rejected():

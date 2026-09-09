@@ -167,10 +167,5 @@ def test_glm5_next_pd_consumer_still_preserves_verifier_window():
 
 
 def test_patch_is_registered_with_upstream_signature():
-    assert (
-        scheduler_module.Scheduler._mamba_block_aligned_split
-        is _mamba_block_aligned_split
-    )
-    assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(
-        _original_mamba_block_aligned_split
-    )
+    assert scheduler_module.Scheduler._mamba_block_aligned_split is _mamba_block_aligned_split
+    assert inspect.signature(_mamba_block_aligned_split) == inspect.signature(_original_mamba_block_aligned_split)

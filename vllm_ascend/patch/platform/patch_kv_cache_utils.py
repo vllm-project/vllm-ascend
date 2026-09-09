@@ -116,12 +116,8 @@ def _ascend_resolve_kv_cache_block_sizes(
         # Resolve from the actual groups so prefix hashes remain splittable by
         # the state cache after that rewrite.
         scheduler_block_size = math.lcm(*group_block_sizes) * dcp * pcp
-        connector_enabled = (
-            getattr(vllm_config, "kv_transfer_config", None) is not None
-        )
-        if not (
-            cache_config.enable_prefix_caching or connector_enabled
-        ):
+        connector_enabled = getattr(vllm_config, "kv_transfer_config", None) is not None
+        if not (cache_config.enable_prefix_caching or connector_enabled):
             return scheduler_block_size, scheduler_block_size
 
         requested_hash_block_size = getattr(
@@ -130,14 +126,9 @@ def _ascend_resolve_kv_cache_block_sizes(
             None,
         )
         hash_block_size = (
-            requested_hash_block_size
-            if requested_hash_block_size is not None
-            else math.gcd(*group_block_sizes)
+            requested_hash_block_size if requested_hash_block_size is not None else math.gcd(*group_block_sizes)
         )
-        if any(
-            block_size % hash_block_size
-            for block_size in group_block_sizes
-        ):
+        if any(block_size % hash_block_size for block_size in group_block_sizes):
             raise ValueError(
                 f"Invalid hash_block_size={hash_block_size}; all GLM-Next "
                 "KV cache group block sizes must be divisible by it. "
@@ -616,6 +607,8 @@ def _ascend_get_kv_cache_config_from_groups(
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
+
+
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
 vllm.v1.core.kv_cache_utils.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
 vllm.v1.core.kv_cache_utils._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups

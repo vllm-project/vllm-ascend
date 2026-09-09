@@ -319,21 +319,15 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
         model_version="glm5_next",
         cache_role="indexer_state",
     )
-    full_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        {"layer.main": main_spec, "layer.indexer": indexer_spec}
-    )
-    state_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        {"layer.state": state_spec}
-    )
+    full_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.main": main_spec, "layer.indexer": indexer_spec})
+    state_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.state": state_spec})
     mamba_spec = MambaSpec(
         block_size=full_block_size,
         shapes=((1,),),
         dtypes=(torch.float32,),
         mamba_cache_mode="align",
     )
-    mamba_group_spec = UniformTypeKVCacheSpecs.from_specs(
-        {"layer.mamba": mamba_spec}
-    )
+    mamba_group_spec = UniformTypeKVCacheSpecs.from_specs({"layer.mamba": mamba_spec})
     assert full_group_spec is not None
     assert state_group_spec is not None
     assert mamba_group_spec is not None
@@ -360,9 +354,7 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
     scheduler_full_spec = scheduler_config.kv_cache_groups[0].kv_cache_spec
     assert isinstance(scheduler_full_spec, MLAAttentionSpec)
     assert scheduler_full_spec.head_size == main_spec.head_size
-    ratio_field = (
-        "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state"
-    )
+    ratio_field = "compress_ratio" if vllm_version_is("0.28.0") else "tokens_per_state"
     assert getattr(scheduler_full_spec, ratio_field) == 1
 
     vllm_config = _make_vllm_config(
@@ -374,15 +366,12 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
     # Match EngineCore: the global block size becomes the smallest unwrapped
     # scheduler group size, which is the indexer-state granularity here.
     vllm_config.cache_config.block_size = min(
-        group.kv_cache_spec.block_size
-        for group in scheduler_config.kv_cache_groups
+        group.kv_cache_spec.block_size for group in scheduler_config.kv_cache_groups
     )
     assert vllm_config.cache_config.block_size == 16
-    scheduler_block_size, hash_block_size = (
-        _ascend_resolve_kv_cache_block_sizes(
-            scheduler_config,
-            vllm_config,
-        )
+    scheduler_block_size, hash_block_size = _ascend_resolve_kv_cache_block_sizes(
+        scheduler_config,
+        vllm_config,
     )
     assert (scheduler_block_size, hash_block_size) == (
         full_block_size,
@@ -390,10 +379,7 @@ def test_glm5_hashes_use_state_granularity_after_engine_min_block_update(
     )
 
     hashes_per_full_block = full_block_size // hash_block_size
-    base_hashes = [
-        index.to_bytes(2, "little")
-        for index in range(2 * hashes_per_full_block)
-    ]
+    base_hashes = [index.to_bytes(2, "little") for index in range(2 * hashes_per_full_block)]
     full_group_hashes = BlockHashListWithBlockSize(
         base_hashes,
         hash_block_size,

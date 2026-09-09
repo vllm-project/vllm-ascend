@@ -22,9 +22,7 @@ from vllm_ascend.utils import (
 SFA_QSFA_TILE_SIZE = 128
 MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
-_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset(
-    {"Glm5NextIndexerCache", "Glm5NextStateCache"}
-)
+_GLM5_NEXT_KPOOL_CACHE_TYPES = frozenset({"Glm5NextIndexerCache", "Glm5NextStateCache"})
 
 
 def is_glm5_next_kpool_cache(attn_module: Any) -> bool:

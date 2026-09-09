@@ -524,12 +524,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             dtypes=(torch.float32,),
         )
 
-        main_module = SimpleNamespace(
-            get_kv_cache_spec=lambda _config: main_spec
-        )
-        indexer_module = Glm5NextIndexerCache.__new__(
-            Glm5NextIndexerCache
-        )
+        main_module = SimpleNamespace(get_kv_cache_spec=lambda _config: main_spec)
+        indexer_module = Glm5NextIndexerCache.__new__(Glm5NextIndexerCache)
         torch.nn.Module.__init__(indexer_module)
         indexer_module.get_kv_cache_spec = lambda _config: indexer_spec
         state_module = Glm5NextStateCache.__new__(Glm5NextStateCache)
@@ -549,12 +545,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             specs["model.layers.1.attn"].page_size_padded,
             mamba_spec.page_size_bytes,
         )
-        self.assertIsNone(
-            specs["model.layers.1.indexer.k_cache"].page_size_padded
-        )
-        self.assertIsNone(
-            specs["model.layers.1.indexer.state_cache"].page_size_padded
-        )
+        self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
+        self.assertIsNone(specs["model.layers.1.indexer.state_cache"].page_size_padded)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):

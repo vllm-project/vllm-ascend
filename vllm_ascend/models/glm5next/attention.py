@@ -72,14 +72,10 @@ class Indexer(nn.Module):
         self.q_lora_rank = q_lora_rank  # 1536
 
         # kpool
-        self.index_kpool_compress_ape = nn.Parameter(
-            torch.zeros(self.index_kpool, self.head_dim, dtype=torch.float32)
-        )
+        self.index_kpool_compress_ape = nn.Parameter(torch.zeros(self.index_kpool, self.head_dim, dtype=torch.float32))
         # Keep the checkpoint name ``index_kpool_compress_gate`` without a
         # ``.weight`` suffix. torch.mm consumes its [head_dim, hidden_size] shape.
-        self.index_kpool_compress_gate = nn.Parameter(
-            torch.empty(self.head_dim, hidden_size, dtype=torch.bfloat16)
-        )
+        self.index_kpool_compress_gate = nn.Parameter(torch.empty(self.head_dim, hidden_size, dtype=torch.bfloat16))
 
         # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(
@@ -168,9 +164,7 @@ class Indexer(nn.Module):
         k = self.k_norm(kw[:, : self.head_dim])
 
         if self.rope_dim > 0:
-            q_pe, q_nope = torch.split(
-                q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-            )
+            q_pe, q_nope = torch.split(q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1)
             k_pe, k_nope = torch.split(
                 k,
                 [self.rope_dim, self.head_dim - self.rope_dim],

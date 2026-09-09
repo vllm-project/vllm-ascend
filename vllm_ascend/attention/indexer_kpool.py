@@ -41,13 +41,8 @@ def select_indexer_block_size(storage_block_size: int) -> tuple[int, int]:
     Returns ``(block_size, blocks_per_logical_block)``.
     """
     if storage_block_size <= 0:
-        raise ValueError(
-            f"Indexer KPool storage block size must be positive, got {storage_block_size}."
-        )
-    if (
-        storage_block_size <= INDEXER_KPOOL_MAX_BLOCK_SIZE
-        and storage_block_size % INDEXER_KPOOL_BLOCK_ALIGNMENT == 0
-    ):
+        raise ValueError(f"Indexer KPool storage block size must be positive, got {storage_block_size}.")
+    if storage_block_size <= INDEXER_KPOOL_MAX_BLOCK_SIZE and storage_block_size % INDEXER_KPOOL_BLOCK_ALIGNMENT == 0:
         return storage_block_size, 1
     max_candidate = min(storage_block_size, INDEXER_KPOOL_MAX_BLOCK_SIZE)
     max_candidate -= max_candidate % INDEXER_KPOOL_BLOCK_ALIGNMENT
@@ -106,18 +101,12 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
     ) -> None:
         if not isinstance(kv_cache_spec, MLAAttentionSpec):
             raise TypeError(
-                "Ascend Indexer KPool backend requires MLAAttentionSpec, "
-                f"got {type(kv_cache_spec).__name__}."
+                f"Ascend Indexer KPool backend requires MLAAttentionSpec, got {type(kv_cache_spec).__name__}."
             )
         compress_ratio = get_kv_cache_compression_ratio(kv_cache_spec)
         if compress_ratio <= 1:
-            raise ValueError(
-                "Ascend Indexer KPool cache requires compress_ratio > 1, "
-                f"got {compress_ratio}."
-            )
-        if not layer_names or any(
-            not name.endswith(".indexer.k_cache") for name in layer_names
-        ):
+            raise ValueError(f"Ascend Indexer KPool cache requires compress_ratio > 1, got {compress_ratio}.")
+        if not layer_names or any(not name.endswith(".indexer.k_cache") for name in layer_names):
             raise ValueError(f"Invalid Indexer KPool cache layer names: {layer_names}.")
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.logical_block_size = kv_cache_spec.block_size
@@ -129,11 +118,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 f"kernel block size: logical={self.logical_block_size}, "
                 f"kernel={GLM5_SFA_KERNEL_BLOCK_SIZE}."
             )
-        self.kernel_blocks_per_logical_block = (
-            self.logical_block_size // GLM5_SFA_KERNEL_BLOCK_SIZE
-        )
-        self.indexer_block_size, self.indexer_blocks_per_logical_block = (
-            select_indexer_block_size(self.storage_block_size)
+        self.kernel_blocks_per_logical_block = self.logical_block_size // GLM5_SFA_KERNEL_BLOCK_SIZE
+        self.indexer_block_size, self.indexer_blocks_per_logical_block = select_indexer_block_size(
+            self.storage_block_size
         )
         scheduler_config = vllm_config.scheduler_config
         # ACLGraph replay keeps the addresses captured on the first run. The
@@ -198,13 +185,9 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             out=seq_lens,
         )
         cum_query_lens = self._cum_query_lens_buffer[:num_reqs]
-        cum_query_lens.copy_(
-            common_attn_metadata.query_start_loc[: num_reqs + 1][1:]
-        )
+        cum_query_lens.copy_(common_attn_metadata.query_start_loc[: num_reqs + 1][1:])
         raw_seq_lens = self._raw_seq_lens_buffer[:num_reqs]
-        raw_seq_lens.copy_(
-            common_attn_metadata.seq_lens[:num_reqs]
-        )
+        raw_seq_lens.copy_(common_attn_metadata.seq_lens[:num_reqs])
         if common_attn_metadata._seq_lens_cpu is not None:
             seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_reqs]
         elif common_attn_metadata.seq_lens_cpu is not None:
@@ -231,9 +214,7 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
                 f"required={expanded_width}, capacity="
                 f"{self._block_table_buffer.shape[1]}."
             )
-        block_table = self._block_table_buffer[
-            :num_reqs, :expanded_width
-        ]
+        block_table = self._block_table_buffer[:num_reqs, :expanded_width]
         # The common full-group table is expanded for the C128 SFA kernel:
         # scheduler block N becomes [split*N, ..., split*N+split-1]. The
         # compressed indexer owns one physical page per scheduler block, so it
@@ -248,11 +229,14 @@ class AscendIndexerKPoolMetadataBuilder(AttentionMetadataBuilder):
             block_table.copy_(base)
         else:
             base_repeated = base.repeat_interleave(k, dim=1)
-            offsets = torch.arange(
-                expanded_width,
-                dtype=torch.int32,
-                device=base.device,
-            ) % k
+            offsets = (
+                torch.arange(
+                    expanded_width,
+                    dtype=torch.int32,
+                    device=base.device,
+                )
+                % k
+            )
             valid = base_repeated >= 0
             block_table.copy_(
                 torch.where(

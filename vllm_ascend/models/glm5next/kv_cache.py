@@ -28,8 +28,7 @@ def format_indexer_kpool_slot_mapping(
     """Map completed token pools onto the compressed indexer cache."""
     if compress_ratio <= 1 or logical_block_size <= 0 or logical_block_size % compress_ratio:
         raise ValueError(
-            f"logical_block_size={logical_block_size} must be divisible by "
-            f"compress_ratio={compress_ratio}."
+            f"logical_block_size={logical_block_size} must be divisible by compress_ratio={compress_ratio}."
         )
     valid = (slot_mapping >= 0) & (torch.remainder(positions + 1, compress_ratio) == 0)
     safe_slots = slot_mapping.clamp_min(0)
@@ -74,10 +73,7 @@ class Glm5NextIndexerCache(nn.Module, AttentionLayerBase):
         self.compress_ratio = compress_ratio
         self.prefix = prefix
         current_config = get_current_vllm_config()
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(current_config.parallel_config.pipeline_parallel_size)
-        ]
+        self.kv_cache = [torch.tensor([]) for _ in range(current_config.parallel_config.pipeline_parallel_size)]
         static_context = current_config.compilation_config.static_forward_context
         if prefix in static_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -127,13 +123,10 @@ class Glm5NextStateCache(nn.Module, AttentionLayerBase):
     ) -> None:
         super().__init__()
         if dtype != torch.float32:
-            raise ValueError(
-                f"GLM-Next compressor state must use torch.float32, got {dtype}."
-            )
+            raise ValueError(f"GLM-Next compressor state must use torch.float32, got {dtype}.")
         if compress_ratio <= 1:
             raise ValueError(
-                "GLM-Next compressor state requires compress_ratio greater "
-                f"than one, got {compress_ratio}."
+                f"GLM-Next compressor state requires compress_ratio greater than one, got {compress_ratio}."
             )
         self.state_dim = state_dim
         self.dtype = dtype
@@ -144,10 +137,7 @@ class Glm5NextStateCache(nn.Module, AttentionLayerBase):
         self.cache_config = cache_config
         self.cache_role = "indexer_state"
         current_config = get_current_vllm_config()
-        self.kv_cache = [
-            torch.tensor([])
-            for _ in range(current_config.parallel_config.pipeline_parallel_size)
-        ]
+        self.kv_cache = [torch.tensor([]) for _ in range(current_config.parallel_config.pipeline_parallel_size)]
         static_context = current_config.compilation_config.static_forward_context
         if prefix in static_context:
             raise ValueError(f"Duplicate layer name: {prefix}")

@@ -33,11 +33,7 @@ from vllm_ascend.utils import vllm_version_is
 
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
-    return (
-        {"compress_ratio": ratio}
-        if vllm_version_is("0.28.0")
-        else {"tokens_per_state": ratio}
-    )
+    return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
 
 def test_state_uses_sliding_pages_and_full_precision():
@@ -59,10 +55,7 @@ def test_state_uses_sliding_pages_and_full_precision():
             prefill_context_parallel_size=2,
         ),
     )
-    assert (
-        spec.max_memory_usage_bytes(context_parallel_config)
-        == spec.page_size_bytes
-    )
+    assert spec.max_memory_usage_bytes(context_parallel_config) == spec.page_size_bytes
 
 
 @pytest.mark.parametrize(
@@ -93,9 +86,7 @@ def test_completed_pool_slots_preserve_logical_block_padding():
 @pytest.mark.parametrize("ratio", [0, 1, 3])
 def test_invalid_pool_geometry_is_rejected(ratio):
     with pytest.raises(ValueError):
-        format_indexer_kpool_slot_mapping(
-            torch.tensor([0]), torch.tensor([0]), 128, ratio
-        )
+        format_indexer_kpool_slot_mapping(torch.tensor([0]), torch.tensor([0]), 128, ratio)
 
 
 @pytest.mark.parametrize(

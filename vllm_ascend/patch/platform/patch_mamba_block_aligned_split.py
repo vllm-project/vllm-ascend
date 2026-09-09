@@ -59,19 +59,13 @@ def _mamba_block_aligned_split(
         return num_new_tokens
 
     if _is_glm5_next_model(self.vllm_config.model_config):
-        num_computed_tokens = (
-            request.num_computed_tokens
-            + num_new_local_computed_tokens
-            + num_external_computed_tokens
-        )
+        num_computed_tokens = request.num_computed_tokens + num_new_local_computed_tokens + num_external_computed_tokens
         if num_computed_tokens < max(
             request.num_prompt_tokens,
             request.num_tokens - 1,
         ):
             block_size = self.block_size
-            last_cache_position = (
-                request.num_tokens - request.num_tokens % block_size
-            )
+            last_cache_position = request.num_tokens - request.num_tokens % block_size
             if self.use_eagle:
                 last_cache_position = max(last_cache_position - block_size, 0)
             scheduled_end = num_computed_tokens + num_new_tokens
