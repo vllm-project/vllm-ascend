@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from collections.abc import Iterable
 from copy import copy
 from types import SimpleNamespace
@@ -446,7 +447,27 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             input_ids=input_ids,
         )
         if self.log2phy is not None:
+            log2phy_before = topk_ids
             topk_ids = self.log2phy[topk_ids]
+            if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                n_show = min(8, topk_ids.shape[0])
+                print(
+                    f"[MoE-DEBUG] ep_rank={self.ep_rank} | log2phy 映射（逻辑专家→物理专家，EPLB）"
+                    f" shape={tuple(self.log2phy.shape)}",
+                    flush=True,
+                )
+                if self.log2phy.numel() <= 64:
+                    print(f"[MoE-DEBUG]   log2phy 全量 = {self.log2phy.tolist()}", flush=True)
+                else:
+                    print(
+                        f"[MoE-DEBUG]   log2phy 前 16 项 = {self.log2phy[:16].tolist()}",
+                        flush=True,
+                    )
+                print(
+                    f"[MoE-DEBUG]   前 {n_show} 个 token 逻辑 id → 物理 id："
+                    f"{log2phy_before[:n_show].tolist()} → {topk_ids[:n_show].tolist()}",
+                    flush=True,
+                )
 
         num_shared_experts = self.n_shared_experts
         if num_shared_experts is None:
@@ -532,6 +553,14 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
             enable_force_load_balance=enable_force_load_balance,
             input_ids=input_ids,
         )
+        if os.environ.get("DSV4_MOE_DEBUG") == "1":
+            n_show = min(8, topk_ids.shape[0])
+            print(
+                f"[MoE-DEBUG] ep_rank={self.ep_rank}/{self.moe_config.ep_size} "
+                f"| 路由结果 topk_ids {tuple(topk_ids.shape)} "
+                f"（前 {n_show} 个 token 选中的专家 id）: {topk_ids[:n_show].tolist()}",
+                flush=True,
+            )
         self.ascend_pertoken_scale = pertoken_scale
         self.ascend_mc2_mask = mc2_mask
         try:

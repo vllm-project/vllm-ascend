@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 
 
+import os
 import torch
 import torch_npu
 from torch.nn.functional import pad
@@ -670,6 +671,14 @@ def unquant_apply_mlp(
         w1 = w1.transpose(1, 2)
         w2 = w2.transpose(1, 2)
 
+    if os.environ.get("DSV4_MOE_DEBUG") == "1":
+        gl = group_list.tolist() if hasattr(group_list, "tolist") else group_list
+        print(
+            f"[MoE-DEBUG] grouped_matmul(gate_up)：x {tuple(hidden_states.shape)} "
+            f"weight {tuple(w1.shape)} | group_list_type={group_list_type} "
+            f"group_list={gl}（每个本地专家分到的 token 数）",
+            flush=True,
+        )
     gate_up_out = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],

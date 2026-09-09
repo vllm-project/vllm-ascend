@@ -24,6 +24,7 @@
 # limitations under the License.
 #
 import math
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -364,6 +365,14 @@ class DeepseekV4MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        if os.environ.get("DSV4_MOE_DEBUG") == "1":
+            print(
+                f"[MoE-DEBUG] layer={self.layer_idx} tp_rank={self.tp_rank} "
+                f"ep_rank={self.ep_rank}/{self.ep_size} | 进入 MoE：x {tuple(hidden_states.shape)} "
+                f"(attention 已 all-reduce 完成，shape 完整)",
+                flush=True,
+            )
+
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
         # TODO: We can replace the all_reduce at the end of attn with a
@@ -381,6 +390,12 @@ class DeepseekV4MoE(nn.Module):
         else:
             # router_logits: (num_tokens, n_experts)
             router_logits = F.linear(hidden_states.float(), self.gate.weight)
+            if os.environ.get("DSV4_MOE_DEBUG") == "1":
+                print(
+                    f"[MoE-DEBUG] layer={self.layer_idx} tp_rank={self.tp_rank} "
+                    f"ep_rank={self.ep_rank} | gate 打分：router_logits {tuple(router_logits.shape)}",
+                    flush=True,
+                )
             fused_moe_out = self.experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
