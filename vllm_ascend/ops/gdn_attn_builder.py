@@ -52,6 +52,40 @@ def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
     return torch.argsort(tensor, stable=True)
 
 
+def _remove_spec_graph_padding_queries(
+    common_attn_metadata: CommonAttentionMetadata,
+    num_decode_draft_tokens_cpu: torch.Tensor | None,
+) -> CommonAttentionMetadata:
+    """Keep FIA graph padding from becoming a real GDN prefill segment.
+
+    FIA gives padded requests a full K+1 query span. GDN must instead see
+    zero-length inactive suffixes, otherwise it takes the mixed-prefill path
+    and fails to refresh the stable speculative buffers used by graph replay.
+    Only change the GDN-local metadata view, never the shared MLA metadata.
+    """
+    seq_lens = common_attn_metadata.seq_lens_cpu_upper_bound
+    if seq_lens is None or num_decode_draft_tokens_cpu is None:
+        return common_attn_metadata
+    num_reqs = common_attn_metadata.num_reqs
+    draft_tokens = num_decode_draft_tokens_cpu[:num_reqs]
+    if draft_tokens.numel() != num_reqs or not torch.any(draft_tokens > 0).item():
+        return common_attn_metadata
+    inactive = (seq_lens[:num_reqs] == 0) & (draft_tokens < 0)
+    if not torch.any(inactive).item():
+        return common_attn_metadata
+    first_inactive = int(torch.nonzero(inactive, as_tuple=True)[0][0])
+    # Graph padding is a suffix. Do not silently compact/reorder live tokens.
+    if not torch.all(inactive[first_inactive:]).item():
+        raise ValueError("GDN speculative graph padding must be a request suffix")
+    query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu.clone()
+    query_start_loc_cpu[first_inactive + 1 :] = query_start_loc_cpu[first_inactive]
+    return common_attn_metadata.replace(
+        query_start_loc_cpu=query_start_loc_cpu,
+        query_start_loc=query_start_loc_cpu.to(common_attn_metadata.query_start_loc.device),
+        num_actual_tokens=int(query_start_loc_cpu[-1]),
+    )
+
+
 def _treat_single_token_prefills_with_state_as_decodes(
     common_attn_metadata: CommonAttentionMetadata,
 ) -> CommonAttentionMetadata:
@@ -518,6 +552,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
     ) -> GDNAttentionMetadata:
+        if self.use_full_cuda_graph and self.use_spec_decode:
+            common_attn_metadata = _remove_spec_graph_padding_queries(common_attn_metadata, num_decode_draft_tokens_cpu)
         m = _treat_single_token_prefills_with_state_as_decodes(common_attn_metadata)
 
         query_start_loc = m.query_start_loc
@@ -829,13 +865,18 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             and num_decodes <= self.decode_cudagraph_max_bs
         ):
             graph_batch_size = m.num_reqs
+            # Ascend pads query_start_loc for FIA as if every graph row held a
+            # one-token decode. GDN must instead use the real token count when
+            # refreshing its stable recurrent-state buffers; otherwise padded
+            # rows retain block-0 state indices and are replayed as live work.
+            num_live_decode_tokens = min(num_decode_tokens, m.num_actual_tokens)
             (
                 non_spec_state_indices_tensor,
                 non_spec_query_start_loc,
             ) = self._pad_non_spec_decode_graph_inputs(
                 non_spec_state_indices_tensor,
                 non_spec_query_start_loc,
-                num_decode_tokens=num_decode_tokens,
+                num_decode_tokens=num_live_decode_tokens,
                 graph_batch_size=graph_batch_size,
             )
             non_spec_conv1d_cache_indices = non_spec_state_indices_tensor

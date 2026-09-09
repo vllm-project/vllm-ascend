@@ -42,7 +42,7 @@ from vllm_ascend.weight_switch import (
 )
 from vllm_ascend.weight_switch.o_proj import OProjWeightSwitchMixin
 
-if vllm_version_is("0.28.0"):
+if vllm_version_is("0.27.1") or vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
 else:
     from vllm.v1.attention.ops.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
