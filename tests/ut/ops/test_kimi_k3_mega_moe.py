@@ -133,15 +133,22 @@ def test_kimi_megamoe_symm_buffer_uses_routed_dimensions(monkeypatch):
         "get_mc2_group",
         lambda: SimpleNamespace(device_group=object()),
     )
+    monkeypatch.setattr(
+        moe_comm_module,
+        "get_ascend_config",
+        lambda: SimpleNamespace(mega_moe_max_tokens=65536),
+    )
+
     comm_impl._init_mega_moe_symm_buffer(
         dispatch_quant_mode=2,
         dispatch_quant_out_dtype=torch.int8,
+        is_decode_only_node=False,
     )
 
     call = comm_impl.get_symm_buffer_for_mega_moe.call_args
     assert call.kwargs["hidden"] == 3584
     assert call.kwargs["intermediate_hidden"] == 6144
-    assert call.kwargs["max_recv_token_num"] == 0
+    assert call.kwargs["max_recv_token_num"] == 65536
 
 
 def test_cann_mega_moe_maps_kimi_situ_activation():
@@ -200,7 +207,10 @@ def test_cann_mega_moe_forwards_kimi_situ_to_operator():
         activation=MoEActivation.SITU,
     )
 
-    result, result_expert_tokens = comm_impl._apply_cann_mega_moe(fused_input)
+    result, result_expert_tokens = comm_impl._apply_cann_mega_moe(
+        fused_input,
+        is_decode_only_node=False,
+    )
 
     assert result is expected
     assert result_expert_tokens is expert_tokens
@@ -230,7 +240,7 @@ def _run_scale_normalization_case(scale_payload):
         w2_scale=scale_payload,
     )
 
-    comm_impl._apply_cann_mega_moe(fused_input)
+    comm_impl._apply_cann_mega_moe(fused_input, is_decode_only_node=False)
     call = comm_impl.mega_moe.call_args
     return call.kwargs["l1_weights_sf"], call.kwargs["l2_weights_sf"]
 
