@@ -19,10 +19,9 @@
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py`.
 """
 
-import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -225,98 +224,6 @@ DSV3_2_SFA_PCP_DCP_CASE = AccuracyCase(
 def test_dsv3_2_sfa_pcp_model_runner_v2_graph_accuracy() -> None:
     """Guard MRV2 SFA PCP full-decode-only graph accuracy."""
     _run_accuracy_case(DSV3_2_SFA_PCP_CASE)
-
-
-@pytest.mark.e2e_model(DSV3_2_MODEL)
-@pytest.mark.parametrize("graph_mode", ["FULL_DECODE_ONLY", "NONE"])
-@pytest.mark.parametrize("collect_logits", [False, True], ids=["original_sampling", "raw_logits"])
-@patch.dict(
-    os.environ,
-    {
-        "VLLM_USE_V2_MODEL_RUNNER": "1",
-        "VLLM_BATCH_INVARIANT": "1",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "HCCL_BUFFSIZE": "768",
-        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
-    },
-)
-@wait_until_npu_memory_free(target_free_percentage=0.8)
-def test_dsv3_2_sfa_pcp_graph_diagnostic(
-    graph_mode: str, collect_logits: bool, input_variant: str = "original"
-) -> None:
-    """Compare one graph variable, preserving the original accuracy assertions.
-
-    Score collection is a separate axis so its effect on the original greedy
-    path remains observable. Each case creates a fresh model and KV cache.
-    """
-    runner_kwargs = dict(DSV3_2_SFA_PCP_CASE.runner_kwargs)
-    runner_kwargs["compilation_config"] = {**FULL_DECODE_GRAPH, "cudagraph_mode": graph_mode}
-    if collect_logits:
-        runner_kwargs["logprobs_mode"] = "raw_logits"
-    if input_variant == "pcp1":
-        runner_kwargs["prefill_context_parallel_size"] = 1
-    case = replace(DSV3_2_SFA_PCP_CASE, runner_kwargs=runner_kwargs)
-    if input_variant == "third_prompt_only":
-        # Retain the existing golden for the selected prompt verbatim.
-        case = replace(
-            case,
-            prompts=case.prompts[2:3],
-            expected_outputs=tuple(expected[2:3] for expected in DSV3_2_SFA_PCP_GOLDENS),
-        )
-    original_generate = VllmRunner.generate_greedy
-
-    def logged_generate(runner, prompts, max_tokens):
-        if not collect_logits:
-            outputs = original_generate(runner, prompts, max_tokens)
-            records = [
-                {"prompt": prompt, "full_token_ids": ids, "full_text": text}
-                for prompt, (ids, text) in zip(prompts, outputs, strict=True)
-            ]
-        else:
-            scored_outputs = runner.generate_greedy_logprobs(prompts, max_tokens, 5)
-            outputs = []
-            records = []
-            for prompt, scored_output in zip(prompts, scored_outputs, strict=True):
-                ids, text, steps = scored_output[:3]
-                token_records = []
-                for token_id, scores in zip(ids, steps, strict=True):
-                    top = sorted(scores.items(), key=lambda item: item[1].logprob, reverse=True)[:5]
-                    token_records.append(
-                        {
-                            "sampled_token_id": token_id,
-                            "top_k_raw_logits": [
-                                {"token_id": tid, "logit": score.logprob, "text": score.decoded_token}
-                                for tid, score in top
-                            ],
-                            "top1_top2_margin": top[0][1].logprob - top[1][1].logprob if len(top) >= 2 else None,
-                        }
-                    )
-                records.append({"prompt": prompt, "generated_token_ids": ids, "text": text, "steps": token_records})
-                outputs.append((ids, prompt + text))
-        print(
-            "SFA_PCP_DIAGNOSTIC "
-            + json.dumps(
-                {
-                    "graph_mode": graph_mode,
-                    "collect_logits": collect_logits,
-                    "input_variant": input_variant,
-                    "requests": records,
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        return outputs
-
-    with patch.object(VllmRunner, "generate_greedy", logged_generate):
-        _run_accuracy_case(case)
-
-
-@pytest.mark.e2e_model(DSV3_2_MODEL)
-@pytest.mark.parametrize("input_variant", ["original", "pcp1", "third_prompt_only"])
-def test_dsv3_2_sfa_pcp_layout_diagnostic(input_variant: str) -> None:
-    """Vary only PCP or prompt batch against the fixed graph/scored reference."""
-    test_dsv3_2_sfa_pcp_graph_diagnostic("FULL_DECODE_ONLY", True, input_variant)
 
 
 @pytest.mark.e2e_model(DSV3_2_MODEL)
