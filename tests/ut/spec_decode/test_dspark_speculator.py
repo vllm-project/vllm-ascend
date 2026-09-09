@@ -19,12 +19,14 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
+import vllm.forward_context as forward_context
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
@@ -270,3 +272,121 @@ def test_build_draft_is_prefilling_zeros_padded_requests():
         is_prefilling,
         torch.tensor([True, False, False, False]),
     )
+
+
+@pytest.mark.parametrize("legacy_api", [False, True])
+@pytest.mark.parametrize("dummy_run,skip_attn", [(True, True), (True, False), (False, False)])
+def test_propose_does_not_reuse_target_dp_counts_for_memory_profile(monkeypatch, legacy_api, dummy_run, skip_attn):
+    module = "vllm_ascend.worker.v2.spec_decode.dspark.speculator"
+    counts = torch.tensor([16, 32], dtype=torch.int32)
+    target_sync = counts if legacy_api else SimpleNamespace(num_tokens_across_dp=counts)
+    spec = _spec(_bf16_config())
+    spec.input_buffers = SimpleNamespace(positions=torch.zeros(16, dtype=torch.int64))
+    spec.max_num_tokens = 16
+    spec.max_num_reqs = 2
+    spec._build_draft_is_prefilling = MagicMock(return_value=torch.zeros(2, dtype=torch.bool))
+    monkeypatch.setattr(f"{module}.vllm_version_is", lambda _: legacy_api)
+    monkeypatch.setattr(f"{module}.build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(f"{module}.build_draft_attn_metadata_factory", lambda *args: nullcontext())
+    parent_propose = MagicMock(return_value=torch.zeros(2, 5, dtype=torch.int64))
+    monkeypatch.setattr(DSparkSpeculator, "propose", parent_propose)
+
+    spec.propose(
+        SimpleNamespace(num_reqs=2, num_tokens=16),
+        {},
+        {},
+        torch.zeros(16, _HIDDEN),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        num_tokens_across_dp=target_sync if legacy_api else None,
+        dp_sync=None if legacy_api else target_sync,
+        dummy_run=dummy_run,
+        skip_attn_for_dummy_run=skip_attn,
+        is_profile=dummy_run and skip_attn,
+    )
+
+    forwarded_sync = parent_propose.call_args.args[11]
+    if dummy_run and skip_attn:
+        # None makes the draft forward synchronize its own query count (2 * 5),
+        # rather than asserting that the target count (16) equals 10.
+        assert forwarded_sync is None
+    else:
+        assert forwarded_sync is target_sync
+    torch.testing.assert_close(counts, torch.tensor([16, 32], dtype=torch.int32))
+
+
+@pytest.mark.parametrize("dp_rank", [0, 1])
+def test_memory_profile_recomputes_draft_dp_counts_in_forward_context(monkeypatch, dp_rank):
+    """Exercise the real upstream profile branch and forward-context DP check."""
+    module = "vllm_ascend.worker.v2.spec_decode.dspark.speculator"
+    config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=2,
+            data_parallel_rank=dp_rank,
+            is_moe_model=True,
+        )
+    )
+    spec = _spec(config)
+    spec.max_num_tokens = 16
+    spec.max_num_reqs = 2
+    spec.max_model_len = 128
+    spec.num_query_per_req = 5
+    spec.hidden_states = torch.zeros(16, _HIDDEN)
+    spec.context_positions = torch.zeros(16, dtype=torch.int64)
+    spec.input_buffers = SimpleNamespace(positions=spec.context_positions)
+    spec.draft_tokens = torch.zeros(2, 5, dtype=torch.int64)
+    spec.model = SimpleNamespace(precompute_and_store_context_kv=MagicMock())
+    spec._prepare_eplb_forward = MagicMock()
+    spec._build_draft_is_prefilling = MagicMock(return_value=torch.zeros(2, dtype=torch.bool))
+    monkeypatch.setattr(f"{module}.vllm_version_is", lambda _: False)
+    monkeypatch.setattr(f"{module}.build_attn_metadata_wrapper", nullcontext)
+    monkeypatch.setattr(f"{module}.build_draft_attn_metadata_factory", lambda *args: nullcontext())
+    # Stub only distributed transport / device context setup, not the upstream
+    # propose path or the DPMetadata.make assertion that failed in production.
+    coordinate = MagicMock(return_value=(False, torch.tensor([10, 10]), None))
+    monkeypatch.setattr(forward_context, "coordinate_batch_across_dp", coordinate)
+    monkeypatch.setattr(forward_context.current_platform, "set_additional_forward_context", lambda **kwargs: {})
+    monkeypatch.setattr(forward_context, "create_forward_context", lambda *args, **kwargs: SimpleNamespace())
+    observed = []
+
+    def generate(num_reqs, num_tokens, **kwargs):
+        with forward_context.set_forward_context(
+            None,
+            config,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=kwargs["num_tokens_across_dp"],
+        ):
+            observed.append((num_reqs, num_tokens))
+
+    spec._generate_draft = generate
+    target_counts = torch.tensor([16, 16])
+    spec.propose(
+        SimpleNamespace(num_reqs=2, num_tokens=16, seq_lens_cpu_upper_bound=np.array([8, 8])),
+        {},
+        {},
+        torch.zeros(16, _HIDDEN),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        dp_sync=SimpleNamespace(num_tokens_across_dp=target_counts),
+        dummy_run=True,
+        skip_attn_for_dummy_run=True,
+        is_profile=True,
+    )
+
+    assert observed == [(2, 10)]
+    coordinate.assert_called_once_with(
+        num_tokens_unpadded=10,
+        parallel_config=config.parallel_config,
+        allow_microbatching=False,
+    )
+    torch.testing.assert_close(target_counts, torch.tensor([16, 16]))

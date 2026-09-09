@@ -316,6 +316,12 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         self.input_batch = input_batch
         assert self.input_batch is not None
         sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if dummy_run and skip_attn_for_dummy_run:
+            # The upstream memory-profile path forwards this state directly to
+            # the draft, whose query count differs from the target's. Let
+            # set_forward_context synchronize the draft count independently;
+            # do not mutate the target state or add a sync to normal decoding.
+            sync_state = None
         if self.aux_hidden_contract is not None:
             self.aux_hidden_contract.validate_runtime(
                 aux_hidden_states,
