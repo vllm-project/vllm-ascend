@@ -30,10 +30,10 @@ Download the [Eco-Tech/Kimi-K3-w4a8](https://www.modelscope.cn/models/Eco-Tech/K
 | Platform                     | Deployment                                 | Topology                  |
 | ---------------------------- | ------------------------------------------ | ------------------------- |
 | 4 × Atlas 800 A3 (64G × 16)  | Mixed Prefill/Decode deployment            | DP4/TP16/EP64             |
-| 8 × Atlas 800 A3 (64G × 16)  | Four Prefill nodes and four Decode nodes   | DP4/TP16/PP1 on each side |
+| 8 × Atlas 800 A3 (64G × 16)  | Four Prefill nodes and four Decode nodes   | DP4/TP16 on each side     |
 | 8 × Atlas 800 A2 (64G × 8)   | Mixed Prefill/Decode deployment            | DP8/TP8/EP64              |
 | 4 × Atlas 950DT (8 devices)   | Mixed Prefill/Decode deployment            | DP4/TP8/EP32              |
-| 8 × Atlas 950DT (8 devices)   | Four Prefill nodes and four Decode nodes   | DP4/TP8/PP1 on each side  |
+| 8 × Atlas 950DT (8 devices)   | Four Prefill nodes and four Decode nodes   | DP4/TP8 on each side      |
 
 The checkpoint directory must contain the model configuration, tokenizer, image processor, and model weight files required by the published Kimi K3 package.
 
@@ -805,7 +805,7 @@ The A2 capabilities have not changed in this release and remain consistent with 
 
 ### 5.2 Eight-Node PD Separation Deployment
 
-The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. A3 uses DP4/TP16/PP1 on each side, while Atlas 950DT uses DP4/TP8/PP1 on each side.
+The validated PD separation topology uses eight nodes: four Prefill nodes and four Decode nodes. A3 uses DP4/TP16 on each side, while Atlas 950DT uses DP4/TP8 on each side.
 
 Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
@@ -832,7 +832,6 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
     export HCCL_BUFFSIZE=1024
     export HCCL_IF_IP=${local_ip}
     export HCCL_SOCKET_IFNAME=${nic_name}
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
@@ -877,26 +876,18 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
         --limit-mm-per-prompt '{"vision_chunk": 2}' \
         --kv-transfer-config \
         '{
-         "kv_connector": "MultiConnector",
-         "kv_role": "kv_producer",
-         "kv_connector_extra_config": {
-            "connectors": [
-              {
-                "kv_connector": "MooncakeConnectorV1",
-                "kv_role": "kv_producer",
-                "kv_port": "'"$KV_PORT"'",
-                "kv_connector_extra_config": {
-                    "prefill": {
-                        "dp_size": 4,
-                        "tp_size": '"$7"'
-                    },
-                    "decode": {
-                        "dp_size": 4,
-                        "tp_size": '"$7"'
-                   }
-                }
-              }
-            ]
+          "kv_connector": "MooncakeConnectorV1",
+          "kv_role": "kv_producer",
+          "kv_port": "'"$KV_PORT"'",
+          "kv_connector_extra_config": {
+            "prefill": {
+                "dp_size": 4,
+                "tp_size": '"$7"'
+            },
+            "decode": {
+                "dp_size": 4,
+                "tp_size": '"$7"'
+            }
           }
         }'
     ```
@@ -919,7 +910,6 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
     export HCCL_IF_IP=${local_ip}
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=${nic_name}
-    export ASCEND_ENABLE_USE_FABRIC_MEM=1
     export ASCEND_RT_VISIBLE_DEVICES=$1
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
@@ -989,7 +979,6 @@ Deploy `launch_online_dp.py` and the corresponding engine template on every node
     python launch_online_dp.py \
         --dp-size 4 \
         --tp-size 16 \
-        --pp-size 1 \
         --dp-size-local 1 \
         --dp-rank-start <LOCAL_DP_RANK> \
         --dp-address <PD_MASTER_IP> \
@@ -1003,7 +992,6 @@ Deploy `launch_online_dp.py` and the corresponding engine template on every node
     python launch_online_dp.py \
         --dp-size 4 \
         --tp-size 8 \
-        --pp-size 1 \
         --dp-size-local 1 \
         --dp-rank-start <LOCAL_DP_RANK> \
         --dp-address <PD_MASTER_IP> \
@@ -1022,7 +1010,6 @@ Key PD settings:
 | Topology                     | 4P4D                         | Four Prefill and four Decode nodes.                     |
 | `--dp-size`                  | `4`                          | Four DP ranks on each side.                             |
 | `--tp-size`                  | `16` on A3; `8` on Atlas 950DT | Uses all devices in a node.                           |
-| `--pp-size`                  | `1`                          | One pipeline stage per engine.                          |
 | `--dp-size-local`            | `1`                          | One DP rank per node.                                   |
 | `KV_PORT`                    | `36000` for P, `36200` for D | Separates producer and consumer KV traffic.             |
 | `recompute_scheduler_enable` | `false`                      | Matches the validated Prefill and Decode configuration. |
