@@ -191,12 +191,17 @@ def _categorical_kernel(
             if FP64:
                 # C220 has no vector uint64 select. Sum 16-bit limbs in
                 # uint32 (4096 * 65535 fits), then combine scalar uint64s.
-                low, high = _fixed_mass_words(weights)
-                tile_mass = (
-                    tl.sum(low & 0xFFFF, 0).to(tl.uint64)
-                    + (tl.sum((low >> 16) & 0xFFFF, 0).to(tl.uint64) << 16)
-                    + (tl.sum(high, 0).to(tl.uint64) << 32)
-                )
+                # Bound conversion temporaries without changing native's
+                # 4096-element FP32 tiles or their accumulation order.
+                tile_mass = tl.full((), 0, tl.uint64)
+                for start in range(0, BLOCK, 256):
+                    chunk = tl.gather(weights, start + tl.arange(0, 256), axis=0)
+                    low, high = _fixed_mass_words(chunk)
+                    tile_mass += (
+                        tl.sum(low & 0xFFFF, 0).to(tl.uint64)
+                        + (tl.sum((low >> 16) & 0xFFFF, 0).to(tl.uint64) << 16)
+                        + (tl.sum(high, 0).to(tl.uint64) << 32)
+                    )
                 masses_low = tl.where(tile_ids == tile, tile_mass.to(tl.uint32), masses_low)
                 masses_high = tl.where(tile_ids == tile, (tile_mass >> 32).to(tl.uint32), masses_high)
                 total_mass += tile_mass

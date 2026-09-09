@@ -575,9 +575,10 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
             False,
         )
 
+    sample()
+    torch.npu.synchronize()
+    print("valid categorical warmup passed", flush=True)
     if execution == "aclgraph":
-        sample()
-        torch.npu.synchronize()
         graph = torch.npu.NPUGraph()
         with torch.npu.graph(graph):
             graph_outputs = sample()
@@ -628,7 +629,13 @@ def test_categorical_sampling_asserts_invalid_device_values(
     )
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode != 0, f"{case}/{execution} unexpectedly succeeded"
-    assert expected_message in output, output
+    assert "valid categorical warmup passed" in output, output
+    if backend == "native":
+        assert expected_message in output, output
+    else:
+        # Triton's device_assert traps but C220 does not flush its message.
+        # Require the device trap, not an arbitrary import/compile failure.
+        assert "error code is 507035" in output and "trap error" in output, output
 
 
 @dataclass(frozen=True)
