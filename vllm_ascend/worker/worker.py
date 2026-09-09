@@ -70,6 +70,7 @@ from vllm.v1.worker.workspace import init_workspace_manager
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.batch_invariant import init_batch_invariance
+from vllm_ascend.core.kv_cache_interface import is_deepseek_v4_kv_cache_spec
 from vllm_ascend.core.profiling_chunk_predictor import (
     _attach_profiling_chunk_execution_time,
 )
@@ -656,17 +657,27 @@ class NPUWorker(WorkerBase):
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory
+
+        # vLLM #51718 removed the DSV4-specific packed planner; the shared-tuple
+        # layout is produced by AscendKVCacheConfigBuilder (vLLM PR #53558), so
+        # DSV4 already fits all groups in one physical budget and must not take
+        # the generic per-layer multi-group scale below. Detect it BEFORE the
+        # generic planner: on the #53558 vLLM, planning.get_kv_cache_groups()
+        # rejects MLA indexer layers (page size cannot be padded), so the old
+        # post-hoc DSV4 guard could never be reached.
+        if any(is_deepseek_v4_kv_cache_spec(spec) for spec in kv_cache_spec.values()):
+            return available_memory
+
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
         if not kv_cache_groups:
             return available_memory
-        # vLLM #51718 removed the DSV4-specific packed planner. Ascend restores
-        # that shared-tuple layout in patch_kv_cache_utils, so DSV4 already fits
-        # all groups in one physical budget and must not take the generic
-        # per-layer multi-group scale below.
+        # Retained guard for specs that carry model_version on nested groups.
         for group in kv_cache_groups:
             group_spec = group.kv_cache_spec
             specs = (
-                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
+                group_spec.kv_cache_specs.values()
+                if isinstance(group_spec, UniformTypeKVCacheSpecs)
+                else (group_spec,)
             )
             if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
                 return available_memory
