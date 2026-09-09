@@ -19,6 +19,8 @@
 import os
 from unittest.mock import patch
 
+import pytest
+
 from tests.e2e.conftest import VllmRunner
 
 
@@ -39,8 +41,9 @@ def test_qwen3_next_distributed_mp_full_decode_only_tp4():
         del vllm_model
 
 
+@pytest.mark.parametrize("enable_fused_mc2", [0, 2], ids=["default", "megamoe"])
 @patch.dict(os.environ, {"HCCL_BUFFSIZE": "1024"})
-def test_qwen3_next_w8a8dynamic_distributed_mp_tp4():
+def test_qwen3_next_w8a8dynamic_distributed_mp_tp4(enable_fused_mc2: int):
     example_prompts = [
         "Hello, my name is",
     ] * 4
@@ -54,6 +57,7 @@ def test_qwen3_next_w8a8dynamic_distributed_mp_tp4():
         enable_expert_parallel=True,
         enforce_eager=True,
         quantization="ascend",
+        additional_config={"enable_fused_mc2": enable_fused_mc2},
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
         del vllm_model

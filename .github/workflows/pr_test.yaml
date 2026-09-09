@@ -347,6 +347,15 @@ jobs:
             rm -f extra_recommended_tests.obs.yaml
           fi
 
+      - name: Include MegaMoE opt-in regression tests
+        run: |
+          # Always exercise the explicit MegaMoE opt-in in ready-precise runs.
+          # ready-all and main2main already collect these parameterized cases.
+          printf '%s\n' \
+            'tests/e2e/pull_request/four_card/test_deepseek_v3_2_w8a8_pruning.py::test_moe_w8a8_tp_pp_ep_full_decode_only[megamoe]' \
+            'tests/e2e/pull_request/four_card/test_qwen3_next.py::test_qwen3_next_w8a8dynamic_distributed_mp_tp4[megamoe]' \
+            >> recommended_pytest_paths.txt
+
       - name: Export coverage paths output
         id: export-paths
         if: ${{ !cancelled() }}
