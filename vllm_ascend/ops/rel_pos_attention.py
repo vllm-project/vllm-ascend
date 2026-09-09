@@ -39,10 +39,22 @@ class AscendRelPosAttention(RelPosAttention):
         )
 
     if vllm_version_is("0.28.0"):
-        __init__ = _init_attention
-    else:
 
         def __init__(
+            self,
+            dim: int,
+            num_heads: int = 8,
+            qkv_bias: bool = True,
+            use_rel_pos: bool = False,
+            rel_pos_zero_init: bool = True,
+            input_size: tuple[int, int] | None = None,
+        ) -> None:
+            self._init_attention(dim, num_heads, qkv_bias, use_rel_pos, rel_pos_zero_init, input_size)
+
+    else:
+        # The upstream main constructor intentionally has a different positional
+        # signature from v0.28.0; mypy cannot select this runtime version branch.
+        def __init__(  # type: ignore[misc]
             self,
             dim: int,
             num_heads: int = 8,
