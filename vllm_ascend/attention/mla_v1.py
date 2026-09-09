@@ -1534,9 +1534,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             query, key.contiguous(), value.contiguous(), **common_kwargs
         )
 
-        attn_output, attn_lse = self._compute_prefill_context(
-            q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
-        )
+        if not self.enable_kv_nz:
+            attn_output, atten_else = self._compute_prefill_context(
+                q_nope, q_pe, kv_c_and_k_pe_cache, 
+                self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse
+            )
 
         attn_output = attn_output.reshape([num_tokens, self.num_heads * self.v_head_dim])
 
@@ -1568,13 +1570,33 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         kv_c_normed = kv_c_normed.view(num_tokens, self.num_kv_heads, self.kv_lora_rank)
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, self.qk_rope_head_dim)
-        DeviceOperator.reshape_and_cache(
-            key=kv_c_normed,
-            value=k_pe,
-            key_cache=kv_cache[0],
-            value_cache=kv_cache[1],
-            slot_mapping=slots,
-        )
+        if self.enable_kv_nz:
+            _NZ_DIM = 16
+            torch_npu.npu_scatter_pa_kv_cache(
+                key=kv_c_normed.unsqueeze(1).contnuous(),
+                value=k_pe.unsqueeze(1).contiguous(),
+                key_cache=kv_cache[0].view(
+                    -1,
+                    self.kv_lora_rank // _NZ_DIM,
+                    kv_cache[0].shape[-1],
+                    _NZ_DIM,
+                ),
+                value_cache=kv_cache[1].view(
+                    -1,
+                    self.qk_rope_head_dim // _NZ_DIM,
+                    kv_cache[1].shape[-1],
+                    _NZ_DIM,
+                ),
+                slot_mapping=slots.continguous(),
+            )
+        else：
+            DeviceOperator.reshape_and_cache(
+                key=kv_c_normed,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_mapping=slots,
+            )
         return k_pe, kv_c_normed
 
     def exec_kv_decode(
