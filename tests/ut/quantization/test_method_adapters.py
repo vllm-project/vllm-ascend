@@ -11,6 +11,7 @@ from vllm_ascend.quantization.method_adapters import (
     AscendKVCacheMethod,
     AscendLinearMethod,
     _make_mx_scale_weight_loader,
+    _make_padded_mx_scale_weight_loader,
 )
 from vllm_ascend.quantization.methods.base import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme
 
@@ -31,6 +32,23 @@ def test_mx_scale_weight_loader_preserves_group_phase():
 
     weight_loader.assert_not_called()
     torch.testing.assert_close(param, loaded_weight[:, 49:66])
+
+
+def test_padded_mx_scale_weight_loader_supports_tp4_mxfp8():
+    def weight_loader(param, loaded_weight):
+        shard_size = param.shape[param.input_dim]
+        start_idx = 3 * shard_size
+        param.data.copy_(loaded_weight.narrow(param.input_dim, start_idx, shard_size))
+
+    param = torch.nn.Parameter(torch.empty(2, 17), requires_grad=False)
+    param.input_dim = 1
+    loader = _make_padded_mx_scale_weight_loader(weight_loader, tp_size=4)
+    loaded_weight = torch.arange(2 * 66, dtype=torch.float32).reshape(2, 66)
+
+    loader(param, loaded_weight)
+
+    expected = torch.cat((loaded_weight[:, 51:66], torch.zeros(2, 2)), dim=1)
+    torch.testing.assert_close(param, expected)
 
 
 class TestAscendLinearMethod(TestBase):
