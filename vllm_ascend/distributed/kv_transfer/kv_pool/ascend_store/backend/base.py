@@ -30,33 +30,6 @@ def parse_qos_from_extra_config(extra_config: dict[str, Any] | None) -> int | No
     return qos
 
 
-def fetch_qos_from_current_config() -> int | None:
-    """Fetch the ``qos_priority`` field of kv_connector_extra_config from the
-    current vLLM config.
-
-    The store backends call this inside their QoS injection helpers so no QoS
-    needs to be passed through ``__init__``. Returns None when no current
-    config is available in this process (e.g. standalone store usage) or when
-    the field is absent; an invalid value still fails fast via
-    ``parse_qos_from_extra_config``.
-    """
-    from vllm.config import get_current_vllm_config
-
-    try:
-        vllm_config = get_current_vllm_config()
-    except AssertionError:
-        # vLLM >= 0.27.1 (main) raises when no config has been set in this
-        # process (e.g. stores used outside the vLLM engine).
-        vllm_config = None
-    if vllm_config is None:
-        return None
-    kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-    if kv_transfer_config is None:
-        return None
-    extra_config = getattr(kv_transfer_config, "kv_connector_extra_config", None)
-    return parse_qos_from_extra_config(extra_config)
-
-
 class Backend(ABC):
     store: Any | None = None
     # Whether the connector must filter existing keys before calling put().

@@ -20,7 +20,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base impor
     QOS_VALUE_MAX,
     QOS_VALUE_MIN,
     Backend,
-    fetch_qos_from_current_config,
+    parse_qos_from_extra_config,
 )
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
@@ -102,17 +102,17 @@ def _validate_store_qos() -> None:
         )
 
 
-def _inject_store_qos() -> None:
+def _inject_store_qos(extra_config: dict[str, Any] | None) -> None:
     """Inject the QoS from kv_connector_extra_config into the
     ``store.comm_resource_config.qos`` field of ASCEND_GLOBAL_RESOURCE_CONFIG.
 
-    The QoS is read from the current vLLM config instead of an ``__init__``
-    parameter; the call is a no-op when no qos is configured. Merges into the
+    The QoS is parsed from the connector's extra_config passed by the pool
+    worker; the call is a no-op when no qos is configured. Merges into the
     existing config so other HIXL fields (protocol_desc, listen_port, ...)
     are preserved. An explicit extra-config value overrides a qos already
     present in the environment.
     """
-    qos = fetch_qos_from_current_config()
+    qos = parse_qos_from_extra_config(extra_config)
     if qos is None:
         return
     config_str = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")
@@ -155,12 +155,18 @@ def _inject_store_qos() -> None:
 
 
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
+    def __init__(
+        self,
+        parallel_config: ParallelConfig,
+        lazy_init: bool = False,
+        contribute_memory: bool = True,
+        extra_config: dict[str, Any] | None = None,
+    ):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
-        _inject_store_qos()
+        _inject_store_qos(extra_config)
         _validate_store_qos()
 
         self.store: Any | None = None

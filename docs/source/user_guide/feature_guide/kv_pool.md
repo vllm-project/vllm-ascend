@@ -1592,7 +1592,6 @@ For the temporary DSv4 known issue, see:
 | :--- | :--- |
 | `comm_resource_config.protocol_desc` | Protocol descriptor for the top-level Mooncake transfer engine. In PD disaggregation, this controls the `MooncakeConnectorV1` PD transfer path. Example values include `["hccs:device"]` and `["roce:device"]`. |
 | `store.comm_resource_config.protocol_desc` | Protocol descriptor for Mooncake Store traffic used by `AscendStoreConnector`. On A3, this can be set to `["roce:device"]` while PD transfer uses HCCS. |
-| `store.comm_resource_config.qos` | Transfer QoS for Mooncake Store traffic used by `AscendStoreConnector`. The valid range is **0-4 (integers only)**; the **default value is 0**, and a larger value means a higher transfer priority. Invalid values cause startup to fail fast with a validation error. See [QoS Configuration](#561-qos-configuration). |
 | `comm_resource_config.listen_port` | One-sided communication listen port. The HIXL default is `16666`; use a different port for standalone `mooncake_client` processes to avoid conflicts with embedded clients. |
 | `fabric_memory.max_capacity` | Fabric memory quota in GB per process. Use it only when the fabric memory budget is too small; see [Fabric memory size alignment](#5322-fabric-memory-size-alignment-a3--ascend_enable_use_fabric_mem1). |
 

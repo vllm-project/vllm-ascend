@@ -21,7 +21,7 @@ import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, patch
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend import (
@@ -619,53 +619,25 @@ class TestExtraConfigQos(unittest.TestCase):
             ):
                 parse_qos_from_extra_config({"qos_priority": qos})
 
-    def test_fetch_qos_from_current_config(self):
-        from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
-            fetch_qos_from_current_config,
-        )
 
-        def _cfg(extra_config):
-            return SimpleNamespace(kv_transfer_config=SimpleNamespace(kv_connector_extra_config=extra_config))
-
-        # Patch the object registered as vllm.config (the test env mocks it):
-        # patch("vllm.config.get_current_vllm_config") would resolve through
-        # the parent package mock instead and silently not take effect.
-        def _fetch(cfg):
-            return patch.object(sys.modules["vllm.config"], "get_current_vllm_config", Mock(return_value=cfg))
-
-        with _fetch(_cfg({"qos_priority": 2})):
-            self.assertEqual(fetch_qos_from_current_config(), 2)
-        with _fetch(_cfg({})):
-            self.assertIsNone(fetch_qos_from_current_config())
-        with _fetch(None):
-            self.assertIsNone(fetch_qos_from_current_config())
-        with patch.object(sys.modules["vllm.config"], "get_current_vllm_config", Mock(side_effect=AssertionError)):
-            self.assertIsNone(fetch_qos_from_current_config())
-        with (
-            _fetch(_cfg({"qos_priority": 9})),
-            self.assertRaisesRegex(ValueError, "kv_connector_extra_config"),
-        ):
-            fetch_qos_from_current_config()
+def _qos_config(qos) -> dict | None:
+    return None if qos is None else {"qos_priority": qos}
 
 
 class TestMooncakeStoreQosInjection(unittest.TestCase):
     _ENV = "ASCEND_GLOBAL_RESOURCE_CONFIG"
 
-    @staticmethod
-    def _qos(qos):
-        return patch.object(mooncake_module, "fetch_qos_from_current_config", return_value=qos)
-
     def test_inject_creates_config_when_unset(self):
-        with patch.dict(os.environ, {}, clear=True), self._qos(3):
-            _inject_store_qos()
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_store_qos(_qos_config(3))
             self.assertEqual(
                 json.loads(os.environ[self._ENV]),
                 {"store": {"comm_resource_config": {"qos": 3}}},
             )
 
     def test_inject_noop_without_qos(self):
-        with patch.dict(os.environ, {}, clear=True), self._qos(None):
-            _inject_store_qos()
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_store_qos(_qos_config(None))
             self.assertNotIn(self._ENV, os.environ)
 
     def test_inject_merges_into_existing_config(self):
@@ -674,8 +646,8 @@ class TestMooncakeStoreQosInjection(unittest.TestCase):
             "store": {"comm_resource_config": {"protocol_desc": ["roce:device"]}},
             "fabric_memory": {"max_capacity": 32},
         }
-        with patch.dict(os.environ, {self._ENV: json.dumps(existing)}), self._qos(2):
-            _inject_store_qos()
+        with patch.dict(os.environ, {self._ENV: json.dumps(existing)}):
+            _inject_store_qos(_qos_config(2))
             merged = json.loads(os.environ[self._ENV])
             self.assertEqual(merged["store"]["comm_resource_config"]["qos"], 2)
             # Other HIXL fields are preserved.
@@ -687,9 +659,8 @@ class TestMooncakeStoreQosInjection(unittest.TestCase):
         with (
             patch.dict(os.environ, self._store_qos_env(1)),
             patch.object(mooncake_module, "logger") as mock_logger,
-            self._qos(4),
         ):
-            _inject_store_qos()
+            _inject_store_qos(_qos_config(4))
             self.assertEqual(json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"], 4)
             mock_logger.warning.assert_called_once()
 
@@ -697,38 +668,34 @@ class TestMooncakeStoreQosInjection(unittest.TestCase):
         with (
             patch.dict(os.environ, self._store_qos_env(3)),
             patch.object(mooncake_module, "logger") as mock_logger,
-            self._qos(3),
         ):
-            _inject_store_qos()
+            _inject_store_qos(_qos_config(3))
             mock_logger.warning.assert_not_called()
 
     def test_inject_rejects_malformed_json(self):
         with (
             patch.dict(os.environ, {self._ENV: "not-json"}),
-            self._qos(3),
             self.assertRaisesRegex(ValueError, "not valid JSON"),
         ):
-            _inject_store_qos()
+            _inject_store_qos(_qos_config(3))
 
     def test_inject_rejects_non_object_json(self):
         for bad in ("[]", '"str"', "3"):
             with (
                 self.subTest(bad=bad),
                 patch.dict(os.environ, {self._ENV: bad}),
-                self._qos(3),
                 self.assertRaisesRegex(ValueError, "must be a JSON object"),
             ):
-                _inject_store_qos()
+                _inject_store_qos(_qos_config(3))
 
     def test_inject_rejects_non_object_store_fields(self):
         for bad in ('{"store": 1}', '{"store": {"comm_resource_config": 2}}'):
             with (
                 self.subTest(bad=bad),
                 patch.dict(os.environ, {self._ENV: bad}),
-                self._qos(3),
                 self.assertRaisesRegex(ValueError, "must be a JSON object"),
             ):
-                _inject_store_qos()
+                _inject_store_qos(_qos_config(3))
 
     def test_init_injects_qos_before_validation(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -738,13 +705,29 @@ class TestMooncakeStoreQosInjection(unittest.TestCase):
             with (
                 patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": path}, clear=True),
                 patch.object(MooncakeBackend, "_setup_store"),
-                self._qos(3),
             ):
-                MooncakeBackend(MagicMock())
+                MooncakeBackend(MagicMock(), extra_config={"qos_priority": 3})
                 self.assertEqual(
                     json.loads(os.environ[self._ENV])["store"]["comm_resource_config"]["qos"],
                     3,
                 )
+        finally:
+            os.unlink(path)
+
+    def test_init_without_extra_config_does_not_inject(self):
+        # The scheduler client is created without an extra_config; it must not
+        # touch ASCEND_GLOBAL_RESOURCE_CONFIG (only the worker process owns
+        # the environment the HIXL store reads).
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"metadata_server": "192.168.0.1:2379"}, f)
+            path = f.name
+        try:
+            with (
+                patch.dict(os.environ, {"MOONCAKE_CONFIG_PATH": path}, clear=True),
+                patch.object(MooncakeBackend, "_setup_store"),
+            ):
+                MooncakeBackend(MagicMock(), contribute_memory=False)
+                self.assertNotIn(self._ENV, os.environ)
         finally:
             os.unlink(path)
 
@@ -756,27 +739,22 @@ class TestMooncakeStoreQosInjection(unittest.TestCase):
 class TestMemcacheQosInjection(unittest.TestCase):
     _ENV = "MF_DEVICE_UB_QOS"
 
-    @staticmethod
-    def _qos(qos):
-        return patch.object(memcache_module, "fetch_qos_from_current_config", return_value=qos)
-
     def test_inject_sets_env(self):
-        with patch.dict(os.environ, {}, clear=True), self._qos(3):
-            _inject_device_ub_qos()
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_device_ub_qos(_qos_config(3))
             self.assertEqual(os.environ[self._ENV], "3")
 
     def test_inject_noop_without_qos(self):
-        with patch.dict(os.environ, {}, clear=True), self._qos(None):
-            _inject_device_ub_qos()
+        with patch.dict(os.environ, {}, clear=True):
+            _inject_device_ub_qos(_qos_config(None))
             self.assertNotIn(self._ENV, os.environ)
 
     def test_inject_overrides_existing_value(self):
         with (
             patch.dict(os.environ, {self._ENV: "1"}),
             patch.object(memcache_module, "logger") as mock_logger,
-            self._qos(2),
         ):
-            _inject_device_ub_qos()
+            _inject_device_ub_qos(_qos_config(2))
             self.assertEqual(os.environ[self._ENV], "2")
             mock_logger.warning.assert_called_once()
 
@@ -784,18 +762,16 @@ class TestMemcacheQosInjection(unittest.TestCase):
         with (
             patch.dict(os.environ, {self._ENV: "2"}),
             patch.object(memcache_module, "logger") as mock_logger,
-            self._qos(2),
         ):
-            _inject_device_ub_qos()
+            _inject_device_ub_qos(_qos_config(2))
             mock_logger.warning.assert_not_called()
 
     def test_init_injects_qos_before_validation(self):
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(MemcacheBackend, "_setup_store"),
-            self._qos(2),
         ):
-            MemcacheBackend(MagicMock(), local_rank=0)
+            MemcacheBackend(MagicMock(), local_rank=0, extra_config={"qos_priority": 2})
             self.assertEqual(os.environ.get(self._ENV), "2")
 
 
