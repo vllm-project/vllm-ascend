@@ -94,6 +94,12 @@
         "image_tag": "9.1.0-910b-ubuntu22.04-py3.12",
         "csrc_cache_target": "a2-arm64-ubuntu"
     },
+    "linux-aarch64-a2-2-hk-001": {
+        "chip": "a2",
+        "npu_num": 2,
+        "image_tag": "9.1.0-910b-ubuntu22.04-py3.12",
+        "csrc_cache_target": "a2-arm64-ubuntu"
+    },
     "linux-aarch64-a2b3-4": {
         "chip": "a2",
         "npu_num": 4,
