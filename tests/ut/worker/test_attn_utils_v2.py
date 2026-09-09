@@ -787,3 +787,93 @@ def test_build_attn_metadata_propagates_prefill_state():
     )
 
     assert metadata["layer.0"] is is_prefilling
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("kernel_block_size", [2, 4])
+@pytest.mark.parametrize("connector", [None, "SfaRemoteD2HConnector", "MultiConnector"])
+def test_sfa_parent_allocation_and_kernel_blocks(monkeypatch, legacy, kernel_block_size, connector):
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+    from vllm_ascend.worker.sfa_kv_layout import get_sfa_kv_parent
+
+    names = ["model.layers.0.self_attn.attn", "model.layers.1.self_attn.attn"]
+    spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
+    config = KVCacheConfig(
+        num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[KVCacheGroupSpec(layer_names=names, kv_cache_spec=spec)]
+    )
+    config.kv_cache_tensors = [
+        SimpleNamespace(size=3 * spec.page_size_bytes * (1 if legacy else 2), layers=names, shared_by=names)
+    ]
+    transfer = None if connector is None else SimpleNamespace(kv_connector=connector, kv_connector_module_path=None)
+    vc = SimpleNamespace(
+        kv_transfer_config=transfer, quant_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace())
+    )
+    layers = {name: SimpleNamespace(get_attn_backend=lambda: AscendSFABackend) for name in names}
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vc)
+    monkeypatch.setattr(attn_utils, "get_layers_from_vllm_config", lambda *a, **kw: layers)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *a: True)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *a: False)
+    monkeypatch.setattr(attn_utils, "vllm_version_is", lambda v: legacy)
+    monkeypatch.setattr(attn_utils, "get_kv_cache_tensor_layers", lambda d: names)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
+    raw = attn_utils._allocate_kv_cache(config, {}, torch.device("cpu"))
+    concat = connector != "MultiConnector"
+    if concat:
+        assert isinstance(raw[names[0]], torch.Tensor)
+        assert raw[names[0]].numel() == 3 * spec.page_size_bytes
+    else:
+        assert isinstance(raw[names[0]], tuple)
+        assert sum(t.numel() for t in raw[names[0]]) == 3 * spec.page_size_bytes
+    raw0 = raw[names[0]] if concat else raw[names[0]][0]
+    raw1 = raw[names[1]] if concat else raw[names[1]][0]
+    assert (raw0 is raw1) == legacy
+    groups = [SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=AscendSFABackend, layer_names=names)]
+    caches = attn_utils._reshape_kv_cache_v2(groups, raw, "auto", [kernel_block_size], {}, config)
+    if not concat:
+        assert all(t.is_contiguous() for n in names for t in caches[n])
+        with pytest.raises(ValueError, match="storage"):
+            get_sfa_kv_parent(*caches[names[0]])
+        return
+    p0, p1 = [get_sfa_kv_parent(*caches[n]) for n in names]
+    assert p0.shape == (3 * 4 // kernel_block_size, kernel_block_size, 1, 12)
+    caches[names[0]][0][1, 1, 0, 0] = 7
+    assert p0[1, 1, 0, 0] == 7
+    assert (p1[1, 1, 0, 0] == 7).item() == legacy
+
+
+@pytest.mark.parametrize("failure", ["partial_page", "capacity", "kernel_ratio", "padded", "backend_shape"])
+def test_sfa_parent_reshape_rejects_invalid_geometry(monkeypatch, failure):
+    from dataclasses import replace
+
+    from vllm_ascend.attention.sfa_v1 import AscendSFABackend
+
+    name = "model.layers.0.self_attn.attn"
+    spec = AscendMLAAttentionSpec(block_size=4, num_kv_heads=1, head_size=12, dtype=torch.float16)
+    if failure == "padded":
+        spec = replace(spec, page_size_padded=spec.page_size_bytes + 16)
+    config = KVCacheConfig(
+        num_blocks=3, kv_cache_tensors=[], kv_cache_groups=[KVCacheGroupSpec(layer_names=[name], kv_cache_spec=spec)]
+    )
+    vc = SimpleNamespace(kv_transfer_config=None, model_config=SimpleNamespace(hf_config=SimpleNamespace()))
+    monkeypatch.setattr(attn_utils, "get_current_vllm_config", lambda: vc)
+    monkeypatch.setattr(attn_utils, "enable_sfa", lambda *a: True)
+    monkeypatch.setattr(attn_utils, "enable_fa_quant", lambda *a: False)
+    monkeypatch.setattr(attn_utils, "_get_attention_kv_cache_dims", lambda *a: (8, 4))
+    backend = AscendSFABackend
+    if failure == "backend_shape":
+
+        class WrongShapeBackend(AscendSFABackend):
+            @staticmethod
+            def get_kv_cache_shape(nb, bs, heads, width, *args):
+                return (nb, 1, bs, width)
+
+        backend = WrongShapeBackend
+    size = 3 * spec.page_size_bytes
+    if failure == "partial_page":
+        size -= 1
+    if failure == "capacity":
+        size -= spec.page_size_bytes
+    raw = {name: torch.zeros(size, dtype=torch.int8)}
+    groups = [SimpleNamespace(kv_cache_group_id=0, kv_cache_spec=spec, backend=backend, layer_names=[name])]
+    with pytest.raises(ValueError):
+        attn_utils._reshape_kv_cache_v2(groups, raw, "auto", [3 if failure == "kernel_ratio" else 4], {}, config)

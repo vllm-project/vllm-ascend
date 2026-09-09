@@ -65,6 +65,10 @@ from vllm_ascend.utils import (
     get_kv_cache_tensor_layers,
     vllm_version_is,
 )
+from vllm_ascend.worker.sfa_kv_layout import (
+    sfa_kv_parent_supported_for_transfer,
+    split_sfa_kv_parent,
+)
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.pcp_manager import AscendPCPAttentionContext
@@ -384,6 +388,26 @@ def _is_dsv4_model(vllm_config: VllmConfig) -> bool:
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None) if model_config else None
     return hf_config is not None and hasattr(hf_config, "compress_ratios")
+
+
+def _uses_sfa_kv_parent(layer_name: str, spec: AttentionSpec, backend=None) -> bool:
+    config = get_current_vllm_config()
+    if (
+        not enable_sfa(config)
+        or not sfa_kv_parent_supported_for_transfer(config.kv_transfer_config)
+        or not isinstance(spec, AscendMLAAttentionSpec)
+        or bool(getattr(spec, "cache_sparse_sfa_c8", False))
+        or "cache_only_layers" in layer_name
+        or getattr(spec, "model_version", None) == "deepseek_v4"
+        or _is_dsv4_model(config)
+    ):
+        return False
+    if backend is None:
+        layer = get_layers_from_vllm_config(config, AttentionLayerBase, [layer_name]).get(layer_name)
+        if layer is None:
+            return False
+        backend = layer.get_attn_backend()
+    return backend.get_name() == "ASCEND_SFA"
 
 
 def _get_attention_kv_cache_dims(
@@ -791,6 +815,31 @@ def _allocate_kv_cache(
 
             continue
 
+        # Inspect each layer's actual backend, not the target model capability.
+        sfa_names = [
+            name
+            for name in shared_names
+            if not use_hybrid_layout and _uses_sfa_kv_parent(name, layer_kv_cache_spec[name])
+        ]
+        if sfa_names:
+            if vllm_version_is("0.28.0"):
+                if len(sfa_names) != len(shared_names) or any(
+                    layer_kv_cache_spec[n] != example_spec for n in sfa_names
+                ):
+                    raise ValueError("Legacy SFA aliases require matching per-layer specs and backends")
+                raw = _allocate_int8_cache_tensor(kv_cache_tensor.size, alignment, device)
+                for name in sfa_names:
+                    kv_cache_raw_tensors[name] = raw
+            else:
+                for name in sfa_names:
+                    layer_bytes = kv_cache_config.num_blocks * layer_kv_cache_spec[name].page_size_bytes
+                    kv_cache_raw_tensors[name] = _allocate_int8_cache_tensor(layer_bytes, alignment, device)
+            shared_names = [name for name in shared_names if name not in sfa_names]
+            if not shared_names:
+                continue
+            example_layer_name = shared_names[0]
+            example_spec = layer_kv_cache_spec[example_layer_name]
+
         # vLLM #51718 packs all group layers into one tensor on main; the
         # per-layer size is the block count times this layer's own page size
         # (correct even when the tensor's group is not the largest group).
@@ -1040,6 +1089,15 @@ def _reshape_kv_cache_v2(
             if total_bytes % kv_cache_spec.page_size_bytes:
                 raise ValueError(f"KV cache for {layer_name} is not a whole number of pages.")
             num_blocks = total_bytes // kv_cache_spec.page_size_bytes
+            use_sfa_parent = not any(
+                isinstance(spec, MambaSpec) for spec in layer_kv_cache_spec.values()
+            ) and _uses_sfa_kv_parent(layer_name, kv_cache_spec, group.backend)
+            if use_sfa_parent:
+                storage_block_size = get_storage_block_size(kv_cache_spec)
+                if kernel_block_size <= 0 or storage_block_size % kernel_block_size:
+                    raise ValueError(f"SFA storage block cannot be divided into kernel blocks for {layer_name}")
+                if num_blocks < kv_cache_config.num_blocks:
+                    raise ValueError(f"SFA main cache has fewer blocks than KVCacheManager for {layer_name}")
             num_blocks_per_kv_block = get_storage_block_size(kv_cache_spec) // kernel_block_size
             kernel_num_blocks = num_blocks * num_blocks_per_kv_block
             kv_cache_shape = group.backend.get_kv_cache_shape(
@@ -1082,6 +1140,25 @@ def _reshape_kv_cache_v2(
                 )
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
                 kv_caches[layer_name] = (k_cache,)
+            elif use_sfa_parent:
+                if not isinstance(raw_cache, torch.Tensor):
+                    raise ValueError(f"SFA main cache for {layer_name} requires one parent raw tensor")
+                dense_page_bytes = (
+                    get_storage_block_size(kv_cache_spec) * (k_dim + v_dim) * get_dtype_size(kv_cache_spec.dtype)
+                )
+                if kv_cache_spec.num_kv_heads != 1 or kv_cache_spec.page_size_bytes != dense_page_bytes:
+                    raise ValueError(
+                        f"SFA parent requires heads=1 and dense pages; padding is unsupported for {layer_name}"
+                    )
+                expected_shape = (kernel_num_blocks, kernel_block_size, 1, k_dim + v_dim)
+                if tuple(kv_cache_shape) != expected_shape:
+                    raise ValueError(f"Unsupported SFA backend parent shape for {layer_name}: {kv_cache_shape}")
+                kv_caches[layer_name] = split_sfa_kv_parent(
+                    raw_cache,
+                    dtype=kv_cache_spec.dtype,
+                    shape=expected_shape,
+                    nope_dim=k_dim,
+                )
             elif isinstance(raw_cache, tuple):
                 raw_k_tensor, raw_v_tensor = raw_cache
                 k_cache = raw_k_tensor.view(k_dtype).view(k_shape)
