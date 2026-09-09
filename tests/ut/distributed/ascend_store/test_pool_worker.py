@@ -109,6 +109,17 @@ class TestKVPoolWorkerHelpers(unittest.TestCase):
             with self.subTest(exists=exists):
                 self.assertEqual(cls.check_all_layers_exists(None, exists, num_layers), expected)
 
+    def test_uses_mamba_kv_cache_inside_uniform_group(self):
+        from vllm.v1.kv_cache_interface import MambaSpec, UniformTypeKVCacheSpecs
+
+        cls = self._make_worker_class()
+        mamba_spec = MambaSpec(block_size=384, shapes=((1,),), dtypes=(np.dtype("float32"),))
+        uniform_spec = UniformTypeKVCacheSpecs.from_specs({"mamba.layer": mamba_spec})
+        self.assertIsNotNone(uniform_spec)
+        kv_cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(kv_cache_spec=uniform_spec)])
+
+        self.assertTrue(cls._uses_mamba_kv_cache(True, kv_cache_config))
+
     def test_find_all_continuous_hit_positions(self):
         cls = self._make_worker_class()
         cases = [

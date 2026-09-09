@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.core.kv_cache_interface import AscendSlidingWindowMLASpec
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
 class AscendCompressorStateCache(CompressorStateCache):
@@ -177,6 +178,13 @@ class Compressor(nn.Module):
         metadata: typing.Any,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         from vllm_ascend.attention.dsa_attn_kv_plan import get_dsa_attn_kv_plan
+
+        precomputed = getattr(metadata, "compressor_metadata", None)
+        if precomputed is not None:
+            group_id = metadata.compressor_metadata_group_id
+            assert group_id is not None
+            wait_for_device_metadata(DeviceMetadataStage.COMPRESSOR, group_id)
+            return precomputed
 
         assert metadata.full_compress_cos is not None
         assert metadata.full_compress_sin is not None

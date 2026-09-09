@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from types import MethodType, SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import torch
 from safetensors.torch import save_file
@@ -16,6 +16,24 @@ from vllm_ascend.models.kimi_k3 import (
 from vllm_ascend.models.kimi_k3_dspark import (
     AscendK3DSparkForCausalLM,
 )
+
+
+def test_kimi_moe_leaves_routed_input_transform_to_runner():
+    moe = kimi_k3.AscendKimiMoE.__new__(kimi_k3.AscendKimiMoE)
+    nn.Module.__init__(moe)
+    hidden_states = torch.randn(4, 8)
+    router_logits = torch.randn(4, 16)
+    output = torch.randn(4, 8)
+    moe.gate = MagicMock(return_value=(router_logits, None))
+    moe.experts = MagicMock(return_value=output)
+
+    result = moe.forward(hidden_states)
+
+    moe.experts.assert_called_once()
+    call_kwargs = moe.experts.call_args.kwargs
+    torch.testing.assert_close(call_kwargs["hidden_states"], hidden_states)
+    torch.testing.assert_close(call_kwargs["router_logits"], router_logits)
+    torch.testing.assert_close(result, output)
 
 
 def test_ascend_attn_res_matches_canonical_k3_math():
@@ -69,9 +87,11 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
     nn.Module.__init__(model)
     layer = nn.Module()
     layer.self_attn = nn.Module()
-    layer.self_attn.in_proj_gfab = nn.Module()
+    layer.self_attn.fused_bfg_proj = nn.Module()
     packed_weight = nn.Parameter(torch.empty(6, 4))
-    layer.self_attn.in_proj_gfab.register_parameter("weight", packed_weight)
+    layer.self_attn.fused_bfg_proj.register_parameter("weight", packed_weight)
+    layer.self_attn.fused_bfg_proj.register_parameter("f_a_weight", nn.Parameter(torch.empty(1)))
+    layer.self_attn.fused_bfg_proj.register_parameter("f_b_weight", nn.Parameter(torch.empty(1)))
     layer.router = nn.Linear(4, 1, bias=False)
     model.layers = nn.ModuleList([layer])
 
@@ -90,24 +110,38 @@ def test_kimi_mixed_kda_gate_weights_use_upstream_packed_loader(monkeypatch):
         ("layers.0.router.weight", torch.full((1, 4), 0.5)),
         ("layers.0.self_attn.g_proj.weight", torch.full((1,), 1.0)),
         ("layers.0.self_attn.f_a_proj.weight", torch.full((1,), 2.0)),
-        ("layers.0.self_attn.b_proj.weight", torch.full((1,), 3.0)),
-        ("layers.0.self_attn.o_proj.weight", torch.full((1,), 4.0)),
+        ("layers.0.self_attn.f_b_proj.weight", torch.full((1,), 3.0)),
+        ("layers.0.self_attn.b_proj.weight", torch.full((1,), 4.0)),
+        ("layers.0.self_attn.o_proj.weight", torch.full((1,), 5.0)),
     ]
 
     loaded = model.load_weights(iter(source_weights))
 
     assert remaining[0] == source_weights[0]
     assert remaining[-1] == source_weights[-1]
-    assert [name for name, _, _ in remaining[1:4]] == [
-        "layers.0.self_attn.in_proj_gfab.weight",
-    ] * 3
-    assert [loaded_weight.item() for _, loaded_weight, _ in remaining[1:4]] == [1.0, 2.0, 3.0]
-    assert [kwargs["loaded_shard_id"] for _, _, kwargs in remaining[1:4]] == [0, 1, 2]
+    assert [name for name, _, _ in remaining[1:5]] == [
+        "layers.0.self_attn.fused_bfg_proj.weight",
+        "layers.0.self_attn.fused_bfg_proj.f_a_weight",
+        "layers.0.self_attn.fused_bfg_proj.f_b_weight",
+        "layers.0.self_attn.fused_bfg_proj.weight",
+    ]
+    assert [loaded_weight.item() for _, loaded_weight, _ in remaining[1:5]] == [1.0, 2.0, 3.0, 4.0]
+    assert [kwargs["loaded_shard_id"] for _, _, kwargs in remaining[1:5]] == [2, None, None, 0]
     assert loaded == {
-        "layers.0.self_attn.in_proj_gfab.weight",
+        "layers.0.self_attn.fused_bfg_proj.weight",
+        "layers.0.self_attn.fused_bfg_proj.f_a_weight",
+        "layers.0.self_attn.fused_bfg_proj.f_b_weight",
         "layers.0.router.weight",
         "layers.0.self_attn.o_proj.weight",
     }
+
+
+def test_kimi_model_declares_fused_bfg_checkpoint_mapping():
+    assert AscendKimiLinearModel.packed_modules_mapping["fused_bfg_proj"] == [
+        "b_proj",
+        "f_a_proj",
+        "g_proj",
+    ]
 
 
 def test_kimi_attention_residual_stays_sequence_sharded(monkeypatch):

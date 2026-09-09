@@ -11,10 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.logger import init_logger
 from vllm.v1.metrics.utils import create_metric_per_engine
-
-logger = init_logger(__name__)
 
 LOAD_GET_HISTOGRAM_BUCKETS = (
     1e-3,
@@ -68,7 +65,6 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
 
     def record_operation(self, operation: str, duration_seconds: float, num_keys: int) -> None:
         if operation != "load_get":
-            logger.warning_once("Ignoring unsupported AscendStore metrics operation: %s", operation)
             return
         self.data.setdefault("load_get_duration_seconds", []).append(duration_seconds)
         self.data["load_get_keys"] = self.data.get("load_get_keys", 0) + num_keys

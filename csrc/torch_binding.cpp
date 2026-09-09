@@ -56,6 +56,9 @@
 #include "attention/store_kv_block_metadata/store_kv_block_metadata_torch_adpt.cpp"
 #include "moe/dequant_situ_quant/dequant_situ_quant_torch_adpt.h"
 #include "moe/situ_mx_quant/situ_mx_quant_torch_adpt.h"
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+#include "moe/grouped_matmul_situ_quant/grouped_matmul_situ_quant_torch_adpt.h"
+#endif
 #include "attention/mla_prolog_v3/mla_prolog_v3_torch_adpt.h"
 #include <c10/core/Device.h>
 #include <c10/core/Scalar.h>
@@ -1903,7 +1906,18 @@ at::Tensor npu_sparse_attention_score_prefill(
                                        "than 0, but shape[", i, "] is ", query.size(i));
     }
 
-    at::Tensor output = at::empty(query.sizes(), query.options().dtype(query.dtype()));
+    at::ScalarType out_dtype = query.scalar_type();
+    if (query.scalar_type() == at::kFloat8_e4m3fn) {
+        out_dtype = at::kBFloat16;
+    }
+    at::Tensor output = at::empty(query.sizes(), query.options().dtype(out_dtype));
+    // MinimaxSparseAttentionSplitKv always exposes softmaxLse as its second
+    // ACLNN output. Prefill does not consume it, so keep the flag disabled and
+    // pass the empty FP32 placeholder required by the operator interface.
+    at::Tensor softmax_lse = at::empty({0}, query.options().dtype(at::kFloat));
+    bool softmax_lse_flag = false;
+    std::string input_layout = "TND";
+    char *input_layout_ptr = const_cast<char *>(input_layout.c_str());
 
     EXEC_NPU_CMD(
         aclnnMinimaxSparseAttentionSplitKv,
@@ -1921,7 +1935,10 @@ at::Tensor npu_sparse_attention_score_prefill(
         block_size,
         top_k,
         inner_precise,
-        output
+        softmax_lse_flag,
+        input_layout_ptr,
+        output,
+        softmax_lse
     );
 
     return output;
@@ -2057,6 +2074,37 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "              bool activate_left=False, "
         "              int dst_type=36) -> (Tensor y, Tensor mxscale)");
     ops.impl("situ_mx_quant", torch::kPrivateUse1, &vllm_ascend::situ_mx_quant);
+
+#ifdef VLLM_ASCEND_ENABLE_GMM_SITU_QUANT_NATIVE
+    ops.def(
+        "grouped_matmul_situ_quant(Tensor x, Tensor weight, Tensor weight_scale, Tensor? weight_assist_matrix, "
+        "Tensor? bias, Tensor x_scale, Tensor? smooth_scale, Tensor group_list, int dequant_mode, "
+        "int dequant_dtype, int quant_mode, int group_list_type, int[]? tuning_config, float beta, "
+        "float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nd);
+    ops.def(
+        "grouped_matmul_situ_quant.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
+        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant.list", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nd_list);
+    ops.def(
+        "grouped_matmul_situ_quant_weight_nz(Tensor x, Tensor weight, Tensor weight_scale, "
+        "Tensor? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant_weight_nz", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nz);
+    ops.def(
+        "grouped_matmul_situ_quant_weight_nz.list(Tensor x, Tensor[] weight, Tensor[] weight_scale, "
+        "Tensor[]? weight_assist_matrix, Tensor? bias, Tensor x_scale, Tensor? smooth_scale, "
+        "Tensor group_list, int dequant_mode, int dequant_dtype, int quant_mode, int group_list_type, "
+        "int[]? tuning_config, float beta, float linear_beta) -> (Tensor output, Tensor output_scale)");
+    ops.impl("grouped_matmul_situ_quant_weight_nz.list", torch::kPrivateUse1,
+             &ascend_kernel::gmm_situ_quant_v2_nz_list);
+#endif
 
 #ifdef VLLM_ENABLE_ATB_AND_DIRECT_KERNELS
     // Direct kernel custom ops
@@ -2688,7 +2736,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         "Tensor? actual_seq_lengths=None, Tensor? actual_seq_lengths_kv=None, "
         "str q_input_layout=\"TND\", str kv_input_layout=\"BNSD\", "
         "int num_key_value_heads=1, float scale_value=1.0, "
-        "int block_size=128, int top_k=16, int inner_precise=0) -> Tensor"
+        "int block_size=128, int top_k=16, int inner_precise=0, "
+        "ScalarType? attention_out_dtype=None) -> Tensor"
     );
     ops.impl("npu_sparse_attention_score", torch::kPrivateUse1,
              &vllm_ascend::npu_sparse_attention_score);

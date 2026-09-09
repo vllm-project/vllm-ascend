@@ -192,6 +192,11 @@ from vllm_ascend.utils import (
     weak_ref_tensors,
 )
 from vllm_ascend.worker.dcp_utils import DCPAsyncSpecDecodeRebuildResult, DCPManager
+from vllm_ascend.worker.device_metadata import (
+    DeviceMetadataExecutor,
+    DeviceMetadataTask,
+    DeviceMetadataTaskProvider,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
@@ -304,6 +309,8 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        self.device_metadata_executor: DeviceMetadataExecutor | None = None
+        self.device_metadata_providers: dict[int, DeviceMetadataTaskProvider] | None = None
         self.pin_memory = PIN_MEMORY
 
         set_offloader(create_offloader(self.offload_config))
@@ -2139,7 +2146,7 @@ class NPUModelRunner(GPUModelRunner):
                         # returns True. before returning early here we call
                         # dummy run to ensure coordinate_batch_across_dp
                         # is called into to avoid out of sync issues.
-                        self._dummy_run(1)
+                        self._dummy_run(1, skip_gdn_state_update=True)
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2307,6 +2314,8 @@ class NPUModelRunner(GPUModelRunner):
                     num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                     num_scheduled_tokens_np=num_scheduled_tokens_np,
                     cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    cudagraph_runtime_mode=cudagraph_mode,
+                    batch_descriptor=batch_desc,
                 )
 
                 self._sanitize_placeholder_input_ids_for_forward(
@@ -2351,6 +2360,7 @@ class NPUModelRunner(GPUModelRunner):
         defer_kv_connector_finalize = self.speculative_config is not None and (
             get_pp_group().is_last_rank or self.broadcast_pp_output
         )
+        active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_mode)
         with (
             record_function_or_nullcontext("forward"),
             set_ascend_forward_context(
@@ -2362,6 +2372,7 @@ class NPUModelRunner(GPUModelRunner):
                 batch_descriptor=batch_desc,
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens,
                 model_instance=self.model,
+                device_metadata_executor=active_device_metadata_executor,
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
@@ -2400,6 +2411,8 @@ class NPUModelRunner(GPUModelRunner):
             # Verify every scheduled layer executed its deferred copy.
             if self.cache_config.mamba_cache_mode == "align" and mamba_copy_connector is not None:
                 mamba_copy_connector.finish_mamba_state_copy()
+        if active_device_metadata_executor is not None:
+            active_device_metadata_executor.release()
         with record_function_or_nullcontext("post process"):
             aux_hidden_states = None
             if self.use_aux_hidden_state_outputs:
@@ -2930,6 +2943,16 @@ class NPUModelRunner(GPUModelRunner):
 
         return hidden_states
 
+    def _prepare_device_metadata_for_forward(
+        self, cudagraph_runtime_mode: CUDAGraphMode
+    ) -> DeviceMetadataExecutor | None:
+        executor = self.device_metadata_executor
+        if executor is None or not executor.submission_in_flight:
+            return None
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL and not executor.uses_external_events:
+            raise RuntimeError("Full-graph device metadata requires external events")
+        return executor
+
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
@@ -3098,6 +3121,9 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens: dict[str, int] | None = None,
         num_scheduled_tokens_np: np.ndarray | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
+        skip_gdn_state_update: bool = False,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+        batch_descriptor: BatchDescriptor | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -3119,6 +3145,9 @@ class NPUModelRunner(GPUModelRunner):
                 self._offload_token_to_req,
             )
         attn_metadata: PerLayerAttnMetadata = {}
+        device_metadata_tasks: list[DeviceMetadataTask] | None = (
+            [] if self.device_metadata_executor is not None else None
+        )
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
@@ -3262,12 +3291,51 @@ class NPUModelRunner(GPUModelRunner):
         ) -> None:
             attn_group = self.attn_groups[kv_cache_gid][attn_gid]
             builder = attn_group.get_metadata_builder(ubid or 0)
+            is_gdn_noop = skip_gdn_state_update and isinstance(
+                builder,
+                GDNAttentionMetadataBuilder,
+            )
+            if is_gdn_noop:
+                # Dummy-run callers coalesce this; fall back to the unpadded
+                # batch size instead of asserting in the execute path.
+                gdn_num_reqs = (
+                    num_reqs if num_reqs_padded is None else num_reqs_padded
+                )
+                # Idle DP dummy: keep captured GDN tensor ranks for graph
+                # replay/collectives. num_actual_tokens=0 is the kernel no-op
+                # (ops slice mixed_qkv[:0]); query_start_loc is a zero-filled
+                # prefix sized to the graph, not a real token schedule.
+                common_attn_metadata = replace(
+                    common_attn_metadata,
+                    query_start_loc=self.gdn_query_start_loc.gpu[
+                        : gdn_num_reqs + 1
+                    ],
+                    query_start_loc_cpu=self.gdn_query_start_loc.cpu[
+                        : gdn_num_reqs + 1
+                    ],
+                    num_actual_tokens=0,
+                    max_query_len=0,
+                    is_prefilling=(
+                        torch.zeros_like(common_attn_metadata.is_prefilling)
+                        if common_attn_metadata.is_prefilling is not None
+                        else None
+                    ),
+                )
+            device_metadata_provider = (
+                self.device_metadata_providers.get(id(builder))
+                if self.device_metadata_providers is not None
+                else None
+            )
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid] if cascade_attn_prefix_lens else 0
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+            if (
+                use_spec_decode
+                and isinstance(builder, GDNAttentionMetadataBuilder)
+                and not is_gdn_noop
+            ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
@@ -3280,8 +3348,8 @@ class NPUModelRunner(GPUModelRunner):
                 extra_attn_metadata_args = dict(
                     num_actual_reqs=num_reqs,
                     common_ratio_to_sas_metadata=common_ratio_to_sas_metadata,
+                    full_graph_mode=cudagraph_runtime_mode == CUDAGraphMode.FULL,
                 )
-
             if (for_cudagraph_capture
                     and not isinstance(builder, (
                         AscendDSAMetadataBuilder,
@@ -3301,6 +3369,9 @@ class NPUModelRunner(GPUModelRunner):
                     and isinstance(builder, GDNAttentionMetadataBuilder) and attn_metadata_i.num_prefills == 0:
                     if attn_metadata_i.num_decodes == 0 and attn_metadata_i.num_spec_decodes > 0:
                         attn_metadata_i.spec_state_indices_tensor[attn_metadata_i.num_spec_decodes:].fill_(0)
+            if device_metadata_provider is not None:
+                assert device_metadata_tasks is not None
+                device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             if isinstance(builder, AscendDSAMetadataBuilder):
                 common_ratio_to_sas_metadata = builder.common_ratio_to_sas_metadata  # type: ignore[assignment]
 
@@ -3393,6 +3464,12 @@ class NPUModelRunner(GPUModelRunner):
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
+        if device_metadata_tasks:
+            assert self.device_metadata_executor is not None
+            self.device_metadata_executor.submit(
+                device_metadata_tasks,
+                batch_descriptor if cudagraph_runtime_mode == CUDAGraphMode.FULL else None,
+            )
         return attn_metadata, spec_decode_common_attn_metadata
 
     def _should_build_dummy_attn_metadata(
@@ -3426,6 +3503,7 @@ class NPUModelRunner(GPUModelRunner):
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         profile_cpp: bool = False,
+        skip_gdn_state_update: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # only support eager mode and piecewise graph now
         assert cudagraph_runtime_mode is None or cudagraph_runtime_mode.valid_runtime_modes()
@@ -3564,7 +3642,12 @@ class NPUModelRunner(GPUModelRunner):
                 self.query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
                 self.query_start_loc.copy_to_gpu()
                 if self._has_gdn:
-                    self.gdn_query_start_loc.np[1 : num_reqs_padded + 1] = cum_num_tokens
+                    if skip_gdn_state_update:
+                        self.gdn_query_start_loc.np.fill(0)
+                    else:
+                        self.gdn_query_start_loc.np[
+                            1 : num_reqs_padded + 1
+                        ] = cum_num_tokens
                     self.gdn_query_start_loc.copy_to_gpu()
 
                 if not profile_cpp:
@@ -3603,6 +3686,9 @@ class NPUModelRunner(GPUModelRunner):
                     ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
                     for_cudagraph_capture=is_graph_capturing,
                     num_scheduled_tokens_np=num_scheduled_tokens,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_desc,
+                    skip_gdn_state_update=skip_gdn_state_update,
                 )
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
@@ -3676,6 +3762,7 @@ class NPUModelRunner(GPUModelRunner):
                 if hasattr(self.drafter, "model") and hasattr(self.drafter.model, "compute_logits"):
                     return self.drafter.model.compute_logits(hidden_states[dummy_indices])
 
+            active_device_metadata_executor = self._prepare_device_metadata_for_forward(cudagraph_runtime_mode)
             with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
@@ -3686,12 +3773,15 @@ class NPUModelRunner(GPUModelRunner):
                 aclgraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_desc,
                 model_instance=self.model,
+                device_metadata_executor=active_device_metadata_executor,
                 has_sinks = self._has_sinks,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
                     num_tokens_padded, input_ids, positions, intermediate_tensors, inputs_embeds
                 )
+            if active_device_metadata_executor is not None:
+                active_device_metadata_executor.release()
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
@@ -4969,6 +5059,19 @@ class NPUModelRunner(GPUModelRunner):
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        device_metadata_providers = {
+            id(builder): builder
+            for attn_groups in self.attn_groups
+            for attn_group in attn_groups
+            for builder in attn_group.metadata_builders
+            if isinstance(builder, DeviceMetadataTaskProvider)
+        }
+        if device_metadata_providers:
+            self.device_metadata_executor = DeviceMetadataExecutor()
+            self.device_metadata_providers = device_metadata_providers
+            for provider in device_metadata_providers.values():
+                provider.enable_device_metadata()
 
         # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
