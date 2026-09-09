@@ -583,6 +583,9 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
         with torch.npu.graph(graph):
             graph_outputs = sample()
         torch.npu.synchronize()
+        graph.replay()
+        torch.npu.synchronize()
+        print("valid categorical graph replay passed", flush=True)
 
     if case == "nan":
         logits[0, 0] = float("nan")
@@ -630,6 +633,8 @@ def test_categorical_sampling_asserts_invalid_device_values(
     output = f"{result.stdout}\n{result.stderr}"
     assert result.returncode != 0, f"{case}/{execution} unexpectedly succeeded"
     assert "valid categorical warmup passed" in output, output
+    if execution == "aclgraph":
+        assert "valid categorical graph replay passed" in output, output
     if backend == "native":
         assert expected_message in output, output
     else:

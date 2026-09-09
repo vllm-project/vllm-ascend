@@ -115,17 +115,15 @@ def _categorical_kernel(
         if RETURN_LSE:
             tl.store(lse + row, 0.0)
         return
-    tl.device_assert(
-        (request >= 0) & (request < REQUESTS), "CategoricalSample expanded index mapping is outside request state"
-    )
+    if (request < 0) | (request >= REQUESTS):
+        tl.device_assert(False, "CategoricalSample expanded index mapping is outside request state")
     temperature = tl.load(temperatures + request)
     column = tl.full((), 0, tl.int32)
     if cache is not None:
         if cache_col is not None:
             column = tl.load(cache_col + tl.where(PER_ROW_COL, row, 0))
-        tl.device_assert(
-            (column >= 0) & (column < COLS), "CategoricalSample output processed logits column is outside cache bounds"
-        )
+        if (column < 0) | (column >= COLS):
+            tl.device_assert(False, "CategoricalSample output processed logits column is outside cache bounds")
     offsets = tl.arange(0, BLOCK)
     row_offset = row * row_stride
     row_max = tl.full((), -float("inf"), tl.float32)
@@ -135,16 +133,15 @@ def _categorical_kernel(
         indices = tile * TILE + offsets
         values = _load_logits(logits, row_offset, indices, VOCAB, temperature, APPLY)
         valid = (offsets < TILE) & (indices < VOCAB)
-        tl.device_assert(
-            tl.sum((valid & (values != values)).to(tl.int32), 0) == 0,
-            "CategoricalSample processed logits must not contain NaN",
-        )
+        if tl.sum((valid & (values != values)).to(tl.int32), 0) != 0:
+            tl.device_assert(False, "CategoricalSample processed logits must not contain NaN")
         values = tl.where(valid, values, -float("inf"))
         maximum = tl.max(values, 0)
         index = tl.min(tl.where(valid & (values == maximum), indices, VOCAB), 0)
         first_max = tl.where(maximum > row_max, index, first_max)
         row_max = tl.maximum(row_max, maximum)
-    tl.device_assert(row_max != -float("inf"), "CategoricalSample processed logits row must not be all -inf")
+    if row_max == -float("inf"):
+        tl.device_assert(False, "CategoricalSample processed logits row must not be all -inf")
 
     total = tl.full((), 0.0, tl.float32)
     total_mass = tl.full((), 0, tl.uint64)
