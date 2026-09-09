@@ -40,6 +40,7 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import set_graph_params, update_full_graph_params
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.v2.input_batch import AscendInputBatch
 from vllm_ascend.worker.v2.utils import communicator_switch
 
@@ -209,6 +210,23 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 pcp_manager=pcp_manager,
             )
         with communicator_switch():
+            # vLLM #53869 added pcp_manager to ModelCudaGraphManager.capture on
+            # main; v0.28.0 still uses the older signature without that kwarg.
+            if not vllm_version_is("0.28.0"):
+                return super().capture(
+                    model,
+                    model_state,
+                    input_buffers,
+                    intermediate_tensors,
+                    block_tables,
+                    attn_groups,
+                    kv_cache_config,
+                    pcp_manager=pcp_manager,
+                    has_lora=has_lora,
+                    use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
+                    lora_capture_hook=lora_capture_hook,
+                    progress_bar_desc=progress_bar_desc,
+                )
             return super().capture(
                 model,
                 model_state,
@@ -217,7 +235,6 @@ class ModelAclGraphManager(ModelCudaGraphManager):
                 block_tables,
                 attn_groups,
                 kv_cache_config,
-                pcp_manager=pcp_manager,
                 has_lora=has_lora,
                 use_aux_hidden_state_outputs=use_aux_hidden_state_outputs,
                 lora_capture_hook=lora_capture_hook,

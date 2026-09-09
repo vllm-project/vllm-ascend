@@ -80,6 +80,14 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 from vllm_ascend.ascend_config import init_ascend_config
 
+# vLLM main added KVConnectorBlockState for connector block snapshots; v0.28.0
+# does not ship it. Import optionally so CI rebase onto main does not break the
+# release lane at module import time.
+try:
+    from vllm.v1.core.sched.output import KVConnectorBlockState
+except ImportError:  # pragma: no cover - exercised on v0.28.0
+    KVConnectorBlockState = None  # type: ignore[misc, assignment]
+
 
 def _balance_scheduling_enabled(vllm_config) -> bool:
     # Primary source of truth is AscendConfig. The additional_config fallback
@@ -781,6 +789,29 @@ class BalanceScheduler(Scheduler):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Drain every step, including without a connector, to avoid stale
+        # Mamba boundary offers. Snapshot exact current block tables for the
+        # connector before building its metadata. (vLLM main only)
+        kv_connector_block_state = None
+        if KVConnectorBlockState is not None:
+            boundary_state_offloads = self.kv_cache_manager.take_boundary_state_offloads()
+            if self.connector is not None:
+                snapshot_req_ids = {req.req_id for req in new_reqs_data}
+                snapshot_req_ids.update(
+                    req_id
+                    for req_id, block_ids in zip(
+                        cached_reqs_data.req_ids,
+                        cached_reqs_data.new_block_ids,
+                        strict=True,
+                    )
+                    if block_ids
+                )
+                snapshot_req_ids.update(req_id for req_id in boundary_state_offloads if req_id in self.requests)
+                kv_connector_block_state = KVConnectorBlockState(
+                    block_ids={req_id: self.kv_cache_manager.get_block_ids(req_id) for req_id in snapshot_req_ids},
+                    boundary_state_offloads=boundary_state_offloads,
+                )
+
         new_block_ids_to_zero = (
             (self.kv_cache_manager.take_new_block_ids() or None) if self.needs_kv_cache_zeroing else None
         )
@@ -790,7 +821,7 @@ class BalanceScheduler(Scheduler):
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[len(num_scheduled_tokens)]
 
-        scheduler_output = SchedulerOutput(
+        scheduler_output_kwargs = dict(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -808,6 +839,9 @@ class BalanceScheduler(Scheduler):
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
+        if KVConnectorBlockState is not None:
+            scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
+        scheduler_output = SchedulerOutput(**scheduler_output_kwargs)
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -821,6 +855,10 @@ class BalanceScheduler(Scheduler):
         if self.ec_connector is not None:
             ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(scheduler_output)
             scheduler_output.ec_connector_metadata = ec_meta
+
+        # Connector-only block state must not be dispatched to workers.
+        if KVConnectorBlockState is not None:
+            scheduler_output.kv_connector_block_state = None
 
         # Advance the fence only for non-empty steps (those that actually
         # write KV and have their output processed later in update_from_output).
