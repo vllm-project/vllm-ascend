@@ -16,6 +16,7 @@ if "torch_npu._inductor" not in sys.modules:
     sys.modules["torch_npu._inductor"] = MagicMock()
 
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADSACPImpl
+from vllm_ascend.attention.indexer import AscendSFAIndexerBackend
 from vllm_ascend.attention.sfa_kv_offload import (
     AscendSFAKVOffloadImpl,
     AscendSFAKVOffloadMetadataBuilder,
@@ -246,7 +247,10 @@ class TestAscendSFACacheComposition(TestBase):
 
                 main_cache = tuple(torch.empty(1) for _ in range(1 if enable_sfa_c8 else 2))
                 indexer_cache = tuple(torch.empty(1) for _ in range(2 if enable_li_c8 else 1))
-                impl.indexer = SimpleNamespace(k_cache=SimpleNamespace(kv_cache=indexer_cache))
+                impl.indexer = SimpleNamespace(
+                    k_cache=SimpleNamespace(kv_cache=indexer_cache),
+                    num_cache_tensors=2 if enable_li_c8 else 1,
+                )
 
                 composed = impl._compose_sfa_kv_cache(main_cache)
 
@@ -257,25 +261,86 @@ class TestAscendSFACacheComposition(TestBase):
                 for actual_tensor, expected_tensor in zip(composed, expected):
                     self.assertIs(actual_tensor, expected_tensor)
 
-    @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
+    @patch("vllm_ascend.attention.indexer.get_ascend_config")
     def test_li_c8_reshape_optim_requires_layer_li_c8(self, mock_get_ascend_config):
+        indexer = AscendSFAIndexerBackend.__new__(AscendSFAIndexerBackend)
+        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = True
+
+        indexer.enable_sparse_li_c8 = False
+        self.assertFalse(indexer._use_c8_reshape_optim())
+
+        indexer.enable_sparse_li_c8 = True
+        self.assertTrue(indexer._use_c8_reshape_optim())
+
+        mock_get_ascend_config.return_value.c8_reshape_optim_enabled = False
+        self.assertFalse(indexer._use_c8_reshape_optim())
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_fetches_by_k_cache_prefix(self, mock_get_forward_context):
         impl = AscendSFAImpl.__new__(AscendSFAImpl)
-        mock_get_ascend_config.return_value.c8_enable_reshape_optim = True
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.0.self_attn.attn"
+        own_metadata = SimpleNamespace(slot_mapping=torch.tensor([1, 2]))
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.0.indexer"),
+        )
+        mock_get_forward_context.return_value.attn_metadata = {"model.layers.0.indexer": own_metadata}
 
-        impl.enable_sparse_li_c8 = False
-        self.assertFalse(impl._use_li_c8_reshape_optim())
+        self.assertIs(impl._get_indexer_attn_metadata(), own_metadata)
 
-        impl.enable_sparse_li_c8 = True
-        self.assertTrue(impl._use_li_c8_reshape_optim())
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_missing_raises(self, mock_get_forward_context):
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.0.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.0.indexer"),
+        )
+        mock_get_forward_context.return_value.attn_metadata = {}
 
-        mock_get_ascend_config.return_value.c8_enable_reshape_optim = False
-        self.assertFalse(impl._use_li_c8_reshape_optim())
+        with self.assertRaises(RuntimeError):
+            impl._get_indexer_attn_metadata()
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_falls_back_to_main_metadata(self, mock_get_forward_context):
+        # A KV-sharing layer (e.g. an MTP draft layer) owns no indexer cache,
+        # so no metadata is built under its own prefix; the indexer shares
+        # this layer's SFA attention metadata instead.
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        main_metadata = SimpleNamespace(slot_mapping=torch.tensor([3, 4]))
+        mock_get_forward_context.return_value.attn_metadata = {"model.layers.78.self_attn.attn": main_metadata}
+
+        self.assertIs(impl._get_indexer_attn_metadata(), main_metadata)
+
+    @patch("vllm_ascend.attention.sfa_v1.get_forward_context")
+    def test_get_indexer_attn_metadata_resolves_kv_sharing_target(self, mock_get_forward_context):
+        # During draft propose the forward context is the main runner's, which
+        # only keys main-layer prefixes; a KV-sharing draft layer resolves its
+        # indexer metadata via the sharing target's indexer cache prefix.
+        impl = AscendSFAImpl.__new__(AscendSFAImpl)
+        impl.has_indexer = True
+        impl.layer_name = "model.layers.78.self_attn.attn"
+        impl.kv_sharing_target_layer_name = "model.layers.77.self_attn.attn"
+        impl.indexer = SimpleNamespace(
+            k_cache=SimpleNamespace(prefix="model.layers.78.self_attn.indexer.k_cache"),
+        )
+        target_metadata = SimpleNamespace(slot_mapping=torch.tensor([5, 6]))
+        mock_get_forward_context.return_value.attn_metadata = {
+            "model.layers.77.self_attn.indexer.k_cache": target_metadata
+        }
+
+        self.assertIs(impl._get_indexer_attn_metadata(), target_metadata)
 
     @patch(
         "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_lightning_indexer_quant",
         create=True,
     )
-    def test_li_c8_indexer_uses_cache_slots_after_main_cache(self, mock_indexer):
+    def test_li_c8_indexer_uses_own_cache_tuple_slots(self, mock_indexer):
         expected_topk = torch.zeros(2, 1, 4, dtype=torch.int32)
         mock_indexer.return_value = expected_topk
         q_li = torch.zeros(2, 1, 128, dtype=torch.int8)
@@ -283,45 +348,34 @@ class TestAscendSFACacheComposition(TestBase):
         weights = torch.ones(2, 1, dtype=torch.bfloat16)
         attn_metadata = SimpleNamespace(block_table=torch.zeros(1, 2, dtype=torch.int32))
 
-        for enable_sfa_c8 in (False, True):
-            with self.subTest(enable_sfa_c8=enable_sfa_c8):
-                main_cache = (
-                    (torch.empty(2, 16, 1, 656, dtype=torch.int8),)
-                    if enable_sfa_c8
-                    else (
-                        torch.empty(2, 16, 1, 512, dtype=torch.bfloat16),
-                        torch.empty(2, 16, 1, 64, dtype=torch.bfloat16),
-                    )
-                )
-                indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
-                indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
-                kv_cache = (*main_cache, indexer_k_cache, indexer_scale_cache)
-                impl = AscendSFAImpl.__new__(AscendSFAImpl)
-                impl.enable_sparse_sfa_c8 = enable_sfa_c8
-                impl.use_torch_npu_lightning_indexer = False
-                mock_indexer.reset_mock()
+        # The wrapper receives the indexer's own cache tuple (k + scale) at
+        # the fixed slots; the main SFA cache is no longer part of it.
+        indexer_k_cache = torch.empty(2, 16, 1, 128, dtype=torch.int8)
+        indexer_scale_cache = torch.empty(2, 16, 1, 1, dtype=torch.float16)
+        kv_cache = (indexer_k_cache, indexer_scale_cache)
 
-                result = BaseDeviceAdaptor.indexer_select_post_process(
-                    impl,
-                    q_li,
-                    q_li_scale,
-                    q_li.shape,
-                    weights,
-                    kv_cache,
-                    attn_metadata,
-                    torch.tensor([2], dtype=torch.int32),
-                    torch.tensor([2], dtype=torch.int32),
-                    True,
-                    False,
-                )
+        result = BaseDeviceAdaptor.indexer_select_post_process(
+            q_li,
+            q_li_scale,
+            q_li.shape,
+            weights,
+            kv_cache,
+            0,
+            1,
+            attn_metadata,
+            torch.tensor([2], dtype=torch.int32),
+            torch.tensor([2], dtype=torch.int32),
+            True,
+            False,
+        )
 
-                self.assertIs(result, expected_topk)
-                call_kwargs = mock_indexer.call_args.kwargs
-                self.assertIs(call_kwargs["key"], indexer_k_cache)
-                self.assertEqual(
-                    call_kwargs["key_dequant_scale"].data_ptr(),
-                    indexer_scale_cache.data_ptr(),
-                )
+        self.assertIs(result, expected_topk)
+        call_kwargs = mock_indexer.call_args.kwargs
+        self.assertIs(call_kwargs["key"], indexer_k_cache)
+        self.assertEqual(
+            call_kwargs["key_dequant_scale"].data_ptr(),
+            indexer_scale_cache.data_ptr(),
+        )
 
 
 class TestAscendSFAKVQuantSparseAttention(TestBase):
@@ -522,7 +576,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
         self.patcher.start()
 
         mock_ascend_config = MagicMock()
-        mock_ascend_config.c8_enable_reshape_optim = False
+        mock_ascend_config.c8_reshape_optim_enabled = False
         mock_ascend_config.enable_mlapo = True
         mock_ascend_config.enable_shared_expert_dp = False
         self.ascend_config_patcher = patch(
@@ -707,7 +761,7 @@ class TestAscendSFAMetadataBuilder(TestBase):
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("torch.ops._C_ascend.store_kv_block_metadata", create=True)
-    def test_ascend_sfa_metadata_builder_build_with_c8_reshape_optim(
+    def test_ascend_sfa_metadata_builder_automatically_builds_li_c8_metadata_on_prefill_node(
         self,
         store_kv_block_metadata,
         mock_get_cos_and_sin_mla,
@@ -729,14 +783,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
         vllm_config.model_config.get_head_size.return_value = 64
         vllm_config.model_config.dtype = torch.float16
         vllm_config.model_config.hf_text_config.qk_rope_head_dim = 64
+        vllm_config.kv_transfer_config = SimpleNamespace(
+            kv_role="kv_producer",
+            is_kv_producer=True,
+            is_kv_consumer=False,
+        )
         speculative_config = MagicMock()
         speculative_config.num_speculative_tokens = 4
         vllm_config.speculative_config = speculative_config
         device = torch.device("cpu")
-
-        builder = AscendSFAMetadataBuilder(
-            kv_cache_spec=kv_cache_spec, layer_names=layer_names, vllm_config=vllm_config, device=device
-        )
 
         common_attn_metadata = MagicMock()
         common_attn_metadata.num_reqs = 10
@@ -759,8 +814,15 @@ class TestAscendSFAMetadataBuilder(TestBase):
 
         with patch("vllm_ascend.attention.sfa_v1.get_ascend_config") as mock_get_ascend_config:
             mock_ascend_config = MagicMock()
-            mock_ascend_config.c8_enable_reshape_optim = True
+            mock_ascend_config.c8_reshape_optim_enabled = True
             mock_get_ascend_config.return_value = mock_ascend_config
+
+            builder = AscendSFAMetadataBuilder(
+                kv_cache_spec=kv_cache_spec,
+                layer_names=layer_names,
+                vllm_config=vllm_config,
+                device=device,
+            )
 
             metadata = builder.build(
                 common_prefix_len=10,
@@ -1122,7 +1184,6 @@ class TestAscendSFAImpl(TestBase):
         impl.kv_a_layernorm.weight.data = torch.ones(32)
         impl.kv_a_layernorm.variance_epsilon = 1e-5
         impl.has_indexer = True
-        impl.wq_b = None
         impl.weight_dq = torch.empty(1)
         impl.weight_uq_qr = torch.empty(1)
         impl.W_UK_T = torch.randn(2, 64, 32)

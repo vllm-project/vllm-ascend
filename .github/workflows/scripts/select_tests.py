@@ -104,6 +104,13 @@ CPU_UT_BATCH_PATH = "tests/ut"
 # Full-suite mode roots scanned by --all-tests.
 _ALL_TESTS_ROOTS = ("tests/ut", "tests/e2e/pull_request")
 
+# When set via --skip-cpu-ut, tests/ut targets are dropped from every selection
+# mode. CPU UTs are executed by the cpu-ut job on every PR; the PR test
+# scheduling path must not reserve a runner for them. Scheduled full-suite
+# coverage runs (schedule_test_coverage.yaml) do NOT pass this flag, so their
+# --all-tests runs keep collecting CPU UT coverage.
+_SKIP_CPU_UT = False
+
 # Generic ``linux-aarch64-a3-N-`` labels are mixed pools of 560T and 752T
 # machines (i.e. random machine class). When accuracy tests are selected (or
 # the full suite runs), reroute those partitions to the dedicated 560T labels.
@@ -301,6 +308,12 @@ def _route_explicit_test_target(
     groups: dict[PartitionKey, list[str]],
 ) -> None:
     """Route a single explicit UT/E2E target to the appropriate runner group."""
+    if _SKIP_CPU_UT and (target == CPU_UT_BATCH_ALIAS or _is_ut_path(_pytest_node_file_path(target))):
+        print(
+            f"Warning: Skipping CPU UT target (--skip-cpu-ut is set): {target}",
+            file=sys.stderr,
+        )
+        return
     # The coverage recommender emits "cpu-ut" (the batch label of the
     # default_cpu_ut module) instead of the real pytest path "tests/ut".
     # Map it back so the recommended path runs the same CPU UTs the
@@ -731,7 +744,17 @@ def main():
         default=None,
         help="Force route all non-CPU tests to an exact label from runner_label.json",
     )
+    parser.add_argument(
+        "--skip-cpu-ut",
+        action="store_true",
+        help="Drop tests/ut targets from every selection mode. Used by the PR "
+        "scheduling path, where CPU UTs run in the cpu-ut job instead of "
+        "on a reserved runner. Scheduled full-suite coverage runs do not pass "
+        "this flag, so --all-tests keeps collecting CPU UT coverage.",
+    )
     args = parser.parse_args()
+    global _SKIP_CPU_UT
+    _SKIP_CPU_UT = args.skip_cpu_ut
     meta = yaml.safe_load(args.config.read_text()) or {}
     runners = _load_runners()
     partition_config = _load_partition_config(meta)
@@ -772,6 +795,12 @@ def main():
     elif args.all_tests:
         matched_modules = ["all"]
         for root in _ALL_TESTS_ROOTS:
+            if _SKIP_CPU_UT and _is_ut_path(root):
+                print(
+                    f"  Skipping {root} (--skip-cpu-ut is set)",
+                    file=sys.stderr,
+                )
+                continue
             path = Path(root)
             if _is_ut_path(root):
                 _scan_ut_test_dir(root, all_groups)

@@ -1,10 +1,10 @@
 # Speculative Decoding KV Sliding Window
 
 Speculative decoding draft models are typically trained on short contexts
-(e.g. 4-8K tokens). At inference time, when the running context grows far
+(e.g. 4-8k tokens). At inference time, when the running context grows far
 beyond the training length, the draft's attention over the full KV cache goes
 out-of-distribution and acceptance collapses: on GLM-5.2 with an early DSpark
-draft, the mean acceptance length dropped from ~5 to ~1 at 32K context, making
+draft, the mean acceptance length dropped from ~5 to ~1 at 32k context, making
 speculation a net loss.
 
 The KV sliding window caps the **draft model's attention** to the most recent
@@ -12,7 +12,7 @@ The KV sliding window caps the **draft model's attention** to the most recent
 to the full context, so generation quality is preserved; only the draft reads
 a shorter, in-distribution window. On acceptance-collapsed drafts this
 restores acceptance (the same GLM-5.2 draft recovered from ~1.0 to ~4.7-5.5
-at 32K, up to +381% end-to-end throughput in the original evaluation).
+at 32k, up to +381% end-to-end throughput in the original evaluation).
 
 ## Configuration
 

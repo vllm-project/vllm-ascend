@@ -188,7 +188,7 @@ def _scatter_index_cache(
         return
 
     flat_cache = cache.view(-1, cache.shape[-1])
-    torch.ops._C_ascend.npu_scatter_nd_update_v2(
+    torch.ops._C_ascend.npu_scatter_nd_update_sk(
         flat_cache,
         slots.view(-1, 1),
         updates,

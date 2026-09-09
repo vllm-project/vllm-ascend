@@ -45,7 +45,11 @@ from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, 
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
 from vllm_ascend.ops.linear import AscendUnquantizedLinearMethod
 from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import npu_stream_switch
+from vllm_ascend.utils import (
+    npu_stream_switch,
+    vllm_version_is,
+)
+from vllm_ascend.worker.device_metadata import DeviceMetadataStage, wait_for_device_metadata
 
 
 def hadamard_linear(x: torch.Tensor, hadamard: torch.Tensor) -> tuple[torch.Tensor, tuple[int, ...], int]:
@@ -99,18 +103,25 @@ class AscendDeepseekV4IndexerCache(DeepseekV4IndexerCache):
         from vllm_ascend.models.layer.attention.layer import DSV4_BLOCK_SIZES
 
         storage_block_size = DSV4_BLOCK_SIZES[vllm_config.cache_config.block_size][0][0]
+        # vLLM #51718 replaced MLAAttentionSpec.compress_ratio with
+        # AttentionSpec.tokens_per_state on main.
+        ratio_kwargs = (
+            {"compress_ratio": self.compress_ratio}
+            if vllm_version_is("0.28.0")
+            else {"tokens_per_state": self.compress_ratio}
+        )
         return AscendMLAAttentionSpec(
             block_size=storage_block_size * self.compress_ratio,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             model_version="deepseek_v4",
-            compress_ratio=self.compress_ratio,
             cache_dtype_str=self.cache_config.cache_dtype,
             scale_dim=1 if self.head_dim == 128 else 0,
             scale_dtype=torch.float
             if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE)
             else torch.float16,
+            **ratio_kwargs,
         )
 
     def forward(self): ...
@@ -190,26 +201,25 @@ class AscendIndexerOps:
         scale_cache: torch.Tensor,
         metadata: typing.Any,
     ) -> torch.Tensor:
-        topk_idxs, _ = torch.ops._C_ascend.npu_vllm_quant_lightning_indexer(
+        wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
+        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
             query=query,
             key=key_cache,
             weights=self.device_operator.prepare_dsa_indexer_weights(weights),
             query_dequant_scale=self.device_operator.prepare_dsa_indexer_query_scale(query_scale),
             key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
-            actual_seq_lengths_query=metadata.query_start_loc[1:],
-            actual_seq_lengths_key=metadata.seq_lens,
+            topk=self.index_topk,
+            quant_mode=2,
+            cu_seqlens_q=metadata.qli_cu_seqlens_q,
+            seqused_k=metadata.qli_seqused_k,
+            cmp_residual_k=metadata.qli_cmp_residual_k,
             block_table=metadata.block_table,
             metadata=metadata.qli_metadata,
-            query_quant_mode=0,
-            key_quant_mode=0,
-            layout_query="TND",
-            layout_key="PA_BSND",
-            sparse_count=self.index_topk,
-            sparse_mode=3,
-            pre_tokens=(1 << 63) - 1,
-            next_tokens=(1 << 63) - 1,
+            layout_q="TND",
+            layout_k="PA_BBND",
+            mask_mode=3,
             cmp_ratio=4,
-            return_value=False,
+            return_value=0,
         )
         return topk_idxs
 

@@ -382,6 +382,14 @@ packed_modules_model_mapping: dict[str, dict[str, list[str]]] = {
 
 QUANT_MODEL_PREFIX_MAPPINGS = {
     "deepseek_v4": {
+        # Multimodal checkpoints keep the text-backbone quantization keys in
+        # the original causal-LM namespace (``model.*`` / ``lm_head.*``),
+        # while the vLLM wrapper nests the module under ``language_model``.
+        "language_model.model.": "model.",
+        "language_model.lm_head.": "lm_head.",
+        # ``WeightsMapper`` treats the trailing dot literally, while the
+        # quantization lookup also queries the module prefix itself.
+        "language_model.lm_head": "lm_head",
         "layers.": "model.layers.",
         "embed.": "model.embed_tokens.",
         "head.": "lm_head.",

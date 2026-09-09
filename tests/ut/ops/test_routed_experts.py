@@ -79,7 +79,7 @@ def test_ascend_expert_map_follows_model_runner(use_v2_model_runner):
     legacy_map = torch.tensor([1, 0], dtype=torch.int32)
     upstream_map = torch.tensor([0, 1], dtype=torch.int32)
     object.__setattr__(routed_experts, "_use_v2_model_runner", use_v2_model_runner)
-    if not vllm_version_is("0.27.1"):
+    if not vllm_version_is("0.28.0"):
         # main (cdc4824a21): RoutedExperts.expert_map reads quant_method.moe_kernel
         routed_experts.quant_method = SimpleNamespace(moe_kernel=None)
     routed_experts.ascend_expert_map = legacy_map

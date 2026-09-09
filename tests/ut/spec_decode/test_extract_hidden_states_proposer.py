@@ -37,7 +37,7 @@ from vllm_ascend.utils import vllm_version_is
 
 @pytest.fixture(autouse=True)
 def _no_pin_memory():
-    if vllm_version_is("0.27.1"):
+    if vllm_version_is("0.28.0"):
         with patch(
             "vllm.v1.spec_decode.extract_hidden_states.PIN_MEMORY",
             False,

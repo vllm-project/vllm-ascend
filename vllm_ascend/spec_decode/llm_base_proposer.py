@@ -64,6 +64,7 @@ from vllm_ascend.spec_decode.utils import (
     patch_tensor_parallel_group,
 )
 from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
+from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
 _PREPARE_INPUTS_BLOCK_SIZE = 4
@@ -112,8 +113,25 @@ def _is_glm_model(model_config) -> bool:
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     _runnable: ACLGraphWrapper | Callable
 
+    def _create_draft_vllm_config(self) -> VllmConfig:
+        """Expose the draft runner type during model construction.
+
+        ``_get_model`` calls this hook before ``get_model`` installs the
+        returned config as the current vLLM config. Attention constructors can
+        then identify the draft model from ``runner_type="draft"``.
+
+        Keep the target-derived model config otherwise unchanged. Replacing it
+        with ``draft_model_config`` changes how generic proposers construct
+        their layers and can invalidate target parallel settings.
+        """
+        draft_vllm_config = super()._create_draft_vllm_config()
+        draft_vllm_config = copy.copy(draft_vllm_config)
+        draft_vllm_config.model_config = copy.copy(draft_vllm_config.model_config)
+        draft_vllm_config.model_config.runner_type = self.speculative_config.draft_model_config.runner_type
+        return draft_vllm_config
+
     @staticmethod
-    def _get_multimodal_image_token_index(model_name: str, config: Any) -> int:
+    def _get_multimodal_image_token_index(model_name: str, config: Any) -> int | None:
         if model_name in [
             "Qwen2_5_VLForConditionalGeneration",
             "Qwen3VLForConditionalGeneration",
@@ -134,7 +152,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             "AscendKimiK3ForConditionalGeneration",
         }:
             return config.media_placeholder_token_id
-        return config.image_token_index
+        # Some models (for example DeepSeek-V4 Vision) use multiple
+        # position-dependent image sentinel tokens instead of one placeholder
+        # token. Their text-only drafter does not need a synthetic image token
+        # index during decode.
+        return getattr(config, "image_token_index", None)
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
@@ -404,7 +426,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         if supports_multimodal(model):
             # handle multimodality
             model_name = self.get_model_name(model)
-            self.model.config.image_token_index = self._get_multimodal_image_token_index(model_name, model.config)
+            image_token_index = self._get_multimodal_image_token_index(model_name, model.config)
+            if image_token_index is not None:
+                self.model.config.image_token_index = image_token_index
             target_language_model = model.get_language_model()
         else:
             target_language_model = model
@@ -634,10 +658,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         is_profile=False,
     ):
         (
-            num_tokens,
+            _,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_tokens = int(num_tokens_across_dp[self.dp_rank].item())
         dcp_manager = getattr(self.runner, "dcp_manager", None)
 
         multi_steps_attn_metadata = []
@@ -907,10 +933,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_input_tokens = num_tokens
 
         (
-            num_input_tokens,
+            _,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
@@ -1105,6 +1133,11 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.token_indices_to_sample[:token_indices_to_sample_len].copy_(token_indices_to_sample)
         self.token_indices_to_sample[token_indices_to_sample_len:].fill_(0)
 
+        active_device_metadata_executor = (
+            getattr(self.runner, "device_metadata_executor", None) if self.method == "dspark" else None
+        )
+        if active_device_metadata_executor is not None and not active_device_metadata_executor.submission_in_flight:
+            active_device_metadata_executor = None
         with set_ascend_forward_context(
             multi_steps_attn_metadata[0],
             self.vllm_config,
@@ -1115,6 +1148,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=multi_steps_attn_metadata,
+            device_metadata_executor=active_device_metadata_executor,
             eplb_heat_collection_status=(
                 self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
             ),
@@ -1144,6 +1178,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             else:
                 draft_token_ids = run_draft()
                 self._update_full_graph_params_if_needed(forward_context, num_input_tokens, multi_steps_attn_metadata)
+        if active_device_metadata_executor is not None:
+            active_device_metadata_executor.release()
         return draft_token_ids
 
     def _sample_draft_from_logits(
@@ -1500,6 +1536,13 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
             )
 
+            if self.use_compress:
+                # The compressor metadata cached for the previous draft substep
+                # is stale now; drop it before running the next one.
+                from vllm_ascend.attention.dsa_v1 import reset_compressor_metadata_cache
+
+                reset_compressor_metadata_cache()
+
             model_kwargs = {
                 "input_ids": model_input_ids,
                 "positions": model_positions,
@@ -1745,7 +1788,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            if vllm_version_is("0.27.1"):
+            if vllm_version_is("0.28.0"):
                 return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
             else:
                 return bool(
@@ -2383,8 +2426,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the cache empty in the non-compression path to avoid passing an
         # unexpected argument.
         shared_dsa_draft_cache: dict = dict(common_ratio_to_sas_metadata=dict()) if self.use_compress else {}
+        device_metadata_tasks: list[DeviceMetadataTask] = []
+        device_metadata_executor = (
+            getattr(self.runner, "device_metadata_executor", None)
+            if (
+                self.method == "dspark"
+                and self.dcp_size == 1
+                and self.vllm_config.parallel_config.prefill_context_parallel_size == 1
+            )
+            else None
+        )
         for attn_group in self.draft_attn_groups:
             builder = attn_group.get_metadata_builder()
+            device_metadata_provider = (
+                builder
+                if device_metadata_executor is not None and isinstance(builder, DeviceMetadataTaskProvider)
+                else None
+            )
             extra_attn_metadata_args: dict = dict(shared_dsa_draft_cache)
             if self.use_compress:
                 extra_attn_metadata_args["block_size"] = attn_group.kv_cache_spec.block_size
@@ -2409,6 +2467,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 attn_metadata = builder.build_for_drafting(
                     common_attn_metadata, draft_index=1, **extra_attn_metadata_args
                 )
+                if device_metadata_provider is not None:
+                    device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             else:
                 attn_metadata = builder.build(
                     0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
@@ -2418,6 +2478,8 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
+        if device_metadata_executor is not None and device_metadata_tasks:
+            device_metadata_executor.submit(device_metadata_tasks)
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
         attn_metadata_i = per_layer_attn_metadata[self.draft_attn_groups[0].layer_names[0]]

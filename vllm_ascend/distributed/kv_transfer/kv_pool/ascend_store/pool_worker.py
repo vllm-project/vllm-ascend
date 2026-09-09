@@ -436,7 +436,7 @@ class KVPoolWorker:
                 self.prefetch_layer_map = self._layerwise_reuse_layout.prefetch_layer_map
                 self.num_prefetch_layers = self._layerwise_reuse_layout.num_prefetch_layers
         else:
-            self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 1))
+            self.num_prefetch_layers = int(self._extra_config.get("layerwise_prefetch_layers", 2))
         self.sync_save_events: list[torch.npu.Event] | None = None
 
         logger.info(
@@ -582,6 +582,7 @@ class KVPoolWorker:
                     ready_event_sending,
                     self.group_uses_align_state,
                     self.enable_kv_events,
+                    worker=self if self.tp_mismatch else None,
                 )
                 self.kv_send_thread.start()
                 ready_event_sending.wait()
@@ -597,6 +598,7 @@ class KVPoolWorker:
                     ready_event,
                     invalid_block_ids=self._invalid_block_ids,
                     invalid_block_ids_lock=self._invalid_block_ids_lock,
+                    worker=self if self.tp_mismatch else None,
                 )
                 self.kv_recv_thread.start()
                 ready_event.wait()
@@ -643,7 +645,14 @@ class KVPoolWorker:
     def _uses_mamba_kv_cache(use_hybrid: bool, kv_cache_config: KVCacheConfig | None):
         if not use_hybrid or kv_cache_config is None:
             return False
-        return any([isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_config.kv_cache_groups])
+        for group in kv_cache_config.kv_cache_groups:
+            kv_cache_spec = group.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                if any(isinstance(spec, MambaSpec) for spec in kv_cache_spec.kv_cache_specs.values()):
+                    return True
+            elif isinstance(kv_cache_spec, MambaSpec):
+                return True
+        return False
 
     @staticmethod
     def _as_cache_tuple(cache_or_caches) -> tuple[torch.Tensor, ...]:
@@ -887,6 +896,18 @@ class KVPoolWorker:
             if self.load_async:
                 self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                     request,
+                )
+                continue
+
+            if self.tp_mismatch:
+                # TP mismatch is restricted to non-hybrid, single-group KV.
+                group_block_size = self.grouped_block_size[0]
+                mask_num = load_spec.vllm_cached_tokens // group_block_size * group_block_size
+                self._load_kv_tp_mismatch(
+                    request.block_hashes,
+                    request.block_ids_by_group[0],
+                    token_len,
+                    mask_num,
                 )
                 continue
 
