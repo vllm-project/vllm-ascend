@@ -85,6 +85,18 @@ class NPUModelRunner(GPUModelRunner):
 
     execute_model_state: ExecuteModelState | None
 
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.use_uno()
+            and any(
+                req.lora_request
+                for req in scheduler_output.scheduled_new_reqs
+            )
+        ):
+            raise ValueError("Uno does not support request-specific LoRA adapters")
+        super().update_requests(scheduler_output)
+
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         # Ascend-specific configurations
         self.ascend_config = get_ascend_config()
@@ -136,7 +148,7 @@ class NPUModelRunner(GPUModelRunner):
         # so here we just call init_speculator to reinitialize speculator.
         self.speculator: AscendEagleSpeculator | None = None
         if self.speculative_config is not None and (not self.use_spec_pp or self.is_last_pp_rank):
-            self.speculator = init_speculator(self.vllm_config, self.device)
+            self.speculator = init_speculator(self.vllm_config, self.device, self)
             # Shared update_stream: main model (ModelAclGraphManager) and draft
             # (Eagle/DFlash/DSpark AclGraphManager) all use this same stream.
             self.speculator.update_stream = self.update_stream

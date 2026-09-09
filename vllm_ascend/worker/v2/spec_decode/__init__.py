@@ -23,12 +23,19 @@ from vllm.config import VllmConfig
 def init_speculator(
     vllm_config: VllmConfig,
     device: torch.device,
+    runner=None,
 ):
     """Override GPU init_speculator for Ascend NPUs.
     Use AscendEagleSpeculator when eagle is used.
     """
     speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    if speculative_config.use_uno():
+        from vllm_ascend.worker.v2.spec_decode.uno.speculator import (
+            AscendUnoSpeculator,
+        )
+
+        return AscendUnoSpeculator(vllm_config, device, runner)
     if speculative_config.use_dspark():
         from vllm_ascend.worker.v2.spec_decode.dspark.speculator import (
             AscendDSparkSpeculator,

@@ -19,7 +19,10 @@ class PunicaWrapperNPU(PunicaWrapperBase):
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int, device: torch.device | str, **kwargs):
-        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_batches, device)
+        # Parallel drafting can alternate base-model and LoRA rows inside one
+        # request, so the number of contiguous LoRA segments can be greater
+        # than max_batches. Token capacity is the safe upper bound.
+        PunicaWrapperBase.__init__(self, max_num_batched_tokens, max_num_batched_tokens, device)
         refresh_all_lora_classes()
         self.lora_config = kwargs.get("lora_config")
         if not get_current_hardware_profile().supports(HardwareCapability.LORA_CUSTOM_OPS) or (
