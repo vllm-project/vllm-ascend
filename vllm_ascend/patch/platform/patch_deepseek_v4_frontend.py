@@ -145,7 +145,7 @@ def _patched_get_deepseek_v4_tokenizer(tokenizer: deepseek_v4.HfTokenizer):
     @wraps(original_apply)
     def apply_chat_template(
         self: Any,
-        messages: Any,
+        messages: Any = None,
         tools: list[dict[str, Any]] | None = None,
         **kwargs: Any,
     ) -> str | list[int]:
@@ -187,13 +187,18 @@ def _patched_get_deepseek_v4_tokenizer(tokenizer: deepseek_v4.HfTokenizer):
 @wraps(_original_parser_init)
 def _patched_parser_init(self: DeepSeekV4Parser, *args: Any, **kwargs: Any) -> None:
     bound = _original_parser_init_signature.bind(self, *args, **kwargs)
-    extra_kwargs = bound.arguments.get("kwargs", {})
-    chat_kwargs = extra_kwargs.get("chat_template_kwargs") or {}
+    has_explicit = "chat_template_kwargs" in _original_parser_init_signature.parameters
+    if has_explicit:
+        chat_kwargs = bound.arguments.get("chat_template_kwargs") or {}
+    else:
+        extra_kwargs = bound.arguments.get("kwargs", {})
+        chat_kwargs = extra_kwargs.get("chat_template_kwargs") or {}
     if "thinking" not in chat_kwargs and "enable_thinking" not in chat_kwargs:
-        extra_kwargs["chat_template_kwargs"] = {
-            **chat_kwargs,
-            "enable_thinking": True,
-        }
+        chat_kwargs = {**chat_kwargs, "enable_thinking": True}
+        if has_explicit:
+            bound.arguments["chat_template_kwargs"] = chat_kwargs
+        else:
+            bound.arguments.setdefault("kwargs", {})["chat_template_kwargs"] = chat_kwargs
     _original_parser_init(*bound.args, **bound.kwargs)
 
 
