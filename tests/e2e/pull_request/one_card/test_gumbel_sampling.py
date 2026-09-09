@@ -607,7 +607,7 @@ class TestGumbelSampling:
                 logits,
                 mapping,
                 torch.ones(1, device=DEVICE),
-                mapping,
+                mapping.to(torch.int64),
                 mapping,
                 True,
                 logits_cache=torch.empty(1, 1, 31, device=DEVICE),

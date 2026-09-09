@@ -1,6 +1,6 @@
 # MRV2 categorical sampling on Ascend
 
-NPU Model Runner V2 uses an AscendC categorical operator for ordinary random sampling. The operator preserves the sampler's request-level seed and position model while avoiding a full-vocabulary random tensor, host synchronization, and per-token host synchronization.
+NPU Model Runner V2 uses an AscendC categorical operator for ordinary random sampling. The operator preserves the sampler's request-level seed and position model while avoiding a full-vocabulary random tensor and per-token host synchronization.
 
 This page describes the first integration stage and its contributor-facing contracts. The broader design in [RFC #14130](https://github.com/vllm-project/vllm-ascend/issues/14130) also proposes routing speculative rejection resampling through this operator in a follow-up change.
 
