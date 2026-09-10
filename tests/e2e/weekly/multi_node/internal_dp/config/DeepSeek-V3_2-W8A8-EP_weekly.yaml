@@ -47,7 +47,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true,"enable_fused_mc2":0}'
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -70,7 +70,6 @@ deployment:
   -
     envs:
       <<: *env_common
-      VLLM_ASCEND_ENABLE_FLASHCOMM1: 1
     server_cmd: >
       vllm serve vllm-ascend/DeepSeek-V3.2-W8A8
           --host 0.0.0.0
@@ -92,7 +91,7 @@ deployment:
           --gpu-memory-utilization 0.90
           --enforce-eager
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true,"enable_fused_mc2":0}'
+          --additional-config '{"enable_cpu_binding" : false, "enable_dsa_cp":true}'
           --tokenizer-mode deepseek_v32 
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -136,7 +135,7 @@ deployment:
           --max-num-seqs 14
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true,"enable_fused_mc2":0,"enable_mlapo":true}'
+          --additional-config '{"enable_cpu_binding":false,"recompute_scheduler_enable":true,"enable_mlapo":true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config
@@ -181,7 +180,7 @@ deployment:
           --max-num-seqs 14
           --gpu-memory-utilization 0.90
           --no-enable-prefix-caching
-          --additional-config '{"enable_cpu_binding" : false,"recompute_scheduler_enable" : true,"enable_fused_mc2":0,"enable_mlapo":true}'
+          --additional-config '{"enable_cpu_binding":false,"recompute_scheduler_enable":true,"enable_mlapo":true}'
           --tokenizer-mode deepseek_v32
           --reasoning-parser deepseek_v3
           --kv-transfer-config 
