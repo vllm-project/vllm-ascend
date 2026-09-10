@@ -1,17 +1,12 @@
 import torch
 import torch_npu
-from vllm.distributed import (
-    get_dp_group,
-    get_ep_group,
-    tensor_model_parallel_all_reduce,
-)
+from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import rope_forward_oot
 from vllm_ascend.ops.triton.muls_add import muls_add_triton
-from vllm_ascend.utils import is_vl_model
 
 
 def _get_ep_local_sizes(dp_metadata, ep_group) -> list[int] | None:
@@ -75,9 +70,6 @@ def _maybe_all_gather_and_maybe_unpad_impl(x: torch.Tensor) -> torch.Tensor:
 def _maybe_pad_and_reduce_impl(x: torch.Tensor) -> torch.Tensor:
     """EP communication only: pad according to the DP token distribution, then EP reduce_scatter."""
     forward_context = get_forward_context()
-
-    if _EXTRA_CTX.is_draft_model and is_vl_model():
-        return tensor_model_parallel_all_reduce(x)
 
     dp_metadata = forward_context.dp_metadata
     if dp_metadata is None:
