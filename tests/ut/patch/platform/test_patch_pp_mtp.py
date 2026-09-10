@@ -3,7 +3,25 @@
 from types import SimpleNamespace
 
 import pytest
+from transformers import PretrainedConfig
 from vllm.config.model import ModelConfig
+
+from vllm_ascend.patch.platform.patch_speculative_config import hf_config_override
+
+
+@pytest.mark.parametrize(
+    ("model_type", "expected_architecture"),
+    [("qwen3_5_text", "Qwen3_5MTP"), ("qwen3_5_moe_text", "Qwen3_5MoeMTP")],
+)
+def test_qwen3_5_text_config_mtp_override(model_type, expected_architecture):
+    hf_config = PretrainedConfig()
+    hf_config.model_type = model_type
+    hf_config.architectures = ["Qwen3_5MoeForCausalLM" if "moe" in model_type else "Qwen3_5ForCausalLM"]
+    hf_config.mtp_num_hidden_layers = 1
+    result = hf_config_override(hf_config)
+    assert result.model_type == "qwen3_5_mtp"
+    assert result.n_predict == 1
+    assert result.architectures == [expected_architecture]
 
 
 def test_model_config_validates_local_mtp_drafter_as_single_pp_rank(monkeypatch):
