@@ -36,7 +36,7 @@ _server_cmd: &server_cmd
   - "--data-parallel-size"
   - "2"
   - "--enable-expert-parallel"
-  - "seed"
+  - "--seed"
   - "42"
   - "--max-model-len"
   - "5000"
