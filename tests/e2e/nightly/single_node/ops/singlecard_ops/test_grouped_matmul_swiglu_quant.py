@@ -1,6 +1,7 @@
 import gc
 
 import numpy as np
+import pytest
 import torch
 import torch_npu
 
@@ -159,3 +160,54 @@ def test_grouped_matmul_swiglu_quant_kernel():
     gc.collect()
     torch.npu.empty_cache()
     torch.npu.reset_peak_memory_stats()
+
+
+@pytest.mark.parametrize("num_experts", [16, 32])
+@pytest.mark.parametrize("group_list_type", [0, 1])
+@torch.inference_mode()
+def test_grouped_matmul_swiglu_quant_v2_expert_bias_list(num_experts, group_list_type):
+    torch.npu.config.allow_internal_format = True
+    num_tokens, hidden_size, output_size = 128, 512, 1024
+    generator = torch.Generator().manual_seed(1024)
+    unpacked = torch.randint(-4, 4, (num_experts, hidden_size, output_size), dtype=torch.int8, generator=generator)
+    packed = (unpacked[..., ::2] & 15) | (unpacked[..., 1::2] << 4)
+    weight = torch_npu.npu_format_cast(packed.npu(), 29)
+    weight_list = [expert.clone().view(torch.int32).contiguous() for expert in weight.unbind(0)]
+    scale = torch.full((num_experts, output_size), 0.002).view(torch.int32).to(torch.int64).npu()
+    bias = torch.zeros((num_experts, output_size), device="npu")
+    bias_list = []
+    for expert_bias in bias:
+        # Only memory outside the valid view is poisoned, exposing cross-expert reads.
+        backing = torch.full((num_experts, output_size), float("nan"), device="npu")
+        backing[0].copy_(expert_bias)
+        bias_list.append(backing[0])
+    x = torch.randint(-8, 8, (num_tokens, hidden_size), dtype=torch.int8, generator=generator).npu()
+    x_scale = torch.full((num_tokens,), 0.01, device="npu")
+    group_list = torch.full((num_experts,), num_tokens // num_experts, dtype=torch.int64, device="npu")
+    if group_list_type == 0:
+        group_list = group_list.cumsum(0)
+
+    output, output_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
+        x=x,
+        weight=weight_list,
+        weight_scale=[expert.clone() for expert in scale.unbind(0)],
+        x_scale=x_scale,
+        group_list=group_list,
+        weight_assist_matrix=bias_list,
+        dequant_mode=0,
+        group_list_type=group_list_type,
+    )
+    reference, reference_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
+        x=x,
+        weight=[weight.view(torch.int32).contiguous()],
+        weight_scale=[scale],
+        x_scale=x_scale,
+        group_list=group_list,
+        weight_assist_matrix=[bias],
+        dequant_mode=0,
+        group_list_type=group_list_type,
+    )
+    assert torch.isfinite(reference_scale.cpu()).all()
+    assert torch.isfinite(output_scale.cpu()).all()
+    torch.testing.assert_close(output.cpu(), reference.cpu(), atol=1, rtol=0)
+    torch.testing.assert_close(output_scale.cpu(), reference_scale.cpu(), atol=1e-8, rtol=0.005)
