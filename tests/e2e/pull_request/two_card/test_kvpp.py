@@ -4,7 +4,9 @@ import traceback
 from collections import defaultdict
 
 import pytest
+import zmq
 from vllm import SamplingParams
+from vllm.distributed.device_communicators import shm_broadcast
 from vllm.transformers_utils.utils import maybe_model_redirect
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -109,6 +111,16 @@ def test_kvpp_combined_features(monkeypatch):
     """Compare KVPP off/on with chunk, prefix, TP, EP, async and MTP."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    original_context = shm_broadcast.Context
+
+    def queue_context():
+        context = original_context()
+        # Completed requests need no queued notifications after workers exit.
+        # Avoid indefinite ZMQ linger during in-process engine garbage collection.
+        context.setsockopt(zmq.LINGER, 0)
+        return context
+
+    monkeypatch.setattr(shm_broadcast, "Context", queue_context)
     original_exit = VllmRunner.__exit__
 
     def report_exit(runner, exc_type, exc_value, exc_tb):
