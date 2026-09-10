@@ -146,7 +146,8 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     --trust-remote-code \
     --max-model-len 131072 \
     --tensor-parallel-size 4 \
-    --data-parallel-size 4 --api_server_count 1 \
+    --data-parallel-size 4 \
+    --api_server_count 1 \
     --max-num-batched-tokens 32768 \
     --long-prefill-token-threshold 4096 \
     --enable-expert-parallel \
