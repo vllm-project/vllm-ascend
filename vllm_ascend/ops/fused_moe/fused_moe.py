@@ -116,6 +116,13 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
             self.moe_config.ep_group = get_ep_group()
             self.moe_config.mc2_group = get_mc2_group()
 
+        # Pre-cast internal-router gate weights at load time. Forward-time
+        # gate.weight.to(fp32) emits an uncapturable aclop Cast (ACLGraph);
+        # same issue fixed for 310P in #14863. Needed after #14872 widened
+        # is_internal_router to `gate is not None` (e.g. Qwen3-VL W8A8).
+        if self.gate is not None and not hasattr(self.gate, "weight_fp32"):
+            self.gate.precast_fp32_weight = True
+
         self.ascend_shared_experts = None
         if shared_experts is not None:
             routed_experts.return_with_event = True
