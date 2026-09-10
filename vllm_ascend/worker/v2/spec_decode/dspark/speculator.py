@@ -19,7 +19,7 @@ from copy import copy
 from typing import Any, cast
 
 import torch
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -41,6 +41,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_draft_attn_metadata_factory,
 )
 from vllm_ascend.worker.v2.spec_decode.dflash.aclgraph import DFlashAclGraphManager
+from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
 
 
 def _derive_draft_capture_sizes(
@@ -99,6 +100,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        vllm_config, self.replicated_pcp = prepare_replicated_pcp_config(vllm_config)
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
         self.aux_hidden_contract: DSparkAuxHiddenContract | None = None
@@ -197,27 +199,29 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         target_input_buffers: Any,
         target_attn_groups: Any,
     ) -> None:
-        super().set_attn(
-            model_state,
-            kv_cache_config,
-            block_tables,
-            target_input_buffers,
-            target_attn_groups,
-        )
-        self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
-        # npu needs attn_backends to update full graph params in run_fullgraph.
-        attn_backends: dict[str, type[AttentionBackend]] = {}
-        active_layer_names = self.draft_attn_layer_names
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            layer_names = kv_cache_group_spec.layer_names
-            if active_layer_names is not None:
-                layer_names = list(active_layer_names.intersection(layer_names))
+        # Initialize the draft attention backend with its PCP=1 config.
+        with set_current_vllm_config(self.attn_vllm_config):
+            super().set_attn(
+                model_state,
+                kv_cache_config,
+                block_tables,
+                target_input_buffers,
+                target_attn_groups,
+            )
+            self._context_slot_mappings = self._context_slot_mappings.to(torch.int32)  # type: ignore[has-type]
+            # npu needs attn_backends to update full graph params in run_fullgraph.
+            attn_backends: dict[str, type[AttentionBackend]] = {}
+            active_layer_names = self.draft_attn_layer_names
+            for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+                layer_names = kv_cache_group_spec.layer_names
+                if active_layer_names is not None:
+                    layer_names = list(active_layer_names.intersection(layer_names))
 
-            layer_type = cast(type[Any], AttentionLayerBase)
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
+                layer_type = cast(type[Any], AttentionLayerBase)
+                attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)
 
-            for layer_name in layer_names:
-                attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
+                for layer_name in layer_names:
+                    attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         if active_layer_names is not None:
             missing_layers = active_layer_names.difference(attn_backends)

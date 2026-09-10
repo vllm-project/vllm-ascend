@@ -451,6 +451,10 @@ def test_stateful_handoff_preserves_decode_graph(
         max_cudagraph_capture_size=32,
         compile_sizes=[],
     )
+    runner.model_config = SimpleNamespace(
+        is_encoder_decoder=False,
+        hf_text_config=SimpleNamespace(to_dict=lambda: {}),
+    )
     runner.vllm_config = SimpleNamespace(
         parallel_config=runner.parallel_config,
         compilation_config=runner.compilation_config,
@@ -458,8 +462,8 @@ def test_stateful_handoff_preserves_decode_graph(
         observability_config=SimpleNamespace(cudagraph_metrics=False),
         num_speculative_tokens=num_spec_tokens,
         lora_config=None,
+        model_config=runner.model_config,
     )
-    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
     runner.uniform_decode_query_len = 1 + num_spec_tokens
     runner.input_batch = SimpleNamespace(
         num_computed_tokens_cpu=np.array(computed),

@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -203,6 +203,55 @@ def test_copy_config_with_draft_capture_sizes_preserves_runtime_state():
     assert draft_config.compilation_config.static_forward_context is static_forward_context
     assert compilation_config.cudagraph_capture_sizes == [16, 32]
     assert compilation_config.max_cudagraph_capture_size == 32
+
+
+@pytest.mark.parametrize("layer_names", [["draft.mla"], [], ["draft.mla", "draft.other"]])
+def test_set_attn_preserves_pcp_context_and_backend_validation(monkeypatch, layer_names):
+    spec = _spec(SimpleNamespace())
+    draft_config = object()
+    monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: draft_config))
+    spec.draft_attn_layer_names = set(layer_names) or {"draft.mla"}
+    spec._context_slot_mappings = torch.zeros(2, dtype=torch.int64)
+    backends = {name: type(f"Backend{idx}", (), {}) for idx, name in enumerate(layer_names)}
+    context_active = False
+    parent_calls = []
+
+    @contextmanager
+    def draft_context(config):
+        nonlocal context_active
+        assert config is spec.attn_vllm_config
+        context_active = True
+        try:
+            yield
+        finally:
+            context_active = False
+
+    def parent_set_attn(*args):
+        assert context_active
+        parent_calls.append(args)
+
+    def get_layers(config, layer_type, names):
+        assert context_active
+        assert config is spec.vllm_config
+        return {name: SimpleNamespace(get_attn_backend=lambda name=name: backends[name]) for name in names}
+
+    module = "vllm_ascend.worker.v2.spec_decode.dspark.speculator"
+    monkeypatch.setattr(f"{module}.set_current_vllm_config", draft_context)
+    monkeypatch.setattr(f"{module}.get_layers_from_vllm_config", get_layers)
+    monkeypatch.setattr(DSparkSpeculator, "set_attn", parent_set_attn)
+    cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=layer_names)])
+    expected_error = (
+        pytest.raises(RuntimeError, match="no KV-cache backend|homogeneous") if len(layer_names) != 1 else nullcontext()
+    )
+    with expected_error:
+        spec.set_attn(object(), cache_config, object(), object(), object())
+
+    assert len(parent_calls) == 1
+    assert not context_active
+    assert spec._context_slot_mappings.dtype == torch.int32
+    if len(layer_names) == 1:
+        assert spec.attn_backends == backends
+        assert spec.attn_backend is backends["draft.mla"]
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])

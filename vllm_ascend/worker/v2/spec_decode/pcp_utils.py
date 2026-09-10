@@ -2,14 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Protocol
 
-from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
+from vllm.config import VllmConfig, replace
 
 if TYPE_CHECKING:
     from vllm_ascend.worker.v2.model_states.default import AscendModelState
+    from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 class ReplicatedPCPDraftSpeculator(Protocol):
@@ -17,13 +18,13 @@ class ReplicatedPCPDraftSpeculator(Protocol):
 
     replicated_pcp: bool
     model_state: "AscendModelState"
-    pcp_manager: AscendPCPManager | None
+    pcp_manager: "AscendPCPManager | None"
 
 
 @contextmanager
 def disable_target_pcp_for_replicated_draft(
     speculator: ReplicatedPCPDraftSpeculator,
-) -> Iterator[None]:
+) -> Generator[None, None, None]:
     """Keep replicated PCP=1 draft out of target PCP partitioning."""
     target_pcp_manager = speculator.pcp_manager
     if not speculator.replicated_pcp or target_pcp_manager is None:
@@ -41,3 +42,20 @@ def disable_target_pcp_for_replicated_draft(
         yield
     finally:
         model_state.pcp_manager = target_pcp_manager
+
+
+def prepare_replicated_pcp_config(
+    vllm_config: VllmConfig,
+) -> tuple[VllmConfig, bool]:
+    """Return the draft execution config and whether target PCP is replicated."""
+    target_parallel_config = vllm_config.parallel_config
+    replicated_pcp = target_parallel_config.prefill_context_parallel_size > 1
+    if replicated_pcp:
+        vllm_config = replace(
+            vllm_config,
+            parallel_config=replace(
+                target_parallel_config,
+                prefill_context_parallel_size=1,
+            ),
+        )
+    return vllm_config, replicated_pcp
