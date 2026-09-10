@@ -31,7 +31,8 @@ def _decoder_methods(clone_residual: bool = False) -> ast.Module:
         assert ast.unparse(snapshot.value) == "hidden_states"
         if clone_residual:
             snapshot.value = ast.parse("hidden_states.clone()", mode="eval").body
-    return ast.fix_missing_locations(ast.Module(body=methods, type_ignores=[]))
+    module_body: list[ast.stmt] = [*methods]
+    return ast.fix_missing_locations(ast.Module(body=module_body, type_ignores=[]))
 
 
 def _storage(tensor: torch.Tensor) -> int:
