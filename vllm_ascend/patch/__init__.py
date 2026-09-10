@@ -274,8 +274,10 @@
 #       used to be patched here has moved to AscendKVCacheConfigBuilder
 #       (vllm_ascend.worker.kv_cache_config_builder), wired via
 #       NPUPlatform.get_kv_cache_config_builder_cls. Only resolve_kv_cache_block_sizes,
-#       the Kimi K3 DSpark grouping (_get_kv_cache_groups_uniform_page_size) and
-#       KVCacheConfig.has_mamba_layers are still monkey-patched here.
+#       the Kimi K3 DSpark grouping (_get_kv_cache_groups_uniform_page_size), the
+#       GLM5-Next cache layout (get_kv_cache_groups / _pool_bytes_per_block /
+#       _max_memory_usage_bytes_from_groups / get_kv_cache_config_from_groups)
+#       and KVCacheConfig.has_mamba_layers are still monkey-patched here.
 #
 # ** 10. File: platform/patch_mamba_block_aligned_split.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

@@ -685,9 +685,7 @@ class NPUWorker(WorkerBase):
         for group in kv_cache_groups:
             group_spec = group.kv_cache_spec
             specs = (
-                group_spec.kv_cache_specs.values()
-                if isinstance(group_spec, UniformTypeKVCacheSpecs)
-                else (group_spec,)
+                group_spec.kv_cache_specs.values() if isinstance(group_spec, UniformTypeKVCacheSpecs) else (group_spec,)
             )
             if any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in specs):
                 return available_memory
