@@ -1038,15 +1038,14 @@ class RecomputeScheduler(Scheduler):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=self._get_new_block_ids_to_zero(),
+            kv_cache_block_copies=pending_kv_cache_block_copies,
+            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             preempted_reqs=preempted_req_data,
             recomputed_reqs=recomputed_reqs,
         )
-        if vllm_version_is("0.28.0"):
-            scheduler_output_kwargs["kv_cache_block_copies"] = pending_kv_cache_block_copies
-        else:
+        if not vllm_version_is("0.28.0"):
             scheduler_output_kwargs["kv_connector_block_state"] = kv_connector_block_state
-            scheduler_output_kwargs["ec_manager_metadata"] = self.encoder_cache_manager.get_manager_metadata()
         scheduler_output = RecomputeSchedulerOutput(**scheduler_output_kwargs)
         if vllm_version_is("0.28.0"):
             scheduler_output.partial_tail_offloads = pending_partial_tail_offloads
