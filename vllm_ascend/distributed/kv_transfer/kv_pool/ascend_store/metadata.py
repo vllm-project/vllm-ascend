@@ -180,6 +180,17 @@ def infer_cache_family_from_ratio(compress_ratio: int | None) -> str:
     return f"c{compress_ratio}"
 
 
+def infer_cache_family_ratio(cache_family: str | None) -> int:
+    if not cache_family or not cache_family.startswith("c"):
+        return 1
+    ratio = cache_family[1:]
+    return int(ratio) if ratio.isdigit() else 1
+
+
+def get_cache_family_granularity(block_size: int, cache_family: str | None) -> int:
+    return block_size * infer_cache_family_ratio(cache_family)
+
+
 def _get_layer_compress_ratio(
     layer_name: str,
     compress_ratios: Sequence[int] | None,
@@ -886,6 +897,8 @@ class ReqMeta:
     # TODO: add lora_request which used for gen lora_id/lora_name in kv event
     token_ids: list[int] | None = None
     original_block_size: list[int] | int | None = None
+    # Wire-format KVCacheSpecKind names per group for Phase-1 BlockStored events.
+    kv_cache_spec_kinds: list[str] | None = None
 
     event_id: int | None = None
 
@@ -904,6 +917,7 @@ class ReqMeta:
         num_prompt_tokens: int | None = None,
         token_ids: list[int] | None = None,
         original_block_size: list[int] | int | None = None,
+        kv_cache_spec_kinds: list[str] | None = None,
         block_ids: list[int] | list[list[int]] | None = None,
         event_id: int | None = None,
         save_end_token: int | None = None,
@@ -942,6 +956,7 @@ class ReqMeta:
         self.num_prompt_tokens = num_prompt_tokens
         self.token_ids = token_ids
         self.original_block_size = original_block_size
+        self.kv_cache_spec_kinds = kv_cache_spec_kinds
         self.event_id = event_id
         self.last_block_gva = last_block_gva
         self.partial_block_index = partial_block_index
@@ -991,6 +1006,7 @@ class ReqMeta:
         kv_cache_group_families: list[str] | None = None,
         save_partial_block: bool = False,
         hash_block_size: int | None = None,
+        kv_cache_spec_kinds: list[str] | None = None,
     ) -> ReqMeta | None:
         """Create the request metadata from a request tracker."""
         if block_hashes is None:
@@ -1094,6 +1110,7 @@ class ReqMeta:
             else None,
             gva_block_offset=tracker.gva_block_offset,
             kv_cache_group_ids=list(range(len(tracker.allocated_block_ids_by_group))),
+            kv_cache_spec_kinds=kv_cache_spec_kinds,
         )
 
 

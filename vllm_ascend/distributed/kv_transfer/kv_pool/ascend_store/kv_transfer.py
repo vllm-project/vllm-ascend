@@ -26,6 +26,7 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     ReqMeta,
     SharedBlockData,
     get_block_hashes,
+    infer_cache_family_ratio,
 )
 # isort: on
 
@@ -727,6 +728,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
         for group_id in req_meta.kv_cache_group_ids or [0]:
             group_block_size = self._get_block_size(group_id)
+            cache_family = self.token_database.group_cache_families["kv"].get(group_id)
+            raw_group_block_size = group_block_size * infer_cache_family_ratio(cache_family)
 
             group_store_mask = (
                 list(store_masks[group_id]) if store_masks is not None and group_id < len(store_masks) else None
@@ -734,8 +737,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if group_store_mask is not None:
                 skipped_chunks = 0
                 for chunk_id, allowed in enumerate(group_store_mask):
-                    start = chunk_id * group_block_size
-                    if allowed and should_skip(start, start + group_block_size):
+                    start = chunk_id * raw_group_block_size
+                    if allowed and should_skip(start, start + raw_group_block_size):
                         group_store_mask[chunk_id] = False
                         skipped_chunks += 1
                 if skipped_chunks:
@@ -761,13 +764,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 start: int,
                 group_block_size=group_block_size,
                 group_store_mask=group_store_mask,
+                raw_group_block_size=raw_group_block_size,
             ) -> bool:
                 block_idx = start // group_block_size
                 mask_allows = group_store_mask is None or (
                     block_idx < len(group_store_mask) and group_store_mask[block_idx]
                 )
-                chunk_start = block_idx * group_block_size
-                return mask_allows and not should_skip(chunk_start, chunk_start + group_block_size)
+                chunk_start = block_idx * raw_group_block_size
+                return mask_allows and not should_skip(chunk_start, chunk_start + raw_group_block_size)
 
             pre_shard = self.dcp_size <= 1 and not align_state_group
             iterator = self.token_database.process_token_key_strings_with_block_ids(
@@ -810,11 +814,20 @@ class KVCacheStoreSendingThread(KVTransferThread):
             addrs = []
             sizes = []
             stored_events: list[BlockStored] = []
+            # MLA compress_ratio (cache_family cN) shrinks storage addressing
+            # (start/end) by N while prefix hashes / conductor / HBM events
+            # stay on the effective token window (block_size * N).
+            cache_family_ratio = max(infer_cache_family_ratio(cache_family), 1)
+            effective_block_size = group_block_size * cache_family_ratio
             all_hashes = []
+            spec_kinds = req_meta.kv_cache_spec_kinds
+            spec_kind = (
+                spec_kinds[group_id] if spec_kinds is not None and group_id < len(spec_kinds) else None
+            )
             if self.enable_kv_event:
                 group_block_hashes = get_block_hashes(
                     req_meta.block_hashes,
-                    group_block_size,
+                    effective_block_size,
                     getattr(self.token_database, "hash_block_size", group_block_size),
                 )
                 all_hashes = [maybe_convert_block_hash(bh) for bh in group_block_hashes]
@@ -836,14 +849,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 addrs.append(addr)
                 sizes.append(size)
+                # Map storage (start, end) back to the effective token window so
+                # conductor/HBM block_size and tokens_hash stay aligned.
                 if self.enable_kv_event:
-                    token_ids = req_meta.token_ids[start : ends[index]] if req_meta.token_ids is not None else None
-                    block_size = (
+                    storage_block_size = (
                         req_meta.original_block_size[group_id]
                         if isinstance(req_meta.original_block_size, list)
                         else req_meta.original_block_size
                     )
-                    if block_size is not None:
+                    if storage_block_size is not None:
+                        token_start = start * cache_family_ratio
+                        token_end = ends[index] * cache_family_ratio
+                        # Skip incomplete effective windows (conductor needs a
+                        # full registered block_size worth of tokens).
+                        if token_end - token_start != effective_block_size:
+                            continue
+                        token_ids = (
+                            req_meta.token_ids[token_start:token_end]
+                            if req_meta.token_ids is not None
+                            else []
+                        )
                         block_idx = start // group_block_size
                         if block_idx >= len(all_hashes):
                             continue
@@ -853,10 +878,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             block_hashes=[current_hash],
                             parent_block_hash=parent_hash,
                             token_ids=token_ids,
-                            block_size=block_size,
+                            block_size=effective_block_size,
                             lora_id=None,
                             medium="cpu",
                             lora_name=None,
+                            group_idx=group_id,
+                            kv_cache_spec_kind=spec_kind,
                         )
                         stored_events.append(stored_event)
                         logger.debug("Added kv cache event '%s' to kv cache events queue", stored_event)

@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
@@ -119,6 +120,7 @@ class KVPoolScheduler:
         use_eagle_fn = getattr(speculative_config, "use_eagle", None)
         self.use_eagle = use_eagle_fn() is True if callable(use_eagle_fn) else False
         self.original_block_size = infer_group_block_sizes(vllm_config.cache_config.block_size, kv_cache_groups)
+        self.kv_cache_spec_kinds = self._infer_group_spec_kinds(vllm_config, kv_cache_config)
         cp_scale = self.pcp_size * self.dcp_size
         self.grouped_block_size = [block_size * cp_scale for block_size in self.original_block_size]
         requested_hash_block_size = vllm_config.cache_config.prefix_match_unit
@@ -400,6 +402,23 @@ class KVPoolScheduler:
         )
         return hit_tokens
 
+    def _infer_group_spec_kinds(
+        self,
+        vllm_config: "VllmConfig",
+        kv_cache_config: KVCacheConfig | None,
+    ) -> list[str]:
+        """Wire-format KVCacheSpecKind names per group for Phase-1 events."""
+        if kv_cache_config is None or not self.use_hybrid:
+            # Non-hybrid: single full/MLA group; kind is optional for events.
+            return ["full_attention"]
+
+        kinds: list[str] = []
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            kind = get_kv_cache_spec_kind(kv_cache_group.kv_cache_spec)
+            kinds.append(kind.value if hasattr(kind, "value") else str(kind))
+        return kinds
+
+
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 
@@ -654,6 +673,7 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
+            kv_cache_spec_kinds=self.kv_cache_spec_kinds,
             save_partial_block=self.layerwise_offload,
             hash_block_size=self.hash_block_size,
         )
@@ -820,6 +840,7 @@ class KVPoolScheduler:
             discard_partial_chunks=self._discard_partial_chunks,
             original_block_size=self.original_block_size,
             kv_cache_group_families=self.kv_cache_group_families,
+            kv_cache_spec_kinds=self.kv_cache_spec_kinds,
             hash_block_size=self.hash_block_size,
         )
 
