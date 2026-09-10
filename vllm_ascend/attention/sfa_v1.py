@@ -239,6 +239,10 @@ SFA_FIA_DENSE_PREFILL_LATENT_DIM = 512
 SFA_FIA_DENSE_PREFILL_ROPE_DIM = 64
 SFA_FIA_DENSE_PREFILL_BLOCK_SIZE = 128
 SFA_FIA_SHARED_PREFILL_TOPK_WIDTH = 2048
+# Bounded scheduler-observed multi-request geometry. Keep each FIA call at
+# the existing 2048-row/visible-KV limit; broaden only with direct evidence.
+SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS = 3
+SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH = 2267
 
 
 class PreprocessType(enum.Enum):
@@ -1618,6 +1622,118 @@ class AscendSFAImpl(MLAAttentionImpl):
             or getattr(attn_metadata, "num_decode_tokens", None) != 0
         ):
             return None
+
+        exact_multi_segment = (
+            attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and len(query_lengths) == SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+            and query_lengths
+            == [SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH] * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+            and kv_lengths
+            == [SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH] * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+        )
+        if exact_multi_segment:
+            if (
+                topk_indices.ndim != 3
+                or topk_indices.shape[0] != num_tokens
+                or topk_indices.shape[1] != 1
+                or topk_indices.shape[2] != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
+                or topk_indices.dtype != torch.int32
+                or topk_indices.device != ql_nope.device
+            ):
+                return None
+
+            dense_inputs: list[tuple[torch.Tensor, torch.Tensor, M]] = []
+            tail_spans: list[tuple[int, int]] = []
+            for request, start in enumerate(query_starts):
+                dense_end = start + SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
+                dense_q = ql_nope[start:dense_end]
+                dense_rope = q_pe[start:dense_end]
+                dense_metadata = copy(attn_metadata)
+                dense_metadata.block_table = attn_metadata.block_table[request : request + 1]
+                dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
+                dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
+                dense_metadata.cum_query_lens = cum_query_lens.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
+                dense_metadata.seq_lens = seq_lens.new_tensor([SFA_FIA_SHARED_PREFILL_TOPK_WIDTH])
+                dense_metadata.num_actual_tokens = SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
+                dense_metadata.num_input_tokens = SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
+                dense_inputs.append((dense_q, dense_rope, dense_metadata))
+                tail_spans.append((dense_end, query_ends[request]))
+
+            # Validate every segment before submitting the first FIA kernel. A
+            # late per-segment decline must never replay the incumbent after an
+            # earlier FIA side effect.
+            for dense_q, dense_rope, dense_metadata in dense_inputs:
+                if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
+                    return None
+
+            def pack_exact_rows(tensor: torch.Tensor, spans: tuple[tuple[int, int], ...]) -> torch.Tensor:
+                if len(spans) == 1:
+                    start, end = spans[0]
+                    return tensor[start:end]
+                return torch.cat([tensor[start:end] for start, end in spans], dim=0)
+
+            tail_q = pack_exact_rows(ql_nope, tuple(tail_spans))
+            tail_rope = pack_exact_rows(q_pe, tuple(tail_spans))
+            tail_indices = pack_exact_rows(topk_indices, tuple(tail_spans))
+            tail_metadata = copy(attn_metadata)
+            tail_metadata.block_table = attn_metadata.block_table
+            tail_query_ends = [
+                (request + 1) * (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH - SFA_FIA_SHARED_PREFILL_TOPK_WIDTH)
+                for request in range(SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS)
+            ]
+            tail_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(tail_query_ends)
+            tail_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor(kv_lengths)
+            tail_metadata.cum_query_lens = cum_query_lens.new_tensor(tail_query_ends)
+            tail_metadata.seq_lens = seq_lens.new_tensor(kv_lengths)
+            tail_metadata.num_actual_tokens = tail_q.shape[0]
+            tail_metadata.num_input_tokens = tail_q.shape[0]
+
+            dense_outputs = []
+            for dense_q, dense_rope, dense_metadata in dense_inputs:
+                dense_output = self._execute_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata)
+                assert dense_output is not None, "Validated multi-segment FIA unexpectedly declined"
+                dense_outputs.append(dense_output)
+
+            tail_output = self._execute_sparse_flash_attention_process(
+                tail_q,
+                tail_rope,
+                kv_cache,
+                tail_indices,
+                tail_metadata,
+                tail_metadata.cum_query_lens,
+                tail_metadata.seq_lens,
+                block_table=tail_metadata.block_table,
+            )
+            if (
+                tail_output.shape != tail_q.shape
+                or tail_output.dtype != tail_q.dtype
+                or tail_output.device != tail_q.device
+            ):
+                raise RuntimeError(
+                    "Multi-segment shared SFA tail returned an incompatible output: "
+                    f"expected shape={tuple(tail_q.shape)}, dtype={tail_q.dtype}, device={tail_q.device}; "
+                    f"got shape={tuple(tail_output.shape)}, dtype={tail_output.dtype}, device={tail_output.device}."
+                )
+
+            outputs = []
+            tail_cursor = 0
+            for dense_output, (tail_start, tail_end) in zip(dense_outputs, tail_spans, strict=True):
+                outputs.append(dense_output)
+                tail_length = tail_end - tail_start
+                outputs.append(tail_output[tail_cursor : tail_cursor + tail_length])
+                tail_cursor += tail_length
+            attn_output = torch.cat(outputs, dim=0)
+            if (
+                attn_output.shape != ql_nope.shape
+                or attn_output.dtype != ql_nope.dtype
+                or attn_output.device != ql_nope.device
+            ):
+                raise RuntimeError(
+                    "Multi-segment shared prefill row restoration returned an incompatible output: "
+                    f"expected shape={tuple(ql_nope.shape)}, dtype={ql_nope.dtype}, device={ql_nope.device}; "
+                    f"got shape={tuple(attn_output.shape)}, dtype={attn_output.dtype}, device={attn_output.device}."
+                )
+            return attn_output
 
         signature = (tuple(query_ends), tuple(kv_lengths))
         plan = getattr(attn_metadata, "_sfa_fia_shared_prefill_plan", None)
