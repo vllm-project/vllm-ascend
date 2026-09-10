@@ -36,7 +36,7 @@
 #include "../msa_index_score_common.h"
 #include "msa_block_mmad.h"
 #include "msa_index_score_task.h"
-#include "msa_seg_row_max_epilogue.h"
+#include "msa_index_score_epilogue.h"
 
 namespace MsaIndexScoreNs {
 

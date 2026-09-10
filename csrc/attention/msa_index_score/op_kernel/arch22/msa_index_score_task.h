@@ -162,10 +162,10 @@ public:
         }
         task.globalRowBase = cuQStart_ * numQHeads_ + task.mStart;
 
-        const uint32_t tLo = task.mStart / numQHeads_;
-        const uint32_t tHigh = (task.mStart + task.mActual - 1) / numQHeads_;
-        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tHigh));
-        const int32_t visibleKeyEndLo = VisibleKeyEndOf(static_cast<int32_t>(tLo));
+        const uint32_t tokenLo = task.mStart / numQHeads_;
+        const uint32_t tokenHi = (task.mStart + task.mActual - 1) / numQHeads_;
+        const int32_t visibleKeyEndHi = VisibleKeyEndOf(static_cast<int32_t>(tokenHi));
+        const int32_t visibleKeyEndLo = VisibleKeyEndOf(static_cast<int32_t>(tokenLo));
 
         uint32_t visibleEndBlk = MsaCeilDiv(static_cast<uint32_t>(visibleKeyEndHi), MSA_BLOCK_SIZE);
         visibleEndBlk = MsaMinU32(visibleEndBlk, maxBlocksPerBatch_);

@@ -9,7 +9,7 @@
  */
 
 /*!
- * \file msa_seg_row_max_epilogue.h
+ * \file msa_index_score_epilogue.h
  * \brief AIV 侧 Epilogue：可选反量化列乘 -> atten_mask -> 分段 RowMax -> local_mask -> 写回。
  *
  * 数值路径：
@@ -18,8 +18,8 @@
  * local_mask 由 start_loc（query 所在逻辑 block）+ init/local_blocks 生成强制 +∞。
  */
 
-#ifndef MSA_SEG_ROW_MAX_EPILOGUE_H
-#define MSA_SEG_ROW_MAX_EPILOGUE_H
+#ifndef MSA_INDEX_SCORE_EPILOGUE_H
+#define MSA_INDEX_SCORE_EPILOGUE_H
 
 #include "kernel_operator.h"
 
@@ -702,4 +702,4 @@ private:
 
 } // namespace MsaIndexScoreNs
 
-#endif // MSA_SEG_ROW_MAX_EPILOGUE_H
+#endif // MSA_INDEX_SCORE_EPILOGUE_H
