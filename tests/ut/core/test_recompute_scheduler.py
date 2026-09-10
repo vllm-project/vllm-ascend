@@ -1098,96 +1098,74 @@ def test_update_from_output_removes_stopped_preempted_requests():
     assert request not in scheduler.skipped_waiting
 
 
-def _prime_running(scheduler, num_requests=2, num_tokens=32, max_tokens=16):
-    block_size = scheduler.vllm_config.cache_config.block_size
-    for i in range(num_requests):
-        scheduler.add_request(
-            create_request(
-                request_id=i + 1,
-                num_tokens=num_tokens,
-                max_tokens=max_tokens,
-                block_size=block_size,
-            )
-        )
-    scheduler.schedule()
-    for req in scheduler.running:
-        req.num_computed_tokens = 0
-        req.num_output_placeholders = 0
-        req.next_decode_eligible_step = 0
-    return scheduler.vllm_config.cache_config.block_size
-
-
 def _mock_kv_connector(*, matched=(0, False), offload=False):
     connector = MagicMock()
     connector.get_num_new_matched_tokens.return_value = matched
+    connector.get_num_new_matched_tokens.side_effect = None
     connector.update_state_before_preempt.return_value = offload
     connector.ensure_cache_available.return_value = True
     connector.build_connector_meta.return_value = "meta"
+    connector.get_kv_connector_stats.return_value = None
+    connector.take_events.return_value = []
     return connector
 
 
 def test_recompute_schedule_preempt_skips_and_waiting_edges():
-    fcfs = _make_recompute_scheduler()
-    _prime_running(fcfs)
-    fcfs.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    _, fcfs = _create_live_recompute_scheduler()
+    _warmup_two_running(fcfs)
+    _fail_first_allocate(fcfs)
     fcfs.schedule()
 
-    prio = _make_recompute_scheduler()
-    _prime_running(prio)
+    _, prio = _create_live_recompute_scheduler()
+    keep, victim = _warmup_two_running(prio)
     prio.policy = SchedulingPolicy.PRIORITY
-    if len(prio.running) >= 2:
-        prio.running[0].priority = 10
-        prio.running[-1].priority = 0
-    prio.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    keep.priority = 10
+    victim.priority = 0
+    _fail_first_allocate(prio)
     prio.schedule()
 
-    offload = _make_recompute_scheduler()
-    _prime_running(offload)
+    _, offload = _create_live_recompute_scheduler()
+    _warmup_two_running(offload)
     offload.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
     offload.connector = _mock_kv_connector(offload=True)
     offload.kv_cache_manager.get_block_ids = MagicMock(return_value=([0],))
-    offload.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    _fail_first_allocate(offload)
     offload.schedule()
 
-    fallback = _make_recompute_scheduler()
-    _prime_running(fallback)
+    _, fallback = _create_live_recompute_scheduler()
+    _warmup_two_running(fallback)
     fallback.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=False)
     fallback.connector = _mock_kv_connector(offload=False)
     fallback.kv_cache_manager.get_block_ids = MagicMock(return_value=([0],))
-    fallback.kv_cache_manager.allocate_slots = MagicMock(return_value=None)
+    _fail_first_allocate(fallback)
     fallback.schedule()
 
-    skips = _make_recompute_scheduler()
-    _prime_running(skips, num_requests=2)
-    if len(skips.running) >= 2:
-        first, second = skips.running[0], skips.running[1]
-        first.num_output_placeholders = 2
-        first.num_computed_tokens = first.num_prompt_tokens + first.max_tokens
-        second.next_decode_eligible_step = skips.current_step + 8
-        skips.schedule()
-        first.num_output_placeholders = 0
-        first.num_computed_tokens = 0
-        try:
-            first.is_prefill_chunk = True
-            second.is_prefill_chunk = False
-        except AttributeError:
-            pass
-        second.next_decode_eligible_step = 0
+    _, skips = _create_live_recompute_scheduler()
+    first, second = _warmup_two_running(skips)
+    first.num_output_placeholders = 2
+    first.num_computed_tokens = first.num_prompt_tokens + first.max_tokens
+    second.next_decode_eligible_step = skips.current_step + 8
+    skips.schedule()
+    first.num_output_placeholders = 0
+    first.num_computed_tokens = 0
+    if hasattr(first, "is_prefill_chunk"):
+        first.is_prefill_chunk = True
+        second.is_prefill_chunk = False
+    second.next_decode_eligible_step = 0
     skips.schedule(throttle_prefills=True)
 
-    extras = _make_recompute_scheduler()
-    _prime_running(extras, num_requests=1)
+    _, extras = _create_live_recompute_scheduler()
+    extras_keep, _ = _warmup_two_running(extras)
     extras.scheduler_config.long_prefill_token_threshold = 8
     extras.need_mamba_block_aligned_split = True
     extras._mamba_block_aligned_split = MagicMock(side_effect=lambda req, n, *a, **k: n)
-    extras.lora_config = MagicMock(max_loras=1)
-    extras.ec_connector = MagicMock()
-    extras.ec_connector.ensure_cache_available.return_value = True
+    extras.lora_config = SimpleNamespace(max_loras=1)
+    extras.ec_connector = _mock_kv_connector()
     extras._try_schedule_encoder_inputs = MagicMock(return_value=([0], 8, 99, [1]))
     extras.encoder_cache_manager.allocate = MagicMock()
-    if extras.running:
-        extras.running[0].lora_request = MagicMock(lora_int_id=1)
-        extras.running[0].spec_token_ids = [9, 8, 7]
+    extras.kv_cache_manager.take_kv_cache_block_copies = MagicMock(return_value=([], []))
+    extras_keep.lora_request = SimpleNamespace(lora_int_id=1)
+    extras_keep.spec_token_ids = [9, 8, 7]
     with patch.object(Request, "has_encoder_inputs", new_callable=PropertyMock, return_value=True):
         extras.schedule()
 
@@ -1244,11 +1222,11 @@ def test_recompute_waiting_connector_lora_stale_and_output_edges():
     resumed.schedule()
 
     lora = _make_recompute_scheduler()
-    lora.lora_config = MagicMock(max_loras=1)
+    lora.lora_config = SimpleNamespace(max_loras=1)
     r1 = create_request(request_id=70, num_tokens=16, max_tokens=4, block_size=block_size)
     r2 = create_request(request_id=71, num_tokens=16, max_tokens=4, block_size=block_size)
-    r1.lora_request = MagicMock(lora_int_id=1)
-    r2.lora_request = MagicMock(lora_int_id=2)
+    r1.lora_request = SimpleNamespace(lora_int_id=1)
+    r2.lora_request = SimpleNamespace(lora_int_id=2)
     lora.add_request(r1)
     lora.add_request(r2)
     lora.schedule()
@@ -1279,8 +1257,14 @@ def test_recompute_waiting_connector_lora_stale_and_output_edges():
     out = output_sched.schedule()
     output_sched.finished_req_ids_dict = {0: {"gone"}, 1: {"other"}}
     output_sched.grammar_compile_error_reqs = set()
-    kv_out = SimpleNamespace(invalid_block_ids={"b"}, kv_connector_stats=None)
+    kv_out = SimpleNamespace(
+        invalid_block_ids={"b"},
+        kv_connector_stats=None,
+        finished_recving=set(),
+        finished_sending=set(),
+    )
     model_out = create_model_runner_output(list(output_sched.running) or [out_req])
     model_out.kv_connector_output = kv_out
     output_sched._handle_invalid_blocks = MagicMock(return_value=set())
+    output_sched._update_from_kv_xfer_finished = MagicMock()
     output_sched.update_from_output(out, model_out)
