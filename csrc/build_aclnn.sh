@@ -175,7 +175,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "compressor_metadata"
         "hc_pre"
         "hc_post"
-        "inplace_partial_rotary_mul"
         "dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
