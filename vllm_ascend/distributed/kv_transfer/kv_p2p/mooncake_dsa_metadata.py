@@ -46,8 +46,6 @@ def _normalize_block_ids(name: str, values: object) -> tuple[int, ...]:
     block_ids = tuple(values)
     for block_id in block_ids:
         _require_nonnegative_integer(name, block_id)
-    if not block_ids:
-        raise ValueError(f"{name} must not be empty")
     if len(set(block_ids)) != len(block_ids):
         raise ValueError(f"{name} must not contain duplicates")
     return block_ids
@@ -73,8 +71,35 @@ class RemoteSource:
     endpoints_by_prefill_rank: tuple[RemoteEndpoint, ...]
     indexer_block_ids: tuple[int, ...]
     main_block_ids: tuple[int, ...]
+    remote_dcp_size: int = 1
+    remote_pcp_size: int = 1
+    remote_ptp_size: int = 1
+    remote_pp_size: int = 1
+    remote_block_size: int = 1
+    num_prompt_blocks: int = 0
+    remote_main_group_id: int | None = None
+    remote_indexer_group_id: int | None = None
+    remote_main_block_size: int = 0
+    remote_indexer_block_size: int = 0
+    num_computed_tokens: int = 0
+    num_external_tokens: int = 0
 
     def __post_init__(self) -> None:
+        for name in ("remote_dcp_size", "remote_pcp_size", "remote_ptp_size", "remote_pp_size", "remote_block_size"):
+            _require_nonnegative_integer(name, getattr(self, name))
+            if getattr(self, name) == 0:
+                raise ValueError(f"{name} must be positive")
+        for name in (
+            "num_computed_tokens",
+            "num_external_tokens",
+            "remote_main_block_size",
+            "num_prompt_blocks",
+            "remote_indexer_block_size",
+        ):
+            _require_nonnegative_integer(name, getattr(self, name))
+        for name in ("remote_main_group_id", "remote_indexer_group_id"):
+            if getattr(self, name) is not None:
+                _require_nonnegative_integer(name, getattr(self, name))
         _require_nonempty_string(
             "remote_request_id",
             self.remote_request_id,
@@ -82,12 +107,8 @@ class RemoteSource:
         endpoints = tuple(self.endpoints_by_prefill_rank)
         if not endpoints:
             raise ValueError("endpoints_by_prefill_rank must not be empty")
-        if not all(
-            isinstance(endpoint, RemoteEndpoint) for endpoint in endpoints
-        ):
-            raise TypeError(
-                "endpoints_by_prefill_rank must contain RemoteEndpoint values"
-            )
+        if not all(isinstance(endpoint, RemoteEndpoint) for endpoint in endpoints):
+            raise TypeError("endpoints_by_prefill_rank must contain RemoteEndpoint values")
         object.__setattr__(self, "endpoints_by_prefill_rank", endpoints)
         object.__setattr__(
             self,
@@ -112,11 +133,16 @@ class DsaStepRequest:
     source: RemoteSource
     main_host_block_ids: tuple[int, ...]
     indexer_hbm_block_ids: tuple[int, ...]
+    invalid_block_ids: tuple[int, ...] = ()
+    notify_only: bool = False
 
     def __post_init__(self) -> None:
         _require_nonempty_string("request_id", self.request_id)
         if not isinstance(self.source, RemoteSource):
             raise TypeError("source must be RemoteSource")
+        if not isinstance(self.notify_only, bool):
+            raise TypeError("notify_only must be bool")
+        object.__setattr__(self, "invalid_block_ids", _normalize_block_ids("invalid_block_ids", self.invalid_block_ids))
         object.__setattr__(
             self,
             "main_host_block_ids",
@@ -140,26 +166,21 @@ class DsaConnectorMetadata(KVConnectorMetadata):
     """One-shot receive requests issued to Decode workers."""
 
     requests: tuple[DsaStepRequest, ...] = ()
+    cancelled_requests: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         requests_by_id: dict[str, DsaStepRequest] = {}
         for request in self.requests:
             if not isinstance(request, DsaStepRequest):
-                raise TypeError(
-                    "requests must contain DsaStepRequest values"
-                )
+                raise TypeError("requests must contain DsaStepRequest values")
             existing = requests_by_id.get(request.request_id)
             if existing is not None and existing != request:
-                raise ValueError(
-                    f"conflicting DSA requests for {request.request_id!r}"
-                )
+                raise ValueError(f"conflicting DSA requests for {request.request_id!r}")
             requests_by_id[request.request_id] = request
         object.__setattr__(
             self,
             "requests",
-            tuple(
-                requests_by_id[key] for key in sorted(requests_by_id)
-            ),
+            tuple(requests_by_id[key] for key in sorted(requests_by_id)),
         )
 
 
@@ -180,18 +201,10 @@ class DsaLocalResult:
             DsaTransferPhase,
         ):
             raise TypeError("failure_phase must be DsaTransferPhase")
-        if (
-            self.kind is DsaLocalResultKind.TRANSFER_FAILED
-            and self.failure_phase is None
-        ):
+        if self.kind is DsaLocalResultKind.TRANSFER_FAILED and self.failure_phase is None:
             raise ValueError("TRANSFER_FAILED requires a failure phase")
-        if (
-            self.kind is DsaLocalResultKind.RECEIVE_COMPLETE
-            and self.failure_phase is not None
-        ):
-            raise ValueError(
-                "RECEIVE_COMPLETE must not carry a failure phase"
-            )
+        if self.kind is DsaLocalResultKind.RECEIVE_COMPLETE and self.failure_phase is not None:
+            raise ValueError("RECEIVE_COMPLETE must not carry a failure phase")
 
     @property
     def identity(self) -> tuple[str, int]:
@@ -205,14 +218,10 @@ def _merge_results(
     for results in groups:
         for result in results:
             if not isinstance(result, DsaLocalResult):
-                raise TypeError(
-                    "results must contain DsaLocalResult values"
-                )
+                raise TypeError("results must contain DsaLocalResult values")
             existing = merged.get(result.identity)
             if existing is not None and existing != result:
-                raise ValueError(
-                    f"conflicting DSA local results for {result.identity}"
-                )
+                raise ValueError(f"conflicting DSA local results for {result.identity}")
             merged[result.identity] = result
     return tuple(merged[key] for key in sorted(merged))
 
@@ -235,9 +244,5 @@ class DsaWorkerResultMetadata(KVConnectorWorkerMetadata):
         other: KVConnectorWorkerMetadata,
     ) -> DsaWorkerResultMetadata:
         if not isinstance(other, DsaWorkerResultMetadata):
-            raise TypeError(
-                "aggregate expects DsaWorkerResultMetadata"
-            )
-        return DsaWorkerResultMetadata(
-            _merge_results((self.results, other.results))
-        )
+            raise TypeError("aggregate expects DsaWorkerResultMetadata")
+        return DsaWorkerResultMetadata(_merge_results((self.results, other.results)))

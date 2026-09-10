@@ -3438,6 +3438,12 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                                 remote_multi_nodes_meta_mapping={},
                             )
 
+                            if case["prefill_pp_size"] > 1:
+                                # This synthetic PCP+PP case bypasses startup validation.
+                                # It must not pass merely because stage 0's block counts match.
+                                with self.assertRaisesRegex(AssertionError, "KV source coverage incomplete"):
+                                    worker._get_kv_split_metadata("req_pd", meta)
+                                continue
                             ports, local_ids, remote_ids = worker._get_kv_split_metadata("req_pd", meta)
                             group_pulls = worker._get_group_pulls_metadata(
                                 "req_pd",

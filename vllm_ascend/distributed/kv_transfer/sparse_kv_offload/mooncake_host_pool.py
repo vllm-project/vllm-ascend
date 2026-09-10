@@ -47,6 +47,8 @@ class HostMemoryRegion:
     tensor: torch.Tensor
     handle: Any = None
     release_callback: Callable[[Any], None] | None = None
+    segment_offset: int = 0
+    segment_offset: int = 0
     _released: bool = field(default=False, init=False)
 
     def release(self) -> None:
@@ -144,6 +146,7 @@ def allocate_mooncake_host_region(
     return HostMemoryRegion(
         tensor=aligned,
         handle=segment,
+        segment_offset=base_offset,
     )
 
 
@@ -212,6 +215,30 @@ class MooncakeHostPool:
             self._offset = end
         return tensors
 
+    def describe_local_views(self, views, num_blocks: int) -> tuple:
+        """Validate typed views and describe shared offsets, not absolute virtual addresses."""
+        entries, ranges = [], []
+        identities = set()
+        for name, component, tensor in views:
+            if (name, component) in identities:
+                raise ValueError("duplicate Host component")
+            identities.add((name, component))
+            if tensor.ndim not in (3, 4) or tensor.shape[0] != num_blocks or num_blocks <= 0:
+                raise ValueError("invalid Host block capacity/shape")
+            if not tensor.is_contiguous():
+                raise ValueError("Host views must be contiguous for zero-copy fused consumption")
+            if tensor.data_ptr() % tensor.element_size():
+                raise ValueError("Host view is not dtype aligned")
+            offset = tensor.data_ptr() - self.data_ptr
+            size = tensor.numel() * tensor.element_size()
+            if offset < 0 or size <= 0 or offset + size > self.nbytes:
+                raise ValueError("Host view outside shared pool")
+            ranges.append((offset, offset + size))
+            entries.append((name, component, offset, tuple(tensor.shape), str(tensor.dtype), tuple(tensor.stride())))
+        ranges.sort()
+        if any(a[1] > b[0] for a, b in zip(ranges, ranges[1:])):
+            raise ValueError("overlapping Host views")
+        return self.region.segment_offset, self.nbytes, tuple(entries)
     def close(self) -> None:
         if self._closed:
             return

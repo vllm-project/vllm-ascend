@@ -115,6 +115,7 @@ class TestMooncakeHostPool(unittest.TestCase):
         raw.narrow.assert_called_once_with(0, alignment - 1, requested_size)
         self.assertIs(region.tensor, aligned)
         self.assertEqual(region.tensor.numel(), requested_size)
+        self.assertEqual(region.segment_offset, alignment - 1)
 
     def test_host_register_sets_migratepages_guard(self):
         key = "VLLM_ASCEND_SKIP_MIGRATEPAGES"
@@ -157,7 +158,6 @@ class TestMooncakeHostPool(unittest.TestCase):
             ),
         ):
             host_pool_module._select_shared_segment_mode()
-
     def test_failed_construction_releases_region(self):
         release = MagicMock()
         region = HostMemoryRegion(
@@ -185,3 +185,25 @@ class TestMooncakeHostPool(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_layout_uses_segment_offsets_and_rejects_overlaps():
+    pools, descriptions = [], []
+    for rank in range(2):
+        pool = MooncakeHostPool(
+            HostMemoryRegion(torch.empty(256, dtype=torch.int8), segment_offset=8),
+            HostPoolTopology(tp_rank=rank, tp_size=2),
+        )
+        k, v = [t.view(torch.bfloat16).reshape(4, 2, 1, 2) for t in pool.allocate_tensors([32, 32], 16)]
+        views = [("layer", "k", k), ("layer", "v", v)]
+        descriptions.append(pool.describe_local_views(views, 4))
+        pools.append(pool)
+        assert k.reshape(4, 2, 2).contiguous().data_ptr() == k.data_ptr()
+    assert pools[0].data_ptr != pools[1].data_ptr
+    assert descriptions[0] == descriptions[1]
+    pools[1].region.segment_offset = 0
+    assert pools[1].describe_local_views(views, 4) != descriptions[0]
+    with unittest.TestCase().assertRaisesRegex(ValueError, "overlapping"):
+        pools[1].describe_local_views([("layer", "k", k), ("layer", "v", k)], 4)
+    with unittest.TestCase().assertRaisesRegex(ValueError, "outside"):
+        pools[0].describe_local_views(views, 4)

@@ -54,7 +54,7 @@ def test_remote_source_normalizes_block_ids() -> None:
     "field",
     ("indexer_block_ids", "main_block_ids"),
 )
-def test_remote_source_rejects_empty_block_ids(field: str) -> None:
+def test_remote_source_preserves_empty_block_ids(field: str) -> None:
     kwargs = {
         "remote_request_id": "prefill-request",
         "endpoints_by_prefill_rank": (_endpoint(),),
@@ -62,8 +62,7 @@ def test_remote_source_rejects_empty_block_ids(field: str) -> None:
         "main_block_ids": (2,),
     }
     kwargs[field] = ()
-    with pytest.raises(ValueError, match="must not be empty"):
-        dsa.RemoteSource(**kwargs)
+    assert getattr(dsa.RemoteSource(**kwargs), field) == ()
 
 
 def test_step_request_owns_only_one_shot_destinations() -> None:
@@ -75,9 +74,7 @@ def test_step_request_owns_only_one_shot_destinations() -> None:
 
 
 def test_connector_metadata_sorts_requests() -> None:
-    metadata = dsa.DsaConnectorMetadata(
-        (_request("request-b"), _request("request-a"))
-    )
+    metadata = dsa.DsaConnectorMetadata((_request("request-b"), _request("request-a")))
     assert tuple(item.request_id for item in metadata.requests) == (
         "request-a",
         "request-b",
