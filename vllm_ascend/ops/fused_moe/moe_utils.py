@@ -24,7 +24,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
 from torch.nn.functional import pad
-from vllm.config import get_current_vllm_config
+from vllm.config import get_current_vllm_config_or_none
 
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import enable_custom_op
@@ -261,6 +261,10 @@ def enable_fusion_gmmswigluquant():
 # serves every pad and is allocated exactly once — never replaced or freed,
 # which is what makes it safe for captured graphs to reference.
 #
+# Outside a worker context there is no current vllm config (e.g. unit tests
+# calling prepare() directly): tp_size then reads as 0 and every pad takes
+# the F.pad fallback below.
+#
 # A pad wider than tp_size can only happen outside that invariant (e.g. an
 # eager call with zero tokens); it falls back to plain `nn.functional.pad`
 # instead of growing the entry, keeping the cache static.
@@ -278,7 +282,8 @@ def _pad_tokens_with_cat(x: torch.Tensor, padded_len: int) -> torch.Tensor:
     a slice of a cached zero block: value-equivalent to
     `F.pad(x, (0, 0, 0, padded_len - n))` at one kernel instead of two."""
     pad_rows = padded_len - x.shape[0]
-    tp_size = get_current_vllm_config().parallel_config.tensor_parallel_size
+    vllm_config = get_current_vllm_config_or_none()
+    tp_size = vllm_config.parallel_config.tensor_parallel_size if vllm_config is not None else 0
     if pad_rows > tp_size:
         return nn.functional.pad(x, (0, 0, 0, pad_rows))
     key = (*x.shape[1:], x.dtype, str(x.device))
