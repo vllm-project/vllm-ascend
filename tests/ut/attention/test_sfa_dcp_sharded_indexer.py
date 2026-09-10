@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
-from types import SimpleNamespace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.indexer import (
     AscendSFAIndexerMetadataBuilder,
     dcp_local_to_global_indices,
@@ -15,7 +16,6 @@ from vllm_ascend.attention.indexer import (
     mask_dcp_inactive_local_candidates,
     merge_dcp_indexer_candidates,
 )
-from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.device.device_op import BaseDeviceAdaptor
 from vllm_ascend.utils import enable_sfa_dcp_sharded_indexer, get_sfa_dcp_indexer_cache_factor
 
@@ -187,9 +187,7 @@ def test_local_to_global_map_uses_128_token_interleave():
 def test_inactive_local_rows_publish_only_sentinels():
     indices = torch.tensor([[[7, 3, -1]], [[9, 2, -1]]], dtype=torch.int32)
     scores = torch.tensor([[[0.7, 0.3, float("-inf")]], [[0.9, 0.2, float("-inf")]]])
-    masked_i, masked_s = mask_dcp_inactive_local_candidates(
-        indices, scores, torch.tensor([4, 0], dtype=torch.int32)
-    )
+    masked_i, masked_s = mask_dcp_inactive_local_candidates(indices, scores, torch.tensor([4, 0], dtype=torch.int32))
     assert torch.equal(masked_i[0], indices[0])
     assert torch.equal(masked_i[1], torch.full_like(indices[1], -1))
     assert torch.equal(masked_s[0], scores[0])
@@ -218,7 +216,13 @@ def test_merge_cutoff_ties_are_threshold_equivalent_and_repeatable():
 
 def test_merge_preserves_native_singleton_indexer_head_dimension():
     indices = torch.tensor([[[[0, 2, -1]], [[4, 6, -1]]], [[[1, 3, -1]], [[5, 7, -1]]]], dtype=torch.int32)
-    scores = torch.tensor([[[[0.9, 0.7, float("-inf")]], [[0.9, 0.7, float("-inf")]]], [[[0.8, 0.6, float("-inf")]], [[0.8, 0.6, float("-inf")]]]], dtype=torch.float32)
+    scores = torch.tensor(
+        [
+            [[[0.9, 0.7, float("-inf")]], [[0.9, 0.7, float("-inf")]]],
+            [[[0.8, 0.6, float("-inf")]], [[0.8, 0.6, float("-inf")]]],
+        ],
+        dtype=torch.float32,
+    )
     merged = merge_dcp_indexer_candidates(indices, scores, topk=3)
     assert merged.shape == (2, 1, 3)
     assert torch.equal(merged[:, 0], torch.tensor([[0, 1, 2], [4, 5, 6]], dtype=torch.int32))
@@ -240,10 +244,13 @@ def test_multi_request_pseudo_rows_preserve_every_query_row():
     assert torch.equal(local_visible[32:], torch.tensor([65, 66, 67, 68], dtype=torch.int32))
 
 
-
 def _make_replicated_indexer_builder(
-    *, world_size: int, kernel_block_size: int, blocks_per_phys_block: int,
-    local_cols: int, max_num_tokens: int,
+    *,
+    world_size: int,
+    kernel_block_size: int,
+    blocks_per_phys_block: int,
+    local_cols: int,
+    max_num_tokens: int,
 ):
     builder = AscendSFAIndexerMetadataBuilder.__new__(AscendSFAIndexerMetadataBuilder)
     builder.device = torch.device("cpu")
@@ -258,21 +265,19 @@ def _make_replicated_indexer_builder(
     builder._dcp_blocks_per_phys_block = blocks_per_phys_block
     builder._dcp_max_local_block_table_cols = local_cols
     replicated_cols = local_cols * world_size
-    builder._dcp_replicated_block_table_buf = torch.empty(
-        (1, replicated_cols), dtype=torch.int32
-    )
-    builder._dcp_replicated_col_idx = torch.arange(
-        replicated_cols, dtype=torch.int32
-    )
-    builder._dcp_replicated_slot_mapping_buf = torch.empty(
-        max_num_tokens, dtype=torch.int32
-    )
+    builder._dcp_replicated_block_table_buf = torch.empty((1, replicated_cols), dtype=torch.int32)
+    builder._dcp_replicated_col_idx = torch.arange(replicated_cols, dtype=torch.int32)
+    builder._dcp_replicated_slot_mapping_buf = torch.empty(max_num_tokens, dtype=torch.int32)
     return builder
 
 
 def _make_sfa_dcp_reference_builder(
-    *, world_size: int, kernel_block_size: int, blocks_per_phys_block: int,
-    local_cols: int, max_num_tokens: int,
+    *,
+    world_size: int,
+    kernel_block_size: int,
+    blocks_per_phys_block: int,
+    local_cols: int,
+    max_num_tokens: int,
 ):
     builder = AscendSFADCPMetadataBuilder.__new__(AscendSFADCPMetadataBuilder)
     builder.dcp_size = world_size
@@ -281,13 +286,9 @@ def _make_sfa_dcp_reference_builder(
     builder.replicated_view_block_size = kernel_block_size
     builder.device = torch.device("cpu")
     replicated_cols = local_cols * world_size
-    builder.block_table_replicated_view_buf = torch.empty(
-        (1, replicated_cols), dtype=torch.int32
-    )
+    builder.block_table_replicated_view_buf = torch.empty((1, replicated_cols), dtype=torch.int32)
     builder.arange_buffer = torch.arange(replicated_cols, dtype=torch.int32)
-    builder.slot_mapping_replicated_view_buf = torch.empty(
-        max_num_tokens, dtype=torch.int32
-    )
+    builder.slot_mapping_replicated_view_buf = torch.empty(max_num_tokens, dtype=torch.int32)
     return builder
 
 
@@ -372,21 +373,13 @@ def test_independent_replicated_view_matches_sfa_dcp_at_a1r3_24k_to_32k_boundary
         max_num_tokens=num_tokens,
     )
 
-    independent_table = independent._build_dcp_replicated_block_table(
-        local_block_table, seq_lens, 1
-    )
-    reference_table = reference._build_block_table_replicated_view(
-        local_block_table, seq_lens
-    )
+    independent_table = independent._build_dcp_replicated_block_table(local_block_table, seq_lens, 1)
+    reference_table = reference._build_block_table_replicated_view(local_block_table, seq_lens)
     torch.testing.assert_close(independent_table, reference_table, rtol=0, atol=0)
     assert independent_table.shape == (1, 1024)
 
-    independent_slots = independent._build_dcp_replicated_slot_mapping(
-        common, independent_table
-    )
-    reference_slots = reference._build_slot_mapping_replicated_view(
-        common, reference_table
-    )
+    independent_slots = independent._build_dcp_replicated_slot_mapping(common, independent_table)
+    reference_slots = reference._build_slot_mapping_replicated_view(common, reference_table)
     torch.testing.assert_close(independent_slots, reference_slots, rtol=0, atol=0)
     assert independent_slots.numel() == num_tokens
     assert int(independent_slots.min()) >= 0
@@ -404,7 +397,9 @@ def test_metadata_builder_emits_q32_pseudo_rows_and_rank_local_slots(
     mock_cos_sin.return_value = (torch.zeros(40, 1, 1, 8), torch.zeros(40, 1, 1, 8))
     spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
     cfg = _sfa_config()
-    builder = AscendSFAIndexerMetadataBuilder(spec, ["model.layers.0.self_attn.indexer.k_cache"], cfg, torch.device("cpu"))
+    builder = AscendSFAIndexerMetadataBuilder(
+        spec, ["model.layers.0.self_attn.indexer.k_cache"], cfg, torch.device("cpu")
+    )
     common = SimpleNamespace(
         num_reqs=1,
         num_actual_tokens=32,

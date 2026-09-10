@@ -127,11 +127,7 @@ def dcp_local_to_global_indices(
     # q*world*interleave + rank*interleave + r equals
     # local + q*(world-1)*interleave + rank*interleave.
     local_block = local // interleave_size
-    global_indices = (
-        local
-        + local_block * ((dcp_world_size - 1) * interleave_size)
-        + dcp_rank * interleave_size
-    )
+    global_indices = local + local_block * ((dcp_world_size - 1) * interleave_size) + dcp_rank * interleave_size
     return torch.where(valid, global_indices.to(local_indices.dtype), local_indices)
 
 
@@ -333,9 +329,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         # native output before DCP publication.  This keeps factor=1 cache
         # semantics valid without a late replicated-path fallback.
         native_local_visible = (
-            local_visible
-            if indexer_metadata.all_local_rows_active
-            else torch.clamp(local_visible, min=1)
+            local_visible if indexer_metadata.all_local_rows_active else torch.clamp(local_visible, min=1)
         )
 
         selected = DeviceOperator.indexer_select_post_process(
@@ -357,9 +351,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         )
         local_indices, local_scores = selected
         if not indexer_metadata.all_local_rows_active:
-            local_indices, local_scores = mask_dcp_inactive_local_candidates(
-                local_indices, local_scores, local_visible
-            )
+            local_indices, local_scores = mask_dcp_inactive_local_candidates(local_indices, local_scores, local_visible)
         global_indices = dcp_local_to_global_indices(
             local_indices,
             indexer_metadata.dcp_rank,
@@ -371,9 +363,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
         dcp_group = get_dcp_group()
         if dcp_group.world_size != 16 or indexer_metadata.dcp_world_size != 16:
-            raise RuntimeError(
-                "DCP sharded indexer butterfly merge is restricted to DCP16."
-            )
+            raise RuntimeError("DCP sharded indexer butterfly merge is restricted to DCP16.")
         rank_in_group = dcp_group.rank_in_group
         indices = global_indices.contiguous()
         scores = local_scores.contiguous()
@@ -785,9 +775,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     f"({kv_cache_spec.block_size}) to be divisible by "
                     f"{self._dcp_replicated_view_block_size}."
                 )
-            self._dcp_blocks_per_phys_block = (
-                kv_cache_spec.block_size // self._dcp_replicated_view_block_size
-            )
+            self._dcp_blocks_per_phys_block = kv_cache_spec.block_size // self._dcp_replicated_view_block_size
             self._dcp_max_local_block_table_cols = (
                 cdiv(
                     vllm_config.model_config.max_model_len,
@@ -795,9 +783,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 )
                 * self._dcp_blocks_per_phys_block
             )
-            max_replicated_cols = (
-                self._dcp_max_local_block_table_cols * self._dcp_world_size
-            )
+            max_replicated_cols = self._dcp_max_local_block_table_cols * self._dcp_world_size
             max_num_reqs = vllm_config.scheduler_config.max_num_seqs
             max_num_input_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             self._dcp_replicated_block_table_buf = torch.empty(
@@ -805,12 +791,8 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 dtype=torch.int32,
                 device=device,
             )
-            self._dcp_replicated_col_idx = torch.arange(
-                max_replicated_cols, dtype=torch.int32, device=device
-            )
-            self._dcp_replicated_slot_mapping_buf = torch.empty(
-                max_num_input_tokens, dtype=torch.int32, device=device
-            )
+            self._dcp_replicated_col_idx = torch.arange(max_replicated_cols, dtype=torch.int32, device=device)
+            self._dcp_replicated_slot_mapping_buf = torch.empty(max_num_input_tokens, dtype=torch.int32, device=device)
 
     def _build_dcp_replicated_block_table(
         self,
@@ -818,10 +800,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         seq_lens: torch.Tensor,
         num_reqs: int,
     ) -> torch.Tensor:
-        if (
-            self._dcp_replicated_block_table_buf is None
-            or self._dcp_replicated_col_idx is None
-        ):
+        if self._dcp_replicated_block_table_buf is None or self._dcp_replicated_col_idx is None:
             raise RuntimeError("DCP replicated indexer buffers are not initialized.")
         local_cols = min(block_table.shape[1], self._dcp_max_local_block_table_cols)
         replicated_cols = local_cols * self._dcp_world_size
@@ -829,30 +808,19 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         col_idx = self._dcp_replicated_col_idx[:replicated_cols]
         blocks_per_phys = self._dcp_blocks_per_phys_block
         local_col_idx = (
-            col_idx // (self._dcp_world_size * blocks_per_phys) * blocks_per_phys
-            + col_idx % blocks_per_phys
+            col_idx // (self._dcp_world_size * blocks_per_phys) * blocks_per_phys + col_idx % blocks_per_phys
         )
         rank_in_replicated_view = (col_idx // blocks_per_phys) % self._dcp_world_size
-        local_logical_blocks = torch.index_select(
-            block_table[:num_reqs, :local_cols], 1, local_col_idx
-        )
+        local_logical_blocks = torch.index_select(block_table[:num_reqs, :local_cols], 1, local_col_idx)
         if blocks_per_phys == 1:
-            replicated_blocks = (
-                local_logical_blocks * self._dcp_world_size
-                + rank_in_replicated_view
-            )
+            replicated_blocks = local_logical_blocks * self._dcp_world_size + rank_in_replicated_view
         else:
             local_sub_blocks = local_logical_blocks % blocks_per_phys
             local_phys_blocks = local_logical_blocks // blocks_per_phys
             replicated_blocks = (
-                local_phys_blocks * self._dcp_world_size
-                + rank_in_replicated_view
+                local_phys_blocks * self._dcp_world_size + rank_in_replicated_view
             ) * blocks_per_phys + local_sub_blocks
-        valid_req_mask = (
-            (seq_lens[:num_reqs].to(device=self.device) > 0)
-            .to(replicated_blocks.dtype)
-            .view(-1, 1)
-        )
+        valid_req_mask = (seq_lens[:num_reqs].to(device=self.device) > 0).to(replicated_blocks.dtype).view(-1, 1)
         out.copy_(replicated_blocks * valid_req_mask)
         return out
 
@@ -865,16 +833,13 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             raise RuntimeError("DCP replicated indexer slot buffer is not initialized.")
         num_reqs = common_attn_metadata.num_reqs
         num_input_tokens = common_attn_metadata.num_input_tokens
-        num_actual_tokens = min(
-            common_attn_metadata.num_actual_tokens, num_input_tokens
-        )
+        num_actual_tokens = min(common_attn_metadata.num_actual_tokens, num_input_tokens)
         out = self._dcp_replicated_slot_mapping_buf[:num_input_tokens]
         out.fill_(-1)
         if num_actual_tokens == 0:
             return out
         query_lens = (
-            common_attn_metadata.query_start_loc[1 : num_reqs + 1]
-            - common_attn_metadata.query_start_loc[:num_reqs]
+            common_attn_metadata.query_start_loc[1 : num_reqs + 1] - common_attn_metadata.query_start_loc[:num_reqs]
         )
         req_indices = torch.repeat_interleave(
             torch.arange(num_reqs, dtype=torch.int32, device=self.device),
@@ -883,18 +848,12 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         )[:num_actual_tokens]
         num_actual_tokens = min(num_actual_tokens, req_indices.shape[0])
         req_indices = req_indices[:num_actual_tokens]
-        positions = common_attn_metadata.positions[:num_actual_tokens].to(
-            device=self.device, dtype=torch.int32
-        )
+        positions = common_attn_metadata.positions[:num_actual_tokens].to(device=self.device, dtype=torch.int32)
         logical_block_idx = positions // self._dcp_replicated_view_block_size
         block_offsets = positions % self._dcp_replicated_view_block_size
-        table_indices = (
-            req_indices * block_table.shape[1] + logical_block_idx
-        )
+        table_indices = req_indices * block_table.shape[1] + logical_block_idx
         block_numbers = block_table.flatten()[table_indices]
-        out[:num_actual_tokens] = (
-            block_numbers * self._dcp_replicated_view_block_size + block_offsets
-        )
+        out[:num_actual_tokens] = block_numbers * self._dcp_replicated_view_block_size + block_offsets
         return out
 
     @classmethod
@@ -928,9 +887,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 common_attn_metadata.seq_lens,
                 num_reqs,
             )
-            slot_mapping = self._build_dcp_replicated_slot_mapping(
-                common_attn_metadata, block_table
-            )
+            slot_mapping = self._build_dcp_replicated_slot_mapping(common_attn_metadata, block_table)
         input_positions = common_attn_metadata.positions[:num_input_tokens].long()
         block_size = self.kernel_block_size
 
@@ -976,9 +933,7 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             # rank has non-empty local visibility for every newly scheduled row.
             # Other/mixed/decode geometries retain the sentinel mask below.
             is_prefilling_cpu = getattr(common_attn_metadata, "is_prefilling", None)
-            seq_lens_cpu_upper_bound = getattr(
-                common_attn_metadata, "seq_lens_cpu_upper_bound", None
-            )
+            seq_lens_cpu_upper_bound = getattr(common_attn_metadata, "seq_lens_cpu_upper_bound", None)
             query_start_loc_cpu = getattr(common_attn_metadata, "query_start_loc_cpu", None)
             if (
                 num_reqs == 1
@@ -987,13 +942,9 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 and query_start_loc_cpu is not None
                 and bool(is_prefilling_cpu[0])
             ):
-                query_len_cpu = int(
-                    query_start_loc_cpu[1] - query_start_loc_cpu[0]
-                )
+                query_len_cpu = int(query_start_loc_cpu[1] - query_start_loc_cpu[0])
                 context_len_cpu = int(seq_lens_cpu_upper_bound[0]) - query_len_cpu
-                all_local_rows_active = context_len_cpu >= (
-                    self._dcp_world_size * self._dcp_interleave_size
-                )
+                all_local_rows_active = context_len_cpu >= (self._dcp_world_size * self._dcp_interleave_size)
             li_cum_query_lens = torch.arange(
                 1,
                 local_visible_by_query.numel() + 1,
@@ -1025,12 +976,15 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             # rank-local physical pages (the geometry proven by R5).
             dcp_local_block_table = dcp_local_request_block_table[token_req_indices]
             local_req_indices = token_req_indices[dcp_local_token_mask]
-            local_indices = local_positions // (self._dcp_interleave_size * self._dcp_world_size) * self._dcp_interleave_size
+            local_indices = (
+                local_positions // (self._dcp_interleave_size * self._dcp_world_size) * self._dcp_interleave_size
+            )
             local_indices = local_indices + local_positions % self._dcp_interleave_size
             local_block_idx = local_indices // self.kernel_block_size
             local_block_offsets = local_indices % self.kernel_block_size
             dcp_local_slot_mapping = (
-                dcp_local_request_block_table[local_req_indices, local_block_idx.to(torch.long)] * self.kernel_block_size
+                dcp_local_request_block_table[local_req_indices, local_block_idx.to(torch.long)]
+                * self.kernel_block_size
                 + local_block_offsets
             ).to(slot_mapping.dtype)
 
