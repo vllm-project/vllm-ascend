@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests for the fault-tolerance framework on Ascend NPU.
 
-Requires 4 NPUs (DP=4); gated behind ``has_npu_ft_capability()``.
+Requires 4 NPUs (DP=4). Retry is gated behind ``has_npu_ft_capability()``;
+scale-down additionally behind ``has_npu_scale_down_capability()`` (CANN V3+).
 """
 
 import contextlib
+import json
 import os
 import threading
 import time
@@ -20,7 +22,7 @@ import torch
 
 from tests.e2e.conftest import RemoteOpenAIServer
 
-MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen3-30B-A3B")
+MODEL_NAME = os.getenv("MODEL_NAME", "vllm-ascend/Qwen3-30B-A3B-W8A8")
 DP_SIZE = 4
 
 # Fault-detection timeout budget:
@@ -30,6 +32,18 @@ DP_SIZE = 4
 CPU_DISTRIBUTED_TIMEOUT_S = 15
 FT_COMMUNICATION_ABORT_TIMEOUT_S = 10
 FAULT_DETECTION_DEADLINE_S = 45
+
+# scale_down re-hosts the dead rank's experts on the survivors and reloads
+# the reassigned weights from disk; give the redistribution + dummy-batch
+# check more headroom than fault detection (still under
+# engine_recovery_timeout_sec=120, the busy-loop's own give-up point).
+SCALE_DOWN_DEADLINE_S = 90
+
+# Qwen3-30B-A3B has 128 routed experts; on EP=4, 48 redundant experts give
+# 44 physical slots per rank, so the 3 surviving ranks still have
+# 3 * 44 = 132 >= 128 slots after one rank is removed (the strict minimum
+# ``check_redundancy_sufficient`` accepts for a 4 -> 3 shrink is 44).
+NUM_REDUNDANT_EXPERTS = 48
 
 # Post-recovery accuracy check: after retry recovery, every DP rank must
 # answer these factual prompts correctly. Each expected answer is a single
@@ -129,10 +143,13 @@ def _install_fault_injection(monkeypatch, tmp_path, rank: int, step: int) -> Non
 # ---------------------------------------------------------------------------
 
 
-def _ft_server_args() -> list[str]:
+def _ft_server_args(extra_args: list[str] | None = None) -> list[str]:
+    # Quantized path end to end: --quantization ascend (W8A8); no --dtype,
+    # the checkpoint's own config decides. MODEL_NAME must point at a W8A8
+    # checkpoint (e.g. vllm-ascend/Qwen3-30B-A3B-W8A8).
     return [
-        "--dtype",
-        "bfloat16",
+        "--quantization",
+        "ascend",
         "--max-model-len",
         "37364",
         "--max-num-seqs",
@@ -145,6 +162,7 @@ def _ft_server_args() -> list[str]:
         '{"engine_recovery_timeout_sec": 120}',
         "--additional-config",
         f'{{"ft_communication_abort_timeout": {FT_COMMUNICATION_ABORT_TIMEOUT_S}}}',
+        *(extra_args or []),
     ]
 
 
@@ -225,11 +243,11 @@ class FTServerManager:
         self.servers.clear()
 
 
-def _ft_manager() -> FTServerManager:
+def _ft_manager(extra_args: list[str] | None = None) -> FTServerManager:
     return FTServerManager(
         MODEL_NAME,
         DP_SIZE,
-        base_server_args=_ft_server_args(),
+        base_server_args=_ft_server_args(extra_args),
         tp_size=1,
     )
 
@@ -266,7 +284,7 @@ def _in_parallel(fn, servers) -> list[Any]:
 
 
 def _get_ft_status(server: RemoteOpenAIServer) -> dict:
-    resp = requests.get(server.url_for("fault_tolerance/status"), timeout=10)
+    resp = requests.get(server.url_for("v1/fault_tolerance/status"), timeout=10)
     resp.raise_for_status()
     return resp.json()
 
@@ -274,7 +292,7 @@ def _get_ft_status(server: RemoteOpenAIServer) -> dict:
 def _apply_ft(server: RemoteOpenAIServer, instruction: str, params: dict | None = None) -> dict:
     """POST an FT instruction; assert it is accepted (202) and return body."""
     resp = requests.post(
-        server.url_for("fault_tolerance/apply"),
+        server.url_for("v1/fault_tolerance/apply"),
         json={"instruction": instruction, "params": params or {}},
         timeout=10,
     )
@@ -294,9 +312,9 @@ def _assert_serving_and_healthy(
 def _assert_correct_answers(servers: tuple[RemoteOpenAIServer, ...]) -> None:
     """Send factual prompts to every DP rank and assert the answer appears.
 
-    Must only be called after retry recovery has fully completed (see
-    ``_assert_serving_and_healthy``), so the requests are not sent into a
-    still-faulting cluster.
+    Must only be called after FT recovery (retry or scale_down) has fully
+    completed (see ``_assert_serving_and_healthy``), so the requests are not
+    sent into a still-faulting cluster.
     """
     for server in servers:
         client = server.get_client()
@@ -311,7 +329,7 @@ def _assert_correct_answers(servers: tuple[RemoteOpenAIServer, ...]) -> None:
             matched = any(re.search(rf"\b{re.escape(answer)}\b", completion, re.IGNORECASE) for answer in answers)
             print(f"[accuracy] rank {server.port} prompt {prompt!r}: {completion!r}")
             assert matched, (
-                f"[post-retry] rank {server.port} answered {prompt!r} incorrectly: "
+                f"[post-recovery] rank {server.port} answered {prompt!r} incorrectly: "
                 f"expected one of {answers!r}, got {completion!r}"
             )
 
@@ -329,7 +347,7 @@ def _wait_for_engines(
     match_values: set[str],
     deadline_s: int = FAULT_DETECTION_DEADLINE_S,
 ) -> list[dict[str, Any] | None]:
-    """Poll ``/fault_tolerance/status`` until each server's engine status matches.
+    """Poll ``/v1/fault_tolerance/status`` until each server's engine status matches.
 
     A server matches when its engine-status dict has ``match_key`` equal to
     one of ``match_values``. Returns one engine-status dict per server.
@@ -379,7 +397,7 @@ def _driving(*servers: RemoteOpenAIServer):
 
 
 def _wait_for_ft_apply_outcome(server: RemoteOpenAIServer, request_id: str, deadline_s: int) -> str | None:
-    """Wait until ``/fault_tolerance/status`` records the FT apply outcome."""
+    """Wait until ``/v1/fault_tolerance/status`` records the FT apply outcome."""
     engine_status = _wait_for_engines(
         [server],
         match_key="last_ft_request_id",
@@ -400,6 +418,23 @@ def has_npu_ft_capability() -> bool:
         return False
     try:
         return torch.npu.device_count() >= DP_SIZE
+    except Exception:
+        return False
+
+
+def has_npu_scale_down_capability() -> bool:
+    """scale_down additionally requires the V3 dispatch op (CANN V3+).
+
+    Mirrors the engine-side precondition in ``WorkerSentinel
+    ._validate_scale_down_preconditions`` so the test skips cleanly on
+    older CANN/torch_npu stacks instead of timing out mid-recovery.
+    """
+    if not has_npu_ft_capability():
+        return False
+    try:
+        import torch_npu
+
+        return hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
     except Exception:
         return False
 
@@ -472,39 +507,46 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(
-    not has_npu_ft_capability(),
-    reason="Requires at least 4 NPUs for DP=4 fault-tolerance testing",
+    not has_npu_scale_down_capability(),
+    reason=("Requires at least 4 NPUs and npu_moe_distribute_dispatch_v2 (CANN V3+) for DP=4 scale-down testing"),
 )
-def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
-    """SIGKILL one Worker; survivors go UNHEALTHY, victim goes DEAD.
+def test_scale_down_removes_dead_rank_and_recovers():
+    """scale_down removes the dead DP rank; survivors keep serving.
 
-    Killing only rank 3's worker leaves all EngineCores alive, so the same
-    fault is seen two ways:
-
-    - Survivors (ranks 0, 1, 2): detect the dead peer via Gloo DP allreduce
-      / HCSP timeout. Their own executor is fine, so ``on_fault`` marks them
-      UNHEALTHY with a ``fault_info``.
-    - Victim (rank 3): detects its own executor failure and marks itself DEAD.
-
-    Recovery is gated on UNHEALTHY: the DEAD engine accepts ``retry`` at the
-    HTTP layer (202 = background dispatch) but rejects it in the engine,
-    recording the reason as ``ft_error``.
+    SIGKILL rank 3's worker: survivors go UNHEALTHY, the victim goes DEAD
+    and rejects ``retry`` (recovery requires UNHEALTHY). ``scale_down``
+    with ``removed_dp_ranks=[3]`` masks the dead rank, redistributes its
+    EPLB experts onto the survivors and reloads the reassigned weights.
+    Rank 3 (not rank 0, the DP store master) is removed so no
+    ``dp_master_ip`` / ``dp_store_port`` params are needed. After recovery
+    every survivor must answer factual prompts correctly.
     """
-    with _ft_manager() as servers:
+    victim_rank = DP_SIZE - 1
+    extra_args = [
+        "--compilation-config",
+        json.dumps(
+            {
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                "cudagraph_capture_sizes": [4, 8, 12, 16, 20, 24, 28, 32],
+            }
+        ),
+        "--enable-eplb",
+        "--eplb-config.num_redundant_experts",
+        str(NUM_REDUNDANT_EXPERTS),
+    ]
+    with _ft_manager(extra_args) as servers:
         assert len(servers) == DP_SIZE
-        survivor0 = _server_for_rank(servers, 0)
-        survivor1 = _server_for_rank(servers, 1)
-        survivor2 = _server_for_rank(servers, 2)
-        victim = _server_for_rank(servers, 3)
-        all_ranks = (survivor0, survivor1, survivor2, victim)
+        servers_by_rank = {r: _server_for_rank(servers, r) for r in range(DP_SIZE)}
+        victim = servers_by_rank[victim_rank]
+        survivor_ranks = [r for r in range(DP_SIZE) if r != victim_rank]
+        survivors = tuple(servers_by_rank[r] for r in survivor_ranks)
+        all_ranks = tuple(servers_by_rank[r] for r in range(DP_SIZE))
 
-        # 1. Confirm all engines are healthy and serving.
+        # 1. All engines healthy and serving.
         _assert_serving_and_healthy(all_ranks)
 
-        # 2. Kill only the victim's worker; all EngineCores stay alive.
+        # 2. Kill the victim's worker; survivors detect the peer fault.
         _kill_worker_process(victim)
-
-        # 3. Drive all engines so each keeps stepping into the failed component.
         with _driving(*all_ranks):
             faulted_results = _wait_for_engines(
                 list(all_ranks),
@@ -512,26 +554,45 @@ def test_worker_kill_survivor_unhealthy_and_dead_rejects_retry():
                 match_values={"dead", "unhealthy"},
             )
 
-        s0, s1, s2, victim_faulted = faulted_results
-
-        # Survivors must report the peer fault as UNHEALTHY.
-        for label, result in [("rank 0", s0), ("rank 1", s1), ("rank 2", s2)]:
-            assert result is not None, (
-                f"{label} did not report the peer fault within {FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
+        for rank, engine_status in enumerate(faulted_results):
+            assert engine_status is not None, (
+                f"rank {rank} did not report the fault within {FAULT_DETECTION_DEADLINE_S}s -- it likely hung"
             )
-            assert result["status"] == "unhealthy", result
-            assert result.get("fault_info"), result
 
-        # Victim must report DEAD (its own worker is gone).
-        assert victim_faulted is not None, (
-            f"victim (rank 3) did not report its worker's death within {FAULT_DETECTION_DEADLINE_S}s"
-        )
-        assert victim_faulted["status"] == "dead", victim_faulted
+        # Survivors must report the peer fault as UNHEALTHY with fault info
+        # (UNHEALTHY is the precondition for accepting scale_down)...
+        for rank in survivor_ranks:
+            assert faulted_results[rank]["status"] == "unhealthy", faulted_results[rank]
+            assert faulted_results[rank].get("fault_info"), faulted_results[rank]
+        # ...while the victim is DEAD (its own worker is gone).
+        assert faulted_results[victim_rank]["status"] == "dead", faulted_results[victim_rank]
 
-        # 4. retry is accepted at the HTTP layer (202 = background dispatch)...
+        # 3. The DEAD victim rejects retry: recovery requires UNHEALTHY.
+        #    retry is accepted at the HTTP layer (202 = background dispatch)...
         request_id = _apply_ft(victim, "retry")["request_id"]
-
-        # 5. ...but the DEAD engine must reject it: recovery requires UNHEALTHY.
+        # 4. ...but the rejection is recorded in /v1/fault_tolerance/status.
         ft_error = _wait_for_ft_apply_outcome(victim, request_id, FAULT_DETECTION_DEADLINE_S)
-        assert ft_error is not None, "rejection was never recorded in /fault_tolerance/status"
+        assert ft_error is not None, "rejection was never recorded in /v1/fault_tolerance/status"
         assert "status is DEAD" in ft_error, ft_error
+
+        # 5. scale_down to every survivor: remove the dead rank.
+        for server in survivors:
+            _apply_ft(server, "scale_down", {"removed_dp_ranks": [victim_rank]})
+
+        # 6. Recovery completes: survivors return to healthy and serve again.
+        recovered = _wait_for_engines(
+            list(survivors),
+            match_key="status",
+            match_values={"healthy"},
+            deadline_s=SCALE_DOWN_DEADLINE_S,
+        )
+        for rank, engine_status in zip(survivor_ranks, recovered):
+            assert engine_status is not None, (
+                f"survivor {rank} did not recover within {SCALE_DOWN_DEADLINE_S}s -- "
+                "expert redistribution or weight reload likely failed"
+            )
+        _in_parallel(lambda s: _complete(s.get_client()), survivors)
+
+        # 7. Factual answers on the survivors: the re-hosted experts must
+        #    produce correct completions on the shrunken DP group.
+        _assert_correct_answers(survivors)
