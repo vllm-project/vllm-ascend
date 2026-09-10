@@ -152,6 +152,85 @@ def enable_sfa_dcp_replicated_indexer(vllm_config: VllmConfig | None = None) -> 
     return model_uses_sfa_sparse(vllm_config.model_config) and parallel_config.decode_context_parallel_size > 1
 
 
+def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    """Default-off ordinary-DCP16 key-domain indexer candidate selector.
+
+    Unsupported shapes intentionally return False so callers continue through
+    the incumbent replicated-indexer DCP path.
+    """
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+
+    try:
+        ascend_config = get_ascend_config()
+    except RuntimeError:
+        return False
+    if not bool(getattr(ascend_config, "enable_sfa_dcp_sharded_indexer", False)):
+        return False
+    if not model_uses_sfa_sparse(vllm_config.model_config):
+        return False
+
+    parallel_config = vllm_config.parallel_config
+    if getattr(parallel_config, "decode_context_parallel_size", 1) != 16:
+        return False
+    if getattr(parallel_config, "tensor_parallel_size", 16) != 16:
+        return False
+    if getattr(parallel_config, "cp_kv_cache_interleave_size", 1) != 128:
+        return False
+    if getattr(parallel_config, "prefill_context_parallel_size", 1) != 1:
+        return False
+    try:
+        dsa_cp_enabled = enable_dsa_cp()
+    except Exception:
+        dsa_cp_enabled = False
+    if dsa_cp_enabled:
+        return False
+
+    # The physical indexer cache switches from replicated to rank-local as
+    # soon as this selector returns True.  Therefore unsupported runtime
+    # modes must be rejected here, before cache allocation; falling back from
+    # the IndexerBackend later would read a non-replicated cache as if it were
+    # replicated.
+    if bool(getattr(ascend_config, "enable_sparse_li_c8", False)):
+        return False
+    if bool(getattr(getattr(ascend_config, "xlite_graph_config", None), "enabled", False)):
+        return False
+    if bool(
+        getattr(
+            getattr(ascend_config, "ascend_compilation_config", None),
+            "enable_npugraph_ex",
+            False,
+        )
+    ):
+        return False
+
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    cudagraph_mode = getattr(compilation_config, "cudagraph_mode", None)
+    if cudagraph_mode is not None:
+        mode_name = getattr(cudagraph_mode, "name", str(cudagraph_mode).rsplit(".", 1)[-1])
+        if str(mode_name).upper() != "NONE":
+            return False
+    return True
+
+
+def enable_sfa_dcp_indexer(vllm_config: VllmConfig | None = None) -> bool:
+    return enable_sfa_dcp_sharded_indexer(vllm_config) or enable_sfa_dcp_replicated_indexer(vllm_config)
+
+
+def get_sfa_dcp_indexer_cache_factor(vllm_config: VllmConfig | None = None) -> int:
+    if vllm_config is None:
+        from vllm.config import get_current_vllm_config
+
+        vllm_config = get_current_vllm_config()
+    if enable_sfa_dcp_sharded_indexer(vllm_config):
+        return 1
+    if enable_sfa_dcp_replicated_indexer(vllm_config):
+        return vllm_config.parallel_config.decode_context_parallel_size
+    return 1
+
+
 def clear_enable_sp():
     enable_dsa_cp.cache_clear()
     enable_dsa_cp_full_o_proj.cache_clear()

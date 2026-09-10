@@ -41,6 +41,7 @@ from vllm_ascend.patch.platform.patch_kv_cache_utils import (
     _get_kv_cache_config_deepseek_v4_main,
 )
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.worker import model_runner_v1
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.worker.v2.kvpp import KVPPRuntime
 
@@ -460,6 +461,26 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     raw = runner._allocate_kv_cache_tensors(cache_config)
                     caches = runner._reshape_kv_cache_tensors(cache_config, raw)
                 assert_attention_cache_views(caches, raw, packed)
+
+    def test_v1_sfa_indexer_allocation_factor_uses_replicated_or_sharded_mode(self):
+        cfg = MagicMock()
+        with (
+            patch.object(model_runner_v1, "enable_sfa_dcp_replicated_indexer", return_value=False),
+            patch.object(model_runner_v1, "get_sfa_dcp_indexer_cache_factor", return_value=16),
+        ):
+            self.assertEqual(model_runner_v1.get_sfa_dcp_indexer_allocation_factor_v1(cfg), 1)
+
+        with (
+            patch.object(model_runner_v1, "enable_sfa_dcp_replicated_indexer", return_value=True),
+            patch.object(model_runner_v1, "get_sfa_dcp_indexer_cache_factor", return_value=16),
+        ):
+            self.assertEqual(model_runner_v1.get_sfa_dcp_indexer_allocation_factor_v1(cfg), 16)
+
+        with (
+            patch.object(model_runner_v1, "enable_sfa_dcp_replicated_indexer", return_value=True),
+            patch.object(model_runner_v1, "get_sfa_dcp_indexer_cache_factor", return_value=1),
+        ):
+            self.assertEqual(model_runner_v1.get_sfa_dcp_indexer_allocation_factor_v1(cfg), 1)
 
     def test_allocate_kv_cache_uses_layer_spec_for_draft_gqa(self):
         runner = self._build_runner()

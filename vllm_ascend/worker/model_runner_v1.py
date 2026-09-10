@@ -200,6 +200,7 @@ from vllm_ascend.utils import (
     enable_sfa_dcp_replicated_indexer,
     enable_sp,
     get_c_env,
+    get_sfa_dcp_indexer_cache_factor,
     get_kv_cache_tensor_layers,
     global_stream,
     is_hidden_state_cache_spec,
@@ -269,6 +270,12 @@ AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
+
+
+def get_sfa_dcp_indexer_allocation_factor_v1(vllm_config: VllmConfig) -> int:
+    if enable_sfa_dcp_replicated_indexer(vllm_config):
+        return get_sfa_dcp_indexer_cache_factor(vllm_config)
+    return 1
 
 
 
@@ -478,8 +485,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.use_sparse,
             )
         self.sfa_dcp_replicated_indexer_size = 1
-        if enable_sfa_dcp_replicated_indexer():
-            self.sfa_dcp_replicated_indexer_size = self.dcp_size
+        self.sfa_dcp_replicated_indexer_size = get_sfa_dcp_indexer_allocation_factor_v1(self.vllm_config)
 
         # Create a CPU numpy buffer for positions computation when
         # self.positions is a plain tensor (non-CpuGpuBuffer case).
