@@ -1,5 +1,5 @@
 # Memcache supports DeepSeek V4 Flash dual-machine PD separation accuracy testing
-test_name: "DeepSeek-V4-Flash-Memcache-PD-acc"
+test_name: "DSv4-Flash-Memcache-PD-layerwise"
 model: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
 num_nodes: 2
 npu_per_node: 16
@@ -8,14 +8,16 @@ env_common: &env_common
   VLLM_USE_MODELSCOPE: "true"
   SERVER_PORT: "${PORT}"
   ASCEND_RT_VISIBLE_DEVICES: "${VISIBLE_DEVICES}"
+  LD_LIBRARY_PATH: "/usr/local/Ascend/ascend-toolkit/latest/python/site-packages:$LD_LIBRARY_PATH"
   VLLM_RPC_TIMEOUT: "3600000"
   VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: "30000"
-  HCCL_EXEC_TIMEOUT: "204"
   OMP_PROC_BIND: "false"
   OMP_NUM_THREADS: "10"
   PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
   TASK_QUEUE_ENABLE: "1"
   HCCL_OP_EXPANSION_MODE: "AIV"
+  PYTHONHASHSEED: "0"
+  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 routing:
   type: "disaggregated_prefill"
@@ -57,14 +59,13 @@ config:
 
 env_prefill: &env_prefill
   <<: *env_common
-  HCCL_CONNECT_TIMEOUT: "120"
   HCCL_BUFFSIZE: "2560"
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 env_decode: &env_decode
   <<: *env_common
-  HCCL_CONNECT_TIMEOUT: "1200"
   HCCL_BUFFSIZE: "1024"
+  HCCL_CONNECT_TIMEOUT: "1200"
+  VLLM_ASCEND_ENABLE_MLAPO: "1"
 
 templates:
   - node_index: 0
@@ -115,9 +116,9 @@ templates:
       - "ascend"
       - "--enforce-eager"
       - "--additional-config"
-      - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true, "enable_dsa_cp": true}'
+      - '{"enable_cpu_binding": true, "enable_shared_expert_dp": true, "enable_dsa_cp": true, "enable_flashcomm1":true}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"lookup_rpc_port":"0","backend": "memcache"}}]}}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_producer", "kv_port": "30000", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_producer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": true}}]}}'
 
   - node_index: 1
     envs:
@@ -141,7 +142,7 @@ templates:
       - "--seed"
       - "1024"
       - "--max-model-len"
-      - "1048576"
+      - "37368"
       - "--max-num-batched-tokens"
       - "120"
       - "--max-num-seqs"
@@ -169,9 +170,9 @@ templates:
       - "--speculative-config"
       - '{"num_speculative_tokens": 1,"method": "mtp","enforce_eager": true}'
       - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true,"recompute_scheduler_enable":true}'
+      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false}, "enable_cpu_binding":true, "multistream_overlap_shared_expert":true, "recompute_scheduler_enable":true}'
       - "--kv-transfer-config"
-      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"lookup_rpc_port":"0","backend": "memcache"}}]}}'
+      - '{"kv_connector": "MultiConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"connectors": [{"kv_connector": "MooncakeHybridConnector", "kv_role": "kv_consumer", "kv_port": "30100", "kv_connector_extra_config": {"prefill": {"dp_size": 4, "tp_size": 4}, "decode": {"dp_size": 16, "tp_size": 1}}}, {"kv_connector": "AscendStoreConnector", "kv_role": "kv_consumer", "kv_connector_extra_config": {"backend": "memcache", "use_layerwise": true}}]}}'
 
 benchmarks:
   acc_aime2025:
