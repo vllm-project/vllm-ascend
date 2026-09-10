@@ -348,6 +348,7 @@ def test_eagle3_gqa_spec_decode_with_pcp() -> None:
     os.environ,
     {
         "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_DISABLE_COMPILE_CACHE": "1",
         "VLLM_BATCH_INVARIANT": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "HCCL_BUFFSIZE": "768",

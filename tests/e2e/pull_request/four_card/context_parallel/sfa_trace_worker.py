@@ -18,6 +18,7 @@ class SFATraceWorker(NPUWorker):
         self.trace_batch = None
         self.trace_captures = []
         self.trace_buffers = {}
+        self.trace_counters = {}
         state = self.model_runner.model_state
         original = state.prepare_attn
         signature = inspect.signature(original)
@@ -41,13 +42,17 @@ class SFATraceWorker(NPUWorker):
         def snapshot(module, inputs, output):
             values = output if isinstance(output, tuple) else (output,)
             for index, value in enumerate(values):
-                if not isinstance(value, torch.Tensor) or value.ndim != 2 or value.shape[0] not in (2, 4):
+                if not isinstance(value, torch.Tensor) or value.ndim != 2:
                     continue
-                key = (name, index, tuple(value.shape))
+                key = (name, index)
                 if key not in self.trace_buffers:
-                    self.trace_buffers[key] = torch.empty_like(value)
+                    self.trace_buffers[key] = value.new_zeros((4, value.shape[1]))
+                    self.trace_counters[key] = value.new_zeros((), dtype=torch.int64)
                 # This copy is recorded in the graph; host reads occur only after execution.
-                self.trace_buffers[key].copy_(value)
+                self.trace_buffers[key].zero_()
+                first_rows = value[:4]
+                self.trace_buffers[key][: first_rows.shape[0]].copy_(first_rows)
+                self.trace_counters[key].add_(1)
 
         return snapshot
 
@@ -91,7 +96,7 @@ class SFATraceWorker(NPUWorker):
 
     def execute_model(self, scheduler_output):
         result = super().execute_model(scheduler_output)
-        if self.trace_batch is None or self.trace_step >= 5:
+        if self.trace_batch is None or self.trace_step >= 12:
             return result
         batch, metadata = self.trace_batch
         self.trace_batch = None
@@ -109,6 +114,9 @@ class SFATraceWorker(NPUWorker):
             "num_tokens",
             "num_tokens_after_padding",
             "req_ids",
+            "is_prefilling_np",
+            "num_scheduled_tokens",
+            "num_computed_tokens_np",
         )
         batch_record = {
             name: self._tensor(value) if isinstance(value, torch.Tensor) else value
@@ -130,8 +138,8 @@ class SFATraceWorker(NPUWorker):
             flush=True,
         )
         # Prefill snapshots are intentionally omitted: only small decode-shaped copies are captured.
-        if batch.num_tokens <= 4:
-            for (name, index, shape), value in self.trace_buffers.items():
+        if not batch.is_prefilling_np.any():
+            for (name, index), value in self.trace_buffers.items():
                 cpu = value.detach().cpu().contiguous()
                 rows = [
                     {
@@ -149,7 +157,8 @@ class SFATraceWorker(NPUWorker):
                             "step": self.trace_step,
                             "module": name,
                             "output_index": index,
-                            "shape": shape,
+                            "shape": list(value.shape),
+                            "updates": int(self.trace_counters[(name, index)].item()),
                             "rows": rows,
                         }
                     ),
