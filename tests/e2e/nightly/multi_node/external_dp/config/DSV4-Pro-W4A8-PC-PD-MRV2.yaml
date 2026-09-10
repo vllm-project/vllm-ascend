@@ -1,5 +1,5 @@
-test_name: "DeepSeek-V4-Pro-w4a8-mtp-prefix-cache-PD-MRV2"
-model: "Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp"
+test_name: "DSV4-Pro-W4A8-PC-PD-MRV2"
+model: "Eco-Tech/DeepSeek-V4-Pro-0813-w4a8"
 num_nodes: 4
 npu_per_node: 16
 
@@ -65,7 +65,7 @@ env_prefill: &env_prefill
   HCCL_CONNECT_TIMEOUT: "6000"
   HCCL_BUFFSIZE: "1024"
   VLLM_ASCEND_ENABLE_FLASHCOMM1: "1"
-  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "16384"
+  VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
 
 env_decode: &env_decode
   <<: *env_common
@@ -119,7 +119,7 @@ templates:
       - "32"
       - --enforce-eager
       - --speculative-config
-      - '{"num_speculative_tokens": 1,"method": "mtp"}'
+      - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - --additional-config
       - '{"enable_cpu_binding": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
@@ -171,7 +171,7 @@ templates:
       - "32"
       - --enforce-eager
       - --speculative-config
-      - '{"num_speculative_tokens": 1,"method": "mtp"}'
+      - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - --additional-config
       - '{"enable_cpu_binding": true,"enable_fused_mc2":1}'
       - --kv-transfer-config
@@ -201,7 +201,7 @@ templates:
       - --max-model-len
       - "204800"
       - --max-num-batched-tokens
-      - "120"
+      - "180"
       - --max-num-seqs
       - "30"
       - --async-scheduling
@@ -220,7 +220,7 @@ templates:
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --speculative-config
-      - '{"num_speculative_tokens": 3,"method": "mtp"}'
+      - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - --gpu-memory-utilization
       - "0.95"
       - --quantization
@@ -256,7 +256,7 @@ templates:
       - --max-model-len
       - "204800"
       - --max-num-batched-tokens
-      - "120"
+      - "180"
       - --max-num-seqs
       - "30"
       - --async-scheduling
@@ -275,7 +275,7 @@ templates:
       - '{"enable_multithread_load": true, "num_threads": 128}'
       - --trust-remote-code
       - --speculative-config
-      - '{"num_speculative_tokens": 3,"method": "mtp"}'
+      - '{"num_speculative_tokens": 5,"method": "dspark","enforce_eager": true}'
       - --gpu-memory-utilization
       - "0.95"
       - --quantization
@@ -308,7 +308,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 48
     request_rate: 1
-    baseline: 471.1520
+    baseline: 471.8498
     threshold: 0.95
   acc_aime2025:
     case_type: accuracy
