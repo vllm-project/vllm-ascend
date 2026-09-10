@@ -25,9 +25,7 @@ PROXY_SCRIPT_BY_ROUTING_TYPE = {
     ROUTING_DISAGGREGATED_PREFILL: "examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py",
 }
 LAYERWISE_PROXY_SCRIPT_BY_ROUTING_TYPE = {
-    ROUTING_DISAGGREGATED_PREFILL: (
-        "examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"
-    ),
+    ROUTING_DISAGGREGATED_PREFILL: ("examples/disaggregated_prefill_v1/load_balance_proxy_layerwise_server_example.py"),
 }
 
 CLUSTER_PLACEHOLDER_RE = re.compile(r"\$\{(NODE_(\d+)_IP|LOCAL_IP|MASTER_IP|LWS_WORKER_INDEX)\}")
@@ -279,9 +277,7 @@ class ExternalDPConfigLoader:
         if layerwise:
             proxy_script = LAYERWISE_PROXY_SCRIPT_BY_ROUTING_TYPE.get(routing_type)
             if proxy_script is None:
-                raise ValueError(
-                    f"routing.layerwise=true is not supported for routing.type={routing_type!r}"
-                )
+                raise ValueError(f"routing.layerwise=true is not supported for routing.type={routing_type!r}")
         else:
             proxy_script = PROXY_SCRIPT_BY_ROUTING_TYPE[routing_type]
 
