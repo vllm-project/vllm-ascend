@@ -54,14 +54,20 @@ class TestQwen3DSparkDraftWindow:
         }
         assert _resolve_layer_attention(draft_hf_config, 0) == (1024, False)
 
-    def test_preserves_other_dflash_options(self) -> None:
+    def test_updates_existing_dflash_config_in_place(self) -> None:
+        dflash_config = {
+            "causal": False,
+            "use_swa": False,
+            "swa_window_size": 4096,
+        }
         vllm_config, draft_hf_config = self._make_config(
             2048,
-            {"causal": False, "use_swa": False, "swa_window_size": 4096},
+            dflash_config,
         )
 
         qwen3_dspark._configure_dspark_draft_window(vllm_config)
 
+        assert draft_hf_config.dflash_config is dflash_config
         assert draft_hf_config.dflash_config == {
             "causal": False,
             "use_swa": True,
@@ -78,6 +84,22 @@ class TestQwen3DSparkDraftWindow:
         qwen3_dspark._configure_dspark_draft_window(vllm_config)
 
         assert draft_hf_config.dflash_config == {"causal": False}
+
+    @pytest.mark.parametrize(
+        "speculative_config",
+        [
+            None,
+            SimpleNamespace(draft_model_config=None),
+            SimpleNamespace(draft_model_config=SimpleNamespace(hf_config=None)),
+        ],
+    )
+    def test_missing_draft_config_is_noop(self, speculative_config) -> None:
+        vllm_config = SimpleNamespace(
+            additional_config={"draft_window_size": 1024},
+            speculative_config=speculative_config,
+        )
+
+        qwen3_dspark._configure_dspark_draft_window(vllm_config)
 
     @pytest.mark.parametrize("window_size", [0, -1, 1024.0, True])
     def test_rejects_invalid_window(self, window_size) -> None:
