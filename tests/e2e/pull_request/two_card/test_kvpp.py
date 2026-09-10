@@ -4,10 +4,10 @@ import traceback
 from collections import defaultdict
 
 import pytest
-import zmq
 from vllm import SamplingParams
 from vllm.distributed.device_communicators import shm_broadcast
 from vllm.transformers_utils.utils import maybe_model_redirect
+from zmq.constants import LINGER
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
@@ -117,7 +117,7 @@ def test_kvpp_combined_features(monkeypatch):
         context = original_context()
         # Completed requests need no queued notifications after workers exit.
         # Avoid indefinite ZMQ linger during in-process engine garbage collection.
-        context.setsockopt(zmq.LINGER, 0)
+        context.setsockopt(LINGER, 0)
         return context
 
     monkeypatch.setattr(shm_broadcast, "Context", queue_context)
