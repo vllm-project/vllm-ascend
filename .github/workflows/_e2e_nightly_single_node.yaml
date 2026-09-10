@@ -123,11 +123,6 @@ on:
         type: string
         default: ''
         description: override CONFIG_BASE_PATH for bisect
-      openlibing_secret:
-        required: false
-        type: string
-        default: ''
-        description: openlibing api secret
     secrets:
       OBS_ACCESS_KEY_ID:
         required: false
