@@ -518,6 +518,37 @@ def test_kimi_k3_gqa_mixed_groups_use_expected_physical_layout(monkeypatch) -> N
     assert sum(tensor.size for tensor in tensors) == available_memory
 
 
+def test_kimi_k3_none_mamba_uses_separate_scheduler_block_size() -> None:
+    page_size = 940032
+    specs = _make_kimi_k3_dspark_kv_cache_specs(block_size=768, page_size=page_size)
+    for name, spec in list(specs.items()):
+        if isinstance(spec, MambaSpec):
+            specs[name] = replace(
+                spec,
+                block_size=200000,
+                shapes=((6, 4608), (12, 128, 128)),
+                mamba_cache_mode="none",
+                num_speculative_blocks=3,
+            )
+        elif name.startswith("model.layers."):
+            specs[name] = replace(spec, num_kv_heads=2)
+    groups = _get_kimi_k3_dspark_mixed_kv_cache_groups(specs)
+    assert groups is not None
+    assert [len(g.layer_names) for g in groups] == [29, 23, 23, 23]
+    assert [g.kv_cache_spec.block_size for g in groups] == [768, 200000, 200000, 200000]
+    config = _make_vllm_config(enable_prefix_caching=False, dcp=1, block_size=768)
+    config.cache_config.mamba_cache_mode = "none"
+    assert {g.kv_cache_spec.max_num_blocks_per_req(config, 200000) for g in groups[1:]} == {4}
+
+
+def test_kimi_k3_mixed_attention_still_requires_same_block_size() -> None:
+    specs = _make_kimi_k3_dspark_kv_cache_specs()
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is not None
+    name = "model.layers.93.self_attn.attn"
+    specs[name] = replace(specs[name], block_size=192)
+    assert _get_kimi_k3_dspark_mixed_kv_cache_groups(specs) is None
+
+
 def test_kimi_k3_gqa_mixed_grouping_falls_back_on_unrecognized_layer() -> None:
     specs = _make_kimi_k3_dspark_kv_cache_specs()
     specs["unrecognized.layer"] = next(iter(specs.values()))
