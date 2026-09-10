@@ -469,17 +469,8 @@ private:
 
     __aicore__ inline float Uniform(int64_t seed, int64_t position)
     {
-        LocalTensor<float> scalar = scalarBuf_.Get<float>();
-        LocalTensor<int32_t> scalarInt = scalarIntBuf_.Get<int32_t>();
-        scalarInt.SetValue(0, PhiloxRandom24(seed, position));
-        PipeSToV();
-        Cast(scalar, scalarInt, RoundMode::CAST_NONE, 1);
-        PipeBarrier<PIPE_V>();
-        Adds(scalar, scalar, 0.5f, 1);
-        PipeBarrier<PIPE_V>();
-        Muls(scalar, scalar, UINT24_TO_UNIT, 1);
-        PipeVToS();
-        return scalar.GetValue(0);
+        const float random = static_cast<float>(PhiloxRandom24(seed, position));
+        return (random + 0.5f) * UINT24_TO_UNIT;
     }
 
     __aicore__ inline int64_t SelectCategorical(uint32_t row, float rowMax, float uniform, float total)
