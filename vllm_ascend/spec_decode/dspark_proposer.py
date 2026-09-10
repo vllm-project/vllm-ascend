@@ -13,9 +13,8 @@ from vllm.v1.worker.utils import AttentionGroup
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.context_parallel.common_cp import get_dcp_local_seq_lens
 from vllm_ascend.attention.dsa_v1 import AscendDSAMetadataBuilder
-from vllm_ascend.attention.utils import AscendDCPMetadata, enable_pcp
+from vllm_ascend.attention.utils import enable_pcp
 from vllm_ascend.ops.triton.spec_decode.utils import copy_and_expand_dflash_and_dspark_inputs_kernel
 from vllm_ascend.spec_decode.dflash_proposer import AscendDflashProposer, _compute_num_programs
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
@@ -345,25 +344,15 @@ class AscendDSparkProposer(AscendDflashProposer):
         cad.attn_state = AscendAttentionState.ChunkedPrefill
 
         if dcp_size > 1:
-            seq_lens_cpu = getattr(cad, "_seq_lens_cpu", None)
-            if seq_lens_cpu is None:
-                seq_lens_cpu = cad.seq_lens.cpu()
-            local_seq_lens = get_dcp_local_seq_lens(
-                seq_lens_cpu - self.num_query_per_req,
-                dcp_size,
-                cp_interleave_size,
+            if cad.is_prefilling is not None:
+                cad.is_prefilling.fill_(False)
+            assert self.runner is not None
+            dcp_manager = getattr(self.runner, "dcp_manager", None)
+            assert dcp_manager is not None
+            long_seq_args = dcp_manager.prepare_dspark_first_pass_cp_metadata(
+                common_attn_metadata=cad,
+                num_query_per_req=self.num_query_per_req,
             )
-            cad.context_parallel_metadata = AscendDCPMetadata(
-                num_computed_tokens_of_dcp=local_seq_lens.numpy(),
-                query_lens_cpu=torch.full(
-                    (batch_size,),
-                    self.num_query_per_req,
-                    dtype=torch.int32,
-                ),
-                max_query_len=self.num_query_per_req,
-                dcp_mtp_attn_mask=None,
-            )
-            long_seq_args = (None, None)
 
         return num_query_total, token_indices_to_sample, cad, long_seq_args
 

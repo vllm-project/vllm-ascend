@@ -166,8 +166,7 @@ def copy_and_expand_dflash_and_dspark_inputs_kernel(
             virtual_block_offset = query_kv_slot_pos % virtual_block_size
             owner_rank = virtual_block_offset // CP_INTERLEAVE_SIZE
             local_kv_slot_pos = (
-                query_kv_slot_pos // virtual_block_size * CP_INTERLEAVE_SIZE
-                + virtual_block_offset % CP_INTERLEAVE_SIZE
+                query_kv_slot_pos // virtual_block_size * CP_INTERLEAVE_SIZE + virtual_block_offset % CP_INTERLEAVE_SIZE
             )
         else:
             owner_rank = DCP_RANK
