@@ -185,7 +185,7 @@ for output in outputs:
 
 Chunked prefill, prefix caching, and request preemption (eviction and recomputation) are not supported with batch invariance.
 
-These scheduling features are not disabled automatically. You must explicitly disable chunked prefill and prefix caching and set the KV cache block size to 128 in your configuration — for example, `--no-enable-chunked-prefill`, `--no-enable-prefix-caching`, and `--block-size 128` when starting the server, or `enable_chunked_prefill=False`, `enable_prefix_caching=False`, and `block_size=128` for offline inference — as shown in the examples above.
+These scheduling features are not disabled automatically. You must explicitly disable chunked prefill and prefix caching in your configuration, and pair the chunked prefill disabling with a KV cache block size of 128 — pass `--block-size 128` together with `--no-enable-chunked-prefill` when starting the server, or `block_size=128` together with `enable_chunked_prefill=False` for offline inference — as shown in the examples above.
 
 ## Tested Models
 
