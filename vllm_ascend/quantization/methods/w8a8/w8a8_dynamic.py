@@ -454,7 +454,7 @@ class AscendW8A8DynamicFusedMoEMethod(AscendMoEScheme):
                         "glu_bias": mlp_compute_input.swiglu_beta,
                     }
                 )
-            hidden_states, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(**dequant_swiglu_kwargs)
+            hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(**dequant_swiglu_kwargs)
         else:
             # For those who choose to not use grouped_matmul_swiglu_quant and in prefill stage,
             # use gmm1 + activation + quant instead.

@@ -31,8 +31,9 @@ def _shared_dequant_swiglu_quant(
     activation_scale = activation_scale.to(torch.float32).reshape(hidden_states.shape[:-1] + (1,))
     gate_up = hidden_states.to(torch.float32) * weight_scale * activation_scale
 
-    half = gate_up.shape[-1] // 2
     limit = float(swiglu_limit)
+    # CANN 9.2 beta.2 on A3 implements mode 1 as contiguous front/back halves.
+    half = gate_up.shape[-1] // 2
     gate = gate_up[..., :half]
     up = gate_up[..., half:]
     # Skip clamp when limit == 0 (treated as "no clamp")
@@ -46,11 +47,11 @@ def _shared_dequant_swiglu_quant(
 
 
 _REPRO_CASES = [
-    ([4608, 2048], 0.0, "large_2048_aligned"),
-    ([2, 192], 0.0, "small_192_misaligned"),
-    ([4, 192], 0.0, "small_192_misaligned_4rows"),
-    ([8, 384], 0.0, "small_384_aligned"),
-    ([1, 256], 0.0, "single_row_256_aligned"),
+    ([4608, 2048], 10.0, "large_2048_aligned"),
+    ([2, 192], 10.0, "small_192_misaligned"),
+    ([4, 192], 10.0, "small_192_misaligned_4rows"),
+    ([8, 384], 10.0, "small_384_aligned"),
+    ([1, 256], 10.0, "single_row_256_aligned"),
 ]
 
 
@@ -78,7 +79,7 @@ def test_npu_dequant_swiglu_quant_with_limit(x_shape, clamp_limit, desc):
     # 2. Fused op (NPUGraph, same as production code)
     graph = torch.npu.NPUGraph()
     with torch.npu.graph(graph, capture_error_mode="thread_local", auto_dispatch_capture=True):
-        output, output_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+        output, output_scale = torch_npu.npu_dequant_swiglu_quant(
             x=x,
             weight_scale=weight_scale,
             activation_scale=activate_scale,
