@@ -37,7 +37,6 @@ deployment:
       <<: *env_common
     server_cmd: >
         vllm serve "Qwen/Qwen3-235B-A22B"
-        --headless
         --data-parallel-size 2
         --data-parallel-size-local 1
         --data-parallel-start-rank 1
