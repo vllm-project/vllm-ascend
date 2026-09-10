@@ -1416,13 +1416,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                     else:
                         next_token_ids = logits[:, idx].argmax(dim=-1)
                         if dspark_has_vocab_mapping:
-                            if hasattr(self.model, "map_draft_to_target"):
-                                next_token_ids = self.model.map_draft_to_target(next_token_ids)
-                            else:
-                                bias = torch.index_select(
-                                    self.model.draft_id_to_target_id, dim=0, index=next_token_ids.view(-1)
-                                ).view(next_token_ids.shape)
-                                next_token_ids = next_token_ids + bias
+                            next_token_ids = self.model.map_draft_to_target(next_token_ids)
                         draft_token_ids[:, idx + 1].copy_(next_token_ids)
 
                 if use_probabilistic and dspark_probs_list:
