@@ -30,7 +30,7 @@ from itertools import chain
 
 from vllm.logger import logger
 
-from vllm_ascend.core.dynamic_spec_scheduler import (
+from vllm_ascend.dynamic_spec import (
     install_output_fields,
     install_scheduler_policy,
     update_dynamic_feedback,

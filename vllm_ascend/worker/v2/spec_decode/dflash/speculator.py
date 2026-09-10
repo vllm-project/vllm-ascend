@@ -17,7 +17,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 )
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
-from vllm_ascend.worker.v2.spec_decode.physical_k import (
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
     PhysicalKDFlashMixin,
     initialize_physical_k_buffers,
     physical_k_scope,

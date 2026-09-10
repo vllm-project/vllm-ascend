@@ -73,7 +73,7 @@ from vllm_ascend.worker.v2.pp_utils import (
 )
 from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
-from vllm_ascend.worker.v2.spec_decode.verification import adaptive_verification_gate_wrapper
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import adaptive_verification_gate_wrapper
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
 

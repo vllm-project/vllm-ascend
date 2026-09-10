@@ -26,7 +26,7 @@ from vllm.logger import logger
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.config_utils import config
-from vllm_ascend.dynamic_spec_config import resolve_method_params
+from vllm_ascend.dynamic_spec import resolve_method_params
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

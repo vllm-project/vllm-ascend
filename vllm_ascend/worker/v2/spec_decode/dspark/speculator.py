@@ -37,7 +37,7 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
-from vllm_ascend.worker.v2.spec_decode.physical_k import (
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
     PhysicalKDSparkMixin,
     initialize_dspark_physical_k,
     physical_k_scope,

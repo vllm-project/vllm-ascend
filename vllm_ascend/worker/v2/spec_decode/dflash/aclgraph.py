@@ -21,11 +21,11 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.worker.v2.aclgraph_utils import collect_sorted_captured_token_sizes, model_capture_wrapper
-from vllm_ascend.worker.v2.spec_decode.physical_k import v2_varlen_physical_k_enabled
-from vllm_ascend.worker.v2.spec_decode.physical_k_graph import (
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
     enable_draft_graph_debug,
     extend_capture_descriptors,
     physical_k_capture_scope,
+    v2_varlen_physical_k_enabled,
 )
 from vllm_ascend.worker.v2.utils import communicator_switch
 

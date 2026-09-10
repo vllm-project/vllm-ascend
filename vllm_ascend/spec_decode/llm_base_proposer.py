@@ -53,6 +53,7 @@ from vllm_ascend.distributed.kv_transfer.sparse_kv_offload.sparse_kv_offload_man
     prepare_sparse_kv_offload_mtp_dummy_metadata,
 )
 from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.dynamic_spec import validate_v1_dynamic_policy
 from vllm_ascend.models.deepseek_v4.dspark import DSparkDeepseekV4ForCausalLM
 from vllm_ascend.models.llama_eagle3_vwn import Eagle3VwnLlamaForCausalLM
 from vllm_ascend.ops.triton.spec_decode.utils import prepare_inputs_padded_kernel
@@ -160,6 +161,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device, pass_hidden_states_to_model: bool, runner=None):
         super().__init__(vllm_config, device, pass_hidden_states_to_model, runner=runner)
+
+        # Share the V1 policy guard without changing either child constructor.
+        # Hardware-aware execution uses V2, not this legacy budget scheduler.
+        validate_v1_dynamic_policy(self.method, get_ascend_config().dynamic_spec_config)
 
         # Assign runner before it's used in the methods below
         self.runner = runner

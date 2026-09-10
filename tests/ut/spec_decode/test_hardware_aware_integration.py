@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import importlib.util
 import random
+import subprocess
 import sys
 import unittest
 from dataclasses import dataclass
@@ -20,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[3]
 RUNNER = ROOT / "vllm_ascend/worker/v2/model_runner.py"
@@ -48,8 +51,8 @@ def method_calls(node):
     }
 
 
-controller_module = load_standalone("vllm_ascend/spec_decode/dynamic/policy.py", "physical_k_contract_controller")
-config_module = load_standalone("vllm_ascend/dynamic_spec_config.py", "physical_k_contract_config")
+controller_module = load_standalone("vllm_ascend/dynamic_spec.py", "physical_k_contract_controller")
+config_module = load_standalone("vllm_ascend/dynamic_spec.py", "physical_k_contract_config")
 
 
 class TestHybridController(unittest.TestCase):
@@ -119,6 +122,33 @@ class TestHybridController(unittest.TestCase):
 
 
 class TestRunnerWiring(unittest.TestCase):
+    def test_shared_v1_guard_is_called_and_children_keep_baseline_arguments(self):
+        path = ROOT / "vllm_ascend/spec_decode/llm_base_proposer.py"
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        base = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "AscendSpecDecodeBaseProposer")
+        init = next(n for n in base.body if isinstance(n, ast.FunctionDef) and n.name == "__init__")
+        self.assertIn("validate_v1_dynamic_policy", method_calls(init))
+        for method in ("dspark", "dflash"):
+            child = ast.parse((ROOT / f"vllm_ascend/spec_decode/{method}_proposer.py").read_text())
+            calls = [
+                n
+                for n in ast.walk(child)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "DynamicSpecScheduler"
+            ]
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn("policy", {kw.arg for kw in calls[0].keywords})
+
+    def test_host_module_import_does_not_load_vllm_or_torch(self):
+        code = (
+            "import importlib.util,sys; "
+            "spec=importlib.util.spec_from_file_location('host_contract',sys.argv[1]); "
+            "module=importlib.util.module_from_spec(spec); sys.modules[spec.name]=module; "
+            "spec.loader.exec_module(module); "
+            "assert not any(n=='torch' or n.startswith('torch.') or n=='vllm' or n.startswith('vllm.') "
+            "for n in sys.modules)"
+        )
+        subprocess.run([sys.executable, "-I", "-c", code, str(ROOT / "vllm_ascend/dynamic_spec.py")], check=True)
+
     def test_piecewise_wrapper_is_entered(self):
         calls = method_calls(method_node(RUNNER, "NPUModelRunner", "initialize_kv_cache"))
         self.assertIn("adaptive_verification_gate_wrapper", calls)
@@ -166,7 +196,7 @@ class TestRunnerWiring(unittest.TestCase):
 class TestSamplerDelegation(unittest.TestCase):
     def sampler(self, active_k, fail=False):
         node = method_node(
-            ROOT / "vllm_ascend/worker/v2/spec_decode/physical_k.py", "PhysicalKDSparkMixin", "_sample_sequential"
+            ROOT / "vllm_ascend/worker/v2/spec_decode/hardware_aware.py", "PhysicalKDSparkMixin", "_sample_sequential"
         )
 
         class UpstreamSampler:
@@ -272,27 +302,16 @@ class TestRuntimeAdapters(unittest.TestCase):
         self.capture = module("vllm.v1.worker.gpu.spec_decode.dflash.cudagraph")
         self.sched_module = module("vllm.v1.core.sched.scheduler")
         self.outputs = module("vllm.v1.outputs")
-        module(
-            "vllm_ascend.dynamic_spec_config",
-            **{name: getattr(config_module, name) for name in ("resolve_method_params", "v2_physical_k_enabled")},
-        )
-        module(
-            "vllm_ascend.spec_decode.dynamic.policy",
-            AdaptiveDraftKController=controller_module.AdaptiveDraftKController,
-            ProposalGate=controller_module.ProposalGate,
-        )
         module("vllm_ascend.worker.v2.spec_decode")
         stub_imports = patch.dict(sys.modules, modules)
         stub_imports.start()
         self.addCleanup(stub_imports.stop)
-        self.scheduler = load_standalone("vllm_ascend/core/dynamic_spec_scheduler.py", "contract_scheduler")
+        self.scheduler = load_standalone("vllm_ascend/dynamic_spec.py", "vllm_ascend.dynamic_spec")
         self.physical = load_standalone(
-            "vllm_ascend/worker/v2/spec_decode/physical_k.py", "vllm_ascend.worker.v2.spec_decode.physical_k"
+            "vllm_ascend/worker/v2/spec_decode/hardware_aware.py",
+            "vllm_ascend.worker.v2.spec_decode.hardware_aware",
         )
-        self.verification = load_standalone(
-            "vllm_ascend/worker/v2/spec_decode/verification.py", "contract_verification"
-        )
-        self.graph = load_standalone("vllm_ascend/worker/v2/spec_decode/physical_k_graph.py", "contract_graph")
+        self.verification = self.graph = self.physical
         self.mode = GraphMode
         self.descriptor = Descriptor
 
@@ -610,6 +629,113 @@ class TestRuntimeAdapters(unittest.TestCase):
             self.capture._prepare_dflash_inputs_to_capture(2, 6, None, None, [], None, 256, False, False)
         self.assertIs(self.capture._prepare_dflash_inputs_to_capture, original)
         self.assertEqual(manager.speculator.num_speculative_steps, 5)
+
+
+def test_compact_and_expanded_configs_create_equivalent_controllers(monkeypatch):
+    import random
+
+    from vllm.v1.core.sched import scheduler as scheduler_module
+
+    import vllm_ascend.patch.platform.patch_pp_mtp  # noqa: F401
+    from vllm_ascend.dynamic_spec import install_scheduler_policy, resolve_method_params
+    from vllm_ascend.worker.v2.spec_decode.hardware_aware import configured_capture_k, v2_varlen_physical_k_enabled
+
+    class FakeScheduler:
+        def __init__(self, vllm_config):
+            pass
+
+        def _update_after_schedule(self, output):
+            pass
+
+    monkeypatch.setattr(scheduler_module, "Scheduler", FakeScheduler)
+    install_scheduler_policy()
+    compact = {"method": "dspark", "policy": "hardware_aware", "physical_k": {"min_k": 3, "capture_k": [3, 5]}}
+    expanded = {"method": "dspark", "policy": "hardware_aware", "method_params": resolve_method_params(compact)}
+    controllers = []
+    for dynamic in (compact, expanded):
+        config = SimpleNamespace(
+            additional_config={"dynamic_spec_config": dynamic},
+            speculative_config=SimpleNamespace(num_speculative_tokens=5),
+            use_v2_model_runner=True,
+        )
+        controller = FakeScheduler(config)._ascend_physical_k_controller
+        assert controller is not None
+        controllers.append(controller)
+        assert v2_varlen_physical_k_enabled(config)
+        assert configured_capture_k(config, 5) == (3, 5)
+    rng = random.Random(20260908)
+    for _ in range(1000):
+        batch = rng.choice([1, 4, 8, 16])
+        k = controllers[0].cap(5)
+        samples = [list(range(rng.randrange(k + 1) + 1)) for _ in range(batch)]
+        for controller in controllers:
+            controller.observe([k] * batch, samples)
+        assert controllers[0].__dict__ == controllers[1].__dict__
+
+
+@pytest.mark.parametrize("configured,expected", [(5, 4), (3, 3), (0, 0)])
+def test_next_physical_k_is_selected_before_async_placeholders(configured, expected):
+    import vllm_ascend.patch.platform.patch_pp_mtp  # noqa: F401
+    from vllm_ascend.dynamic_spec import AdaptiveDraftKController
+
+    scheduler, request = _scheduler()
+    controller = AdaptiveDraftKController(max_k=5, min_k=4, slack=0)
+    controller.update([1] * 16)
+    scheduler._ascend_physical_k_controller = controller
+    output = _output(configured)
+
+    scheduler._update_after_schedule(output)
+
+    assert output.num_spec_tokens_to_schedule == expected
+    assert len(request.spec_token_ids) == expected
+    assert len(scheduler._spec_token_placeholders) == expected
+    # Current-step verification and bonus accounting must not be retroactively
+    # shortened when choosing the NEXT step's physical draft width.
+    assert len(output.scheduled_spec_decode_tokens["r"]) == 5
+    assert request.num_output_placeholders == 6
+    assert request.next_decode_eligible_step == 8
+
+
+def test_upstream_placeholder_width_unchanged_without_controller():
+    import vllm_ascend.patch.platform.patch_pp_mtp  # noqa: F401
+
+    scheduler, request = _scheduler()
+    output = _output(5)
+    scheduler._update_after_schedule(output)
+    assert len(request.spec_token_ids) == 5
+    assert output.num_spec_tokens_to_schedule == 5
+
+
+def _scheduler():
+    from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+    scheduler = AsyncScheduler.__new__(AsyncScheduler)
+    request = SimpleNamespace(
+        num_computed_tokens=10,
+        num_in_flight_tokens=0,
+        num_tokens=10,
+        num_output_placeholders=0,
+        use_structured_output=False,
+    )
+    scheduler.requests = {"r": request}
+    scheduler.defer_block_free = False
+    scheduler.enable_return_routed_experts = False
+    scheduler._inflight_prefills = SimpleNamespace(discard=lambda request: None)
+    scheduler.num_sampled_tokens_per_step = 1
+    scheduler.use_v2_model_runner = True
+    scheduler.current_step = 7
+    scheduler.pp_size = 1
+    return scheduler, request
+
+
+def _output(configured):
+    return SimpleNamespace(
+        num_spec_tokens_to_schedule=configured,
+        num_scheduled_tokens={"r": 6},
+        scheduled_spec_decode_tokens={"r": [0] * 5},
+        has_structured_output_requests=False,
+        pending_structured_output_tokens=False,
+    )
 
 
 if __name__ == "__main__":

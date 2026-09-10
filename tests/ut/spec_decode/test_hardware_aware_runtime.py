@@ -1,20 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Physical draft K and batch gating layered over upstream verification."""
-
-from __future__ import annotations
+"""Tensor storage, width dispatch and diagnostics for hardware-aware decoding."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
-from vllm_ascend.ascend_config import DynamicSpecConfig
-from vllm_ascend.spec_decode.dynamic.policy import AdaptiveDraftKController, ProposalGate
-from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
-from vllm_ascend.worker.v2.spec_decode.physical_k import physical_k_scope
+from vllm_ascend.worker.v2.spec_decode.hardware_aware import (
+    IndexedConfidenceBuffer,
+    IndexedDraftTokenBuffer,
+    enable_budget_debug,
+    enable_draft_graph_debug,
+    physical_k_scope,
+)
 
 
 @pytest.mark.parametrize(
@@ -95,46 +97,6 @@ def test_v2_physical_k_scope_uses_next_draft_width_from_scheduler() -> None:
         assert speculator.num_query_per_req == 2
 
 
-def test_adaptive_draft_k_hybrid_keeps_small_batch_at_full_width() -> None:
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        hybrid_enabled=True,
-        hybrid_min_batch_size=8,
-    )
-
-    controller.observe([5] * 4, [[0]] * 4)
-
-    assert controller.current_k == 5
-    assert controller.last_reason == "small_batch_full_k"
-
-
-def test_adaptive_draft_k_hybrid_uses_hysteresis_and_probe() -> None:
-    controller = AdaptiveDraftKController(
-        max_k=5,
-        min_k=4,
-        slack=0,
-        hybrid_enabled=True,
-        hybrid_min_batch_size=8,
-        hybrid_acceptance_threshold=0.6,
-        hybrid_low_steps=2,
-        hybrid_probe_interval=3,
-    )
-    sampled = [[0]] * 8
-
-    controller.observe([5] * 8, sampled)
-    assert controller.current_k is None
-    assert controller.last_reason == "low_acceptance_hysteresis"
-
-    controller.observe([5] * 8, sampled)
-    assert controller.current_k == 4
-    assert controller.last_reason == "low_acceptance_dynamic_k"
-
-    controller.observe([4] * 8, sampled)
-    assert controller.current_k == 5
-    assert controller.last_reason == "periodic_full_k_probe"
-
-
 def test_v2_physical_k_scope_reuses_preallocated_device_indices() -> None:
     speculator = SimpleNamespace(
         vllm_config=SimpleNamespace(
@@ -189,110 +151,9 @@ def test_v2_dflash_physical_k_writes_only_active_prefix() -> None:
     ]
 
 
-def test_proposal_gate_enters_latency_profile_after_low_load_streak() -> None:
-    gate = ProposalGate(
-        max_num_seqs=8,
-        enter_ratio=0.5,
-        enter_steps=2,
-        exit_steps=1,
-    )
-
-    assert (
-        gate.select_k(
-            4,
-            num_running=1,
-            num_waiting=0,
-            total_num_scheduled_tokens=1,
-            num_scheduled_requests=1,
-            prefill_scheduled=False,
-        )
-        == 0
-    )
-    assert (
-        gate.select_k(
-            4,
-            num_running=1,
-            num_waiting=0,
-            total_num_scheduled_tokens=1,
-            num_scheduled_requests=1,
-            prefill_scheduled=False,
-        )
-        == 4
-    )
-
-
-def test_proposal_gate_exits_immediately_when_queue_builds() -> None:
-    gate = ProposalGate(max_num_seqs=4, enter_steps=1, exit_steps=1)
-    assert (
-        gate.select_k(
-            2,
-            num_running=1,
-            num_waiting=0,
-            total_num_scheduled_tokens=1,
-            num_scheduled_requests=1,
-            prefill_scheduled=False,
-        )
-        == 2
-    )
-    assert (
-        gate.select_k(
-            2,
-            num_running=2,
-            num_waiting=1,
-            total_num_scheduled_tokens=2,
-            num_scheduled_requests=2,
-            prefill_scheduled=False,
-        )
-        == 0
-    )
-
-
-def test_adaptive_draft_k_tracks_actual_accepted_width() -> None:
-    controller = AdaptiveDraftKController(max_k=5, min_k=1, slack=1)
-
-    # The first step keeps the configured width; the result feeds the next
-    # scheduler step and removes one unused draft position.
-    assert controller.cap(5) == 5
-    controller.observe([5, 5], [[1, 2, 3, 4], [1, 2, 3]])
-    assert controller.current_k == 4
-    assert controller.last_accepted_lengths == [3, 2]
-    assert controller.cap(5) == 4
-
-    # A prefix that reaches the physical width allows gradual growth again.
-    controller.observe([4, 4], [[1, 2, 3, 4, 5], [1, 2, 3, 4, 5]])
-    assert controller.current_k == 5
-    assert controller.cap(5) == 5
-
-
-def test_adaptive_draft_k_preserves_gate_zero_and_minimum() -> None:
-    controller = AdaptiveDraftKController(max_k=5, min_k=1, slack=1)
-    assert controller.cap(5) == 5
-    controller.update([0, 0])
-    assert controller.current_k == 1
-    assert controller.cap(0) == 0
-    # A temporary batch-level gate must not permanently disable speculation.
-    assert controller.cap(5) == 1
-
-
-def test_removed_v2_legacy_manager_configuration_is_rejected() -> None:
-    with pytest.raises(ValueError, match="reuse_upstream_adaptive_verification"):
-        DynamicSpecConfig(
-            method="dspark",
-            policy="hardware_aware",
-            method_params={"reuse_upstream_adaptive_verification": False},
-        )
-
-
-def test_upstream_manager_configuration_remains_compatible() -> None:
-    config = DynamicSpecConfig(
-        method="dspark",
-        policy="hardware_aware",
-        method_params={"reuse_upstream_adaptive_verification": True},
-    )
-    assert config.policy == "hardware_aware"
-
-
 def test_v1_scheduler_rejects_removed_hardware_policy() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
     with pytest.raises(ValueError, match="legacy V1 scheduler"):
         DynamicSpecScheduler(
             method="dspark",
@@ -305,6 +166,8 @@ def test_v1_scheduler_rejects_removed_hardware_policy() -> None:
 
 
 def test_v1_confidence_budget_handles_smaller_draft_width() -> None:
+    from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
+
     scheduler = DynamicSpecScheduler(
         method="dflash",
         method_params={},
@@ -314,3 +177,99 @@ def test_v1_confidence_budget_handles_smaller_draft_width() -> None:
     )
     result = scheduler.update(logits=torch.zeros((4, 8)), num_reqs=2)
     assert result.tolist() == [2, 2]
+
+
+@pytest.mark.parametrize("enable", [enable_budget_debug, enable_draft_graph_debug])
+def test_info_mode_does_not_wrap_or_touch_manager(enable):
+    logger = Mock()
+    logger.isEnabledFor.return_value = False
+    manager = SimpleNamespace()
+    enable(manager, logger)
+    assert vars(manager) == {}
+    logger.debug.assert_not_called()
+
+
+def test_budget_debug_preserves_arguments_result_and_state():
+    logger = Mock()
+    logger.isEnabledFor.return_value = True
+    state = ({"a": 3, "b": 3}, {"a": 1, "b": 1}, 4)
+    original = Mock(return_value=6)
+    manager = SimpleNamespace(get_num_tokens=original, _batch_budget=state)
+    enable_budget_debug(manager, logger)
+    assert manager.get_num_tokens("tokens", drafts="drafts") == 6
+    original.assert_called_once_with("tokens", drafts="drafts")
+    assert manager._batch_budget is state
+    assert state == ({"a": 3, "b": 3}, {"a": 1, "b": 1}, 4)
+    assert logger.debug.call_args.args[1:7] == (2, 6, 4, 3, 3, 2)
+
+
+def test_graph_debug_preserves_descriptor_identity():
+    logger = Mock()
+    logger.isEnabledFor.return_value = True
+    desc = SimpleNamespace(cg_mode="FULL", num_tokens=48, num_reqs=16, uniform_token_count=3)
+    original = Mock(return_value=desc)
+    manager = SimpleNamespace(dispatch=original, _capture_descs={"FULL": [desc]})
+    enable_draft_graph_debug(manager, logger)
+    assert manager.dispatch(num_tokens=48, num_reqs=16, uniform_token_count=3) is desc
+    original.assert_called_once_with(num_tokens=48, num_reqs=16, uniform_token_count=3)
+    assert logger.debug.call_args.args[1:] == ("FULL", 48, 16, 3)
+
+
+def test_debug_does_not_swallow_upstream_errors():
+    logger = Mock()
+    logger.isEnabledFor.return_value = True
+    manager = SimpleNamespace(get_num_tokens=Mock(side_effect=ValueError("upstream")))
+    enable_budget_debug(manager, logger)
+    with pytest.raises(ValueError, match="upstream"):
+        manager.get_num_tokens({}, {})
+
+
+@pytest.mark.parametrize("batch", [0, 1, 4, 16])
+@pytest.mark.parametrize("active_k", [1, 2, 3, 4])
+def test_indexed_writes_preserve_backing_and_inactive_elements(batch, active_k):
+    tokens = torch.full((16, 5), -1, dtype=torch.int64)
+    confidence = torch.full((16, 5), -1.0)
+    token_writer = IndexedDraftTokenBuffer(tokens)
+    confidence_writer = IndexedConfidenceBuffer(confidence, active_k)
+    token_pointer, confidence_pointer = tokens.data_ptr(), confidence.data_ptr()
+    for offset in [0, 100]:
+        # Strided inputs exercise the same per-column layout as upstream.
+        values = torch.arange(batch * active_k).reshape(batch, active_k) + offset
+        for col in range(active_k):
+            token_writer[:batch, col] = values[:, col]
+        confidence_writer[:batch] = values.float() / 100
+        torch.testing.assert_close(tokens[:batch, :active_k], values)
+        torch.testing.assert_close(confidence[:batch, :active_k], values.float() / 100)
+        assert torch.all(tokens[:, active_k:] == -1)
+        assert torch.all(confidence[:, active_k:] == -1)
+        assert torch.all(tokens[batch:] == -1)
+        assert torch.all(confidence[batch:] == -1)
+    assert (tokens.data_ptr(), confidence.data_ptr()) == (token_pointer, confidence_pointer)
+
+
+def test_reject_narrow_backing_copy_and_invalid_indices():
+    backing = torch.zeros(16, 5)
+    with pytest.raises(ValueError, match="contiguous"):
+        IndexedConfidenceBuffer(backing[:, :4], 4)
+    with pytest.raises(ValueError, match="contiguous"):
+        IndexedDraftTokenBuffer(backing[:, :4])
+    writer = IndexedDraftTokenBuffer(backing)
+    with pytest.raises(TypeError):
+        writer[1:2, 0] = torch.zeros(1)
+    with pytest.raises(IndexError):
+        writer[:17, 0] = torch.zeros(17)
+    with pytest.raises(IndexError):
+        writer[:1, 5] = torch.zeros(1)
+
+
+def test_preallocated_indices_reused_across_width_and_batch_changes():
+    backing = torch.zeros(16, 5)
+    writers = {k: IndexedConfidenceBuffer(backing, k) for k in range(1, 5)}
+    pointers = {k: writer._indices.data_ptr() for k, writer in writers.items()}
+    expected = backing.clone()
+    for batch, width in [(16, 4), (1, 2), (4, 3), (16, 1), (16, 4)]:
+        value = torch.full((batch, width), float(batch + width))
+        writers[width][:batch] = value
+        expected[:batch, :width] = value
+        torch.testing.assert_close(backing, expected)
+        assert writers[width]._indices.data_ptr() == pointers[width]
