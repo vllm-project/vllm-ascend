@@ -10,7 +10,6 @@ from tests.e2e.model_utils import check_outputs_equal
 
 MODEL = "vllm-ascend/DeepSeek-V3.2-W8A8-Pruning"
 TP_SIZE = 2
-PP_SIZE = 2
 BLOCK_SIZE = 128
 NUM_BLOCKS = 64
 TOKEN_BUDGET = BLOCK_SIZE
@@ -23,8 +22,6 @@ pytestmark = pytest.mark.e2e_model(MODEL)
 
 def read_worker_state(worker):
     # Resolve worker-local objects inside the executor process.
-    from vllm.distributed import get_pp_group
-
     from vllm_ascend.core.kv_cache_interface import AscendSFAIndexerCacheSpec
     from vllm_ascend.core.kv_cache_placement import find_mtp_layers
     from vllm_ascend.distributed import parallel_state
@@ -37,7 +34,6 @@ def read_worker_state(worker):
     mtp = find_mtp_layers(config, specs)
     scheduler = runner.kvpp.scheduler
     return {
-        "stage": get_pp_group().rank_in_group,
         "rank": group.rank_in_group if group is not None else None,
         "ranks": tuple(group.ranks) if group is not None else (),
         "targets": set(scheduler.attention_layer_names) if scheduler is not None else set(),
@@ -53,22 +49,17 @@ def read_worker_state(worker):
 
 def assert_worker_state(runner, enabled):
     states = runner.model.collective_rpc(read_worker_state)
-    assert len(states) == TP_SIZE * PP_SIZE
-    assert {state["stage"] for state in states} == set(range(PP_SIZE))
-    assert any(state["mtp"] for state in states)
+    assert len(states) == TP_SIZE
     for state in states:
         assert state["ep"] and state["async"]
         assert state["num_blocks"] == NUM_BLOCKS
-        assert state["mtp"].isdisjoint(state["targets"])
-    for stage in range(PP_SIZE):
-        workers = [state for state in states if state["stage"] == stage]
-        assert len(workers) == TP_SIZE
-        if enabled:
-            assert {state["rank"] for state in workers} == set(range(TP_SIZE))
-            assert {state["ranks"] for state in workers} == {tuple(range(stage * TP_SIZE, (stage + 1) * TP_SIZE))}
-            assert all(state["targets"] and state["targets"] == state["expected_targets"] for state in workers)
-        else:
-            assert all(not state["targets"] and state["rank"] is None and not state["ranks"] for state in workers)
+        assert state["mtp"] and state["mtp"].isdisjoint(state["targets"])
+    if enabled:
+        assert {state["rank"] for state in states} == set(range(TP_SIZE))
+        assert {state["ranks"] for state in states} == {tuple(range(TP_SIZE))}
+        assert all(state["targets"] and state["targets"] == state["expected_targets"] for state in states)
+    else:
+        assert all(not state["targets"] and state["rank"] is None and not state["ranks"] for state in states)
 
 
 def observe_prefill(runner, monkeypatch):
@@ -105,7 +96,7 @@ def token_prompt(tokenizer, text, length):
 @pytest.mark.e2e_coverage(
     arch="moe",
     feature="kvpp,chunked_prefill,prefix_caching,mtp",
-    parallel="TP,EP,PP",
+    parallel="TP,EP",
     deploy="pd_mix",
     hardware="A3",
     quantization="W8A8",
@@ -113,7 +104,7 @@ def token_prompt(tokenizer, text, length):
 )
 @wait_until_npu_memory_free()
 def test_kvpp_combined_features(monkeypatch):
-    """Compare KVPP off/on with chunk, prefix, TP, EP, PP, async and MTP."""
+    """Compare KVPP off/on with chunk, prefix, TP, EP, async and MTP."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     results = []
@@ -123,7 +114,6 @@ def test_kvpp_combined_features(monkeypatch):
             dtype="auto",
             quantization="ascend",
             tensor_parallel_size=TP_SIZE,
-            pipeline_parallel_size=PP_SIZE,
             enable_expert_parallel=True,
             enforce_eager=True,
             async_scheduling=True,

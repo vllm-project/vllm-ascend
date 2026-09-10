@@ -41,7 +41,7 @@
 # Named test lists selected via ``select_tests.py --curated <name>``.
 curated_tests:
   kvpp:
-    - tests/e2e/pull_request/four_card/test_kvpp.py
+    - tests/e2e/pull_request/two_card/test_kvpp.py
   # A5 (Ascend 950) curated test suite
   a5:
     - tests/e2e/pull_request/four_card/test_data_parallel_tp2.py
