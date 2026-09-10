@@ -226,7 +226,7 @@ jobs:
 
   trigger-image-sync:
     name: Trigger quay.io sync
-    if: ${{ !cancelled() && (needs.image_build.result == 'success' || needs.image_build_by_commit.result == 'success') }}
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && (needs.image_build.result == 'success' || needs.image_build_by_commit.result == 'success') }}
     needs: [image_build, image_build_by_commit]
     runs-on: linux-amd64-cpu-4
     steps:

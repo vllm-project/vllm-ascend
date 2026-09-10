@@ -14,6 +14,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 _BACKEND_ATTR = "_vllm_ascend_structured_output_backend"
 _ORIGINAL_GRAMMAR_INIT_ATTR = "_vllm_ascend_original_grammar_init"
 _ORIGINAL_VALIDATE_ATTR = "_vllm_ascend_original_validate_structured_outputs"
+_ORIGINAL_OUTLINES_ACCEPT_ATTR = "_vllm_ascend_original_outlines_accept_tokens"
 
 
 def _request_backend(request: Any) -> str | None:
@@ -130,5 +131,33 @@ def _patch_structured_output_manager() -> None:
     StructuredOutputManager.grammar_init = grammar_init
 
 
+def _patch_outlines_accept_tokens() -> None:
+    # Importing this module is safe without outlines installed: it loads
+    # outlines_core lazily.
+    from vllm.v1.structured_output.backend_outlines import OutlinesGrammar
+
+    original_accept = getattr(OutlinesGrammar, _ORIGINAL_OUTLINES_ACCEPT_ATTR, None)
+    if original_accept is not None:
+        return
+    original_accept = OutlinesGrammar.accept_tokens
+    setattr(OutlinesGrammar, _ORIGINAL_OUTLINES_ACCEPT_ATTR, original_accept)
+
+    def accept_tokens(self: Any, request_id: str, tokens: list[int]) -> bool:
+        # Mirror xgrammar's terminal short-circuit
+        # (backend_xgrammar.py: `if self._is_terminated: return True`).
+        # Once the outlines FSM finishes, the scheduler still emits one more
+        # mask that allows EOS/stop tokens so the request can terminate
+        # normally. Those tokens are not part of the FSM alphabet built from
+        # the JSON regex, so `guide.accepts_tokens()` rejects them and the
+        # scheduler terminates the request with FINISHED_ERROR even though
+        # the grammar text is already complete.
+        if self.guide.is_finished():
+            return True
+        return original_accept(self, request_id, tokens)
+
+    OutlinesGrammar.accept_tokens = accept_tokens
+
+
 _patch_sampling_params_validation()
 _patch_structured_output_manager()
+_patch_outlines_accept_tokens()
