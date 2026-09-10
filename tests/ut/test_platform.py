@@ -22,6 +22,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
+    vllm_version_is,
 )
 
 
@@ -73,7 +74,8 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
-        mock_ascend_config.mc2_comm_alg = ""
+        mock_ascend_config.get_mc2_comm_alg = MagicMock()
+        mock_ascend_config.get_mc2_comm_alg.return_value = ""
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
@@ -644,6 +646,27 @@ class TestNPUPlatform(TestBase):
         self.assertEqual(self.platform.get_device_name(device_id), device_name)
         mock_get_device_name.assert_called_once_with(0)
 
+    def test_get_device_total_memory_before_npu_init(self):
+        mock_npu = MagicMock()
+        mock_npu.is_initialized.return_value = False
+        with (
+            patch.object(torch, "npu", mock_npu, create=True),
+            pytest.raises(NotImplementedError),
+        ):
+            self.platform.get_device_total_memory(device_id=0)
+        mock_npu.is_initialized.assert_called_once_with()
+        mock_npu.mem_get_info.assert_not_called()
+
+    def test_get_device_total_memory_after_npu_init(self):
+        mock_npu = MagicMock()
+        mock_npu.is_initialized.return_value = True
+        mock_npu.mem_get_info.return_value = (8 << 30, 16 << 30)
+        with patch.object(torch, "npu", mock_npu, create=True):
+            total_memory = self.platform.get_device_total_memory(device_id=1)
+        self.assertEqual(total_memory, 16 << 30)
+        mock_npu.is_initialized.assert_called_once_with()
+        mock_npu.mem_get_info.assert_called_once_with(1)
+
     @patch("vllm_ascend.platform.torch.npu.get_device_properties")
     def test_get_device_uuid(self, mock_get_device_properties):
         device_id = 0
@@ -662,6 +685,7 @@ class TestNPUPlatform(TestBase):
     def test_set_additional_forward_context_v2_includes_required_moe_fields(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.use_v2_model_runner = True
+        vllm_config.parallel_config.prefill_context_parallel_size = 2
         dummy_comm_method = object()
 
         with (
@@ -683,6 +707,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertFalse(kwargs["in_profile_run"])
         self.assertEqual(kwargs["padded_num_tokens"], 8)
+        self.assertEqual(kwargs["max_tokens_across_pcp"], 5)
         self.assertIs(kwargs["moe_comm_method"], dummy_comm_method)
         self.assertEqual(kwargs["dynamic_mx_quant_scale_alg"], 0)
 
@@ -1707,30 +1732,43 @@ class TestNPUPlatform(TestBase):
         )
         for use_mla, use_pcp, use_dcp, expected_backend in cases:
             with self.subTest(use_mla=use_mla, use_pcp=use_pcp, use_dcp=use_dcp):
-                attn_selector_config = AttentionSelectorConfig(
-                    dtype=torch.float16,
-                    head_size=0,
-                    kv_cache_dtype=None,
-                    block_size=128,
-                    use_mla=use_mla,
-                    use_sparse=False,
-                    use_pcp=use_pcp,
-                    use_dcp=use_dcp,
-                )
+                # use_dcp is a main-only AttentionSelectorConfig field; keep the
+                # attribute available on 0.28.0 via SimpleNamespace.
+                if vllm_version_is("0.28.0"):
+                    attn_selector_config = SimpleNamespace(
+                        dtype=torch.float16,
+                        head_size=0,
+                        kv_cache_dtype=None,
+                        block_size=128,
+                        use_mla=use_mla,
+                        use_sparse=False,
+                        use_pcp=use_pcp,
+                        use_dcp=use_dcp,
+                    )
+                else:
+                    attn_selector_config = AttentionSelectorConfig(
+                        dtype=torch.float16,
+                        head_size=0,
+                        kv_cache_dtype=None,
+                        block_size=128,
+                        use_mla=use_mla,
+                        use_sparse=False,
+                        use_pcp=use_pcp,
+                        use_dcp=use_dcp,
+                    )
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
 
-    def test_get_attn_backend_cls_rejects_pcp_and_dcp(self):
-        attn_selector_config = AttentionSelectorConfig(
-            dtype=torch.float16,
-            head_size=0,
-            kv_cache_dtype=None,
-            block_size=128,
+    def test_get_attn_backend_cls_supports_legacy_config_without_use_dcp(self):
+        attn_selector_config = SimpleNamespace(
+            use_mla=True,
+            use_sparse=True,
             use_pcp=True,
-            use_dcp=True,
         )
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP simultaneously"):
-            self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+
+        result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
+
+        self.assertEqual(result, "vllm_ascend.attention.sfa_v1.AscendSFABackend")
 
     def test_get_attn_backend_cls_selects_sfa_pcp_backend(self):
         attn_selector_config = AttentionSelectorConfig(

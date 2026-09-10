@@ -24,6 +24,7 @@ from vllm.utils.math_utils import cdiv, next_power_of_2
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h_kda
 from .cumsum import chunk_local_cumsum
 from .fused_recurrent_kda import fused_recurrent_gated_delta_rule_fwd_kernel
+from .gate import DEFAULT_KDA_LOWER_BOUND, apply_kda_gate
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril_kda
 from .utils import FLA_CHUNK_SIZE, prepare_chunk_indices
@@ -122,6 +123,13 @@ def fused_recurrent_kda(
     use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.LongTensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    out: torch.Tensor | None = None,
+    sigmoid_beta: bool = False,
+    a_log: torch.Tensor | None = None,
+    g_bias: torch.Tensor | None = None,
+    compute_gate: bool = False,
+    lower_bound: float | None = -5.0,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if cu_seqlens is not None and q.shape[0] != 1:
@@ -131,6 +139,21 @@ def fused_recurrent_kda(
         )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+
+    # GLM-5.3-Flash (and newer FLA) compute the bounded gate and beta sigmoid
+    # inside the CUDA kernel. The NPU kernel does not, so expand them here.
+    if compute_gate:
+        if a_log is None:
+            raise ValueError("compute_gate requires a_log.")
+        g = apply_kda_gate(
+            g,
+            a_log,
+            g_bias,
+            safe_gate=True,
+            lower_bound=DEFAULT_KDA_LOWER_BOUND if lower_bound is None else lower_bound,
+        )
+    if sigmoid_beta:
+        beta = beta.float().sigmoid()
 
     o, final_state = fused_recurrent_kda_fwd(
         q=q.contiguous(),
@@ -143,9 +166,12 @@ def fused_recurrent_kda(
         inplace_final_state=inplace_final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
-        num_accepted_tokens=None,
+        num_accepted_tokens=num_accepted_tokens,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
+    if out is not None and o is not out:
+        out.copy_(o)
+        return out, final_state
     return o, final_state
 
 
@@ -1330,3 +1356,41 @@ def fused_kda_gate(
 
     y = y.view(*orig_shape, H, head_k_dim)
     return y
+
+
+def chunk_kda_with_fused_gate(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    raw_g: torch.Tensor,
+    beta: torch.Tensor,
+    A_log: torch.Tensor,
+    g_bias: torch.Tensor | None,
+    scale: float | None = None,
+    initial_state: torch.Tensor | None = None,
+    output_final_state: bool = False,
+    use_qk_l2norm_in_kernel: bool = False,
+    cu_seqlens: torch.Tensor | None = None,
+    safe_gate: bool = False,
+    lower_bound: float = -5.0,
+    **kwargs,
+):
+    """Prefill KDA from a raw gate projection, matching upstream FLA's API.
+
+    Upstream fuses gate + chunk-local cumsum in one Triton kernel. On NPU the
+    existing ``chunk_kda`` path already does the cumsum, so only the gate is
+    expanded here (safe sigmoid for GLM-5.3-Flash, softplus otherwise).
+    """
+    g = apply_kda_gate(raw_g, A_log, g_bias, safe_gate=safe_gate, lower_bound=lower_bound)
+    return chunk_kda(
+        q=q,
+        k=k,
+        v=v,
+        g=g,
+        beta=beta,
+        scale=scale,
+        initial_state=initial_state,
+        output_final_state=output_final_state,
+        use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        cu_seqlens=cu_seqlens,
+    )

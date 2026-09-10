@@ -29,8 +29,11 @@ import logging
 import os
 import sys
 import types
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
+
+from prometheus_client import Counter, Gauge, Histogram
 
 # ---------------------------------------------------------------------------
 # Mock torch / torch_npu
@@ -71,6 +74,7 @@ _vllm_mock_modules = [
     "vllm.distributed.kv_transfer.kv_connector.factory",
     "vllm.distributed.kv_transfer.kv_connector.v1",
     "vllm.distributed.kv_transfer.kv_connector.v1.base",
+    "vllm.distributed.kv_transfer.kv_connector.v1.metrics",
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
@@ -96,9 +100,12 @@ _vllm_mock_modules = [
     "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.kv_cache_interface",
     "vllm.v1.kv_cache_spec_registry",
+    "vllm.v1.metrics",
+    "vllm.v1.metrics.utils",
     "vllm.v1.outputs",
     "vllm.v1.request",
     "vllm.v1.serial_utils",
+    "vllm.v1.worker",
 ]
 if _MOCK_VLLM_DEPS:
     for _mod_name in _vllm_mock_modules:
@@ -119,6 +126,39 @@ _base_mod.KVConnectorRole = MagicMock()  # type: ignore[attr-defined]
 _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
 _base_mod.SupportsHMA = type("SupportsHMA", (), {})  # type: ignore[attr-defined]
+
+
+@dataclass
+class _MockKVConnectorStats:
+    data: dict = field(default_factory=dict)
+
+
+class _MockKVConnectorPromMetrics:
+    def __init__(
+        self,
+        vllm_config,
+        metric_types,
+        labelnames,
+        per_engine_labelvalues,
+    ):
+        self._gauge_cls = metric_types[Gauge]
+        self._counter_cls = metric_types[Counter]
+        self._histogram_cls = metric_types[Histogram]
+        self.per_engine_labelvalues = per_engine_labelvalues
+
+
+_metrics_mod: Any = (
+    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.metrics"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
+_metrics_mod.KVConnectorStats = _MockKVConnectorStats
+_metrics_mod.KVConnectorPromMetrics = _MockKVConnectorPromMetrics
+_metrics_mod.PromMetric = type("PromMetric", (), {})
+_metrics_mod.PromMetricT = type("PromMetricT", (), {})
+
+_metrics_utils_mod: Any = sys.modules["vllm.v1.metrics.utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+_metrics_utils_mod.create_metric_per_engine = lambda metric, labelvalues: {
+    engine_idx: metric.labels(*values) for engine_idx, values in labelvalues.items()
+}
 
 _events_mod: Any = sys.modules["vllm.distributed.kv_events"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
@@ -401,6 +441,15 @@ _distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # 
 )
 sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
 
+# mooncake_backend imports get_global_rank from the real
+# vllm_ascend.distributed.parallel_state, whose import chain pulls in vllm.
+# Only mock it when vllm is absent; otherwise keep the real module so the
+# mock does not leak into other UTs collected in the same process.
+if _MOCK_VLLM_DEPS:
+    _ascend_parallel_state = _make_pkg("vllm_ascend.distributed.parallel_state")
+    _ascend_parallel_state.get_global_rank = MagicMock(return_value=0)  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend.distributed.parallel_state"] = _ascend_parallel_state
+
 _kv_transfer_real_path = os.path.join(_vllm_ascend_real_path, "distributed", "kv_transfer")
 if _MOCK_VLLM_DEPS:
     _kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer", _kv_transfer_real_path)
@@ -450,24 +499,24 @@ _backend_pkg = _make_pkg(
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
 
-# Mirror the real backend/__init__.py entry points. The scheduler/worker resolve
-# the backend class dynamically via ``importlib.import_module(path)``; tests that
-# exercise those paths patch ``<module>.importlib`` locally (see
-# test_pool_scheduler.py / test_pool_worker.py) so the backend resolves to a
-# MagicMock. Do NOT register the backends in sys.modules or globally wrap
-# import_module here: test_backend.py imports the real backend classes and also
-# relies on ``mock.patch`` (which itself calls importlib.import_module) resolving
+# Execute the real backend/__init__.py inside the stub package so that
+# backend_map always stays in sync with the source of truth. The stub
+# package shadows the real package for these tests; without this, any
+# ``from ...backend import backend_map`` in the real modules would fail
+# with ImportError under the stub. (Submodules such as
+# backend.memcache_backend resolve through the stub package's __path__ and
+# need no special casing.)
+# The scheduler/worker resolve the backend class dynamically via
+# ``importlib.import_module(path)``; tests that exercise those paths patch
+# ``<module>.importlib`` locally (see test_pool_scheduler.py /
+# test_pool_worker.py) so the backend resolves to a MagicMock. Do NOT
+# register the backends in sys.modules or globally wrap import_module here:
+# test_backend.py imports the real backend classes and also relies on
+# ``mock.patch`` (which itself calls importlib.import_module) resolving
 # those real modules.
-_backend_module_paths = {
-    "mooncake": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
-    "memcache": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
-    "yuanrong": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
-}
-_backend_pkg.backend_map = {  # type: ignore[attr-defined]
-    "mooncake": {"name": "MooncakeBackend", "path": _backend_module_paths["mooncake"]},
-    "memcache": {"name": "MemcacheBackend", "path": _backend_module_paths["memcache"]},
-    "yuanrong": {"name": "YuanrongBackend", "path": _backend_module_paths["yuanrong"]},
-}
+_backend_init_path = os.path.join(_backend_pkg.__path__[0], "__init__.py")  # type: ignore[attr-defined]
+with open(_backend_init_path, encoding="utf-8") as _backend_init_file:
+    exec(compile(_backend_init_file.read(), _backend_init_path, "exec"), vars(_backend_pkg))  # type: ignore[arg-type]
 
 if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
     _ascend_utils = MagicMock()

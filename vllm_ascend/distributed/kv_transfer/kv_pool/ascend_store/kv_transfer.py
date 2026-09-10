@@ -537,6 +537,17 @@ class KVTransferThread(threading.Thread):
             )
             return [False] * len(keys)
 
+    def _get_missing_indices(self, keys: list[str], require_exists_check: bool = False) -> list[int]:
+        """Filter existing keys unless the backend can do so during put.
+
+        Callers that need the exact newly stored key set, such as KV event
+        publishers, can force connector-side filtering.
+        """
+        if not require_exists_check and not self.m_store.requires_exists_before_put:
+            return list(range(len(keys)))
+        exists_states = self.lookup(keys)
+        return [index for index, exists in enumerate(exists_states) if not exists]
+
     def update_kv_event(self, event: list[BlockStored]):
         with self.kv_event_lock:
             self.kv_events.extend(event)
@@ -779,8 +790,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             if not keys:
                 continue
-            exists_states = self.lookup(keys)
-            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
+            missing_indices = self._get_missing_indices(keys, require_exists_check=self.enable_kv_event)
             if not missing_indices:
                 continue
             starts = [starts[index] for index in missing_indices]
@@ -878,6 +888,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         invalid_block_ids: set[int] | None = None,
         invalid_block_ids_lock: threading.Lock | None = None,
         worker: Any = None,
+        record_operation: Callable[[str, float, int], None] | None = None,
     ):
         super().__init__(
             m_store,
@@ -892,6 +903,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         self._invalid_block_ids = invalid_block_ids if invalid_block_ids is not None else set()
         self._invalid_block_ids_lock = invalid_block_ids_lock or threading.Lock()
         self.worker = worker
+        self._record_operation_cb = record_operation
 
     def _handle_request(self, req_meta: ReqMeta):
         try:
@@ -967,7 +979,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 len(key_list_c),
                 key_list_c[:3],
             )
+            load_get_start = time.perf_counter() if self._record_operation_cb is not None else 0.0
             ret = self.m_store.get(key_list_c, addr_list_c, size_list_c)
+            if self._record_operation_cb is not None:
+                self._record_operation_cb(
+                    "load_get",
+                    time.perf_counter() - load_get_start,
+                    len(key_list_c),
+                )
             if ret is not None and any(r != 0 for r in ret):
                 missing_block_ids = record_failed_blocks(
                     block_id_list_c,
@@ -1145,8 +1164,7 @@ class KVCacheStoreKeyLayerSendingThread(KVTransferThread):
             self.dec_stored_request(req_id)
 
         if key_list:
-            exists_states = self.lookup(key_list)
-            missing_indices = [index for index, exists in enumerate(exists_states) if not exists]
+            missing_indices = self._get_missing_indices(key_list)
             keys_to_put = [key_list[index] for index in missing_indices]
             addrs_to_put = [addr_list[index] for index in missing_indices]
             sizes_to_put = [size_list[index] for index in missing_indices]
@@ -1319,7 +1337,7 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
                 del self.stored_requests[req_id]
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
-        """Pre-compute shared block data for all layers (GVA path)."""
+        """Pre-compute shared block data for all layers."""
         if self.group_builders is not None:
             builder = self.group_builders[task.group_id]
         else:
@@ -1329,6 +1347,9 @@ class KVCacheStoreLayerSendingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, transfer_tasks: list[LayerTransferTask]
     ):
+        # Layerwise threads only run when the worker-side
+        # use_layerwise_transfer gate is on; every store call below sits on
+        # the Backend ABC, so the thread stays backend-agnostic.
         if len(transfer_tasks) == 0:
             self.request_queue.task_done()
             return
@@ -1457,7 +1478,7 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
             )
 
     def build_shared_data(self, task: LayerTransferTask) -> SharedBlockData | None:
-        """Pre-compute shared block data for all layers (GVA path)."""
+        """Pre-compute shared block data for all layers."""
         if self.group_builders is not None:
             builder = self.group_builders[task.group_id]
         else:
@@ -1481,6 +1502,9 @@ class KVCacheStoreLayerRecvingThread(KVTransferThread):
     def _handle_request(  # type: ignore[override]
         self, data: LayerLoadTask
     ):
+        # Layerwise threads only run when the worker-side
+        # use_layerwise_transfer gate is on; every store call below sits on
+        # the Backend ABC, so the thread stays backend-agnostic.
         wait_for_save = data.wait_for_save_layer
         transfer_tasks = data.transfer_tasks
         layer_id = data.layer_id

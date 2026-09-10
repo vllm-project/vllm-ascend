@@ -137,12 +137,13 @@ class TestKVPoolScheduler(unittest.TestCase):
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_layerwise_mtp_hit_uses_safe_load_extent(self, mock_client_cls):
-        scheduler = KVPoolScheduler(self._make_config(block_size=16), use_layerwise=False)
-        scheduler.use_layerwise = True
-        scheduler.use_gva_layerwise = True
+        scheduler = KVPoolScheduler(
+            self._make_config(block_size=16, extra_config={"backend": "memcache"}),
+            use_layerwise=True,
+        )
         scheduler.use_eagle = True
         scheduler.cache_transfer_granularity = 16
-        scheduler._get_layerwise_gva_hit_tokens = MagicMock(return_value=64)
+        scheduler._get_layerwise_hit_tokens = MagicMock(return_value=64)
 
         request = MagicMock()
         request.prompt_token_ids = list(range(64))
@@ -334,6 +335,42 @@ class TestKVPoolSchedulerBuildMeta(unittest.TestCase):
         sched_output.scheduled_cached_reqs.req_ids = ["r1"]
         sched_output.scheduled_cached_reqs.new_block_ids = [new_block_ids]
         return sched_output
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_running_chunk_passes_computed_tokens_to_tracker(self, mock_client_cls):
+        scheduler = KVPoolScheduler(self._make_config(), use_layerwise=False)
+        request = MagicMock()
+        request.num_computed_tokens = 128
+        request.num_prompt_tokens = 256
+        request.prompt_token_ids = list(range(256))
+        request.all_token_ids = list(range(256))
+        request.block_hashes = [b"h"] * 16
+        scheduler._unfinished_requests["r1"] = (request, [[] for _ in range(4)])
+        request_tracker = RequestTracker(
+            req_id="r1",
+            token_len=128,
+            allocated_block_ids_by_group=[[] for _ in range(4)],
+        )
+        request_tracker.update = MagicMock()
+        scheduler._request_trackers["r1"] = request_tracker
+        new_block_ids = (
+            [21, 22, 23, 24, 25, 26, 27, 28],
+            [0, 0, 0, 0, 10, 11, 12, 29],
+            [0, 0, 0, 0, 14, 15, 16, 30],
+            [0, 0, 0, 0, 18, 19, 20, 31],
+        )
+        scheduler._build_req_meta = MagicMock(return_value=None)
+
+        scheduler._process_running_cached_request(
+            new_block_ids,
+            "r1",
+            0,
+            MagicMock(),
+            self._make_running_chunk_output(new_block_ids),
+            False,
+        )
+
+        request_tracker.update.assert_called_once_with(new_block_ids, 128)
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_build_connector_meta_new_req(self, mock_client_cls):
@@ -640,9 +677,16 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
             with self.subTest(direction=direction, finished=finished):
                 scheduler = self._make_scheduler()
                 attribute = "_delayed_free_req_ids" if direction == "sending" else "_loading_req_ids"
-                setattr(scheduler, attribute, initial)
+                if direction == "sending":
+                    for req_id in initial:
+                        scheduler._set_delayed_free(req_id, 1)
+                else:
+                    setattr(scheduler, attribute, initial)
                 getattr(scheduler, f"update_finished_{direction}")(finished)
                 self.assertEqual(getattr(scheduler, attribute), expected)
+                if direction == "sending":
+                    self.assertEqual(scheduler._delayed_free_blocks_by_req, dict.fromkeys(expected, 1))
+                    self.assertEqual(scheduler._num_delayed_free_blocks, len(expected))
 
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
@@ -700,6 +744,19 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.update_connector_output(output)
         scheduler._block_pool.free_blocks.assert_not_called()
 
+    def test_finished_send_updates_delayed_release_metrics(self):
+        scheduler = self._make_scheduler()
+        scheduler._set_delayed_free("r1", 3)
+
+        entered = scheduler.get_stats()
+        self.assertEqual(entered.data["delayed_release_requests"], 1)
+        self.assertEqual(entered.data["delayed_release_blocks"], 3)
+
+        scheduler.update_finished_sending({"r1"})
+        released = scheduler.get_stats()
+        self.assertEqual(released.data["delayed_release_requests"], 0)
+        self.assertEqual(released.data["delayed_release_blocks"], 0)
+
 
 class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
     """Test request_finished_all_groups."""
@@ -748,7 +805,7 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request.request_id = "r1"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
         self.assertTrue(delay)
-        self.assertIn("r1", scheduler._delayed_free_req_ids)
+        self.assertEqual(scheduler._delayed_free_blocks_by_req["r1"], 2)
 
     def test_no_delay_empty_blocks(self):
         scheduler = self._make_scheduler()
@@ -790,14 +847,17 @@ class TestKVPoolSchedulerInferMambaGroups(unittest.TestCase):
         self.assertEqual(scheduler._infer_mamba_groups(), [])
 
 
-class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
-    """Test _get_layerwise_gva_hit_tokens."""
+class TestKVPoolSchedulerGetLayerwiseHitTokens(unittest.TestCase):
+    """Test _get_layerwise_hit_tokens."""
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def _make_scheduler(self, mock_client_cls):
-        return KVPoolScheduler(make_config(), use_layerwise=False)
+        # memcache backend makes the constructor resolve the real protocol
+        # module; use_layerwise stays False so the test keeps exercising
+        # the query_start_block offset math it was built around.
+        return KVPoolScheduler(make_config(extra_config={"backend": "memcache"}), use_layerwise=False)
 
-    def test_layerwise_gva_hit_tokens(self):
+    def test_layerwise_hit_tokens(self):
         cases = [
             (2, [True, True], 32, 0, 32),
             (2, [True, False], 32, 0, 16),
@@ -817,7 +877,7 @@ class TestKVPoolSchedulerGetLayerwiseGvaHitTokens(unittest.TestCase):
                 scheduler.store_scheduler.batch_get_key_info.return_value = key_infos
                 request = MagicMock()
                 request.block_hashes = [b"\xaa"] * hash_count
-                result = scheduler._get_layerwise_gva_hit_tokens(request, token_count, computed_tokens)
+                result = scheduler._get_layerwise_hit_tokens(request, token_count, computed_tokens)
                 self.assertEqual(result, expected)
 
 

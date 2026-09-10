@@ -20,6 +20,7 @@ from vllm_ascend.utils import (
 )
 
 SFA_QSFA_TILE_SIZE = 128
+MLAPO_MAX_SUPPORTED_TOKENS = 1024
 
 
 def get_or_register_attention_buffer(
@@ -227,7 +228,6 @@ def enable_dcp():
     return parallel_config.decode_context_parallel_size > 1
 
 
-@lru_cache(maxsize=1)
 def enable_pcp():
     parallel_config = get_current_vllm_config().parallel_config
     return parallel_config.prefill_context_parallel_size > 1
@@ -477,7 +477,7 @@ def wait_for_kv_layer_from_connector(layer_name: str):
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.wait_for_layer_load(layer_name)
@@ -494,7 +494,7 @@ def maybe_save_kv_layer_to_connector(
 
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
+    if attn_metadata is None or not connector.has_connector_metadata():
         return
     # TODO: assert ascendMetadata
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)

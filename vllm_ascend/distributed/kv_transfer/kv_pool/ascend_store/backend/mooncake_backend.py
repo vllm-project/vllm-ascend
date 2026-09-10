@@ -16,7 +16,12 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    QOS_VALUE_MAX,
+    QOS_VALUE_MIN,
+    Backend,
+    parse_qos_from_extra_config,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
@@ -60,16 +65,117 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
     }
 
 
+def _validate_store_qos() -> None:
+    """Validate the store QoS configured via ASCEND_GLOBAL_RESOURCE_CONFIG.
+
+    KV pool transfers go through the Mooncake store, whose HIXL QoS comes from
+    the ``store.comm_resource_config.qos`` field. The top-level
+    ``comm_resource_config.qos`` belongs to other HIXL users and is not
+    validated here. Only integers in [QOS_VALUE_MIN, QOS_VALUE_MAX] are
+    supported; an invalid value fails fast with a clear error instead of an
+    obscure failure inside the transfer engine.
+    """
+    config_str = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")
+    if not config_str:
+        return
+    try:
+        config = json.loads(config_str)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"ASCEND_GLOBAL_RESOURCE_CONFIG is not valid JSON: {e}. "
+            'Expected e.g. \'{"store": {"comm_resource_config": {"qos": 3}}}\'.'
+        ) from e
+    if not isinstance(config, dict):
+        return
+    store_config = config.get("store")
+    if not isinstance(store_config, dict):
+        return
+    comm_resource_config = store_config.get("comm_resource_config")
+    if not isinstance(comm_resource_config, dict) or "qos" not in comm_resource_config:
+        return
+    qos = comm_resource_config["qos"]
+    if isinstance(qos, bool) or not isinstance(qos, int) or not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
+        raise ValueError(
+            f"Invalid store QoS {qos!r} in ASCEND_GLOBAL_RESOURCE_CONFIG "
+            f"(store.comm_resource_config.qos): QoS must be an integer in "
+            f"[{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
+
+
+def _inject_store_qos(extra_config: dict[str, Any] | None) -> None:
+    """Inject the QoS from kv_connector_extra_config into the
+    ``store.comm_resource_config.qos`` field of ASCEND_GLOBAL_RESOURCE_CONFIG.
+
+    The QoS is parsed from the connector's extra_config passed by the pool
+    worker; the call is a no-op when no qos is configured. Merges into the
+    existing config so other HIXL fields (protocol_desc, listen_port, ...)
+    are preserved. An explicit extra-config value overrides a qos already
+    present in the environment.
+    """
+    qos = parse_qos_from_extra_config(extra_config)
+    if qos is None:
+        return
+    config_str = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")
+    config: dict[str, Any] = {}
+    if config_str is not None and config_str.strip():
+        try:
+            config = json.loads(config_str)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"ASCEND_GLOBAL_RESOURCE_CONFIG is not valid JSON: {e}. "
+                'Expected e.g. \'{"store": {"comm_resource_config": {"qos": 3}}}\'.'
+            ) from e
+        if not isinstance(config, dict):
+            raise ValueError(
+                "ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object when qos_priority "
+                "is set in kv_connector_extra_config."
+            )
+    store_config = config.setdefault("store", {})
+    if not isinstance(store_config, dict):
+        raise ValueError("The 'store' field of ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object.")
+    comm_resource_config = store_config.setdefault("comm_resource_config", {})
+    if not isinstance(comm_resource_config, dict):
+        raise ValueError(
+            "The 'store.comm_resource_config' field of ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object."
+        )
+    existing_qos = comm_resource_config.get("qos")
+    if existing_qos is not None and existing_qos != qos:
+        logger.warning(
+            "Overriding store.comm_resource_config.qos=%s from ASCEND_GLOBAL_RESOURCE_CONFIG "
+            "with qos=%s from kv_connector_extra_config.",
+            existing_qos,
+            qos,
+        )
+    comm_resource_config["qos"] = qos
+    os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] = json.dumps(config)
+    logger.info(
+        "Injected store.comm_resource_config.qos=%d from kv_connector_extra_config into ASCEND_GLOBAL_RESOURCE_CONFIG.",
+        qos,
+    )
+
+
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
+    def __init__(
+        self,
+        parallel_config: ParallelConfig,
+        lazy_init: bool = False,
+        contribute_memory: bool = True,
+        extra_config: dict[str, Any] | None = None,
+    ):
         self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
+        _inject_store_qos(extra_config)
+        _validate_store_qos()
 
         self.store: Any | None = None
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
+        # ASCEND_GLOBAL_RESOURCE_CONFIG: dual-protocol / RoCE Store path where the store
+        # operates independently of the global transfer engine; setup goes through store
+        # and buffers are registered via store.register_buffer() instead of global_te.
+        self._use_store_independent_te = bool(os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")) and not self._use_fabric_mem
         self._lazy_init = lazy_init and self._use_fabric_mem
         self._contribute_memory = contribute_memory
         self._store_initialized = False
@@ -122,7 +228,8 @@ class MooncakeBackend(Backend):
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
-        if not self._use_fabric_mem:
+        # ASCEND_GLOBAL_RESOURCE_CONFIG takes the same store-independent-TE setup path as fabric-mem.
+        if not self._use_fabric_mem and not self._use_store_independent_te:
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = store.setup(
@@ -176,7 +283,18 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        if not self._use_fabric_mem:
+        if self._use_store_independent_te:
+            assert self.store is not None
+            for ptr, length in zip(ptrs, lengths):
+                ret = self.store.register_buffer(ptr, length)
+                if ret != 0:
+                    logger.error(
+                        "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
+                        ptr,
+                        length,
+                        ret,
+                    )
+        elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
             global_te.register_buffer(ptrs, lengths)

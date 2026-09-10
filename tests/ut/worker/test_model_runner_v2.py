@@ -1,12 +1,17 @@
+import ast
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import numpy as np
 import pytest
+import torch
 from vllm.config import CUDAGraphMode
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
+from vllm_ascend.worker.v2.input_batch import AscendInputBatch, AscendInputBuffers
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
+from vllm_ascend.worker.v2.pcp_manager import AscendPCPManager
 
 
 def _make_runner(need_timing: bool = True):
@@ -20,8 +25,7 @@ def _make_runner(need_timing: bool = True):
     return runner
 
 
-@pytest.mark.parametrize("is_vllm_0_27_1", [True, False], ids=["v0.27.1", "newer"])
-def test_execute_model_records_profiling_time(is_vllm_0_27_1):
+def test_execute_model_records_profiling_time():
     runner = _make_runner()
     scheduler_output = SimpleNamespace(disable_profiling_timing=False)
 
@@ -31,10 +35,6 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
             "execute_model",
             return_value=None,
         ) as mock_execute_model,
-        patch(
-            "vllm_ascend.worker.v2.model_runner.vllm_version_is",
-            return_value=is_vllm_0_27_1,
-        ),
         patch("vllm_ascend.core.profiling_chunk_predictor.torch.npu.synchronize") as mock_synchronize,
         patch(
             "vllm_ascend.core.profiling_chunk_predictor.time.perf_counter",
@@ -51,9 +51,8 @@ def test_execute_model_records_profiling_time(is_vllm_0_27_1):
         "dummy_run": False,
         "skip_attn_for_dummy_run": False,
         "is_profile": False,
+        "context_len": 0,
     }
-    if not is_vllm_0_27_1:
-        expected_kwargs["context_len"] = 0
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -97,3 +96,163 @@ def test_full_decode_only_keeps_graph_descriptor_request_count():
 
     assert num_reqs_padded == 4
     np.testing.assert_array_equal(actual[:5], np.array([0, 1, 2, 3, 4], dtype=np.int32))
+
+
+@pytest.mark.parametrize(
+    "decode_query_len, query_lens, num_tokens_padded, descriptor_num_reqs, expected_query_start_loc",
+    [
+        (1, [4], 8, 8, [0, 4, 8]),
+        (4, [4, 5], 16, 4, [0, 4, 9, 16]),
+        (4, [2, 6], 16, 4, [0, 2, 8, 16]),
+        (4, [2, 4], 8, 2, [0, 2, 6, 8]),
+    ],
+    ids=["non-mtp-prefill", "mtp-mixed", "mtp-uniform-average", "mtp-no-request-padding"],
+)
+def test_full_graph_non_uniform_queries_use_mixed_padding(
+    decode_query_len, query_lens, num_tokens_padded, descriptor_num_reqs, expected_query_start_loc
+):
+    runner = NPUModelRunner.__new__(NPUModelRunner)
+    runner.decode_query_len = decode_query_len
+    runner.compilation_config = SimpleNamespace(cudagraph_mode=CUDAGraphMode.FULL)
+    num_reqs = len(query_lens)
+    query_start_loc = np.full(descriptor_num_reqs + 2, sum(query_lens), dtype=np.int32)
+    query_start_loc[: num_reqs + 1] = np.cumsum([0, *query_lens])
+
+    padded_query_start_loc, num_reqs_padded = runner._pad_query_start_loc_for_fia(
+        num_tokens_padded=num_tokens_padded,
+        num_reqs_padded=descriptor_num_reqs,
+        num_reqs=num_reqs,
+        query_start_loc_np=query_start_loc,
+        cudagraph_runtime_mode=CUDAGraphMode.FULL,
+        batch_desc_num_reqs=descriptor_num_reqs,
+    )
+
+    assert num_reqs_padded == num_reqs + 1
+    np.testing.assert_array_equal(padded_query_start_loc[: num_reqs_padded + 1], expected_query_start_loc)
+    assert padded_query_start_loc[num_reqs_padded] == num_tokens_padded
+
+
+def test_sample_tokens_restores_replicated_draft_hidden_states():
+    runner = _make_runner(need_timing=False)
+    runner.is_last_pp_rank = True
+    runner.speculator = SimpleNamespace(replicated_pcp=True)
+    runner.use_spec_pp = False
+
+    aux_hidden_states = [
+        torch.arange(6, dtype=torch.float32).reshape(2, 3),
+        torch.arange(4, dtype=torch.float32).reshape(2, 2),
+    ]
+    state = Mock(aux_hidden_states=aux_hidden_states)
+    restored_state = object()
+    state._replace.return_value = restored_state
+    runner.execute_model_state = state
+
+    target_hidden_states = object()
+    restored_aux_hidden_states = torch.ones(4, 5)
+    runner.pcp_manager = SimpleNamespace(
+        restore_hidden_state_buffer=Mock(),
+        restore_hidden_states=Mock(
+            return_value=restored_aux_hidden_states,
+        ),
+    )
+    runner.model = SimpleNamespace(
+        get_mtp_target_hidden_states=lambda: target_hidden_states,
+    )
+    grammar_output = object()
+    expected_output = object()
+
+    with patch.object(
+        GPUModelRunner,
+        "sample_tokens",
+        return_value=expected_output,
+    ) as parent_sample_tokens:
+        actual = runner.sample_tokens(grammar_output)
+
+    assert actual is expected_output
+    parent_sample_tokens.assert_called_once_with(grammar_output)
+    runner.pcp_manager.restore_hidden_state_buffer.assert_called_once_with(target_hidden_states)
+    restored_input = runner.pcp_manager.restore_hidden_states.call_args.args[0]
+    torch.testing.assert_close(
+        restored_input,
+        torch.cat(aux_hidden_states, dim=-1),
+    )
+    state._replace.assert_called_once_with(aux_hidden_states=[restored_aux_hidden_states])
+    assert runner.execute_model_state is restored_state
+
+
+def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
+    source_path = Path(__file__).parents[3] / "vllm_ascend" / "worker" / "v2" / "model_runner.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    padding_assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "num_tokens_after_padding" for target in node.targets)
+    ]
+    partition_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "maybe_partition_pcp_batch"
+    ]
+
+    # prepare_inputs keeps the real global PCP batch when it is larger than the
+    # graph descriptor, and forwards the descriptor as an explicit rank-local
+    # padded extent on main (upstream vLLM #53515). v0.28.0 omits the kwarg.
+    assert len(padding_assignments) == 1
+    assert ast.unparse(padding_assignments[0].value) == "max(num_tokens, batch_desc.num_tokens)"
+
+    assert len(partition_calls) == 2
+    padded_call = next(
+        call for call in partition_calls if any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
+    )
+    unpadded_call = next(
+        call for call in partition_calls if not any(keyword.arg == "padded_num_tokens" for keyword in call.keywords)
+    )
+    assert unpadded_call is not None
+    padded_num_tokens = next(keyword.value for keyword in padded_call.keywords if keyword.arg == "padded_num_tokens")
+    assert isinstance(padded_num_tokens, ast.Attribute)
+    assert padded_num_tokens.attr == "num_tokens"
+    assert isinstance(padded_num_tokens.value, ast.Name)
+    assert padded_num_tokens.value.id == "batch_desc"
+
+
+@pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
+def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tokens):
+    runner = _make_runner()
+    runner.input_buffers = AscendInputBuffers(4, 8, torch.device("cpu"))
+    manager = AscendPCPManager(2, 1, torch.device("cpu"), max_num_reqs=4, max_num_tokens=8)
+    runner.pcp_manager = manager
+    manager._local_block_tables = (torch.full((8, 2), 99, dtype=torch.int32),)
+    manager._gathered_kv_slot_mappings = torch.full((1, 16), 99, dtype=torch.int64)
+    captured = {
+        name: getattr(manager.input_buffers, name)
+        for name in ("input_ids", "positions", "is_padding", "query_start_loc", "seq_lens")
+    }
+    for name, value in captured.items():
+        value.fill_(False if name == "is_padding" else 99)
+    manager.input_buffers.seq_lens_np.fill(99)
+    with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
+        dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
+
+    block_tables, slots = runner.prepare_dummy_attn(dummy)
+
+    for name, value in captured.items():
+        expected = getattr(dummy, name)
+        torch.testing.assert_close(value[: len(expected)], expected)
+    np.testing.assert_array_equal(manager.input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
+    assert block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
+    assert torch.count_nonzero(block_tables[0]) == 0
+    assert slots.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()
+    assert slots.shape == (1, 2 * num_tokens)
+    assert torch.all(slots == -1)
+
+
+def test_prepare_dummy_attn_without_pcp_uses_upstream():
+    runner = _make_runner()
+    runner.pcp_manager = None
+    dummy = object()
+    with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
+        assert runner.prepare_dummy_attn(dummy) == ((), None)
+    parent.assert_called_once_with(dummy)

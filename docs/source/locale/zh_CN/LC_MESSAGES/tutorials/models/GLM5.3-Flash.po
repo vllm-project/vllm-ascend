@@ -1,0 +1,284 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2026-09-09 01:27+0000\n"
+"PO-Revision-Date: 2026-09-09 01:27+0000\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
+
+msgid "# GLM-5.3-Flash"
+msgstr "# GLM-5.3-Flash"
+
+msgid "## 1 Introduction"
+msgstr "## 1 简介"
+
+msgid ""
+"[GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) is the first "
+"natively multimodal model in the GLM-5 series. Built on a hybrid "
+"architecture that combines sparse and linear attention for the first time in"
+" the GLM series, it adopts Manifold-Constrained Hyper-Connections (mHC) and "
+"is trained on a 30T-token multimodal pre-training corpus. With 320B total "
+"parameters and only 18B active parameters, it outperforms GLM-5.2 across "
+"benchmarks and real-world workloads at one-tenth the price, while "
+"approaching Claude Opus 4.8 on coding and agentic benchmarks. GLM-5.3-Flash "
+"also supports controlling the thinking budget through the `reasoning_effort`"
+" parameter (`low`, `high`, `max`)."
+msgstr ""
+"[GLM-5.3-Flash](https://huggingface.co/zai-org/GLM-5.3-Flash) 是 GLM-5 "
+"系列中首个原生多模态模型。它基于 GLM 系列中首次结合稀疏注意力和线性注意力的混合架构构建，采用流形约束超连接（mHC），并在 30T token "
+"的多模态预训练语料上进行训练。该模型总参数量为 320B，但仅有 18B 激活参数，在基准测试和实际工作负载上以十分之一的价格超越 "
+"GLM-5.2，同时在编码和智能体基准上接近 Claude Opus 4.8。GLM-5.3-Flash 还支持通过 "
+"`reasoning_effort` 参数（`low`、`high`、`max`）控制思考预算。"
+
+msgid ""
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, single-"
+"node and multi-node deployment, accuracy and performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度与性能评估。"
+
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参考[支持特性列表](../../user_guide/support_matrix/supported_models.md)获取该模型的支持特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参考[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置方法。"
+
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
+
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
+msgid ""
+"- `GLM-5.3-Flash-w8a8-mxfp8 (Ascend950DT mxfp8 Quantized)`: requires 1 Ascend950DT (96GB × 8) node.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8).\n"
+"- `GLM-5.3-Flash-w8a8`: requires 1 Atlas 800 A3 (128GB × 8) node.[Download model weight](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8).\n"
+"- `GLM-5.3-Flash-w8a8`: requires 2 Atlas 800 A2 (64GB × 16) nodes.[Download model weight](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)."
+msgstr ""
+"- `GLM-5.3-Flash-w8a8-mxfp8 (Ascend950DT mxfp8 量化版)`：需要 1 个 Ascend950DT（96GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8-mxfp8)。\n"
+"- `GLM-5.3-Flash-w8a8`：需要 1 个 Atlas 800 A3（128GB × 8）节点。[下载模型权重](https://modelers.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)。\n"
+"- `GLM-5.3-Flash-w8a8`：需要 2 个 Atlas 800 A2（64GB × 16）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/GLM-5.3-Flash-w8a8)。"
+
+msgid ""
+"- You can use [msmodelslim](https://gitcode.com/Ascend/msmodelslim) to "
+"quantize the model directly."
+msgstr ""
+"- 您可以使用 [msmodelslim](https://gitcode.com/Ascend/msmodelslim) 直接对模型进行量化。"
+
+msgid ""
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`"
+msgstr "建议将模型权重下载到多个节点的共享目录中，例如 `/root/.cache/`"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid "=== \"Ascend950DT series\""
+msgstr "=== \"Ascend950DT 系列\""
+
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动 docker 镜像。"
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3 系列\""
+
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动 docker 镜像。"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
+
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动 docker 镜像。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid "### 5.1 Single-Node Online Deployment"
+msgstr "### 5.1 单节点在线部署"
+
+msgid "=== \"Ascend950DT series\""
+msgstr "=== \"Ascend950DT 系列\""
+
+msgid ""
+"- Quantized model `GLM-5.3-Flash-w8a8-mxfp8` can be deployed on 1 "
+"Ascend950DT (96GB × 8) ."
+msgstr "- 量化模型 `GLM-5.3-Flash-w8a8-mxfp8` 可以部署在 1 个 Ascend950DT（96GB × 8）上。"
+
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+msgid "=== \"Atlas 800 A3 series\""
+msgstr "=== \"Atlas 800 A3 系列\""
+
+msgid ""
+"- Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 1 A3 (64GB × 16) ."
+msgstr "- 量化模型 `GLM-5.3-Flash-w8a8` 可以部署在 1 个 A3（64GB × 16）上。"
+
+msgid "Run the following script to execute online inference."
+msgstr "运行以下脚本执行在线推理。"
+
+msgid "#### Key Parameter Descriptions"
+msgstr "#### 关键参数说明"
+
+msgid ""
+"Only the key parameters specific to this model/scenario are described below."
+" `max-model-len` and `max-num-seqs` need to be set according to the actual "
+"usage scenario."
+msgstr "下面仅描述该模型/场景特有的关键参数。`max-model-len` 和 `max-num-seqs` 需要根据实际使用场景进行设置。"
+
+msgid "**Model-specific parameters:**"
+msgstr "**模型特有参数：**"
+
+msgid ""
+"- `--data-parallel-size 1`: Runs a single DP rank. `--tensor-parallel-size` is 8 on Ascend950DT and 16 on Atlas 800 A3. This layout is recommended to balance memory capacity and compute efficiency for the w8a8 weights.\n"
+"- `--enable-expert-parallel`: Must be enabled for the MoE architecture of GLM-5.3-Flash.\n"
+"- `--quantization ascend`: Enables Ascend quantization for the w8a8 quantized weights.\n"
+"- `--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'`: Enables graph capture for the decode phase only, improving decode performance by reducing kernel launch overhead.\n"
+"- `--limit-mm-per-prompt '{\"image\": 1, \"video\": 0}'`: For text-only deployment, --limit-mm-per-prompt can be omitted. For multimodal deployment, configure this parameter according to the actual request shape. For example, use --limit-mm-per-prompt '{\"image\":2,\"video\":0}' for two-image requests, and use --limit-mm-per-prompt '{\"image\":0,\"video\":1}' for one-video requests.\n"
+"- `--speculative-config '{\"num_speculative_tokens\": 3, \"method\": \"deepseek_mtp\", \"enforce_eager\": true}'`: Enables Multi-Token Prediction (MTP) speculative decoding with the DeepSeek-style MTP draft head of GLM-5.3-Flash. `num_speculative_tokens` (3-5) controls how many tokens are speculated per step; `enforce_eager: true` is required because GLM-5.3-Flash does not support graph-mode speculative decoding."
+msgstr ""
+"- `--data-parallel-size 1`：运行单个 DP rank。`--tensor-parallel-size` 在 Ascend950DT 上为 8，在 Atlas 800 A3 上为 16。建议采用此布局以平衡 w8a8 权重的内存容量和计算效率。\n"
+"- `--enable-expert-parallel`：对于 GLM-5.3-Flash 的 MoE 架构，必须启用此参数。\n"
+"- `--quantization ascend`：为 w8a8 量化权重启用 Ascend 量化。\n"
+"- `--compilation-config '{\"cudagraph_mode\": \"FULL_DECODE_ONLY\"}'`：仅对解码阶段启用图捕获，通过减少内核启动开销来提升解码性能。\n"
+"- `--limit-mm-per-prompt '{\"image\": 1, \"video\": 0}'`：对于纯文本部署，可以省略 --limit-mm-per-prompt。对于多模态部署，请根据实际请求形态配置此参数。例如，对于双图像请求，使用 --limit-mm-per-prompt '{\"image\":2,\"video\":0}'；对于单视频请求，使用 --limit-mm-per-prompt '{\"image\":0,\"video\":1}'。\n"
+"- `--speculative-config '{\"num_speculative_tokens\": 3, \"method\": \"deepseek_mtp\", \"enforce_eager\": true}'`：启用基于 GLM-5.3-Flash 的 DeepSeek 风格 MTP 草稿头的多令牌预测（MTP）投机解码。`num_speculative_tokens`（3-5）控制每步推测的令牌数量；必须设置 `enforce_eager: true`，因为 GLM-5.3-Flash 不支持图模式投机解码。"
+
+msgid "### 5.2 Multi-Node Deployment"
+msgstr "### 5.2 多节点部署"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
+
+msgid ""
+"- Quantized model `GLM-5.3-Flash-w8a8` can be deployed on 2 Atlas 800 A2 "
+"(64GB × 8) nodes with DP2 across the two nodes (one DP rank per node) and "
+"TP8 inside each node."
+msgstr ""
+"- 量化模型 `GLM-5.3-Flash-w8a8` 可以部署在 2 个 Atlas 800 A2（64GB × 8）节点上，跨两个节点使用 "
+"DP2（每个节点一个 DP rank），节点内使用 TP8。"
+
+msgid "Run the following scripts on two nodes respectively."
+msgstr "分别在两个节点上运行以下脚本。"
+
+msgid "**node 0**"
+msgstr "**节点 0**"
+
+msgid "**node 1**"
+msgstr "**节点 1**"
+
+msgid "#### Key Parameter Descriptions"
+msgstr "#### 关键参数说明"
+
+msgid "**Multi-node network and data parallel configuration:**"
+msgstr "**多节点网络和数据并行配置：**"
+
+msgid ""
+"- `HCCL_IF_IP`, `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, `HCCL_SOCKET_IFNAME`: Network interface configuration for multi-node communication. Set `nic_name` to the network interface name (obtained via `ifconfig`) and `local_ip` to the current node's IP address. These must be correctly configured on each node for successful multi-node communication.\n"
+"- `--data-parallel-size 2 --data-parallel-size-local 1`: Runs two DP ranks across the two nodes, one rank per node; each rank uses TP8 within its node.\n"
+"- `--data-parallel-start-rank`: Starting DP rank offset of the current node. Node 0 uses `0`, node 1 uses `1`.\n"
+"- `--data-parallel-address`: IP address of the data parallel master node (node 0). Must match the `local_ip` of the master node.\n"
+"- `--data-parallel-rpc-port 12321`: RPC port for data parallel master communication. Must be the same across all nodes.\n"
+"- `--headless`: Indicates a non-master node (used on node 1). Do not use on node 0."
+msgstr ""
+"- `HCCL_IF_IP`、`GLOO_SOCKET_IFNAME`、`TP_SOCKET_IFNAME`、`HCCL_SOCKET_IFNAME`：用于多节点通信的网络接口配置。将 `nic_name` 设置为网络接口名称（通过 `ifconfig` 获取），并将 `local_ip` 设置为当前节点的 IP 地址。每个节点都必须正确配置这些参数，才能实现成功的多节点通信。\n"
+"- `--data-parallel-size 2 --data-parallel-size-local 1`：在两个节点上运行两个 DP rank，每个节点一个 rank；每个 rank 在其节点内使用 TP8。\n"
+"- `--data-parallel-start-rank`：当前节点的起始 DP rank 偏移量。节点 0 使用 `0`，节点 1 使用 `1`。\n"
+"- `--data-parallel-address`：数据并行主节点（节点 0）的 IP 地址。必须与主节点的 `local_ip` 一致。\n"
+"- `--data-parallel-rpc-port 12321`：数据并行主节点通信的 RPC 端口。所有节点必须相同。\n"
+"- `--headless`：表示非主节点（在节点 1 上使用）。不要在节点 0 上使用。"
+
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
+
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
+msgstr "服务器启动后，您可以使用输入提示词查询模型："
+
+msgid ""
+"Expected Result:\n"
+"The expected result of this request is a JSON payload containing the model’s generated text in a text_completion format."
+msgstr ""
+"预期结果：\n"
+"此请求的预期结果是一个 JSON 负载，其中包含模型以 text_completion 格式生成的文本。"
+
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
+msgid "Here are two accuracy evaluation methods."
+msgstr "以下是两种精度评估方法。"
+
+msgid "### 7.1 Using AISBench"
+msgstr "### 7.1 使用 AISBench"
+
+msgid ""
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"1. 有关详细信息，请参阅 [使用 "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+
+msgid "2. After execution, you can get the result."
+msgstr "2. 执行后，您可以获得结果。"
+
+msgid "### 7.2 Using Language Model Evaluation Harness"
+msgstr "### 7.2 使用 Language Model Evaluation Harness"
+
+msgid "Not tested yet."
+msgstr "尚未测试。"
+
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
+
+msgid "### 8.1 Using AISBench"
+msgstr "### 8.1 使用 AISBench"
+
+msgid ""
+"Refer to [Using AISBench for performance "
+"evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation) for details."
+msgstr ""
+"有关详细信息，请参阅 [使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
+
+msgid "### 8.2 Using vLLM Benchmark"
+msgstr "### 8.2 使用 vLLM Benchmark"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr ""
+"有关更多详细信息，请参阅 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid "## 9 FAQ"
+msgstr "## 9 常见问题"
+
+msgid "- **Q: How to enable function calling for GLM-5.3-Flash?**"
+msgstr "- **问：如何为 GLM-5.3-Flash 启用函数调用？**"
+
+msgid "A: Please add following configurations in vLLM startup command"
+msgstr "答：请在 vLLM 启动命令中添加以下配置"

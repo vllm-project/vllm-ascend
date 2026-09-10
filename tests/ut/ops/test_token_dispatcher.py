@@ -23,6 +23,8 @@ import pytest
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.ops.fused_moe.dataclass.router_input import MoeRouterInput
 from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
     MoEAllGatherCombineMetadata,
@@ -32,7 +34,6 @@ from vllm_ascend.ops.fused_moe.dataclass.token_dispatcher import (
 )
 
 from vllm_ascend.ops.fused_moe.token_dispatcher import (  # isort: skip
-    AscendDeviceType,
     EXPERT_TOKEN_NUMS_TYPE_COUNT,
     EXPERT_TOKEN_NUMS_TYPE_CUMSUM,
     TokenDispatcherWithAll2AllV,
@@ -126,23 +127,28 @@ class TestTokenDispatcherWithMC2(TestBase):
         )
         self.forward_context_patch.start()
 
-        # Mock get_ascend_device_type()
-        self.ascend_soc_version_patch = patch(
-            "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_device_type", return_value=AscendDeviceType.A3
+        # Mock the current hardware profile.
+        self.hardware_profile_patch = patch(
+            "vllm_ascend.ops.fused_moe.token_dispatcher.get_current_hardware_profile",
+            return_value=get_hardware_profile(AscendDeviceType.A3),
         )
-        self.ascend_soc_version_patch.start()
+        self.hardware_profile_patch.start()
 
         # Mock get_ascend_config()
         mock_ascend_config = MagicMock()
-        mock_ascend_config.mc2_comm_alg = ""
+        mock_ascend_config.get_mc2_comm_alg = MagicMock()
+        mock_ascend_config.get_mc2_comm_alg.return_value = ""
         mock_ascend_config.eplb_config = MagicMock()
         mock_ascend_config.eplb_config.dynamic_eplb = False
+        mock_ascend_config.combine_quant_mode = 0
         self.ascend_config_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.get_ascend_config", return_value=mock_ascend_config
         )
-        self.ascend_config_patch.start()
+        self.mock_ascend_config = self.ascend_config_patch.start()
         self.ascend_config_utils_patch = patch("vllm_ascend.utils.get_ascend_config", return_value=mock_ascend_config)
         self.ascend_config_utils_patch.start()
+        # Keep a handle so individual tests can set combine_quant_mode.
+        self.mock_ascend_config = mock_ascend_config
         self.skip_allreduce_patch = patch(
             "vllm_ascend.ops.fused_moe.token_dispatcher.should_skip_allreduce_across_dp_group", return_value=False
         )
@@ -157,7 +163,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.mc2_group_patch.stop()
         self.rank_group_patch.stop()
         self.forward_context_patch.stop()
-        self.ascend_soc_version_patch.stop()
+        self.hardware_profile_patch.stop()
         self.ascend_config_patch.stop()
         self.ascend_config_utils_patch.stop()
         self.skip_allreduce_patch.stop()
@@ -200,6 +206,8 @@ class TestTokenDispatcherWithMC2(TestBase):
         self.assertNotIn("x_active_mask", kwargs)
 
     def test_get_dispatch_mc2_kwargs_without_skip_allreduce_keeps_mc2_mask(self):
+        self.mock_skip_allreduce.return_value = False
+        dispatcher = TokenDispatcherWithMC2(with_quant=False, top_k=8, num_experts=128)
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
@@ -213,7 +221,7 @@ class TestTokenDispatcherWithMC2(TestBase):
             mc2_mask=mc2_mask,
         )
 
-        kwargs = self.dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
+        kwargs = dispatcher.get_dispatch_mc2_kwargs(token_dispatch_input)
 
         self.assertEqual(kwargs["global_bs"], 0)
         self.assertIs(kwargs["x_active_mask"], mc2_mask)
@@ -337,13 +345,128 @@ class TestTokenDispatcherWithMC2(TestBase):
         kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
         self.assertIn("tp_send_counts", kwargs)
 
+    def test_get_combine_mc_kwargs_combine_quant_mode_forces_quant_mode(self):
+        # When additional_config.combine_quant_mode is non-zero (here 4), the
+        # combine comm quant_mode is forced to that value even for a non-MXFP
+        # (NONE) quant_type, which would otherwise default to 0.
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        assist_info_for_combine = torch.arange(10)
+
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            # default QuantType.NONE and comm_quant_mode=None
+        )
+
+        combine_metadata = MoEMC2CombineMetadata(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            expert_map=expert_map,
+            ep_recv_counts=ep_recv_counts,
+            tp_recv_counts=tp_recv_counts,
+            assist_info_for_combine=assist_info_for_combine,
+            expand_scales=None,
+            quant=token_dispatch_input.quant,
+        )
+
+        self.dispatcher.moe_expert_num = len(expert_map)
+        # The setUp mock_ascend_config is a MagicMock; set the real int value.
+        self.mock_ascend_config.combine_quant_mode = 4
+
+        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
+
+        self.assertEqual(kwargs["comm_quant_mode"], 4)
+
+    def test_get_combine_mc_kwargs_combine_quant_mode_zero_defaults_to_0(self):
+        # With combine_quant_mode disabled (0) and a non-MXFP quant_type, the
+        # combine comm quant_mode must keep its default 0 (no regression).
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        assist_info_for_combine = torch.arange(10)
+
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+        )
+
+        combine_metadata = MoEMC2CombineMetadata(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            expert_map=expert_map,
+            ep_recv_counts=ep_recv_counts,
+            tp_recv_counts=tp_recv_counts,
+            assist_info_for_combine=assist_info_for_combine,
+            expand_scales=None,
+            quant=token_dispatch_input.quant,
+        )
+
+        self.dispatcher.moe_expert_num = len(expert_map)
+        self.mock_ascend_config.combine_quant_mode = 0
+
+        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
+
+        self.assertEqual(kwargs["comm_quant_mode"], 0)
+
+    def test_get_combine_mc_kwargs_combine_quant_mode_wins_over_explicit_comm_quant_mode(self):
+        # combine_quant_mode is documented as a force switch: when non-zero it
+        # overrides even an explicit per-layer comm_quant_mode (the opposite of
+        # the older test name, which assumed comm_quant_mode took precedence).
+        hidden_states = torch.randn(10, 128)
+        topk_ids = torch.randint(0, 8, (10, 1))
+        topk_weights = torch.randn(10, 1)
+        expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        ep_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        tp_recv_counts = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
+        assist_info_for_combine = torch.arange(10)
+
+        token_dispatch_input = build_token_dispatch_input_fixture(
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            expert_map=expert_map,
+            comm_quant_mode=2,
+        )
+
+        combine_metadata = MoEMC2CombineMetadata(
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            expert_map=expert_map,
+            ep_recv_counts=ep_recv_counts,
+            tp_recv_counts=tp_recv_counts,
+            assist_info_for_combine=assist_info_for_combine,
+            expand_scales=None,
+            quant=token_dispatch_input.quant,
+        )
+
+        self.dispatcher.moe_expert_num = len(expert_map)
+        self.mock_ascend_config.combine_quant_mode = 4
+
+        kwargs = self.dispatcher.get_combine_mc_kwargs(hidden_states, combine_metadata)
+
+        # combine_quant_mode (4) is non-zero and takes precedence over the
+        # explicit comm_quant_mode (2) in the current implementation.
+        self.assertEqual(kwargs["comm_quant_mode"], 4)
+
     def test_get_dispatch_mc2_kwargs_with_mxfp8_quant(self):
         hidden_states = torch.randn(10, 128)
         topk_ids = torch.randint(0, 8, (10, 1))
         topk_weights = torch.randn(10, 1)
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
-        self.dispatcher.a5_need_extra_args = True
+        self.dispatcher.need_shared_expert_args = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,
@@ -365,7 +488,7 @@ class TestTokenDispatcherWithMC2(TestBase):
         topk_ids = torch.randint(0, 8, (10, 1))
         expert_map = torch.tensor([0, 1, 2, 3, 4, 5, 6, 7])
 
-        self.dispatcher.a5_need_extra_args = True
+        self.dispatcher.need_shared_expert_args = True
         token_dispatch_input = build_token_dispatch_input_fixture(
             hidden_states=hidden_states,
             topk_weights=topk_weights,

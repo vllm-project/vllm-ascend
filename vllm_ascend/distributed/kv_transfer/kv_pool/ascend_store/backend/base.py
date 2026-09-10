@@ -5,9 +5,35 @@ from typing import Any
 
 from vllm.config import ParallelConfig
 
+# QoS range supported by the pooled KV store backends. A larger value
+# means a higher transfer priority.
+QOS_VALUE_MIN = 0
+QOS_VALUE_MAX = 4
+
+
+def parse_qos_from_extra_config(extra_config: dict[str, Any] | None) -> int | None:
+    """Parse and validate the ``qos_priority`` field of kv_connector_extra_config.
+
+    Returns None when the field is absent; otherwise the QoS integer in
+    [QOS_VALUE_MIN, QOS_VALUE_MAX]. Only integers are supported; an invalid
+    value fails fast with a clear error instead of an obscure failure inside
+    the store backends.
+    """
+    if not extra_config or "qos_priority" not in extra_config:
+        return None
+    qos = extra_config["qos_priority"]
+    if isinstance(qos, bool) or not isinstance(qos, int) or not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
+        raise ValueError(
+            f"Invalid qos_priority {qos!r} in kv_connector_extra_config: "
+            f"QoS must be an integer in [{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
+    return qos
+
 
 class Backend(ABC):
     store: Any | None = None
+    # Whether the connector must filter existing keys before calling put().
+    requires_exists_before_put: bool = True
 
     @abstractmethod
     def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False):

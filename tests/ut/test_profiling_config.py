@@ -9,8 +9,8 @@ def test_service_profiling_symbols_yaml():
     entries = yaml.safe_load(profiling_config.SERVICE_PROFILING_SYMBOLS_YAML)
     symbols = {entry["symbol"] for entry in entries}
 
-    assert len(entries) == 76
-    assert len(symbols) == 75
+    assert len(entries) == 75
+    assert len(symbols) == 74
     assert {
         "vllm.entrypoints.openai.completion.serving:OpenAIServingCompletion.create_completion",
         "vllm.entrypoints.openai.chat_completion.serving:OpenAIServingChat.create_chat_completion",

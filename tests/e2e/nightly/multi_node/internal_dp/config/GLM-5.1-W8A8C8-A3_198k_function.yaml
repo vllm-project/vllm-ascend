@@ -55,7 +55,6 @@ deployment:
       --data-parallel-size 8
       --data-parallel-size-local 4
       --data-parallel-start-rank 4
-      --headless
       --data-parallel-address $MASTER_IP
       --enable-expert-parallel
       --data-parallel-rpc-port 12980
@@ -83,9 +82,20 @@ benchmarks:
     dataset_path: vllm-ascend/aime2025
     request_conf: vllm_api_general_chat
     dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
-    max_out_len: 129024
+    max_out_len: 77824
     batch_size: 32
     baseline: 93.33
     threshold: 10
     temperature: 1.0
     top_p: 0.95
+  perf:
+    case_type: performance
+    dataset_path: vllm-ascend/GSM8K_prefix90_in198656_bs10_glm5
+    request_conf: vllm_api_stream_chat
+    dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str_perf
+    num_prompts: 1
+    max_out_len: 1500
+    batch_size: 1
+    request_rate: 0
+    baseline: 0
+    threshold: 0.97
