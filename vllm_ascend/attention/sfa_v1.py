@@ -864,12 +864,24 @@ class AscendSFAImpl(MLAAttentionImpl):
             .split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         )
 
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        return ql_nope.transpose(0, 1), q_pe
+        if hasattr(torch_npu, "npu_transpose_batchmatmul"):
+            # Convert from (B, N, P) to (N, B, P) and multiply
+            # (N, B, P) x (N, P, L) -> (B, N, L)
+            ql_nope = torch_npu.npu_transpose_batchmatmul(
+                q_nope,
+                self.W_UK_T,
+                perm_x1=(1, 0, 2),
+                perm_x2=(0, 1, 2),
+                perm_y=(1, 0, 2),
+            )
+        else:
+            # Convert from (B, N, P) to (N, B, P)
+            q_nope = q_nope.transpose(0, 1)
+            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            # Convert from (N, B, L) to (B, N, L)
+            ql_nope = ql_nope.transpose(0, 1)
+        return ql_nope, q_pe
 
     def _v_up_proj(self, x):
         num_input_tokens, _, _ = x.shape
