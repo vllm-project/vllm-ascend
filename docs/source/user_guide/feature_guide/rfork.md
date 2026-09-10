@@ -54,6 +54,22 @@ RFork consists of four cooperating components:
 - **Destination instance**: A new vLLM Ascend instance that creates the matching tensor layout and pulls weights into its local NPU buffers.
 - **YuanRong TransferEngine**: Manages registered memory and performs batched reads between the seed and destination.
 
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 24, "rankSpacing": 32, "padding": 10}}}%%
+flowchart LR
+    P["Planner"]
+    S["Seed: rank r<br/>Registered NPU weights"]
+    D["Destination: rank r<br/>Local NPU buffers"]
+    S -.->|"Advertise / heartbeat"| P
+    P <-.->|"Seed / lease"| D
+    D <-->|"Seed HTTP metadata"| S
+    S ==>|"TransferEngine weights"| D
+```
+
+Dashed arrows show **Planner coordination**, thin arrows show **Seed HTTP metadata exchange**, and the thick arrow shows **TransferEngine weight data**. The destination requests the seed's transfer session, tensor addresses, and shapes over HTTP, then initiates batch reads from Seed NPU memory into its local NPU buffers. The Planner and Seed HTTP service do not carry tensor contents.
+
+The diagram shows one matching rank pair. Each destination worker independently acquires a seed for its TP/PP/EP shard identity and transfers that shard into its own NPU buffers. Different destination ranks may select corresponding seed workers from different instances. After loading and releasing its source lease, a destination can advertise itself as another seed.
+
 ### End-to-End Workflow
 
 The RFork loading flow is:
@@ -63,7 +79,29 @@ The RFork loading flow is:
 3. RFork initializes the local model and prepares/synchronizes any required processed tensor layout, then asks the planner for a seed matching that key.
 4. If a seed is returned, the new instance registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.
 5. If no seed is available, or any transfer step fails, RFork cleans up and falls back to the default loader.
-6. RFork completes post-load processing and switches the model to evaluation mode before it starts a local seed service and advertises it to the planner. A seed-service startup failure does not reload the valid model; RFork only cleans up its registered memory.
+6. After a successful transfer, RFork schedules asynchronous source-lease release, completes any remaining post-load processing, and switches the model to evaluation mode. It then starts a local seed service and advertises it to the planner when the source lease has been released. A seed-service startup failure retains the loaded model and cleans up Seed resources as far as safely possible.
+
+```mermaid
+%%{init: {"flowchart": {"nodeSpacing": 24, "rankSpacing": 26, "padding": 10, "curve": "linear"}}}%%
+flowchart TD
+    A["Build key; initialize model<br/>Prepare layout"]
+    B["Request seed lease"]
+    C["Register NPU memory<br/>Fetch / validate metadata<br/>Pull weights"]
+    D["Release lease asynchronously<br/>Post-load processing + eval"]
+    E["Cleanup + lease release<br/>Default loader"]
+    F["Publish Seed if eligible<br/>Keep model on startup failure"]
+    A --> B
+    B -->|"Seed found"| C
+    B -->|"No seed"| E
+    C -->|"Failure"| E
+    C -->|"Success"| D
+    D --> F
+    E --> F
+```
+
+Model initialization and required layout preparation happen **before lease acquisition**, keeping the lease focused on registration, metadata exchange, and transfer. Session setup, initialization, layout, or post-load errors also use the fallback cleanup path. If the default loader itself fails, model loading fails.
+
+Source-lease release runs asynchronously with bounded retries. A pending release delays Seed publication without discarding the loaded model; publication can resume after release is acknowledged. Exhausted release retries or incomplete cleanup suppress publication. A Seed service startup or advertisement failure also **keeps the loaded model**, with no checkpoint reload. When dynamic EPLB disables RFork, the loader bypasses this flow and uses the default loader directly.
 
 TransferEngine metadata is exchanged through the seed HTTP service, while tensor contents are transferred through TransferEngine. Each worker owns its own TransferEngine session and listening port, so corresponding parallel ranks transfer their local weight shards independently.
 
@@ -99,10 +137,6 @@ Each worker uses an `RForkSession` to own the planner lease, registered tensors,
 Registered NPU memory must remain valid while remote readers may still hold leases. RFork therefore keeps Python tensor owners and TransferEngine registration state alive until unregistration or finalization succeeds.
 
 During worker shutdown, RFork first stops advertising the seed, terminates the heartbeat, and closes the local seed service. It then finalizes TransferEngine. If remote reads are still active, finalization retries `ErrorCode.kNotReady` with a bounded delay. If the seed service cannot stop or finalization does not complete within the retry limit, RFork retains the registration state rather than releasing memory that may still be referenced.
-
-## Flowchart
-
-![rfork flowchart](./images/rfork_flowchart.jpg)
 
 ## Application Scenarios
 

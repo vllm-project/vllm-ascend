@@ -643,3 +643,31 @@ msgstr ""
 "- 请确保接收 worker 可以访问种子的绑定和上报地址。传输加密与访问控制由部署环境负责，因此在不可信网络中应使用 HTTPS 和网络隔离。\n"
 "- RFork 权重传输不支持动态 EPLB，因为种子服务启动后专家权重和放置位置可能发生变化。如果 `eplb_config.dynamic_eplb` 或 `eplb_config.expert_map_record_path` 启用动态 EPLB，RFork 会跳过传输并使用默认模型加载器。\n"
 "- 示例 [`rfork_planner.py`](https://github.com/vllm-project/vllm-ascend/blob/main/examples/rfork/rfork_planner.py) 只是简单的模拟实现。如需更强的调度、容量管理或生产级可用性行为，请基于 RFork 种子协议实现自己的规划器。"
+
+
+msgid "Dashed arrows show **Planner coordination**, thin arrows show **Seed HTTP metadata exchange**, and the thick arrow shows **TransferEngine weight data**. The destination requests the seed's transfer session, tensor addresses, and shapes over HTTP, then initiates batch reads from Seed NPU memory into its local NPU buffers. The Planner and Seed HTTP service do not carry tensor contents."
+msgstr "虚线箭头表示 **Planner 调度协调**，细实线箭头表示 **Seed HTTP 元数据交换**，粗实线箭头表示 **TransferEngine 权重数据传输**。目标端通过 HTTP 请求 seed 的传输会话、张量地址和形状，再发起批量读取，将 Seed NPU 内存中的权重读入本地 NPU 缓冲区。Planner 和 Seed HTTP 服务均不传输张量内容。"
+
+msgid "The diagram shows one matching rank pair. Each destination worker independently acquires a seed for its TP/PP/EP shard identity and transfers that shard into its own NPU buffers. Different destination ranks may select corresponding seed workers from different instances. After loading and releasing its source lease, a destination can advertise itself as another seed."
+msgstr "图中展示一对匹配的 rank。每个目标端 worker 根据自身 TP/PP/EP 分片身份独立申请 seed，并将对应分片传输到自己的 NPU 缓冲区。不同目标端 rank 可以从不同实例中选择对应的 seed worker。加载完成并释放源端租约后，目标端也可以将自身发布为新的 seed。"
+
+msgid "5. If no seed is available, or any transfer step fails, RFork cleans up and falls back to the default loader."
+msgstr "5. 如果没有可用 seed，或任一传输步骤失败，RFork 会清理状态并回退到默认加载器。"
+
+msgid "6. After a successful transfer, RFork schedules asynchronous source-lease release, completes any remaining post-load processing, and switches the model to evaluation mode. It then starts a local seed service and advertises it to the planner when the source lease has been released. A seed-service startup failure retains the loaded model and cleans up Seed resources as far as safely possible."
+msgstr "6. 传输成功后，RFork 会调度异步源端租约释放，完成剩余的加载后处理，并将模型切换为评估模式。源端租约释放后，再启动本地 seed 服务并向 Planner 上报。Seed 服务启动失败时会保留已加载模型，并在安全允许的范围内清理 Seed 资源。"
+
+msgid "Model initialization and required layout preparation happen **before lease acquisition**, keeping the lease focused on registration, metadata exchange, and transfer. Session setup, initialization, layout, or post-load errors also use the fallback cleanup path. If the default loader itself fails, model loading fails."
+msgstr "模型初始化和必要的布局准备发生在**申请租约之前**，使租约主要覆盖内存注册、元数据交换和权重传输。会话创建、初始化、布局处理或加载后处理发生错误时，也会进入回退清理路径。如果默认加载器本身失败，模型加载将失败。"
+
+msgid "Source-lease release runs asynchronously with bounded retries. A pending release delays Seed publication without discarding the loaded model; publication can resume after release is acknowledged. Exhausted release retries or incomplete cleanup suppress publication. A Seed service startup or advertisement failure also **keeps the loaded model**, with no checkpoint reload. When dynamic EPLB disables RFork, the loader bypasses this flow and uses the default loader directly."
+msgstr "源端租约通过异步方式释放，并设置有限的重试次数。释放尚未完成时会延迟发布 Seed，但不会丢弃已加载模型；确认释放后可以继续发布。重试次数耗尽或清理未完成时，不会发布 Seed。Seed 服务启动或上报失败时也会**保留已加载模型**，无需重新读取检查点。动态 EPLB 导致 RFork 被禁用时，加载器会跳过此流程，直接使用默认加载器。"
+
+msgid "Release logs include a hashed lease identifier, attempt count, elapsed acquisition-to-release time, HTTP status and a bounded response excerpt with control characters removed and the lease ID redacted. These allow diagnosis without printing the raw USER_ID credential. Per-request timeouts are connect/read inactivity limits, not a strict total wall-clock deadline."
+msgstr "释放日志包含哈希后的租约标识、尝试次数、从获取到释放的耗时、HTTP 状态，以及长度受限的响应摘要；摘要会去除控制字符并隐藏租约 ID。这些信息可用于诊断，同时避免输出原始 USER_ID 凭据。每次请求的超时限制针对连接或读取阶段的无活动时间，并非严格的总耗时上限。"
+
+msgid "For example, start the planner with a 60-second lease TTL:"
+msgstr "例如，使用 60 秒的租约 TTL 启动 Planner："
+
+msgid "Increasing the lease TTL does not change the seed heartbeat TTL (`--heartbeat-ttl-sec`, default 60 seconds). The planner process reads these settings at startup; changing a client-side environment variable does not reconfigure a running planner."
+msgstr "增大租约 TTL 不会改变 seed 心跳 TTL（`--heartbeat-ttl-sec`，默认 60 秒）。Planner 进程在启动时读取这些配置；修改客户端环境变量不会重新配置已运行的 Planner。"
