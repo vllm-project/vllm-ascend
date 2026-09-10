@@ -809,6 +809,8 @@ The validated PD separation topology uses eight nodes: four Prefill nodes and fo
 
 Refer to [PD Disaggregation with Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general service workflow.
 
+Please refer to the [KV Cache Pool (Ascend Store) Deployment Guide](https://docs.vllm.ai/projects/ascend/zh-cn/latest/user_guide/feature_guide/kv_pool.html) for the KV Cache Pool startup method and the Mooncake configuration file.
+
 On Atlas 800 A3 and Atlas 950DT, Prefill uses AICPU by default, so leave `HCCL_OP_EXPANSION_MODE` unset in the Prefill command. Decode uses AIV; explicitly set `HCCL_OP_EXPANSION_MODE=AIV` in the Decode command.
 
 This deployment supports DSpark speculative decoding. Configure the same `Inferact/Kimi-K3-DSpark` draft-model path and `num_speculative_tokens` on both Prefill and Decode nodes. The validated configuration uses draft TP16 on A3 or draft TP8 on Atlas 950DT, greedy drafting, and seven speculative tokens. The seventh argument of the engine template is the tensor-parallel size: `16` for A3 and `8` for Atlas 950DT.
