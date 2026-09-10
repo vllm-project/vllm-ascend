@@ -27,7 +27,7 @@ tokens can be asserted directly.
 """
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
@@ -247,8 +247,8 @@ class TestReducedVocabDrafter:
             observed.append(bias.shape[-1])
             return bias
 
-        model.markov_bias = spy_bias
-        _run(proposer)
+        with patch.object(model, "markov_bias", side_effect=spy_bias):
+            _run(proposer)
 
         assert observed == [_DRAFT_VOCAB] * _NUM_SPEC
         # and the base logits the bias was added to are draft-vocab wide too
