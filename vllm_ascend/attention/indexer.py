@@ -48,6 +48,18 @@ def _get_int_config_attr(config: Any, name: str, default: int) -> int:
     return value if type(value) is int else default
 
 
+def _get_dcp_metadata_max_lens_from_cpu(
+    common_attn_metadata: CommonAttentionMetadata,
+    num_reqs: int,
+) -> tuple[int, int] | None:
+    query_start_loc_cpu = getattr(common_attn_metadata, "query_start_loc_cpu", None)
+    seq_lens_cpu_upper_bound = getattr(common_attn_metadata, "seq_lens_cpu_upper_bound", None)
+    if query_start_loc_cpu is None or seq_lens_cpu_upper_bound is None:
+        return None
+    query_lens_cpu = query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+    return int(query_lens_cpu.max()), int(seq_lens_cpu_upper_bound[:num_reqs].max())
+
+
 @dataclass
 class AscendSFAIndexerMetadata:
     """Engine-side metadata owned by an SFA indexer cache layer.
@@ -918,9 +930,15 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         dcp_local_token_mask = None
         all_local_rows_active = False
         if self._dcp_sharded_indexer:
+            max_lens_cpu = _get_dcp_metadata_max_lens_from_cpu(common_attn_metadata, num_reqs)
+            if max_lens_cpu is None:
+                max_query_len = int(query_lens.max().item())
+                max_seq_len = int(common_attn_metadata.seq_lens[:num_reqs].max().item())
+            else:
+                max_query_len, max_seq_len = max_lens_cpu
             row_offsets = torch.arange(
                 1,
-                int(query_lens.max().item()) + 1,
+                max_query_len + 1,
                 dtype=context_lens.dtype,
                 device=context_lens.device,
             )
@@ -961,14 +979,10 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 (input_positions // self._dcp_interleave_size) % self._dcp_world_size
             ) == self._dcp_rank
             local_positions = input_positions[dcp_local_token_mask]
+            dcp_block_cols_divisor = self.kernel_block_size * self._dcp_world_size
             local_block_cols = max(
                 1,
-                int(
-                    torch.ceil(
-                        common_attn_metadata.seq_lens[:num_reqs].max().float()
-                        / float(self.kernel_block_size * self._dcp_world_size)
-                    ).item()
-                ),
+                (max_seq_len + dcp_block_cols_divisor - 1) // dcp_block_cols_divisor,
             )
             dcp_local_request_block_table = common_attn_metadata.block_table_tensor[:num_reqs, :local_block_cols]
             token_req_indices = torch.repeat_interleave(

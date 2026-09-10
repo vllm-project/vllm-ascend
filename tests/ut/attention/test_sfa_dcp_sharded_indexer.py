@@ -11,6 +11,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm_ascend.attention.context_parallel.sfa_cp import AscendSFADCPMetadataBuilder
 from vllm_ascend.attention.indexer import (
     AscendSFAIndexerMetadataBuilder,
+    _get_dcp_metadata_max_lens_from_cpu,
     dcp_local_to_global_indices,
     dcp_local_visible_counts,
     mask_dcp_inactive_local_candidates,
@@ -244,6 +245,16 @@ def test_multi_request_pseudo_rows_preserve_every_query_row():
     assert torch.equal(local_visible[32:], torch.tensor([65, 66, 67, 68], dtype=torch.int32))
 
 
+def test_cpu_metadata_max_lens_ignores_padded_requests():
+    common = SimpleNamespace(
+        query_start_loc_cpu=torch.tensor([0, 4, 12, 12, 99], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([20, 33, 99, 99], dtype=torch.int32),
+    )
+
+    assert _get_dcp_metadata_max_lens_from_cpu(common, num_reqs=2) == (8, 33)
+    assert _get_dcp_metadata_max_lens_from_cpu(SimpleNamespace(), num_reqs=2) is None
+
+
 def _make_replicated_indexer_builder(
     *,
     world_size: int,
@@ -424,6 +435,88 @@ def test_metadata_builder_emits_q32_pseudo_rows_and_rank_local_slots(
     assert torch.equal(metadata.dcp_local_block_table, common.block_table_tensor[:, :33].expand(32, -1))
     assert torch.equal(metadata.dcp_local_token_mask, torch.ones(32, dtype=torch.bool))
     assert torch.equal(metadata.dcp_local_slot_mapping, torch.arange(4096, 4128, dtype=torch.int32))
+
+
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+@patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=True)
+@patch("vllm_ascend.attention.indexer.get_dcp_group")
+def test_metadata_builder_uses_cpu_max_lens_without_tensor_item(
+    mock_get_dcp_group,
+    _mock_enable,
+    mock_cos_sin,
+    monkeypatch,
+):
+    mock_get_dcp_group.return_value.rank_in_group = 0
+    mock_cos_sin.return_value = (torch.zeros(40, 1, 1, 8), torch.zeros(40, 1, 1, 8))
+    spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    cfg = _sfa_config()
+    builder = AscendSFAIndexerMetadataBuilder(
+        spec, ["model.layers.0.self_attn.indexer.k_cache"], cfg, torch.device("cpu")
+    )
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=32,
+        num_input_tokens=32,
+        slot_mapping=torch.arange(32, dtype=torch.int32),
+        positions=torch.arange(65536, 65568, dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 32], dtype=torch.int32),
+        query_start_loc_cpu=torch.tensor([0, 32], dtype=torch.int32),
+        seq_lens=torch.tensor([65568], dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.tensor([65568], dtype=torch.int32),
+        is_prefilling=torch.tensor([True], dtype=torch.bool),
+        block_table_tensor=torch.arange(512, dtype=torch.int32).view(1, 512),
+        group_len=MagicMock(),
+        group_key_idx=MagicMock(),
+        group_key_cache_idx=MagicMock(),
+    )
+
+    def fail_item(_self):
+        raise AssertionError("CPU metadata path must not depend on Tensor.item()")
+
+    monkeypatch.setattr(torch.Tensor, "item", fail_item)
+    with patch("vllm_ascend.attention.indexer.get_ascend_config") as mock_cfg:
+        mock_cfg.return_value.c8_reshape_optim_enabled = False
+        metadata = builder.build(0, common)
+
+    assert metadata.dcp_local_block_table.shape == (32, 33)
+    assert torch.equal(metadata.li_cum_query_lens, torch.arange(1, 33, dtype=torch.int32))
+
+
+@patch("vllm_ascend.attention.indexer.get_cos_and_sin_mla")
+@patch("vllm_ascend.attention.indexer.enable_sfa_dcp_sharded_indexer", return_value=True)
+@patch("vllm_ascend.attention.indexer.get_dcp_group")
+def test_metadata_builder_falls_back_to_device_max_lens_without_cpu_metadata(
+    mock_get_dcp_group,
+    _mock_enable,
+    mock_cos_sin,
+):
+    mock_get_dcp_group.return_value.rank_in_group = 0
+    mock_cos_sin.return_value = (torch.zeros(40, 1, 1, 8), torch.zeros(40, 1, 1, 8))
+    spec = FullAttentionSpec(block_size=128, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
+    cfg = _sfa_config()
+    builder = AscendSFAIndexerMetadataBuilder(
+        spec, ["model.layers.0.self_attn.indexer.k_cache"], cfg, torch.device("cpu")
+    )
+    common = SimpleNamespace(
+        num_reqs=1,
+        num_actual_tokens=32,
+        num_input_tokens=32,
+        slot_mapping=torch.arange(32, dtype=torch.int32),
+        positions=torch.arange(65536, 65568, dtype=torch.int64),
+        query_start_loc=torch.tensor([0, 32], dtype=torch.int32),
+        seq_lens=torch.tensor([65568], dtype=torch.int32),
+        block_table_tensor=torch.arange(512, dtype=torch.int32).view(1, 512),
+        group_len=MagicMock(),
+        group_key_idx=MagicMock(),
+        group_key_cache_idx=MagicMock(),
+    )
+
+    with patch("vllm_ascend.attention.indexer.get_ascend_config") as mock_cfg:
+        mock_cfg.return_value.c8_reshape_optim_enabled = False
+        metadata = builder.build(0, common)
+
+    assert metadata.dcp_local_block_table.shape == (32, 33)
+    assert torch.equal(metadata.local_visible_by_query, torch.arange(4097, 4129, dtype=torch.int32))
 
 
 def test_sfa_cp_does_not_own_lightning_indexer_selection():
