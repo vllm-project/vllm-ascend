@@ -28,6 +28,7 @@ constexpr uint32_t TILE_ALIGNMENT = 256;
 // Amortize the two cross-core exchanges over at least four tiles per lane.
 constexpr uint32_t MIN_TILES_PER_CORE = 4;
 constexpr uint32_t TILE_STAT_BYTES = 32;
+constexpr uint64_t COOPERATIVE_TILING_KEY_OFFSET = 10;
 
 uint32_t AlignUp(uint32_t value, uint32_t alignment)
 {
@@ -218,6 +219,7 @@ static ge::graphStatus CategoricalSampleTilingFunc(gert::TilingContext* context)
     *workspaceSize = 0;
     uint32_t blockDim = std::min(coreNum, static_cast<uint32_t>(numRows));
     if (coresPerRow > 1) {
+        tilingKey += COOPERATIVE_TILING_KEY_OFFSET;
         blockDim = AlignUp(static_cast<uint32_t>(numRows) * coresPerRow, 2);
         *workspaceSize = static_cast<size_t>(numRows) * tileCount * TILE_STAT_BYTES * 2;
         // All lanes must start together, including when other streams are active.
