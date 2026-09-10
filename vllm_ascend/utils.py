@@ -188,6 +188,10 @@ def enable_sfa_dcp_sharded_indexer(vllm_config: VllmConfig | None = None) -> boo
     if dsa_cp_enabled:
         return False
 
+    # KV transfer still expects the replicated DCP indexer cache layout.
+    if vllm_config.kv_transfer_config is not None:
+        return False
+
     # The physical indexer cache switches from replicated to rank-local as
     # soon as this selector returns True.  Therefore unsupported runtime
     # modes must be rejected here, before cache allocation; falling back from
