@@ -221,7 +221,9 @@ static ge::graphStatus CategoricalSampleTilingFunc(gert::TilingContext* context)
     if (coresPerRow > 1) {
         tilingKey += COOPERATIVE_TILING_KEY_OFFSET;
         blockDim = AlignUp(static_cast<uint32_t>(numRows) * coresPerRow, 2);
-        *workspaceSize = static_cast<size_t>(numRows) * tileCount * TILE_STAT_BYTES * 2;
+        // GetUserWorkspace skips the platform's reserved system workspace.
+        *workspaceSize = platform.GetLibApiWorkSpaceSize() +
+            static_cast<size_t>(numRows) * tileCount * TILE_STAT_BYTES * 2;
         // All lanes must start together, including when other streams are active.
         context->SetScheduleMode(1);
     }

@@ -389,6 +389,40 @@ def test_categorical_sampling_vocab_partition_preserves_results(
         assert torch.all(cached[:, 1, vocab_size:] == -99)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("return_lse", [False, True])
+def test_categorical_sampling_single_row_workspace(dtype: torch.dtype, return_lse: bool) -> None:
+    """A small user workspace must still reserve the platform's system workspace."""
+    logits = torch.randn((1, 151936), device=DEVICE, dtype=dtype)
+    temperature = torch.tensor([0.7], device=DEVICE)
+    seed = torch.tensor([17], device=DEVICE, dtype=torch.int64)
+    expected = None
+    for num_rows in (256, 1):
+        sample = partial(
+            _run_categorical_sampling,
+            logits.expand(num_rows, -1),
+            torch.zeros(num_rows, device=DEVICE, dtype=torch.int32),
+            temperature,
+            seed,
+            torch.zeros(num_rows, device=DEVICE, dtype=torch.int64),
+            return_lse=return_lse,
+            apply_temperature=True,
+        )
+        outputs = sample()
+        actual = tuple(output[:1].cpu() for output in outputs)
+        if expected is None:
+            expected = actual
+        for result, reference in zip(actual, expected, strict=True):
+            torch.testing.assert_close(result, reference, rtol=0, atol=0)
+        graph = torch.npu.NPUGraph()
+        with torch.npu.graph(graph):
+            outputs = sample()
+        for _ in range(3):
+            graph.replay()
+        for result, reference in zip(outputs, expected, strict=True):
+            torch.testing.assert_close(result[:1].cpu(), reference, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("use_fp64", [False, True])
 def test_categorical_sampling_supports_zero_stride_logits(use_fp64: bool) -> None:
     """A broadcast row remains a view and is sampled as independent logical rows."""
