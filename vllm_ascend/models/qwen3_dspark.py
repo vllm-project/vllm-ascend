@@ -30,7 +30,7 @@ def _configure_dspark_draft_window(vllm_config: VllmConfig) -> None:
     ``SlidingWindowAdapter`` limits the block table consumed by attention, but
     the scheduler can recycle old KV blocks only when the attention layers
     expose a ``SlidingWindowSpec``. Qwen3 DSpark is built on the DFlash model,
-    whose ``dflash_config.use_swa`` switch selects that cache spec. Configure
+    whose ``dflash_config["use_swa"]`` switch selects that cache spec. Configure
     it before the parent constructor creates the attention layers so only the
     draft KV groups use ``SlidingWindowManager``; target-model groups are not
     modified.
@@ -42,13 +42,20 @@ def _configure_dspark_draft_window(vllm_config: VllmConfig) -> None:
     if isinstance(window_size, bool) or not isinstance(window_size, int) or window_size <= 0:
         raise ValueError("draft_window_size must be a positive integer")
 
-    draft_config = vllm_config.speculative_config.draft_model_config.hf_config
-    dflash_config = dict(getattr(draft_config, "dflash_config", None) or {})
+    speculative_config = getattr(vllm_config, "speculative_config", None)
+    draft_model_config = getattr(speculative_config, "draft_model_config", None)
+    draft_config = getattr(draft_model_config, "hf_config", None)
+    if draft_config is None:
+        return
+
+    dflash_config = getattr(draft_config, "dflash_config", None)
+    if dflash_config is None:
+        dflash_config = {}
+        draft_config.dflash_config = dflash_config
     dflash_config.update(
         use_swa=True,
         swa_window_size=window_size,
     )
-    draft_config.dflash_config = dflash_config
     logger.info(
         "Configuring Qwen3 DSpark draft KV cache as a %d-token physical sliding window.",
         window_size,
