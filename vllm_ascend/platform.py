@@ -112,6 +112,20 @@ class NPUPlatform(Platform):
     def manual_seed_all(cls, seed: int) -> None:
         pass
 
+    @classmethod
+    def visible_device_id_to_physical_device_id(cls, device_id: int) -> int:
+        """Resolve a bound runtime device ordinal to its host physical NPU ID.
+
+        Call after torch.npu.set_device. CANN resolves visibility reordering
+        and container remapping; device_id is not a vLLM local rank.
+        """
+        # Keep runtime initialization lazy and independent of compute-op flags.
+        bootstrap_custom_op_env()
+        import_module("vllm_ascend.vllm_ascend_C")
+        if not hasattr(torch.ops._C_ascend, "get_physical_device_id"):
+            raise RuntimeError("NPU physical device lookup requires get_physical_device_id; rebuild vllm-ascend.")
+        return torch.ops._C_ascend.get_physical_device_id(device_id)
+
     def is_sleep_mode_available(self) -> bool:
         return True
 
