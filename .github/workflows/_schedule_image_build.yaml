@@ -151,6 +151,9 @@ on:
       SWR_PASSWORD:
         description: 'SWR password for pushing images'
         required: false
+      SYNC_TOOLS_TOKEN:
+        description: 'GitHub token for dispatching quay.io sync workflow'
+        required: false
 
 defaults:
   run:
@@ -613,6 +616,19 @@ jobs:
             echo "skopeo not available, skip temp tag cleanup"
           fi
 
+      - name: Dispatch quay.io sync
+        if: ${{ inputs.should_push }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });
+
   merge-image-temp:
     name: merge-image-temp
     runs-on: linux-amd64-cpu-4
@@ -733,3 +749,16 @@ jobs:
           else
             echo "skopeo not available, skip temp tag cleanup"
           fi
+
+      - name: Dispatch quay.io sync
+        if: ${{ inputs.should_push }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.SYNC_TOOLS_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: 'ascend-gha-runners',
+              repo: 'sync-tools',
+              workflow_id: 'sync-vllm-ascend.yml',
+              ref: 'main',
+            });
