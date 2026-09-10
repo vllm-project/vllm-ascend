@@ -112,7 +112,10 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B
+VLLM_BATCH_INVARIANT=1 vllm serve Qwen/Qwen3-8B \
+    --no-enable-chunked-prefill \
+    --no-enable-prefix-caching \
+    --block-size 128
 ```
 
 Then use the OpenAI-compatible client:
@@ -163,6 +166,9 @@ sampling_params = SamplingParams(
 llm = LLM(
     model="Qwen/Qwen3-8B",
     tensor_parallel_size=1,
+    enable_prefix_caching=False,
+    enable_chunked_prefill=False,
+    block_size=128,
 )
 
 # Outputs will be deterministic regardless of batch size
@@ -174,6 +180,12 @@ for output in outputs:
     print(f"Prompt: {prompt!r}")
     print(f"Generated: {generated_text!r}\n")
 ```
+
+## Scheduling Limitations
+
+Chunked prefill, prefix caching, and request preemption (eviction and recomputation) are not supported with batch invariance.
+
+These scheduling features are not disabled automatically. You must explicitly disable chunked prefill and prefix caching and set the KV cache block size to 128 in your configuration — for example, `--no-enable-chunked-prefill`, `--no-enable-prefix-caching`, and `--block-size 128` when starting the server, or `enable_chunked_prefill=False`, `enable_prefix_caching=False`, and `block_size=128` for offline inference — as shown in the examples above.
 
 ## Tested Models
 

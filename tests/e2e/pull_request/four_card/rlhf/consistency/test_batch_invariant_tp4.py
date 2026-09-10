@@ -116,6 +116,8 @@ def _extract_step_logprobs(request_output):
     dtype="bfloat16",
     tensor_parallel_size=int(os.getenv("VLLM_TEST_TP_SIZE", "4")),
     enable_prefix_caching=False,
+    enable_chunked_prefill=False,
+    block_size=128,
     distributed_executor_backend="mp",
     compilation_config={
         "cudagraph_capture_sizes": [1, 32, 64],
