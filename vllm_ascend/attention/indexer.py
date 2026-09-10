@@ -978,6 +978,10 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             dcp_local_token_mask = (
                 (input_positions // self._dcp_interleave_size) % self._dcp_world_size
             ) == self._dcp_rank
+            actual_token_mask = torch.arange(num_input_tokens, device=input_positions.device) < max(
+                0, min(common_attn_metadata.num_actual_tokens, num_input_tokens)
+            )
+            dcp_local_token_mask = dcp_local_token_mask & actual_token_mask
             local_positions = input_positions[dcp_local_token_mask]
             dcp_block_cols_divisor = self.kernel_block_size * self._dcp_world_size
             local_block_cols = max(
