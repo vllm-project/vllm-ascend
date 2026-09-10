@@ -19,9 +19,10 @@
 Run `pytest tests/e2e/pull_request/four_card/context_parallel/test_accuracy_v2.py`.
 """
 
+import json
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 from unittest.mock import patch
 
@@ -339,3 +340,40 @@ def test_eagle3_gqa_spec_decode_with_pcp() -> None:
             "num_speculative_tokens": 3,
         },
     )
+
+
+@pytest.mark.e2e_model(DSV3_2_MODEL)
+@pytest.mark.parametrize("third_only", [False, True], ids=["batch", "third_only"])
+@patch.dict(
+    os.environ,
+    {
+        "VLLM_USE_V2_MODEL_RUNNER": "1",
+        "VLLM_BATCH_INVARIANT": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_dsv3_2_sfa_pcp_tensor_diagnostic(third_only: bool) -> None:
+    """Temporary observer; preserve the original sampling and golden assertions."""
+    case = DSV3_2_SFA_PCP_CASE
+    kwargs = dict(case.runner_kwargs)
+    kwargs["worker_cls"] = "tests.e2e.pull_request.four_card.context_parallel.sfa_trace_worker.SFATraceWorker"
+    case = replace(case, runner_kwargs=kwargs)
+    if third_only:
+        case = replace(
+            case, prompts=[case.prompts[2]], expected_outputs=tuple([goldens[2]] for goldens in DSV3_2_SFA_PCP_GOLDENS)
+        )
+    original = VllmRunner.generate_greedy
+
+    def generate(runner, prompts, max_tokens):
+        outputs = original(runner, prompts, max_tokens)
+        print(
+            "SFA_TRACE_OUTPUT " + json.dumps({"third_only": third_only, "outputs": outputs}, ensure_ascii=False),
+            flush=True,
+        )
+        return outputs
+
+    with patch.object(VllmRunner, "generate_greedy", generate):
+        _run_accuracy_case(case)
