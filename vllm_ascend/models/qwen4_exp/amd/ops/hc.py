@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm_ascend.ops.triton.hc_combine_norm import hc_combine_norm_fused
 
 
 def _grouped_gemma_rmsnorm(
@@ -64,13 +65,14 @@ def _hc_combine_norm(
     eps: float,
     hc_count: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    combined = _hc_combine(
-        residual, block_output, injection_logits, hc_count
-    )
-    normalized = _grouped_gemma_rmsnorm(
-        combined, norm_weight, eps, hc_count
-    )
-    return combined, normalized
+    return hc_combine_norm_fused(
+            residual,
+            block_output,
+            injection_logits,
+            norm_weight,
+            eps,
+            hc_count,
+        )
 
 
 def _same_shape_fake(x: torch.Tensor, *args) -> torch.Tensor:
