@@ -17,6 +17,27 @@
 
 from __future__ import annotations
 
+PROMPTS = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+# Keep default cudagraph_mode (FULL_AND_PIECEWISE when unspecified) but pin
+# capture sizes. The workload is 4 prompts; leaving sizes unset enumerates
+# graphs up to min(max_num_seqs * (1+K), 512) and dominates runtime.
+CUDAGRAPH_CAPTURE_SIZES = [4, 8]
+FULL_DECODE_ONLY = {
+    "cudagraph_mode": "FULL_DECODE_ONLY",
+    "cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES,
+}
+DEFAULT_PIECEWISE = {"cudagraph_capture_sizes": CUDAGRAPH_CAPTURE_SIZES}
+# Matches the 4-prompt batch; also shrinks KV/draft padding vs default 256.
+MAX_NUM_SEQS = 8
+# Default max_num_batched_tokens=8192 makes torch.compile use range (1, 8192).
+MAX_NUM_BATCHED_TOKENS = 256
+
 
 def calculate_acceptance_per_pos(
     metrics: list,

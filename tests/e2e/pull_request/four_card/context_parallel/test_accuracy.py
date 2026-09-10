@@ -125,7 +125,7 @@ FULL_FEATURE_MODEL_CASES = [
         runner_kwargs={
             "max_model_len": 1024,
             "max_num_seqs": MAX_NUM_SEQS,
-            "max_num_batched_tokens": 1024,
+            "max_num_batched_tokens": 256,
             "data_parallel_size": 2,
             "tensor_parallel_size": 2,
             "decode_context_parallel_size": 2,
@@ -156,9 +156,9 @@ FULL_FEATURE_MODEL_CASES = [
         expected_outputs=DEEPSEEK_V4_GOLDEN,
         max_tokens=5,
         runner_kwargs={
-            "max_model_len": 8192,
-            "max_num_seqs": 16,
-            "max_num_batched_tokens": 4096,
+            "max_model_len": 2048,
+            "max_num_seqs": MAX_NUM_SEQS,
+            "max_num_batched_tokens": 256,
             "dtype": "auto",
             "tensor_parallel_size": 4,
             "decode_context_parallel_size": 1,
@@ -167,9 +167,7 @@ FULL_FEATURE_MODEL_CASES = [
             "quantization": "ascend",
             "tokenizer_mode": "deepseek_v4",
             "block_size": 128,
-            "compilation_config": {
-                "cudagraph_mode": "FULL_DECODE_ONLY",
-            },
+            "compilation_config": FULL_DECODE_GRAPH,
             "additional_config": {
                 "enable_dsa_cp": True,
             },

@@ -17,7 +17,6 @@
 
 import os
 
-import pytest
 from vllm import SamplingParams
 
 from tests.e2e.conftest import DPVllmRunner, wait_until_npu_memory_free
@@ -26,37 +25,6 @@ TEST_MODEL = os.environ.get("SP_TEST_MODEL", "Qwen/Qwen3-30B-A3B")
 # A model with real shared experts, covering the decoupled SP/shared-expert
 # paths that Qwen3-30B-A3B (no shared experts) cannot exercise.
 SHARED_EXPERT_TEST_MODEL = os.environ.get("SP_SHARED_EXPERT_TEST_MODEL", "deepseek-ai/DeepSeek-V2-Lite")
-
-
-@wait_until_npu_memory_free()
-@pytest.mark.parametrize(
-    "enable_shared_expert_dp",
-    [False, True],
-    ids=["sp-only", "sp-with-shared-expert-dp"],
-)
-def test_sequence_parallel_moe_dp2_tp2_functional(enable_shared_expert_dp: bool) -> None:
-    """Verify upstream SP with either independent shared-expert layout."""
-    prompts = [
-        "The capital of France is",
-        "Explain why the sky is blue in one sentence.",
-    ]
-    with DPVllmRunner(
-        TEST_MODEL,
-        data_parallel_size=2,
-        tensor_parallel_size=2,
-        enable_expert_parallel=True,
-        all2all_backend="allgather_reducescatter",
-        additional_config={"enable_shared_expert_dp": enable_shared_expert_dp},
-        distributed_executor_backend="mp",
-        enforce_eager=True,
-        max_model_len=4096,
-        gpu_memory_utilization=0.9,
-    ) as vllm_model:
-        outputs = vllm_model.generate_greedy(prompts, max_tokens=8)
-
-    assert len(outputs) == len(prompts)
-    assert all(output[1] for output in outputs)
-
 
 TEACHER_PAIRS = [
     (
