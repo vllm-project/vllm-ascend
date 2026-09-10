@@ -1285,12 +1285,6 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
         "cudagraph_mode": "FULL_DECODE_ONLY",
         "cudagraph_capture_sizes": [4,8,16,24,32,40,48,56,64,96,128,160,192,224,256,320,384]
     }' \
-    --profiler-config \
-    '{
-        "profiler": "torch", 
-        "torch_profiler_dir": "/home/y00467018/prof", 
-        "torch_profiler_with_stack": false
-    }' \
     --additional-config \
     '{
         "multistream_overlap_shared_expert":true,
