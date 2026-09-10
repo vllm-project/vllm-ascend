@@ -29,6 +29,9 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
         )
         self._configure_layerwise_reuse_completion()
         self._mamba_copy_bufs = None
+        # Handle to the (V2) mamba hybrid model state while its per-layer
+        # align pre-copy is deferred behind a layerwise child connector.
+        self._mamba_state: Any = None
         self.requires_mamba_state_copy_after_layer_load = any(
             getattr(
                 connector,
@@ -82,21 +85,36 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
                 copy_bufs,
                 layer_name,
             )
+        # Mamba state copy runs after every child connector finished this
+        # layer's load so the copy never reads half-loaded state. The model
+        # state no-ops for non-mamba layers and for already-copied layers.
+        if (mamba_state := getattr(self, "_mamba_state", None)) is not None:
+            mamba_state.do_mamba_copy_for_layer(layer_name)
 
-    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+    def prepare_mamba_state_copy(self, mamba_state_or_copy_bufs) -> bool:
+        """Take over the mamba align pre-copy for this step.
+
+        The V1 model runner passes its mamba copy buffers; the V2 model runner
+        passes its mamba hybrid model state. Returns True when any child
+        connector executes per-layer copies from its ``wait_for_layer_load``;
+        see ``AscendStoreConnector.prepare_mamba_state_copy``.
+        """
         if not self.requires_mamba_state_copy_after_layer_load:
             return False
-        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
-        self._mamba_copy_bufs = copy_bufs
+        if hasattr(mamba_state_or_copy_bufs, "do_mamba_copy_for_layer"):
+            self._mamba_state = mamba_state_or_copy_bufs
+        else:
+            mamba_utils.prepare_mamba_copy_by_layer(mamba_state_or_copy_bufs)
+            self._mamba_copy_bufs = mamba_state_or_copy_bufs
         return True
 
     def finish_mamba_state_copy(self) -> None:
-        if self._mamba_copy_bufs is None:
-            return
-        try:
-            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
-        finally:
-            self._mamba_copy_bufs = None
+        if self._mamba_copy_bufs is not None:
+            try:
+                mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+            finally:
+                self._mamba_copy_bufs = None
+        self._mamba_state = None
 
     def save_kv_layer(
         self,

@@ -27,6 +27,13 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend.attention.utils import (
+    maybe_save_kv_layer_to_connector,
+    wait_for_kv_layer_from_connector,
+)
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import (
+    record_attention_compute_start,
+)
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.quantization.methods.w4a8.w4a8_mxfp4 import (
@@ -541,6 +548,14 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         attn_metadata = attn_metadata_raw[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
 
+        # Layerwise KV pool hooks must stay inside this eager-break region:
+        # the forward() caller may be traced, and these side effects (thread
+        # locks, connector waits) would break the graph. Waiting here still
+        # orders the deferred mamba state copy and the layer load before the
+        # conv/recurrent kernels touch mamba state.
+        wait_for_kv_layer_from_connector(self.prefix)
+        record_attention_compute_start()
+
         num_actual_tokens = attn_metadata.num_actual_tokens
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         g1 = g1[:, :num_actual_tokens]
@@ -716,6 +731,7 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
             # Idle DP dummy runs carry graph-shaped metadata with no live work.
             # Do not feed a previous replay's output through the norm gate.
             core_attn_out.zero_()
+            maybe_save_kv_layer_to_connector("", [])
             return
 
         num_live_tokens = None
@@ -750,3 +766,4 @@ class AscendKimiK3DeltaAttention(KimiK3DeltaAttention):
         # static padding rows whose captured gate values are not live.
         core_attn_out[:, :num_actual_tokens].copy_(_zero_padded_output(normalized, num_live_tokens))
         core_attn_out[:, num_actual_tokens:].zero_()
+        maybe_save_kv_layer_to_connector("", [])
