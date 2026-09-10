@@ -206,6 +206,8 @@ def _postprocess_mamba_align_gpu_cpu_fallback(
     kv_cache_config: KVCacheConfig,
     forward_context: dict[str, Any],
     mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...] | dict[str, tuple[MambaStateCopyFunc, ...]],
+    # TODO(v0.28.0): In a future main2main upgrade, remove the dual-version
+    # compatibility interface when v0.28.0 support ends and retain only the dict type.
 ) -> None:
     """CPU fallback for 310P where the Triton fused postprocess is unavailable."""
     ctx = bufs.postprocess_align
