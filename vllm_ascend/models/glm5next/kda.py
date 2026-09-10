@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """GLM-5.3-Flash KDA layer with separate convolutions and a bounded safe gate."""
 
+from functools import wraps
+
 import torch
 from torch import nn
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -17,7 +19,6 @@ from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
-    is_conv_state_dim_first,
 )
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
@@ -35,6 +36,7 @@ from vllm_ascend.models.glm5next.config import Glm5NextConfig
 from vllm_ascend.models.glm5next.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
+    has_fused_conv1d,
 )
 from vllm_ascend.models.glm5next.ops.state_ops import (
     gather_initial_states,
@@ -232,9 +234,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         self.q_conv1d.weight.data = self.q_conv1d.weight.data.unsqueeze(1)
         self.k_conv1d.weight.data = self.k_conv1d.weight.data.unsqueeze(1)
         self.v_conv1d.weight.data = self.v_conv1d.weight.data.unsqueeze(1)
-        # Lazily-built merged q|k|v conv weight (built on first forward, after
-        # weights are loaded). See _forward.
-        self._merged_conv_weight: torch.Tensor | None = None
+        # Merged q|k|v conv weight in the layout npu_causal_conv1d_custom
+        # consumes, materialized by _pack_conv_weight once the checkpoint has
+        # landed. See _forward.
+        self._packed_conv_weight: torch.Tensor | None = None
+        self._install_conv_weight_packing()
 
         self.A_log = nn.Parameter(torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32))
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(2)})
@@ -272,9 +276,54 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # unbounded softplus gate.
         self.kda_safe_gate = True
         self.kda_lower_bound = config.linear_lower_bound
-        # Process-global conv-state layout, resolved once here instead of on
-        # every _forward call (it reads an env-derived flag each time).
-        self._conv_state_dim_first = is_conv_state_dim_first()
+
+    @property
+    def _conv_linears(self) -> tuple[ColumnParallelLinear, ...]:
+        return (self.q_conv1d, self.k_conv1d, self.v_conv1d)
+
+    def _install_conv_weight_packing(self) -> None:
+        """Pack the conv weight as soon as the last conv shard is loaded.
+
+        Packing lazily on the first forward would allocate the tensor while an
+        ACL graph is being captured, leaving the cached weight inside that
+        graph's private memory pool.
+        """
+        for conv in self._conv_linears:
+            original_process_weights = conv.quant_method.process_weights_after_loading
+
+            @wraps(original_process_weights)
+            def process_weights_and_pack(*args, _original=original_process_weights, **kwargs):
+                result = _original(*args, **kwargs)
+                self._pack_conv_weight()
+                return result
+
+            conv.quant_method.process_weights_after_loading = process_weights_and_pack
+
+    @torch.no_grad()
+    def _pack_conv_weight(self) -> None:
+        """Merge the q|k|v conv weights into one ``[width, 3C]`` kernel tensor.
+
+        The 1D conv is independent per channel, so concatenating q/k/v along
+        the channel dim and running a single convolution is bit-identical to
+        three calls, and conv_state already holds the merged q|k|v state. vLLM
+        keeps these weights as checkpoint-compatible FP32 ``[C, 1, width]``.
+
+        ``npu_causal_conv1d_custom`` wants them in the activation dtype, but
+        where it is unavailable the convolution runs in the weight dtype, so
+        staying in FP32 there keeps the checkpoint's precision for free.
+        """
+        if any(conv.weight.is_meta for conv in self._conv_linears):
+            return
+        kernel_dtype = self.model_config.dtype if has_fused_conv1d() else torch.float32
+        self._packed_conv_weight = (
+            torch.cat(
+                [conv.weight.view(conv.weight.size(0), conv.weight.size(2)) for conv in self._conv_linears],
+                dim=0,
+            )
+            .transpose(0, 1)
+            .to(dtype=kernel_dtype)
+            .contiguous()
+        )
 
     def forward(
         self,
@@ -367,28 +416,11 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         beta = beta[:, :num_actual_tokens]
 
         (conv_state, recurrent_state) = constant_caches
-        # conv_state must be (..., dim, width-1) for the conv kernels.
-        # DS layout stores it that way directly; SD layout needs a transpose.
-        # Layout is process-global and resolved once at init (see __init__).
-        if not self._conv_state_dim_first:
-            conv_state = conv_state.transpose(-1, -2)
 
-        # One merged short-conv over q|k|v instead of three separate calls. The
-        # 1D conv is independent per channel, so concatenating q/k/v along the
-        # channel dim and running a single causal_conv1d is bit-identical to
-        # three calls. The merged weight is q|k|v conv weights concatenated;
-        # built once and cached (params are fixed after load). conv_state is
-        # already stored as the merged q|k|v state, so it is used directly.
-        if self._merged_conv_weight is None:
-
-            def _w(m):
-                return m.weight.view(m.weight.size(0), m.weight.size(2))
-
-            self._merged_conv_weight = torch.cat(
-                [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
-                dim=0,
-            ).contiguous()
-        conv_weights = self._merged_conv_weight
+        # One merged short-conv over q|k|v instead of three separate calls; see
+        # _pack_conv_weight for the layout and why the merge is exact.
+        conv_weights = self._packed_conv_weight
+        assert conv_weights is not None, "conv weights were not packed after loading"
         conv_bias = self.q_conv1d.bias
 
         # Split projections / gating into spec (draft-verify) and non-spec token
@@ -426,18 +458,19 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if use_spec:
             assert spec_state_indices_tensor is not None
             assert num_accepted_tokens is not None
-            conv_idx = spec_state_indices_tensor[:, 0][:num_spec_decodes]
-            conv_mql = spec_state_indices_tensor.size(-1)
+            assert spec_query_start_loc is not None
+            # Under full-graph capture the metadata builder pads these to the
+            # graph batch size, so the row count comes from query_start_loc
+            # rather than from num_spec_decodes.
+            spec_rows = spec_query_start_loc.size(0) - 1
             qkv_spec = causal_conv1d_update(
                 qkv_spec,
                 conv_state,
                 conv_weights,
                 conv_bias,
-                activation="silu",
-                conv_state_indices=conv_idx,
-                num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
-                max_query_len=conv_mql,
+                cache_indices=spec_state_indices_tensor[:spec_rows],
+                num_accepted_tokens=num_accepted_tokens[:spec_rows],
             )
             q_spec, k_spec, v_spec = qkv_spec.split(self.local_projection_size, dim=-1)
 
@@ -445,28 +478,30 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
+            assert non_spec_query_start_loc is not None
+            assert non_spec_state_indices_tensor is not None
+            prefill_rows = non_spec_query_start_loc.size(0) - 1
             qkv_ns = causal_conv1d_fn(
-                qkv_ns.transpose(0, 1),
+                qkv_ns,
+                conv_state,
                 conv_weights,
                 conv_bias,
-                activation="silu",
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
                 query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
+                cache_indices=non_spec_state_indices_tensor[:prefill_rows],
+                initial_state_mode=has_initial_state,
+            )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
+            assert non_spec_query_start_loc is not None
             assert non_spec_state_indices_tensor is not None
-            decode_conv_indices = non_spec_state_indices_tensor[: attn_metadata_narrowed.num_decodes]
+            decode_rows = non_spec_query_start_loc.size(0) - 1
             qkv_ns = causal_conv1d_update(
                 qkv_ns,
                 conv_state,
                 conv_weights,
                 conv_bias,
-                activation="silu",
-                conv_state_indices=decode_conv_indices,
+                query_start_loc=non_spec_query_start_loc,
+                cache_indices=non_spec_state_indices_tensor[:decode_rows],
             )
             q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
 

@@ -229,19 +229,40 @@ def causal_conv1d_update(
             state = conv_state[i]
         return state
 
-    def _run_one(seq_tokens: torch.Tensor, state: torch.Tensor) -> torch.Tensor:
+    def _read_at(i: int) -> int:
+        """Which column of the state row this step's history starts at.
+
+        A draft-verify step is handed the count the step before it accepted, and
+        that is what the state has to be rewound to: the row carries one window
+        per count that step could have produced, and the one for a tokens sits
+        a - 1 columns in. Mirrors conv_state_token_offset in the upstream
+        kernel. It says nothing about how many tokens this step may convolve --
+        which drafts the sampler keeps is only known once the model has run.
+        """
+        if num_accepted_tokens is None:
+            return 0
+        return max(int(num_accepted_tokens[i].item()) - 1, 0)
+
+    def _run_one(seq_tokens: torch.Tensor, state: torch.Tensor, read_at: int) -> torch.Tensor:
         # seq_tokens: [L, dim] -> [1, dim, L]
         x_ref = seq_tokens.transpose(0, 1).unsqueeze(0)
-        init_state = state[..., :state_len].unsqueeze(0)
-        out_ref, final_state = causal_conv1d_ref(
+        read_at = min(read_at, state.shape[-1] - state_len)
+        init_state = state[..., read_at : read_at + state_len].unsqueeze(0)
+        out_ref, _ = causal_conv1d_ref(
             x_ref,
             weight,
             bias,
             initial_states=init_state,
-            return_final_states=True,
+            return_final_states=False,
             activation=activation,
         )
-        state[..., :state_len].copy_(final_state.squeeze(0))
+        # Leave the history far enough forward that the next step can rewind to
+        # whichever prefix the sampler accepts: stored shifted by one, the
+        # window ending at this step's a-th token sits at column a - 1. A plain
+        # decode step brings one token, where this is the usual slide by one.
+        history = torch.cat([init_state.squeeze(0), x_ref.squeeze(0)], dim=-1)
+        write_len = min(state.shape[-1], history.shape[-1] - 1)
+        state[..., :write_len].copy_(history[..., 1 : 1 + write_len])
         # [1, dim, L] -> [L, dim]
         return out_ref.squeeze(0).transpose(0, 1)
 
@@ -252,13 +273,7 @@ def causal_conv1d_update(
                 state = _select_state(i)
                 if state is None:
                     continue
-                seq_tokens = x[i : i + 1]
-                if num_accepted_tokens is not None:
-                    accepted = int(num_accepted_tokens[i].item())
-                    if accepted <= 0:
-                        continue
-                    seq_tokens = seq_tokens[:accepted]
-                out_i = _run_one(seq_tokens, state)
+                out_i = _run_one(x[i : i + 1], state, _read_at(i))
                 out[i : i + out_i.shape[0]] = out_i
         else:
             batch = x.shape[0]
@@ -266,13 +281,7 @@ def causal_conv1d_update(
                 state = _select_state(i)
                 if state is None:
                     continue
-                seq_tokens = x[i]
-                if num_accepted_tokens is not None:
-                    accepted = int(num_accepted_tokens[i].item())
-                    if accepted <= 0:
-                        continue
-                    seq_tokens = seq_tokens[:accepted]
-                out_i = _run_one(seq_tokens, state)
+                out_i = _run_one(x[i], state, _read_at(i))
                 out[i, : out_i.shape[0]] = out_i
     else:
         assert conv_state_indices is not None
@@ -285,13 +294,7 @@ def causal_conv1d_update(
             state = _select_state(i)
             if state is None:
                 continue
-            seq_tokens = x[start:end]
-            if num_accepted_tokens is not None:
-                accepted = int(num_accepted_tokens[i].item())
-                if accepted <= 0:
-                    continue
-                seq_tokens = seq_tokens[:accepted]
-            out_i = _run_one(seq_tokens, state)
+            out_i = _run_one(x[start:end], state, _read_at(i))
             out[start : start + out_i.shape[0]] = out_i
 
     return out.to(original_x_dtype)

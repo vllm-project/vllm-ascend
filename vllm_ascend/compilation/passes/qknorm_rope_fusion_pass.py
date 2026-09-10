@@ -198,6 +198,15 @@ class QKNormRopeFusionPass(VllmInductorPass):
             logger.debug("QKNorm and Rope fusion not enabled: unsupported dtype %s", dtype)
             return
 
+        # An MLA model may carry no rotary dimension at all (GLM-5.3-Flash sets
+        # qk_rope_head_dim to 0), leaving nothing for this pattern to match and
+        # tracing it into a zero-width tl.arange. Reachable once a draft model
+        # contributes plain Attention layers to an otherwise MLA-only config.
+        rope_dim = get_rope_dim(vllm_config)
+        if rope_dim <= 0:
+            logger.debug("QKNorm and Rope fusion not enabled: the model applies no rope (rope_dim=%d)", rope_dim)
+            return
+
         # use one attn layer to get meta (such as head_dim) for QKNormRopeFusionPattern
         attn_layers: dict[str, Attention] = get_layers_from_vllm_config(vllm_config, Attention)
         if len(attn_layers) == 0:
