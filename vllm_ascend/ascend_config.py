@@ -328,6 +328,7 @@ class AscendConfig:
             "enable_reduce_sample": false,
             "enable_dsa_cp": false,
             "sfa_dcp_force_tmajor_restore": false,
+            "enable_sfa_dcp_sharded_indexer": false,
             "enable_force_eplb": false,
             "enable_pcp_o_proj_weight_sharding": false,
             "draft_window_size": null,
@@ -463,6 +464,7 @@ class AscendConfig:
     enable_reduce_sample: bool = False
     enable_dsa_cp: bool = False
     sfa_dcp_force_tmajor_restore: bool = False
+    enable_sfa_dcp_sharded_indexer: bool = False
     enable_force_eplb: bool = False
     enable_pcp_o_proj_weight_sharding: bool = False
     draft_window_size: int | None = None

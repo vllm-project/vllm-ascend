@@ -277,13 +277,18 @@ def test_build_draft_attn_metadata_preserves_caller_state(monkeypatch, state_kwa
 
 
 @pytest.mark.parametrize(
-    ("replicated_indexer", "expected_size"),
-    [(False, 1), (True, 4)],
+    ("replicated_indexer", "sharded_indexer", "expected_size"),
+    [(False, False, 1), (True, False, 4), (True, True, 1)],
 )
 @pytest.mark.parametrize("li_c8", [False, True])
 @pytest.mark.parametrize("owner", ["unpaired", "static_shared", "mtp", "regular"])
 def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
-    monkeypatch, replicated_indexer, expected_size, li_c8, owner
+    monkeypatch,
+    replicated_indexer,
+    sharded_indexer,
+    expected_size,
+    li_c8,
+    owner,
 ):
     layer_name = "model.layers.0.self_attn.indexer.k_cache"
     indexer_module = DeepseekV32IndexerCache.__new__(DeepseekV32IndexerCache)
@@ -319,8 +324,8 @@ def test_sfa_indexer_cache_spec_runtime_ownership_and_dcp_replication(
     )
     monkeypatch.setattr(
         attn_utils,
-        "enable_sfa_dcp_replicated_indexer",
-        lambda _config: replicated_indexer,
+        "get_sfa_dcp_indexer_cache_factor",
+        lambda _config: 1 if sharded_indexer else (4 if replicated_indexer else 1),
     )
     monkeypatch.setattr(
         attn_utils,

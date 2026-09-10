@@ -47,7 +47,7 @@ from vllm_ascend.utils import (
     FP8_METHOD,
     bootstrap_custom_op_env,
     check_kv_extra_config,
-    enable_sfa_dcp_replicated_indexer,
+    enable_sfa_dcp_indexer,
     is_moe_model,
     model_uses_sfa_sparse,
     refresh_block_size,
@@ -1507,8 +1507,8 @@ def _validate_parallel_config(vllm_config: VllmConfig) -> None:
     ):
         return
 
-    sfa_dcp_replicated_indexer = enable_sfa_dcp_replicated_indexer(vllm_config)
-    if sfa_dcp_replicated_indexer:
+    sfa_dcp_indexer = enable_sfa_dcp_indexer(vllm_config)
+    if sfa_dcp_indexer:
         pcp_size = parallel_config.prefill_context_parallel_size
         full_dcp_size = parallel_config.tensor_parallel_size * pcp_size
         supported_dcp_sizes = {pcp_size, full_dcp_size}

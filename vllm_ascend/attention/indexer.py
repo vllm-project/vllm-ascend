@@ -3,11 +3,13 @@ from typing import Any
 
 import scipy  # type: ignore
 import torch
+import torch.distributed as dist
 import torch_npu
 from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -39,6 +41,7 @@ from vllm_ascend.utils import (
     _round_up,
     enable_dsa_cp,
     enable_sfa_dcp_replicated_indexer,
+    enable_sfa_dcp_sharded_indexer,
     is_pd_decode_recompute_scheduler_enabled,
     vllm_version_is,
 )
@@ -87,6 +90,127 @@ class AscendSFAIndexerMetadata:
     # The PCP cache-write gather splits the local prefill region on this
     # independently computed decode-token count.
     num_decode_tokens: int = 0
+    dcp_sharded_indexer_enabled: bool = False
+    dcp_rank: int = 0
+    dcp_world_size: int = 1
+    dcp_interleave_size: int = 128
+    dcp_local_block_table: torch.Tensor | None = None
+    dcp_local_slot_mapping: torch.Tensor | None = None
+    dcp_local_token_mask: torch.Tensor | None = None
+    request_query_lens: torch.Tensor | None = None
+    request_context_lens: torch.Tensor | None = None
+    local_visible_by_query: torch.Tensor | None = None
+    li_cum_query_lens: torch.Tensor | None = None
+    # True only when CPU-authoritative prefill metadata proves every DCP rank
+    # has at least one visible local key for every query row.  This permits the
+    # expensive empty-row publication mask to be skipped without weakening the
+    # short-context fallback semantics.
+    all_local_rows_active: bool = False
+
+
+def dcp_local_visible_counts(
+    global_visible: torch.Tensor,
+    dcp_rank: int,
+    dcp_world_size: int,
+    interleave_size: int,
+) -> torch.Tensor:
+    base = global_visible // interleave_size // dcp_world_size * interleave_size
+    remainder = global_visible - base * dcp_world_size
+    return base + torch.clamp(
+        remainder - dcp_rank * interleave_size,
+        min=0,
+        max=interleave_size,
+    )
+
+
+def dcp_local_to_global_indices(
+    local_indices: torch.Tensor,
+    dcp_rank: int,
+    dcp_world_size: int,
+    interleave_size: int,
+) -> torch.Tensor:
+    valid = local_indices >= 0
+    local = torch.clamp(local_indices, min=0)
+    # Reuse the quotient instead of issuing both integer division and modulo.
+    # For local = q*interleave + r, the original mapping
+    # q*world*interleave + rank*interleave + r equals
+    # local + q*(world-1)*interleave + rank*interleave.
+    local_block = local // interleave_size
+    global_indices = (
+        local
+        + local_block * ((dcp_world_size - 1) * interleave_size)
+        + dcp_rank * interleave_size
+    )
+    return torch.where(valid, global_indices.to(local_indices.dtype), local_indices)
+
+
+def mask_dcp_inactive_local_candidates(
+    local_indices: torch.Tensor,
+    local_scores: torch.Tensor,
+    local_visible: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mask pseudo-rows whose rank-local K-domain is empty.
+
+    The sharded cache allocation is already physical factor=1, so an empty
+    local row cannot fall back to the replicated indexer.  The native LI call
+    is issued with a one-token dummy visibility for such rows and its result
+    is discarded here before publication.
+    """
+    active = (local_visible > 0).view(-1, *([1] * (local_indices.dim() - 1)))
+    masked_indices = torch.where(active, local_indices, torch.full_like(local_indices, -1))
+    masked_scores = torch.where(active, local_scores, torch.full_like(local_scores, float("-inf")))
+    return masked_indices, masked_scores
+
+
+def merge_dcp_indexer_candidates(
+    candidate_indices: torch.Tensor,
+    candidate_scores: torch.Tensor,
+    topk: int,
+) -> torch.Tensor:
+    """Merge gathered DCP records by score.
+
+    LightningIndexer returns ``[row, 1, candidate]`` for the single indexer
+    head. A real DCP all-gather therefore produces ``[rank,row,1,candidate]``.
+    Preserve the singleton head dimension for the existing SFA consumer ABI.
+
+    Unique-cutoff rows must match incumbent full-K LI. At a cutoff tie the
+    supported contract is strict-threshold equivalence plus deterministic
+    repeat; choosing the same tied subset by global-index order is not required.
+    """
+    preserve_head_dim = False
+    if candidate_indices.dim() == 4:
+        if candidate_indices.shape[2] != 1 or candidate_scores.shape[2] != 1:
+            raise ValueError(
+                "DCP sharded indexer expects exactly one LI head, got "
+                f"indices={tuple(candidate_indices.shape)} scores={tuple(candidate_scores.shape)}"
+            )
+        candidate_indices = candidate_indices.squeeze(2)
+        candidate_scores = candidate_scores.squeeze(2)
+        preserve_head_dim = True
+    elif candidate_indices.dim() == 2:
+        candidate_indices = candidate_indices.unsqueeze(0)
+        candidate_scores = candidate_scores.unsqueeze(0)
+    if candidate_indices.dim() != 3 or candidate_scores.dim() != 3:
+        raise ValueError(
+            "DCP sharded indexer candidates must be [rank,row,K] or [rank,row,1,K], got "
+            f"indices={tuple(candidate_indices.shape)} scores={tuple(candidate_scores.shape)}"
+        )
+    if candidate_indices.shape != candidate_scores.shape:
+        raise ValueError(
+            "DCP sharded indexer index/score shapes must match, got "
+            f"indices={tuple(candidate_indices.shape)} scores={tuple(candidate_scores.shape)}"
+        )
+    flat_indices = candidate_indices.permute(1, 0, 2).reshape(candidate_indices.shape[1], -1)
+    flat_scores = candidate_scores.permute(1, 0, 2).reshape(candidate_scores.shape[1], -1)
+    valid = flat_indices >= 0
+    scores = torch.where(valid, flat_scores, torch.full_like(flat_scores, float("-inf")))
+    k = min(topk, scores.shape[-1])
+    selected_scores, selected_pos = torch.topk(scores, k=k, dim=-1, largest=True, sorted=True)
+    selected = torch.gather(flat_indices, -1, selected_pos)
+    selected = torch.where(selected_scores > float("-inf"), selected, torch.full_like(selected, -1))
+    if selected.shape[-1] < topk:
+        selected = torch.nn.functional.pad(selected, (0, topk - selected.shape[-1]), value=-1)
+    return selected.unsqueeze(1) if preserve_head_dim else selected
 
 
 class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
@@ -202,6 +326,130 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         parallel_config = get_current_vllm_config().parallel_config
         self._pcp_active = parallel_config.prefill_context_parallel_size > 1
         self._dsa_cp_active = enable_dsa_cp()
+
+    def _select_dcp_sharded_topk(
+        self,
+        q_li: torch.Tensor,
+        q_li_scale: torch.Tensor | None,
+        q_li_shape_ori: tuple[Any, ...] | None,
+        weights: torch.Tensor,
+        indexer_metadata: AscendSFAIndexerMetadata,
+    ) -> torch.Tensor | None:
+        if (
+            not indexer_metadata.dcp_sharded_indexer_enabled
+            or self.enable_sparse_li_c8
+            or indexer_metadata.dcp_local_block_table is None
+            or indexer_metadata.local_visible_by_query is None
+            or indexer_metadata.li_cum_query_lens is None
+        ):
+            return None
+        local_visible = indexer_metadata.local_visible_by_query
+        # PA_BSND LI does not need to observe an empty physical K-domain.
+        # Use one dummy visible key for inactive rows, then discard that row's
+        # native output before DCP publication.  This keeps factor=1 cache
+        # semantics valid without a late replicated-path fallback.
+        native_local_visible = (
+            local_visible
+            if indexer_metadata.all_local_rows_active
+            else torch.clamp(local_visible, min=1)
+        )
+
+        selected = DeviceOperator.indexer_select_post_process(
+            q_li,
+            q_li_scale,
+            q_li_shape_ori,
+            weights,
+            self.k_cache.kv_cache,
+            INDEXER_K_CACHE_SLOT,
+            INDEXER_SCALE_CACHE_SLOT,
+            indexer_metadata,
+            indexer_metadata.li_cum_query_lens,
+            native_local_visible,
+            self.enable_sparse_li_c8,
+            self.use_torch_npu_lightning_indexer,
+            return_selected_scores=True,
+            sparse_mode=0,
+            block_table=indexer_metadata.dcp_local_block_table,
+        )
+        local_indices, local_scores = selected
+        if not indexer_metadata.all_local_rows_active:
+            local_indices, local_scores = mask_dcp_inactive_local_candidates(
+                local_indices, local_scores, local_visible
+            )
+        global_indices = dcp_local_to_global_indices(
+            local_indices,
+            indexer_metadata.dcp_rank,
+            indexer_metadata.dcp_world_size,
+            indexer_metadata.dcp_interleave_size,
+        )
+        if indexer_metadata.dcp_world_size == 1:
+            return global_indices
+
+        dcp_group = get_dcp_group()
+        if dcp_group.world_size != 16 or indexer_metadata.dcp_world_size != 16:
+            raise RuntimeError(
+                "DCP sharded indexer butterfly merge is restricted to DCP16."
+            )
+        rank_in_group = dcp_group.rank_in_group
+        indices = global_indices.contiguous()
+        scores = local_scores.contiguous()
+        # Four pairwise merge rounds reduce communication from publishing all
+        # 16 rank-local K lists to every rank at once to O(K log DCP).  Both
+        # peers order lower-rank subgroup first, making cutoff-tie selection
+        # repeat-deterministic while preserving the established threshold
+        # equivalence contract.
+        for level, step in enumerate((1, 2, 4, 8)):
+            peer_in_group = rank_in_group ^ step
+            peer = dcp_group.ranks[peer_in_group]
+            other_scores = torch.empty_like(scores)
+            other_indices = torch.empty_like(indices)
+            p2p_ops = [
+                dist.P2POp(
+                    dist.isend,
+                    scores,
+                    peer,
+                    group=dcp_group.device_group,
+                    tag=320 + level * 2,
+                ),
+                dist.P2POp(
+                    dist.irecv,
+                    other_scores,
+                    peer,
+                    group=dcp_group.device_group,
+                    tag=320 + level * 2,
+                ),
+                dist.P2POp(
+                    dist.isend,
+                    indices,
+                    peer,
+                    group=dcp_group.device_group,
+                    tag=321 + level * 2,
+                ),
+                dist.P2POp(
+                    dist.irecv,
+                    other_indices,
+                    peer,
+                    group=dcp_group.device_group,
+                    tag=321 + level * 2,
+                ),
+            ]
+            for request in dist.batch_isend_irecv(p2p_ops):
+                request.wait()
+            if rank_in_group & step:
+                candidate_scores = torch.cat((other_scores, scores), dim=-1)
+                candidate_indices = torch.cat((other_indices, indices), dim=-1)
+            else:
+                candidate_scores = torch.cat((scores, other_scores), dim=-1)
+                candidate_indices = torch.cat((indices, other_indices), dim=-1)
+            scores, selected_pos = torch.topk(
+                candidate_scores,
+                k=self.topk_tokens,
+                dim=-1,
+                largest=True,
+                sorted=True,
+            )
+            indices = torch.gather(candidate_indices, -1, selected_pos)
+        return indices
 
     def process_weights_after_loading(self) -> None:
         if self.enable_sparse_li_c8 and AscendSFAIndexerBackend.q_hadamard is None:
@@ -338,7 +586,19 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k across the TP group (its padded slot mapping already covers the
         gathered layout)."""
         slot_mapping = indexer_metadata.slot_mapping
-        if self._pcp_active:
+        if indexer_metadata.dcp_sharded_indexer_enabled:
+            if indexer_metadata.dcp_local_token_mask is None or indexer_metadata.dcp_local_slot_mapping is None:
+                raise RuntimeError("DCP sharded indexer cache write requires rank-local token metadata.")
+            local_mask = indexer_metadata.dcp_local_token_mask.to(device=k_li.device)
+            k_li = k_li[local_mask]
+            if k_li_scale is not None:
+                k_li_scale = k_li_scale[local_mask]
+            slot_mapping = indexer_metadata.dcp_local_slot_mapping
+            assert slot_mapping.numel() == k_li.shape[0], (
+                "DCP sharded indexer cache write requires one rank-local slot per rank-local K token: "
+                f"tokens={k_li.shape[0]}, slots={slot_mapping.numel()}."
+            )
+        elif self._pcp_active:
             tensors = (k_li,) if k_li_scale is None else (k_li, k_li_scale)
             gathered_tensors, slot_mapping = _gather_prefill_cache_inputs(
                 tensors, slot_mapping, indexer_metadata.num_decode_tokens
@@ -452,6 +712,16 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
             q_li, q_li_scale = torch_npu.npu_dynamic_quant(q_li.view(-1, self.head_dim), dst_type=self.c8_k_cache_dtype)
             q_li_scale = q_li_scale.to(self.c8_k_scale_cache_dtype)  # [b*s,]
 
+        sharded_topk = self._select_dcp_sharded_topk(
+            q_li,
+            q_li_scale,
+            q_li_shape_ori,
+            weights,
+            indexer_metadata,
+        )
+        if sharded_topk is not None:
+            return sharded_topk
+
         return DeviceOperator.indexer_select_post_process(
             q_li,
             q_li_scale,
@@ -512,6 +782,13 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         self._dcp_block_table_buffers: dict[object, torch.Tensor] = {}
         self._dcp_slot_mapping_buffers: dict[object, torch.Tensor] = {}
         self._pcp_indexer_slot_mapping_buffers: dict[object, torch.Tensor] = {}
+        self._dcp_sharded_indexer = enable_sfa_dcp_sharded_indexer(vllm_config)
+        self._dcp_world_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
+        self._dcp_interleave_size = getattr(vllm_config.parallel_config, "cp_kv_cache_interleave_size", 128)
+        try:
+            self._dcp_rank = get_dcp_group().rank_in_group
+        except Exception:
+            self._dcp_rank = 0
         max_num_input_tokens = scheduler_config.max_num_batched_tokens
         self._rope_capacity = max_num_input_tokens
         pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
@@ -536,7 +813,10 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                     self.dsa_cp_seq_capacity,
                     max_num_reqs * (spec_tokens + 1) + 1,
                 )
-        self.use_dcp = enable_sfa_dcp_replicated_indexer(vllm_config)
+        self.use_dcp = (
+            not self._dcp_sharded_indexer
+            and enable_sfa_dcp_replicated_indexer(vllm_config)
+        )
         if not self.use_dcp:
             return
 
@@ -1072,6 +1352,95 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
                 block_size,
             )
 
+        query_start = common_attn_metadata.query_start_loc[: num_reqs + 1]
+        query_lens = query_start[1:] - query_start[:-1]
+        context_lens = common_attn_metadata.seq_lens[:num_reqs] - query_lens
+        li_cum_query_lens = None
+        local_visible_by_query = None
+        dcp_local_block_table = None
+        dcp_local_slot_mapping = None
+        dcp_local_token_mask = None
+        all_local_rows_active = False
+        if self._dcp_sharded_indexer:
+            row_offsets = torch.arange(
+                1,
+                int(query_lens.max().item()) + 1,
+                dtype=context_lens.dtype,
+                device=context_lens.device,
+            )
+            global_visible = context_lens.unsqueeze(1) + row_offsets.unsqueeze(0)
+            row_mask = row_offsets.unsqueeze(0) <= query_lens.unsqueeze(1)
+            global_visible = global_visible[row_mask]
+            local_visible_by_query = dcp_local_visible_counts(
+                global_visible,
+                self._dcp_rank,
+                self._dcp_world_size,
+                self._dcp_interleave_size,
+            ).to(torch.int32)
+            # For a single prefill request, both phase and sequence length are
+            # available on CPU without a device synchronization.  Once the
+            # cached context spans at least one full DCP interleave cycle, every
+            # rank has non-empty local visibility for every newly scheduled row.
+            # Other/mixed/decode geometries retain the sentinel mask below.
+            is_prefilling_cpu = getattr(common_attn_metadata, "is_prefilling", None)
+            seq_lens_cpu_upper_bound = getattr(
+                common_attn_metadata, "seq_lens_cpu_upper_bound", None
+            )
+            query_start_loc_cpu = getattr(common_attn_metadata, "query_start_loc_cpu", None)
+            if (
+                num_reqs == 1
+                and is_prefilling_cpu is not None
+                and seq_lens_cpu_upper_bound is not None
+                and query_start_loc_cpu is not None
+                and bool(is_prefilling_cpu[0])
+            ):
+                query_len_cpu = int(
+                    query_start_loc_cpu[1] - query_start_loc_cpu[0]
+                )
+                context_len_cpu = int(seq_lens_cpu_upper_bound[0]) - query_len_cpu
+                all_local_rows_active = context_len_cpu >= (
+                    self._dcp_world_size * self._dcp_interleave_size
+                )
+            li_cum_query_lens = torch.arange(
+                1,
+                local_visible_by_query.numel() + 1,
+                dtype=torch.int32,
+                device=local_visible_by_query.device,
+            )
+            dcp_local_token_mask = (
+                (input_positions // self._dcp_interleave_size) % self._dcp_world_size
+            ) == self._dcp_rank
+            local_positions = input_positions[dcp_local_token_mask]
+            local_block_cols = max(
+                1,
+                int(
+                    torch.ceil(
+                        common_attn_metadata.seq_lens[:num_reqs].max().float()
+                        / float(self.kernel_block_size * self._dcp_world_size)
+                    ).item()
+                ),
+            )
+            dcp_local_request_block_table = common_attn_metadata.block_table_tensor[:num_reqs, :local_block_cols]
+            token_req_indices = torch.repeat_interleave(
+                torch.arange(num_reqs, dtype=torch.int64, device=input_positions.device),
+                query_lens.to(device=input_positions.device),
+                output_size=num_input_tokens,
+            )
+            # sparse_mode=0 represents every query token as its own LI
+            # pseudo-row.  PA_BSND requires block_table.dim(0) to match that
+            # pseudo-row batch, while all rows of one request share the same
+            # rank-local physical pages (the geometry proven by R5).
+            dcp_local_block_table = dcp_local_request_block_table[token_req_indices]
+            local_req_indices = token_req_indices[dcp_local_token_mask]
+            local_indices = local_positions // (self._dcp_interleave_size * self._dcp_world_size) * self._dcp_interleave_size
+            local_indices = local_indices + local_positions % self._dcp_interleave_size
+            local_block_idx = local_indices // self.kernel_block_size
+            local_block_offsets = local_indices % self.kernel_block_size
+            dcp_local_slot_mapping = (
+                dcp_local_request_block_table[local_req_indices, local_block_idx.to(torch.long)] * self.kernel_block_size
+                + local_block_offsets
+            ).to(slot_mapping.dtype)
+
         return AscendSFAIndexerMetadata(
             num_actual_tokens=common_attn_metadata.num_actual_tokens,
             slot_mapping=slot_mapping,
@@ -1087,4 +1456,16 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
             actual_seq_lengths_query=actual_seq_lengths_query,
             actual_seq_lengths_key=actual_seq_lengths_key,
             num_decode_tokens=num_decode_tokens,
+            dcp_sharded_indexer_enabled=self._dcp_sharded_indexer,
+            dcp_rank=self._dcp_rank,
+            dcp_world_size=self._dcp_world_size,
+            dcp_interleave_size=self._dcp_interleave_size,
+            dcp_local_block_table=dcp_local_block_table,
+            dcp_local_slot_mapping=dcp_local_slot_mapping,
+            dcp_local_token_mask=dcp_local_token_mask,
+            request_query_lens=query_lens.to(torch.int32),
+            request_context_lens=context_lens.to(torch.int32),
+            local_visible_by_query=local_visible_by_query,
+            li_cum_query_lens=li_cum_query_lens,
+            all_local_rows_active=all_local_rows_active,
         )
