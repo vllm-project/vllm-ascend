@@ -180,6 +180,45 @@ a3:
       - name: Kimi-K2.6-w4a8-A3
         os: linux-aarch64-nightly-a3-16
         config_file_path: Kimi-K2.6-w4a8-A3.yaml
+      - name: Minimax_m2.7_w8a8_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Minimax_m2.7_w8a8_A3.yaml
+      - name: Qwen3_32b_w8a8_ml_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3_32b_w8a8_ml_A3.yaml
+      - name: Deepseek_R1_W8A8_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Deepseek_R1_W8A8_A3.yaml
+      - name: Qwen3.8-27B-w8a8-A3
+        os: linux-aarch64-nightly-a3-2
+        config_file_path: Qwen3.8-27B-w8a8-A3.yaml
+      - name: Qwq_32b_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwq_32b_A3.yaml
+      - name: Qwen3_32b_W8A8_wl_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3_32b_W8A8_wl_A3.yaml
+      - name: Deepseek_R1_W8A8_Reasoning_output_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Deepseek_R1_W8A8_Reasoning_output_A3.yaml
+      - name: qwen_3_6_27b_w8a8_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: qwen_3_6_27b_w8a8_A3.yaml
+      - name: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: Qwen3-235B-A22B-W8A8_piecewise_fullgraph_A3.yaml
+      - name: acceptace_rate_deepseekv4-flash-w8a8-mtp
+        os: linux-aarch64-nightly-a3-8
+        config_file_path: acceptace_rate_deepseekv4-flash-w8a8-mtp.yaml
+      - name: kimi-k2.6_max_model_len
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: kimi-k2.6_max_model_len.yaml
+      - name: kimi25_w4a8_step_3_7
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: kimi25_w4a8_step_3_7.yaml
+      - name: deepseek-v4-flash-dspark-w4a8-a3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: DeepSeek-V4-Flash-DSpark-W4A8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
@@ -292,6 +331,12 @@ a3-560t:
       - name: glm-5.2-w4a8-mtp-v2
         os: linux-aarch64-a3-800i-16
         config_file_path: GLM-5.2-W4A8-MTP-A3-V2.yaml
+      - name: MiniMax-M3-BF16-A3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: MiniMax-M3-BF16-A3.yaml
+      - name: deepseek-v4-flash-dspark-w4a8-a3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-V4-Flash-DSpark-W4A8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
