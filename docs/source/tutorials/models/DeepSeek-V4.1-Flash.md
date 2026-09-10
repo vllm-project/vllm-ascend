@@ -16,10 +16,10 @@ speculative decoding. These designs reduce the global KV cache footprint to
 one eighth of DeepSeek-V4-Flash. The model accepts text and images and supports
 a continuously adjustable reasoning effort from 1 to 100.
 
-Support on vLLM Ascend is experimental. This guide documents the validated
-W8A8 colocated deployment on two Atlas 800 A3 servers. Prefill-Decode
-disaggregation and the full one-million-token context are not covered by this
-guide.
+Support on vLLM Ascend is experimental. This guide documents W8A8 colocated
+deployment on either two Atlas 800 A3 servers or four Atlas 800 A2 servers.
+Prefill-Decode disaggregation and the full one-million-token context are not
+covered by this guide.
 
 ## 2 Supported Features
 
@@ -47,68 +47,115 @@ tables. Use [ModelSlim](https://gitcode.com/Ascend/msmodelslim) to prepare a
 ModelSlim-compatible checkpoint. Record its absolute path on both servers;
 the examples use `<YOUR_MODEL_PATH>`.
 
-The validated deployment requires two Atlas 800 A3 servers (128GB × 8 NPUs
-per server). Store the checkpoint in a shared directory or copy it to the same
-absolute path on both servers.
+Use one of the following hardware configurations:
+
+- **A3 series**: two Atlas 800 A3 servers. Each server has 8 NPUs with 128GB
+  memory per NPU and exposes 16 logical devices to the container.
+- **A2 series**: four Atlas 800 A2 servers. Each server has 8 NPUs with 64GB
+  memory per NPU and exposes 8 devices to the container.
+
+Store the checkpoint in a shared directory or copy it to the same absolute
+path on every server.
 
 ### 3.2 Verify Multi-node Communication
 
 Before deployment, follow
 [Verify Multi-node Communication](../../getting_started/installation.md#installation-multi-node-interconnect).
-The two servers must be able to communicate through the selected network
+All servers must be able to communicate through the selected network
 interfaces, and the service ports must not be blocked.
 
 ## 4 Installation
 
 ### 4.1 Docker Image Installation
 
-Use the A3 image built from the `main` branch after DeepSeek-V4.1 support is
-merged:
+Select the tab for the target hardware. Use the matching image after
+DeepSeek-V4.1 support is merged into the `main` branch.
 
-```shell
-export IMAGE=quay.io/ascend/vllm-ascend:nightly-main-a3
-export MODEL_ROOT="/data/weights"
+=== "A3 series"
 
-docker pull "$IMAGE"
+    An A3 server exposes 16 logical devices. Run this command on both A3
+    servers.
 
-docker run --rm -it \
-  --name deepseek-v41 \
-  --net=host \
-  --shm-size=512g \
-  --privileged=true \
-  --device /dev/davinci0 \
-  --device /dev/davinci1 \
-  --device /dev/davinci2 \
-  --device /dev/davinci3 \
-  --device /dev/davinci4 \
-  --device /dev/davinci5 \
-  --device /dev/davinci6 \
-  --device /dev/davinci7 \
-  --device /dev/davinci8 \
-  --device /dev/davinci9 \
-  --device /dev/davinci10 \
-  --device /dev/davinci11 \
-  --device /dev/davinci12 \
-  --device /dev/davinci13 \
-  --device /dev/davinci14 \
-  --device /dev/davinci15 \
-  --device /dev/davinci_manager \
-  --device /dev/devmm_svm \
-  --device /dev/hisi_hdc \
-  -v /usr/local/dcmi:/usr/local/dcmi \
-  -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
-  -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-  -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-  -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
-  -v /etc/ascend_install.info:/etc/ascend_install.info \
-  -v /etc/hccn.conf:/etc/hccn.conf \
-  -v "$MODEL_ROOT:$MODEL_ROOT" \
-  "$IMAGE" bash
-```
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main-a3
+    export MODEL_ROOT="/data/weights"
 
-Run this command on both servers. Change `MODEL_ROOT` if the checkpoint is
-stored elsewhere, and keep the same absolute path inside and outside the
-container.
+    docker pull "$IMAGE"
+
+    docker run --rm -it \
+      --name deepseek-v41 \
+      --net=host \
+      --shm-size=512g \
+      --privileged=true \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci8 \
+      --device /dev/davinci9 \
+      --device /dev/davinci10 \
+      --device /dev/davinci11 \
+      --device /dev/davinci12 \
+      --device /dev/davinci13 \
+      --device /dev/davinci14 \
+      --device /dev/davinci15 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccn.conf:/etc/hccn.conf \
+      -v "$MODEL_ROOT:$MODEL_ROOT" \
+      "$IMAGE" bash
+    ```
+
+=== "A2 series"
+
+    An A2 server exposes 8 devices. Run this command on all four A2 servers.
+
+    ```shell
+    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    export MODEL_ROOT="/data/weights"
+
+    docker pull "$IMAGE"
+
+    docker run --rm -it \
+      --name deepseek-v41 \
+      --net=host \
+      --shm-size=512g \
+      --privileged=true \
+      --device /dev/davinci0 \
+      --device /dev/davinci1 \
+      --device /dev/davinci2 \
+      --device /dev/davinci3 \
+      --device /dev/davinci4 \
+      --device /dev/davinci5 \
+      --device /dev/davinci6 \
+      --device /dev/davinci7 \
+      --device /dev/davinci_manager \
+      --device /dev/devmm_svm \
+      --device /dev/hisi_hdc \
+      -v /usr/local/dcmi:/usr/local/dcmi \
+      -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+      -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+      -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+      -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+      -v /etc/ascend_install.info:/etc/ascend_install.info \
+      -v /etc/hccn.conf:/etc/hccn.conf \
+      -v "$MODEL_ROOT:$MODEL_ROOT" \
+      "$IMAGE" bash
+    ```
+
+Change `MODEL_ROOT` if the checkpoint is stored elsewhere. Keep the same
+absolute path inside and outside every container.
 
 ### 4.2 Source Code Installation
 
@@ -119,73 +166,149 @@ and use the `main` branch with the matching vLLM revision recorded in
 
 ## 5 Online Service Deployment
 
-### 5.1 Two-Node Colocated Deployment
+### 5.1 Multi-Node Colocated Deployment
 
-Run the following script on both servers. Change only `NODE_RANK`, `NODE0_IP`,
-`LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH`. Set `NODE_RANK=0` on the server that
-exposes the API and `NODE_RANK=1` on the headless worker.
+The A3 and A2 configurations use the same global DP4/TP8/EP32 topology. A3
+places two local DP ranks on each of two servers; A2 places one local DP rank
+on each of four servers.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+Select the tab for the target hardware. In each script, change `NODE_RANK`,
+`NODE0_IP`, `LOCAL_IP`, `NIC_NAME`, and `MODEL_PATH`. Node 0 exposes the API;
+every other node is a headless worker.
 
-# Node 0 uses NODE_RANK=0; Node 1 uses NODE_RANK=1.
-NODE_RANK=0
-NODE0_IP="<NODE0_IP>"
-LOCAL_IP="<LOCAL_IP>"
-NIC_NAME="<NETWORK_INTERFACE>"
-MODEL_PATH="<YOUR_MODEL_PATH>"
+=== "A3 series"
 
-export HCCL_IF_IP="$LOCAL_IP"
-export GLOO_SOCKET_IFNAME="$NIC_NAME"
-export TP_SOCKET_IFNAME="$NIC_NAME"
-export HCCL_SOCKET_IFNAME="$NIC_NAME"
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
+    Run this script on both A3 servers. Set `NODE_RANK=0` on Node 0 and
+    `NODE_RANK=1` on Node 1.
 
-if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
-  export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
-fi
+    ```bash
+    #!/usr/bin/env bash
+    set -euo pipefail
 
-DP_START_RANK=$((NODE_RANK * 2))
-HEADLESS_ARGS=()
-if [[ "$NODE_RANK" == "1" ]]; then
-  HEADLESS_ARGS+=(--headless)
-fi
+    NODE_RANK=0
+    NODE0_IP="<NODE0_IP>"
+    LOCAL_IP="<LOCAL_IP>"
+    NIC_NAME="<NETWORK_INTERFACE>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
 
-vllm serve "$MODEL_PATH" \
-  --host 0.0.0.0 \
-  --port 8000 \
-  "${HEADLESS_ARGS[@]}" \
-  --data-parallel-address "$NODE0_IP" \
-  --data-parallel-rpc-port 13399 \
-  --data-parallel-size 4 \
-  --data-parallel-size-local 2 \
-  --data-parallel-start-rank "$DP_START_RANK" \
-  --tensor-parallel-size 8 \
-  --enable-expert-parallel \
-  --served-model-name deepseek-v41 \
-  --max-model-len 131072 \
-  --max-num-batched-tokens 4096 \
-  --max-num-seqs 32 \
-  --gpu-memory-utilization 0.90 \
-  --block-size 128 \
-  --no-enable-prefix-caching \
-  --tokenizer-mode deepseek_v41 \
-  --reasoning-parser deepseek_v41 \
-  --tool-call-parser deepseek_v41 \
-  --enable-auto-tool-choice \
-  --trust-remote-code \
-  --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
-  --safetensors-load-strategy lazy \
-  --quantization ascend \
-  --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
-  --speculative-config "{\"method\":\"dspark\",\"model\":\"${MODEL_PATH}\",\"num_speculative_tokens\":5,\"enforce_eager\":true}" \
-  --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-```
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
-Start Node 0 first and then Node 1. The global topology is DP4/TP8/EP32: each
-server hosts two local DP ranks, and each rank uses eight logical devices.
-Only Node 0 exposes the API endpoint.
+    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+
+    DP_START_RANK=$((NODE_RANK * 2))
+    HEADLESS_ARGS=()
+    if [[ "$NODE_RANK" != "0" ]]; then
+      HEADLESS_ARGS+=(--headless)
+    fi
+
+    vllm serve "$MODEL_PATH" \
+      --host 0.0.0.0 \
+      --port 8000 \
+      "${HEADLESS_ARGS[@]}" \
+      --data-parallel-address "$NODE0_IP" \
+      --data-parallel-rpc-port 13399 \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 2 \
+      --data-parallel-start-rank "$DP_START_RANK" \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --served-model-name deepseek-v41 \
+      --max-model-len 131072 \
+      --max-num-batched-tokens 4096 \
+      --max-num-seqs 32 \
+      --gpu-memory-utilization 0.90 \
+      --block-size 128 \
+      --no-enable-prefix-caching \
+      --tokenizer-mode deepseek_v41 \
+      --reasoning-parser deepseek_v41 \
+      --tool-call-parser deepseek_v41 \
+      --enable-auto-tool-choice \
+      --trust-remote-code \
+      --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+      --safetensors-load-strategy lazy \
+      --quantization ascend \
+      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+      --speculative-config "{\"method\":\"dspark\",\"model\":\"${MODEL_PATH}\",\"num_speculative_tokens\":5,\"enforce_eager\":true}" \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    ```
+
+=== "A2 series"
+
+    Run this script on all four A2 servers. Set `NODE_RANK` to `0`, `1`, `2`,
+    or `3` on the corresponding node.
+
+    ```bash
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    NODE_RANK=0
+    NODE0_IP="<NODE0_IP>"
+    LOCAL_IP="<LOCAL_IP>"
+    NIC_NAME="<NETWORK_INTERFACE>"
+    MODEL_PATH="<YOUR_MODEL_PATH>"
+
+    export HCCL_IF_IP="$LOCAL_IP"
+    export GLOO_SOCKET_IFNAME="$NIC_NAME"
+    export TP_SOCKET_IFNAME="$NIC_NAME"
+    export HCCL_SOCKET_IFNAME="$NIC_NAME"
+    export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+
+    if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
+      export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
+    fi
+
+    HEADLESS_ARGS=()
+    if [[ "$NODE_RANK" != "0" ]]; then
+      HEADLESS_ARGS+=(--headless)
+    fi
+
+    vllm serve "$MODEL_PATH" \
+      --host 0.0.0.0 \
+      --port 8000 \
+      "${HEADLESS_ARGS[@]}" \
+      --data-parallel-address "$NODE0_IP" \
+      --data-parallel-rpc-port 13399 \
+      --data-parallel-size 4 \
+      --data-parallel-size-local 1 \
+      --data-parallel-start-rank "$NODE_RANK" \
+      --tensor-parallel-size 8 \
+      --enable-expert-parallel \
+      --served-model-name deepseek-v41 \
+      --max-model-len 131072 \
+      --max-num-batched-tokens 4096 \
+      --max-num-seqs 32 \
+      --gpu-memory-utilization 0.90 \
+      --block-size 128 \
+      --no-enable-prefix-caching \
+      --tokenizer-mode deepseek_v41 \
+      --reasoning-parser deepseek_v41 \
+      --tool-call-parser deepseek_v41 \
+      --enable-auto-tool-choice \
+      --trust-remote-code \
+      --model-loader-extra-config '{"enable_multithread_load":true,"num_threads":128}' \
+      --safetensors-load-strategy lazy \
+      --quantization ascend \
+      --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
+      --speculative-config "{\"method\":\"dspark\",\"model\":\"${MODEL_PATH}\",\"num_speculative_tokens\":5,\"enforce_eager\":true}" \
+      --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
+    ```
+
+Start Node 0 first and then the remaining nodes. The global topology is
+DP4/TP8/EP32 in both configurations:
+
+- **A3 series**: two servers, local DP2 per server, and 16 visible logical
+  devices per server.
+- **A2 series**: four servers, local DP1 per server, and 8 visible devices per
+  server.
+
+Each DP rank uses eight devices through TP8. Only Node 0 exposes the API
+endpoint.
 
 Wait until every DP engine finishes loading weights and graph capture. A
 successful startup includes output similar to:
@@ -314,8 +437,8 @@ For common environment, installation, and parameter issues, refer to the
 
 ## 11 Limitations
 
-- The documented deployment uses two Atlas 800 A3 servers and an Ascend W8A8
-  checkpoint with INT8 Engram storage.
+- The documented deployment uses either two Atlas 800 A3 servers or four
+  Atlas 800 A2 servers and an Ascend W8A8 checkpoint with INT8 Engram storage.
 - The validated maximum model length is 131072 tokens; the official model's
   one-million-token context is not validated in this configuration.
 - Prefill-Decode disaggregation, pipeline parallelism, and model runner V2 are
