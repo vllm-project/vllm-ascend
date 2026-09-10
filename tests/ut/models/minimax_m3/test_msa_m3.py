@@ -1682,6 +1682,7 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
     assert mock_sparse_attn_prefill.call_args.kwargs["max_kv_blocks"] == 1
 
 
+@pytest.mark.parametrize(("supports_fp8", "expected_inner_precise"), [(False, 0), (True, 1)])
 @patch.object(
     torch.ops._C_ascend,
     "npu_sparse_attention_score_prefill",
@@ -1691,6 +1692,8 @@ def test_sparse_impl_forward_dispatches_decode_and_prefill_paths(
 def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     mock_k2q_csr: MagicMock,
     mock_sparse_attention_score_prefill: MagicMock,
+    supports_fp8: bool,
+    expected_inner_precise: int,
 ) -> None:
     q = torch.zeros(3, 4, 4, dtype=torch.bfloat16)
     kv_cache = torch.zeros(2, 8, 128, 2, 4, dtype=torch.bfloat16)
@@ -1702,6 +1705,7 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
         dtype=torch.int32,
     )
     block_table = torch.arange(8, dtype=torch.int32).view(2, 4)
+    original_topk_idx = topk_idx.clone()
     cu_seqlens_q = torch.tensor([0, 1, 3], dtype=torch.int32)
     seq_lens = torch.tensor([129, 257], dtype=torch.int32)
     output = torch.empty_like(q)
@@ -1724,7 +1728,7 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
         block_size=128,
         total_kv_blocks=5,
         max_kv_blocks=3,
-        supports_fp8=False,
+        supports_fp8=supports_fp8,
     )
 
     mock_k2q_csr.assert_called_once()
@@ -1735,6 +1739,7 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     assert k2q_kwargs["use_simt"] == 0
     assert k2q_kwargs["q_global_offset"] is True
     assert mock_k2q_csr.call_args.args[0] is topk_idx
+    assert torch.equal(topk_idx, original_topk_idx)
 
     mock_sparse_attention_score_prefill.assert_called_once()
     args = mock_sparse_attention_score_prefill.call_args.args
@@ -1742,7 +1747,7 @@ def test_sparse_attn_prefill_kv_gather_q_forwards_csr_metadata(
     assert args[0] is q
     assert args[3] is block_table
     assert args[4] is k2q_row_ptr
-    assert args[7:12] == (2, 0.5, 128, 2, 1)
+    assert args[7:12] == (2, 0.5, 128, 2, expected_inner_precise)
     assert torch.equal(kwargs["actual_seq_lengths"], torch.tensor([1, 2], dtype=torch.int32))
     assert torch.equal(kwargs["actual_seq_lengths_kv"], seq_lens)
     assert torch.equal(output, torch.ones_like(output))

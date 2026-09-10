@@ -14,6 +14,7 @@ from vllm_ascend.utils import enable_custom_op
 
 _SPARSE_ATTN_INNER_PRECISE = 4
 _PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
+_A3_PREFILL_KV_GATHER_Q_INNER_PRECISE = 0
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
 _FP8_E4M3_MAX = 448.0
@@ -549,7 +550,9 @@ def _minimax_m3_sparse_attn_kv_gather_q(
 ) -> None:
     key, value = _split_main_kv_cache(kv_cache)
 
-    inner_precise = _PREFILL_KV_GATHER_Q_INNER_PRECISE
+    # A3 uses FP32 scores and partial outputs. Keep A5's existing BF16
+    # precision mode; its FP8 cache path overrides this below as before.
+    inner_precise = _PREFILL_KV_GATHER_Q_INNER_PRECISE if supports_fp8 else _A3_PREFILL_KV_GATHER_Q_INNER_PRECISE
     if key.dtype == torch.float8_e4m3fn:
         if not supports_fp8:
             raise TypeError("MiniMax-M3 FP8 sparse attention is not supported on this device")
