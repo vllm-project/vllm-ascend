@@ -821,6 +821,7 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
 
     ```shell
     KV_PORT=36000
+    LOOKUP_RPC_PORT=0
 
     unset ftp_proxy FTP_PROXY
     unset https_proxy HTTPS_PROXY
@@ -835,6 +836,7 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
     export HCCL_IF_IP=${local_ip}
     export HCCL_SOCKET_IFNAME=${nic_name}
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export MOONCAKE_CONFIG_PATH=<MOONCAKE_CONFIG_PATH>
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -878,23 +880,32 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
         --limit-mm-per-prompt '{"vision_chunk": 2}' \
         --kv-transfer-config \
         '{
-         "kv_connector": "MultiConnector",
-         "kv_role": "kv_producer",
-         "kv_connector_extra_config": {
+          "kv_connector": "MultiConnector",
+          "kv_role": "kv_producer",
+          "kv_load_failure_policy": "recompute",
+          "kv_connector_extra_config": {
             "connectors": [
               {
                 "kv_connector": "MooncakeConnectorV1",
                 "kv_role": "kv_producer",
                 "kv_port": "'"$KV_PORT"'",
                 "kv_connector_extra_config": {
-                    "prefill": {
-                        "dp_size": 4,
-                        "tp_size": '"$7"'
-                    },
-                    "decode": {
-                        "dp_size": 4,
-                        "tp_size": '"$7"'
-                   }
+                  "prefill": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  },
+                  "decode": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  }
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_producer",
+                "kv_connector_extra_config": {
+                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'",
+                  "backend": "mooncake"
                 }
               }
             ]
@@ -906,6 +917,7 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
 
     ```shell
     KV_PORT=36200
+    LOOKUP_RPC_PORT=1
 
     unset ftp_proxy FTP_PROXY
     unset https_proxy HTTPS_PROXY
@@ -921,6 +933,7 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
     export HCCL_OP_EXPANSION_MODE="AIV"
     export HCCL_SOCKET_IFNAME=${nic_name}
     export ASCEND_RT_VISIBLE_DEVICES=$1
+    export MOONCAKE_CONFIG_PATH=<MOONCAKE_CONFIG_PATH>
     export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/python/site-packages/mooncake:$LD_LIBRARY_PATH
     export GLOO_SOCKET_IFNAME=${nic_name}
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
@@ -963,18 +976,36 @@ This deployment supports DSpark speculative decoding. Configure the same `Infera
         --limit-mm-per-prompt '{"vision_chunk":2}' \
         --kv-transfer-config \
         '{
-          "kv_connector": "MooncakeConnectorV1",
+          "kv_connector": "MultiConnector",
           "kv_role": "kv_consumer",
-          "kv_port": "'"$KV_PORT"'",
+          "kv_load_failure_policy": "recompute",
           "kv_connector_extra_config": {
-            "prefill": {
-                "dp_size": 4,
-                "tp_size": '"$7"'
-            },
-            "decode": {
-                "dp_size": 4,
-                "tp_size": '"$7"'
-            }
+            "connectors": [
+              {
+                "kv_connector": "MooncakeConnectorV1",
+                "kv_role": "kv_consumer",
+                "kv_port": "'"$KV_PORT"'",
+                "kv_connector_extra_config": {
+                  "prefill": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  },
+                  "decode": {
+                    "dp_size": 4,
+                    "tp_size": '"$7"'
+                  }
+                }
+              },
+              {
+                "kv_connector": "AscendStoreConnector",
+                "kv_role": "kv_consumer",
+                "kv_connector_extra_config": {
+                  "lookup_rpc_port": "'"$LOOKUP_RPC_PORT"'",
+                  "load_async": true,
+                  "backend": "mooncake"
+                }
+              }
+            ]
           }
         }'
     ```
