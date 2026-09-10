@@ -277,6 +277,9 @@ a3:
       - name: kimi25_w4a8_step_3_7
         os: linux-aarch64-nightly-a3-16
         config_file_path: kimi25_w4a8_step_3_7.yaml
+      - name: deepseek-v4-flash-dspark-w4a8-a3
+        os: linux-aarch64-nightly-a3-16
+        config_file_path: DeepSeek-V4-Flash-DSpark-W4A8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
@@ -408,6 +411,9 @@ a3-560t:
       - name: MiniMax-M3-BF16-A3
         os: linux-aarch64-a3-16-cn12-001
         config_file_path: MiniMax-M3-BF16-A3.yaml
+      - name: deepseek-v4-flash-dspark-w4a8-a3
+        os: linux-aarch64-a3-16-cn12-001
+        config_file_path: DeepSeek-V4-Flash-DSpark-W4A8-A3.yaml
   multi_card:
     test_config:
       # pytest-driven tests
