@@ -418,7 +418,6 @@ class KVPoolScheduler:
             kinds.append(kind.value if hasattr(kind, "value") else str(kind))
         return kinds
 
-
     def _floor_to_cache_transfer_granularity(self, token_len: int) -> int:
         return token_len // self.cache_transfer_granularity * self.cache_transfer_granularity
 

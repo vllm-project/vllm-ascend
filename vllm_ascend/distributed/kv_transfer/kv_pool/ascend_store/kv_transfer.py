@@ -821,9 +821,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             effective_block_size = group_block_size * cache_family_ratio
             all_hashes = []
             spec_kinds = req_meta.kv_cache_spec_kinds
-            spec_kind = (
-                spec_kinds[group_id] if spec_kinds is not None and group_id < len(spec_kinds) else None
-            )
+            spec_kind = spec_kinds[group_id] if spec_kinds is not None and group_id < len(spec_kinds) else None
             if self.enable_kv_event:
                 group_block_hashes = get_block_hashes(
                     req_meta.block_hashes,
@@ -864,11 +862,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         # full registered block_size worth of tokens).
                         if token_end - token_start != effective_block_size:
                             continue
-                        token_ids = (
-                            req_meta.token_ids[token_start:token_end]
-                            if req_meta.token_ids is not None
-                            else []
-                        )
+                        token_ids = req_meta.token_ids[token_start:token_end] if req_meta.token_ids is not None else []
                         block_idx = start // group_block_size
                         if block_idx >= len(all_hashes):
                             continue
