@@ -30,7 +30,7 @@ configuration.
 
 The configuration in this guide has been validated with W8A8 weights, INT8
 Engram storage, TP8/DP4/EP32, DSpark speculative decoding, and
-`FULL_DECODE_ONLY` ACL Graph. It uses model runner V1 and disables automatic
+`FULL_DECODE_ONLY` ACL Graph. It uses model runner V1 and supports automatic
 prefix caching.
 
 ## 3 Prerequisites
@@ -224,7 +224,6 @@ every other node is a headless worker.
       --max-num-seqs 32 \
       --gpu-memory-utilization 0.90 \
       --block-size 128 \
-      --no-enable-prefix-caching \
       --tokenizer-mode deepseek_v41 \
       --reasoning-parser deepseek_v41 \
       --tool-call-parser deepseek_v41 \
@@ -285,7 +284,6 @@ every other node is a headless worker.
       --max-num-seqs 32 \
       --gpu-memory-utilization 0.90 \
       --block-size 128 \
-      --no-enable-prefix-caching \
       --tokenizer-mode deepseek_v41 \
       --reasoning-parser deepseek_v41 \
       --tool-call-parser deepseek_v41 \
