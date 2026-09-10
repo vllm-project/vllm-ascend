@@ -19,7 +19,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.forward_context import get_forward_context, is_forward_context_available
-from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -80,11 +79,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils.math_utils import cdiv
 
 from vllm_ascend.ops.kimi_kda import AscendKimiK3DeltaAttention  # type: ignore[import-untyped]
-from vllm_ascend.ops.mla import AscendMultiHeadLatentAttention
-from vllm_ascend.utils import get_rotation_path, vllm_version_is
-
-if not vllm_version_is("0.28.0"):
-    from vllm.models.kimi_k3.amd.mla import KimiK3MultiHeadLatentAttentionWrapper
+from vllm_ascend.utils import get_rotation_path
 
 if HAS_TRITON:
     from vllm_ascend.ops.triton.kimi_k3.attention_residual import (  # type: ignore[import-untyped]
@@ -243,17 +238,6 @@ class AscendKimiMoE(nn.Module):
             router_logits=router_logits,
         )
         return final_hidden_states.view(num_tokens, hidden_size)
-
-
-if not vllm_version_is("0.28.0"):
-
-    @PluggableLayer.register_oot(name="KimiK3MultiHeadLatentAttentionWrapper")
-    class AscendKimiK3MultiHeadLatentAttention(AscendMultiHeadLatentAttention, KimiK3MultiHeadLatentAttentionWrapper):
-        """Keep Ascend MLA dispatch after vLLM #52494 introduced an AMD subclass.
-
-        OOT lookup uses the concrete class name. Inherit the upstream subclass too
-        so Python runs the Ascend initializer on the replacement instance.
-        """
 
 
 class AscendKimiMLAAttention(UpstreamKimiMLAAttention):
