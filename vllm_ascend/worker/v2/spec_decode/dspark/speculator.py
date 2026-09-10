@@ -90,7 +90,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
         # lm_head before upstream decides whether to share target weights.
         rotation_path = get_rotation_path(self.vllm_config)
         injected_rotation = rotation_path is not None and draft_hf_config is not None
-        if injected_rotation:
+        if injected_rotation and draft_hf_config is not None:
             draft_hf_config._ascend_target_rotation_path = str(rotation_path)
         try:
             model = super().load_draft_model(target_model, target_attn_layer_names)
