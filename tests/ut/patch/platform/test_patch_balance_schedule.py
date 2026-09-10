@@ -934,4 +934,3 @@ def test_balance_engine_core_hooks(monkeypatch):
             assert pbs._engine_core_mod.DPEngineCoreProc is pbs._OriginalDPEngineCoreProc
     finally:
         pbs._engine_core_mod.DPEngineCoreProc = orig
-

@@ -1224,7 +1224,9 @@ def test_recompute_waiting_connector_lora_stale_and_output_edges():
     connector_sched.kv_cache_manager.get_zeroing_block_ids_in_range = MagicMock(return_value={1})
     connector_sched.kv_cache_manager.record_prefix_cache_stats = MagicMock()
     for i in range(3):
-        connector_sched.add_request(create_request(request_id=50 + i, num_tokens=16, max_tokens=4, block_size=block_size))
+        connector_sched.add_request(
+            create_request(request_id=50 + i, num_tokens=16, max_tokens=4, block_size=block_size)
+        )
     connector_sched.schedule()
 
     stale = _make_recompute_scheduler()
@@ -1282,4 +1284,3 @@ def test_recompute_waiting_connector_lora_stale_and_output_edges():
     model_out.kv_connector_output = kv_out
     output_sched._handle_invalid_blocks = MagicMock(return_value=set())
     output_sched.update_from_output(out, model_out)
-
