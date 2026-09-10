@@ -107,6 +107,36 @@ Batch invariance can be enabled by setting the `VLLM_BATCH_INVARIANT` environmen
 export VLLM_BATCH_INVARIANT=1
 ```
 
+### Scheduling limitations
+
+Chunked prefill, request preemption (eviction and recomputation), and prefix
+caching are not supported with batch invariance. At runtime,
+`VLLM_BATCH_INVARIANT=1` automatically disables chunked prefill and prefix caching,
+overriding their configuration flags, and selects a non-preemptive scheduler.
+It also forces `cache_config.block_size=128` for the standard Ascend attention
+backends, overriding any explicit `--block-size` value. You do not need to pass
+`--block-size 128` separately. A single startup warning prefixed with
+`VLLM_BATCH_INVARIANT=1:` summarizes these changes and the resolved block size
+and prefill token budget.
+The prefill token budget is raised to at least `max_model_len` so a complete
+prompt can be processed in one iteration.
+
+The scheduler reserves KV blocks for each admitted request's prompt and maximum
+generation length (`max_tokens`, capped by `max_model_len`, including speculative
+lookahead). New requests wait when the remaining capacity is insufficient;
+running requests retain their KV blocks until completion or cancellation.
+A request whose reservation exceeds the total usable KV capacity raises an error
+instead of waiting indefinitely. Reduce `max_tokens`/`max_model_len` or increase
+KV cache memory in that case. Resetting the prefix cache with eviction of running
+requests is refused while requests are running.
+
+This reservation policy currently requires full-attention KV cache layouts.
+Other cache layouts, KV transfer, and custom or specialized schedulers are
+rejected rather than running without the preemption guarantee. Both standard
+synchronous and asynchronous scheduling are supported. Reserving generation
+capacity can reduce concurrency, and the larger prefill budget can increase
+memory usage.
+
 ### Online Inference (Server Mode)
 
 To start a vLLM server with batch invariance enabled:
