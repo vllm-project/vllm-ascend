@@ -453,15 +453,23 @@ class NPUModelRunner(GPUModelRunner):
         query_start_loc_np[num_reqs + 1 :] = num_tokens
 
         if (adaptive_verification is None and batch_desc.cg_mode == CUDAGraphMode.FULL):
-            # This is only required for vllm-ascend.
-            query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
-                num_tokens_after_padding,
-                num_reqs_padded,
-                num_reqs,
-                query_start_loc_np,
-                batch_desc.cg_mode,
-                batch_desc.num_reqs,
-            )
+            # av uses varlen full graphs for its entire lifecycle including prefills before first draft block exists
+            if self.adaptive_verification is not None:
+                query_start_loc_np, num_reqs_padded = self._pad_adaptive_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                )
+            else:
+                query_start_loc_np, num_reqs_padded = self._pad_query_start_loc_for_fia(
+                    num_tokens_after_padding,
+                    num_reqs_padded,
+                    num_reqs,
+                    query_start_loc_np,
+                    batch_desc.cg_mode,
+                    batch_desc.num_reqs,
+                )
 
         query_start_loc = self.input_buffers.query_start_loc
         async_copy_to_gpu(query_start_loc_np, out=query_start_loc)
@@ -527,7 +535,7 @@ class NPUModelRunner(GPUModelRunner):
         # prepare_pos_seq_lens() operates only on the real requests and clears seq_lens[num_reqs:] to zero.
         # _pad_query_start_loc_for_fia() may append one graph-only request for a mixed/AV FULL batch
         # give that dummy row the corresponding query length as well.
-        if (adaptive_verification is not None and num_reqs_padded > num_reqs):
+        if (self.adaptive_verification is not None and num_reqs_padded > num_reqs):
             dummy_seq_lens_np = np.diff(query_start_loc_np[num_reqs : num_reqs_padded + 1]).astype(np.int32, copy=False)
             self.input_buffers.seq_lens_np[num_reqs:num_reqs_padded] = dummy_seq_lens_np
             self.input_buffers.seq_lens[num_reqs:num_reqs_padded].copy_(torch.from_numpy(dummy_seq_lens_np), non_blocking=False)
