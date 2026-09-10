@@ -58,6 +58,15 @@ class DCPSpecDecodeFirstPassInputs:
 
 
 @dataclass(frozen=True)
+class DCPDummyRunMetadata:
+    """Synthetic decode state shared by DCP dummy metadata builders."""
+
+    seq_len: int
+    seq_lens_cpu: np.ndarray
+    num_computed_tokens_cpu: np.ndarray
+
+
+@dataclass(frozen=True)
 class DCPAsyncSpecDecodeRebuildResult:
     """Status returned after rebuilding async speculative inputs."""
 
@@ -163,6 +172,43 @@ class DCPManager:
         self.query_lens_full.cpu[:num_reqs] = torch.from_numpy(scheduled)
         self.query_lens_full.cpu[num_reqs:].fill_(0)
         self.query_lens_full.copy_to_gpu()
+
+    def prepare_dummy_run_metadata(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        num_reqs: int,
+        seq_len: int,
+        num_computed_tokens: np.ndarray,
+        num_prompt_tokens: np.ndarray,
+        uniform_decode: bool,
+    ) -> DCPDummyRunMetadata | None:
+        """Initialize DCP state for a model-runner dummy execution.
+
+        Uniform-decode dummy runs do not have scheduler-owned requests, so
+        their request state must be synthesized instead of inherited from the
+        previous real batch. Non-uniform runs keep using the input-batch state.
+        """
+        dummy_metadata = None
+        if uniform_decode:
+            max_query_len = int(num_scheduled_tokens[:num_reqs].max())
+            if seq_len <= max_query_len:
+                seq_len = max_query_len + 1
+            dummy_num_computed_tokens = (seq_len - num_scheduled_tokens[:num_reqs]).astype(np.int32, copy=False)
+            dummy_metadata = DCPDummyRunMetadata(
+                seq_len=seq_len,
+                seq_lens_cpu=(dummy_num_computed_tokens + num_scheduled_tokens[:num_reqs]),
+                num_computed_tokens_cpu=dummy_num_computed_tokens,
+            )
+            num_computed_tokens = dummy_num_computed_tokens
+            num_prompt_tokens = dummy_num_computed_tokens
+
+        self.init_batch_info(
+            num_scheduled_tokens,
+            num_reqs,
+            num_computed_tokens,
+            num_prompt_tokens,
+        )
+        return dummy_metadata
 
     def prepare_spec_decode_first_pass_inputs(
         self,
@@ -467,6 +513,37 @@ class DCPManager:
             self.vllm_config.parallel_config.cp_kv_cache_interleave_size,
         )
 
+    def prepare_dspark_first_pass_cp_metadata(
+        self,
+        common_attn_metadata: Any,
+        num_query_per_req: int,
+    ) -> tuple[None, None]:
+        """Build DCP metadata for DSpark's parallel draft query block.
+
+        DSpark has already extended ``seq_lens`` by the complete draft query
+        width at this point. Its proposer marks every draft query as decode:
+        context KV is stored separately, and attention reads the query block
+        back from the paged cache. Retain the complete sequence length even
+        when the originating target batch contains prefill requests.
+        """
+        from vllm_ascend.attention.utils import AscendDCPMetadata
+
+        seq_lens_cpu = getattr(common_attn_metadata, "_seq_lens_cpu", None)
+        if seq_lens_cpu is None:
+            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        local_seq_lens = self._get_dcp_local_seq_lens(seq_lens_cpu)
+        common_attn_metadata.context_parallel_metadata = AscendDCPMetadata(
+            num_computed_tokens_of_dcp=local_seq_lens.numpy(),
+            query_lens_cpu=torch.full(
+                (common_attn_metadata.num_reqs,),
+                num_query_per_req,
+                dtype=torch.int32,
+            ),
+            max_query_len=num_query_per_req,
+            dcp_mtp_attn_mask=None,
+        )
+        return None, None
+
     @staticmethod
     def _is_mla_kv_cache_spec(kv_cache_spec: Any) -> bool:
         from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
@@ -686,11 +763,8 @@ class DCPManager:
             interleave_size,
         )[..., self.dcp_world_rank]
         upper = local_q - 1
-        full_mask = (
-            (k_indices[None, None, :] > upper[:, :, None])
-            & (upper[:, :, None] >= 0)
-            & valid_q[:, :, None]
-            & valid_k[:, None, :]
-        )
+        # Before this rank's first key, upper is -1 and every local key is
+        # in the query's future, even if later queries have local context.
+        full_mask = (k_indices[None, None, :] > upper[:, :, None]) & valid_q[:, :, None] & valid_k[:, None, :]
         output[:num_decode_reqs, :max_q, :max_k] = full_mask
         return output

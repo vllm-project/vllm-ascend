@@ -8,7 +8,6 @@ from vllm.config.speculative import SpeculativeConfig
 _orig_post_init = SpeculativeConfig.__post_init__
 _orig_hf_config_override = SpeculativeConfig.hf_config_override
 
-
 # Transformers 5.14 inherited a hidden_size % num_heads check from Llama in
 # DeepseekV2Config. K3 MLA has independent projection/head dimensions (e.g.
 # hidden_size=7168, num_heads=96), so that MHA constraint does not apply.
@@ -76,12 +75,9 @@ def _normalize_deepseek_v4_dspark_draft(draft_model_config) -> None:
 
 
 @contextmanager
-def _without_upstream_dspark_dcp_guard(self: SpeculativeConfig):
+def _temporarily_disable_dspark_dcp(self: SpeculativeConfig):
     target_parallel_config = self.target_parallel_config
-    if (
-        getattr(self, "method", None) != "dspark"
-        or target_parallel_config.decode_context_parallel_size <= 1
-    ):
+    if getattr(self, "method", None) != "dspark" or target_parallel_config.decode_context_parallel_size <= 1:
         yield
         return
 
@@ -95,7 +91,8 @@ def _without_upstream_dspark_dcp_guard(self: SpeculativeConfig):
 
 
 def _dspark_post_init(self):
-    with _without_upstream_dspark_dcp_guard(self):
+    # TODO: This block can be deleted after the upstream supports the overlay of mla dcp and dspark
+    with _temporarily_disable_dspark_dcp(self):
         _orig_post_init(self)
     if self.use_dspark():
         draft_model_config = getattr(self, "draft_model_config", None)

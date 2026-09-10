@@ -1021,8 +1021,12 @@ def test_ascend_mamba_cache_lookup_ignores_dcp_sharding() -> None:
         mamba_cache_mode="none",
     )
 
+    # The patch module replaces vLLM's public MambaManager symbol with the
+    # Ascend subclass, so patch the subclass's direct base explicitly.
+    base_mamba_manager = AscendMambaManager.__base__
+    assert base_mamba_manager is not None
     with patch.object(
-        AscendMambaManager.__mro__[1],
+        base_mamba_manager,
         "find_longest_cache_hit",
         return_value=((), 0),
     ) as find_cache_hit:
