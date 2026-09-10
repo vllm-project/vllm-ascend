@@ -990,13 +990,16 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
 
 
 def get_spec_layer_idx_from_weight_name(config: Glm5NextConfig, weight_name: str) -> int | None:
-    if hasattr(config, "num_nextn_predict_layers") and (config.num_nextn_predict_layers > 0):
-        layer_idx = config.num_hidden_layers
-        for i in range(config.num_nextn_predict_layers):
-            if weight_name.startswith(f"model.layers.{layer_idx + i}.") or weight_name.startswith(
-                f"layers.{layer_idx + i}."
-            ):
-                return layer_idx + i
+    num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0)
+    if num_mtp_layers <= 0:
+        return None
+
+    layer_idx = config.num_hidden_layers
+    for i in range(num_mtp_layers):
+        if weight_name.startswith(f"model.layers.{layer_idx + i}.") or weight_name.startswith(
+            f"layers.{layer_idx + i}."
+        ):
+            return layer_idx + i
     return None
 
 

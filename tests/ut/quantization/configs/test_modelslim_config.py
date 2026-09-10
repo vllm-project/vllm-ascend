@@ -743,6 +743,78 @@ class TestQuantPrefixMapper(TestBase):
 
         self.assertIsInstance(method, AscendUnquantizedLinearMethod)
 
+    def test_glm5_mtp_quant_prefix_strips_mtp_block(self):
+        config = AscendModelSlimConfig()
+        prefix = "model.layers.45.mtp_block.self_attn.fused_qkv_a_proj"
+        expected = "model.layers.45.self_attn.fused_qkv_a_proj"
+
+        self.assertEqual(
+            config.quant_prefix_mapper("glm5_next_mtp", prefix),
+            expected,
+        )
+
+    def test_glm5_mtp_resolves_real_fused_mlp_prefix(self):
+        layer_prefix = "model.layers.45.mlp"
+        quant_description = {
+            f"{layer_prefix}.gate_proj.weight": "W8A8_DYNAMIC",
+            f"{layer_prefix}.up_proj.weight": "W8A8_DYNAMIC",
+        }
+        config = AscendModelSlimConfig(quant_description)
+        config._update_packed_modules_mapping("glm5_next_mtp")
+        prefix = config.quant_prefix_mapper(
+            "glm5_next_mtp",
+            f"{layer_prefix}.gate_up_proj",
+        )
+
+        self.assertEqual(prefix, f"{layer_prefix}.gate_up_proj")
+        self.assertEqual(
+            get_quant_type_for_layer(
+                quant_description,
+                prefix,
+                config.packed_modules_mapping,
+            ),
+            "W8A8_DYNAMIC",
+        )
+
+    def test_glm5_mtp_float_experts_stay_unquantized(self):
+        experts_prefix = "model.layers.45.mlp.experts"
+        quant_description = {
+            f"{experts_prefix}.0.{name}.weight": "FLOAT"
+            for name in ("gate_proj", "up_proj", "down_proj")
+        }
+        config = AscendModelSlimConfig(quant_description)
+        config._update_packed_modules_mapping("glm5_next_mtp")
+        prefix = config.quant_prefix_mapper(
+            "glm5_next_mtp",
+            experts_prefix,
+        )
+
+        self.assertEqual(prefix, experts_prefix)
+        self.assertIsNone(
+            get_quant_type_for_layer(
+                quant_description,
+                prefix,
+                config.packed_modules_mapping,
+            )
+        )
+
+    def test_glm5_multimodal_quant_prefix_uses_language_model_alias(self):
+        quant_prefix = "language_model.model.layers.0.self_attn.fused_qkv_a_proj"
+        config = AscendModelSlimConfig(
+            {
+                f"{quant_prefix.replace('fused_qkv_a_proj', 'q_a_proj')}.weight": "W8A8_DYNAMIC",
+                f"{quant_prefix.replace('fused_qkv_a_proj', 'kv_a_proj_with_mqa')}.weight": "W8A8_DYNAMIC",
+            }
+        )
+        config._update_packed_modules_mapping("glm5_next")
+
+        prefix = config.quant_prefix_mapper(
+            "glm5_next",
+            "model.layers.0.self_attn.fused_qkv_a_proj",
+        )
+
+        self.assertEqual(prefix, quant_prefix)
+
     def test_non_gemma4_moe_experts_prefix_is_not_rewritten(self):
         config = AscendModelSlimConfig()
 

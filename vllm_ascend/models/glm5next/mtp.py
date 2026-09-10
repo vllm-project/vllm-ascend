@@ -249,6 +249,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
+        if name.startswith("layers."):
+            name = f"model.{name}"
         spec_layer_weight_names = [
             "embed_tokens",
             "enorm",
@@ -283,7 +285,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         own_head_weight = f"model.layers.{self.model.mtp_start_layer_idx}.shared_head.head.weight"
         self.has_own_lm_head = own_head_weight in loaded_weights
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[typing.Any, ...]]) -> set[str]:
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
@@ -292,13 +294,16 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
         ]
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-        )
+        if self.config.n_routed_experts is not None:
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
+                self,
+                ckpt_gate_proj_name="gate_proj",
+                ckpt_down_proj_name="down_proj",
+                ckpt_up_proj_name="up_proj",
+                num_experts=self.config.n_routed_experts,
+            )
+        else:
+            expert_params_mapping = []
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -308,8 +313,14 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         kv_a_pad_size = 0
         if self.config.mla_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
+        for weight in weights:
+            name, loaded_weight = weight[:2]
+            loader_kwargs: dict = weight[2] if len(weight) > 2 else {}
+            if (
+                "rotary_emb.inv_freq" in name
+                or "rotary_emb.cos_cached" in name
+                or "rotary_emb.sin_cached" in name
+            ):
                 continue
             # Multimodal (Glm5NextForConditionalGeneration) checkpoints prefix
             # the text-tower weights with "model.language_model."; the MTP head
@@ -353,6 +364,8 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                     continue
                 name_mapped = name.replace(weight_name, param_name)
                 if (param_name == "fused_qkv_a_proj") and name_mapped not in params_dict:
+                    if name not in params_dict:
+                        raise KeyError(name_mapped)
                     continue
                 else:
                     name = name_mapped
@@ -395,7 +408,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                    weight_loader(param, loaded_weight, **loader_kwargs)
             loaded_params.add(name)
 
         loaded_layers: set[int] = set()

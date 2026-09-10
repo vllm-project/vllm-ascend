@@ -102,6 +102,12 @@ UPDATED_PACKED_MODULES_MAPPING: dict[str, dict[str, list[str]]] = {
         "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
         "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
     },
+    "glm5_next_mtp": {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
+        "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
+    },
     "deepseek_mtp": {
         "gate_up_proj": ["gate_proj", "up_proj"],
     },
@@ -174,6 +180,11 @@ QUANT_MODEL_SUBSTR_MAPPINGS = {
     # (e.g. "model.layers.45.self_attn.q_proj.weight"). Strip it so the quant
     # lookup matches the on-disk naming.
     "step3p5_mtp": {
+        ".mtp_block.": ".",
+    },
+    # GLM-5 MTP nests the decoder under ``mtp_block`` while the ModelSlim
+    # description retains checkpoint-style names.
+    "glm5_next_mtp": {
         ".mtp_block.": ".",
     },
     # Gemma4 MoE renames ".experts." to ".moe.experts." in the vLLM module tree
@@ -459,6 +470,16 @@ class AscendModelSlimConfig(QuantizationConfig):
                 orig_to_new_substr=substr_mapping or {},
             )
             prefix = hf_to_vllm_mapper._map_name(prefix)
+
+        if model_type == "glm5_next" and prefix.startswith("model.layers."):
+            if not self._has_quant_weight(prefix):
+                candidate = prefix.replace(
+                    "model.layers.",
+                    "language_model.model.layers.",
+                    1,
+                )
+                if self._has_quant_weight(candidate):
+                    return candidate
 
         if model_type == "step3p5_mtp" and prefix.startswith("model.layers."):
             # Step3P5 MTP and newly generated Step3P7 W8A8 MTP checkpoints use

@@ -1,5 +1,7 @@
 from dataclasses import replace
+from typing import Literal, get_args
 
+import vllm.config.speculative as speculative_config
 from transformers import DeepseekV2Config, PretrainedConfig
 from vllm.config.speculative import SpeculativeConfig
 
@@ -34,6 +36,15 @@ def _normalize_legacy_qwen3_dspark_config(hf_config: PretrainedConfig) -> Pretra
                 "architectures": ["Qwen3DSparkModel"],
                 "mask_token_id": dflash_config["mask_token_id"],
                 "target_layer_ids": dflash_config["target_layer_ids"],
+            }
+        )
+    if hf_config.model_type in ("glm5_next", "glm5_next_text"):
+        n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+        hf_config.model_type = "glm5_next_mtp"
+        hf_config.update(
+            {
+                "n_predict": n_predict,
+                "architectures": ["Glm5NextMTPModel"],
             }
         )
     return hf_config
@@ -89,3 +100,9 @@ def _dspark_post_init(self):
 
 SpeculativeConfig.hf_config_override = staticmethod(_normalize_legacy_qwen3_dspark_config)
 SpeculativeConfig.__post_init__ = _dspark_post_init
+
+if "glm5_next_mtp" not in get_args(speculative_config.MTPModelTypes):
+    speculative_config.MTPModelTypes = Literal[
+        *get_args(speculative_config.MTPModelTypes),
+        "glm5_next_mtp",
+    ]

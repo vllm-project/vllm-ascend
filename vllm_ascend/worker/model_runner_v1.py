@@ -3137,8 +3137,18 @@ class NPUModelRunner(GPUModelRunner):
     ) -> tuple[CUDAGraphMode, BatchDescriptor, bool, torch.Tensor | None, CUDAGraphStat | None]:
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
         # A stateful P/D handoff can use a uniform decode graph even at
-        # prompt_len - 1 computed tokens. Keep first-token prefills out.
-        has_initial_state = np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0)
+        # prompt_len - 1 computed tokens, but speculative decoding cannot:
+        # concurrent partial-prefill rows can otherwise replay a decode graph
+        # whose padded metadata still contains another request's state.
+        if self.speculative_config:
+            has_initial_state = np.all(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                >= self.input_batch.num_prompt_tokens[:num_reqs]
+            )
+        else:
+            has_initial_state = np.all(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs] > 0
+            )
         uniform_decode = (
             (
                 has_initial_state
@@ -3620,6 +3630,32 @@ class NPUModelRunner(GPUModelRunner):
         # it only happens for cudagraph_runtime_mode=FULL.
         return force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
 
+    def _prepare_dummy_spec_decode_metadata(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        num_reqs: int,
+        num_reqs_padded: int,
+    ) -> bool:
+        if self.speculative_config is None:
+            return False
+
+        accepted_tokens = np.asarray(
+            num_scheduled_tokens[:num_reqs],
+            dtype=np.int32,
+        )
+        self.num_decode_draft_tokens.np[:num_reqs] = accepted_tokens - 1
+        self.num_accepted_tokens.np[:num_reqs] = accepted_tokens
+        if num_reqs_padded > num_reqs:
+            self.num_decode_draft_tokens.np[num_reqs:num_reqs_padded] = (
+                self.uniform_decode_query_len - 1
+            )
+            self.num_accepted_tokens.np[num_reqs:num_reqs_padded] = (
+                self.uniform_decode_query_len
+            )
+        self.num_decode_draft_tokens.copy_to_gpu()
+        self.num_accepted_tokens.copy_to_gpu()
+        return True
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -3799,6 +3835,15 @@ class NPUModelRunner(GPUModelRunner):
                 # rows as well so device-side metadata does not see stale block ids.
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
+                # Dummy uniform-decode runs must expose the same speculative
+                # metadata as the real decode path. Otherwise GDN/KDA builders
+                # classify the multi-token rows as prefills during graph warmup.
+                use_spec_decode = uniform_decode and self._prepare_dummy_spec_decode_metadata(
+                    num_scheduled_tokens,
+                    num_reqs,
+                    num_reqs_padded,
+                )
+
                 # Invalidate real-request slots before attention backends derive
                 # or copy their backend-specific metadata for dummy execution.
                 if not is_graph_capturing:
@@ -3823,6 +3868,7 @@ class NPUModelRunner(GPUModelRunner):
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_desc,
                     skip_gdn_state_update=skip_gdn_state_update,
+                    use_spec_decode=use_spec_decode,
                 )
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
