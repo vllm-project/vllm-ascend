@@ -939,7 +939,7 @@ The A2 series uses a different optimization stack than A3: FlashComm1 and DSA-CP
 
 On Atlas 800 A2, where each node exposes 8 cards, the same global P/D topology (Prefill `DP4 TP8`, Decode `DP8 TP4`) is split across 8 nodes: 4 prefill nodes hosting 1 DP rank each (8 cards per rank), and 4 decode nodes hosting 2 DP ranks each (4 cards per rank). The `launch_online_dp.py` above is reused as-is. The prefill side enables FlashComm1 and DSA CP; the decode side enables MLAPO and `DYNAMIC_EPLB` with a `FULL_DECODE_ONLY` graph. Both sides enable prefix caching and MTP (`num_speculative_tokens=1` on prefill, `3` on decode). All IPs, NIC names, ports and weight paths below are placeholders.
 
-=== "GLM-5.2-w4a8c8"
+**GLM-5.2-w4a8c8:**
 
 `GLM-5.2-w4a8c8` is an experimental feature with known accuracy issues in Prefill-Decode (PD) disaggregation scenarios (see [Model Weight](#31-model-weight)).
 
@@ -1133,7 +1133,7 @@ vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w4a8c8 \
     --speculative-config '{"num_speculative_tokens": 5, "method":"deepseek_mtp", "enforce_eager":true}'
 ```
 
-=== "GLM-5.2-w8a8c8"
+**GLM-5.2-w8a8c8:**
 
 `run_dp_template.sh` for the prefill nodes:
 
