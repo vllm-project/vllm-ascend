@@ -687,7 +687,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
     --max-retries 3
     ```
 
-    The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible over HTTP at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
 === "950DT products"
 
@@ -856,7 +856,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         31060 31061
     ```
 
-    The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
+    The service is then accessible over HTTP at `<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
 Key Parameter Descriptions:
 
