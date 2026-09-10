@@ -7,8 +7,8 @@ import pytest
 from vllm import SamplingParams
 from vllm.distributed.device_communicators import shm_broadcast
 from vllm.transformers_utils.utils import maybe_model_redirect
-from zmq import Context
 from zmq.constants import LINGER
+from zmq.sugar.context import Context
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
 from tests.e2e.model_utils import check_outputs_equal
