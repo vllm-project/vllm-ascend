@@ -22,6 +22,8 @@ constexpr uint32_t VECTOR_ALIGNMENT_ELEMENTS = 256;
 constexpr int32_t FP64_WEIGHT_FRACTION_BITS = 42;
 constexpr int32_t FP32_ABS_MASK = 0x7FFFFFFF;
 constexpr int32_t FP32_EXP_MASK = 0x7F800000;
+// One DMA-aligned record per original tile; max and sum phases use separate GM regions.
+constexpr uint32_t TILE_STAT_WORDS = 8;
 
 #define CATEGORICAL_SAMPLE_CHECK(condition, message) \
     do {                                             \
@@ -48,6 +50,7 @@ struct CategoricalSampleTilingData {
     uint32_t applyTemperature;
     uint32_t returnLse;
     uint32_t useFp64;
+    uint32_t coresPerRow;
 };
 
 __aicore__ inline uint32_t MinU32(uint32_t lhs, uint32_t rhs)
@@ -159,6 +162,7 @@ public:
         GM_ADDR logitsCacheCol,
         GM_ADDR sampledTokenIds,
         GM_ADDR lse,
+        GM_ADDR workspace,
         CategoricalSampleTilingData* tilingData,
         TPipe* pipe)
     {
@@ -178,6 +182,7 @@ public:
         applyTemperature_ = tilingData->applyTemperature != 0;
         returnLse_ = tilingData->returnLse != 0;
         useFp64_ = tilingData->useFp64 != 0;
+        coresPerRow_ = tilingData->coresPerRow;
         pipe_ = pipe;
 
         processedLogitsGm_.SetGlobalBuffer(
@@ -208,10 +213,18 @@ public:
         pipe_->InitBuffer(tileMassesBuf_, AlignUpU32(tileCount_ * sizeof(uint64_t), 32));
         pipe_->InitBuffer(sampledOutputBuf_, 32);
         pipe_->InitBuffer(lseOutputBuf_, 32);
+        if (coresPerRow_ > 1) {
+            tileStatsGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(GetUserWorkspace(workspace)));
+            pipe_->InitBuffer(tileStatsBuf_, tileCount_ * TILE_STAT_WORDS * sizeof(float));
+        }
     }
 
     __aicore__ inline void Process()
     {
+        if (coresPerRow_ > 1) {
+            ProcessCooperativeRow();
+            return;
+        }
         const uint32_t coreIndex = GetBlockIdx();
         const uint32_t coreCount = GetBlockNum();
         for (uint32_t row = coreIndex; row < numRows_; row += coreCount) {
@@ -220,6 +233,95 @@ public:
     }
 
 private:
+    __aicore__ inline void StoreTileStatistics(uint32_t row, uint32_t phase, uint32_t begin, uint32_t end)
+    {
+        const uint32_t offset = ((row * 2 + phase) * tileCount_ + begin) * TILE_STAT_WORDS;
+        PipeBarrier<PIPE_ALL>();
+        DataCopy(tileStatsGm_[offset], tileStatsBuf_.Get<float>()[begin * TILE_STAT_WORDS],
+                 (end - begin) * TILE_STAT_WORDS);
+        PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline void LoadTileStatistics(uint32_t row, uint32_t phase)
+    {
+        DataCopy(tileStatsBuf_.Get<float>(), tileStatsGm_[(row * 2 + phase) * tileCount_ * TILE_STAT_WORDS],
+                 tileCount_ * TILE_STAT_WORDS);
+        PipeBarrier<PIPE_ALL>();
+    }
+
+    __aicore__ inline void ProcessCooperativeRow()
+    {
+        const uint32_t row = GetBlockIdx() / coresPerRow_;
+        const uint32_t lane = GetBlockIdx() % coresPerRow_;
+        const uint32_t begin = tileCount_ * lane / coresPerRow_;
+        const uint32_t end = tileCount_ * (lane + 1) / coresPerRow_;
+        bool valid = row < numRows_;
+        if (valid) {
+            const int64_t request = expandedIdxMappingGm_.GetValue(row);
+            valid = request >= 0 && request < static_cast<int64_t>(numRequests_);
+            if (valid) {
+                activeRequestIndex_ = static_cast<uint32_t>(request);
+                activeTemperature_ = temperatureGm_.GetValue(request);
+                activeLogitsCacheCol_ = hasLogitsCacheCol_ ?
+                    logitsCacheColGm_.GetValue(logitsCacheColPerToken_ ? row : 0) : 0;
+                valid = !hasLogitsCache_ || (activeLogitsCacheCol_ >= 0 &&
+                    static_cast<uint32_t>(activeLogitsCacheCol_) < logitsCacheNumCols_);
+            }
+        }
+        LocalTensor<float> stats = tileStatsBuf_.Get<float>();
+        if (valid) {
+            for (uint32_t tile = begin; tile < end; ++tile) {
+                uint32_t first = 0;
+                const float maximum = TileMax(row, tile, activeTemperature_ == 0.0f, first);
+                stats.SetValue(tile * TILE_STAT_WORDS, maximum);
+                stats.ReinterpretCast<uint32_t>().SetValue(tile * TILE_STAT_WORDS + 1, first);
+                stats.SetValue(tile * TILE_STAT_WORDS + 2, cooperativeNan_ ? 1.0f : 0.0f);
+            }
+            StoreTileStatistics(row, 0, begin, end);
+        }
+        // Padding, invalid metadata and the optional alignment lane also reach both barriers.
+        SyncAll();
+        if (valid) {
+            LoadTileStatistics(row, 0);
+            for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+                cooperativeNan_ |= stats.GetValue(tile * TILE_STAT_WORDS + 2) != 0.0f;
+                const float maximum = stats.GetValue(tile * TILE_STAT_WORDS);
+                if (maximum > cooperativeMax_) {
+                    cooperativeMax_ = maximum;
+                    cooperativeFirstMax_ = static_cast<int64_t>(tile) * tileElements_ +
+                        stats.ReinterpretCast<uint32_t>().GetValue(tile * TILE_STAT_WORDS + 1);
+                }
+            }
+            if (!cooperativeNan_ && cooperativeMax_ != NEG_INFINITY && cooperativeMax_ != POS_INFINITY) {
+                const bool isGreedy = activeTemperature_ == 0.0f;
+                for (uint32_t tile = begin; tile < end; ++tile) {
+                    float sum = 0.0f;
+                    uint64_t mass = 0;
+                    if (returnLse_ || (!isGreedy && !useFp64_)) {
+                        sum = ComputeTileExpSum(row, tile, cooperativeMax_, hasLogitsCache_);
+                    } else if (isGreedy && hasLogitsCache_) {
+                        LoadTile(row, tile, true);
+                    }
+                    if (!isGreedy && useFp64_) {
+                        mass = ComputeTileFixedMass(row, tile, cooperativeMax_, hasLogitsCache_ && !returnLse_);
+                    }
+                    stats.SetValue(tile * TILE_STAT_WORDS, sum);
+                    stats.ReinterpretCast<uint64_t>().SetValue(tile * TILE_STAT_WORDS / 2 + 1, mass);
+                }
+                StoreTileStatistics(row, 1, begin, end);
+            }
+        }
+        SyncAll();
+        if (row < numRows_ && lane == 0) {
+            // Device assertions and special-value exits occur only after the last collective.
+            CATEGORICAL_SAMPLE_CHECK(!cooperativeNan_, "CategoricalSample processed logits must not contain NaN\n");
+            if (valid && cooperativeMax_ != NEG_INFINITY && cooperativeMax_ != POS_INFINITY) {
+                LoadTileStatistics(row, 1);
+            }
+            ProcessRow(row);
+        }
+    }
+
     __aicore__ inline uint32_t TileLength(uint32_t tileIndex) const
     {
         const uint32_t tileOffset = tileIndex * tileElements_;
@@ -345,8 +447,12 @@ private:
 
         ReduceMax(scalar[8], nanValues, work, validElements);
         PipeVToS();
-        CATEGORICAL_SAMPLE_CHECK(
-            scalar.GetValue(8) == 0.0f, "CategoricalSample processed logits must not contain NaN\n");
+        if (coresPerRow_ > 1) {
+            cooperativeNan_ |= scalar.GetValue(8) != 0.0f;
+        } else {
+            CATEGORICAL_SAMPLE_CHECK(
+                scalar.GetValue(8) == 0.0f, "CategoricalSample processed logits must not contain NaN\n");
+        }
         // ReduceMax returns the first maximum's index, including partial tiles.
         ReduceMax(scalar, logitsFloat, work, validElements, needFirstMaxIndex);
         PipeVToS();
@@ -388,7 +494,10 @@ private:
         LocalTensor<float> tileSums = tileSumsBuf_.Get<float>();
         float total = 0.0f;
         for (uint32_t tile = 0; tile < tileCount_; ++tile) {
-            const float tileSum = ComputeTileExpSum(row, tile, rowMax, writeCache);
+            // Keep the original tile order and FP32 additions, independent of lane count.
+            const float tileSum = coresPerRow_ > 1 ?
+                tileStatsBuf_.Get<float>().GetValue(tile * TILE_STAT_WORDS) :
+                ComputeTileExpSum(row, tile, rowMax, writeCache);
             tileSums.SetValue(tile, tileSum);
             total += tileSum;
         }
@@ -439,7 +548,9 @@ private:
         LocalTensor<uint64_t> tileMasses = tileMassesBuf_.Get<uint64_t>();
         uint64_t totalMass = 0;
         for (uint32_t tile = 0; tile < tileCount_; ++tile) {
-            const uint64_t tileMass = ComputeTileFixedMass(row, tile, rowMax, writeCache);
+            const uint64_t tileMass = coresPerRow_ > 1 ?
+                tileStatsBuf_.Get<uint64_t>().GetValue(tile * TILE_STAT_WORDS / 2 + 1) :
+                ComputeTileFixedMass(row, tile, rowMax, writeCache);
             tileMasses.SetValue(tile, tileMass);
             totalMass += tileMass;
         }
@@ -627,7 +738,7 @@ private:
 
     __aicore__ inline void WriteProcessedLogitsRow(uint32_t row)
     {
-        if (!hasLogitsCache_) {
+        if (!hasLogitsCache_ || coresPerRow_ > 1) {
             return;
         }
         for (uint32_t tile = 0; tile < tileCount_; ++tile) {
@@ -681,9 +792,9 @@ private:
             "CategoricalSample output processed logits column is outside cache bounds\n");
         activeTemperature_ = temperatureGm_.GetValue(requestIndex);
         const bool isGreedy = activeTemperature_ == 0.0f;
-        float rowMax = NEG_INFINITY;
-        int64_t firstMaxIndex = 0;
-        for (uint32_t tile = 0; tile < tileCount_; ++tile) {
+        float rowMax = cooperativeMax_;
+        int64_t firstMaxIndex = cooperativeFirstMax_;
+        for (uint32_t tile = 0; coresPerRow_ == 1 && tile < tileCount_; ++tile) {
             uint32_t tileFirstMaxIndex = 0;
             const float tileMax = TileMax(row, tile, isGreedy, tileFirstMaxIndex);
             if (tileMax > rowMax) {
@@ -753,6 +864,8 @@ private:
     TBuf<QuePosition::VECCALC> tileMassesBuf_;
     TBuf<QuePosition::VECCALC> sampledOutputBuf_;
     TBuf<QuePosition::VECCALC> lseOutputBuf_;
+    TBuf<QuePosition::VECCALC> tileStatsBuf_;
+    GlobalTensor<float> tileStatsGm_;
 
     GlobalTensor<T> processedLogitsGm_;
     GlobalTensor<MappingType> expandedIdxMappingGm_;
@@ -774,6 +887,10 @@ private:
     uint32_t logitsCacheNumCols_ = 0;
     uint32_t tileElements_ = 0;
     uint32_t tileCount_ = 0;
+    uint32_t coresPerRow_ = 1;
+    float cooperativeMax_ = NEG_INFINITY;
+    int64_t cooperativeFirstMax_ = 0;
+    bool cooperativeNan_ = false;
     uint32_t activeRequestIndex_ = 0;
     int32_t activeLogitsCacheCol_ = 0;
     float activeTemperature_ = 1.0f;

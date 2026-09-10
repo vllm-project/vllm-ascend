@@ -16,6 +16,7 @@ import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass
+from functools import partial
 
 import pytest
 import torch
@@ -320,6 +321,74 @@ def test_categorical_sampling_is_invariant_to_batch_layout() -> None:
         _assert_tensor_equal(actual, baseline.cpu())
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("use_fp64", [False, True])
+@pytest.mark.parametrize("execution", ["eager", "aclgraph"])
+def test_categorical_sampling_vocab_partition_preserves_results(
+    dtype: torch.dtype, use_fp64: bool, execution: str
+) -> None:
+    """Changing row parallelism preserves tokens, LSE and raw cache, including mixed rows."""
+    vocab_size = 32769  # Multiple tiles, uneven lane partitions, and a partial final tile.
+    generator = torch.Generator().manual_seed(17)
+    real_logits = torch.randn((5, vocab_size), generator=generator).to(dtype)
+    real_logits[0, [4095, 16384, vocab_size - 1]] = 10  # Greedy ties across tiles.
+    real_logits[2, [4096, vocab_size - 1]] = float("inf")
+    real_logits[3] = float("nan")  # Padding must not participate in validation.
+    temperature = torch.tensor([0.0, 0.7, 1.0, 1.3], device=DEVICE)
+    seed = torch.tensor([101, 202, 303, 404], dtype=torch.int64, device=DEVICE)
+    expected = None
+
+    # Row-rich reference, then small/odd batches and values around common core counts.
+    for num_rows in (256, 5, 7, 16, 19, 20, 21, 39, 40, 41, 64):
+        logits = torch.full((num_rows, vocab_size), float("nan"), dtype=dtype, device=DEVICE)
+        logits[:5].copy_(real_logits)
+        mapping = torch.full((num_rows,), -1, dtype=torch.int64, device=DEVICE)
+        mapping[:5] = torch.tensor([0, 1, 2, -1, 3], dtype=torch.int64, device=DEVICE)
+        pos = torch.arange(num_rows, dtype=torch.int64, device=DEVICE) + (1 << 32)
+        cache = torch.full((4, 2, vocab_size + 32), -99.0, dtype=dtype, device=DEVICE)
+        cache_col = torch.ones(num_rows, dtype=torch.int32, device=DEVICE)
+
+        sample = partial(
+            _run_categorical_sampling,
+            logits,
+            mapping,
+            temperature,
+            seed,
+            pos,
+            return_lse=True,
+            apply_temperature=True,
+            logits_cache=cache,
+            logits_cache_col=cache_col,
+            use_fp64=use_fp64,
+        )
+
+        outputs = sample()
+        if execution == "aclgraph":
+            torch.npu.synchronize()
+            graph = torch.npu.NPUGraph()
+            with torch.npu.graph(graph):
+                outputs = sample()
+            # Reuse the workspace repeatedly, including after its inputs change.
+            for position_offset in (17, 0):
+                pos.add_(position_offset)
+                graph.replay()
+                graph.replay()
+                pos.sub_(position_offset)
+        actual = tuple(output[:5].cpu() for output in outputs)
+        if expected is None:
+            expected = actual
+        else:
+            for result, reference in zip(actual, expected, strict=True):
+                torch.testing.assert_close(result, reference, rtol=0, atol=0)
+        assert outputs[0][0].item() == 4095
+        assert torch.count_nonzero(outputs[0][5:]).item() == 0
+        assert torch.count_nonzero(outputs[1][5:]).item() == 0
+        cached = cache.cpu()
+        torch.testing.assert_close(cached[:, 1, :vocab_size], real_logits[[0, 1, 2, 4]], rtol=0, atol=0)
+        assert torch.all(cached[:, 0] == -99)
+        assert torch.all(cached[:, 1, vocab_size:] == -99)
+
+
 @pytest.mark.parametrize("use_fp64", [False, True])
 def test_categorical_sampling_supports_zero_stride_logits(use_fp64: bool) -> None:
     """A broadcast row remains a view and is sampled as independent logical rows."""
@@ -555,10 +624,18 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
     temperature = torch.ones(1, dtype=torch.float32, device=device)
     seed = torch.ones(1, dtype=torch.int64, device=device)
     pos = torch.zeros(1, dtype=torch.int64, device=device)
+    if len(sys.argv) > 5:
+        vocab_size = int(sys.argv[5])
+        logits = torch.zeros((3, vocab_size), dtype=torch.float32, device=device)
+        logits[2] = float("nan")
+        mapping = torch.tensor([0, 1, -1], dtype=mapping_dtype, device=device)
+        temperature = torch.ones(2, dtype=torch.float32, device=device)
+        seed = torch.ones(2, dtype=torch.int64, device=device)
+        pos = torch.arange(3, dtype=torch.int64, device=device)
     cache = None
     cache_col = None
     if case == "cache_column":
-        cache = torch.full((1, 2, 4), 17.0, dtype=torch.float32, device=device)
+        cache = torch.full((temperature.numel(), 2, logits.shape[1]), 17.0, dtype=torch.float32, device=device)
         cache_col = torch.zeros((), dtype=torch.int32, device=device)
 
     def sample():
@@ -586,13 +663,13 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
         torch.npu.synchronize()
 
     if case == "nan":
-        logits[0, 0] = float("nan")
+        logits[0, -1] = float("nan")
     elif case == "all_negative_infinity":
-        logits.fill_(-float("inf"))
+        logits[0].fill_(-float("inf"))
     elif case == "mapping":
-        mapping.fill_(-2)
+        mapping[0] = -2
     elif case == "mapping_int64":
-        mapping.fill_(int(sys.argv[3]))
+        mapping[0] = int(sys.argv[3])
     elif case == "cache_column":
         cache_col.fill_(2)
     else:
@@ -608,22 +685,25 @@ _ASSERTION_SUBPROCESS = textwrap.dedent(
 
 
 @pytest.mark.parametrize("execution", ["eager", "aclgraph"])
+@pytest.mark.parametrize("vocab_size", [4, 32769])
 @pytest.mark.parametrize(
     "case,expected_message",
     [
         ("nan", "CategoricalSample processed logits must not contain NaN"),
         ("all_negative_infinity", "CategoricalSample processed logits row must not be all -inf"),
         ("mapping", "CategoricalSample expanded index mapping is outside request state"),
+        ("mapping_int64", "CategoricalSample expanded index mapping is outside request state"),
         ("cache_column", "CategoricalSample output processed logits column is outside cache bounds"),
     ],
 )
 def test_categorical_sampling_asserts_invalid_device_values(
     execution: str,
+    vocab_size: int,
     case: str,
     expected_message: str,
 ) -> None:
     result = subprocess.run(
-        [sys.executable, "-c", _ASSERTION_SUBPROCESS, case, execution],
+        [sys.executable, "-c", _ASSERTION_SUBPROCESS, case, execution, str(2**32), "native", str(vocab_size)],
         capture_output=True,
         text=True,
         timeout=120,

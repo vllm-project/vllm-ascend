@@ -25,6 +25,9 @@ constexpr size_t LSE_INDEX = 1;
 constexpr uint32_t MAX_VOCAB_SIZE = 1'048'576;
 constexpr uint32_t MAX_TILE_ELEMENTS = 4096;
 constexpr uint32_t TILE_ALIGNMENT = 256;
+// Amortize the two cross-core exchanges over at least four tiles per lane.
+constexpr uint32_t MIN_TILES_PER_CORE = 4;
+constexpr uint32_t TILE_STAT_BYTES = 32;
 
 uint32_t AlignUp(uint32_t value, uint32_t alignment)
 {
@@ -175,6 +178,11 @@ static ge::graphStatus CategoricalSampleTilingFunc(gert::TilingContext* context)
 
     const uint32_t vocab = static_cast<uint32_t>(vocabSize);
     const uint32_t tileElements = std::min(MAX_TILE_ELEMENTS, AlignUp(vocab, TILE_ALIGNMENT));
+    const uint32_t tileCount = CeilDiv(vocab, tileElements);
+    // SyncAll needs an even resident AIV launch. Do not assume a device's core count.
+    const uint32_t syncCoreNum = coreNum / 2 * 2;
+    const uint32_t coresPerRow = std::max(1U, std::min(
+        syncCoreNum / static_cast<uint32_t>(numRows), tileCount / MIN_TILES_PER_CORE));
     CategoricalSampleTilingData tilingData;
     tilingData.set_numRows(static_cast<uint32_t>(numRows));
     tilingData.set_vocabSize(vocab);
@@ -196,18 +204,26 @@ static ge::graphStatus CategoricalSampleTilingFunc(gert::TilingContext* context)
     tilingData.set_logitsCacheDtype(cacheDtype);
     tilingData.set_logitsCacheNumCols(logitsCacheNumCols);
     tilingData.set_tileElements(tileElements);
-    tilingData.set_tileCount(CeilDiv(vocab, tileElements));
+    tilingData.set_tileCount(tileCount);
     tilingData.set_hasLogitsCache(logitsCacheShape != nullptr ? 1U : 0U);
     tilingData.set_hasLogitsCacheCol(logitsCacheColShape != nullptr ? 1U : 0U);
     tilingData.set_logitsCacheColPerToken(logitsCacheColPerToken ? 1U : 0U);
     tilingData.set_applyTemperature(*applyTemperature ? 1U : 0U);
     tilingData.set_returnLse(*returnLse ? 1U : 0U);
     tilingData.set_useFp64(*useFp64 ? 1U : 0U);
+    tilingData.set_coresPerRow(coresPerRow);
 
     size_t* workspaceSize = context->GetWorkspaceSizes(1);
     OP_CHECK_NULL_WITH_CONTEXT(context, workspaceSize);
     *workspaceSize = 0;
-    context->SetBlockDim(std::min(coreNum, static_cast<uint32_t>(numRows)));
+    uint32_t blockDim = std::min(coreNum, static_cast<uint32_t>(numRows));
+    if (coresPerRow > 1) {
+        blockDim = AlignUp(static_cast<uint32_t>(numRows) * coresPerRow, 2);
+        *workspaceSize = static_cast<size_t>(numRows) * tileCount * TILE_STAT_BYTES * 2;
+        // All lanes must start together, including when other streams are active.
+        context->SetScheduleMode(1);
+    }
+    context->SetBlockDim(blockDim);
     context->SetTilingKey(tilingKey);
 
     auto rawTilingData = context->GetRawTilingData();

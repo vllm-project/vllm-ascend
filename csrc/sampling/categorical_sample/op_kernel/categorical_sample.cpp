@@ -45,17 +45,17 @@ extern "C" __global__ __aicore__ void categorical_sample(
     if (TILING_KEY_IS(1)) {
         CategoricalSample::CategoricalSampleKernel<float, DTYPE_EXPANDEDIDXMAPPING> op;
         op.Init(processedLogits, expandedIdxMapping, temperature, seed, pos, logitsCache,
-                logitsCacheCol, sampledTokenIds, lse, &tilingData, &pipe);
+                logitsCacheCol, sampledTokenIds, lse, workspace, &tilingData, &pipe);
         op.Process();
     } else if (TILING_KEY_IS(2)) {
         CategoricalSample::CategoricalSampleKernel<half, DTYPE_EXPANDEDIDXMAPPING> op;
         op.Init(processedLogits, expandedIdxMapping, temperature, seed, pos, logitsCache,
-                logitsCacheCol, sampledTokenIds, lse, &tilingData, &pipe);
+                logitsCacheCol, sampledTokenIds, lse, workspace, &tilingData, &pipe);
         op.Process();
     } else if (TILING_KEY_IS(3)) {
         CategoricalSample::CategoricalSampleKernel<bfloat16_t, DTYPE_EXPANDEDIDXMAPPING> op;
         op.Init(processedLogits, expandedIdxMapping, temperature, seed, pos, logitsCache,
-                logitsCacheCol, sampledTokenIds, lse, &tilingData, &pipe);
+                logitsCacheCol, sampledTokenIds, lse, workspace, &tilingData, &pipe);
         op.Process();
     }
 }

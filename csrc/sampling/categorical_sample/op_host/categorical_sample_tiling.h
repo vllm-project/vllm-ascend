@@ -25,6 +25,7 @@ BEGIN_TILING_DATA_DEF(CategoricalSampleTilingData)
     TILING_DATA_FIELD_DEF(uint32_t, applyTemperature);
     TILING_DATA_FIELD_DEF(uint32_t, returnLse);
     TILING_DATA_FIELD_DEF(uint32_t, useFp64);
+    TILING_DATA_FIELD_DEF(uint32_t, coresPerRow);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(CategoricalSample, CategoricalSampleTilingData)
