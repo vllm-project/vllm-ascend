@@ -131,7 +131,10 @@ def adaptive_verification_gate_wrapper(runner_module):
         query_start_loc,
         num_bonus_tokens,
         max_total_logits,
+        **factory_kwargs,
     ):
+        # Keep upstream validation inputs (config, target layer names and
+        # additional attention support) intact; only relax the graph gate.
         if not enable_adaptive_verification:
             return original_factory(
                 enable_adaptive_verification=enable_adaptive_verification,
@@ -141,6 +144,7 @@ def adaptive_verification_gate_wrapper(runner_module):
                 query_start_loc=query_start_loc,
                 num_bonus_tokens=num_bonus_tokens,
                 max_total_logits=max_total_logits,
+                **factory_kwargs,
             )
         try:
             manager = original_factory(
@@ -151,6 +155,7 @@ def adaptive_verification_gate_wrapper(runner_module):
                 query_start_loc=query_start_loc,
                 num_bonus_tokens=num_bonus_tokens,
                 max_total_logits=max_total_logits,
+                **factory_kwargs,
             )
         except ValueError as exc:
             # Only the ALWAYS requirement is relaxed on Ascend; any other

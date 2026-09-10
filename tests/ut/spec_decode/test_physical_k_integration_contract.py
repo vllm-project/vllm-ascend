@@ -495,6 +495,31 @@ class TestRuntimeAdapters(unittest.TestCase):
                         self.adaptive.AdaptiveVerificationManager.assert_not_called()
                 self.assertIs(runner_module.maybe_create_adaptive_verification_manager, factory)
 
+    def test_factory_forwards_upstream_validation_inputs(self):
+        for enabled in (False, True):
+            for error in (None, "requires AttentionCGSupport.ALWAYS", "CPU query lengths mismatch"):
+                with self.subTest(enabled=enabled, error=error):
+                    manager = self.manager()
+                    factory = Mock(return_value=manager, side_effect=ValueError(error) if error else None)
+                    runner_module = SimpleNamespace(maybe_create_adaptive_verification_manager=factory)
+                    args = self.factory_args(enabled)
+                    args.update(
+                        vllm_config=object(),
+                        target_layer_names={"target.attn"},
+                        additional_attn_cg_support=(object(), "draft.attn"),
+                    )
+                    self.adaptive.AdaptiveVerificationManager.reset_mock()
+                    self.adaptive.AdaptiveVerificationManager.return_value = manager
+                    with self.verification.adaptive_verification_gate_wrapper(runner_module):
+                        if error and (not enabled or "ALWAYS" not in error):
+                            with self.assertRaisesRegex(ValueError, error):
+                                runner_module.maybe_create_adaptive_verification_manager(**args)
+                            self.adaptive.AdaptiveVerificationManager.assert_not_called()
+                        else:
+                            self.assertIs(runner_module.maybe_create_adaptive_verification_manager(**args), manager)
+                    factory.assert_called_once_with(**args)
+                    self.assertIs(runner_module.maybe_create_adaptive_verification_manager, factory)
+
     def test_disabled_factory_delegates_unmodified(self):
         marker = object()
         factory = Mock(return_value=marker)
