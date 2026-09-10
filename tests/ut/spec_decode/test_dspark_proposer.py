@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
+from vllm.forward_context import BatchDescriptor
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MLAAttentionSpec,
@@ -115,6 +116,64 @@ def test_build_draft_metadata_submits_only_non_cp_device_tasks(
         executor.submit.assert_called_once_with(tasks)
     else:
         executor.submit.assert_not_called()
+
+
+def test_build_draft_metadata_uses_external_event_key_for_full_graph():
+    task = DeviceMetadataTask(DeviceMetadataStage.ATTENTION, lambda: None, 7)
+
+    class DraftMetadataProvider:
+        def enable_device_metadata(self):
+            pass
+
+        def take_device_metadata_tasks(self):
+            return (task,)
+
+        def build_for_drafting(self, common_attn_metadata, draft_index, **kwargs):
+            return SimpleNamespace()
+
+    builder = DraftMetadataProvider()
+    group = SimpleNamespace(
+        kv_cache_group_id=0,
+        layer_names=["draft.attn"],
+        get_metadata_builder=lambda: builder,
+    )
+    executor = MagicMock()
+    proposer = SimpleNamespace(
+        draft_attn_groups=[group],
+        use_compress=False,
+        method="dspark",
+        runner=SimpleNamespace(device_metadata_executor=executor),
+        dcp_size=1,
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(prefill_context_parallel_size=1)
+        ),
+        sliding_window=None,
+        _per_group_block_table_buffers={
+            0: torch.ones((1, 1), dtype=torch.int32)
+        },
+        _per_group_query_slot_mapping_buffers={
+            0: torch.zeros(1, dtype=torch.int32)
+        },
+    )
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=1,
+        block_table_tensor=torch.ones((1, 1), dtype=torch.int32),
+        slot_mapping=torch.zeros(1, dtype=torch.int32),
+    )
+    descriptor = BatchDescriptor(num_tokens=4, num_reqs=1, uniform=True)
+
+    AscendSpecDecodeBaseProposer.build_draft_attn_metadata(
+        proposer,
+        common_attn_metadata,
+        num_input_tokens=1,
+        num_actual_tokens=1,
+        batch_descriptor=descriptor,
+    )
+
+    executor.submit.assert_called_once_with(
+        [task],
+        batch_descriptor=descriptor,
+    )
 
 
 @pytest.mark.parametrize("has_task", [True, False])
@@ -520,7 +579,10 @@ class TestDSparkInitialization(_DSparkProposerTestBase):
             hf_config=hf_config,
             draft_sample_method=draft_sample_method,
         )
-        expected_max_query_tokens = _MAX_BATCH_SIZE * expected_num_query_per_req
+        expected_max_query_tokens = _MAX_BATCH_SIZE * max(
+            expected_num_query_per_req,
+            1 + _NUM_SPECULATIVE_TOKENS,
+        )
         assert proposer.sample_from_anchor is expected_sample_from_anchor
         assert proposer.num_query_per_req == expected_num_query_per_req
         assert proposer.max_query_tokens == expected_max_query_tokens
@@ -874,3 +936,60 @@ class TestInitializeAttnBackend(_DSparkProposerTestBase):
         assert set(proposer.draft_attn_groups[0].layer_names) == set(draft_layers)
         assert proposer.draft_attn_groups[0].kv_cache_group_id == 0
         assert proposer._layer_group_idx == [0] * 5
+
+
+class TestDSparkACLGraphContract(_DSparkProposerTestBase):
+    def test_maps_uniform_target_descriptor_to_draft_tokens(self) -> None:
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=4,
+            block_size=7,
+        )
+        target_desc = BatchDescriptor(
+            num_tokens=32,
+            num_reqs=4,
+            uniform=True,
+        )
+
+        assert proposer.get_graph_num_input_tokens(target_desc) == 28
+        assert proposer.uses_target_batch_descriptor_for_graph()
+
+    def test_non_uniform_descriptor_uses_target_token_fallback(self) -> None:
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=4,
+            block_size=7,
+        )
+        target_desc = BatchDescriptor(
+            num_tokens=31,
+            num_reqs=4,
+            uniform=False,
+        )
+
+        assert proposer.get_graph_num_input_tokens(target_desc) == 31
+
+    @pytest.mark.parametrize("supported", [False, True])
+    def test_model_capability_gate(self, supported: bool) -> None:
+        proposer = self._make_proposer(
+            max_num_tokens=32,
+            num_reqs=2,
+            block_size=3,
+        )
+        proposer.model = SimpleNamespace(supports_dspark_aclgraph=supported)
+
+        assert proposer._model_supports_dspark_aclgraph() is supported
+
+    def test_binds_persistent_context_slot_mappings_per_layer(self) -> None:
+        proposer = self._make_proposer(
+            max_num_tokens=32,
+            num_reqs=2,
+            block_size=3,
+        )
+        proposer._layer_group_idx = [0, 0]
+        expected = proposer._per_group_context_slot_mapping_buffers[0]
+
+        proposer._bind_context_slot_mapping_buffers()
+
+        assert proposer._context_slot_mapping_buffers is not None
+        assert proposer._context_slot_mapping_buffers[0] is expected
+        assert proposer._context_slot_mapping_buffers[1] is expected
