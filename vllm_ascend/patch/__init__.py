@@ -943,6 +943,25 @@
 #    Future Plan:
 #       Remove this patch when vllm-ascend supports pattern matching for ops.*.
 #
+# ** 18a. File: worker/patch_copy_kv_cache.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.worker.utils.copy_kv_cache_blocks_inplace`
+#    Why:
+#       Upstream block copy assumes every runner cache is a tensor. The V1
+#       component-major MLA cache binds a `(nope, rope)` tuple of two strided
+#       views over one page, so direct indexing cannot express a whole-page COW
+#       copy.
+#    How:
+#       Detect only dynamically geometry-valid component pairs that share one
+#       storage with the expected nope-to-rope offset, convert each pair to a
+#       whole-page byte view, and delegate both ordinary and page-view caches
+#       to the upstream copy implementation.
+#    Related PR (vllm-ascend):
+#       None; component-major MLA cache is an Ascend V1 layout feature.
+#    Future Plan:
+#       Remove this patch once upstream exposes a cache-owned whole-page copy
+#       protocol that can describe component views.
+#
 # ** 18. File: worker/patch_bind_kv_cache.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.worker.utils.bind_kv_cache`

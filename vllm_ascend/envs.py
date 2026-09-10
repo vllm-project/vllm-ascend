@@ -22,6 +22,14 @@ import os
 from collections.abc import Callable
 from typing import Any
 
+
+def _mla_component_cache_enabled() -> bool:
+    value = os.getenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "0")
+    if value not in {"0", "1"}:
+        raise ValueError("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE must be 0 or 1")
+    return value == "1"
+
+
 # The begin-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
@@ -76,6 +84,10 @@ env_variables: dict[str, Callable[[], Any]] = {
     # (safe for Ascend 910B/A3). Set to a positive value to override when
     # auto-detection is unavailable or for debugging UB overflow issues.
     "VLLM_ASCEND_ROPE_UB_SIZE_KB": lambda: int(os.getenv("VLLM_ASCEND_ROPE_UB_SIZE_KB") or 0),
+    # Enable the V1 dense-MLA component-major KV cache layout. Valid values are
+    # 0 (default, legacy path) and 1 (one backing with strided nope/rope views).
+    # This variable is not sensitive and only gates ModelRunner V1.
+    "VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE": _mla_component_cache_enabled,
 }
 
 # end-env-vars-definition

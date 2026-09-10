@@ -82,6 +82,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.outputs import (
@@ -217,6 +218,10 @@ from vllm_ascend.worker.device_metadata import (
     DeviceMetadataTask,
     DeviceMetadataTaskProvider,
 )
+from vllm_ascend.worker.mla_component_cache_v1 import (
+    allocate_mla_component_cache,
+    use_mla_component_cache,
+)
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
 
@@ -337,6 +342,7 @@ class NPUModelRunner(GPUModelRunner):
         self.use_compress = (
             hf_config is not None and hasattr(hf_config, "compress_ratios")
         )
+        self._use_mla_component_cache = False
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -4179,6 +4185,7 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        self._use_mla_component_cache = use_mla_component_cache(self.vllm_config)
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
@@ -4248,7 +4255,7 @@ class NPUModelRunner(GPUModelRunner):
         offset = (aligned_addr - data_ptr) // tensor.element_size()
         return tensor[int(offset) :]
 
-    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, torch.Tensor]:
+    def initialize_kv_cache_tensors(self, kv_cache_config: KVCacheConfig) -> dict[str, Any]:
         """
         Initialize the memory buffer for KV cache.
 
@@ -4258,10 +4265,23 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(kv_cache_config, kv_cache_raw_tensors)
+        if self._use_mla_component_cache:
+            self.hybrid_with_attn_and_mamba = False
+            kv_caches = allocate_mla_component_cache(
+                vllm_config=self.vllm_config,
+                kv_cache_config=kv_cache_config,
+                static_forward_context=self.compilation_config.static_forward_context,
+                device=self.device,
+                kernel_block_sizes=self.kernel_block_sizes,
+            )
+        else:
+            # Initialize the memory buffer for KV cache
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            # Change the memory buffer to the desired shape
+            kv_caches = self._reshape_kv_cache_tensors(
+                kv_cache_config,
+                kv_cache_raw_tensors,
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():
@@ -5565,6 +5585,7 @@ class NPUModelRunner(GPUModelRunner):
         if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
 
+        self._use_mla_component_cache = use_mla_component_cache(self.vllm_config)
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -5595,6 +5616,23 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
+                # 开启首轴非连续场景，确保走MLAAttention，并且跳过AscendMLAAttentionSpec重建路径
+                if self._use_mla_component_cache:
+                    spec = attn_module.get_kv_cache_spec(self.vllm_config)
+                    if type(spec) is not MLAAttentionSpec:
+                        raise TypeError(
+                            "The MLA component cache requires the exact upstream "
+                            f"MLAAttentionSpec for {layer_name}, got {type(spec).__name__}"
+                        )
+                    spec = attn_module.get_attn_backend().customize_spec(spec)
+                    if type(spec) is not MLAAttentionSpec:
+                        raise TypeError(
+                            "The MLA attention backend must preserve the exact "
+                            f"upstream MLAAttentionSpec for {layer_name}, got {type(spec).__name__}"
+                        )
+                    kv_cache_spec[layer_name] = spec
+                    attn_layer_names.add(layer_name)
+                    continue
                 if self.use_sparse:
                     impl = attn_module.impl
                     cache_sparse_sfa_c8 = bool(

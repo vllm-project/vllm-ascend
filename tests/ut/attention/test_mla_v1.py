@@ -5,6 +5,7 @@ import torch
 from vllm.config import CacheConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
+from vllm.v1.kv_cache_interface import KVCacheLayout
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_config import init_ascend_config
@@ -69,6 +70,9 @@ class TestAscendMLABackend(TestBase):
     def test_get_supported_kernel_block_sizes(self):
         result = AscendMLABackend.get_supported_kernel_block_sizes()
         self.assertEqual(result, [128])
+
+    def test_supported_kv_cache_layouts(self):
+        self.assertEqual(AscendMLABackend.supported_kv_cache_layouts(), (KVCacheLayout.LBNHC,))
 
     @patch("vllm_ascend.attention.mla_v1.enable_dcp")
     def test_get_builder_cls_with_dcp(self, mock_enable_dcp):
