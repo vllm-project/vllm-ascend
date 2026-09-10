@@ -153,17 +153,13 @@ class NPUModelRunner(GPUModelRunner):
             vocab_size=self.vocab_size,
             device=self.device,
         )
-        if self.use_spec_pp:
+        if self.use_spec_pp and vllm_version_is("0.28.0"):
             from vllm_ascend.patch.worker.patch_v2.patch_spec_pp import (
-                install_spec_pp_draft_update,
                 install_spec_pp_token_broadcast,
             )
 
             assert self.pp_handler is not None
-            if vllm_version_is("0.28.0"):
-                install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
-            else:
-                install_spec_pp_draft_update(self.pp_handler)
+            install_spec_pp_token_broadcast(self.pp_handler, self.req_states)
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
         # so reinitialize input_buffers here.
         self.input_buffers: AscendInputBuffers = AscendInputBuffers(
