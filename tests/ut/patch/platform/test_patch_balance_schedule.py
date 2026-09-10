@@ -50,6 +50,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import torch
 
 # Capture the upstream originals BEFORE importing the patch: importing the patch
 # mutates the module-level ``Scheduler`` / ``DPEngineCoreProc`` symbols, so grab
