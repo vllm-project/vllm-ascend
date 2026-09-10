@@ -88,7 +88,7 @@ public:
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(inQueueGamma, BUFFER_NUM, numColAlign * sizeof(T));
         pPipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
-        pPipe->InitBuffer(outQueueX, DOUBLE_BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
+        pPipe->InitBuffer(outQueueX, nullptrBeta ? DOUBLE_BUFFER_NUM : BUFFER_NUM, numColAlign * sizeof(T) * rowFactor);
         pPipe->InitBuffer(outQueueRstd, DOUBLE_BUFFER_NUM, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xReduceBuff, rstdUbSizeAlignSize);
         pPipe->InitBuffer(xFp32Buff, numColAlign * sizeof(float) * rowFactor);
@@ -146,7 +146,11 @@ private:
         DataCopyPad(rstdGm[rowLoopIdx * rowFactor], rstdLocal, rstdCopyParams);
 
         LocalTensor<T> yLocal = outQueueY.AllocTensor<T>();
-        CalculateY(xFp32Local, gammaLocal, betaLocal, yLocal, rstdLocal, curRows, numColAlign, numCol, nullptrBeta);
+        if (nullptrBeta) {
+            CalculateY<false>(xFp32Local, gammaLocal, betaLocal, yLocal, rstdLocal, curRows, numColAlign, numCol);
+        } else {
+            CalculateY<true>(xFp32Local, gammaLocal, betaLocal, yLocal, rstdLocal, curRows, numColAlign, numCol);
+        }
         outQueueRstd.FreeTensor(rstdLocal);
         outQueueY.EnQue<T>(yLocal);
         CopyOutY(rowLoopOffset, curRows, numColAlign);
@@ -181,17 +185,18 @@ private:
         }
     }
 
+    template <bool HAS_BETA>
     __aicore__ inline void CalculateY(LocalTensor<float>& xFp32Local, LocalTensor<T>& gammaLocal,
                                       LocalTensor<T>& betaLocal,
                                       LocalTensor<T>& yLocal, LocalTensor<float>& rstdLocal, uint32_t curRows,
-                                      uint32_t numColAlign, uint32_t reduceNum, uint32_t nullptrBeta)
+                                      uint32_t numColAlign, uint32_t reduceNum)
     {
         __ubuf__ float* xFp32Tmp = (__ubuf__ float*)xFp32Local.GetPhyAddr();
         __ubuf__ T* gammaInUb = (__ubuf__ T*)gammaLocal.GetPhyAddr();
         __ubuf__ T* yInUb = (__ubuf__ T*)yLocal.GetPhyAddr();
         __ubuf__ float* rstdInUb = (__ubuf__ float*)rstdLocal.GetPhyAddr();
         __ubuf__ T* betaInUb = nullptr;
-        if (!nullptrBeta) {
+        if constexpr (HAS_BETA) {
             betaInUb = (__ubuf__ T*)betaLocal.GetPhyAddr();
         }
 
@@ -228,7 +233,7 @@ private:
                     LoadRegForDtype<T>(gammaInUb, gammaReg, regCurLoop, r * VL_FP32);
                     Mul(mul2Reg, mul1Reg, gammaReg, regCurLoop);
                     Mul(mul2UnrollReg, mul1UnrollReg, gammaReg, regCurLoop);
-                    if (!nullptrBeta) {
+                    if constexpr (HAS_BETA) {
                         LoadRegForDtype<T>(betaInUb, betaReg, regCurLoop, r * VL_FP32);
                         Add(mul2Reg, mul2Reg, betaReg, regCurLoop);
                         Add(mul2UnrollReg, mul2UnrollReg, betaReg, regCurLoop);
@@ -247,7 +252,7 @@ private:
                     Mul(mul1Reg, x1Reg, rstd1Reg, regCurLoop);
                     LoadRegForDtype<T>(gammaInUb, gammaReg, regCurLoop, r * VL_FP32);
                     Mul(mul2Reg, mul1Reg, gammaReg, regCurLoop);
-                    if (!nullptrBeta) {
+                    if constexpr (HAS_BETA) {
                         LoadRegForDtype<T>(betaInUb, betaReg, regCurLoop, r * VL_FP32);
                         Add(mul2Reg, mul2Reg, betaReg, regCurLoop);
                     }

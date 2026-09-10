@@ -62,14 +62,14 @@ public:
         gammaGm.SetGlobalBuffer((__gm__ T*)gamma, numCol);
         if (!nullptrBeta) {
             betaGm.SetGlobalBuffer((__gm__ T*)beta, numCol);
-            pPipe->InitBuffer(inQueueBeta, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
+            pPipe->InitBuffer(inQueueBeta, BUFFER_NUM, colBufferLength * sizeof(T));
         }
         yGm.SetGlobalBuffer((__gm__ T*)y + blockOffset, blockLength);
         rstdGm.SetGlobalBuffer((__gm__ float*)rstd + blockRowOffset, rowWork);
         xOutGm.SetGlobalBuffer((__gm__ T*)x + blockOffset, blockLength);
         pPipe->InitBuffer(inQueueX1, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(inQueueX2, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
-        pPipe->InitBuffer(inQueueGamma, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
+        pPipe->InitBuffer(inQueueGamma, nullptrBeta ? DOUBLE_BUFFER_NUM : BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueY, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueX, DOUBLE_BUFFER_NUM, colBufferLength * sizeof(T));
         pPipe->InitBuffer(outQueueRstd, DOUBLE_BUFFER_NUM, rowFactor * sizeof(float));
@@ -265,9 +265,17 @@ private:
             LocalTensor<T> xOutLocal = outQueueX.AllocTensor<T>();
             uint32_t calCount = CeilAlign((uint64_t)(calColNum * sizeof(T)), ALIGN_512_FACTOR) / sizeof(T);
             if constexpr (!is_same<T, float>::value) {
-                ComputeLatterY<T>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal, nullptrBeta);
+                if (nullptrBeta) {
+                    ComputeLatterY<T, false>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
+                } else {
+                    ComputeLatterY<T, true>(xFp32, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
+                }
             } else {
-                ComputeLatterY<T>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal, nullptrBeta);
+                if (nullptrBeta) {
+                    ComputeLatterY<T, false>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
+                } else {
+                    ComputeLatterY<T, true>(xLocal1, gammaLocal, betaLocal, yLocal, rstdLocal, row, calCount, xOutLocal);
+                }
             }
             inQueueX1.FreeTensor(xLocal1);
             inQueueX2.FreeTensor(xLocal2);
@@ -308,7 +316,7 @@ private:
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX1;
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueX2;
     TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueGamma;
-    TQue<QuePosition::VECIN, DOUBLE_BUFFER_NUM> inQueueBeta;
+    TQue<QuePosition::VECIN, BUFFER_NUM> inQueueBeta;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueY;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueX;
     TQue<QuePosition::VECOUT, DOUBLE_BUFFER_NUM> outQueueRstd;
