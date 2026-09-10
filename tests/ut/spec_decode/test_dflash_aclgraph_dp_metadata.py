@@ -54,13 +54,12 @@ class TestDFlashDPMetadata(unittest.TestCase):
             self.assertIs(other, stream)
             events.append("wait")
 
-        isolated_class = ast.ClassDef(
-            name=manager.name,
-            bases=[ast.Name(id="GraphBase", ctx=ast.Load())],
-            keywords=[],
-            body=[replay],
-            decorator_list=[],
-        )
+        # Parsing supplies version-specific AST fields, including type_params
+        # on Python 3.12+, without depending on ClassDef's constructor signature.
+        isolated_class = ast.parse("class Isolated(GraphBase):\n    pass\n").body[0]
+        assert isinstance(isolated_class, ast.ClassDef)
+        isolated_class.name = manager.name
+        isolated_class.body = [replay]
         module = ast.Module(
             body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), isolated_class],
             type_ignores=[],
