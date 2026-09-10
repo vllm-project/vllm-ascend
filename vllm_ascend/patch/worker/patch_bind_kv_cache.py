@@ -11,6 +11,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    kv_cache_groups: list | None = None,
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so
@@ -27,9 +28,12 @@ def bind_kv_cache(
         forward_context: The global forward context containing all Attention
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
+        kv_cache_groups: Per-group specs; accepted for upstream-main call
+            compatibility, unused by this simplified binding.
     """
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
+    del kv_cache_groups
 
     # Convert kv_caches dict to a list of tensors in the order of layer_index.
     index2name = defaultdict(list)

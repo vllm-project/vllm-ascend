@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 import unittest
 from collections import deque
 from contextlib import nullcontext
@@ -281,7 +282,18 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         batch.refresh_metadata()
         batch.prev_req_id_to_index = dict(batch.req_id_to_index)
         runner._get_mamba_bufs = MagicMock()
-        runner.kv_cache_config = object()
+        # ``_update_states_after_model_execute`` resolves the per-type copy
+        # funcs from the KV cache config on main, so provide one mamba group.
+        from vllm.v1.kv_cache_interface import KVCacheGroupSpec, MambaSpec
+
+        runner.kv_cache_config = SimpleNamespace(
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["mamba.layer"],
+                    kv_cache_spec=MambaSpec(block_size=4, shapes=((1,),), dtypes=(torch.float32,)),
+                )
+            ]
+        )
         runner.compilation_config = SimpleNamespace(static_forward_context={})
         runner.model = MagicMock()
 

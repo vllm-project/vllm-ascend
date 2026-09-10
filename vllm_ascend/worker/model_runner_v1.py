@@ -912,6 +912,8 @@ class NPUModelRunner(GPUModelRunner):
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
         if self.cache_config.mamba_cache_mode == "align":
+            from vllm_ascend.patch.worker.patch_mamba_utils import resolve_mamba_state_copy_funcs
+
             mamba_utils.postprocess_mamba_align_gpu(
                 bufs=self._get_mamba_bufs(),
                 num_reqs=num_reqs,
@@ -920,7 +922,7 @@ class NPUModelRunner(GPUModelRunner):
                 input_batch=self.input_batch,
                 kv_cache_config=self.kv_cache_config,
                 forward_context=self.compilation_config.static_forward_context,
-                mamba_state_copy_funcs=self.model.get_mamba_state_copy_func(),
+                mamba_state_copy_funcs=resolve_mamba_state_copy_funcs(self.model, self.kv_cache_config),
             )
         else:
             self.num_accepted_tokens.copy_to_cpu(num_reqs)
@@ -1714,8 +1716,9 @@ class NPUModelRunner(GPUModelRunner):
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += arange
 
+        pin_metadata = self.device.type != "cpu"
         cpu_metadata = tuple(
-            torch.from_numpy(value).pin_memory()
+            torch.from_numpy(value).pin_memory() if pin_metadata else torch.from_numpy(value)
             for value in (
                 cu_num_draft_tokens,
                 cu_num_sampled_tokens,
@@ -2325,6 +2328,8 @@ class NPUModelRunner(GPUModelRunner):
                         deferred_state_corrections_fn = None
                     mamba_bufs = self._get_mamba_bufs()
                     preprocess_bufs = mamba_bufs.preprocess
+                    from vllm_ascend.patch.worker.patch_mamba_utils import resolve_mamba_state_copy_funcs
+
                     mamba_utils.preprocess_mamba(
                         scheduler_output,
                         self.kv_cache_config,
@@ -2333,7 +2338,7 @@ class NPUModelRunner(GPUModelRunner):
                         self.input_batch,
                         self.requests,
                         self.compilation_config.static_forward_context,
-                        self.model.get_mamba_state_copy_func(),
+                        resolve_mamba_state_copy_funcs(self.model, self.kv_cache_config),
                         preprocess_bufs,
                     )
                     # preprocess_mamba resets num_accepted_tokens_cpu to 1

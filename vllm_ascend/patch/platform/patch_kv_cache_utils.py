@@ -72,6 +72,17 @@ def _page_sizes(spec: UniformTypeKVCacheSpecs) -> set[int]:
     return {s.page_size_bytes for s in spec.kv_cache_specs.values()}
 
 
+def _num_layer_tuples(spec: UniformTypeKVCacheSpecs) -> int:
+    """Count the layers sharing the group's most common page size.
+
+    vLLM #51718 renamed ``get_num_layer_tuples`` to
+    ``get_max_layers_per_page_size`` on main; the body is unchanged.
+    """
+    if vllm_version_is("0.28.0"):
+        return spec.get_num_layer_tuples()  # type: ignore[attr-defined]
+    return spec.get_max_layers_per_page_size()
+
+
 def _ascend_resolve_kv_cache_block_sizes(
     kv_cache_config: KVCacheConfig,
     vllm_config: VllmConfig,
@@ -278,7 +289,7 @@ def _get_kv_cache_groups_uniform_groups(
     # The other uniform KV cache specs will be similarly partitioned into layer tuples.
     # Say we have 21 SWA layers, all with the same page size, then we will have "21"
     # layer tuples.
-    num_layer_tuples_per_group: list[int] = [g_spec.get_num_layer_tuples() for g_spec in grouped_specs]
+    num_layer_tuples_per_group: list[int] = [_num_layer_tuples(g_spec) for g_spec in grouped_specs]
     # Choose `num_layer_tuples` to minimize total padding across groups.
     num_layer_tuples = _approximate_gcd(num_layer_tuples_per_group, lower_bound=num_layer_tuples_per_group[0])
     # Round up to the nearest multiple of `num_layer_tuples` (i.e., padding)
@@ -530,7 +541,7 @@ def _ascend_max_memory_usage_bytes_from_groups(
     assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(_page_sizes(full_mla_spec))
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        group.kv_cache_spec.get_max_layers_per_page_size()
         for group in kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )
@@ -572,6 +583,36 @@ def _ascend_get_kv_cache_config_from_groups(
         kv_cache_groups=kv_cache_groups,
         prefix_cache_retention_interval=vllm_config.cache_config.prefix_cache_retention_interval,
     )
+
+
+if vllm_version_is("0.28.0"):
+    _orig_get_packed_kv_cache_groups = None
+else:
+    _orig_get_packed_kv_cache_groups = vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups
+
+
+def _ascend_get_packed_kv_cache_groups(
+    vllm_config: VllmConfig,
+    kv_cache_spec: dict[str, KVCacheSpec],
+) -> list[KVCacheGroupSpec] | None:
+    """Restore Ascend's DSV4 shared-tuple packing removed by vLLM #51718.
+
+    Upstream's generic packer only fires for a block-outermost cache layout;
+    Ascend keeps per-layer contiguous buffers, so fall back to the pre-#51718
+    DeepseekV4 grouping when it declines.
+    """
+    if _orig_get_packed_kv_cache_groups is not None:
+        packed_groups = _orig_get_packed_kv_cache_groups(vllm_config, kv_cache_spec)
+        if packed_groups is not None:
+            return packed_groups
+    grouped_specs = group_and_unify_kv_cache_specs(kv_cache_spec)
+    if grouped_specs is None:
+        return None
+    return _get_kv_cache_groups_uniform_groups(grouped_specs)
+
+
+if not vllm_version_is("0.28.0"):
+    vllm.v1.core.kv_cache_utils._get_packed_kv_cache_groups = _ascend_get_packed_kv_cache_groups
 
 
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes

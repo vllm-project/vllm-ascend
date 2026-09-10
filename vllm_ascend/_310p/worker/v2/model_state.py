@@ -239,10 +239,14 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
         num_reqs: int,
     ) -> None:
         """Copy mamba state across block boundaries without Triton."""
-        from vllm_ascend.patch.worker.patch_mamba_utils import _tensor_view_from_data_ptr
+        from vllm_ascend.patch.worker.patch_mamba_utils import (
+            _tensor_view_from_data_ptr,
+            layer_state_copy_funcs,
+            resolve_mamba_state_copy_funcs,
+        )
 
         forward_context = self.vllm_config.compilation_config.static_forward_context
-        copy_funcs = self.model.get_mamba_state_copy_func()
+        copy_funcs = resolve_mamba_state_copy_funcs(self.model, kv_cache_config)
         for batch_i in range(num_reqs):
             req_idx = int(input_batch.idx_mapping[batch_i].item())
             if req_idx < 0:
@@ -260,11 +264,12 @@ class Ascend310PMambaHybridModelState(_Ascend310PModelStateMixin, AscendMambaHyb
                 if not block_ids or src_col >= len(block_ids) or dst_col >= len(block_ids):
                     continue
                 dest_block_id = block_ids[dst_col]
-                layer_names = kv_cache_config.kv_cache_groups[group_id].layer_names
-                for layer_name in layer_names:
+                kv_cache_group = kv_cache_config.kv_cache_groups[group_id]
+                for layer_name in kv_cache_group.layer_names:
+                    state_copy_funcs = layer_state_copy_funcs(kv_cache_config, group_id, layer_name, copy_funcs)
                     attention = forward_context[layer_name]
                     kv_caches = attention.kv_cache
-                    for state, state_copy_func in zip(kv_caches, copy_funcs):
+                    for state, state_copy_func in zip(kv_caches, state_copy_funcs):
                         copy_spec = state_copy_func(state, block_ids, src_col, token_bias + 1)
                         src_state = _tensor_view_from_data_ptr(state, copy_spec.start_addr, copy_spec.num_elements)
                         dst_state = _tensor_view_from_data_ptr(

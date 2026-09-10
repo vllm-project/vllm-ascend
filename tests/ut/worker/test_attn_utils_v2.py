@@ -1,3 +1,4 @@
+# mypy: ignore-errors
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import MagicMock
@@ -456,8 +457,9 @@ def test_mrv2_initializes_dsv4_cache_only_layer(
             forward_context: dict[str, Any],
             runner_kv_caches_: list[Any],
             num_attn_module: int = 1,
+            kv_cache_groups: Any | None = None,
         ) -> None:
-            del num_attn_module
+            del num_attn_module, kv_cache_groups
             assert len(runner_kv_caches_) == 0
             for kv_cache in kv_caches.values():
                 runner_kv_caches_.append(kv_cache)

@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel,
 )
+from vllm_ascend.utils import vllm_version_is
 
 # Staging a complete block-table row gives substantially faster contiguous GM
 # access on Ascend, but the staged fp32 row must fit in UB together with the
@@ -47,20 +48,35 @@ class AscendBlockTables(BlockTables):
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        slot_mapping_enabled: list[bool] | None = None,
     ):
         if kernel_block_sizes is None:
             kernel_block_sizes = block_sizes
-        super().__init__(
-            block_sizes,
-            max_num_reqs,
-            max_num_batched_tokens,
-            max_num_blocks_per_group,
-            device,
-            kernel_block_sizes,
-            cp_size,
-            cp_rank,
-            cp_interleave,
-        )
+        if vllm_version_is("0.28.0"):
+            super().__init__(
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                max_num_blocks_per_group,
+                device,
+                kernel_block_sizes,
+                cp_size,
+                cp_rank,
+                cp_interleave,
+            )
+        else:
+            super().__init__(
+                block_sizes,
+                max_num_reqs,
+                max_num_batched_tokens,
+                max_num_blocks_per_group,
+                device,
+                kernel_block_sizes,
+                cp_size,
+                cp_rank,
+                cp_interleave,
+                slot_mapping_enabled,
+            )
         # The kernel block-table row can be wider than
         # max_num_blocks_per_group when one KV block maps to multiple kernel
         # blocks. Use the allocated row stride so the staged row is complete.

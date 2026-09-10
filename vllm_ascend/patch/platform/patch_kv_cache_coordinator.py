@@ -31,6 +31,11 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 
+from vllm_ascend.utils import vllm_version_is
+
+if not vllm_version_is("0.28.0"):
+    from vllm.v1.core.kv_cache_utils import dcp_world_size_for_kv_cache_spec  # type: ignore[import-not-found]
+
 USE_MULTI_GROUPS_KV_CACHE = True
 
 _orig_get_kv_cache_coordinator = vllm.v1.core.kv_cache_coordinator.get_kv_cache_coordinator
@@ -143,7 +148,11 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
                 block_pool=self.block_pool,
                 enable_caching=enable_caching,
                 kv_cache_group_id=i,
-                dcp_world_size=dcp_world_size,
+                dcp_world_size=(
+                    dcp_world_size
+                    if vllm_version_is("0.28.0")
+                    else dcp_world_size_for_kv_cache_spec(kv_cache_group.kv_cache_spec, dcp_world_size)
+                ),
                 pcp_world_size=1,
                 max_in_flight_tokens=token_budget,
                 max_model_len=max_model_len,
@@ -172,6 +181,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
             and g.kv_cache_spec.block_size > hash_block_size
             for g in kv_cache_config.kv_cache_groups
         )
+        # Hybrid fine-grained lookup refines each manager's block-alignment
+        # after validation; mirror upstream before splitting the groups.
+        cache_hit_alignment_tokens = (
+            self.hash_block_size if self.enable_partial_hash_hits else self.scheduler_block_size
+        )
+        for manager in self.single_type_managers:
+            manager.cache_hit_alignment_tokens = cache_hit_alignment_tokens
         self.verify_and_split_kv_cache_groups()
 
         # Align the WRITE-path mask granularity (reachable_block_mask) with the

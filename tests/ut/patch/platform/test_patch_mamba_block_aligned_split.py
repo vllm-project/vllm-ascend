@@ -48,6 +48,9 @@ def _scheduler(
         cache_config=SimpleNamespace(block_size=384),
         block_size=128,
         use_eagle=True,
+        # vLLM main renamed the scheduler gate from `use_eagle` to
+        # `use_eagle_block_drop`; v0.28.0 only reads `use_eagle`.
+        use_eagle_block_drop=True,
         max_num_scheduled_tokens=8192,
         scheduler_config=SimpleNamespace(long_prefill_token_threshold=0),
         hash_block_size=384,

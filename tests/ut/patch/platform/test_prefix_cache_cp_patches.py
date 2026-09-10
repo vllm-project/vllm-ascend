@@ -3,6 +3,7 @@
 import math
 from dataclasses import replace
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -57,7 +58,7 @@ def _make_kv_cache_tensor(size: int, layer_names: list[str]) -> KVCacheTensor:
     return KVCacheTensor(size=size, layers=layer_names, layer_stride=0, block_stride=0, offset=0)
 
 
-def _ratio_kwargs(ratio: int) -> dict[str, int]:
+def _ratio_kwargs(ratio: int) -> dict[str, Any]:
     """vLLM #51718 renamed compress_ratio to tokens_per_state on main."""
     return {"compress_ratio": ratio} if vllm_version_is("0.28.0") else {"tokens_per_state": ratio}
 
@@ -626,7 +627,7 @@ def test_deepseek_v4_main_restores_ascend_shared_tuple_planner(monkeypatch) -> N
     assert isinstance(full_spec, UniformTypeKVCacheSpecs)
     layer_tuple_bytes = sum(spec.page_size_bytes for spec in full_spec.kv_cache_specs.values())
     num_layer_tuples = max(
-        group.kv_cache_spec.get_num_layer_tuples()
+        group.kv_cache_spec.get_max_layers_per_page_size()
         for group in kv_cache_config.kv_cache_groups
         if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
     )

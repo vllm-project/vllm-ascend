@@ -55,4 +55,8 @@ class NPUCommunicator(DeviceCommunicatorBase):
         )
         self.device = torch.npu.current_device()
         self.ca_comm = None
+        # Upstream `GroupCoordinator.graph_capture` reads this (it is aliased
+        # into `CudaCommunicator` during `communicator_switch`); NPU has no
+        # FlashInfer PCIe IPC all-reduce backend.
+        self.fi_pcie_ipc_ar_comm = None
         self.all2all_manager = _NpuAll2AllManager()
