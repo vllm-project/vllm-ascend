@@ -19,6 +19,7 @@ class SFATraceWorker(NPUWorker):
         self.trace_captures = []
         self.trace_buffers = {}
         self.trace_counters = {}
+        self.trace_rows = torch.arange(4, device=self.device)
         state = self.model_runner.model_state
         original = state.prepare_attn
         signature = inspect.signature(original)
@@ -49,9 +50,11 @@ class SFATraceWorker(NPUWorker):
                     self.trace_buffers[key] = value.new_zeros((4, value.shape[1]))
                     self.trace_counters[key] = value.new_zeros((), dtype=torch.int64)
                 # This copy is recorded in the graph; host reads occur only after execution.
-                self.trace_buffers[key].zero_()
-                first_rows = value[:4]
-                self.trace_buffers[key][: first_rows.shape[0]].copy_(first_rows)
+                # Keep both copy operands shape-four even when the compiled graph
+                # receives fewer tokens. A dynamic slice may be specialized by
+                # the no-guards compiler; repeated last rows are diagnostic padding.
+                rows = self.trace_rows.clamp_max(value.shape[0] - 1)
+                self.trace_buffers[key].copy_(torch.index_select(value, 0, rows))
                 self.trace_counters[key].add_(1)
 
         return snapshot
