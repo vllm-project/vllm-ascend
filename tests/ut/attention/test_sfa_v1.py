@@ -1203,18 +1203,13 @@ class TestAscendSFAImpl(TestBase):
         metadata.attn_state = AscendAttentionState.PrefillNoCache
         fia, sparse = self._mock_shared_fia_kernels()
         result = self.impl._try_sfa_fia_shared_prefill(*args)
-        self.assertEqual(fia.call_count, 2)
+        fia.assert_called_once()
         sparse.assert_called_once()
-        dense0 = fia.call_args_list[0].kwargs
-        dense1 = fia.call_args_list[1].kwargs
-        self.assertEqual(dense0["actual_seq_lengths"], [1024])
-        self.assertEqual(dense0["actual_seq_lengths_kv"], [1024])
-        torch.testing.assert_close(dense0["query"], q[:1024])
-        torch.testing.assert_close(dense0["block_table"], metadata.block_table[:1])
-        self.assertEqual(dense1["actual_seq_lengths"], [1024])
-        self.assertEqual(dense1["actual_seq_lengths_kv"], [1024])
-        torch.testing.assert_close(dense1["query"], q[2048:3072])
-        torch.testing.assert_close(dense1["block_table"], metadata.block_table[1:2])
+        dense = fia.call_args.kwargs
+        self.assertEqual(dense["actual_seq_lengths"], [1024, 2048])
+        self.assertEqual(dense["actual_seq_lengths_kv"], [2048, 2048])
+        torch.testing.assert_close(dense["query"], torch.cat((q[:1024], q[2048:3072])))
+        torch.testing.assert_close(dense["block_table"], metadata.block_table)
         tail = sparse.call_args.args
         torch.testing.assert_close(tail[0], torch.cat((q[1024:2048], q[3072:])))
         torch.testing.assert_close(tail[3], torch.cat((indices[1024:2048], indices[3072:])))
@@ -1222,6 +1217,58 @@ class TestAscendSFAImpl(TestBase):
         self.assertEqual(tail[5].tolist(), [1024, 2048])
         self.assertEqual(tail[6].tolist(), [3072, 3072])
         expected = torch.cat((q[:1024] + 10, q[1024:2048] + 20, q[2048:3072] + 10, q[3072:] + 20))
+        torch.testing.assert_close(result, expected)
+
+    def test_shared_fia_prefix_context_multifia_lengths_and_restore_order(self):
+        args = self._setup_shared_fia((2267, 4111), (2500, 4300))
+        q, _, _, metadata, indices = args
+        metadata.attn_state = AscendAttentionState.PrefillNoCache
+        fia, sparse = self._mock_shared_fia_kernels()
+        validate = self.impl._validate_sfa_fia_shared_group
+        dense_length_metadata = []
+
+        def record_dense_metadata(dense_q, dense_rope, kv_cache, dense_metadata):
+            result = validate(dense_q, dense_rope, kv_cache, dense_metadata)
+            if dense_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+                dense_length_metadata.append(
+                    (
+                        dense_metadata.cum_query_lens_cpu.tolist(),
+                        dense_metadata.seq_lens_cpu.tolist(),
+                        dense_metadata.cum_query_lens.tolist(),
+                        dense_metadata.seq_lens.tolist(),
+                    )
+                )
+            return result
+
+        with patch.object(self.impl, "_validate_sfa_fia_shared_group", side_effect=record_dense_metadata):
+            result = self.impl._try_sfa_fia_shared_prefill(*args)
+
+        self.assertEqual(fia.call_count, 2)
+        sparse.assert_called_once()
+        self.assertEqual(
+            dense_length_metadata,
+            [
+                ([1815], [2048], [1815], [2048]),
+                ([1859], [2048], [1859], [2048]),
+                ([1815], [2048], [1815], [2048]),
+                ([1859], [2048], [1859], [2048]),
+            ],
+        )
+        for request, (start, eligible) in enumerate(((0, 1815), (2267, 1859))):
+            dense = fia.call_args_list[request].kwargs
+            torch.testing.assert_close(dense["query"], q[start : start + eligible])
+            torch.testing.assert_close(dense["block_table"], metadata.block_table[request : request + 1])
+            self.assertEqual(dense["actual_seq_lengths"], [eligible])
+            self.assertEqual(dense["actual_seq_lengths_kv"], [2048])
+
+        tail = sparse.call_args.args
+        torch.testing.assert_close(tail[0], torch.cat((q[1815:2267], q[4126:])))
+        torch.testing.assert_close(tail[3], torch.cat((indices[1815:2267], indices[4126:])))
+        self.assertEqual(tail[5].tolist(), [452, 2704])
+        self.assertEqual(tail[6].tolist(), [2500, 4300])
+        torch.testing.assert_close(sparse.call_args.kwargs["block_table"], metadata.block_table)
+
+        expected = torch.cat((q[:1815] + 10, q[1815:2267] + 20, q[2267:4126] + 10, q[4126:] + 20))
         torch.testing.assert_close(result, expected)
 
     def test_shared_fia_exact_three_request_multisegment_and_restore_order(self):
@@ -1350,12 +1397,33 @@ class TestAscendSFAImpl(TestBase):
         sparse.assert_not_called()
 
     def test_shared_fia_multisegment_fewer_than_two_eligible_segments_falls_back_without_submission(self):
-        args = self._setup_shared_fia((3000, 200), (3000, 2249))
+        args = self._setup_shared_fia((3000, 200), (3001, 2250))
         args[3].attn_state = AscendAttentionState.PrefillNoCache
         fia, sparse = self._mock_shared_fia_kernels()
         self.assertIsNone(self.impl._try_sfa_fia_shared_prefill(*args))
         fia.assert_not_called()
         sparse.assert_not_called()
+
+    def test_shared_fia_two_requests_chunked_prefill_uses_legacy_grouped_path(self):
+        args = self._setup_shared_fia((2048, 2048), (3072, 3072))
+        q, _, _, metadata, indices = args
+        self.assertEqual(metadata.attn_state, AscendAttentionState.ChunkedPrefill)
+        fia, sparse = self._mock_shared_fia_kernels()
+
+        result = self.impl._try_sfa_fia_shared_prefill(*args)
+
+        fia.assert_called_once()
+        sparse.assert_called_once()
+        dense = fia.call_args.kwargs
+        self.assertEqual(dense["actual_seq_lengths"], [1024, 2048])
+        self.assertEqual(dense["actual_seq_lengths_kv"], [2048, 2048])
+        torch.testing.assert_close(dense["query"], torch.cat((q[:1024], q[2048:3072])))
+        tail = sparse.call_args.args
+        torch.testing.assert_close(tail[3], torch.cat((indices[1024:2048], indices[3072:])))
+        self.assertEqual(tail[5].tolist(), [1024, 2048])
+        self.assertEqual(tail[6].tolist(), [3072, 3072])
+        expected = torch.cat((q[:1024] + 10, q[1024:2048] + 20, q[2048:3072] + 10, q[3072:] + 20))
+        torch.testing.assert_close(result, expected)
 
     def test_shared_fia_multisegment_topk_failure_has_no_partial_side_effect(self):
         args = self._setup_shared_fia((2267, 4111), (2267, 4111))
