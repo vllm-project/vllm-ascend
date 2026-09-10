@@ -528,9 +528,7 @@ class AscendModelSlimConfig(QuantizationConfig):
         # Only update packed_modules_mapping if the upstream model definition not satisfies our scenario.
         mapping_model_type = "glm5_next" if model_type == "glm5_next_text" else model_type
         if mapping_model_type in UPDATED_PACKED_MODULES_MAPPING:
-            self.packed_modules_mapping.update(
-                UPDATED_PACKED_MODULES_MAPPING[mapping_model_type]
-            )
+            self.packed_modules_mapping.update(UPDATED_PACKED_MODULES_MAPPING[mapping_model_type])
         if model_type in ("kimi_k3", "kimi_linear"):
             from vllm.models.kimi_k3.nvidia.model import KimiLinearModel
 

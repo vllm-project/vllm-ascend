@@ -4,15 +4,11 @@
 from types import SimpleNamespace
 from typing import get_args
 
-import torch
 import vllm.config.speculative as speculative_config
-from torch import nn
 
-from vllm_ascend.models.glm5next import model as glm5next_model
 from vllm_ascend.models.glm5next.config import Glm5NextTextConfig
 from vllm_ascend.models.glm5next.model import (
     Glm5NextForConditionalGeneration,
-    _mark_zero_initialized_rms_norm_biases,
     get_spec_layer_idx_from_weight_name,
 )
 from vllm_ascend.models.glm5next.mtp import Glm5NextMTP
@@ -68,30 +64,6 @@ def test_multimodal_mapper_flattens_modelslim_forget_gate_prefix():
         Glm5NextForConditionalGeneration.hf_to_vllm_mapper._map_name("model.language_model.layers.1.ffn_hc.scale")
         == "language_model.model.layers.1.hc_ffn_scale"
     )
-
-
-def test_synthetic_rms_norm_biases_are_zeroed_and_marked(monkeypatch):
-    class FakeRMSNorm(nn.Module):
-        def __init__(self, *, bias_loaded: bool):
-            super().__init__()
-            self.bias = nn.Parameter(torch.ones(2), requires_grad=False)
-            self.bias_loaded = bias_loaded
-
-    class TestModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.synthetic = FakeRMSNorm(bias_loaded=False)
-            self.checkpoint = FakeRMSNorm(bias_loaded=True)
-
-    monkeypatch.setattr(glm5next_model, "RMSNorm", FakeRMSNorm)
-    model = TestModel()
-    loaded_params: set[str] = set()
-
-    _mark_zero_initialized_rms_norm_biases(model, loaded_params)
-
-    assert loaded_params == {"synthetic.bias"}
-    assert torch.equal(model.synthetic.bias, torch.zeros(2))
-    assert torch.equal(model.checkpoint.bias, torch.ones(2))
 
 
 def test_glm5_speculative_config_selects_mtp_architecture():

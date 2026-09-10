@@ -91,19 +91,6 @@ from .multimodal import (
 from .ops.mhc_ops import hc_contract, hc_expand
 
 
-def _mark_zero_initialized_rms_norm_biases(module: nn.Module, loaded_params: set[str]) -> None:
-    """Mark synthetic zero RMSNorm biases that have no checkpoint tensor."""
-    for module_name, norm in module.named_modules():
-        if not isinstance(norm, RMSNorm):
-            continue
-        bias = getattr(norm, "bias", None)
-        if bias is None or getattr(norm, "bias_loaded", False):
-            continue
-        with torch.no_grad():
-            bias.zero_()
-        loaded_params.add(f"{module_name}.bias")
-
-
 class Glm5NextMLP(nn.Module):
     def __init__(
         self,
@@ -834,7 +821,6 @@ class Glm5NextModel(nn.Module):
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
-        _mark_zero_initialized_rms_norm_biases(self, loaded_params)
         return loaded_params
 
 

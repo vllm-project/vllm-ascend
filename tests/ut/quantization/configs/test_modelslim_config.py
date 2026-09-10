@@ -781,8 +781,7 @@ class TestQuantPrefixMapper(TestBase):
         runtime_prefix = "model.layers.45.mtp_block.mlp.experts"
         checkpoint_prefix = "model.language_model.layers.45.mlp.experts"
         quant_description = {
-            f"{checkpoint_prefix}.0.{name}.weight": "FLOAT"
-            for name in ("gate_proj", "up_proj", "down_proj")
+            f"{checkpoint_prefix}.0.{name}.weight": "FLOAT" for name in ("gate_proj", "up_proj", "down_proj")
         }
         config = AscendModelSlimConfig(quant_description)
         config._update_packed_modules_mapping("glm5_next_mtp")

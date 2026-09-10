@@ -92,6 +92,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
         call_kwargs = runner.cudagraph_dispatcher.dispatch.call_args.kwargs
         self.assertFalse(call_kwargs["uniform_decode"])
 
+
 class TestDummyRunSlotInvalidation(unittest.TestCase):
     def test_backend_metadata_sees_invalidated_dummy_slots(self):
         runner = NPUModelRunner.__new__(NPUModelRunner)
