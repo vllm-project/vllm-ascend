@@ -37,6 +37,29 @@ else:
     triton_q_rms = None  # type: ignore
 
 
+# quant_mode of npu_quant_lightning_indexer(_v2), derived from the actual
+# qk/scale tensor dtypes at runtime. Keyed by (qk dtype, scale dtype); see
+# ops-transformer attention/quant_lightning_indexer_v2_metadata README for
+# the enum.
+_QLI_QUANT_MODES = {
+    (torch.float8_e4m3fn, torch.float32): 1,  # qk: fp8(e4m3) per-token-head, scale: fp32
+    (torch.int8, torch.float16): 2,  # qk: int8 per-token-head, scale: fp16, w: fp16
+    (torch.float8_e4m3fn, torch_npu.float8_e8m0fnu): 3,  # qk: mxfp8(e4m3), scale: fp8(e8m0)
+    (torch_npu.float4_e2m1fn_x2, torch_npu.float8_e8m0fnu): 5,  # qk: mxfp4(e2m1), scale: fp8(e8m0)
+}
+
+
+def qli_quant_mode(qk_dtype: torch.dtype, scale_dtype: torch.dtype) -> int:
+    """Map the runtime qk/scale dtypes to the lightning indexer quant_mode."""
+    try:
+        return _QLI_QUANT_MODES[(qk_dtype, scale_dtype)]
+    except KeyError:
+        raise ValueError(
+            f"unsupported indexer qk quant dtypes ({qk_dtype}, {scale_dtype}) "
+            "for npu_quant_lightning_indexer quant_mode"
+        ) from None
+
+
 class BaseDeviceAdaptor:
     @classmethod
     def reshape_and_cache(cls, key, value, key_cache, value_cache, slot_mapping):
@@ -565,6 +588,10 @@ class BaseDeviceAdaptor:
         torch.ops._C_ascend.npu_scatter_nd_update_sk(indexer_scale_cache, slot_mapping, kv_scale_dummy)
 
     # ===== Lightning Indexer Dtype Prep =====
+
+    # Indexer qk quant dtypes actually produced by indexer_quantize_query and
+    # the prepare_dsa_indexer_* helpers: (qk dtype, scale dtype).
+    INDEXER_QUANT_DTYPES = (torch.int8, torch.float16)
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
@@ -1158,6 +1185,10 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         )
 
     # ===== Lightning Indexer Dtype Prep =====
+
+    # Indexer qk quant dtypes actually produced by indexer_quantize_query and
+    # the prepare_dsa_indexer_* helpers: (qk dtype, scale dtype).
+    INDEXER_QUANT_DTYPES = (torch.float8_e4m3fn, torch.float32)
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
