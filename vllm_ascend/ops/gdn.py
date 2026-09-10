@@ -27,11 +27,20 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # typ
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
+from vllm_ascend import envs
 from vllm_ascend.attention.utils import maybe_save_kv_layer_to_connector
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.ops.gdn_attn_builder import AscendGDNAttentionBackend
 from vllm_ascend.ops.triton.fla.chunk import chunk_gated_delta_rule
 from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_split_reshape_cat
+from vllm_ascend.ops.triton.fla.gdn_decode_tile import (
+    QWEN35_CONV_KERNEL_SIZE,
+    QWEN35_HEAD_DIM,
+    QWEN35_HIDDEN_DIM,
+    QWEN35_NUM_QK_HEADS,
+    QWEN35_NUM_V_HEADS,
+    gdn_decode_tile,
+)
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
@@ -75,6 +84,32 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        if self._supports_qwen35_decode_tile_pipeline(hidden_states):
+            num_tokens = hidden_states.size(0)
+            projected_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            projected_ba, _ = self.in_proj_ba(hidden_states)
+            normalized_attn_out = torch.zeros(
+                (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            unused_z_scratch = torch.empty_like(normalized_attn_out)
+
+            # Keep runtime decode dispatch behind vLLM's existing GDN custom-op
+            # boundary. torch.compile otherwise profiles without attention
+            # metadata and permanently traces the unfused branch into the graph.
+            torch.ops.vllm.qwen_gdn_attention_core(
+                projected_qkvz,
+                projected_ba,
+                unused_z_scratch,
+                normalized_attn_out,
+                layer_name=self.prefix,
+                use_aiter=True,
+            )
+            maybe_save_kv_layer_to_connector("", [])
+            output[:num_tokens], _ = self.out_proj(normalized_attn_out.flatten(-2))
+            return
+
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
@@ -143,6 +178,156 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def _supports_qwen35_decode_tile_pipeline(self, hidden_states: torch.Tensor) -> bool:
+        return bool(
+            envs.VLLM_ASCEND_ENABLE_GDN_DECODE_TILE_PIPELINE
+            and hidden_states.ndim == 2
+            and hidden_states.shape[1] == QWEN35_HIDDEN_DIM
+            # FP32 is supported by the fused decode kernel itself, but not by
+            # the existing Qwen3.5 prefill causal-convolution path.
+            and hidden_states.dtype in (torch.bfloat16, torch.float16)
+            and self.tp_size > 0
+            and hasattr(self, "in_proj_qkvz")
+            and not getattr(self, "gqa_interleaved_layout", True)
+            and self.num_k_heads == QWEN35_NUM_QK_HEADS
+            and self.num_v_heads == QWEN35_NUM_V_HEADS
+            and self.num_k_heads % self.tp_size == 0
+            and self.num_v_heads % self.tp_size == 0
+            and self.num_v_heads // self.tp_size == 2 * (self.num_k_heads // self.tp_size)
+            and self.head_k_dim == QWEN35_HEAD_DIM
+            and self.head_v_dim == QWEN35_HEAD_DIM
+            and self.conv_kernel_size == QWEN35_CONV_KERNEL_SIZE
+            and self.activation in ("silu", "swish")
+        )
+
+    def _try_qwen35_decode_tile(
+        self,
+        projected_qkvz: torch.Tensor,
+        projected_ba: torch.Tensor,
+    ) -> torch.Tensor | None:
+        if (
+            self.tp_size <= 0
+            or self.num_k_heads % self.tp_size != 0
+            or self.num_v_heads % self.tp_size != 0
+            or self.num_v_heads // self.tp_size != 2 * (self.num_k_heads // self.tp_size)
+        ):
+            return None
+
+        decode_batch = projected_qkvz.shape[0] if projected_qkvz.ndim == 2 else 0
+        expected_qkvz_dim = (self.key_dim * 2 + self.value_dim * 2) // self.tp_size
+        expected_ba_dim = self.num_v_heads * 2 // self.tp_size
+        if (
+            projected_qkvz.ndim != 2
+            or projected_qkvz.shape[1] != expected_qkvz_dim
+            or projected_ba.shape != (decode_batch, expected_ba_dim)
+            or decode_batch < 1
+            or projected_qkvz.dtype not in (torch.bfloat16, torch.float16)
+            or projected_ba.dtype != projected_qkvz.dtype
+        ):
+            return None
+
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return None
+        layer_metadata = attn_metadata.get(self.prefix)
+        if not isinstance(layer_metadata, GDNAttentionMetadata):
+            return None
+        if (
+            layer_metadata.spec_sequence_masks is not None
+            or layer_metadata.num_prefills != 0
+            or layer_metadata.non_spec_decode_metadata is None
+            or layer_metadata.non_spec_state_indices_tensor is None
+        ):
+            return None
+
+        conv_metadata = layer_metadata.non_spec_decode_metadata.causal_conv1d
+        metadata_batch = conv_metadata.cache_indices.numel()
+        # FULL graphs pad GDN metadata to ``decode_batch`` and use repeated
+        # query offsets as a device-side validity mask. PIECEWISE graphs pad the
+        # projection tensors only, so process their real metadata prefix and
+        # leave the remaining output rows at zero.
+        if (
+            not 1 <= metadata_batch <= decode_batch
+            or conv_metadata.query_start_loc.numel() != metadata_batch + 1
+            or layer_metadata.non_spec_state_indices_tensor.numel() != metadata_batch
+        ):
+            return None
+
+        conv_weight = getattr(self, "_qwen35_decode_conv_weight", None)
+        if conv_weight is None:
+            conv_weight = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+            conv_weight = conv_weight.transpose(0, 1).contiguous()
+            self._qwen35_decode_conv_weight = conv_weight
+
+        return gdn_decode_tile(
+            projected_qkvz=projected_qkvz[:metadata_batch],
+            projected_ba=projected_ba[:metadata_batch],
+            conv_weight=conv_weight,
+            conv_state=self.kv_cache[0],
+            cache_indices=conv_metadata.cache_indices,
+            query_start_loc=conv_metadata.query_start_loc,
+            a_log=self.A_log,
+            dt_bias=self.dt_bias,
+            recurrent_state=self.kv_cache[1],
+            recurrent_state_indices=layer_metadata.non_spec_state_indices_tensor,
+            norm_weight=self.norm.weight,
+            norm_eps=self.norm.eps,
+            num_qk_heads=self.num_k_heads // self.tp_size,
+            num_v_heads=self.num_v_heads // self.tp_size,
+            head_dim=self.head_k_dim,
+        )
+
+    def _forward_core_rocm(
+        self,
+        qkvz: torch.Tensor,
+        ba: torch.Tensor,
+        z_out: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        """Compatibility hook required by vLLM's packed GDN custom op.
+
+        Upstream currently names the ``use_aiter=True`` callback
+        ``_forward_core_rocm``. Ascend uses that platform-neutral packed-input
+        boundary for graph-safe runtime dispatch, while keeping the actual
+        implementation under an Ascend-neutral name below.
+        """
+        self._forward_core_ascend(qkvz, ba, z_out, core_attn_out)
+
+    def _forward_core_ascend(
+        self,
+        qkvz: torch.Tensor,
+        ba: torch.Tensor,
+        z_out: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        """Packed custom-op implementation used for graph-safe Ascend dispatch.
+
+        The upstream custom op calls this method for packed ``[q,k,v,z]`` and
+        ``[b,a]`` inputs. On Ascend it provides the opaque runtime boundary
+        needed to select the optimized decode kernel during graph capture.
+        """
+        fused_decode_output = self._try_qwen35_decode_tile(qkvz, ba)
+        if fused_decode_output is not None:
+            fused_rows = fused_decode_output.shape[0]
+            core_attn_out[:fused_rows].copy_(fused_decode_output.reshape(fused_rows, *core_attn_out.shape[1:]))
+            return
+
+        qkv_size = (self.key_dim * 2 + self.value_dim) // self.tp_size
+        z_size = self.value_dim // self.tp_size
+        mixed_qkv, z = qkvz.split([qkv_size, z_size], dim=-1)
+        z = z.reshape(z.size(0), -1, self.head_v_dim)
+        b, a = self._split_ba_for_tp(ba)
+        b = b.contiguous()
+        a = a.contiguous()
+
+        self._forward_core(mixed_qkv, b, a, core_attn_out)
+        normalized = self.norm(
+            core_attn_out.reshape(-1, self.head_v_dim),
+            z.reshape(-1, self.head_v_dim),
+        ).reshape_as(core_attn_out)
+        core_attn_out.copy_(normalized)
 
     def _forward_core(
         self,
