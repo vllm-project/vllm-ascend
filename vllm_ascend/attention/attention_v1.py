@@ -1576,10 +1576,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
         on A5 hardware with the extension installed, and only for plain
         bf16/fp16 GQA (no alibi, no c8 quant, no PCP).
         """
+
+        def _disabled(reason: str) -> bool:
+            logger.info("[cann_ops.flash_attn] disabled: %s", reason)
+            return False
+
         if not envs_ascend.VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN:
-            return False
+            return _disabled("VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN is not set")
         if not get_current_hardware_profile().supports(HardwareCapability.CANN_FLASH_ATTN):
-            return False
+            return _disabled("hardware does not support CANN_FLASH_ATTN")
         if not is_cann_ops_flash_attn_available():
             logger.warning(
                 "VLLM_ASCEND_USE_CANN_OPS_FLASH_ATTN=1 but cann_ops_transformer is not installed; "
@@ -1587,38 +1592,47 @@ class AscendAttentionBackendImpl(AttentionImpl):
             )
             return False
         if self.head_size not in SUPPORTED_HEAD_DIMS:
-            return False
+            return _disabled(f"head_size {self.head_size} not in {sorted(SUPPORTED_HEAD_DIMS)}")
         if self.alibi_slopes is not None:
-            return False
+            return _disabled("alibi_slopes is set")
         if self.sinks is not None:
             # Operator constraint (README §1.8): the sinks input is reserved
             # but the current operator version rejects it in the checker
             # ("sinks is currently not supported"). Sink models must stay on
             # the FIA path, which supports learnable_sink.
-            return False
+            return _disabled("sinks is set")
         if self.pcp_enabled:
             # PCP rank-local query/key/value have already been gathered and
             # re-sliced by _reshape_and_cache_pcp before forward_impl; this
             # path slices by the global actual_seq_lengths_q instead, which
             # would mis-read the per-rank tensors.
-            return False
+            return _disabled("prefill_context_parallel is enabled")
         if self.enable_c8_quant:
-            return False
+            return _disabled("c8 quant is enabled")
         if self.kv_cache_dtype not in ("auto", "bfloat16", "float16"):
             # The operator only accepts bf16/fp16 q/k/v; quantized KV caches
             # (e.g. fp8 via enable_fa_quant) must stay on the FIA paths.
-            return False
+            return _disabled(f"kv_cache_dtype {self.kv_cache_dtype} is not bf16/fp16")
         # Operator constraint: 1024 >= block_size >= 16, block_size % 16 == 0.
         # The cache tensor's block axis is the kernel block size (independent
         # of the user's --block-size), which is what the operator validates.
         kernel_block_size = min(AscendAttentionBackend.get_supported_kernel_block_sizes())
         if not (16 <= kernel_block_size <= 1024 and kernel_block_size % 16 == 0):
-            return False
+            return _disabled(f"kernel_block_size {kernel_block_size} violates [16, 1024] and 16-alignment")
         if self.sliding_window is not None:
             # mask_mode=4 (window) requires the fixed (2048, 2048) int8
             # attn_mask, which this eager path does not provide yet.
-            return False
-        return self.attn_type == AttentionType.DECODER
+            return _disabled("sliding_window is set")
+        if self.attn_type != AttentionType.DECODER:
+            return _disabled(f"attn_type {self.attn_type} is not DECODER")
+        logger.info(
+            "[cann_ops.flash_attn] enabled: head_size=%d, heads=%d, kv_heads=%d, kv_cache_dtype=%s",
+            self.head_size,
+            self.num_heads,
+            self.num_kv_heads,
+            self.kv_cache_dtype,
+        )
+        return True
 
     def _forward_cann_ops_flash_attn(
         self,
