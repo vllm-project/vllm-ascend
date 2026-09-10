@@ -79,6 +79,14 @@ class IndexerWrapper(nn.Module):
     def num_cache_tensors(self) -> int:
         return self.impl.num_cache_tensors
 
+    @property
+    def topk_output_width(self) -> int:
+        return self.impl.topk_output_width
+
+    def get_topk_lengths(self, positions: torch.Tensor) -> torch.Tensor:
+        """Return model-defined visible index counts for attention planning."""
+        return self.impl.get_topk_lengths(positions)
+
     def process_weights_after_loading(self) -> None:
         self.impl.process_weights_after_loading()
 

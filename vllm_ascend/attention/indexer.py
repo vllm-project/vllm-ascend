@@ -107,6 +107,13 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
 
     accept_output_buffer: bool = True
 
+    @property
+    def topk_output_width(self) -> int:
+        return self.topk_tokens
+
+    def get_topk_lengths(self, positions: torch.Tensor) -> torch.Tensor:
+        return (positions + 1).clamp(min=0, max=self.topk_tokens)
+
     # q_hadamard and k_hadamard tensor shared when dsa c8 enabled
     q_hadamard: torch.Tensor | None = None
     k_hadamard: torch.Tensor | None = None
