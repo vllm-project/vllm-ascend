@@ -3,15 +3,13 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 import torch
-
-logger = logging.getLogger(__name__)
+from vllm.logger import logger
 
 
 def _align_up(value: int, alignment: int) -> int:
@@ -212,6 +210,15 @@ class MooncakeHostPool:
                 )
             tensors.append(self.region.tensor.narrow(0, start, int(size)))
             self._offset = end
+        logger.debug(
+            "Mooncake HostPool allocated views rank=%s/%s views=%s requested_bytes=%s used_bytes=%s capacity_bytes=%s",
+            self.topology.tp_rank,
+            self.topology.tp_size,
+            len(tensors),
+            sum(sizes),
+            self._offset,
+            self.nbytes,
+        )
         return tensors
 
     def describe_local_views(self, views, num_blocks: int) -> tuple:
@@ -237,6 +244,14 @@ class MooncakeHostPool:
         ranges.sort()
         if any(a[1] > b[0] for a, b in zip(ranges, ranges[1:])):
             raise ValueError("overlapping Host views")
+        logger.debug(
+            "Mooncake HostPool described local views rank=%s/%s components=%s blocks=%s capacity_bytes=%s",
+            self.topology.tp_rank,
+            self.topology.tp_size,
+            len(entries),
+            num_blocks,
+            self.nbytes,
+        )
         return self.region.segment_offset, self.nbytes, tuple(entries)
 
     def close(self) -> None:
@@ -244,3 +259,8 @@ class MooncakeHostPool:
             return
         self.region.release()
         self._closed = True
+        logger.debug(
+            "Mooncake HostPool closed rank=%s/%s",
+            self.topology.tp_rank,
+            self.topology.tp_size,
+        )

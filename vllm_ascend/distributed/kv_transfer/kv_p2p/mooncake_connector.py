@@ -328,6 +328,14 @@ class KVCacheTaskTracker:
             if count != expected:
                 raise ValueError("DSA expected notification count changed")
             seen.add(participant)
+            logger.debug(
+                "DSA producer received completion request=%s participant=%s progress=%s/%s complete=%s",
+                request_id,
+                participant,
+                len(seen),
+                expected,
+                len(seen) == expected,
+            )
             if len(seen) == expected:
                 self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
@@ -745,6 +753,22 @@ class KVCacheRecvingThread(threading.Thread):
         cancelled: threading.Event,
         all_task_done: bool,
     ) -> None:
+        logger.debug(
+            "DSA enqueue request=%s decode_rank=%s remote=%s:%s cp_rank=%s "
+            "pp_rank=%s include_indexer=%s expected_notifications=%s "
+            "notify_only=%s cancelled=%s all_task_done=%s",
+            command.request_id,
+            self.tp_rank,
+            remote_endpoint.remote_host,
+            remote_endpoint.remote_port,
+            cp_rank,
+            pp_rank,
+            include_indexer,
+            expected,
+            command.notify_only,
+            cancelled.is_set(),
+            all_task_done,
+        )
         self.request_queue.put(
             dict(
                 request_id=command.request_id,
@@ -765,12 +789,37 @@ class KVCacheRecvingThread(threading.Thread):
 
     def _execute_dsa_receive(self, task: dict[str, Any]) -> None:
         command = task["dsa_command"]
-        if command.notify_only or task["expected"] == 0 or task["cancelled"].is_set():
+        skip_reason = None
+        if command.notify_only:
+            skip_reason = "notify_only"
+        elif task["expected"] == 0:
+            skip_reason = "zero_reader_cleanup"
+        elif task["cancelled"].is_set():
+            skip_reason = "cancelled"
+        if skip_reason is not None:
+            logger.debug(
+                "DSA skip transfer request=%s decode_rank=%s reason=%s",
+                command.request_id,
+                self.tp_rank,
+                skip_reason,
+            )
             return
         endpoint = task["dsa_remote_endpoint"]
         engine_id, port, host = endpoint.remote_engine_id, endpoint.remote_port, endpoint.remote_host
         with self.remote_metadata_lock:
             has_metadata = self.remote_metadata_hosts.get(engine_id, {}).get(port) == host
+        logger.debug(
+            "DSA begin endpoint request=%s decode_rank=%s remote=%s:%s "
+            "metadata_cached=%s cp_rank=%s pp_rank=%s include_indexer=%s",
+            command.request_id,
+            self.tp_rank,
+            host,
+            port,
+            has_metadata,
+            task["cp_rank"],
+            task["pp_rank"],
+            task["include_indexer"],
+        )
         if not has_metadata:
             self._get_remote_metadata(host, port)
         with self.remote_metadata_lock:
@@ -846,8 +895,24 @@ class KVCacheRecvingThread(threading.Thread):
                 for output, values in zip(combined, part):
                     output.extend(values)
             plans.append((indexer, combined, statistics))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DSA built transfer plans request=%s decode_rank=%s phases=%s token_range=[%s,%s) pp_layers=[%s,%s)",
+                command.request_id,
+                self.tp_rank,
+                [("indexer" if indexer else "main", len(plan[0]), sum(plan[2])) for indexer, plan, _ in plans],
+                start,
+                end,
+                first,
+                last,
+            )
         for indexer, plan, statistics in plans:
             if task["cancelled"].is_set():
+                logger.debug(
+                    "DSA stop remaining phases request=%s decode_rank=%s reason=cancelled",
+                    command.request_id,
+                    self.tp_rank,
+                )
                 break
             task["failure_phase"] = DsaTransferPhase.INDEXER_D2D if indexer else DsaTransferPhase.MAIN_D2RH
             if plan[0]:
@@ -870,9 +935,23 @@ class KVCacheRecvingThread(threading.Thread):
         command = task["dsa_command"]
         endpoint = task["dsa_remote_endpoint"]
         task["failure_phase"] = DsaTransferPhase.MAIN_D2RH
+        logger.debug(
+            "DSA handle endpoint request=%s decode_rank=%s participant=%s remote=%s:%s",
+            command.request_id,
+            self.tp_rank,
+            task["participant"],
+            endpoint.remote_host,
+            endpoint.remote_port,
+        )
         try:
             if not self._is_failed_recv_request(command.request_id):
                 self._execute_dsa_receive(task)
+            else:
+                logger.debug(
+                    "DSA skip endpoint request=%s decode_rank=%s reason=prior_endpoint_failure",
+                    command.request_id,
+                    self.tp_rank,
+                )
         except Exception:
             # The upstream invalid-block interface uses cache group 0's ID
             # space (R1). Preserve that space; never report Host IDs as group 0.
@@ -889,6 +968,13 @@ class KVCacheRecvingThread(threading.Thread):
                     {endpoint.remote_port: {"num": task["expected"], "host": endpoint.remote_host}},
                     participant=task["participant"],
                 )
+                logger.debug(
+                    "DSA sent completion notification request=%s decode_rank=%s participant=%s expected=%s",
+                    command.request_id,
+                    self.tp_rank,
+                    task["participant"],
+                    task["expected"],
+                )
             except Exception:
                 logger.exception("DSA endpoint done notification failed: %s", command.request_id)
             if self._mark_request_task_done(command.request_id, task["all_task_done"]):
@@ -896,6 +982,13 @@ class KVCacheRecvingThread(threading.Thread):
                 with self.failed_recv_requests_lock:
                     phase = self.dsa_failure_phases.pop(command.request_id, DsaTransferPhase.MAIN_D2RH)
                 self._clear_failed_recv_request(command.request_id)
+                logger.debug(
+                    "DSA local request complete request=%s decode_rank=%s failed=%s failure_phase=%s",
+                    command.request_id,
+                    self.tp_rank,
+                    failed,
+                    phase if failed else None,
+                )
                 task["dsa_on_result"](
                     DsaLocalResult(
                         command.request_id,
@@ -2004,6 +2097,20 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
             num_computed_tokens=num_computed_tokens,
             num_external_tokens=external_tokens,
         )
+        logger.debug(
+            "DSA scheduler matched request=%s remote_request=%s computed_tokens=%s "
+            "external_tokens=%s remote_blocks(main=%s,indexer=%s) remote_topology=(tp=%s,pcp=%s,dcp=%s,pp=%s)",
+            request.request_id,
+            source.remote_request_id,
+            num_computed_tokens,
+            external_tokens,
+            len(source.main_block_ids),
+            len(source.indexer_block_ids),
+            source.remote_ptp_size,
+            source.remote_pcp_size,
+            source.remote_dcp_size,
+            source.remote_pp_size,
+        )
         return external_tokens, external_tokens > 0
 
     def update_state_after_alloc(
@@ -2053,6 +2160,16 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
         tracker.invalid_block_ids = invalid_block_ids
         tracker.indexer_hbm_block_ids = indexer_block_ids
         tracker.main_block_ids = main_block_ids[:bound_blocks]
+        logger.debug(
+            "DSA scheduler allocated request=%s external_tokens=%s notify_only=%s "
+            "local_blocks(main=%s,indexer=%s,invalid=%s)",
+            request.request_id,
+            num_external_tokens,
+            tracker.notify_only,
+            len(tracker.main_block_ids),
+            len(tracker.indexer_hbm_block_ids),
+            len(tracker.invalid_block_ids),
+        )
         if isinstance(request.kv_transfer_params, dict):
             request.kv_transfer_params["do_remote_prefill"] = False
 
@@ -2082,6 +2199,13 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
                 self._dsa_requests.pop(command.request_id, None)
         cancelled = tuple(getattr(self, "_dsa_cancelled", ()))
         self._dsa_cancelled = set()
+        if (requests or cancelled) and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DSA scheduler emitted metadata requests=%s notify_only=%s cancelled=%s",
+                [command.request_id for command in requests],
+                [command.request_id for command in requests if command.notify_only],
+                list(cancelled),
+            )
         return DsaConnectorMetadata(tuple(requests), cancelled)
 
     def update_connector_output(self, connector_output: Any) -> None:
@@ -2107,6 +2231,17 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
                     raise ValueError(f"conflicting DSA result for {result.identity}")
                 continue
             tracker.results_by_rank[result.tp_rank] = result
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "DSA scheduler received result request=%s rank=%s kind=%s phase=%s "
+                    "received_ranks=%s expected_ranks=%s",
+                    result.request_id,
+                    result.tp_rank,
+                    result.kind,
+                    result.failure_phase,
+                    sorted(tracker.results_by_rank),
+                    sorted(self._expected_tp_ranks),
+                )
             if set(tracker.results_by_rank) != self._expected_tp_ranks:
                 continue
             # Invalid blocks are reported by the receiving worker before this
@@ -2118,6 +2253,7 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
             connector_output.finished_recving = finished
             for request_id in completed:
                 self._dsa_requests.pop(request_id, None)
+            logger.debug("DSA scheduler completed requests=%s", completed)
 
     def set_xfer_handshake_metadata(
         self,
@@ -2147,10 +2283,16 @@ class _MooncakeDsaDecodeScheduler(SFAPDRD2HScheduler):
             tracker.allocated = True
             tracker.notify_only = True
             request.kv_transfer_params["do_remote_prefill"] = False
+            logger.debug("DSA scheduler marked request=%s notify_only before allocation", request.request_id)
             return False, None
         if not hasattr(self, "_dsa_cancelled"):
             self._dsa_cancelled = set()
         self._dsa_cancelled.add(request.request_id)
+        logger.debug(
+            "DSA scheduler cancelled request=%s notify_only=%s",
+            request.request_id,
+            tracker.notify_only,
+        )
         return not tracker.notify_only, None
 
 
@@ -2188,6 +2330,14 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
                     raise ValueError("Blockwise DSA Decode requires fused overlap")
                 if offload.host_backend != "mooncake":
                     raise ValueError("Blockwise DSA Decode requires host_backend='mooncake'")
+            logger.debug(
+                "DSA connector enabled role=%s connector_role=%s prefill_tp=%s decode_tp=%s decode_mode=%s",
+                kv_role,
+                role,
+                prefill_tp,
+                decode_tp,
+                self._dsa_decode,
+            )
         self._connector_metadata = MooncakeConnectorMetadata()
 
         if role == KVConnectorRole.SCHEDULER:
@@ -2824,6 +2974,17 @@ class MooncakeConnectorWorker:
             self._dsa_results: queue.SimpleQueue[DsaLocalResult] = queue.SimpleQueue()
             self._dsa_dispatch_lock = threading.Lock()
             self._closing = False
+            logger.debug(
+                "DSA worker enabled engine=%s decode_rank=%s/%s prefill_topology=(tp=%s,pp=%s) "
+                "local_context_parallel=(pcp=%s,dcp=%s)",
+                self.engine_id,
+                self.tp_rank,
+                self.tp_size,
+                self._prefill_tp_size,
+                self._prefill_pp_size,
+                self.pcp_size,
+                self.dcp_size,
+            )
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -3331,6 +3492,12 @@ class MooncakeConnectorWorker:
                 (indexer if is_indexer else main).append(entry)
         if not indexer or not main:
             raise ValueError("DSA requires Main and Indexer component layouts")
+        logger.debug(
+            "DSA local layouts ready decode_rank=%s indexer_components=%s main_components=%s",
+            self.tp_rank,
+            len(indexer),
+            len(main),
+        )
         return indexer, main
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -4532,6 +4699,13 @@ class MooncakeConnectorWorker:
     ):
         """Start loading KV blocks from remote engine."""
         if isinstance(metadata, DsaConnectorMetadata):
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "DSA worker received metadata decode_rank=%s requests=%s cancelled=%s",
+                    self.tp_rank,
+                    [command.request_id for command in metadata.requests],
+                    list(metadata.cancelled_requests),
+                )
             scheduled_ids = {command.request_id for command in metadata.requests}
             for request_id in metadata.cancelled_requests:
                 if request_id in self._dsa_active_commands or request_id in scheduled_ids:
@@ -4732,9 +4906,31 @@ class MooncakeConnectorWorker:
             if existing is not None:
                 if existing != command:
                     raise ValueError(f"conflicting DSA receive for {command.request_id!r}")
+                logger.debug(
+                    "DSA ignore duplicate command request=%s decode_rank=%s",
+                    command.request_id,
+                    self.tp_rank,
+                )
                 continue
             plan = self._plan_dsa_endpoints(command)
-            logger.debug("DSA plan request=%s rank=%s endpoint_tasks=%s", command.request_id, self.tp_rank, len(plan))
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "DSA plan request=%s decode_rank=%s notify_only=%s endpoint_tasks=%s tasks=%s",
+                    command.request_id,
+                    self.tp_rank,
+                    command.notify_only,
+                    len(plan),
+                    [
+                        {
+                            "prefill_rank": rank,
+                            "cp_rank": cp_rank,
+                            "pp_rank": pp_rank,
+                            "indexer": indexer,
+                            "expected": expected,
+                        }
+                        for rank, cp_rank, pp_rank, indexer, expected, _ in plan
+                    ],
+                )
             self._dsa_active_commands[command.request_id] = command
             cancelled = self._dsa_cancel_events.setdefault(command.request_id, threading.Event())
             for index, (rank, cp_rank, pp_rank, indexer, expected, task_index) in enumerate(plan):
@@ -4757,11 +4953,25 @@ class MooncakeConnectorWorker:
         result: DsaLocalResult,
     ) -> None:
         if self._dsa_active_commands.get(command.request_id) != command:
+            logger.debug(
+                "DSA ignore stale local result request=%s decode_rank=%s kind=%s",
+                command.request_id,
+                self.tp_rank,
+                result.kind,
+            )
             return
         self._dsa_active_commands.pop(command.request_id, None)
         self._dsa_cancel_events.pop(command.request_id, None)
         if not command.notify_only:
             self._dsa_results.put(result)
+        logger.debug(
+            "DSA worker finalized request=%s decode_rank=%s kind=%s phase=%s notify_only=%s",
+            command.request_id,
+            self.tp_rank,
+            result.kind,
+            result.failure_phase,
+            command.notify_only,
+        )
 
     def build_connector_worker_meta(
         self,
@@ -4774,6 +4984,12 @@ class MooncakeConnectorWorker:
                 break
         if not results:
             return None
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "DSA worker emitted results decode_rank=%s results=%s",
+                self.tp_rank,
+                [(result.request_id, result.kind, result.failure_phase) for result in results],
+            )
         return DsaWorkerResultMetadata(tuple(results))
 
     def _get_tp_num_need_pulls(self, prefill_tp_size: int | None) -> int:
