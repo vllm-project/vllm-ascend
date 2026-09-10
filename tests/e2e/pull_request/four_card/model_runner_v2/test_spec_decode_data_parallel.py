@@ -59,8 +59,8 @@ PROMPTS = [
 def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
     with DPVllmRunner(
         DEEPSEEK_V4_DSPARK_MODEL,
-        data_parallel_size=4,
-        tensor_parallel_size=1,
+        data_parallel_size=2,
+        tensor_parallel_size=2,
         max_model_len=4096,
         max_num_seqs=2,
         max_num_batched_tokens=512,
