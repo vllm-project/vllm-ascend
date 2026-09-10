@@ -13,14 +13,15 @@ from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.ops.fused_moe import moe_mlp as moe_mlp_module
 from vllm_ascend.ops.fused_moe.dataclass.fused_experts import MoEWeights
 from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.dataclass.moe_quant import MoEMxfpParams, MoEQuantParams
 from vllm_ascend.ops.fused_moe.moe_mlp import (
     _swiglu_oai_dynamic_mx_quant,
     cumsum_group_list,
-    synthetic_balance_group_list,
     quant_apply_mlp,
+    synthetic_balance_group_list,
     unified_apply_mlp,
     unquant_apply_mlp,
 )
