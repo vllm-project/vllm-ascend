@@ -381,6 +381,72 @@ def test_shared_prefill_native_grouped_request_q1536_kv2560_dense2048_tail1024()
     _compare_case((1536, 1536), (2560, 2560), 2027)
 
 
+def test_shared_prefill_native_exact_three_request_q2267_multisegment():
+    query_lens = (2267, 2267, 2267)
+    kv_lengths = (2267, 2267, 2267)
+    impl = _create_shared_prefill_impl(2028)
+    baseline_metadata, kv_cache, ql_nope, q_pe, topk_indices = _build_prefill_case(query_lens, kv_lengths, 2028)
+    baseline_metadata.attn_state = AscendAttentionState.PrefillNoCache
+    candidate_metadata = copy.deepcopy(baseline_metadata)
+    snapshot = _snapshot_prefill_inputs(candidate_metadata, kv_cache, topk_indices)
+
+    baseline = impl._execute_sparse_flash_attention_process(
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        baseline_metadata,
+        baseline_metadata.cum_query_lens,
+        baseline_metadata.seq_lens,
+        block_table=baseline_metadata.block_table,
+    )
+    with (
+        patch.object(
+            torch_npu,
+            "npu_fused_infer_attention_score",
+            wraps=torch_npu.npu_fused_infer_attention_score,
+        ) as fused_mock,
+        patch.object(
+            AscendSFAImpl,
+            "_execute_sparse_flash_attention_process",
+            wraps=impl._execute_sparse_flash_attention_process,
+        ) as sparse_mock,
+    ):
+        candidate = impl._try_sfa_fia_shared_prefill(ql_nope, q_pe, kv_cache, candidate_metadata, topk_indices)
+
+    assert candidate is not None
+    assert fused_mock.call_count == 3
+    for request, call in enumerate(fused_mock.call_args_list):
+        dense = call.kwargs
+        assert dense["query"].shape[0] == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
+        assert dense["actual_seq_lengths"] == [SFA_FIA_SHARED_PREFILL_TOPK_WIDTH]
+        assert dense["actual_seq_lengths_kv"] == [SFA_FIA_SHARED_PREFILL_TOPK_WIDTH]
+        torch.testing.assert_close(
+            dense["block_table"],
+            candidate_metadata.block_table[request : request + 1],
+        )
+
+    sparse_mock.assert_called_once()
+    tail = sparse_mock.call_args.args
+    assert tail[0].shape[0] == 657
+    assert tail[5].tolist() == [219, 438, 657]
+    assert tail[6].tolist() == [2267, 2267, 2267]
+    torch.testing.assert_close(sparse_mock.call_args.kwargs["block_table"], candidate_metadata.block_table)
+
+    candidate_repeat = impl._try_sfa_fia_shared_prefill(ql_nope, q_pe, kv_cache, candidate_metadata, topk_indices)
+    assert candidate_repeat is not None
+    assert candidate_metadata._sfa_fia_shared_prefill_plan is None
+    _assert_no_input_mutation(candidate_metadata, snapshot, kv_cache, topk_indices)
+    torch.testing.assert_close(
+        candidate, candidate_repeat, rtol=_SHARED_PREFILL_RTOL, atol=_SHARED_PREFILL_ATOL, check_dtype=False
+    )
+    torch.testing.assert_close(
+        candidate, baseline, rtol=_SHARED_PREFILL_RTOL, atol=_SHARED_PREFILL_ATOL, check_dtype=False
+    )
+    assert torch.isfinite(candidate).all()
+    assert torch.isfinite(baseline).all()
+
+
 def test_shared_prefill_native_fallback_when_dense_total_not_admitted():
     _run_sparsity_fallback_case((277,), (277,), 2030)
 
