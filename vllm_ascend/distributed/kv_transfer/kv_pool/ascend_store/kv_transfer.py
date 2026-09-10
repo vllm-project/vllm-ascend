@@ -15,24 +15,6 @@ from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
 
-# Main-attention kinds aligned with kv_conductor is_main_attention_kind.
-_MAIN_ATTENTION_KINDS = frozenset(
-    {
-        "full_attention",
-        "mla_attention",
-        "sink_full_attention",
-    }
-)
-
-
-def _is_main_attention_kind(kind: str | None) -> bool:
-    """Return True for main attention groups (or when kind is unspecified)."""
-    if kind is None:
-        return True
-    normalized = kind.replace("_", "").lower()
-    return normalized in {k.replace("_", "") for k in _MAIN_ATTENTION_KINDS}
-
-
 # isort: off
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
     ChunkedTokenDatabase,
@@ -841,8 +823,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             spec_kind = (
                 spec_kinds[group_id] if spec_kinds is not None and group_id < len(spec_kinds) else None
             )
-            emit_kv_event = self.enable_kv_event and _is_main_attention_kind(spec_kind)
-            if emit_kv_event:
+            if self.enable_kv_event:
                 group_block_hashes = get_block_hashes(
                     req_meta.block_hashes,
                     effective_block_size,
@@ -867,10 +848,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 addrs.append(addr)
                 sizes.append(size)
-                # Phase-1 offload event for main attention only. Map storage
-                # (start, end) back to the effective token window so
-                # conductor/HBM block_size and tokens_hash stay aligned.
-                if emit_kv_event:
+                # Phase-1 offload event. Map storage (start, end) back to the
+                # effective token window so conductor/HBM block_size and
+                # tokens_hash stay aligned.
+                if self.enable_kv_event:
                     storage_block_size = (
                         req_meta.original_block_size[group_id]
                         if isinstance(req_meta.original_block_size, list)

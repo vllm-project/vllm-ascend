@@ -274,7 +274,7 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         self.assertEqual(events[1].block_size, 64)
         self.assertEqual(events[1].token_ids, list(range(64, 128)))
 
-    def test_handle_request_skips_kv_event_for_non_main_group(self):
+    def test_handle_request_emits_kv_event_for_non_main_group(self):
         t, store = self._make_thread([0], enable_kv_event=True)
         req = ReqMeta(
             req_id="r1",
@@ -289,9 +289,10 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.add_stored_request("r1")
         t.request_queue.put(req)
         t._handle_request(req)
-        # Put still happens; Phase-1 event is skipped for non-main group.
+        events = t.get_kv_events()
         self.assertEqual(len(store.put_calls), 1)
-        self.assertEqual(len(t.get_kv_events()), 0)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kv_cache_spec_kind, "sliding_window_mla")
 
     def test_handle_request_consumer_role(self):
         t, store = self._make_thread([0], kv_role="kv_consumer")
