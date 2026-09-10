@@ -925,6 +925,28 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         super().process_weights_after_loading(act_dtype)
 
+    def _fia_mask_mode(self, causal: bool) -> tuple[int, int, int]:
+        """How FIA should mask this batch: ``(sparse_mode, pre_tokens, next_tokens)``.
+
+        Whether the batch is bidirectional has to be asked before whether the
+        layer has a window, which is the order ``forward_fused_infer_attention``
+        asks in. A bidirectional batch -- a DFlash draft block, say -- carries no
+        mask, because the mask builder withholds one: FIA reads whatever mask it
+        is given as defaultMask, which would crop the upper triangle away. Band
+        mode then refuses to run at all:
+
+            when sparse_mode is 4 (not 0), atten_mask cannot be empty
+
+        So a window cannot be applied to such a batch, and the band stays open
+        rather than carrying the window's ``next_tokens=0``, which would mask out
+        the block's own right half.
+        """
+        if not causal:
+            return 0, SWA_INT_MAX, SWA_INT_MAX
+        if self.sliding_window:
+            return 4, self.sliding_window, 0
+        return 3, SWA_INT_MAX, SWA_INT_MAX
+
     def full_graph_fia(
         self,
         query: torch.Tensor,
@@ -947,10 +969,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
         softmax_lse = torch.empty(1, dtype=query.dtype, device=query.device)
         input_layout = "TND"
-        attn_mask = attn_metadata.attn_mask
-        sparse_mode = 4 if self.sliding_window else 3 if attn_metadata.causal else 0
-        pre_tokens = self.sliding_window or SWA_INT_MAX
-        next_tokens = 0 if self.sliding_window else SWA_INT_MAX
+        sparse_mode, pre_tokens, next_tokens = self._fia_mask_mode(attn_metadata.causal)
+        attn_mask = attn_metadata.attn_mask if attn_metadata.causal else None
 
         extra_args = {}
         if self.enable_c8_quant and layer is not None:
