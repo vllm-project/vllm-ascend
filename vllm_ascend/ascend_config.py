@@ -998,6 +998,9 @@ class FinegrainedTPConfig:
         return self
 
     def _validate_preconditions(self, vllm_config: Any):
+        # Local import to avoid a circular import during platform resolution.
+        from vllm.config.compilation import CUDAGraphMode
+
         vc = vllm_config
         enabled_configs = []
         if self.oproj_tensor_parallel_size > 0:
@@ -1014,11 +1017,11 @@ class FinegrainedTPConfig:
                     "tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
-            # The static all_to_all / reduce_scatter exchange buffers used by
-            # _forward_o_proj are sized for graph replay and require ACL graph
-            # capture; dummy_run does not run the entire attention module in
-            # eager mode, so o_proj tp split can only be used in graph mode.
-            if vc.model_config and vc.model_config.enforce_eager:
+            # The o_proj exchange requires ACL graph capture (buffers sized
+            # for graph replay; eager dummy runs skip the attention module).
+            # VllmConfig.__post_init__ maps enforce_eager to
+            # cudagraph_mode=NONE, so checking the mode covers both.
+            if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
                 raise AssertionError(
