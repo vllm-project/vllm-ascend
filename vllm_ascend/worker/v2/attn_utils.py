@@ -66,7 +66,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.sfa_kv_layout import (
-    sfa_kv_parent_supported_for_transfer,
+    should_use_sfa_kv_parent_layout,
     split_sfa_kv_parent,
 )
 
@@ -394,7 +394,7 @@ def _uses_sfa_kv_parent(layer_name: str, spec: AttentionSpec, backend=None) -> b
     config = get_current_vllm_config()
     if (
         not enable_sfa(config)
-        or not sfa_kv_parent_supported_for_transfer(config.kv_transfer_config)
+        or not should_use_sfa_kv_parent_layout(config.kv_transfer_config)
         or not isinstance(spec, AscendMLAAttentionSpec)
         or bool(getattr(spec, "cache_sparse_sfa_c8", False))
         or "cache_only_layers" in layer_name
