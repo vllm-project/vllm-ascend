@@ -16,9 +16,9 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
-# The device implementation uses an operator-private Catlass snapshot under
-# op_kernel/catlass, derived from v1.3.1-notla. Its interfaces differ from the
-# repository Catlass submodule, so the msa_ prefix keeps the two copies isolated.
+# Ascend 950 uses an operator-private Catlass snapshot under op_kernel/catlass,
+# derived from v1.3.1-notla. A2/A3 keep using the repository Catlass submodule.
+# The msa_ prefix keeps the A5-only snapshot isolated from the repository copy.
 set(MSA_CATLASS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel")
 if(NOT EXISTS "${MSA_CATLASS_INCLUDE_DIR}/catlass/msa_catlass.hpp")
     message(FATAL_ERROR
@@ -31,6 +31,8 @@ add_ops_compile_options(
             -Wno-deprecated-declarations
             -fpermissive
     OPTIONS -I${MSA_CATLASS_INCLUDE_DIR}
+    OPTIONS -I${CMAKE_SOURCE_DIR}/third_party/catlass/include
+    OPTIONS -DCATLASS_ARCH=2201
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)

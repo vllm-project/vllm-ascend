@@ -23,8 +23,8 @@
 
 #include "kernel_operator.h"
 
-#include "catlass/arch/msa_arch.hpp"
-#include "catlass/arch/msa_resource.hpp"
+#include "catlass/arch/arch.hpp"
+#include "catlass/arch/resource.hpp"
 
 #include "../msa_index_score_common.h"
 #include "msa_index_score_task.h"

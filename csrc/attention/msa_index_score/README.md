@@ -139,6 +139,7 @@ uses `2e-2`.
   element.
 - The Ascend 950 implementation is under `op_kernel/arch35`. It uses native
   Cube FP8 tiling keys 4/5/6 without a scale or an intermediate FP16 cast.
-- `op_kernel/catlass` is an operator-private Catlass snapshot derived from the
-  v1.3.1-notla implementation. It is intentionally isolated from the repository
-  Catlass submodule because its interfaces and implementation differ.
+- Ascend 950 uses the operator-private Catlass snapshot under
+  `op_kernel/catlass`, derived from v1.3.1-notla. A2/A3 continue to use the
+  repository Catlass submodule. The `msa_` prefix isolates only the A5-specific
+  snapshot because its interfaces and implementation differ.
