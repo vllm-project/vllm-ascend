@@ -395,14 +395,11 @@ private:
         return total;
     }
 
-    __aicore__ inline uint64_t FloatToFixedMass(float value)
+    __aicore__ inline uint64_t FloatToFixedMass(uint32_t bits)
     {
-        if (value <= 0.0f) {
+        if (bits == 0 || (bits >> 31U) != 0) {
             return 0;
         }
-        LocalTensor<float> scalar = scalarBuf_.Get<float>();
-        scalar.SetValue(0, value);
-        const uint32_t bits = scalar.ReinterpretCast<uint32_t>().GetValue(0);
         const uint32_t exponent = (bits >> 23U) & 0xFFU;
         const uint64_t mantissa = exponent == 0 ? (bits & 0x7FFFFFU) : ((bits & 0x7FFFFFU) | 0x800000U);
         const int32_t binaryExponent = exponent == 0 ? -149 : static_cast<int32_t>(exponent) - 150;
@@ -428,9 +425,11 @@ private:
         Exp(logitsFloat, logitsFloat, vectorElements);
         PipeVToS();
 
+        // Read the existing FP32 bits without a scalar UB round trip.
+        LocalTensor<uint32_t> weightBits = logitsFloat.ReinterpretCast<uint32_t>();
         uint64_t tileMass = 0;
         for (uint32_t index = 0; index < validElements; ++index) {
-            tileMass += FloatToFixedMass(logitsFloat.GetValue(index));
+            tileMass += FloatToFixedMass(weightBits.GetValue(index));
         }
         return tileMass;
     }
@@ -545,10 +544,11 @@ private:
         Exp(logitsFloat, logitsFloat, vectorElements);
         PipeVToS();
 
+        LocalTensor<uint32_t> weightBits = logitsFloat.ReinterpretCast<uint32_t>();
         uint64_t cumulative = prefix;
         int64_t fallback = static_cast<int64_t>(selectedTile) * tileElements_;
         for (uint32_t index = 0; index < validElements; ++index) {
-            const uint64_t mass = FloatToFixedMass(logitsFloat.GetValue(index));
+            const uint64_t mass = FloatToFixedMass(weightBits.GetValue(index));
             if (mass > 0) {
                 fallback = static_cast<int64_t>(selectedTile) * tileElements_ + index;
             }
