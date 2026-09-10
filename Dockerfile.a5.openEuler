@@ -94,6 +94,14 @@ ARG RUSTUP_DIST_SERVER
 ARG RUSTUP_UPDATE_ROOT
 ENV RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER \
     RUSTUP_UPDATE_ROOT=$RUSTUP_UPDATE_ROOT
+RUN case $(uname -m) in \
+      x86_64) ARCH=x86_64-unknown-linux-gnu ;; \
+      aarch64) ARCH=aarch64-unknown-linux-gnu ;; \
+    esac && \
+    curl -fsSL "${RUSTUP_DIST_SERVER}/dist/${ARCH}/rustup-init" -o /tmp/rustup-init && \
+    chmod +x /tmp/rustup-init && \
+    /tmp/rustup-init -y --no-modify-path --default-toolchain none && \
+    rm /tmp/rustup-init
 RUN cd /vllm-workspace/vllm && \
     export PROTOC_INCLUDE=/usr/include && \
     python3 -m pip install setuptools-rust && \
