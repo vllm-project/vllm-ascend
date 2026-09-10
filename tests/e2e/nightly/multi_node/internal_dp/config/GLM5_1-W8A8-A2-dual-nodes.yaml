@@ -52,6 +52,7 @@ deployment:
       --tensor-parallel-size 8
       --data-parallel-size-local 1
       --data-parallel-start-rank 1
+      --headless
       --data-parallel-address $MASTER_IP
       --data-parallel-rpc-port 13389
       --enable-expert-parallel
