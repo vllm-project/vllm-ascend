@@ -178,7 +178,6 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
-        "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
         "chunk_fwd_o"
