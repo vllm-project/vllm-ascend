@@ -123,6 +123,11 @@ on:
         type: string
         default: ''
         description: override CONFIG_BASE_PATH for bisect
+      openlibing_secret:
+        required: false
+        type: string
+        default: ''
+        description: openlibing api secret
     secrets:
       OBS_ACCESS_KEY_ID:
         required: false
@@ -161,7 +166,7 @@ jobs:
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
       VLLM_ENGINE_READY_TIMEOUT_S: 1800
-      OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
+      OPENLIBING_SECRET: ${{ inputs.openlibing_secret }}
       VLLM_ASCEND_BRANCH: ${{ inputs.vllm_ascend_branch }}
     steps:
       - name: Check npu and CANN info
