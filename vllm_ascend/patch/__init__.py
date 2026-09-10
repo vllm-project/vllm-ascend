@@ -126,6 +126,38 @@
 #       handles a pre-sharded visible-devices env var, or vLLM-Ascend stops
 #       relying on application-level device slicing for DP.
 #
+# ** 4a. File: platform/patch_defer_block_free_schedule.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler.schedule`
+#      `vllm.v1.core.sched.scheduler.Scheduler._free_request_blocks`
+#      `vllm.v1.core.sched.scheduler.Scheduler._should_defer_request_block_free`
+#      (new method, added by the patch)
+#    Why:
+#       Backport of vLLM PR #49675. With deferred block freeing enabled
+#       (async scheduling + PD KV-consumer), the `schedule()` allocation
+#       retry loop can pick a preemption victim whose blocks are still
+#       fenced by an in-flight step: freeing them is deferred, so the
+#       retry `allocate_slots` keeps failing and preempts the running
+#       requests one by one (zero-reclaim preemption cascade), stalling
+#       the engine.
+#    How:
+#       Applies the PR verbatim: the retry loop selects the victim before
+#       removing it and breaks out when
+#       `_should_defer_request_block_free(victim)` is true (retry on a
+#       later step instead of cascading); `_free_request_blocks` is
+#       refactored onto the same helper. `schedule()` is an ~800-line
+#       method, so (as in `patch_balance_schedule.py`) the whole body is
+#       copied verbatim from the pinned vLLM release tag
+#       (`.github/vllm-release-tag.commit`) with only the preemption-loop
+#       delta, adapted to the pin's older bookkeeping. Install is guarded:
+#       skip if the installed vLLM already ships the fix; fail loudly if
+#       the installed `schedule()` signature no longer matches the pin.
+#    Related PR (if no, explain why):
+#       https://github.com/vllm-project/vllm/pull/49675
+#    Future Plan:
+#       Remove this patch once the pinned vLLM release tag carries PR
+#       #49675 (the import-time `hasattr` guard then auto-skips it).
+#
 # ** 5. File: platform/patch_dyntra_lb_core.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
