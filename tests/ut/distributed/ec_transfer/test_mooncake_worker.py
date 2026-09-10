@@ -8,11 +8,26 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendConsumerMemoryPool,
     AscendContiguousAllocator,
+    AscendProducerAllocator,
     AscendProducerMemoryPool,
 )
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.worker import (
     AscendECMooncakeWorker,
+    _resolve_bounce_arena_size,
 )
+
+
+def _make_bounce_config(
+    *,
+    max_num_seqs: int = 128,
+    extra_config: dict[str, object] | None = None,
+) -> MagicMock:
+    config = MagicMock()
+    config.scheduler_config.max_num_seqs = max_num_seqs
+    config.ec_transfer_config.ec_connector_extra_config = (
+        {} if extra_config is None else extra_config
+    )
+    return config
 
 
 def test_make_config_maps_upstream_defaults_to_ascend():
@@ -107,6 +122,7 @@ def test_record_source_ready_event_uses_npu_event():
 
 def test_make_memory_pools_use_ascend_allocator():
     worker = object.__new__(AscendECMooncakeWorker)
+    worker._bounce_arena_size = 2 * 1024 * 1024
     transfer = MagicMock()
     capacity = 1024
 
@@ -116,5 +132,69 @@ def test_make_memory_pools_use_ascend_allocator():
     assert isinstance(consumer, AscendConsumerMemoryPool)
     assert isinstance(producer, AscendProducerMemoryPool)
     assert isinstance(consumer._allocator, AscendContiguousAllocator)
-    assert isinstance(producer._allocator, AscendContiguousAllocator)
+    assert isinstance(producer._allocator, AscendProducerAllocator)
+    assert producer._allocator.staging_capacity == capacity
+    assert producer._allocator.bounce_capacity == worker._bounce_arena_size
     assert consumer._allocator is not producer._allocator
+
+
+@pytest.mark.parametrize(
+    ("max_num_seqs", "expected_mib"),
+    [
+        (5, 10),
+        (128, 256),
+        (256, 256),
+        (1024, 256),
+    ],
+)
+def test_resolve_default_bounce_arena_size(
+    max_num_seqs: int,
+    expected_mib: int,
+):
+    config = _make_bounce_config(
+        max_num_seqs=max_num_seqs,
+    )
+
+    result = _resolve_bounce_arena_size(config)
+
+    assert result == expected_mib * 1024 * 1024
+
+
+def test_resolve_explicit_bounce_arena_size_align_up():
+    mib = 1024 * 1024
+    config = _make_bounce_config(
+        extra_config={
+            "ascend_mooncake_bounce_arena_size": 2 * mib + 1,
+        },
+    )
+
+    assert _resolve_bounce_arena_size(config) == 4 * mib
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        True,
+        False,
+        0,
+        -1,
+        2 * 1024 * 1024 - 1,
+        2.0,
+        "2097152",
+        None,
+    ],
+)
+def test_resolve_explicit_bounce_arena_size_rejects_invalid_values(
+    value: object,
+):
+    config = _make_bounce_config(
+        extra_config={
+            "ascend_mooncake_bounce_arena_size": value,
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="ascend_mooncake_bounce_arena_size",
+    ):
+        _resolve_bounce_arena_size(config)

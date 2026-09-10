@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
@@ -9,8 +10,11 @@ from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake import (
 from vllm_ascend.distributed.ec_transfer.ec_connector.mooncake.memory import (
     AscendConsumerMemoryPool,
     AscendContiguousAllocator,
+    AscendProducerAllocator,
     AscendProducerMemoryPool,
 )
+
+_MIB = 1024 * 1024
 
 
 def test_allocate_tensor_returns_2_mib_aligned_tensor():
@@ -97,3 +101,91 @@ def test_producer_copies_to_staging_on_npu_stream():
     stream.synchronize.assert_called_once_with()
     assert producer._local.stream is stream
     assert result is None
+
+
+def test_producer_allocator_layout():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+
+    assert allocator.staging_capacity == 3 * _MIB
+    assert allocator.bounce_offset == 4 * _MIB
+    assert allocator.padding == 1 * _MIB
+    assert allocator.bounce_capacity == 2 * _MIB
+    assert allocator.registered_capacity == 6 * _MIB
+    assert allocator.raw_allocation_size == 8 * _MIB - 1
+    assert allocator.bounce_tensor is None
+
+
+def test_producer_allocator_prepares_partitioned_slab():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+
+    allocator.prepare(torch.device("cpu"), transfer)
+
+    tensor = allocator.tensor
+    bounce = allocator.bounce_tensor
+    assert tensor is not None
+    assert bounce is not None
+
+    assert tensor.nbytes == 6 * _MIB
+    assert allocator._free == [(0, 3 * _MIB)]
+
+    assert bounce.data_ptr() == tensor.data_ptr() + 4 * _MIB
+    assert bounce.nbytes == 2 * _MIB
+
+    transfer.register_memory.assert_called_once_with(tensor)
+
+
+def test_producer_allocator_does_not_expose_bounce_to_staging():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+    allocator.prepare(torch.device("cpu"), transfer)
+
+    assert allocator.allocate(3 * _MIB) == (0, 3 * _MIB)
+    assert allocator.allocate(1) is None
+
+
+def test_producer_allocator_prepare_is_idempotent():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 0
+
+    allocator.prepare(torch.device("cpu"), transfer)
+    region = allocator.allocate(256)
+    free_after_allocate = list(allocator._free)
+
+    allocator.prepare(torch.device("cpu"), transfer)
+
+    assert region == (0, 256)
+    assert allocator._free == free_after_allocate
+    transfer.register_memory.assert_called_once()
+
+
+def test_producer_allocator_registration_failure_is_fatal():
+    allocator = AscendProducerAllocator(
+        staging_capacity=3 * _MIB,
+        bounce_capacity=2 * _MIB,
+    )
+    transfer = MagicMock()
+    transfer.register_memory.return_value = 7
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"staging=.*padding=.*bounce=.*registered=.*allocation=",
+    ):
+        allocator.prepare(torch.device("cpu"), transfer)
+
+    assert allocator.tensor is None
