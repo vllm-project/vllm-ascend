@@ -18,8 +18,7 @@ from vllm_ascend.quantization.configs.modelslim_config import (
     MODELSLIM_CONFIG_FILENAME,
     AscendModelSlimConfig,
     _make_modelslim_moe_weight_loader,
-    get_linear_quant_type,
-    get_packed_modules_mapping,
+    get_quant_type_for_layer,
 )
 from vllm_ascend.utils import ASCEND_QUANTIZATION_METHOD, get_rotation_path
 
@@ -39,7 +38,7 @@ class TestAscendModelSlimConfig(TestBase):
             "shard2.weight": "FLOAT",
         }
         self.ascend_config = AscendModelSlimConfig(self.sample_config)
-        self.ascend_config.packed_modules_mapping = None
+        self.ascend_config.packed_modules_mapping = {}
 
     def test_init(self):
         self.assertEqual(self.ascend_config.quant_description, self.sample_config)
@@ -90,12 +89,12 @@ class TestAscendModelSlimConfig(TestBase):
         mock_config = MagicMock()
         mock_config.model_config.hf_config.model_type = None
         linear_layer = MagicMock(spec=LinearBase)
-        # Test skipped layer
+        # Test skipped layer (quant_type is None)
         with (
             patch(
                 "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
             ),
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=True),
+            patch("vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer", return_value=None),
         ):
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIsInstance(method, AscendUnquantizedLinearMethod)
@@ -103,10 +102,10 @@ class TestAscendModelSlimConfig(TestBase):
         # Test quantized layer
         mock_scheme = MagicMock()
         with (
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
             patch(
                 "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
             ),
+            patch("vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer", return_value="INT8"),
             patch(
                 "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
             ),
@@ -179,7 +178,10 @@ class TestAscendModelSlimConfig(TestBase):
             patch(
                 "vllm_ascend.quantization.configs.modelslim_config.get_current_vllm_config", return_value=mock_config
             ),
-            patch.object(self.ascend_config, "is_layer_skipped_ascend", return_value=False),
+            patch(
+                "vllm_ascend.quantization.configs.modelslim_config.get_quant_type_for_layer",
+                return_value="W8A8_DYNAMIC",
+            ),
             patch(
                 "vllm_ascend.quantization.configs.modelslim_config.create_scheme_for_layer", return_value=mock_scheme
             ),
@@ -246,23 +248,6 @@ class TestAscendModelSlimConfig(TestBase):
 
             self.assertIsInstance(args[0], AscendC8KVCacheAttentionMethod)
 
-    def test_is_layer_skipped_ascend(self):
-        # Test non-fused layer that should be quantized
-        self.assertFalse(self.ascend_config.is_layer_skipped_ascend("layer1"))
-
-        # Test non-fused layer that should be skipped
-        self.assertTrue(self.ascend_config.is_layer_skipped_ascend("layer2"))
-
-        # Test fused layer
-        fused_mapping = {"fused_layer": ["shard1", "shard2"]}
-        self.assertTrue(self.ascend_config.is_layer_skipped_ascend("fused_layer", fused_mapping))
-
-        # Test inconsistent fused layer shards
-        bad_config = {"shard1.weight": "FLOAT", "shard2.weight": "INT8"}
-        config = AscendModelSlimConfig(bad_config)
-        with self.assertRaises(ValueError):
-            config.is_layer_skipped_ascend("fused_layer", fused_mapping)
-
     def test_missing_k_eq_v_v_proj_shard_uses_present_shards(self):
         prefix = "model.layers.5.self_attn.qkv_proj"
         fused_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
@@ -270,10 +255,8 @@ class TestAscendModelSlimConfig(TestBase):
             "model.layers.5.self_attn.q_proj.weight": "W8A8_DYNAMIC",
             "model.layers.5.self_attn.k_proj.weight": "W8A8_DYNAMIC",
         }
-        config = AscendModelSlimConfig(quant_description)
 
-        self.assertEqual(get_linear_quant_type(quant_description, prefix, fused_mapping), "W8A8_DYNAMIC")
-        self.assertFalse(config.is_layer_skipped_ascend(prefix, fused_mapping))
+        self.assertEqual(get_quant_type_for_layer(quant_description, prefix, fused_mapping), "W8A8_DYNAMIC")
 
     def test_missing_required_packed_shard_still_raises(self):
         prefix = "model.layers.5.self_attn.qkv_proj"
@@ -282,12 +265,63 @@ class TestAscendModelSlimConfig(TestBase):
             "model.layers.5.self_attn.k_proj.weight": "W8A8_DYNAMIC",
             "model.layers.5.self_attn.v_proj.weight": "W8A8_DYNAMIC",
         }
-        config = AscendModelSlimConfig(quant_description)
 
         with self.assertRaises(KeyError):
-            get_linear_quant_type(quant_description, prefix, fused_mapping)
-        with self.assertRaises(KeyError):
-            config.is_layer_skipped_ascend(prefix, fused_mapping)
+            get_quant_type_for_layer(quant_description, prefix, fused_mapping)
+
+    def test_update_packed_modules_mapping_discovers_gate_up_down(self):
+        """_update_packed_modules_mapping discovers gate/up/down shard names."""
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.3.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.gate_proj.weight_scale": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.up_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.up_proj.weight_scale": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.down_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.0.down_proj.weight_scale": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.1.gate_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.1.up_proj.weight": "W8A8_DYNAMIC",
+                "model.layers.3.mlp.experts.1.down_proj.weight": "W8A8_DYNAMIC",
+            }
+        )
+        self.assertNotIn("experts", config.packed_modules_mapping)
+        config._update_packed_modules_mapping("qwen3")
+        self.assertIn("experts", config.packed_modules_mapping)
+        # sorted: down_proj < gate_proj < up_proj
+        self.assertEqual(
+            config.packed_modules_mapping["experts"],
+            ["experts.0.down_proj", "experts.0.gate_proj", "experts.0.up_proj"],
+        )
+
+    def test_update_packed_modules_mapping_keeps_existing_experts(self):
+        """_update_packed_modules_mapping does not overwrite a custom experts mapping."""
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.0.mlp.experts.0.gate_proj.weight": "W8A8_DYNAMIC",
+            }
+        )
+        # Pre-populate with a custom mapping
+        config.packed_modules_mapping["experts"] = ["experts.0.custom"]
+        config._update_packed_modules_mapping("qwen3")
+        # Should not be overwritten
+        self.assertEqual(config.packed_modules_mapping["experts"], ["experts.0.custom"])
+
+    def test_update_packed_modules_mapping_no_experts(self):
+        """_update_packed_modules_mapping does nothing when no expert weights exist."""
+        config = AscendModelSlimConfig(
+            {
+                "model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+            }
+        )
+        self.assertNotIn("experts", config.packed_modules_mapping)
+        config._update_packed_modules_mapping("qwen3")
+        self.assertNotIn("experts", config.packed_modules_mapping)
+
+    def test_update_packed_modules_mapping_applies_updated_entries(self):
+        """_update_packed_modules_mapping merges UPDATED_PACKED_MODULES_MAPPING entries."""
+        config = AscendModelSlimConfig()
+        config._update_packed_modules_mapping("qwen3_vl_moe")
+        self.assertEqual(config.packed_modules_mapping["gate_up_proj"], ["gate_proj", "up_proj"])
 
     def test_init_with_default_config(self):
         config = AscendModelSlimConfig()
@@ -558,15 +592,6 @@ class TestQuantPrefixMapper(TestBase):
                     expected,
                 )
 
-    def test_qwen3_5_text_backbones_use_packed_module_mappings(self):
-        dense_mapping = get_packed_modules_mapping("qwen3_5_text")
-        moe_mapping = get_packed_modules_mapping("qwen3_5_moe_text")
-        self.assertEqual(dense_mapping["qkv_proj"], ["q_proj", "k_proj", "v_proj"])
-        self.assertEqual(
-            moe_mapping["experts"],
-            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        )
-
     def test_lm_head_maps_to_language_model_lm_head_when_quant_key_exists(self):
         config = AscendModelSlimConfig({"language_model.lm_head.weight": "FLOAT"})
 
@@ -606,6 +631,18 @@ class TestQuantPrefixMapper(TestBase):
                         f"{quant_prefix}.v_proj.weight": "FLOAT",
                     }
                 )
+                config.packed_modules_mapping = {
+                    "qkv_proj": [
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                    ],
+                    "gate_up_proj": [
+                        "gate_proj",
+                        "up_proj",
+                    ],
+                    "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+                }
 
                 prefix = config.quant_prefix_mapper(
                     "step3p5_mtp",
@@ -628,21 +665,21 @@ class TestQuantPrefixMapper(TestBase):
                     model_type,
                     "language_model.model.layers.0.moe.experts",
                 )
-                packed_mapping = get_packed_modules_mapping(model_type)
+                packed_mapping = {
+                    "qkv_proj": [
+                        "q_proj",
+                        "k_proj",
+                        "v_proj",
+                    ],
+                    "gate_up_proj": [
+                        "gate_proj",
+                        "up_proj",
+                    ],
+                    "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+                }
 
                 self.assertEqual(prefix, "language_model.model.layers.0.experts")
-                self.assertEqual(get_linear_quant_type(quant_description, prefix, packed_mapping), "W8A8_DYNAMIC")
-                self.assertFalse(config.is_layer_skipped_ascend(prefix, packed_mapping))
-
-    def test_gemma4_packed_modules_mapping_covers_attention_mlp_and_moe(self):
-        expected_mapping = {
-            "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-            "gate_up_proj": ["gate_proj", "up_proj"],
-            "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-        }
-        for model_type in ("gemma4", "gemma4_text"):
-            with self.subTest(model_type=model_type):
-                self.assertEqual(get_packed_modules_mapping(model_type), expected_mapping)
+                self.assertEqual(get_quant_type_for_layer(quant_description, prefix, packed_mapping), "W8A8_DYNAMIC")
 
     def test_kimi_k3_modelslim_resolves_fused_kda_and_moe_types(self):
         layer_prefix = "language_model.model.layers.1"
@@ -656,21 +693,21 @@ class TestQuantPrefixMapper(TestBase):
                 for name in ("w1", "w2", "w3")
             },
         }
-        packed_mapping = get_packed_modules_mapping("kimi_k3")
 
-        self.assertEqual(
-            get_linear_quant_type(
+        config = AscendModelSlimConfig({})
+        config._update_packed_modules_mapping("kimi_k3")
+        self.assertIsNone(
+            get_quant_type_for_layer(
                 quant_description,
                 f"{layer_prefix}.self_attn.in_proj_qkvgfab",
-                packed_mapping,
+                config.packed_modules_mapping,
             ),
-            "FLOAT",
         )
         self.assertEqual(
-            get_linear_quant_type(
+            get_quant_type_for_layer(
                 quant_description,
                 f"{layer_prefix}.block_sparse_moe.experts",
-                packed_mapping,
+                config.packed_modules_mapping,
             ),
             "W4A8_DYNAMIC",
         )
@@ -682,14 +719,15 @@ class TestQuantPrefixMapper(TestBase):
             **{f"{attention_prefix}.{name}.weight": "FLOAT" for name in ("g_proj", "f_a_proj", "b_proj")},
         }
         config = AscendModelSlimConfig(quant_description)
+        config._update_packed_modules_mapping("kimi_k3")
         fused_prefix = f"{attention_prefix}.in_proj_qkvgfab"
 
         self.assertTrue(config.uses_kimi_k3_mixed_kda_projection(fused_prefix))
         self.assertEqual(
-            get_linear_quant_type(
+            get_quant_type_for_layer(
                 quant_description,
                 f"{attention_prefix}.in_proj_qkv",
-                get_packed_modules_mapping("kimi_k3"),
+                config.packed_modules_mapping,
             ),
             "W8A8_DYNAMIC",
         )
@@ -704,41 +742,6 @@ class TestQuantPrefixMapper(TestBase):
             method = config.get_quant_method(layer, fused_prefix)
 
         self.assertIsInstance(method, AscendUnquantizedLinearMethod)
-
-    def test_glm5_next_packed_modules_mapping_covers_moe_mla_and_kda(self):
-        expected_mapping = {
-            "gate_up_proj": ["gate_proj", "up_proj"],
-            "experts": ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
-            "fused_qkv_a_proj": ["q_a_proj", "kv_a_proj_with_mqa"],
-            "fused_qkvbfg_a_proj": ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"],
-        }
-        self.assertEqual(get_packed_modules_mapping("glm5_next"), expected_mapping)
-
-    def test_gemma4_moe_experts_float_shards_are_skipped_together(self):
-        quant_description = {
-            "language_model.model.layers.0.experts.0.gate_proj.weight": "FLOAT",
-            "language_model.model.layers.0.experts.0.up_proj.weight": "FLOAT",
-            "language_model.model.layers.0.experts.0.down_proj.weight": "FLOAT",
-        }
-        config = AscendModelSlimConfig(quant_description)
-        prefix = config.quant_prefix_mapper("gemma4", "language_model.model.layers.0.moe.experts")
-
-        self.assertTrue(config.is_layer_skipped_ascend(prefix, get_packed_modules_mapping("gemma4")))
-
-    def test_gemma4_moe_experts_mixed_shards_still_raise(self):
-        quant_description = {
-            "language_model.model.layers.0.experts.0.gate_proj.weight": "FLOAT",
-            "language_model.model.layers.0.experts.0.up_proj.weight": "W8A8_DYNAMIC",
-            "language_model.model.layers.0.experts.0.down_proj.weight": "W8A8_DYNAMIC",
-        }
-        config = AscendModelSlimConfig(quant_description)
-        prefix = config.quant_prefix_mapper("gemma4", "language_model.model.layers.0.moe.experts")
-        packed_mapping = get_packed_modules_mapping("gemma4")
-
-        with self.assertRaises(ValueError):
-            get_linear_quant_type(quant_description, prefix, packed_mapping)
-        with self.assertRaises(ValueError):
-            config.is_layer_skipped_ascend(prefix, packed_mapping)
 
     def test_non_gemma4_moe_experts_prefix_is_not_rewritten(self):
         config = AscendModelSlimConfig()
@@ -846,3 +849,55 @@ class TestAddKvcacheQuantMetadata(TestBase):
         self.assertEqual(config.kvcache_quant_layers, [])
         self.assertFalse(config.enable_indexer_quant)
         self.assertEqual(config.indexer_quant_layers, [])
+
+
+class TestGetQuantTypeForLayer(TestBase):
+    """Tests for the get_quant_type_for_layer function."""
+
+    def test_fused_module_all_shards_same(self):
+        """Fused module with all shards having same quant type returns it."""
+        quant_desc = {
+            "model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.q_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.k_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.k_proj.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.v_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.v_proj.weight_scale": "W8A8_DYNAMIC",
+        }
+        mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.self_attn.qkv_proj", mapping)
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_fused_module_inconsistent_shards_raises(self):
+        """Fused module with inconsistent shard quant types raises ValueError."""
+        quant_desc = {
+            "model.layers.0.self_attn.q_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.self_attn.k_proj.weight": "W4A8_DYNAMIC",
+            "model.layers.0.self_attn.v_proj.weight": "W8A8_DYNAMIC",
+        }
+        mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+        with self.assertRaises(ValueError):
+            get_quant_type_for_layer(quant_desc, "model.layers.0.self_attn.qkv_proj", mapping)
+
+    def test_experts_with_mapping_quantized(self):
+        """Experts with Minimax-style w1/w2/w3 mapping."""
+        quant_desc = {
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w1.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w2.weight": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w2.weight_scale": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w3.weight": "W8A8_DYNAMIC",
+            "model.layers.0.block_sparse_moe.experts.0.w3.weight_scale": "W8A8_DYNAMIC",
+        }
+        mapping = {"experts": ["experts.0.w1", "experts.0.w2", "experts.0.w3"]}
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.block_sparse_moe.experts", mapping)
+        self.assertEqual(result, "W8A8_DYNAMIC")
+
+    def test_packed_modules_mapping_none_defaults_to_empty(self):
+        """None packed_modules_mapping is treated as empty dict."""
+        quant_desc = {
+            "model.layers.0.mlp.gate_proj.weight": "W8A8_DYNAMIC",
+            "model.layers.0.mlp.up_proj.weight": "W4A8_DYNAMIC",
+        }
+        result = get_quant_type_for_layer(quant_desc, "model.layers.0.mlp.gate_proj", None)
+        self.assertEqual(result, "W8A8_DYNAMIC")
