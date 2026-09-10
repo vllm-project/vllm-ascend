@@ -143,8 +143,6 @@ class AscendDSparkProposer(AscendDflashProposer):
             return batch_descriptor.num_reqs * self.num_query_per_req
         return batch_descriptor.num_tokens
 
-<<<<<<< ours
-=======
     def _pad_request_tensor(
         self,
         tensor: torch.Tensor | None,
@@ -278,7 +276,6 @@ class AscendDSparkProposer(AscendDflashProposer):
         self._dflash_num_context = num_graph_context
         return num_reqs_padded
 
->>>>>>> theirs
     def _bind_context_slot_mapping_buffers(self) -> None:
         """Bind persistent per-layer context mappings before graph capture."""
         self._context_slot_mapping_buffers = [
@@ -641,15 +638,12 @@ class AscendDSparkProposer(AscendDflashProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             if batch_descriptor is None:
                 raise ValueError("FULL DSpark graph capture requires a batch descriptor")
-<<<<<<< ours
-=======
             self._dflash_hidden_states[:graph_context_tokens].zero_()
             self._context_positions_buffer[:graph_context_tokens].zero_()
             for query_slots in self._per_group_query_slot_mapping_buffers.values():
                 query_slots[:num_input_tokens].fill_(-1)
             for context_slots in self._per_group_context_slot_mapping_buffers.values():
                 context_slots[:graph_context_tokens].fill_(-1)
->>>>>>> theirs
             multi_steps_attn_metadata = self._build_graph_capture_attn_metadata(
                 num_reqs,
                 num_input_tokens,
@@ -705,7 +699,6 @@ class AscendDSparkProposer(AscendDflashProposer):
                     inputs_embeds=None,
                     multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_query_total,
-<<<<<<< ours
                 )
 
             forward_context = get_forward_context()
@@ -719,20 +712,5 @@ class AscendDSparkProposer(AscendDflashProposer):
                     multi_steps_attn_metadata,
                 )
 
-=======
-                )
-
-            forward_context = get_forward_context()
-            if (
-                forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
-                and not _EXTRA_CTX.capturing
-            ):
-                self._update_full_graph_params(
-                    forward_context,
-                    num_input_tokens,
-                    multi_steps_attn_metadata,
-                )
-
->>>>>>> theirs
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()

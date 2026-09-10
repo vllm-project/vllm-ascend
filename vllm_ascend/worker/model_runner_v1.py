@@ -5800,17 +5800,10 @@ class NPUModelRunner(GPUModelRunner):
             for desc in descs
         })
 
-<<<<<<< ours
-        get_draft_graph_num_tokens = (
-            self.drafter.get_graph_num_input_tokens
-            if self.drafter is not None
-            else lambda desc: desc.num_tokens
-=======
         get_draft_graph_num_tokens = getattr(
             self.drafter,
             "get_graph_num_input_tokens",
             lambda desc: desc.num_tokens,
->>>>>>> theirs
         )
         draft_capture_sizes = sorted({
             get_draft_graph_num_tokens(desc)

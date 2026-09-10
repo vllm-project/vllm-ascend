@@ -173,10 +173,7 @@ def test_build_draft_metadata_uses_external_event_key_for_full_graph():
     executor.submit.assert_called_once_with(
         [task],
         batch_descriptor=descriptor,
-<<<<<<< ours
-=======
         event_namespace="dspark-draft",
->>>>>>> theirs
     )
 
 
@@ -972,8 +969,6 @@ class TestDSparkACLGraphContract(_DSparkProposerTestBase):
 
         assert proposer.get_graph_num_input_tokens(target_desc) == 31
 
-<<<<<<< ours
-=======
     def test_target_descriptor_padding_uses_draft_query_geometry(self) -> None:
         proposer = self._make_proposer(
             max_num_tokens=64,
@@ -1060,7 +1055,6 @@ class TestDSparkACLGraphContract(_DSparkProposerTestBase):
             proposer._per_group_query_slot_mapping_buffers[0][15:20] == -1
         )
 
->>>>>>> theirs
     @pytest.mark.parametrize("supported", [False, True])
     def test_model_capability_gate(self, supported: bool) -> None:
         proposer = self._make_proposer(
