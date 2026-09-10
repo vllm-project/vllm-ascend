@@ -172,11 +172,9 @@ class MooncakeBaseConnectorScheduler:
         params["_p_side_truncated"] = True
 
     def get_kv_connector_stats(self) -> MooncakeKVConnectorStats | None:
-        if "delayed_release_requests" not in self._kv_stats.data:
+        if self._kv_stats.is_empty():
             return None
-        stats = self._kv_stats
-        self._kv_stats = MooncakeKVConnectorStats()
-        return stats
+        return self._kv_stats.clone_and_reset()
 
     def on_new_request(self, request: "Request") -> None:
         raise NotImplementedError

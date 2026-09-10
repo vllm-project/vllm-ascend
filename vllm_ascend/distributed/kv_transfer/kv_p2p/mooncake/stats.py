@@ -28,7 +28,7 @@ class MooncakeKVConnectorStats(KVConnectorStats):
     def reset(self) -> None:
         # Values must remain serializable because worker stats are aggregated
         # outside of the worker process.
-        self.data = {
+        self.data: dict[str, Any] = {
             "transfer_duration": [],
             "bytes_transferred": [],
             "num_failed_transfers": [],
@@ -53,25 +53,24 @@ class MooncakeKVConnectorStats(KVConnectorStats):
     def is_empty(self) -> bool:
         return (
             self.num_successful_transfers == 0
-            and not self.data.get("num_failed_transfers")
+            and not self.data["num_failed_transfers"]
             and "delayed_release_requests" not in self.data
         )
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
-        for key in ("transfer_duration", "bytes_transferred", "num_failed_transfers"):
-            if values := other.data.get(key):
-                self.data.setdefault(key, []).extend(values)
-        for key in ("delayed_release_requests", "delayed_release_blocks"):
-            if key in other.data:
-                self.data[key] = other.data[key]
+        if not other.is_empty():
+            for key, value in other.data.items():
+                if isinstance(value, list):
+                    self.data[key].extend(value)
+                else:
+                    self.data[key] = value
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        num_failed_transfers = len(self.data.get("num_failed_transfers", []))
         if self.num_successful_transfers == 0:
             return {
                 "Num successful transfers": 0,
-                "Num failed transfers": num_failed_transfers,
+                "Num failed transfers": len(self.data["num_failed_transfers"]),
                 "Avg xfer time (ms)": 0,
                 "P90 xfer time (ms)": 0,
                 "Avg MB per transfer": 0,
@@ -85,7 +84,7 @@ class MooncakeKVConnectorStats(KVConnectorStats):
 
         return {
             "Num successful transfers": self.num_successful_transfers,
-            "Num failed transfers": num_failed_transfers,
+            "Num failed transfers": len(self.data["num_failed_transfers"]),
             "Avg xfer time (ms)": round(durations.mean() * 1e3, 3),
             "P90 xfer time (ms)": round(np.percentile(durations, 90).item() * 1e3, 3),
             "Avg MB per transfer": round(megabytes.mean(), 3),
@@ -98,7 +97,7 @@ class MooncakeKVConnectorStats(KVConnectorStats):
 
     @property
     def num_successful_transfers(self) -> int:
-        return len(self.data.get("transfer_duration", []))
+        return len(self.data["transfer_duration"])
 
 
 class MooncakePromMetrics(KVConnectorPromMetrics):
@@ -181,11 +180,11 @@ class MooncakePromMetrics(KVConnectorPromMetrics):
         )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0) -> None:
-        for duration in transfer_stats_data.get("transfer_duration", ()):
+        for duration in transfer_stats_data["transfer_duration"]:
             self.transfer_duration[engine_idx].observe(duration)
-        for num_bytes in transfer_stats_data.get("bytes_transferred", ()):
+        for num_bytes in transfer_stats_data["bytes_transferred"]:
             self.bytes_transferred[engine_idx].observe(num_bytes)
-        for failure in transfer_stats_data.get("num_failed_transfers", ()):
+        for failure in transfer_stats_data["num_failed_transfers"]:
             self.failed_transfers[engine_idx].inc(failure)
         if "delayed_release_requests" in transfer_stats_data:
             self.delayed_release_requests[engine_idx].set(transfer_stats_data["delayed_release_requests"])

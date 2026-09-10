@@ -62,8 +62,10 @@ def test_prom_metrics_observes_delayed_release_snapshot() -> None:
     gauge_cls = MagicMock()
     metric_types = {Gauge: gauge_cls, Counter: MagicMock(), Histogram: MagicMock()}
     metrics = MooncakePromMetrics(MagicMock(), metric_types, ["model_name"], {0: ["test-model"]})
+    stats = MooncakeKVConnectorStats()
+    stats.set_delayed_release(2, 7)
 
-    metrics.observe({"delayed_release_requests": 2, "delayed_release_blocks": 7})
+    metrics.observe(stats.data)
 
     assert [metric.kwargs["name"] for metric in gauge_cls.call_args_list] == [
         "vllm:mooncake_pd_delayed_release_requests",
