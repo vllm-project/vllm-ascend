@@ -11,44 +11,12 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.memory import (
     ContiguousAllocator,
     ProducerMemoryPool,
 )
+from vllm.distributed.ec_transfer.ec_connector.mooncake.transfer import (
+    MooncakeTransfer,
+)
+from vllm.utils.math_utils import round_up
 
-_REGISTERED_MEMORY_ALIGNMENT = 2 * 1024 * 1024  # 2MiB
-
-
-def _align_up(value: int, alignment: int) -> int:
-    return (value + alignment - 1) // alignment * alignment
-
-
-def _aligned_storage_start(tensor: torch.Tensor) -> int | None:
-    storage = tensor.untyped_storage()
-
-    storage_start = storage.data_ptr()
-    storage_end = storage_start + storage.nbytes()
-
-    source_start = tensor.data_ptr()
-    source_end = source_start + tensor.nbytes
-
-    aligned_start = _align_up(
-        storage_start,
-        _REGISTERED_MEMORY_ALIGNMENT,
-    )
-
-    if source_start < aligned_start or source_end > storage_end:
-        return None
-
-    return aligned_start
-
-
-def _allocate_aligned_tensor(capacity: int, device: torch.device) -> torch.Tensor:
-    raw_tensor = torch.empty(
-        capacity + _REGISTERED_MEMORY_ALIGNMENT - 1,
-        dtype=torch.uint8,
-        device=device,
-    )
-    offset = (-raw_tensor.data_ptr()) % _REGISTERED_MEMORY_ALIGNMENT
-    tensor = raw_tensor.narrow(0, offset, capacity)
-    assert tensor.data_ptr() % _REGISTERED_MEMORY_ALIGNMENT == 0
-    return tensor
+ASCEND_DIRECT_MEMORY_ALIGNMENT = 2 * 1024 * 1024  # 2 MiB
 
 
 class AscendContiguousAllocator(ContiguousAllocator):
@@ -56,7 +24,82 @@ class AscendContiguousAllocator(ContiguousAllocator):
 
     def _allocate_tensor(self, device: torch.device) -> torch.Tensor:
         """Allocate a 2 MiB-aligned registered-memory tensor on NPU."""
-        return _allocate_aligned_tensor(self._capacity, device)
+        raw_tensor = torch.empty(
+            self._capacity + ASCEND_DIRECT_MEMORY_ALIGNMENT - 1,
+            dtype=torch.uint8,
+            device=device,
+        )
+        offset = (-raw_tensor.data_ptr()) % ASCEND_DIRECT_MEMORY_ALIGNMENT
+        tensor = raw_tensor.narrow(0, offset, self._capacity)
+        assert tensor.data_ptr() % ASCEND_DIRECT_MEMORY_ALIGNMENT == 0
+        return tensor
+
+
+class AscendProducerAllocator(AscendContiguousAllocator):
+    """Own one registered slab partitioned into staging and bounce."""
+
+    def __init__(
+        self,
+        staging_capacity: int,
+        bounce_capacity: int,
+    ) -> None:
+        bounce_offset = round_up(
+            staging_capacity,
+            ASCEND_DIRECT_MEMORY_ALIGNMENT,
+        )
+
+        self.staging_capacity = staging_capacity
+        self.bounce_offset = bounce_offset
+        self.bounce_capacity = bounce_capacity
+        self.registered_capacity = bounce_offset + bounce_capacity
+
+        super().__init__(self.registered_capacity)
+
+    @property
+    def padding(self) -> int:
+        return self.bounce_offset - self.staging_capacity
+
+    @property
+    def raw_allocation_size(self) -> int:
+        return (
+            self.registered_capacity
+            + ASCEND_DIRECT_MEMORY_ALIGNMENT
+            - 1
+        )
+
+    @property
+    def bounce_tensor(self) -> torch.Tensor | None:
+        tensor = self.tensor
+        if tensor is None:
+            return None
+
+        return tensor.narrow(
+            0,
+            self.bounce_offset,
+            self.bounce_capacity,
+        )
+
+    def prepare(
+        self,
+        device: torch.device,
+        transfer: MooncakeTransfer,
+    ) -> None:
+        if self.tensor is not None:
+            return
+
+        super().prepare(device, transfer)
+
+        if self.tensor is None:
+            raise RuntimeError(
+                "Could not initialize the Ascend Mooncake producer buffer: "
+                f"staging={self.staging_capacity} bytes, "
+                f"padding={self.padding} bytes, "
+                f"bounce={self.bounce_capacity} bytes, "
+                f"registered={self.registered_capacity} bytes, "
+                f"allocation={self.raw_allocation_size} bytes"
+            )
+
+        self._free = [(0, self.staging_capacity)]
 
 
 class AscendConsumerMemoryPool(ConsumerMemoryPool):
