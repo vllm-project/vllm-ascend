@@ -95,7 +95,13 @@ from .mooncake_dsa_metadata import (
     RemoteEndpoint,
     RemoteSource,
 )
-from .mooncake_dsa_transfer import DsaCacheLayout, build_component_read
+from .mooncake_dsa_transfer import (
+    DsaCacheLayout,
+    DsaRegisterAtom,
+    build_component_read,
+    collect_bounded_register_regions,
+    layout_span_bytes,
+)
 
 # isort: off
 if TYPE_CHECKING:
@@ -3196,15 +3202,104 @@ class MooncakeConnectorWorker:
 
         return ptrs, lengths
 
-    def _dsa_consumer_device_register_regions(self, kv_caches: dict[str, torch.Tensor]) -> RegisterRegions:
-        indexer_caches = {
-            name: self._as_kv_cache_tuple(cache) for name, cache in kv_caches.items() if "indexer" in name.lower()
-        }
-        if not indexer_caches:
-            raise ValueError("Blockwise DSA Decode has no Indexer device cache")
-        return collect_storage_merged_register_regions(indexer_caches)
+    def _dsa_consumer_register_regions(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        layouts: tuple[list[DsaCacheLayout], list[DsaCacheLayout]],
+    ) -> tuple[RegisterRegions, list[str]]:
+        """Collect Host Main and HBM Indexer atoms for one TE registration."""
+        indexer_layouts, main_layouts = layouts
+        manager = get_sparse_kv_offload_manager()
+        pool = manager.get_mooncake_host_pool()
+        pool_start = pool.data_ptr
+        pool_end = pool_start + pool.nbytes
+        host_location = f"npu:{pool.topology.device_id}"
+        atoms: list[DsaRegisterAtom] = []
 
-    def _build_dsa_local_layouts(self, kv_caches, layer_name_to_idx):
+        for layout in main_layouts:
+            end = layout.base + layout_span_bytes(layout)
+            if layout.base < pool_start or end > pool_end:
+                raise ValueError(f"DSA Host component {layout.layer_name} is outside the Mooncake Host pool")
+            atoms.append(
+                DsaRegisterAtom(
+                    layout.base,
+                    end,
+                    host_location,
+                    ("host", pool_start),
+                )
+            )
+
+        for layout in indexer_layouts:
+            tensors = self._as_kv_cache_tuple(kv_caches[layout.layer_name])
+            if layout.position >= len(tensors):
+                raise ValueError(f"missing DSA Indexer tensor position {layout.position}")
+            tensor = tensors[layout.position]
+            storage = tensor.untyped_storage()
+            storage_start = tensor_storage_key(tensor)
+            storage_end = storage_start + storage.nbytes()
+            end = layout.base + layout_span_bytes(layout)
+            if layout.base < storage_start or end > storage_end:
+                raise ValueError(f"DSA Indexer component {layout.layer_name} is outside its storage")
+            atoms.append(
+                DsaRegisterAtom(
+                    layout.base,
+                    end,
+                    "*",
+                    ("hbm", storage_start),
+                )
+            )
+
+        bounded = collect_bounded_register_regions(atoms)
+        regions = RegisterRegions(
+            ptrs=bounded.ptrs,
+            lengths=bounded.lengths,
+            logical_tensor_count=len(atoms),
+            logical_total_bytes=sum(atom.end - atom.start for atom in atoms),
+        )
+        return regions, bounded.locations
+
+    def _dsa_producer_register_regions(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+    ) -> tuple[RegisterRegions, list[str]]:
+        """Collect DSA source HBM atoms with layout-base-aligned splits."""
+        atoms: list[DsaRegisterAtom] = []
+        for caches in kv_caches.values():
+            for tensor in self._as_kv_cache_tuple(caches):
+                if tensor.numel() == 0:
+                    continue
+                if tensor.ndim < 1 or tensor.shape[0] <= 0:
+                    raise ValueError("DSA producer tensor must have a physical page dimension")
+                block_bytes = tensor.element_size() * math.prod(tensor.shape[1:])
+                stride = tensor.stride(0) * tensor.element_size()
+                if stride < block_bytes:
+                    raise ValueError("DSA producer tensor has overlapping physical pages")
+                start = tensor.data_ptr()
+                end = start + (tensor.shape[0] - 1) * stride + block_bytes
+                storage = tensor.untyped_storage()
+                storage_start = tensor_storage_key(tensor)
+                if start < storage_start or end > storage_start + storage.nbytes():
+                    raise ValueError("DSA producer tensor is outside its storage")
+                atoms.append(
+                    DsaRegisterAtom(
+                        start,
+                        end,
+                        "*",
+                        ("hbm", storage_start),
+                    )
+                )
+        if not atoms:
+            raise ValueError("Blockwise DSA producer has no HBM cache tensors")
+        bounded = collect_bounded_register_regions(atoms)
+        regions = RegisterRegions(
+            ptrs=bounded.ptrs,
+            lengths=bounded.lengths,
+            logical_tensor_count=len(atoms),
+            logical_total_bytes=sum(atom.end - atom.start for atom in atoms),
+        )
+        return regions, bounded.locations
+
+    def _build_dsa_local_layouts(self, kv_caches):
         from vllm.v1.worker.utils import extract_layer_index
 
         self._dsa_transformer_layers = {
@@ -3212,7 +3307,6 @@ class MooncakeConnectorWorker:
             for name in kv_caches
         }
         manager = get_sparse_kv_offload_manager()
-        pool = manager.get_mooncake_host_pool()
         indexer, main = [], []
         for name, caches in kv_caches.items():
             is_indexer = "indexer" in name.lower()
@@ -3237,7 +3331,6 @@ class MooncakeConnectorWorker:
                 (indexer if is_indexer else main).append(entry)
         if not indexer or not main:
             raise ValueError("DSA requires Main and Indexer component layouts")
-        pool.register_local_writer(self.engine)
         return indexer, main
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
@@ -3294,13 +3387,20 @@ class MooncakeConnectorWorker:
 
         dsa_local_layouts = None
         if self._dsa_decode:
-            dsa_local_layouts = self._build_dsa_local_layouts(kv_caches, layer_name_to_idx)
+            dsa_local_layouts = self._build_dsa_local_layouts(kv_caches)
 
+        register_locations = None
         if has_mamba_group:
             ptrs, lengths = self._get_registered_kv_tensor_buffers(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
         elif self._dsa_decode:
-            register_regions = self._dsa_consumer_device_register_regions(kv_caches)
+            assert dsa_local_layouts is not None
+            register_regions, register_locations = self._dsa_consumer_register_regions(
+                kv_caches,
+                dsa_local_layouts,
+            )
+        elif self._dsa_pd_offload:
+            register_regions, register_locations = self._dsa_producer_register_regions(kv_caches)
         elif self.use_hybrid:
             ptrs, lengths = self._get_registered_kv_tensor_buffers_hybrid(kv_caches)
             register_regions = RegisterRegions(ptrs=ptrs, lengths=lengths)
@@ -3311,7 +3411,14 @@ class MooncakeConnectorWorker:
             register_regions = collect_storage_merged_register_regions(kv_caches)
 
         validate_register_region_count(register_regions)
-        global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        if register_locations is None:
+            global_te.register_buffer(register_regions.ptrs, register_regions.lengths)
+        else:
+            global_te.register_buffer(
+                register_regions.ptrs,
+                register_regions.lengths,
+                register_locations,
+            )
 
         logger.debug(
             "Mooncake register kv caches metadata: kv_group2layeridx=%s, kv_caches_base_addr=%s, "

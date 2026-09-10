@@ -21,7 +21,10 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_dsa_metadata import (
     RemoteEndpoint,
     RemoteSource,
 )
-from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_dsa_transfer import DsaCacheLayout
+from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_dsa_transfer import (
+    MAX_REGISTER_MEMORY_BYTES,
+    DsaCacheLayout,
+)
 
 MAIN = "model.layers.0.self_attn.attn"
 INDEXER = "model.layers.0.indexer.attn.index_cache"
@@ -210,27 +213,168 @@ def test_duplicate_and_late_done_do_not_release_early_or_recreate_state():
     assert tracker.get_and_clear_finished_requests() == set()
 
 
-@pytest.mark.parametrize("owner", [True, False])
-def test_all_ranks_register_and_use_local_main_views(owner, monkeypatch):
+@pytest.mark.parametrize("rank", [0, 1])
+def test_all_ranks_build_layouts_from_local_main_views_without_registration(rank, monkeypatch):
     worker = object.__new__(MooncakeConnectorWorker)
+    worker.tp_rank = rank
     worker.num_blocks = 4
     worker.engine = MagicMock()
     worker._get_layer_spec = lambda name: SimpleNamespace(block_size=4)
     host_k = torch.empty((4, 4, 1), dtype=torch.bfloat16)
     host_v = torch.empty_like(host_k)
-    pool = SimpleNamespace(is_owner=owner, register_local_writer=MagicMock())
-    manager = SimpleNamespace(
-        get_mooncake_host_pool=lambda: pool, get_local_host_kv_views=lambda name: (host_k, host_v)
-    )
+    manager = SimpleNamespace(get_local_host_kv_views=lambda name: (host_k, host_v))
     monkeypatch.setattr(mooncake_connector, "get_sparse_kv_offload_manager", lambda: manager)
     indexer = torch.empty_like(host_k)
-    indexer_layout, main_layout = worker._build_dsa_local_layouts(
-        {MAIN: (None,) * 6, INDEXER: (indexer,)}, {MAIN: 0, INDEXER: 1}
-    )
+    indexer_layout, main_layout = worker._build_dsa_local_layouts({MAIN: (None,) * 6, INDEXER: (indexer,)})
     assert main_layout[0].base == host_k.data_ptr()
     assert main_layout[1].base == host_v.data_ptr()
     assert indexer_layout[0].base == indexer.data_ptr()
-    pool.register_local_writer.assert_called_once_with(worker.engine)
+
+
+def test_dsa_register_regions_include_host_and_hbm_locations_once(monkeypatch):
+    worker = object.__new__(MooncakeConnectorWorker)
+    host_storage = torch.empty(256, dtype=torch.int8)
+    host_k = host_storage[:64].view(torch.bfloat16).view(4, 8)
+    host_v = host_storage[64:128].view(torch.bfloat16).view(4, 8)
+    indexer = torch.empty((4, 8), dtype=torch.bfloat16)
+    pool = SimpleNamespace(
+        data_ptr=host_storage.data_ptr(),
+        nbytes=host_storage.nbytes,
+        topology=SimpleNamespace(device_id=3),
+    )
+    manager = SimpleNamespace(get_mooncake_host_pool=lambda: pool)
+    monkeypatch.setattr(mooncake_connector, "get_sparse_kv_offload_manager", lambda: manager)
+    indexer_layouts = [DsaCacheLayout(INDEXER, 0, indexer.data_ptr(), 16, 16, 1, 4, "bf16", 4)]
+    main_layouts = [
+        DsaCacheLayout(MAIN, 0, host_k.data_ptr(), 16, 16, 1, 4, "bf16", 4),
+        DsaCacheLayout(MAIN, 1, host_v.data_ptr(), 16, 16, 1, 4, "bf16", 4),
+    ]
+    regions, locations = worker._dsa_consumer_register_regions(
+        {INDEXER: (indexer,)},
+        (indexer_layouts, main_layouts),
+    )
+    assert regions.ptrs == [host_k.data_ptr(), indexer.data_ptr()]
+    assert regions.lengths == [host_v.data_ptr() + host_v.nbytes - host_k.data_ptr(), indexer.nbytes]
+    assert locations == ["npu:3", "*"]
+
+
+def test_dsa_producer_oversized_atom_uses_layout_base_chunks():
+    base = 4096
+    span = MAX_REGISTER_MEMORY_BYTES + 1
+
+    class FakeStorage:
+        def data_ptr(self):
+            return base
+
+        def nbytes(self):
+            return span
+
+    class FakeTensor:
+        ndim = 1
+        shape = (2,)
+
+        def numel(self):
+            return 2
+
+        def element_size(self):
+            return 1
+
+        def stride(self, dim):
+            assert dim == 0
+            return MAX_REGISTER_MEMORY_BYTES
+
+        def data_ptr(self):
+            return base
+
+        def untyped_storage(self):
+            return FakeStorage()
+
+    worker = object.__new__(MooncakeConnectorWorker)
+    regions, locations = worker._dsa_producer_register_regions({MAIN: (FakeTensor(),)})
+    assert regions.ptrs == [base, base + MAX_REGISTER_MEMORY_BYTES]
+    assert regions.lengths == [MAX_REGISTER_MEMORY_BYTES, 1]
+    assert locations == ["*", "*"]
+
+
+def test_dsa_shutdown_drains_workers_before_unregister(monkeypatch):
+    events = []
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker._dsa_decode = True
+    worker._closing = False
+    worker._dsa_dispatch_lock = threading.Lock()
+    worker.kv_send_thread = None
+    worker.kv_recv_thread = SimpleNamespace(
+        request_queue=SimpleNamespace(
+            join=lambda: events.append("queue_join"),
+            put=lambda value: events.append(("queue_put", value)),
+        ),
+        join=lambda: events.append("thread_join"),
+        executor=SimpleNamespace(shutdown=lambda wait: events.append(("executor_shutdown", wait))),
+    )
+    monkeypatch.setattr(
+        mooncake_connector.global_te,
+        "unregister_buffer",
+        lambda: events.append("unregister"),
+    )
+    worker.shutdown()
+    assert worker._closing
+    assert events == [
+        "queue_join",
+        ("queue_put", None),
+        "thread_join",
+        ("executor_shutdown", True),
+        "unregister",
+    ]
+
+
+def test_producer_shutdown_stops_server_before_unregister(monkeypatch):
+    events = []
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker._dsa_decode = False
+    worker.kv_recv_thread = None
+    worker.kv_send_thread = SimpleNamespace(
+        stop=lambda: events.append("server_stop"),
+        join=lambda: events.append("server_join"),
+    )
+    monkeypatch.setattr(
+        mooncake_connector.global_te,
+        "unregister_buffer",
+        lambda: events.append("unregister"),
+    )
+
+    worker.shutdown()
+
+    assert events == ["server_stop", "server_join", "unregister"]
+
+
+def test_non_dsa_consumer_shutdown_unregisters_after_drain(monkeypatch):
+    events = []
+    worker = object.__new__(MooncakeConnectorWorker)
+    worker._dsa_decode = False
+    worker.kv_send_thread = None
+    worker.kv_recv_thread = SimpleNamespace(
+        request_queue=SimpleNamespace(
+            join=lambda: events.append("queue_join"),
+            put=lambda value: events.append(("queue_put", value)),
+        ),
+        join=lambda: events.append("thread_join"),
+        executor=SimpleNamespace(shutdown=lambda wait: events.append(("executor_shutdown", wait))),
+    )
+    monkeypatch.setattr(
+        mooncake_connector.global_te,
+        "unregister_buffer",
+        lambda: events.append("unregister"),
+    )
+
+    worker.shutdown()
+
+    assert events == [
+        "queue_join",
+        ("queue_put", None),
+        "thread_join",
+        ("executor_shutdown", True),
+        "unregister",
+    ]
 
 
 def test_cancel_inflight_read_waits_for_sync_return_before_terminal_callback():

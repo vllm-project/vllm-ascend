@@ -5,8 +5,12 @@ from dataclasses import replace
 import pytest
 
 from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake_dsa_transfer import (
+    MAX_REGISTER_MEMORY_BYTES,
     DsaCacheLayout,
+    DsaRegisterAtom,
     build_component_read,
+    collect_bounded_register_regions,
+    split_transfer_lists_at_region_boundaries,
 )
 
 
@@ -119,3 +123,109 @@ def test_physical_ids_must_fit_registered_capacity(source, destination):
         build_component_read(
             layout, layout, source, destination, 0, 4, cp_size=1, cp_rank=0, writer_rank=0, writer_size=1, indexer=False
         )
+
+
+@pytest.mark.parametrize(
+    "size,expected",
+    [
+        (MAX_REGISTER_MEMORY_BYTES - 1, [MAX_REGISTER_MEMORY_BYTES - 1]),
+        (MAX_REGISTER_MEMORY_BYTES, [MAX_REGISTER_MEMORY_BYTES]),
+        (MAX_REGISTER_MEMORY_BYTES + 1, [MAX_REGISTER_MEMORY_BYTES, 1]),
+        (2 * MAX_REGISTER_MEMORY_BYTES + 1, [MAX_REGISTER_MEMORY_BYTES, MAX_REGISTER_MEMORY_BYTES, 1]),
+    ],
+)
+def test_oversized_register_atom_is_split_from_its_layout_base(size, expected):
+    regions = collect_bounded_register_regions([DsaRegisterAtom(123, 123 + size, "npu:7", "host")])
+    assert regions.ptrs == [123 + sum(expected[:index]) for index in range(len(expected))]
+    assert regions.lengths == expected
+    assert regions.locations == ["npu:7"] * len(expected)
+
+
+def test_register_regions_merge_only_at_atom_boundaries():
+    limit = 16
+    regions = collect_bounded_register_regions(
+        [
+            DsaRegisterAtom(100, 108, "npu:0", "pool"),
+            DsaRegisterAtom(110, 118, "npu:0", "pool"),
+            DsaRegisterAtom(118, 126, "npu:0", "pool"),
+            DsaRegisterAtom(1000, 1008, "*", "hbm"),
+        ],
+        max_region_bytes=limit,
+    )
+    assert regions.ptrs == [100, 110, 1000]
+    assert regions.lengths == [8, 16, 8]
+    assert regions.locations == ["npu:0", "npu:0", "*"]
+
+
+def test_duplicate_oversized_alias_is_registered_only_once():
+    atom = DsaRegisterAtom(
+        100,
+        100 + MAX_REGISTER_MEMORY_BYTES + 1,
+        "*",
+        "shared-storage",
+    )
+    regions = collect_bounded_register_regions([atom, atom])
+    assert regions.ptrs == [100, 100 + MAX_REGISTER_MEMORY_BYTES]
+    assert regions.lengths == [MAX_REGISTER_MEMORY_BYTES, 1]
+
+
+def test_contained_alias_inside_oversized_chunk_is_safe():
+    base = 100
+    regions = collect_bounded_register_regions(
+        [
+            DsaRegisterAtom(base, base + MAX_REGISTER_MEMORY_BYTES + 10, "*", "shared-storage"),
+            DsaRegisterAtom(
+                base + MAX_REGISTER_MEMORY_BYTES, base + MAX_REGISTER_MEMORY_BYTES + 5, "*", "shared-storage"
+            ),
+        ]
+    )
+    assert regions.ptrs == [base, base + MAX_REGISTER_MEMORY_BYTES]
+    assert regions.lengths == [MAX_REGISTER_MEMORY_BYTES, 10]
+
+
+def test_overlapping_aliases_merge_only_when_union_fits_one_region():
+    atoms = [
+        DsaRegisterAtom(100, 112, "*", "shared-storage"),
+        DsaRegisterAtom(108, 116, "*", "shared-storage"),
+    ]
+    regions = collect_bounded_register_regions(atoms, max_region_bytes=16)
+    assert regions.ptrs == [100]
+    assert regions.lengths == [16]
+    with pytest.raises(ValueError, match="cross a registration boundary"):
+        collect_bounded_register_regions(atoms, max_region_bytes=15)
+
+
+def test_transfer_is_split_at_different_local_and_remote_edges():
+    plan = split_transfer_lists_at_region_boundaries(
+        [114],
+        [1004],
+        [20],
+        local_base=100,
+        remote_base=1000,
+        max_region_bytes=16,
+    )
+    assert plan == ([114, 116, 126, 132], [1004, 1006, 1016, 1022], [2, 10, 6, 2])
+
+
+def test_build_component_read_does_not_remerge_64_gib_registration_edge():
+    size = MAX_REGISTER_MEMORY_BYTES + 1
+    local = DsaCacheLayout("main", 0, 100, size, size, 1, 1, "bytes", 1)
+    remote = DsaCacheLayout("main", 0, 1000, size, size, 1, 1, "bytes", 1)
+    plan = build_component_read(
+        local,
+        remote,
+        (0,),
+        (0,),
+        0,
+        1,
+        cp_size=1,
+        cp_rank=0,
+        writer_rank=0,
+        writer_size=1,
+        indexer=False,
+    )
+    assert plan == (
+        [100, 100 + MAX_REGISTER_MEMORY_BYTES],
+        [1000, 1000 + MAX_REGISTER_MEMORY_BYTES],
+        [MAX_REGISTER_MEMORY_BYTES, 1],
+    )
