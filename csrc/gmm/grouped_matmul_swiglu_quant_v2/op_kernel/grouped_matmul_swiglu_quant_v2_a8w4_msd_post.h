@@ -354,7 +354,12 @@ __aicore__ inline void GMMA8W4PostProcess::UpdateAuxiliaryMatrix(uint32_t loopId
                 }
             }
         }
-        PreLoadAuxiliaryMatrix(vecConfig);
+        LocalTensor<float> weightAuxiliaryMatrixLocal = weightAuxiliaryMatrixInQueue.DeQue<float>();
+        DataCopyExtParams copyParams{1, static_cast<uint32_t>(gmmSwigluQuantV2->tokenLen * sizeof(float)), 0, 0, 0};
+        DataCopyPadExtParams<float> padParams{false, 0, 0, 0};
+        DataCopyPad(weightAuxiliaryMatrixLocal,
+                    weightAuxiliaryMatrixGM[vecConfig.curGroupIdx * gmmSwigluQuantV2->tokenLen], copyParams, padParams);
+        weightAuxiliaryMatrixInQueue.EnQue(weightAuxiliaryMatrixLocal);
     }
 }
 
