@@ -82,7 +82,7 @@ class TestAscendSFABackend(TestBase):
         result = AscendSFABackend.get_impl_cls()
         self.assertEqual(result, AscendSFAImpl)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_builder_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
@@ -90,7 +90,7 @@ class TestAscendSFABackend(TestBase):
         builder_cls = AscendSFABackend.get_builder_cls()
         self.assertIsNotNone(builder_cls)
 
-    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer")
+    @patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_indexer")
     @patch("vllm_ascend.attention.sfa_v1.get_ascend_config")
     def test_get_impl_cls_with_dcp(self, mock_get_ascend_config, mock_enable_dcp):
         mock_enable_dcp.return_value = True
