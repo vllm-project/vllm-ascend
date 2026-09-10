@@ -85,6 +85,17 @@ class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         return make_config(kv_role, extra_config, block_size)
 
+    def test_mooncake_layerwise_rejects_tp_mismatch(self):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"backend": "mooncake", "prefill_tp_size": 4},
+        )
+        config.parallel_config.tensor_parallel_size = 2
+        config.model_config.get_total_num_kv_heads.return_value = 8
+
+        with self.assertRaisesRegex(ValueError, "TP mismatch"):
+            KVPoolScheduler(config, use_layerwise=True)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_early_returns(self, mock_client_cls):
         for role, block_size, token_count in [("kv_consumer", 16, 64), ("kv_producer", 64, 32)]:
@@ -92,6 +103,21 @@ class TestKVPoolScheduler(unittest.TestCase):
                 scheduler = KVPoolScheduler(self._make_config(role, block_size=block_size), use_layerwise=False)
                 request = MagicMock(prompt_token_ids=list(range(token_count)))
                 self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+
+    def test_mooncake_layerwise_hit_requires_every_saving_rank(self):
+        config = self._make_config(extra_config={"backend": "mooncake", "use_layerwise": True})
+        config.parallel_config.tensor_parallel_size = 2
+        config.model_config.get_total_num_kv_heads.return_value = 2
+        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 1, 0, 1, 1]
+        request = MagicMock(request_id="r1", block_hashes=[b"h0", b"h1", b"h2"])
+
+        hit_tokens = scheduler._get_mooncake_layerwise_hit_tokens(request, 48, 0)
+
+        self.assertEqual(hit_tokens, 16)
+        queried_keys = scheduler.store_scheduler.batch_is_exist.call_args.args[0]
+        self.assertEqual(len(queried_keys), 3 * 2)
+        self.assertEqual(queried_keys[:2], ["llama-7b@6830@0", "llama-7b@6830@1"])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_hit(self, mock_client_cls):

@@ -449,7 +449,7 @@ class TestIndexerOps:
         assert qli_kwargs["block_table"] is metadata.block_table
         assert qli_kwargs["metadata"] is metadata.qli_metadata
         assert qli_kwargs["topk"] == 3
-        assert qli_kwargs["quant_mode"] == DeviceOperator.dsa_indexer_quant_mode
+        assert qli_kwargs["quant_mode"] == DeviceOperator.get_dsa_indexer_quant_mode()
         assert qli_kwargs["layout_q"] == "TND"
         assert qli_kwargs["layout_k"] == "PA_BBND"
         assert qli_kwargs["mask_mode"] == 3
@@ -481,4 +481,4 @@ class TestIndexerOps:
         ) as qli:
             indexer_ops.select_topk(query, weights, query_scale, key_cache, scale_cache, metadata)
 
-        assert qli.call_args.kwargs["quant_mode"] == A5DeviceAdaptor.dsa_indexer_quant_mode
+        assert qli.call_args.kwargs["quant_mode"] == A5DeviceAdaptor.get_dsa_indexer_quant_mode()

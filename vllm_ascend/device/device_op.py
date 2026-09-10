@@ -36,12 +36,6 @@ if HAS_TRITON:
 else:
     triton_q_rms = None  # type: ignore
 
-# QuantLightningIndexerV2 derives the accepted query/key, dequant scale and
-# weights dtypes from quant_mode: 1 is fp8 e4m3 with float32 scales and
-# weights, 2 is int8 with float16 scales and weights.
-QLI_QUANT_MODE_FP8_E4M3 = 1
-QLI_QUANT_MODE_INT8 = 2
-
 
 class BaseDeviceAdaptor:
     @classmethod
@@ -572,9 +566,12 @@ class BaseDeviceAdaptor:
 
     # ===== Lightning Indexer Dtype Prep =====
 
-    # Must stay in sync with the dtypes produced below and by
-    # indexer_quantize_query, which the indexer op validates against it.
-    dsa_indexer_quant_mode = QLI_QUANT_MODE_INT8
+    @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """Non-A5: q/k are int8 with fp16 scales, so lightning indexer runs
+        in INT8 quant mode (QUANT_MODE_INT8 = 2 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 2
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):
@@ -1169,9 +1166,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
     # ===== Lightning Indexer Dtype Prep =====
 
-    # The indexer query and KV are fp8 on A5 even when the attention KV is
-    # bfloat16, so the mode does not follow the attention KV dtype.
-    dsa_indexer_quant_mode = QLI_QUANT_MODE_FP8_E4M3
+    @staticmethod
+    def get_dsa_indexer_quant_mode() -> int:
+        """A5: q/k are fp8_e4m3fn with fp32 scales, so lightning indexer runs
+        in FP8 quant mode (QUANT_MODE_FP8 = 1 in
+        csrc/attention/quant_lightning_indexer_v2)."""
+        return 1
 
     @staticmethod
     def prepare_dsa_indexer_weights(weights):

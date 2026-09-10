@@ -209,6 +209,10 @@ TITLES = {
     "user_guide/feature_guide/graph_mode.md": {"en": "Graph Mode", "zh": "图模式"},
     "user_guide/feature_guide/kv_cache_cpu_offload.md": {"en": "KV Cache CPU Offload", "zh": "KV Cache CPU 卸载"},
     "user_guide/feature_guide/kv_pool.md": {"en": "KV Pool", "zh": "KV 池"},
+    "user_guide/feature_guide/mooncake_layerwise_adaptation_and_optimization.md": {
+        "en": "Mooncake Layerwise Adaptation and Optimization",
+        "zh": "Mooncake Layerwise 适配与优化",
+    },
     "user_guide/feature_guide/large_scale_ep.md": {"en": "Large Scale EP", "zh": "大规模 EP"},
     "user_guide/feature_guide/lmcache_ascend_deployment.md": {
         "en": "LMCache Ascend Deployment",
