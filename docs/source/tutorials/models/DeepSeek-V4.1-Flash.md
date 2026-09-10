@@ -142,18 +142,6 @@ export TP_SOCKET_IFNAME="$NIC_NAME"
 export HCCL_SOCKET_IFNAME="$NIC_NAME"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15
 
-export HCCL_BUFFSIZE=1024
-export HCCL_CONNECT_TIMEOUT=7200
-export ASCEND_CONNECT_TIMEOUT=10000
-export ASCEND_TRANSFER_TIMEOUT=10000
-export VLLM_RPC_TIMEOUT=1800000
-export VLLM_ENGINE_READY_TIMEOUT_S=3600
-export VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=3000
-export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-export OMP_PROC_BIND=false
-export OMP_NUM_THREADS=10
-export VLLM_USE_V1=1
-
 if [[ -f /usr/lib/aarch64-linux-gnu/libjemalloc.so.2 ]]; then
   export LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libjemalloc.so.2${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
