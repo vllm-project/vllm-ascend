@@ -2186,6 +2186,7 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     with (
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla", draft_op),
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
         patch.object(
             DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=(None, torch.empty(0), None, None, None, None)
         ),
@@ -2199,6 +2200,7 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     selected.assert_called_once()
     unused.assert_not_called()
     kwargs = selected.call_args.kwargs
+    assert kwargs["cmp_ratio"] == 1
     assert kwargs["ori_mask_mode"] == (0 if is_draft else 4)
     if is_draft:
         assert kwargs["ori_topk_length"] is req.dspark_swa_topk_lengths

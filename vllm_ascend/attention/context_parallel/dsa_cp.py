@@ -21,7 +21,6 @@ from vllm_ascend.attention.dsa_attn_kv_plan import (
 )
 from vllm_ascend.attention.dsa_v1 import (
     _dsa_layout_kv,
-    _dsa_swa_only_cmp_ratio,
     _has_weight_scale,
     build_dspark_swa_indices,
     get_dspark_sparse_sas_window,
@@ -1879,7 +1878,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             seqused_kv=local_seq_lengths_key,
             sinks=self.attn_sink,
             softmax_scale=self.softmax_scale,
-            cmp_ratio=_dsa_swa_only_cmp_ratio(self.compress_ratio, self.vllm_config),
+            cmp_ratio=max(self.compress_ratio, 1),
             ori_mask_mode=4,
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
