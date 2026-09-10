@@ -43,6 +43,11 @@ INDEXER_K_CACHE_SLOT = 0
 INDEXER_SCALE_CACHE_SLOT = 1
 
 
+def _get_int_config_attr(config: Any, name: str, default: int) -> int:
+    value = getattr(config, name, default)
+    return value if type(value) is int else default
+
+
 @dataclass
 class AscendSFAIndexerMetadata:
     """Engine-side metadata owned by an SFA indexer cache layer.
@@ -316,7 +321,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         indexer_metadata: AscendSFAIndexerMetadata,
     ) -> torch.Tensor | None:
         if (
-            not indexer_metadata.dcp_sharded_indexer_enabled
+            not getattr(indexer_metadata, "dcp_sharded_indexer_enabled", False)
             or self.enable_sparse_li_c8
             or indexer_metadata.dcp_local_block_table is None
             or indexer_metadata.local_visible_by_query is None
@@ -560,7 +565,7 @@ class AscendSFAIndexerBackend(nn.Module, AttentionBackend):
         k across the TP group (its padded slot mapping already covers the
         gathered layout)."""
         slot_mapping = indexer_metadata.slot_mapping
-        if indexer_metadata.dcp_sharded_indexer_enabled:
+        if getattr(indexer_metadata, "dcp_sharded_indexer_enabled", False):
             if indexer_metadata.dcp_local_token_mask is None or indexer_metadata.dcp_local_slot_mapping is None:
                 raise RuntimeError("DCP sharded indexer cache write requires rank-local token metadata.")
             local_mask = indexer_metadata.dcp_local_token_mask.to(device=k_li.device)
@@ -736,10 +741,11 @@ class AscendSFAIndexerMetadataBuilder(AttentionMetadataBuilder[AscendSFAIndexerM
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         # Match the logical block size selected for BlockTable.
         self.kernel_block_size = select_common_block_size(kv_cache_spec.block_size, [AscendSFAIndexerBackend])
-        self._pcp_active = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        parallel_config = vllm_config.parallel_config
+        self._pcp_active = _get_int_config_attr(parallel_config, "prefill_context_parallel_size", 1) > 1
         self._dcp_sharded_indexer = enable_sfa_dcp_sharded_indexer(vllm_config)
-        self._dcp_world_size = getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1)
-        self._dcp_interleave_size = getattr(vllm_config.parallel_config, "cp_kv_cache_interleave_size", 128)
+        self._dcp_world_size = _get_int_config_attr(parallel_config, "decode_context_parallel_size", 1)
+        self._dcp_interleave_size = _get_int_config_attr(parallel_config, "cp_kv_cache_interleave_size", 128)
         try:
             self._dcp_rank = get_dcp_group().rank_in_group
         except Exception:

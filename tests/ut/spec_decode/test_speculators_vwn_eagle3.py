@@ -157,7 +157,7 @@ def _mock_npu_env():
         # backend routing checks so their mocked config stays scoped to VWN.
         patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
         patch(
-            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",
+            "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_indexer",
             return_value=False,
         ),
         patch("vllm_ascend.attention.context_parallel.sfa_cp.enable_dsa_cp", return_value=False),
