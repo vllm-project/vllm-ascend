@@ -12,7 +12,6 @@ from vllm.v1.worker.gpu.sample import trace_replay as upstream_trace_replay  # n
 
 import vllm_ascend.patch.worker  # noqa: E402,F401
 
-
 apply_trace_tokens = upstream_trace_replay.apply_trace_tokens
 
 
