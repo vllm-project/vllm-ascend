@@ -7,7 +7,7 @@ import pytest
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 
 import vllm_ascend.patch.platform.patch_pp_mtp  # noqa: F401
-from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
+from vllm_ascend.spec_decode.dynamic.policy import AdaptiveDraftKController
 
 
 def test_compact_and_expanded_configs_create_equivalent_controllers(monkeypatch):
@@ -15,8 +15,8 @@ def test_compact_and_expanded_configs_create_equivalent_controllers(monkeypatch)
 
     from vllm.v1.core.sched import scheduler as scheduler_module
 
+    from vllm_ascend.core.dynamic_spec_scheduler import install_scheduler_policy
     from vllm_ascend.dynamic_spec_config import resolve_method_params
-    from vllm_ascend.patch.platform.patch_pp_mtp import _patch_scheduler_dynamic_gate_compat
     from vllm_ascend.worker.v2.spec_decode.physical_k import configured_capture_k, v2_varlen_physical_k_enabled
 
     class FakeScheduler:
@@ -27,7 +27,7 @@ def test_compact_and_expanded_configs_create_equivalent_controllers(monkeypatch)
             pass
 
     monkeypatch.setattr(scheduler_module, "Scheduler", FakeScheduler)
-    _patch_scheduler_dynamic_gate_compat()
+    install_scheduler_policy()
     compact = {"method": "dspark", "policy": "hardware_aware", "physical_k": {"min_k": 3, "capture_k": [3, 5]}}
     expanded = {"method": "dspark", "policy": "hardware_aware", "method_params": resolve_method_params(compact)}
     controllers = []

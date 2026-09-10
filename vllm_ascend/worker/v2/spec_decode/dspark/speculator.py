@@ -37,35 +37,22 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_attn_metadata_wrapper,
     build_draft_attn_metadata_factory,
 )
-from vllm_ascend.worker.v2.spec_decode.dspark.buffers import IndexedConfidenceBuffer, IndexedDraftTokenBuffer
 from vllm_ascend.worker.v2.spec_decode.physical_k import (
-    initialize_physical_k_buffers,
+    PhysicalKDSparkMixin,
+    initialize_dspark_physical_k,
     physical_k_scope,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class AscendDSparkSpeculator(DSparkSpeculator):
+class AscendDSparkSpeculator(PhysicalKDSparkMixin, DSparkSpeculator):
     _speculator_name = "DSpark"
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
         self.input_batch: InputBatch | None = None
-        self._vllm_ascend_max_speculative_steps = self.num_speculative_steps
-        self._physical_k_log_count = 0
-        # DSpark changes ``sample_from_anchor`` after DFlash initialization,
-        # so initialize the width-dependent anchor indices only now.
-        initialize_physical_k_buffers(self)
-        self._physical_token_buffer = IndexedDraftTokenBuffer(self.draft_tokens)
-        # Retain the full backing allocation, not physical_k_scope's narrow
-        # (noncontiguous) view. Allocate indices before graph capture.
-        confidence_probs = getattr(self, "draft_token_confidence_probs", None)
-        self._physical_confidence_buffers = (
-            {k: IndexedConfidenceBuffer(confidence_probs, k) for k in range(1, self.num_speculative_steps)}
-            if confidence_probs is not None
-            else {}
-        )
+        initialize_dspark_physical_k(self)
 
     def load_draft_model(
         self,
@@ -128,37 +115,6 @@ class AscendDSparkSpeculator(DSparkSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
-
-    def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
-        """Keep DSpark confidence writes compatible with active physical K.
-
-        Upstream DSpark assigns the confidence result to the whole fixed-width
-        request buffer.  During V2 graph capture the physical-K scope exposes a
-        smaller ``num_speculative_steps``, so the result has shape ``[B, K]``
-        while the buffer is still ``[B, max_K]``.  A narrow view preserves the
-        fixed backing allocation and makes both the dense and top-k sampling
-        paths shape-safe; the full view is restored before the caller records
-        confidences for the next scheduler step.
-        """
-        active_k = int(self.num_speculative_steps)
-        max_k = int(getattr(self, "_vllm_ascend_max_speculative_steps", active_k))
-        if active_k >= max_k:
-            # Keep the fixed-K path unchanged; the indexed adapter is only
-            # needed by a smaller physical-K graph.
-            super()._sample_sequential(num_reqs, head_hidden)
-            return
-
-        confidence_probs = getattr(self, "draft_token_confidence_probs", None)
-        old_draft_tokens = self.draft_tokens
-        self.draft_tokens = self._physical_token_buffer
-        if confidence_probs is not None and confidence_probs.ndim >= 2:
-            self.draft_token_confidence_probs = self._physical_confidence_buffers[active_k]
-        try:
-            super()._sample_sequential(num_reqs, head_hidden)
-        finally:
-            self.draft_tokens = old_draft_tokens
-            if confidence_probs is not None and confidence_probs.ndim >= 2:
-                self.draft_token_confidence_probs = confidence_probs
 
     def build_draft_attn_metadatas(
         self,

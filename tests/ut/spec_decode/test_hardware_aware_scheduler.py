@@ -11,8 +11,7 @@ import pytest
 import torch
 
 from vllm_ascend.ascend_config import DynamicSpecConfig
-from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
-from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
+from vllm_ascend.spec_decode.dynamic.policy import AdaptiveDraftKController, ProposalGate
 from vllm_ascend.spec_decode.utils import DynamicSpecScheduler
 from vllm_ascend.worker.v2.spec_decode.dflash.speculator import AscendDFlashSpeculator
 from vllm_ascend.worker.v2.spec_decode.physical_k import physical_k_scope

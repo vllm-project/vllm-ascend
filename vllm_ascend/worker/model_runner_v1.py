@@ -140,6 +140,7 @@ from vllm_ascend.compilation.acl_graph import (
     update_full_graph_params,
 )
 from vllm_ascend.compilation.breakable_aclgraph import BreakableACLGraphWrapper
+from vllm_ascend.core.dynamic_spec_scheduler import trim_proposal_tokens
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.layerwise_cache_layout import (
     apply_layerwise_kv_cache_plan,
@@ -2113,18 +2114,12 @@ class NPUModelRunner(GPUModelRunner):
         out = super().take_draft_token_ids()
         if out is None:
             return None
-        lengths = [
-            self._proposal_lengths_by_req.get(req_id, len(tokens))
-            if getattr(self, "_proposal_lengths_by_req", None) is not None
-            else len(tokens)
-            for req_id, tokens in zip(out.req_ids, out.draft_token_ids)
-        ]
+        draft_token_ids, lengths = trim_proposal_tokens(
+            out.req_ids, out.draft_token_ids, getattr(self, "_proposal_lengths_by_req", None)
+        )
         return DraftTokenIds(
             req_ids=out.req_ids,
-            draft_token_ids=[
-                tokens[: max(0, min(int(k), len(tokens)))]
-                for tokens, k in zip(out.draft_token_ids, lengths)
-            ],
+            draft_token_ids=draft_token_ids,
             proposal_lengths=lengths,
         )
 
@@ -2133,10 +2128,8 @@ class NPUModelRunner(GPUModelRunner):
         lengths_by_req = getattr(self, "_proposal_lengths_by_req", None)
         if lengths_by_req is None:
             return draft_token_ids, req_ids
-        return [
-            tokens[: max(0, min(int(lengths_by_req.get(req_id, len(tokens))), len(tokens)))]
-            for req_id, tokens in zip(req_ids, draft_token_ids)
-        ], req_ids
+        draft_token_ids, _ = trim_proposal_tokens(req_ids, draft_token_ids, lengths_by_req)
+        return draft_token_ids, req_ids
 
     @torch.inference_mode()
     def execute_model(
@@ -2729,16 +2722,11 @@ class NPUModelRunner(GPUModelRunner):
                     draft_req_ids = self.input_batch.req_ids
                 if draft_ids_list and draft_req_ids:
                     draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
-                    proposal_lengths_by_req = getattr(
-                        self, "_proposal_lengths_by_req", {}
-                    ) or {}
-                    output_spec_token_ids = []
-                    for req_id in req_ids_output_copy:
-                        ids = draft_by_req_id.get(req_id, [])
-                        length = proposal_lengths_by_req.get(req_id, len(ids))
-                        output_spec_token_ids.append(
-                            ids[: max(0, min(int(length), len(ids)))]
-                        )
+                    output_spec_token_ids, _ = trim_proposal_tokens(
+                        req_ids_output_copy,
+                        [draft_by_req_id.get(req_id, []) for req_id in req_ids_output_copy],
+                        getattr(self, "_proposal_lengths_by_req", None),
+                    )
 
         model_runner_output = ModelRunnerOutput(
             req_ids=req_ids_output_copy,
@@ -3685,8 +3673,7 @@ class NPUModelRunner(GPUModelRunner):
         # When setting max_query_len = 1, we switch to and capture the optimized
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
-        uniform_decode_query_len = self.uniform_decode_query_len
-        max_query_len = uniform_decode_query_len if uniform_decode else num_tokens
+        max_query_len = self.uniform_decode_query_len if uniform_decode else num_tokens
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.

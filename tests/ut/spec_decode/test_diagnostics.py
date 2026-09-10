@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from vllm_ascend.worker.v2.spec_decode.diagnostics import enable_budget_debug, enable_draft_graph_debug
+from vllm_ascend.worker.v2.spec_decode.physical_k_graph import enable_draft_graph_debug
+from vllm_ascend.worker.v2.spec_decode.verification import enable_budget_debug
 
 
 @pytest.mark.parametrize("enable", [enable_budget_debug, enable_draft_graph_debug])

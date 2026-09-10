@@ -7,7 +7,6 @@ Confidence estimation, cost-based logical budgets, and prefix allocation belong
 to the upstream adaptive-verification manager.
 """
 
-from vllm_ascend.spec_decode.dynamic.draft_k_controller import AdaptiveDraftKController
-from vllm_ascend.spec_decode.dynamic.proposal_gate import ProposalGate
+from vllm_ascend.spec_decode.dynamic.policy import AdaptiveDraftKController, ProposalGate
 
 __all__ = ["AdaptiveDraftKController", "ProposalGate"]

@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm_ascend.worker.v2.spec_decode.dspark.buffers import IndexedConfidenceBuffer, IndexedDraftTokenBuffer
+from vllm_ascend.worker.v2.spec_decode.physical_k import IndexedConfidenceBuffer, IndexedDraftTokenBuffer
 
 
 @pytest.mark.parametrize("batch", [0, 1, 4, 16])

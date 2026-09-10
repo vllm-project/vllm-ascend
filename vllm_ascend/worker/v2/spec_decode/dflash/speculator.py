@@ -18,6 +18,7 @@ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import (
 
 from vllm_ascend.worker.v2.attn_utils import build_attn_metadata_wrapper
 from vllm_ascend.worker.v2.spec_decode.physical_k import (
+    PhysicalKDFlashMixin,
     initialize_physical_k_buffers,
     physical_k_scope,
 )
@@ -25,7 +26,7 @@ from vllm_ascend.worker.v2.spec_decode.physical_k import (
 logger = logging.getLogger(__name__)
 
 
-class AscendDFlashSpeculator(DFlashSpeculator):
+class AscendDFlashSpeculator(PhysicalKDFlashMixin, DFlashSpeculator):
     def build_draft_attn_metadatas(
         self,
         num_reqs_padded,
@@ -116,51 +117,6 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 attn_backends[layer_name] = attn_layers[layer_name].get_attn_backend()
 
         self.attn_backends = attn_backends
-
-    def _generate_draft(
-        self,
-        num_reqs: int,
-        num_tokens_padded: int,
-        attn_metadata: dict[str, Any] | None,
-        slot_mappings: dict[str, torch.Tensor] | None,
-        num_tokens_across_dp: torch.Tensor | None,
-        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    ) -> None:
-        """Run DFlash with a variable physical K without resizing buffers.
-
-        The upstream implementation assigns the sampled ``[num_reqs, K]``
-        result to ``draft_tokens[:num_reqs]``.  That is valid for the fixed
-        configured K, but V2 physical-K replay temporarily exposes a smaller
-        ``num_speculative_steps`` while ``draft_tokens`` remains allocated at
-        the maximum width.  Assign only the active prefix so the fixed buffer
-        contract used by the scheduler and rejection sampler is preserved.
-        """
-        last_hidden_states = self._run_model(
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
-
-        num_steps = self.num_speculative_steps
-        num_sample = num_reqs * num_steps
-        sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
-        draft_tokens = self.sample_draft(
-            sample_hidden_states,
-            self.sample_pos[:num_sample] - 2,
-            self.sample_idx_mapping[:num_sample],
-            self.temperature,
-            self.seeds,
-            self.sample_col[:num_sample],
-            self.draft_logits,
-        )
-        draft_tokens = draft_tokens.view(num_reqs, num_steps)
-        # ``draft_tokens[:, :num_steps]`` is a strided view when physical K
-        # is smaller than the configured maximum.  Use contiguous per-request
-        # rows so ACL graph capture never records an invalid strided copy.
-        for req_idx in range(num_reqs):
-            self.draft_tokens[req_idx, :num_steps].copy_(draft_tokens[req_idx])
 
     def propose(
         self,
