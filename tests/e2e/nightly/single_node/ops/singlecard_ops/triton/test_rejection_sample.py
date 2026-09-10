@@ -438,11 +438,12 @@ def test_rejection_greedy_sample_triton_boundary(is_greedy_pattern):
     assert torch.equal(output_ref, output_triton), f"is_greedy_pattern={is_greedy_pattern}"
 
     # Non-greedy rows are owned by the random-sampling kernel and must stay
-    # untouched (sentinel preserved).
+    # untouched (sentinel preserved). The all-greedy pattern has no such rows,
+    # so the check is skipped.
     if is_greedy is not None:
         non_greedy_rows = ~greedy_rows
-        assert non_greedy_rows.any()
-        assert (output_triton[non_greedy_rows.to(device)] == -1).all()
+        if non_greedy_rows.any():
+            assert (output_triton[non_greedy_rows.to(device)] == -1).all()
 
     # Spot-check greedy rows: an all-match request emits the bonus token; a
     # first-token rejection emits target_argmax and leaves the tail untouched.
