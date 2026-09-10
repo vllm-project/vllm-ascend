@@ -78,8 +78,8 @@ def observe_prefill(runner, monkeypatch):
     chunks = defaultdict(list)
     original_schedule = scheduler.schedule
 
-    def schedule():
-        output = original_schedule()
+    def schedule(*args, **kwargs):
+        output = original_schedule(*args, **kwargs)
         starts = {}
         for request in output.scheduled_new_reqs:
             prompt_lengths[request.req_id] = len(request.prompt_token_ids)
@@ -164,7 +164,8 @@ def test_kvpp_combined_features(monkeypatch):
                     assert output.outputs[0].finish_reason == "length"
                     outputs.append(output)
             assert outputs[0].num_cached_tokens == 0
-            assert outputs[1].num_cached_tokens >= PREFIX_LENGTH
+            # MTP excludes the last matching block to protect prefill lookahead.
+            assert outputs[1].num_cached_tokens == PREFIX_LENGTH - BLOCK_SIZE
             assert any(
                 len(steps) >= 2 and steps[0][0] == 0 and any(start > 0 for start, _ in steps)
                 for steps in chunks.values()
