@@ -58,6 +58,28 @@ def test_sfa_dcp_validation_only_bypasses_separate_draft(model_role):
             enable_sfa.assert_called_once_with(config)
 
 
+@pytest.mark.parametrize("failure", [None, "missing_op", "runtime_error"])
+def test_visible_device_id_to_physical_device_id(failure):
+    with (
+        patch("vllm_ascend.platform.bootstrap_custom_op_env"),
+        patch("vllm_ascend.platform.import_module") as load_extension,
+        patch.object(torch.ops, "_C_ascend") as ops,
+    ):
+        if failure == "missing_op":
+            del ops.get_physical_device_id
+            with pytest.raises(RuntimeError, match="rebuild vllm-ascend"):
+                NPUPlatform.visible_device_id_to_physical_device_id(0)
+        elif failure == "runtime_error":
+            ops.get_physical_device_id.side_effect = RuntimeError("CANN mapping failed")
+            with pytest.raises(RuntimeError, match="CANN mapping failed"):
+                NPUPlatform.visible_device_id_to_physical_device_id(0)
+        else:
+            ops.get_physical_device_id.return_value = 6
+            assert NPUPlatform.visible_device_id_to_physical_device_id(0) == 6
+            ops.get_physical_device_id.assert_called_once_with(0)
+        load_extension.assert_called_once_with("vllm_ascend.vllm_ascend_C")
+
+
 class TestNPUPlatform(TestBase):
     @staticmethod
     def mock_vllm_config():
