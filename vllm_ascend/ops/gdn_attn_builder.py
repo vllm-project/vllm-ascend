@@ -27,23 +27,10 @@ from vllm.v1.attention.backends.gdn_attn import (
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     PAD_SLOT_ID,
-    compute_causal_conv1d_metadata,
     mamba_get_block_table_tensor,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-
-from vllm_ascend.ops.triton.fla.utils import (
-    prepare_chunk_indices,
-    prepare_chunk_offsets,
-    prepare_final_chunk_indices,
-    prepare_update_chunk_offsets,
-)
-
-_GDN_CHUNK_SIZE = 64
-# Keep this aligned with solve_tril.LARGE_BLOCK_T in ops/triton/fla/solve_tril.py.
-_GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE = 608 * 2
-_GDN_CUMSUM_WORKING_SET = 2**18
 
 
 def _stable_argsort_for_npu(tensor: torch.Tensor) -> torch.Tensor:
@@ -80,21 +67,6 @@ def _treat_single_token_prefills_with_state_as_decodes(
 
 
 @dataclass
-class GDNChunkedPrefillMetadata:
-    cu_seqlens_host: tuple[int, ...]
-    chunk_indices_chunk64_host: tuple[int, ...]
-    chunk_indices_chunk64: torch.Tensor
-    chunk_offsets_chunk64: torch.Tensor
-    update_chunk_offsets_chunk64: torch.Tensor
-    final_chunk_indices_chunk64: torch.Tensor
-    chunk_indices_large_block: torch.Tensor
-    block_indices_cumsum: torch.Tensor
-    num_decodes: int
-    cu_seqlens_kern: tuple[int, ...] | None = None
-    keep_meta: torch.Tensor | None = None
-
-
-@dataclass
 class GDNCausalConv1dMetadata:
     query_start_loc: torch.Tensor
     cache_indices: torch.Tensor
@@ -111,7 +83,8 @@ class GDNSpecCausalConv1dMetadata:
 @dataclass
 class GDNPrefillMetadata:
     causal_conv1d: GDNCausalConv1dMetadata
-    chunk: GDNChunkedPrefillMetadata
+    actual_seq_lengths: torch.Tensor
+    non_empty_indices: torch.Tensor | None
 
 
 @dataclass
@@ -141,83 +114,6 @@ def _build_actual_seq_lengths(
         out=actual_seq_lengths[1:],
     )
     return actual_seq_lengths
-
-
-def _compact_empty_segments(cu_seqlens_host, initial_state, device=None):
-    """Drop zero-length segments so AscendC fwd_h/fwd_o indexing lines up.
-
-    Returns ``(cu_seqlens_kern, initial_state_kern, keep_meta)``:
-    cu_seqlens / initial_state with empty segments removed, plus a bool
-    mask (None when nothing was removed).  The compacted ``final_state``
-    must be scattered back via ``keep_meta`` (empty segments keep their
-    initial state).
-
-    When *device* is given, ``keep_meta`` is moved to that device so that
-    callers can index NPU tensors without an extra host→device sync.
-    """
-    if cu_seqlens_host is None:
-        return None, initial_state, None
-    cu = torch.tensor(cu_seqlens_host, dtype=torch.int64)
-    keep = (cu[1:] - cu[:-1]) > 0
-    if bool(keep.all()):
-        return cu_seqlens_host, initial_state, None
-    # Compute compact cu_seqlens while keep is still on CPU (cu is CPU-only).
-    cu_kern = torch.cat([cu[:1], cu[1:][keep]]).tolist()
-    # Move keep to device only for indexing device-side tensors.
-    if device is not None:
-        keep = keep.to(device)
-    st_kern = initial_state[keep] if initial_state is not None else None
-    return cu_kern, st_kern, keep
-
-
-def _build_non_spec_chunked_prefill_metadata(
-    builder,
-    cu_seqlens_cpu: torch.Tensor,
-    device: torch.device,
-) -> GDNChunkedPrefillMetadata:
-    hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
-    if hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
-        gdn_num_heads = (
-            hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
-        )
-    else:
-        gdn_num_heads = builder.vllm_config.model_config.get_num_attention_heads(builder.vllm_config.parallel_config)
-    cumsum_chunks = max(1, _GDN_CUMSUM_WORKING_SET // (gdn_num_heads * _GDN_CHUNK_SIZE))
-    cumsum_chunk_size = 1 if cumsum_chunks <= 1 else 1 << (cumsum_chunks - 1).bit_length()
-
-    chunk_indices_chunk64 = prepare_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    chunk_offsets_chunk64 = prepare_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    update_chunk_offsets_chunk64 = prepare_update_chunk_offsets(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    final_chunk_indices_chunk64 = prepare_final_chunk_indices(cu_seqlens_cpu, _GDN_CHUNK_SIZE)
-    chunk_indices_large_block = prepare_chunk_indices(
-        cu_seqlens_cpu,
-        _GDN_SOLVE_TRIL_LARGE_BLOCK_SIZE,
-    )
-    block_indices_cumsum = prepare_chunk_indices(cu_seqlens_cpu, cumsum_chunk_size)
-
-    cu_seqlens_host = tuple(cu_seqlens_cpu.to(torch.int64).reshape(-1).tolist())
-    num_decodes = sum(1 for seq_start, seq_end in zip(cu_seqlens_host, cu_seqlens_host[1:]) if seq_end - seq_start == 1)
-    # Pre-compute compact cu_seqlens for AscendC kernels so each layer
-    # can reuse them instead of calling _compact_empty_segments again.
-    cu_seqlens_kern, _, keep_meta = _compact_empty_segments(cu_seqlens_host, None, device=device)
-    if keep_meta is None:
-        cu_seqlens_kern = None
-    else:
-        cu_seqlens_kern = tuple(cu_seqlens_kern)
-
-    return GDNChunkedPrefillMetadata(
-        cu_seqlens_host=cu_seqlens_host,
-        chunk_indices_chunk64_host=tuple(chunk_indices_chunk64.to(torch.int64).reshape(-1).tolist()),
-        chunk_indices_chunk64=chunk_indices_chunk64.to(device=device, non_blocking=True),
-        chunk_offsets_chunk64=chunk_offsets_chunk64.to(device=device, non_blocking=True),
-        update_chunk_offsets_chunk64=update_chunk_offsets_chunk64.to(device=device, non_blocking=True),
-        final_chunk_indices_chunk64=final_chunk_indices_chunk64.to(device=device, non_blocking=True),
-        chunk_indices_large_block=chunk_indices_large_block.to(device=device, non_blocking=True),
-        block_indices_cumsum=block_indices_cumsum.to(device=device, non_blocking=True),
-        num_decodes=num_decodes,
-        cu_seqlens_kern=cu_seqlens_kern,
-        keep_meta=keep_meta,
-    )
 
 
 class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
@@ -380,8 +276,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
     def _attach_non_spec_prefill_metadata(
         self,
         attn_metadata: GDNAttentionMetadata,
-        chunk_metadata: GDNChunkedPrefillMetadata | None,
         non_spec_cache_indices: torch.Tensor | None,
+        prefill_actual_seq_lengths: torch.Tensor | None,
+        prefill_non_empty_indices: torch.Tensor | None,
     ) -> GDNAttentionMetadata:
         attn_metadata.non_spec_prefill_metadata = None
         if attn_metadata.num_prefills <= 0:
@@ -389,10 +286,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         if attn_metadata.non_spec_query_start_loc is None:
             raise RuntimeError("Expected attn_metadata.non_spec_query_start_loc for Ascend GDN non-spec prefill path.")
-        if attn_metadata.prefill_query_start_loc is None:
-            raise RuntimeError("Expected attn_metadata.prefill_query_start_loc for Ascend GDN non-spec prefill path.")
-        if chunk_metadata is None:
-            raise RuntimeError("Expected chunk metadata for Ascend GDN non-spec prefill path.")
+        if prefill_actual_seq_lengths is None:
+            raise RuntimeError("Expected actual sequence lengths for Ascend GDN non-spec prefill path.")
 
         initial_state_mode = attn_metadata.has_initial_state
         if non_spec_cache_indices is None:
@@ -410,7 +305,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 cache_indices=non_spec_cache_indices[:prefill_num_rows],
                 initial_state_mode=initial_state_mode,
             ),
-            chunk=chunk_metadata,
+            actual_seq_lengths=prefill_actual_seq_lengths,
+            non_empty_indices=prefill_non_empty_indices,
         )
         return attn_metadata
 
@@ -548,8 +444,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
 
         query_start_loc = m.query_start_loc
         query_start_loc_cpu = m.query_start_loc_cpu
+        query_lens = query_start_loc[1:] - query_start_loc[:-1]
+        query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         context_lens_tensor = m.compute_num_computed_tokens()
-        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
         block_table_tensor = mamba_get_block_table_tensor(
             m.block_table_tensor,
             m.seq_lens,
@@ -601,11 +498,8 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             non_spec_conv1d_cache_indices = block_table_tensor
             spec_query_start_loc = None
             non_spec_query_start_loc = query_start_loc
-            non_spec_query_start_loc_cpu = query_start_loc_cpu
             num_accepted_tokens = None
         else:
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
-            query_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
             assert spec_sequence_masks_cpu is not None
             assert spec_sequence_indices is not None
             assert non_spec_sequence_indices is not None
@@ -647,7 +541,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 non_spec_state_indices_tensor = None
                 spec_query_start_loc = query_start_loc[: num_spec_decodes + 1]
                 non_spec_query_start_loc = None
-                non_spec_query_start_loc_cpu = None
             else:
                 spec_token_masks = torch.repeat_interleave(
                     spec_sequence_masks,
@@ -701,15 +594,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                     dim=0,
                     out=non_spec_query_start_loc[1:],
                 )
-                non_spec_query_start_loc_cpu = torch.zeros(
-                    query_lens_cpu.size(0) - num_spec_decodes + 1,
-                    dtype=torch.int32,
-                )
-                torch.cumsum(
-                    query_lens_cpu[~spec_sequence_masks_cpu],
-                    dim=0,
-                    out=non_spec_query_start_loc_cpu[1:],
-                )
 
             assert num_accepted_tokens is not None
             num_accepted_tokens = torch.index_select(
@@ -718,53 +602,38 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
                 spec_sequence_indices,
             )
 
-        chunk_indices: torch.Tensor | None = None
-        chunk_offsets: torch.Tensor | None = None
-        prefill_query_start_loc: torch.Tensor | None = None
-        prefill_query_start_loc_cpu: torch.Tensor | None = None
         prefill_state_indices: torch.Tensor | None = None
         prefill_has_initial_state: torch.Tensor | None = None
-        non_spec_chunked_prefill_metadata: GDNChunkedPrefillMetadata | None = None
+        prefill_actual_seq_lengths: torch.Tensor | None = None
+        prefill_non_empty_indices: torch.Tensor | None = None
         if num_prefills > 0:
             if spec_sequence_masks is None and num_decodes > 0:
-                assert non_spec_query_start_loc is not None
-                assert non_spec_query_start_loc_cpu is not None
                 assert non_spec_state_indices_tensor is not None
-                prefill_query_start_loc = non_spec_query_start_loc[num_decodes:] - num_decode_tokens
-                prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu[num_decodes:] - num_decode_tokens
                 prefill_state_indices = non_spec_state_indices_tensor[num_decodes:]
+                prefill_query_lens_cpu = query_lens_cpu[num_decodes:]
+                prefill_actual_seq_lengths = query_lens[num_decodes:].contiguous()
             else:
-                prefill_query_start_loc = non_spec_query_start_loc
-                prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
+                prefill_query_lens_cpu = query_lens_cpu if spec_sequence_masks is None else non_spec_query_lens_cpu
+                prefill_actual_seq_lengths = (
+                    query_lens.contiguous() if spec_sequence_masks is None else non_spec_query_lens.contiguous()
+                )
 
-            assert prefill_query_start_loc_cpu is not None
-            non_spec_chunked_prefill_metadata = _build_non_spec_chunked_prefill_metadata(
-                self,
-                prefill_query_start_loc_cpu,
-                query_start_loc.device,
-            )
-            # Preserve upstream GDNAttentionMetadata fields for callers that
-            # still use the chunk_gated_delta_rule API directly.
-            chunk_indices = non_spec_chunked_prefill_metadata.chunk_indices_chunk64
-            chunk_offsets = non_spec_chunked_prefill_metadata.chunk_offsets_chunk64
+            if bool(torch.any(prefill_query_lens_cpu == 0)):
+                prefill_non_empty_indices = torch.nonzero(
+                    prefill_actual_seq_lengths,
+                    as_tuple=False,
+                ).squeeze(-1)
 
         if num_prefills > 0:
-            (
-                has_initial_state,
-                nums_dict,
-                batch_ptr,
-                token_chunk_offset_ptr,
-            ) = self._build_prefill_has_initial_state_and_causal_conv1d_meta(
-                common_attn_metadata=m,
-                context_lens_tensor=context_lens_tensor,
-                num_prefills=num_prefills,
-                spec_sequence_masks_cpu=spec_sequence_masks_cpu,
-                non_spec_sequence_indices=non_spec_sequence_indices,
-                non_spec_query_start_loc_cpu=non_spec_query_start_loc_cpu,
-                query_start_loc=query_start_loc,
-            )
-            assert has_initial_state is not None
+            has_initial_state = context_lens_tensor > 0
+            if spec_sequence_masks_cpu is not None:
+                assert non_spec_sequence_indices is not None
+                has_initial_state = torch.index_select(
+                    has_initial_state,
+                    0,
+                    non_spec_sequence_indices,
+                )
             if spec_sequence_masks is None and num_decodes > 0:
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
@@ -862,9 +731,9 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
             has_initial_state=has_initial_state,
-            chunk_indices=chunk_indices,
-            chunk_offsets=chunk_offsets,
-            prefill_query_start_loc=prefill_query_start_loc,
+            chunk_indices=None,
+            chunk_offsets=None,
+            prefill_query_start_loc=None,
             prefill_state_indices=prefill_state_indices,
             prefill_has_initial_state=prefill_has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
@@ -875,14 +744,15 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
             spec_token_indx=spec_token_indx,
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
-            nums_dict=nums_dict,
-            batch_ptr=batch_ptr,
-            token_chunk_offset_ptr=token_chunk_offset_ptr,
+            nums_dict=None,
+            batch_ptr=None,
+            token_chunk_offset_ptr=None,
         )
         attn_metadata = self._attach_non_spec_prefill_metadata(
             attn_metadata,
-            non_spec_chunked_prefill_metadata,
             non_spec_conv1d_cache_indices,
+            prefill_actual_seq_lengths,
+            prefill_non_empty_indices,
         )
         attn_metadata = self._attach_spec_decode_metadata(
             attn_metadata,
@@ -890,43 +760,6 @@ class AscendGDNAttentionMetadataBuilder(GDNAttentionMetadataBuilder):
         return self._attach_non_spec_decode_metadata(
             attn_metadata,
             non_spec_conv1d_cache_indices,
-        )
-
-    def _build_prefill_has_initial_state_and_causal_conv1d_meta(
-        self,
-        *,
-        common_attn_metadata: CommonAttentionMetadata,
-        context_lens_tensor: torch.Tensor,
-        num_prefills: int,
-        spec_sequence_masks_cpu: torch.Tensor | None,
-        non_spec_sequence_indices: torch.Tensor | None,
-        non_spec_query_start_loc_cpu: torch.Tensor | None,
-        query_start_loc: torch.Tensor,
-    ) -> tuple[
-        torch.Tensor | None,
-        dict[int, dict[str, object]] | None,
-        torch.Tensor | None,
-        torch.Tensor | None,
-    ]:
-        del num_prefills
-        has_initial_state = context_lens_tensor > 0
-        if spec_sequence_masks_cpu is not None:
-            assert non_spec_sequence_indices is not None
-            has_initial_state = torch.index_select(
-                has_initial_state,
-                0,
-                non_spec_sequence_indices,
-            )
-            assert non_spec_query_start_loc_cpu is not None
-        nums_dict, batch_ptr, token_chunk_offset_ptr = compute_causal_conv1d_metadata(
-            non_spec_query_start_loc_cpu,
-            device=query_start_loc.device,
-        )
-        return (
-            has_initial_state,
-            nums_dict,
-            batch_ptr,
-            token_chunk_offset_ptr,
         )
 
 
