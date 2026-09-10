@@ -15,13 +15,17 @@
 # limitations under the License.
 #
 
+from functools import wraps
+
 import torch
 import torch_npu
 from einops import rearrange
+from torch import nn
 from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
+from vllm.model_executor.utils import replace_parameter
 from vllm.third_party.flash_linear_attention.ops.l2norm import l2norm_fwd
 from vllm.triton_utils import triton
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata  # type: ignore
@@ -40,8 +44,87 @@ from vllm_ascend.ops.triton.fla.fused_qkvzba_split_reshape import fused_qkvzba_s
 from vllm_ascend.ops.triton.fla.utils import clear_ssm_states
 from vllm_ascend.ops.triton.mamba.causal_conv1d import extract_last_width
 
+_PACKED_CONV_WEIGHT_NAME = "ascend_conv1d_weight"
+
+
+def _get_base_conv1d(layer: nn.Module) -> nn.Module:
+    """Return the convolution module owning the base weight.
+
+    LoRA replaces ``conv1d`` with a wrapper while retaining the original
+    linear layer in ``base_layer``. The packed parameter must stay on that base
+    module so layerwise reload materializes source and derived state together.
+    """
+    conv1d = layer.conv1d
+    return getattr(conv1d, "base_layer", conv1d)
+
+
+@torch.no_grad()
+def _pack_conv_weights(conv1d: nn.Module) -> None:
+    """Pack ``[D, 1, W]`` weights into the kernel's ``[W, D]`` layout."""
+    source_weight = conv1d.weight
+    if source_weight.is_meta:
+        return
+
+    packed_param = conv1d.get_parameter(_PACKED_CONV_WEIGHT_NAME)
+    packed_weight = (
+        source_weight.view(source_weight.size(0), source_weight.size(2))
+        .transpose(0, 1)
+        .to(device=packed_param.device, dtype=packed_param.dtype)
+        .contiguous()
+    )
+    replace_parameter(
+        conv1d,
+        _PACKED_CONV_WEIGHT_NAME,
+        packed_weight,
+        prefer_copy=True,
+    )
+
+
+def initialize_packed_conv_weight(layer: nn.Module) -> None:
+    """Register the packed weight and repack it after every source load."""
+    conv1d = _get_base_conv1d(layer)
+    source_weight = conv1d.weight
+    if _PACKED_CONV_WEIGHT_NAME not in conv1d._parameters:
+        conv1d.register_parameter(
+            _PACKED_CONV_WEIGHT_NAME,
+            nn.Parameter(
+                torch.empty(
+                    source_weight.size(2),
+                    source_weight.size(0),
+                    dtype=layer.model_config.dtype,
+                    device=source_weight.device,
+                ),
+                requires_grad=False,
+            ),
+        )
+
+    quant_method = getattr(conv1d, "quant_method", None)
+    if quant_method is None:
+        return
+    process_weights_after_loading = getattr(quant_method, "process_weights_after_loading", None)
+    if process_weights_after_loading is None:
+        return
+
+    @wraps(process_weights_after_loading)
+    def process_weights_and_pack(*args, **kwargs):
+        result = process_weights_after_loading(*args, **kwargs)
+        _pack_conv_weights(conv1d)
+        return result
+
+    quant_method.process_weights_after_loading = process_weights_and_pack
+
+
+def _get_packed_conv_weights(layer: nn.Module) -> torch.Tensor:
+    """Return the registered, kernel-layout convolution parameter."""
+    return _get_base_conv1d(layer).get_parameter(_PACKED_CONV_WEIGHT_NAME)
+
 
 class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
+    @torch.no_grad()
+    def _pack_conv_weights(self) -> None:
+        """Refresh the kernel-layout convolution parameter in place."""
+        _pack_conv_weights(_get_base_conv1d(self))
+
     # Cached fused-op availability probe result, shared across all layers so the
     # smoke call runs at most once per process.
     _fused_chunk_available: bool | None = None
@@ -302,7 +385,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         a = a[:num_actual_tokens]
 
         # 1. Convolution sequence transformation
-        conv_weights = self.conv1d.weight.view(self.conv1d.weight.size(0), self.conv1d.weight.size(2))
+        conv_weights_T = _get_packed_conv_weights(self)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
                 mixed_qkv_spec = mixed_qkv
@@ -316,7 +399,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             spec_causal_conv1d_meta = attn_metadata.spec_decode_metadata.spec_causal_conv1d
             spec_query_start_loc_device = spec_causal_conv1d_meta.query_start_loc
@@ -345,12 +427,11 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 cache_indices_opt = non_spec_causal_conv1d_meta.cache_indices
                 initial_state_mode_opt = non_spec_causal_conv1d_meta.initial_state_mode
                 if get_pcp_group().world_size > 1:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
                     assert non_spec_query_start_loc is not None
                     non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
-                    width = conv_weights.shape[1]
+                    width = self.conv_kernel_size
                     state_len = width - 1
                     num_seqs = non_spec_query_start_loc.shape[0] - 1
                     prefill_seq_offset = max(0, num_seqs - attn_metadata.num_prefills)
@@ -388,7 +469,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                             -1, ...
                         ].transpose(-1, -2)
                 else:
-                    conv_weights_T = conv_weights.transpose(0, 1)
                     activation_num = 1 if self.activation else 0
                     mixed_qkv_non_spec_output = torch.empty_like(mixed_qkv_non_spec)
                     torch.ops._C_ascend.npu_causal_conv1d_custom(
@@ -407,7 +487,6 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     )
                     mixed_qkv_non_spec = mixed_qkv_non_spec_output
         elif attn_metadata.num_decodes > 0:
-            conv_weights_T = conv_weights.transpose(0, 1)
             activation_num = 1 if self.activation else 0
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
