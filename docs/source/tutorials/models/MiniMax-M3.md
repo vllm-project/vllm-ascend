@@ -2,7 +2,7 @@
 
 ## 1 Introduction
 
-MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800 A3 (BF16) and Ascend 950DT (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
+MiniMax-M3 is a multimodal large language model that supports text, image, and video inputs. On Ascend, it supports BF16 and W8A8 on A2/A3, Prefill-Decode disaggregation on Atlas 800 A3 (BF16) and 950DT products (MXFP8), thinking mode, reasoning parsing, tool-call parsing, and multimodal inputs.
 
 This document covers supported features, environment and model preparation, single-node deployment, multi-node deployment, PD separation, thinking and parser configuration, functional verification, accuracy evaluation, and troubleshooting.
 
@@ -20,7 +20,7 @@ Refer to the [Feature Guide](../../user_guide/feature_guide/index.md) for featur
 
 - `MiniMax-M3` (BF16): requires 16 × 64 GB NPU chips. Prefill-Decode disaggregation uses 2 Atlas 800 A3 (64GB × 16). [Download the model weights](https://www.modelscope.cn/collections/MiniMax/MiniMax-M3).
 - `MiniMax-M3-w8a8` (W8A8): requires at least 8 × 64 GB NPU chips. Recommended for Atlas 800 A3 (64GB × 16) and Atlas 800 A2 (64GB × 8). [Download the model weights](https://www.modelscope.cn/models/Eco-Tech/MiniMax-M3-w8a8-0626).
-- `MiniMax-M3-MXFP8` (MXFP8): used for Ascend 950DT (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
+- `MiniMax-M3-MXFP8` (MXFP8): used for 950DT products (96GB × 8) PD disaggregation (2 nodes, 1P1D). [Download the model weights](https://huggingface.co/MiniMaxAI/MiniMax-M3-MXFP8).
 
 It is recommended to place the model weight in a shared cache directory.
 
@@ -99,7 +99,7 @@ For descriptions of the standard `vllm serve` arguments used in the deployment e
 
 ### 5.1 Single-Node Deployment
 
-Single-node deployment completes both Prefill and Decode within the same node. Both the bfloat(MiniMax-M3) and quantized(W8A8、MXFP8) model can be deployed on 1 Atlas 800 A3 (64GB × 16). W8A8 quantized model can be deployed on 1 Atlas 800 A2 (64GB × 8). MXFP8 quantized model can be deployed on 1 Ascend 950DT (96GB × 8).
+Single-node deployment completes both Prefill and Decode within the same node. Both the bfloat(MiniMax-M3) and quantized(W8A8、MXFP8) model can be deployed on 1 Atlas 800 A3 (64GB × 16). W8A8 quantized model can be deployed on 1 Atlas 800 A2 (64GB × 8). MXFP8 quantized model can be deployed on 1 950DT products (96GB × 8).
 
 === "A3 series(BF16)"
 
@@ -146,7 +146,8 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     --trust-remote-code \
     --max-model-len 131072 \
     --tensor-parallel-size 4 \
-    --data-parallel-size 4 --api_server_count 1 \
+    --data-parallel-size 4 \
+    --api_server_count 1 \
     --max-num-batched-tokens 32768 \
     --long-prefill-token-threshold 4096 \
     --enable-expert-parallel \
@@ -172,7 +173,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     --port 11223 > ${LOG_PATH} 2>&1 &
     ```
 
-=== "A5 series(Ascend 950DT)"
+=== "950DT products"
 
     ```bash
     nic_name="xxxx"  # NIC corresponding to local_ip
@@ -378,7 +379,7 @@ We'd like to show the deployment guide of MiniMax-M3 on a multi-node environment
 
 PD disaggregation separates Prefill and Decode into different service groups. Prefill nodes process large prompt chunks, Decode nodes serve token generation, and a proxy forwards requests between them. Use Mooncake for KV cache transfer. Refer to [Mooncake](../features/pd_disaggregation_mooncake_multi_node.md) for the general PD disaggregation workflow.
 
-The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. The launcher below extends the repository example with `--pp-size`: on A3, Prefill uses pipeline parallel (`PP=2`) with a `30,30` split of the 60 transformer layers, while the Ascend 950DT MXFP8 launch uses `PP=1` with `DP=2` on both roles. Each DP rank occupies `tp_size * pp_size` NPUs.
+The launch pattern is: prepare `launch_online_dp.py` and a role-specific `run_dp_template.sh` on each node, then start a load-balance proxy after every engine prints `Application startup complete`. The launcher below extends the repository example with `--pp-size`: on A3, Prefill uses pipeline parallel (`PP=2`) with a `30,30` split of the 60 transformer layers, while the 950DT products MXFP8 launch uses `PP=1` with `DP=2` on both roles. Each DP rank occupies `tp_size * pp_size` NPUs.
 
 **Common Issues Tip:** For PD disaggregation issues such as KV transfer timeouts or Mooncake connection errors, refer to the [Public FAQs](../../faqs.md). For MiniMax-specific issues, refer to [Chapter 10 FAQ](#10-faq).
 
@@ -558,7 +559,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
         --max-num-batched-tokens 32768 \
         --long-prefill-token-threshold 2048 \
         --trust-remote-code \
-        --gpu-memory-utilization 0.92 \
+        --gpu-memory-utilization 0.85 \
         --reasoning-parser minimax_m3 \
         --limit-mm-per-prompt '{"image":1,"video":0}' \
         --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false},"multistream_overlap_shared_expert":true,"weight_nz_mode":2,"enable_shared_expert_dp":true}' \
@@ -688,9 +689,9 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
-=== "Ascend 950DT series"
+=== "950DT products"
 
-    Prefill-Decode disaggregation can be deployed on 2 Ascend 950DT (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
+    Prefill-Decode disaggregation can be deployed on 2 950DT products (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
 
     **Deployment topology:**
 
@@ -835,7 +836,7 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     This starts two Decode API servers on ports `31060` and `31061`.
 
-    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For Ascend 950DT 1P1D, the proxy forwards requests to 2 Prefill ranks and 2 Decode ranks.
+    To set up request forwarding, run the following script on a node that can reach every Prefill and Decode API port. You can get the proxy program in the repository's examples: [load_balance_proxy_server_example.py](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/load_balance_proxy_server_example.py). For 950DT products 1P1D, the proxy forwards requests to 2 Prefill ranks and 2 Decode ranks.
 
     ```bash
     unset ftp_proxy
@@ -874,25 +875,25 @@ Key Parameter Descriptions:
 
 **Prefill node-specific configurations:**
 
-- `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The Ascend 950DT launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
+- `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The 950DT products launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
 - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
 - `--speculative-config '{"method":"eagle3", ...}'`: Enables the MiniMax-M3 EAGLE3 draft model. Do not replace this with GLM MTP options.
-- `--no-async-scheduling` (950DT): Used by the verified MXFP8 Prefill launch.
+- `--no-async-scheduling` (950DT products): Used by the verified MXFP8 Prefill launch.
 
 **Decode node-specific configurations:**
 
 - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
-- `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The Ascend 950DT launch does not set this flag and keeps prefix caching enabled.
-- `--max-num-seqs 256`: Decode concurrency used by the verified 950DT 1P1D launch. A3 uses `64`.
+- `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The 950DT products launch does not set this flag and keeps prefix caching enabled.
+- `--max-num-seqs 256`: Decode concurrency used by the verified 950DT products 1P1D launch. A3 uses `64`.
 
 **Mooncake KV transfer configuration (`--kv-transfer-config`):**
 
 - `"kv_connector": "MooncakeConnectorV1"`: Uses Mooncake as the KV cache transfer connector between prefill and decode nodes.
 - `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
-- `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT `30000`/`26900`.
+- `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT products `30000`/`26900`.
 - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
-- `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT only): Required for UBOE / Ascend direct communication on 950DT.
-- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
+- `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT products only): Required for UBOE / Ascend direct communication on 950DT products.
+- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT products uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
 
 **Request forwarding (proxy):**
 
@@ -1232,8 +1233,8 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 | AIME2025 | 8 Atlas 800 A3 (64GB × 16)      | 93.3@repeat2    | 131072        | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
 | GPQA-Diamond | 8 H200 (141GB × 8)     | 92.42    | 81920      | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
 | GPQA-Diamond | 8 Atlas 800 A3 (64GB × 16)      | 92.42    | 131072      | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | 8 Ascend 950DT (96GB × 8)      | 92.9    | 133000      | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
-| MMMU-pro | 8 Ascend 950DT (96GB × 8)      | 78.9    | 133000      | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000      | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
+| MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000      | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
 
 ### 8.3 Multimodal Evaluation
 
