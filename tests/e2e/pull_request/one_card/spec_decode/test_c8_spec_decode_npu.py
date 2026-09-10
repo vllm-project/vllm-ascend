@@ -5,6 +5,7 @@
 
 The standard D128 kernel is intentional: these tests need neither a private
 quantized checkpoint nor the separate D256 custom operator used by Qwen3.8.
+Keep them in the one-card hardware suite; tests/ut is routed to CPU runners.
 """
 
 from types import SimpleNamespace
