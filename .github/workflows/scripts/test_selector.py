@@ -575,7 +575,7 @@ class CodeChangeDetector:
                     old_count = int(match.group(2)) if match.group(2) else 1
                     # Rule: start line = old_start + 2, end line = old_start + old_count - 3
                     start_line = old_start + 2
-                    end_line = old_start + old_count - 3
+                    end_line = old_start + old_count - 4
                     if end_line <= start_line:
                         end_line = old_start + old_count
                     # Collect all lines in hunk, check if there are new lines (starting with +)
@@ -593,7 +593,6 @@ class CodeChangeDetector:
                     has_addition = any(hline.lstrip().startswith("+") for hline in hunk_lines)
                     if not has_addition:
                         start_line += 1
-                        end_line -= 1
                     for line_no in range(start_line, end_line + 1):
                         changed_files[current_file].add(line_no)
 
