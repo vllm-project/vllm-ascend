@@ -1246,7 +1246,7 @@ export HCCL_INTRA_ROCE_ENABLE=1
 
 export ACL_OP_INIT_MODE=1
 
-vllm serve /mnt/share/weight/GLM-5.2-W8A8C8-A3-0808 \
+vllm serve /root/.cache/modelscope/hub/models/vllm-ascend/GLM-5.2-w8a8c8 \
     --host 0.0.0.0 \
     --port $2 \
     --data-parallel-size $3 \
