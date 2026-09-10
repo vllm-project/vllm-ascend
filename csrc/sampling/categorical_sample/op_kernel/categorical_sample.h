@@ -458,7 +458,13 @@ private:
 
     __aicore__ inline float IntToFloat(int32_t value)
     {
-        return static_cast<float>(value);
+        LocalTensor<float> scalar = scalarBuf_.Get<float>();
+        LocalTensor<int32_t> scalarInt = scalarIntBuf_.Get<int32_t>();
+        scalarInt.SetValue(0, value);
+        PipeSToV();
+        Cast(scalar, scalarInt, RoundMode::CAST_NONE, 1);
+        PipeVToS();
+        return scalar.GetValue(0);
     }
 
     __aicore__ inline float Uniform(int64_t seed, int64_t position)
