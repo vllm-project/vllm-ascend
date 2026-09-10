@@ -201,7 +201,7 @@ def _draft_sparse_flash_mla_kwargs(vllm_config: VllmConfig) -> dict[str, int]:
     # Visibility comes from explicit indices. A5 disables band windows with -1;
     # the A2/A3 explicit sparse template requires non-negative window values.
     window = -1 if is_a5_bf16_kv_enabled(vllm_config) else 0
-    return dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=3, ori_win_left=window, ori_win_right=window)
+    return dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=0, ori_win_left=window, ori_win_right=window)
 
 
 def _draft_uses_sparse_flash_mla(vllm_config: VllmConfig) -> bool:

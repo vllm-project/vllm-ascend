@@ -312,6 +312,7 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
             assert kwargs["ori_topk"] == metadata.dspark_swa_indices.shape[-1]
             assert kwargs["ori_topk_length"] is lengths
             assert kwargs["ori_mask_mode"] == 0
+            assert kwargs["cmp_mask_mode"] == 0
             assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == (-1 if a5_bf16 else 0)
         first_indices = metadata.dspark_swa_indices.clone()
         next_metadata = _build_draft_req_metadata(
@@ -2206,6 +2207,7 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft, a5_bf16):
     assert kwargs["cmp_ratio"] == 1
     assert kwargs["ori_mask_mode"] == (0 if is_draft else 4)
     if is_draft:
+        assert kwargs["cmp_mask_mode"] == 0
         assert kwargs["ori_topk_length"] is req.dspark_swa_topk_lengths
         assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == (-1 if a5_bf16 else 0)
     else:
