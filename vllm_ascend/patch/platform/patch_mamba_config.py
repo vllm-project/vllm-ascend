@@ -140,10 +140,18 @@ def verify_and_update_config(cls, vllm_config) -> None:
             assert cache_config.mamba_cache_mode == "align", (
                 "mamba_cache_mode only support 'align' when kv_transfer enabled now!"
             )
+    if (
+        vllm_config.kv_transfer_config
+        and vllm_config.kv_transfer_config.is_kv_consumer
+    ):
+        cache_config.mamba_cache_mode = "none"
     if cache_config.enable_prefix_caching and cache_config.mamba_cache_mode == "align":
         cache_config.mamba_block_size = cache_config.block_size
     else:
-        cache_config.mamba_block_size = model_config.max_model_len
+        cache_config.mamba_block_size = (
+            cdiv(model_config.max_model_len, cache_config.block_size)
+            * cache_config.block_size
+        )
 
 
 vllm.model_executor.models.config.HybridAttentionMambaModelConfig.verify_and_update_config = verify_and_update_config
