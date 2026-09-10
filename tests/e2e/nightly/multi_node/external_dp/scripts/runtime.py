@@ -629,15 +629,31 @@ def _format_rank_statuses(
     return "\n".join(parts)
 
 
+def _tail_log_file(log_file: Path, max_lines: int = 200) -> str:
+    try:
+        lines = log_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return f"<failed to read {log_file}: {exc}>"
+    if not lines:
+        return "<empty log>"
+    return "\n".join(lines[-max_lines:])
+
+
 def _raise_if_rank_process_exited(rank_processes: list[RankProcess] | None) -> None:
     if not rank_processes:
         return
 
-    exited = []
+    exited: list[str] = []
     for process, rank, log_file in rank_processes:
         returncode = process.poll()
         if returncode is not None:
             exited.append(f"{rank_label(rank)} pid={process.pid} returncode={returncode} log={log_file}")
+            logger.error(
+                "External DP rank exited before ready (%s). Tail of %s:\n%s",
+                rank_label(rank),
+                log_file,
+                _tail_log_file(Path(log_file)),
+            )
 
     if exited:
         raise RuntimeError("External DP rank process exited before ready: " + "; ".join(exited))
