@@ -447,6 +447,62 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 else self.model.mask_hidden.view(self.hidden_size)
             )
 
+    def initialize_attn_backend(self, kv_cache_config, kernel_block_sizes=None):
+        layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        auxiliary_layers = {
+            name for name in self._draft_attn_layer_names if getattr(layers[name], "cache_role", "kv") != "kv"
+        }
+        if not auxiliary_layers:
+            return super().initialize_attn_backend(kv_cache_config, kernel_block_sizes)
+
+        # Reuse the runner's resolved backends/specs and cache group IDs. Only
+        # the metadata builders are private to the drafter; cache layout stays
+        # with the existing cache manager.
+        self.draft_attn_groups = []
+        for runner_groups in self.runner.attn_groups:
+            for runner_group in runner_groups:
+                names = sorted(self._draft_attn_layer_names.intersection(runner_group.layer_names))
+                if names:
+                    group = copy.copy(runner_group)
+                    group.layer_names = names
+                    group.create_metadata_builders(
+                        self.vllm_config,
+                        self.device,
+                        # Preserve storage pages, even when the block table is
+                        # split into smaller kernel blocks.
+                        kernel_block_size=None,
+                        num_metadata_builders=self.num_speculative_tokens if set(names) <= auxiliary_layers else 1,
+                    )
+                    self.draft_attn_groups.append(group)
+        self.draft_attn_groups.sort(key=lambda group: set(group.layer_names) <= auxiliary_layers)
+        self.attn_layer_names = [name for group in self.draft_attn_groups for name in group.layer_names]
+        assert set(self.attn_layer_names) == self._draft_attn_layer_names
+        self.kv_cache_gid = self.draft_attn_groups[0].kv_cache_group_id
+        self.block_size = self.runner.input_batch.block_table[self.kv_cache_gid].block_size
+        self.kernel_block_size = self.block_size
+
+    def _cache_group_common_metadata(self, common, group):
+        if group.kv_cache_group_id == self.kv_cache_gid:
+            return common
+        group_common = copy.copy(common)
+        block_table = self.runner.input_batch.block_table[group.kv_cache_group_id]
+        table = block_table.get_device_tensor()[: common.num_reqs]
+        group_common.block_table_tensor = table
+        positions = common.positions[: common.num_input_tokens].long()
+        slots = torch.full_like(positions, PADDING_SLOT_ID)
+        if common.num_reqs and table.shape[1]:
+            rows = torch.arange(positions.numel(), device=positions.device)
+            request = torch.searchsorted(common.query_start_loc[1 : common.num_reqs + 1], rows, right=True)
+            page = positions // block_table.block_size
+            valid = (request < common.num_reqs) & (positions >= 0) & (page < table.shape[1])
+            valid &= common.slot_mapping[: positions.numel()] >= 0
+            physical = table[request.clamp(max=common.num_reqs - 1), page.clamp(0, table.shape[1] - 1)].long()
+            valid &= physical >= 0
+            slots = torch.where(valid, physical * block_table.block_size + positions % block_table.block_size, slots)
+        # Each draft keeps its own mapping, including after rejection/reordering.
+        group_common.slot_mapping = slots
+        return group_common
+
     def _maybe_share_embeddings(self, target_language_model: nn.Module) -> None:
         """
         Some draft models may not have their own embedding layers, and some may
@@ -1112,7 +1168,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             # Copy the old attn_metadata and update
             for draft_index in range(1, self.num_speculative_tokens):
                 per_layer_attn_metadata = dict()
-                for attn_group in self.draft_attn_groups:
+                for group_index, attn_group in enumerate(self.draft_attn_groups):
                     common_attn_metadata, attn_metadata = self.attn_update_stack_num_spec_norm(
                         draft_index,
                         common_attn_metadata,
@@ -1122,8 +1178,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                         aclgraph_runtime_mode,
                         **draft_cp_kwargs,
                         attn_group=attn_group,
+                        advance_common_metadata=group_index == 0,
                     )
-                    for layer_name in self.attn_layer_names:
+                    for layer_name in attn_group.layer_names:
                         per_layer_attn_metadata[layer_name] = attn_metadata
                 multi_steps_attn_metadata.append(per_layer_attn_metadata)
 
@@ -1800,10 +1857,28 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         slot_indices=None,
         mtp_slot_mapping=None,
         attn_group=None,
+        advance_common_metadata=True,
     ):
         assert draft_index > 0
         assert attn_group is not None, "vllm-ascend v0.17.0rc1 requires attn_group"
+        if not advance_common_metadata:
+            builder_index = draft_index if len(attn_group.metadata_builders) > 1 else 0
+            metadata = attn_group.get_metadata_builder(builder_index).build_for_drafting(
+                self._cache_group_common_metadata(old_common_metadata, attn_group), draft_index
+            )
+            return old_common_metadata, metadata
         common_attn_metadata = self.shallow_copy_metadata(old_common_metadata)
+
+        if draft_index == 1 and len(self.draft_attn_groups) > 1 and not self.uses_mrope:
+            # Padded verification includes rejected tokens. All cache groups
+            # must resume drafting from the selected accepted endpoint.
+            common_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
+            common_attn_metadata.seq_lens[:batch_size] = used_update_positions[:batch_size] + 1
+            common_attn_metadata.seq_lens_cpu = None
+            common_attn_metadata._seq_lens_cpu = None
+            common_attn_metadata.num_computed_tokens_cpu = None
+            common_attn_metadata._num_computed_tokens_cpu = None
+            common_attn_metadata._num_computed_tokens_cache = None
 
         if draft_index == 1:
             if aclgraph_runtime_mode == CUDAGraphMode.FULL:
@@ -2428,9 +2503,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 if device_metadata_provider is not None:
                     device_metadata_tasks.extend(device_metadata_provider.take_device_metadata_tasks())
             else:
-                attn_metadata = builder.build(
-                    0, common_attn_metadata, self.runner.get_model(), **extra_attn_metadata_args
-                )
+                group_common = common_attn_metadata
+                if attn_group is not self.draft_attn_groups[0]:
+                    group_common = self._cache_group_common_metadata(common_attn_metadata, attn_group)
+                attn_metadata = builder.build(0, group_common, self.runner.get_model(), **extra_attn_metadata_args)
             if hasattr(attn_metadata, "causal") and not attn_metadata.causal:
                 attn_metadata.attn_mask = None
 
