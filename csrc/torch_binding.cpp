@@ -41,6 +41,7 @@
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
+#include "attention/sparse_flash_mla/sparse_flash_mla_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
 #include "attention/fused_sparse_attention_overlap/fused_sparse_attention_overlap_torch_adpt.h"
 #include "attention/lightning_indexer_quant/lightning_indexer_quant_torch_adpt.h"
@@ -3250,6 +3251,40 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
         );
     ops.impl("npu_quant_lightning_indexer_v2", torch::kPrivateUse1, &vllm_ascend::npu_quant_lightning_indexer_v2_npu);
+
+    ops.def(
+        "npu_sparse_flash_mla("
+            "Tensor q, *, "
+            "Tensor? ori_kv=None, "
+            "Tensor? cmp_kv=None, "
+            "Tensor? ori_sparse_indices=None, "
+            "Tensor? cmp_sparse_indices=None, "
+            "Tensor? ori_block_table=None, "
+            "Tensor? cmp_block_table=None, "
+            "Tensor? cu_seqlens_q=None, "
+            "Tensor? cu_seqlens_ori_kv=None, "
+            "Tensor? cu_seqlens_cmp_kv=None, "
+            "Tensor? seqused_q=None, "
+            "Tensor? seqused_ori_kv=None, "
+            "Tensor? seqused_cmp_kv=None, "
+            "Tensor? cmp_residual_kv=None, "
+            "Tensor? ori_topk_length=None, "
+            "Tensor? cmp_topk_length=None, "
+            "Tensor? sinks=None, "
+            "Tensor? metadata=None, "
+            "float softmax_scale=0, "
+            "int cmp_ratio=4, "
+            "int ori_mask_mode=4, "
+            "int cmp_mask_mode=3, "
+            "int ori_win_left=128, "
+            "int ori_win_right=0, "
+            "str layout_q=\"BSND\", "
+            "str layout_kv=\"PA_ND\", "
+            "int topk_value_mode=0, "
+            "bool return_softmax_lse=False"
+        ") -> (Tensor out, Tensor softmax_lse)"
+        );
+    ops.impl("npu_sparse_flash_mla", torch::kPrivateUse1, &vllm_ascend::npu_sparse_flash_mla);
 
     ops.def(
         "npu_sparse_attn_sharedkv("
