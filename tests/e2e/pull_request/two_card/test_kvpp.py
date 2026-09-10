@@ -7,6 +7,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.distributed.device_communicators import shm_broadcast
 from vllm.transformers_utils.utils import maybe_model_redirect
+from zmq import Context
 from zmq.constants import LINGER
 
 from tests.e2e.conftest import VllmRunner, wait_until_npu_memory_free
@@ -111,6 +112,26 @@ def test_kvpp_combined_features(monkeypatch):
     """Compare KVPP off/on with chunk, prefix, TP, EP, async and MTP."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    context_origins = {}
+    original_init = Context.__init__
+    original_destroy = Context.destroy
+
+    def report_context_init(context, *args, **kwargs):
+        original_init(context, *args, **kwargs)
+        context_origins[id(context)] = "".join(traceback.format_stack(limit=12))
+
+    def report_context_destroy(context, *args, **kwargs):
+        print(
+            f"KVPP test: ZMQ destroy begin id={id(context)}, "
+            f"origin={context_origins.pop(id(context), 'created before test')}",
+            flush=True,
+        )
+        result = original_destroy(context, *args, **kwargs)
+        print(f"KVPP test: ZMQ destroy returned id={id(context)}", flush=True)
+        return result
+
+    monkeypatch.setattr(Context, "__init__", report_context_init)
+    monkeypatch.setattr(Context, "destroy", report_context_destroy)
     original_context = shm_broadcast.Context
 
     def queue_context():
