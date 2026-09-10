@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+from collections.abc import Sequence
 from contextlib import contextmanager
 
 import numpy as np
@@ -42,6 +43,7 @@ from vllm.v1.worker.gpu.model_runner import (
     ExecuteModelState,
     GPUModelRunner,
 )
+from vllm.v1.worker.utils import copy_kv_cache_blocks_inplace
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -73,6 +75,18 @@ from vllm_ascend.worker.v2.spec_decode import init_speculator
 from vllm_ascend.worker.v2.spec_decode.eagle.speculator import AscendEagleSpeculator
 from vllm_ascend.worker.v2.states import AscendRequestState
 from vllm_ascend.worker.v2.utils import torch_cuda_wrapper
+
+
+def _flatten_kv_cache_views(
+    kv_caches: Sequence[torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...]],
+) -> list[torch.Tensor]:
+    flattened: list[torch.Tensor] = []
+    for cache in kv_caches:
+        if isinstance(cache, (list, tuple)):
+            flattened.extend(cache)
+        else:
+            flattened.append(cache)
+    return flattened
 
 
 class NPUModelRunner(GPUModelRunner):
@@ -250,6 +264,28 @@ class NPUModelRunner(GPUModelRunner):
                     self.speculator.pcp_manager = self.pcp_manager
         if self.model_config.enable_return_routed_experts:
             self.init_routed_experts_capturer()
+
+    def update_requests(self, scheduler_output: SchedulerOutput) -> None:
+        """Let upstream copy partial-hit blocks through Ascend cache views."""
+        kv_cache_block_copies = getattr(scheduler_output, "kv_cache_block_copies", None)
+        if not kv_cache_block_copies:
+            super().update_requests(scheduler_output)
+            return
+
+        # Ascend binds Attention K/V as tuples and Mamba states as lists. The
+        # upstream copier already handles aliases and shared backing storage,
+        # but expects the runner cache collection itself to contain tensors.
+        scheduler_output.kv_cache_block_copies = None
+        try:
+            super().update_requests(scheduler_output)
+        finally:
+            scheduler_output.kv_cache_block_copies = kv_cache_block_copies
+
+        copy_kv_cache_blocks_inplace(
+            _flatten_kv_cache_views(self.kv_caches),
+            self.kv_cache_config.num_blocks,
+            kv_cache_block_copies,
+        )
 
     @torch.inference_mode()
     def execute_model(
