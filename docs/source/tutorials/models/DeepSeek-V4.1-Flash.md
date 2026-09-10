@@ -18,8 +18,7 @@ a continuously adjustable reasoning effort from 1 to 100.
 
 Support on vLLM Ascend is experimental. This guide documents W8A8 colocated
 deployment on either two Atlas 800 A3 servers or four Atlas 800 A2 servers.
-Prefill-Decode disaggregation and the full one-million-token context are not
-covered by this guide.
+Prefill-Decode disaggregation is not covered by this guide.
 
 ## 2 Supported Features
 
@@ -222,7 +221,7 @@ every other node is a headless worker.
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
-      --max-model-len 131072 \
+      --max-model-len 1048576 \
       --max-num-batched-tokens 4096 \
       --max-num-seqs 32 \
       --gpu-memory-utilization 0.90 \
@@ -282,7 +281,7 @@ every other node is a headless worker.
       --tensor-parallel-size 8 \
       --enable-expert-parallel \
       --served-model-name deepseek-v41 \
-      --max-model-len 131072 \
+      --max-model-len 1048576 \
       --max-num-batched-tokens 4096 \
       --max-num-seqs 32 \
       --gpu-memory-utilization 0.90 \
@@ -440,8 +439,6 @@ For common environment, installation, and parameter issues, refer to the
 
 - The documented deployment uses either two Atlas 800 A3 servers or four
   Atlas 800 A2 servers and an Ascend W8A8 checkpoint with INT8 Engram storage.
-- The validated maximum model length is 131072 tokens; the official model's
-  one-million-token context is not validated in this configuration.
 - Prefill-Decode disaggregation, pipeline parallelism, and model runner V2 are
   not supported by this guide.
 - DSpark draft execution runs in eager mode while the target model uses
