@@ -219,6 +219,12 @@ def build_attn_metadata(
     # seq_lens_np is used for ascend npus, it maybe None in spec_decode case,
     # we fill it with max_seq_len in case `attn_metadata_builder.build` raise
     # an error.
+    # Only a target-model build carries an exact host mirror. A speculative
+    # draft build arrives without ``seq_lens_np`` -- upstream keeps the exact
+    # lengths on the device and hands the host only an optimistic bound -- so
+    # the placeholder below is not a sequence length and consumers must be told
+    # not to trust it. See issue #16271.
+    seq_lens_cpu_is_exact = seq_lens_np is not None
     if seq_lens_np is None:
         seq_lens_np = np.full(num_reqs, max_seq_len, dtype=np.int32)
     seq_lens_cpu = torch.from_numpy(seq_lens_np)[:num_reqs]
@@ -263,6 +269,7 @@ def build_attn_metadata(
             query_start_loc=query_start_loc_gpu,
             query_start_loc_cpu=query_start_loc_cpu,
             seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu_is_exact=seq_lens_cpu_is_exact,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             seq_lens=seq_lens[:num_reqs],
             num_reqs=num_reqs,

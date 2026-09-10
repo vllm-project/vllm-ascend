@@ -258,6 +258,14 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
     # E.g., tensor([128, 256, 64]) for 3 requests with different seq lengths.
     seq_lens_cpu: torch.Tensor = None
 
+    # Set by producers that guarantee ``seq_lens_cpu`` is an *exact* host mirror
+    # of ``seq_lens``, even under speculative decoding. A speculative *draft*
+    # build only has an optimistic host bound (rejections are resolved on the
+    # device), so it must leave this False and let the attention builder pay a
+    # D2H copy. Defaults to False so producers that have not been audited keep
+    # the previous behaviour. See issue #16271.
+    seq_lens_cpu_is_exact: bool = False
+
     # CPU tensor of already computed tokens count per request.
     # E.g., tensor([100, 200, 50]) means req0 has 100 tokens already computed.
     num_computed_tokens_cpu: torch.Tensor = None
@@ -306,6 +314,7 @@ class AscendCommonAttentionMetadata(CommonAttentionMetadata):
             query_start_loc_cpu=self.query_start_loc_cpu[: num_actual_reqs + 1],
             seq_lens=self.seq_lens[:num_actual_reqs],
             seq_lens_cpu=_slice_reqs(self.seq_lens_cpu),
+            seq_lens_cpu_is_exact=self.seq_lens_cpu_is_exact,
             num_computed_tokens_cpu=_slice_reqs(self.num_computed_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,

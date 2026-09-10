@@ -177,6 +177,81 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.assertTrue(torch.equal(unpadded_metadata._seq_lens_cpu, internal_seq_lens_cpu[:2]))
         self.assertIsNone(unpadded_metadata.seq_lens_cpu)
 
+    def _build_parallel_drafting_metadata(self, *, seq_lens_cpu_is_exact):
+        """Run ``build`` for a parallel-drafting batch, recording every tolist.
+
+        Returns ``(metadata, tolist_sources)``.
+        """
+        seq_lens_device = torch.tensor([4, 5, 6], dtype=torch.int32)
+        seq_lens_cpu = torch.tensor([4, 5, 6], dtype=torch.int32)
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor([0, 1, 2, 3], dtype=torch.int32),
+            seq_lens=seq_lens_device,
+            seq_lens_cpu=seq_lens_cpu,
+            seq_lens_cpu_is_exact=seq_lens_cpu_is_exact,
+            num_computed_tokens_cpu=None,
+            num_reqs=3,
+            num_actual_tokens=3,
+            max_query_len=1,
+            block_table_tensor=torch.zeros((3, 1), dtype=torch.int32),
+            slot_mapping=torch.arange(3, dtype=torch.int32),
+            causal=True,
+            actual_seq_lengths_q=[1, 2, 3],
+            positions=torch.arange(3),
+            attn_state=AscendAttentionState.DecodeOnly,
+            max_seq_len=6,
+        )
+        self.builder.speculative_config = SimpleNamespace(parallel_drafting=True)
+
+        tolist_sources = []
+        original_tolist = torch.Tensor.tolist
+
+        def tracked_tolist(tensor, *args, **kwargs):
+            tolist_sources.append(tensor)
+            return original_tolist(tensor, *args, **kwargs)
+
+        with (
+            patch.object(torch.Tensor, "tolist", new=tracked_tolist),
+            patch.object(
+                AscendAttentionMetadataBuilder,
+                "metadata_cls",
+                side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+            ),
+        ):
+            metadata = self.builder.build(0, common_attn_metadata)
+        return metadata, tolist_sources, seq_lens_device, seq_lens_cpu
+
+    def test_parallel_drafting_uses_cpu_mirror_when_it_is_exact(self):
+        """Target build: the exact host mirror feeds the Python list.
+
+        The backend still receives the device ``seq_lens`` tensor, but no
+        ``.tolist()`` is issued against it -- that call would block host
+        dispatch on the compute stream. See issue #16271.
+        """
+        metadata, tolist_sources, seq_lens_device, seq_lens_cpu = self._build_parallel_drafting_metadata(
+            seq_lens_cpu_is_exact=True
+        )
+
+        self.assertIs(metadata.seq_lens, seq_lens_device)
+        self.assertEqual(metadata.seq_lens_list, [4, 5, 6])
+        self.assertFalse(any(src is seq_lens_device for src in tolist_sources))
+        self.assertTrue(any(src.data_ptr() == seq_lens_cpu.data_ptr() for src in tolist_sources))
+
+    def test_parallel_drafting_falls_back_to_device_when_mirror_is_not_exact(self):
+        """Draft build: the host only has an optimistic bound, so keep the D2H."""
+        metadata, tolist_sources, seq_lens_device, _ = self._build_parallel_drafting_metadata(
+            seq_lens_cpu_is_exact=False
+        )
+
+        self.assertIs(metadata.seq_lens, seq_lens_device)
+        self.assertEqual(metadata.seq_lens_list, [4, 5, 6])
+        self.assertTrue(any(src is seq_lens_device for src in tolist_sources))
+
+    def test_seq_lens_cpu_is_exact_defaults_to_false(self):
+        """Unaudited producers must keep the previous (device) behaviour."""
+        self.assertFalse(AscendCommonAttentionMetadata.seq_lens_cpu_is_exact)
+
     @patch.object(AscendAttentionMetadataBuilder, "metadata_cls")
     def test_build(self, mock_ascend_metadata):
         common_attn_metadata = AscendCommonAttentionMetadata(
