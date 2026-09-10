@@ -35,7 +35,7 @@ from vllm_ascend.attention.utils import (
     wait_for_kv_layer_from_connector,
 )
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
-from vllm_ascend.device.device_op import DeviceOperator
+from vllm_ascend.device.device_op import DeviceOperator, qli_quant_mode
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
 from vllm_ascend.models.common.ops.sequence_parallel import sp_reduce_scatter
@@ -1330,7 +1330,7 @@ class AscendDSACPMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,
                 topk=self.model_config.hf_config.index_topk,
-                quant_mode=2,
+                quant_mode=qli_quant_mode(*DeviceOperator.INDEXER_QUANT_DTYPES),
                 cu_seqlens_q=qli_cu_seqlens_q,
                 seqused_k=qli_seqused_k,
                 cmp_residual_k=qli_cmp_residual_k,
@@ -2132,7 +2132,7 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
             query_dequant_scale=DeviceOperator.prepare_dsa_indexer_query_scale(q_scale),
             key_dequant_scale=DeviceOperator.prepare_dsa_indexer_key_scale(indexer_scale_cache),
             topk=self.index_topk,
-            quant_mode=2,
+            quant_mode=qli_quant_mode(q.dtype, q_scale.dtype),
             cu_seqlens_q=dsa_meta.qli_cu_seqlens_q,
             seqused_k=dsa_meta.qli_seqused_k,
             cmp_residual_k=dsa_meta.qli_cmp_residual_k,
