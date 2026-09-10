@@ -37,6 +37,7 @@ def _sfa_config(**overrides):
             hf_text_config=SimpleNamespace(index_topk=2048, index_head_dim=128),
             hf_config=SimpleNamespace(),
         ),
+        kv_transfer_config=overrides.pop("kv_transfer_config", None),
     )
 
 
@@ -152,6 +153,11 @@ def test_sharded_indexer_selector_default_off_and_fallback(monkeypatch):
     cfg.additional_config["enable_sfa_dcp_sharded_indexer"] = False
     assert enable_sfa_dcp_sharded_indexer(cfg)
     assert get_sfa_dcp_indexer_cache_factor(cfg) == 1
+
+    cfg.kv_transfer_config = SimpleNamespace()
+    assert not enable_sfa_dcp_sharded_indexer(cfg)
+    assert get_sfa_dcp_indexer_cache_factor(cfg) == 16
+    cfg.kv_transfer_config = None
 
     ascend_cfg.enable_sparse_li_c8 = True
     assert not enable_sfa_dcp_sharded_indexer(cfg)
