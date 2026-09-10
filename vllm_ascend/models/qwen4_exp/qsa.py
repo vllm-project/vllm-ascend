@@ -37,6 +37,7 @@ from .nvidia.ops.qsa_indexer_rope import qsa_merge_mrope_cos_sin
 from .ops import (
     qsa_compress_groups_with_ratio,
     qsa_select_paged_tokens as qsa_select_paged_tokens_reference,
+    qsa_sparse_paged_attention as qsa_sparse_paged_attention_reference,
     reshape_and_cache_qsa,
 )
 
@@ -305,7 +306,9 @@ class AscendQSAIndexer(upstream_indexer.QSAIndexer):
         metadata: QSAForwardMetadata,
         out: torch.Tensor | None,
     ) -> torch.Tensor:
-        if envs.VLLM_ASCEND_FORCE_QSA_REFERENCE:
+        soc_version = (envs.VLLM_ASCEND_SOC_VERSION or "").lower()
+        force_reference = envs.VLLM_ASCEND_FORCE_QSA_REFERENCE or soc_version.startswith("ascend950")
+        if force_reference:
             return qsa_select_paged_tokens_reference(
                 query,
                 self.compressed_key_cache.kv_cache,
@@ -419,7 +422,10 @@ class AscendQSAImpl:
         key_cache, value_cache = _split_qsa_kv_cache(kv_cache, self.head_size)
         key_cache = canonicalize_singleton_dim_strides(key_cache)
         value_cache = canonicalize_singleton_dim_strides(value_cache)
-        return qsa_sparse_paged_attention(
+        sparse_attention = qsa_sparse_paged_attention
+        if (envs.SOC_VERSION or "").lower().startswith("ascend950"):
+            sparse_attention = qsa_sparse_paged_attention_reference
+        return sparse_attention(
             query[:num_tokens],
             key_cache,
             value_cache,
