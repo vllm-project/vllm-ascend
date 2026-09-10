@@ -46,13 +46,31 @@ DSPARK_DYNAMIC_SPEC_CONFIG = {
 
 @pytest.mark.parametrize("model_name", MODELS)
 @pytest.mark.parametrize(
-    ("expected_acceptance_length", "num_speculative_tokens", "additional_config"),
+    (
+        "expected_acceptance_length",
+        "num_speculative_tokens",
+        "enforce_eager",
+        "additional_config",
+    ),
     [
-        pytest.param(3.33, 5, {"enable_dsa_cp": False}, id="dspark"),
-        pytest.param(3.45, 7, {"enable_dsa_cp": True}, id="dsa-cp-dspark"),
+        pytest.param(
+            3.33,
+            5,
+            False,
+            {"enable_dsa_cp": False},
+            id="dspark-aclgraph",
+        ),
+        pytest.param(
+            3.45,
+            7,
+            True,
+            {"enable_dsa_cp": True},
+            id="dsa-cp-dspark",
+        ),
         pytest.param(
             3.35,
             5,
+            True,
             {
                 "enable_flashcomm1": False,
                 "enable_dsa_cp": False,
@@ -76,6 +94,7 @@ def test_deepseek_v4_dspark_acceptance_tp4(
     model_name,
     expected_acceptance_length,
     num_speculative_tokens,
+    enforce_eager,
     additional_config,
 ):
     _run_speculative_decoding(
@@ -83,7 +102,7 @@ def test_deepseek_v4_dspark_acceptance_tp4(
         speculative_config={
             "method": "dspark",
             "num_speculative_tokens": num_speculative_tokens,
-            "enforce_eager": True,
+            "enforce_eager": enforce_eager,
         },
         expected_acceptance_length=expected_acceptance_length,
         runner_kwargs={

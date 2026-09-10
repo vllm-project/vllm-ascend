@@ -143,6 +143,142 @@ class AscendDSparkProposer(AscendDflashProposer):
             return batch_descriptor.num_reqs * self.num_query_per_req
         return batch_descriptor.num_tokens
 
+<<<<<<< ours
+=======
+    def _pad_request_tensor(
+        self,
+        tensor: torch.Tensor | None,
+        num_actual_reqs: int,
+        num_reqs_padded: int,
+        pad_value: int = 0,
+    ) -> torch.Tensor | None:
+        if tensor is None:
+            return None
+        padded = self._adjust_tensor(tensor[:num_actual_reqs], num_reqs_padded)
+        if num_reqs_padded > num_actual_reqs and pad_value != 0:
+            padded[num_actual_reqs:].fill_(pad_value)
+        return padded
+
+    def prepare_target_batch_descriptor_for_graph(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_descriptor: BatchDescriptor,
+        num_actual_tokens: int,
+    ) -> int:
+        """Translate verifier padding to DSpark's fixed-width draft batch."""
+        if batch_descriptor.num_reqs is None:
+            raise ValueError("A uniform DSpark graph descriptor must include num_reqs")
+
+        num_actual_reqs = common_attn_metadata.num_reqs
+        num_reqs_padded = batch_descriptor.num_reqs
+        if num_reqs_padded < num_actual_reqs:
+            raise ValueError(
+                "DSpark graph request capacity is smaller than the runtime batch: "
+                f"{num_reqs_padded} < {num_actual_reqs}"
+            )
+
+        num_input_tokens = num_reqs_padded * self.num_query_per_req
+        if num_input_tokens < num_actual_tokens:
+            raise ValueError(
+                "DSpark graph token capacity is smaller than the runtime draft: "
+                f"{num_input_tokens} < {num_actual_tokens}"
+            )
+
+        # The target and draft share a graph cache key, but their uniform query
+        # widths differ: the verifier has K + 1 tokens/request and anchor-first
+        # DSpark has K. Materialize the latter explicitly for all padded rows.
+        common_attn_metadata.query_start_loc = (
+            self.arange_dflash[: num_reqs_padded + 1]
+            * self.num_query_per_req
+        )
+        common_attn_metadata.query_start_loc_cpu = (
+            torch.from_numpy(self.token_arange_np[: num_reqs_padded + 1]).clone()
+            * self.num_query_per_req
+        ).to(torch.int32)
+
+        common_attn_metadata.seq_lens = self._pad_request_tensor(
+            common_attn_metadata.seq_lens,
+            num_actual_reqs,
+            num_reqs_padded,
+            self.num_query_per_req,
+        )
+        seq_lens_cpu = self._pad_request_tensor(
+            common_attn_metadata._seq_lens_cpu,
+            num_actual_reqs,
+            num_reqs_padded,
+            self.num_query_per_req,
+        )
+        if seq_lens_cpu is None:
+            seq_lens_cpu = self._pad_request_tensor(
+                common_attn_metadata.seq_lens_cpu,
+                num_actual_reqs,
+                num_reqs_padded,
+                self.num_query_per_req,
+            )
+        common_attn_metadata._seq_lens_cpu = seq_lens_cpu
+        common_attn_metadata.seq_lens_cpu = (
+            seq_lens_cpu.clone() if seq_lens_cpu is not None else None
+        )
+        common_attn_metadata.seq_lens_cpu_upper_bound = (
+            seq_lens_cpu.clone() if seq_lens_cpu is not None else None
+        )
+        common_attn_metadata.num_computed_tokens_cpu = self._pad_request_tensor(
+            common_attn_metadata.num_computed_tokens_cpu,
+            num_actual_reqs,
+            num_reqs_padded,
+        )
+        if getattr(common_attn_metadata, "_num_computed_tokens_cpu", None) is not None:
+            common_attn_metadata._num_computed_tokens_cpu = self._pad_request_tensor(
+                common_attn_metadata._num_computed_tokens_cpu,
+                num_actual_reqs,
+                num_reqs_padded,
+            )
+        if common_attn_metadata.is_prefilling is not None:
+            common_attn_metadata.is_prefilling = self._pad_request_tensor(
+                common_attn_metadata.is_prefilling,
+                num_actual_reqs,
+                num_reqs_padded,
+            )
+
+        primary_gid = self.draft_attn_groups[0].kv_cache_group_id
+        common_attn_metadata.block_table_tensor = (
+            self._per_group_block_table_buffers[primary_gid][:num_reqs_padded]
+        )
+        common_attn_metadata.slot_mapping = (
+            self._per_group_query_slot_mapping_buffers[primary_gid][
+                :num_input_tokens
+            ]
+        )
+        common_attn_metadata.actual_seq_lengths_q = [
+            self.num_query_per_req
+        ] * num_reqs_padded
+        common_attn_metadata.num_reqs = num_reqs_padded
+        common_attn_metadata.num_actual_tokens = num_input_tokens
+        common_attn_metadata.num_input_tokens = num_input_tokens
+
+        # Context KV still comes from the verifier input and therefore uses the
+        # target K + 1 width. Clear padded rows so replay cannot consume stale
+        # hidden states, positions, or cache slots from an earlier larger batch.
+        num_actual_context = self._dflash_num_context
+        num_graph_context = batch_descriptor.num_tokens
+        if num_graph_context < num_actual_context:
+            raise ValueError(
+                "DSpark graph context capacity is smaller than the verifier input: "
+                f"{num_graph_context} < {num_actual_context}"
+            )
+        if num_graph_context > num_actual_context:
+            self._dflash_hidden_states[
+                num_actual_context:num_graph_context
+            ].zero_()
+            self._context_positions_buffer[
+                num_actual_context:num_graph_context
+            ].zero_()
+            for context_slots in self._per_group_context_slot_mapping_buffers.values():
+                context_slots[num_actual_context:num_graph_context].fill_(-1)
+        self._dflash_num_context = num_graph_context
+        return num_reqs_padded
+
+>>>>>>> theirs
     def _bind_context_slot_mapping_buffers(self) -> None:
         """Bind persistent per-layer context mappings before graph capture."""
         self._context_slot_mapping_buffers = [
@@ -489,8 +625,14 @@ class AscendDSparkProposer(AscendDflashProposer):
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
 
-        context_positions = self._context_positions_buffer[:num_input_tokens]
-        context_states = self.hidden_states[:num_input_tokens]
+        graph_context_tokens = (
+            batch_descriptor.num_tokens
+            if aclgraph_runtime_mode == CUDAGraphMode.FULL
+            and batch_descriptor is not None
+            else num_input_tokens
+        )
+        context_positions = self._context_positions_buffer[:graph_context_tokens]
+        context_states = self.hidden_states[:graph_context_tokens]
 
         self.token_indices_to_sample.fill_(0)
         self._pad_draft_buffers(num_query_total, num_input_tokens)
@@ -499,6 +641,15 @@ class AscendDSparkProposer(AscendDflashProposer):
         if aclgraph_runtime_mode == CUDAGraphMode.FULL:
             if batch_descriptor is None:
                 raise ValueError("FULL DSpark graph capture requires a batch descriptor")
+<<<<<<< ours
+=======
+            self._dflash_hidden_states[:graph_context_tokens].zero_()
+            self._context_positions_buffer[:graph_context_tokens].zero_()
+            for query_slots in self._per_group_query_slot_mapping_buffers.values():
+                query_slots[:num_input_tokens].fill_(-1)
+            for context_slots in self._per_group_context_slot_mapping_buffers.values():
+                context_slots[:graph_context_tokens].fill_(-1)
+>>>>>>> theirs
             multi_steps_attn_metadata = self._build_graph_capture_attn_metadata(
                 num_reqs,
                 num_input_tokens,
@@ -545,7 +696,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                 )
 
             else:
-                self._dflash_num_context = num_input_tokens
+                self._dflash_num_context = graph_context_tokens
                 self._runnable(
                     num_input_tokens=num_input_tokens,
                     batch_size=num_reqs,
@@ -554,6 +705,7 @@ class AscendDSparkProposer(AscendDflashProposer):
                     inputs_embeds=None,
                     multi_steps_attn_metadata=multi_steps_attn_metadata,
                     num_tokens=num_query_total,
+<<<<<<< ours
                 )
 
             forward_context = get_forward_context()
@@ -567,5 +719,20 @@ class AscendDSparkProposer(AscendDflashProposer):
                     multi_steps_attn_metadata,
                 )
 
+=======
+                )
+
+            forward_context = get_forward_context()
+            if (
+                forward_context.cudagraph_runtime_mode == CUDAGraphMode.FULL
+                and not _EXTRA_CTX.capturing
+            ):
+                self._update_full_graph_params(
+                    forward_context,
+                    num_input_tokens,
+                    multi_steps_attn_metadata,
+                )
+
+>>>>>>> theirs
         if active_device_metadata_executor is not None:
             active_device_metadata_executor.release()

@@ -173,6 +173,10 @@ def test_build_draft_metadata_uses_external_event_key_for_full_graph():
     executor.submit.assert_called_once_with(
         [task],
         batch_descriptor=descriptor,
+<<<<<<< ours
+=======
+        event_namespace="dspark-draft",
+>>>>>>> theirs
     )
 
 
@@ -968,6 +972,95 @@ class TestDSparkACLGraphContract(_DSparkProposerTestBase):
 
         assert proposer.get_graph_num_input_tokens(target_desc) == 31
 
+<<<<<<< ours
+=======
+    def test_target_descriptor_padding_uses_draft_query_geometry(self) -> None:
+        proposer = self._make_proposer(
+            max_num_tokens=64,
+            num_reqs=4,
+            block_size=5,
+        )
+        num_actual_reqs = 3
+        num_actual_query_tokens = 15
+        num_actual_context_tokens = 18
+        proposer._dflash_num_context = num_actual_context_tokens
+        proposer._dflash_hidden_states.fill_(7)
+        proposer._context_positions_buffer.fill_(7)
+        proposer._per_group_context_slot_mapping_buffers[0].fill_(7)
+        proposer._per_group_query_slot_mapping_buffers[0].fill_(7)
+
+        seq_lens = torch.tensor([20, 21, 22], dtype=torch.int32)
+        common_attn_metadata = SimpleNamespace(
+            num_reqs=num_actual_reqs,
+            query_start_loc=torch.tensor([0, 5, 10, 15], dtype=torch.int32),
+            query_start_loc_cpu=torch.tensor(
+                [0, 5, 10, 15], dtype=torch.int32
+            ),
+            seq_lens=seq_lens.clone(),
+            _seq_lens_cpu=seq_lens.clone(),
+            seq_lens_cpu=seq_lens.clone(),
+            seq_lens_cpu_upper_bound=seq_lens.clone(),
+            num_computed_tokens_cpu=torch.tensor(
+                [15, 16, 17], dtype=torch.int32
+            ),
+            is_prefilling=torch.tensor([False, False, False]),
+            block_table_tensor=torch.empty(0),
+            slot_mapping=torch.empty(0),
+            actual_seq_lengths_q=[5, 5, 5],
+            num_actual_tokens=num_actual_query_tokens,
+            num_input_tokens=num_actual_query_tokens,
+        )
+        target_desc = BatchDescriptor(
+            num_tokens=24,
+            num_reqs=4,
+            uniform=True,
+        )
+
+        num_reqs_padded = proposer.prepare_target_batch_descriptor_for_graph(
+            common_attn_metadata,
+            target_desc,
+            num_actual_query_tokens,
+        )
+        proposer._pad_draft_buffers(
+            num_actual_query_tokens,
+            proposer.get_graph_num_input_tokens(target_desc),
+        )
+
+        assert num_reqs_padded == 4
+        assert common_attn_metadata.num_reqs == 4
+        assert common_attn_metadata.num_actual_tokens == 20
+        assert common_attn_metadata.num_input_tokens == 20
+        assert torch.equal(
+            common_attn_metadata.query_start_loc_cpu,
+            torch.tensor([0, 5, 10, 15, 20], dtype=torch.int32),
+        )
+        assert torch.equal(
+            common_attn_metadata.seq_lens,
+            torch.tensor([20, 21, 22, 5], dtype=torch.int32),
+        )
+        assert torch.equal(
+            common_attn_metadata._seq_lens_cpu,
+            torch.tensor([20, 21, 22, 5], dtype=torch.int32),
+        )
+        assert common_attn_metadata.actual_seq_lengths_q == [5, 5, 5, 5]
+        assert proposer._dflash_num_context == 24
+        assert torch.count_nonzero(
+            proposer._dflash_hidden_states[num_actual_context_tokens:24]
+        ) == 0
+        assert torch.count_nonzero(
+            proposer._context_positions_buffer[num_actual_context_tokens:24]
+        ) == 0
+        assert torch.all(
+            proposer._per_group_context_slot_mapping_buffers[0][
+                num_actual_context_tokens:24
+            ]
+            == -1
+        )
+        assert torch.all(
+            proposer._per_group_query_slot_mapping_buffers[0][15:20] == -1
+        )
+
+>>>>>>> theirs
     @pytest.mark.parametrize("supported", [False, True])
     def test_model_capability_gate(self, supported: bool) -> None:
         proposer = self._make_proposer(

@@ -648,6 +648,23 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
     def get_graph_num_input_tokens(self, batch_descriptor: BatchDescriptor) -> int:
         return batch_descriptor.num_tokens
 
+<<<<<<< ours
+=======
+    def prepare_target_batch_descriptor_for_graph(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        batch_descriptor: BatchDescriptor,
+        num_actual_tokens: int,
+    ) -> int:
+        """Prepare draft metadata keyed by a target-model graph descriptor.
+
+        Most proposers dispatch their own graph descriptor and never call this
+        hook. A proposer that reuses the target descriptor can override it to
+        translate target padding into its own query geometry.
+        """
+        return common_attn_metadata.num_reqs
+
+>>>>>>> theirs
     def _can_use_target_batch_descriptor_for_graph(
         self,
         runtime_mode: CUDAGraphMode,
@@ -998,11 +1015,19 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             batch_descriptor = None
 
         if aclgraph_runtime_mode == CUDAGraphMode.FULL and use_target_batch_descriptor:
+<<<<<<< ours
             # DSpark's set_inputs_first_pass already materializes the padded
             # request geometry from the target descriptor. Re-padding it with
             # the target verifier width (N + 1) would corrupt the draft's N-wide
             # query_start_loc.
             num_reqs_padded = common_attn_metadata.num_reqs
+=======
+            num_reqs_padded = self.prepare_target_batch_descriptor_for_graph(
+                common_attn_metadata,
+                batch_descriptor,
+                num_tokens,
+            )
+>>>>>>> theirs
         elif aclgraph_runtime_mode == CUDAGraphMode.FULL:
             # TODO: Due to the inconsistency between the proposer `dispatcher` and model runner, this padding
             # should have been done in model runner but not. For example, at prefill stage, target model
@@ -2507,6 +2532,10 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 device_metadata_executor.submit(
                     device_metadata_tasks,
                     batch_descriptor=batch_descriptor,
+<<<<<<< ours
+=======
+                    event_namespace="dspark-draft",
+>>>>>>> theirs
                 )
         multi_steps_attn_metadata = [per_layer_attn_metadata]
         # Copy the old attn_metadata and update
