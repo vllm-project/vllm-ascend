@@ -88,12 +88,15 @@ def verify_and_update_config(cls, vllm_config) -> None:
     else:
         attn_num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         attn_head_size = model_config.get_head_size()
-        attn_single_token_k_page_size = attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
         attn_token_page_size = 2 * attn_head_size * attn_num_kv_heads * get_dtype_size(kv_cache_dtype)
 
-    attn_block_size = kernel_block_size * cdiv(ssm_block_page_size, kernel_block_size * attn_single_token_k_page_size)
-    assert attn_single_token_k_page_size * attn_block_size == ssm_block_page_size, (
-        "Cannot align ssm_page_size and attn_page_size."
+    # Derive from the K+V page size, the same base the downstream padding
+    # uses. Deriving from the K-only page size doubles the attention page
+    # and pads the mamba slot to ~2x what it actually needs.
+    attn_block_size = kernel_block_size * cdiv(ssm_block_page_size, kernel_block_size * attn_token_page_size)
+    assert attn_token_page_size * attn_block_size == ssm_block_page_size, (
+        f"Cannot align ssm_page_size and attn_page_size. ssm={ssm_block_page_size} "
+        f"k_and_v_page={attn_token_page_size} block={attn_block_size}"
     )
 
     # override attention block size if either (a) the
