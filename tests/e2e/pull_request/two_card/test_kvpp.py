@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+import faulthandler
+import traceback
 from collections import defaultdict
 
 import pytest
@@ -107,8 +109,24 @@ def test_kvpp_combined_features(monkeypatch):
     """Compare KVPP off/on with chunk, prefix, TP, EP, async and MTP."""
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    original_exit = VllmRunner.__exit__
+
+    def report_exit(runner, exc_type, exc_value, exc_tb):
+        print(f"KVPP test: cleanup begin, exception={exc_value!r}", flush=True)
+        if exc_value is not None:
+            traceback.print_exception(exc_type, exc_value, exc_tb)
+        # Report the parent process stacks if the shared cleanup hangs.
+        faulthandler.dump_traceback_later(60, repeat=True)
+        try:
+            return original_exit(runner, exc_type, exc_value, exc_tb)
+        finally:
+            faulthandler.cancel_dump_traceback_later()
+            print("KVPP test: cleanup returned", flush=True)
+
+    monkeypatch.setattr(VllmRunner, "__exit__", report_exit)
     results = []
     for enabled in (False, True):
+        print(f"KVPP test: enabled={enabled}, initializing", flush=True)
         with VllmRunner(
             maybe_model_redirect(MODEL),
             dtype="auto",
@@ -131,7 +149,9 @@ def test_kvpp_combined_features(monkeypatch):
             speculative_config={"method": "mtp", "num_speculative_tokens": 1, "enforce_eager": True},
             additional_config={"enable_kvpp": enabled},
         ) as runner:
+            print("KVPP test: checking worker state", flush=True)
             assert_worker_state(runner, enabled)
+            print("KVPP test: worker state passed", flush=True)
             tokenizer = runner.model.get_tokenizer()
             prefix = token_prompt(tokenizer, "Explain how computers store historical information. ", PREFIX_LENGTH)
             prompts = [
@@ -142,7 +162,8 @@ def test_kvpp_combined_features(monkeypatch):
             outputs = []
             with monkeypatch.context() as observation:
                 chunks = observe_prefill(runner, observation)
-                for prompt in prompts:
+                for index, prompt in enumerate(prompts):
+                    print(f"KVPP test: generating request {index}", flush=True)
                     (output,) = runner.model.generate(
                         [{"prompt_token_ids": prompt}],
                         SamplingParams(temperature=0, ignore_eos=True, max_tokens=MAX_TOKENS),
@@ -153,6 +174,8 @@ def test_kvpp_combined_features(monkeypatch):
                     assert len(output.outputs[0].token_ids) == MAX_TOKENS
                     assert output.outputs[0].finish_reason == "length"
                     outputs.append(output)
+                    print(f"KVPP test: request {index} finished, cached={output.num_cached_tokens}", flush=True)
+            print(f"KVPP test: checking prefix and chunks, chunks={dict(chunks)}", flush=True)
             assert outputs[0].num_cached_tokens == 0
             # MTP excludes the last matching block to protect prefill lookahead.
             assert outputs[1].num_cached_tokens == PREFIX_LENGTH - BLOCK_SIZE
@@ -164,6 +187,7 @@ def test_kvpp_combined_features(monkeypatch):
                 metric.value for metric in runner.model.get_metrics() if metric.name == "vllm:spec_decode_num_drafts"
             ]
             assert drafts and sum(drafts) > 0
+            print(f"KVPP test: round passed, drafts={drafts}", flush=True)
             results.append(outputs)
     assert [output.prompt_token_ids for output in results[0]] == [output.prompt_token_ids for output in results[1]]
     check_outputs_equal(
