@@ -159,9 +159,10 @@ ge::graphStatus ValidateInputs(gert::TilingContext* context, uint64_t& numRow, u
     return ge::GRAPH_SUCCESS;
 }
 
-uint64_t ComputeSplitBufferBytes(ge::DataType dtype, uint64_t dtypeBytes, uint64_t length, bool hasBeta)
+uint64_t ComputeSplitBufferBytes(ge::DataType dtype, uint64_t dtypeBytes, uint64_t length)
 {
-    const uint64_t queueBytes = DOUBLE_BUFFER_NUM * length * dtypeBytes * (SPLIT_QUEUE_NUM + hasBeta) +
+    // A single beta tile replaces the second gamma tile, preserving the no-beta budget.
+    const uint64_t queueBytes = DOUBLE_BUFFER_NUM * length * dtypeBytes * SPLIT_QUEUE_NUM +
                                 FP32_VECTOR_ELEMENTS * DOUBLE_BUFFER_NUM * sizeof(float);
     const uint64_t temporaryBytes = dtype == ge::DT_FLOAT ? 0 : length * sizeof(float) * 2;
     return queueBytes + temporaryBytes + RETAINED_SIZE;
@@ -229,7 +230,8 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
     }
     const uint64_t binAddBufferOneline = CeilAlign(CeilDiv(binAddQuotient, FP32_VECTOR_ELEMENTS),
                                                    UB_BLOCK_BYTES / sizeof(float));
-    const uint64_t parameterBytes = numColAlign * dtypeBytes * (1 + hasBeta);
+    // Keep no-beta tiling: one residual-output row tile saves at least the single beta vector.
+    const uint64_t parameterBytes = numColAlign * dtypeBytes;
     const uint64_t rowBytes = numColAlign * dtypeBytes * DOUBLE_BUFFER_NUM * FULL_LOAD_QUEUE_NUM +
                               numColAlign * sizeof(float) + sizeof(float) * (DOUBLE_BUFFER_NUM + 1) +
                               binAddBufferOneline * sizeof(float);
@@ -260,11 +262,11 @@ ge::graphStatus TilingAddRmsNormBiasRegbase(gert::TilingContext* context)
     numColAlign = CeilAlign(numCol * dtypeBytes, SPLIT_ALIGN_BYTES) / dtypeBytes;
     uint64_t ubFactor = 1;
     while (ubFactor < MAX_SPLIT_UB_FACTOR &&
-           ComputeSplitBufferBytes(dtype, dtypeBytes, ubFactor * 2, hasBeta) < ubSize) {
+           ComputeSplitBufferBytes(dtype, dtypeBytes, ubFactor * 2) < ubSize) {
         ubFactor *= 2;
     }
     OP_CHECK_IF(numColAlign > UINT32_LIMIT || ubFactor > numCol || ubFactor * dtypeBytes < SPLIT_ALIGN_BYTES ||
-                    ComputeSplitBufferBytes(dtype, dtypeBytes, ubFactor, hasBeta) >= ubSize,
+                    ComputeSplitBufferBytes(dtype, dtypeBytes, ubFactor) >= ubSize,
                 OP_LOGE(context, "A5 AddRmsNormBias SplitD shape or UB tile is outside the supported range."),
                 return ge::GRAPH_FAILED);
     uint64_t ubLoop = 1;

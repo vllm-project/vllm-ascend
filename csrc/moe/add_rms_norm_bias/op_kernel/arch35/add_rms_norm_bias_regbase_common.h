@@ -652,11 +652,11 @@ __aicore__ inline void ComputeFormerImplV1MultiN(LocalTensor<T>& xLocal1, LocalT
     }
 }
 
-template <typename T>
+template <typename T, bool HAS_BETA>
 __aicore__ inline void ComputeLatterY(LocalTensor<float>& xFp32, LocalTensor<T>& gammaLocal,
                                       LocalTensor<T>& betaLocal, LocalTensor<T>& yLocal,
                                       LocalTensor<float>& rstdLocal, uint32_t offset, uint32_t count,
-                                      LocalTensor<T> xOutLocal, uint32_t nullptrBeta)
+                                      LocalTensor<T> xOutLocal)
 {
     uint32_t calCount = count / 2;
     uint32_t sreg = (uint32_t)calCount;
@@ -673,7 +673,7 @@ __aicore__ inline void ComputeLatterY(LocalTensor<float>& xFp32, LocalTensor<T>&
     __ubuf__ T* xOutAddr2 = (__ubuf__ T*)xOutLocal.GetPhyAddr() + calCount;
     __ubuf__ T* betaAddr1 = nullptr;
     __ubuf__ T* betaAddr2 = nullptr;
-    if (!nullptrBeta) {
+    if constexpr (HAS_BETA) {
         betaAddr1 = (__ubuf__ T*)betaLocal.GetPhyAddr();
         betaAddr2 = betaAddr1 + calCount;
     }
@@ -703,7 +703,7 @@ __aicore__ inline void ComputeLatterY(LocalTensor<float>& xFp32, LocalTensor<T>&
                 Mul(dst2Reg, xB32Reg2, rstdReg, maskReg);
                 Mul(yReg1, dst1Reg, gammaFp32Reg1, maskReg);
                 Mul(yReg2, dst2Reg, gammaFp32Reg2, maskReg);
-                if (!nullptrBeta) {
+                if constexpr (HAS_BETA) {
                     LoadRegForDtype<T>(betaAddr1, betaFp32Reg1, maskReg, i * V_LENGTH);
                     LoadRegForDtype<T>(betaAddr2, betaFp32Reg2, maskReg, i * V_LENGTH);
                     Add(yReg1, yReg1, betaFp32Reg1, maskReg);
@@ -739,7 +739,7 @@ __aicore__ inline void ComputeLatterY(LocalTensor<float>& xFp32, LocalTensor<T>&
                 Mul(vRegTmp2, xReg2, rstdReg, maskReg);
                 Mul(yReg1, vRegTmp1, gammaReg1, maskReg);
                 Mul(yReg2, vRegTmp2, gammaReg2, maskReg);
-                if (!nullptrBeta) {
+                if constexpr (HAS_BETA) {
                     LoadRegForDtype<float>(betaAddr1, betaReg1, maskReg, i * V_LENGTH);
                     LoadRegForDtype<float>(betaAddr2, betaReg2, maskReg, i * V_LENGTH);
                     Add(yReg1, yReg1, betaReg1, maskReg);
