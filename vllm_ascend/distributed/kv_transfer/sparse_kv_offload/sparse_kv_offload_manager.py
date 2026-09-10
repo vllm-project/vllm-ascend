@@ -40,6 +40,7 @@ OFFLOAD_K_CACHE_CPU_INDEX = 2
 OFFLOAD_V_CACHE_CPU_INDEX = 3
 OFFLOAD_TOPK_BUFFER_K_INDEX = 4
 OFFLOAD_TOPK_BUFFER_V_INDEX = 5
+OFFLOAD_STORE_PORT_BASE = 8500
 
 
 _SUBSCRIBED_COMPUTE_STREAMS: set[object] = set()
@@ -367,6 +368,10 @@ class SparseKVOffloadManager:
         config.world_size = self.tp_size
         config.rank_id = self.tp_rank
         config.scene = offload.Scene.SHARED
+        # All TP ranks in a DP replica use the same port. The DP index remains
+        # distinct even when data_parallel_rank is reset to zero for dense models.
+        store_port = OFFLOAD_STORE_PORT_BASE + parallel_config.data_parallel_index
+        config.store_url = f"tcp://127.0.0.1:{store_port}"
         assert offload.initialize(config) == 0, "Sparse KV offload offload.initialize failed."
         self.tp_group.barrier()
 
