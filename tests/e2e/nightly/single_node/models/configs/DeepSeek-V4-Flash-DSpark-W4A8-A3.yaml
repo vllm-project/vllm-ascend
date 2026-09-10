@@ -14,7 +14,6 @@ test_cases:
       HCCL_OP_EXPANSION_MODE: "AIV"
       VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "4096"
       SERVER_PORT: "DEFAULT_PORT"
-      SERVER_PORT: "DEFAULT_PORT"
     server_cmd:
       - "--max-model-len"
       - "16384"
