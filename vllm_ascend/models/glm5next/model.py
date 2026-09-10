@@ -64,6 +64,7 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -88,6 +89,19 @@ from .multimodal import (
     Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
+
+
+def _mark_zero_initialized_rms_norm_biases(module: nn.Module, loaded_params: set[str]) -> None:
+    """Mark synthetic zero RMSNorm biases that have no checkpoint tensor."""
+    for module_name, norm in module.named_modules():
+        if not isinstance(norm, RMSNorm):
+            continue
+        bias = getattr(norm, "bias", None)
+        if bias is None or getattr(norm, "bias_loaded", False):
+            continue
+        with torch.no_grad():
+            bias.zero_()
+        loaded_params.add(f"{module_name}.bias")
 
 
 class Glm5NextMLP(nn.Module):
@@ -820,6 +834,7 @@ class Glm5NextModel(nn.Module):
                     weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader(param, loaded_weight, **kwargs)
             loaded_params.add(name)
+        _mark_zero_initialized_rms_norm_biases(self, loaded_params)
         return loaded_params
 
 
@@ -913,6 +928,25 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
     has_inner_state: ClassVar[Literal[True]] = True
     is_hybrid: ClassVar[Literal[True]] = True
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "lm_head.": "language_model.lm_head.",
+            "model.language_model.": "language_model.model.",
+            "model.visual.": "visual.",
+        },
+        # ModelSlim W8A8 checkpoints group the KDA forget-gate tensors under
+        # ``forget_gate``; the runtime KDA module keeps those parameters flat.
+        orig_to_new_substr={
+            ".forget_gate.": ".",
+            ".attn_hc.fn": ".hc_attn_fn",
+            ".attn_hc.base": ".hc_attn_base",
+            ".attn_hc.scale": ".hc_attn_scale",
+            ".ffn_hc.fn": ".hc_ffn_fn",
+            ".ffn_hc.base": ".hc_ffn_base",
+            ".ffn_hc.scale": ".hc_ffn_scale",
+        },
+    )
+
     # NOTE: weight-prefix mapping is inherited from Glm4vForConditionalGeneration
     # (``model.visual.`` -> ``visual.``, ``model.language_model.`` ->
     # ``language_model.model.``, ``lm_head.`` -> ``language_model.lm_head.``),
@@ -980,6 +1014,12 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def load_weights(self, weights: Iterable[tuple[Any, ...]]) -> set[str]:
+        # The visual merger's down_proj already contains the exported rotation.
+        # Ignore the standalone QuaRot tensor to avoid applying it a second time.
+        loader = AutoWeightsLoader(self, skip_prefixes=["rot."])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_encoder_cudagraph_config(self):
         # This vision tower does not produce the absolute position embedding
