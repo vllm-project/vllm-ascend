@@ -18,6 +18,7 @@
 #
 
 from contextlib import contextmanager
+
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
@@ -57,7 +58,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
-
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (

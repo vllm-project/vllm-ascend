@@ -134,9 +134,7 @@ def test_validate_kv_cache_tensor_layouts_rejects_invalid_descriptions(tensors, 
         validate_kv_cache_tensor_layouts(_layout_config(tensors, same_group=True))
 
 
-@pytest.mark.skipif(
-    not _uses_legacy_kv_tensor_api(), reason="legacy shared_by descriptor is used by v0.28.0"
-)
+@pytest.mark.skipif(not _uses_legacy_kv_tensor_api(), reason="legacy shared_by descriptor is used by v0.28.0")
 def test_validate_v028_shared_kv_tensor_descriptor():
     validate_kv_cache_tensor_layouts(_layout_config([_make_kv_cache_tensor(48, ["attn"], 16)]))
 

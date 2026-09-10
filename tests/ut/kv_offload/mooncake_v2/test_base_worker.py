@@ -22,9 +22,7 @@ from vllm_ascend.distributed.kv_transfer.kv_p2p.mooncake.stats import MooncakeKV
 from .helpers import make_full_spec, make_sfa_indexer_spec, make_sliding_spec
 
 
-def make_kv_cache_tensor(
-    *, size: int, layers: list[str], layer_stride: int, block_stride: int
-) -> KVCacheTensor:
+def make_kv_cache_tensor(*, size: int, layers: list[str], layer_stride: int, block_stride: int) -> KVCacheTensor:
     """Build descriptors across the vLLM 0.28 and main field names."""
     try:
         return KVCacheTensor(
