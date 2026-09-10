@@ -78,12 +78,16 @@ torch._dynamo.trace_rules.clear_lru_cache()  # noqa: E402
 from torch._dynamo.variables import TorchInGraphFunctionVariable  # noqa: E402
 from vllm.utils.torch_utils import set_random_seed  # noqa: E402
 
+from vllm_ascend.common.utils.watch_dog import get_watch_dog  # noqa: E402
+
 torch_non_c_binding_in_graph_functions_npu = dict.fromkeys(
     ["torch.npu.current_stream"],
     TorchInGraphFunctionVariable,
 )  # noqa: E402
 torch_non_c_binding_in_graph_functions_npu["torch.npu.stream"] = TorchInGraphFunctionVariable  # noqa: E402
 torch._dynamo.trace_rules.torch_name_rule_map.append(torch_non_c_binding_in_graph_functions_npu)  # noqa: E402
+
+_watchdog = get_watch_dog()
 
 
 class NPUWorker(WorkerBase):
@@ -169,6 +173,7 @@ class NPUWorker(WorkerBase):
             shutdown_request = False
 
             def signal_handler(signum, frame):
+                _watchdog.dump_stack()
                 nonlocal shutdown_request
                 if not shutdown_request:
                     shutdown_request = True
@@ -612,6 +617,7 @@ class NPUWorker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        _watchdog.feed()
         self.log_memory_stats()
         # enable msMonitor to monitor the performance of vllm-ascend
         if get_ascend_config().msmonitor_use_daemon:
@@ -676,6 +682,7 @@ class NPUWorker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        _watchdog.feed()
         return self.model_runner.sample_tokens(grammar_output)
 
     def load_model(self) -> None:
@@ -983,6 +990,7 @@ class NPUWorker(WorkerBase):
         self.model_runner.reset_encoder_cache()
 
     def execute_dummy_batch(self) -> None:
+        _watchdog.feed()
         self.log_memory_stats()
         self.model_runner._dummy_run(num_tokens=self.model_runner.decode_token_per_req, uniform_decode=True)
 
