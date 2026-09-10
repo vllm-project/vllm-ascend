@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 import torch
 
-
 LEGACY_ROOT_ENV = "VLLM_ASCEND_LEGACY_ROOT"
 REPO_ROOT = Path(__file__).parents[3]
 
@@ -68,9 +67,7 @@ def _run_inplace_partial_rotary_mul(output_path: Path, dtype: str) -> None:
     if os.environ.get("ASCEND_CUSTOM_OPP_PATH"):
         import vllm_ascend.vllm_ascend_C  # noqa: F401  # Registers _C_ascend bindings.
 
-        torch.ops._C_ascend.inplace_partial_rotary_mul(
-            x, cos, sin, rotary_mode="interleave", partial_slice=[64, 128]
-        )
+        torch.ops._C_ascend.inplace_partial_rotary_mul(x, cos, sin, rotary_mode="interleave", partial_slice=[64, 128])
     else:
         inplace_partial_rotary_mul(x, cos, sin, rotary_mode="interleave", partial_slice=[64, 128])
     torch.npu.synchronize()
