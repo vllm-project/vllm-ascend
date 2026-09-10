@@ -21,7 +21,8 @@ from typing import Any
 import numpy as np
 import torch
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import (
     MambaHybridAttnMetadata,
     MambaHybridModelState,
@@ -40,6 +41,13 @@ class AscendMambaHybridModelState(MambaHybridModelState, AscendModelState):
     :class:`MambaHybridModelState`. ``AscendModelState`` remains the second
     base so cooperative ``super()`` calls retain the Ascend model-state MRO.
     """
+
+    def _get_mamba_group_info(self, kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
+        if self._mamba_spec is None:
+            # Ascend's shared resolver also handles MambaSpec entries nested
+            # in UniformTypeKVCacheSpecs, preserving the worker's group IDs.
+            self._mamba_group_ids, self._mamba_spec = mamba_utils.get_mamba_groups(kv_cache_config)
+        return self._mamba_group_ids, self._mamba_spec
 
     def prepare_attn(
         self,

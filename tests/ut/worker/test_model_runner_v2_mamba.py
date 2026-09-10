@@ -1,9 +1,11 @@
 import ast
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
+import pytest
 import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import (
@@ -12,6 +14,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 
@@ -92,6 +95,68 @@ def test_mamba_model_state_inherits_upstream_state_management():
     assert issubclass(AscendMambaHybridModelState, MambaHybridModelState)
     assert AscendMambaHybridModelState.preprocess_state is MambaHybridModelState.preprocess_state
     assert AscendMambaHybridModelState.postprocess_state is MambaHybridModelState.postprocess_state
+
+
+@pytest.mark.parametrize("wrapped_group_ids", [(), (1, 3), (1,)], ids=["plain", "uniform", "mixed"])
+@patch("vllm.v1.worker.gpu.model_states.mamba_hybrid.preprocess_mamba_align_fused_kernel")
+def test_mamba_align_preprocess_preserves_wrapped_group_indices(mock_preprocess_kernel, wrapped_group_ids):
+    """The first real batch must find recurrent groups before copying state."""
+    mamba_spec = replace(_mamba_spec(), mamba_cache_mode="align", num_speculative_blocks=3)
+    attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float16,
+    )
+    groups = []
+    for group_id, spec in enumerate([attention_spec, mamba_spec, attention_spec, mamba_spec]):
+        layer_specs = {f"group.{group_id}.layer.{i}": spec for i in range(2)}
+        # Include a wrapped attention group to check that it is skipped.
+        group_spec = UniformTypeKVCacheSpecs.from_specs(layer_specs) if group_id in (0, *wrapped_group_ids) else spec
+        assert group_spec is not None
+        groups.append(KVCacheGroupSpec(layer_names=list(layer_specs), kv_cache_spec=group_spec))
+    kv_cache_config = KVCacheConfig(num_blocks=8, kv_cache_tensors=[], kv_cache_groups=groups)
+    state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    state._align_mode = True
+    state._mamba_spec = None
+    state._mamba_group_ids = []
+    state._mamba_state_idx_gpu = object()
+    state._mamba_src_col_gpu = object()
+    state._mamba_src_off_gpu = object()
+    state.num_accepted_tokens_gpu = object()
+    state._ensure_align_ctx = MagicMock()
+    input_batch = SimpleNamespace(num_reqs=1, idx_mapping=object(), query_start_loc=object())
+    block_tables = tuple(object() for _ in groups)
+
+    state.preprocess_state(input_batch, block_tables, kv_cache_config, num_computed_tokens=object())
+
+    state._ensure_align_ctx.assert_called_once_with(kv_cache_config, [1, 3], block_tables)
+    assert mock_preprocess_kernel.__getitem__.return_value.call_args.kwargs["MAMBA_BLOCK_SIZE"] == mamba_spec.block_size
+    state._ensure_align_ctx.return_value.run_fused_precopy.assert_called_once_with(
+        1,
+        state._mamba_state_idx_gpu,
+        state._mamba_src_col_gpu,
+        state._mamba_src_off_gpu,
+        input_batch.idx_mapping,
+    )
+
+
+@pytest.mark.parametrize("missing_mamba", [True, False], ids=["missing", "inconsistent"])
+def test_mamba_group_lookup_rejects_invalid_cache_groups(missing_mamba):
+    spec = _mamba_spec()
+    kv_cache_config = _kv_cache_config(spec)
+    if missing_mamba:
+        kv_cache_config.kv_cache_groups.clear()
+    else:
+        kv_cache_config.kv_cache_groups.append(
+            KVCacheGroupSpec(layer_names=["other_mamba"], kv_cache_spec=replace(spec, block_size=32))
+        )
+    state = AscendMambaHybridModelState.__new__(AscendMambaHybridModelState)
+    state._mamba_spec = None
+    state._mamba_group_ids = []
+
+    with pytest.raises(AssertionError, match="no mamba layers in the model" if missing_mamba else None):
+        state._get_mamba_group_info(kv_cache_config)
 
 
 def test_mrv2_advertises_standardized_shared_kv_backing():
