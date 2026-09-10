@@ -1,11 +1,6 @@
 import threading
-from importlib.metadata import version as get_version
-
-from packaging.version import Version
 
 _WILDCARD_LOCATION = "*"
-_LOCATION_API_MIN_VERSION = Version("0.3.12")
-_MOONCAKE_DISTRIBUTION = "mooncake-transfer-engine"
 
 
 class GlobalTE:
@@ -65,13 +60,6 @@ class GlobalTE:
         sizes: list[int],
         locations: list[str] | None = None,
     ) -> None:
-        if locations is not None:
-            mooncake_version = get_version(_MOONCAKE_DISTRIBUTION)
-            if Version(mooncake_version) < _LOCATION_API_MIN_VERSION:
-                raise RuntimeError(
-                    f"Mooncake {mooncake_version} does not support register_memory locations; "
-                    f"{_LOCATION_API_MIN_VERSION} or newer is required"
-                )
 
         normalized_locations = locations if locations is not None else [_WILDCARD_LOCATION] * len(ptrs)
         regions = list(zip(ptrs, sizes, normalized_locations))
@@ -82,10 +70,7 @@ class GlobalTE:
                 return
 
             for ptr, size, location in regions:
-                if locations is None:
-                    ret_value = self.transfer_engine.register_memory(ptr, size)
-                else:
-                    ret_value = self.transfer_engine.register_memory(ptr, size, location)
+                ret_value = self.transfer_engine.register_memory(ptr, size, location)
                 if ret_value != 0:
                     raise RuntimeError("Mooncake memory registration failed.")
             self._registered_regions = regions
