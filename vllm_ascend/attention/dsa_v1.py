@@ -1,7 +1,7 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, TypeAlias
 
 import torch
 import torch.distributed as dist
@@ -34,7 +34,7 @@ from vllm_ascend.attention.utils import (
     split_decodes_and_prefills,
     wait_for_kv_layer_from_connector,
 )
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, get_storage_block_size
+from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
@@ -48,7 +48,6 @@ from vllm_ascend.quantization.methods import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (
     get_potential_max_tokens,
     npu_stream_switch,
-    olora_tp_enable,
     oproj_tp_enable,
 )
 from vllm_ascend.worker.device_metadata import (
@@ -584,6 +583,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
     understand this class
     """
 
+    _request_capacity_factor: ClassVar[int] = 1
+
     def __init__(
         self,
         kv_cache_spec: AscendMLAAttentionSpec,
@@ -599,7 +600,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.model_config = vllm_config.model_config
         self.device = device
         self.logical_block_size = kv_cache_spec.block_size
-        self.storage_block_size = get_storage_block_size(kv_cache_spec)
+        self.storage_block_size = kv_cache_spec.storage_block_size
         scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.decode_threshold = 1
@@ -668,9 +669,8 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.cache_group_key = layer_names[0]
         self.hadamard = None
         self._init_hadamard(layer_names)
-        self.start_pos_prefill: torch.Tensor = torch.zeros(
-            scheduler_config.max_num_seqs, dtype=torch.int32, device=self.device
-        )
+        max_num_reqs = scheduler_config.max_num_seqs * self._request_capacity_factor
+        self.start_pos_prefill: torch.Tensor = torch.zeros(max_num_reqs, dtype=torch.int32, device=self.device)
         self.sas_metadata_buffer: torch.Tensor = torch.zeros(
             DSA_METADATA_BUFFER_SIZE, dtype=torch.int32, device=self.device
         )
@@ -682,7 +682,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         # during graph replay. Full-decode graphs pad the request count beyond
         # max_num_seqs (cudagraph capture sizes plus the FIA dummy request), so
         # size the per-request buffers for the graph-mode maximum.
-        max_qli_reqs = scheduler_config.max_num_seqs
+        max_qli_reqs = max_num_reqs
         compilation_config = self.vllm_config.compilation_config
         if compilation_config.cudagraph_mode != CUDAGraphMode.NONE and compilation_config.cudagraph_capture_sizes:
             max_qli_reqs = max(max_qli_reqs, compilation_config.max_cudagraph_capture_size)
@@ -972,7 +972,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 num_heads_k=1,
                 head_dim=self.model_config.hf_config.index_head_dim,  # 128
                 topk=self.model_config.hf_config.index_topk,
-                quant_mode=2,
+                quant_mode=DeviceOperator.get_dsa_indexer_quant_mode(),
                 cu_seqlens_q=query_start_loc,
                 seqused_k=qli_seqused_k,
                 cmp_residual_k=qli_cmp_residual_k,
@@ -1590,7 +1590,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         o_proj_input = o_proj_input.view(num_tokens, self.n_local_groups, group_hidden_dim)
         # A5 (Ascend950) uses an FP8-quantized o_proj path (dynamic MX quant
         # + quantized batch matmul). Preserve it as-is: it predates and is
-        # orthogonal to the OTP / olora_tp paths below, so it must win first.
+        # orthogonal to the OTP path below, so it must win first.
         use_a5_quant_o_proj = self.support_fp8_attention and _has_weight_scale(self.wo_a)
         if use_a5_quant_o_proj:
             o = o_proj_input
@@ -1676,9 +1676,6 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 )
             dist.reduce_scatter_tensor(self._oproj_rs_out_buf, o_proj_output, group=oproj_group.device_group)
             output[...] = self._oproj_rs_out_buf[:num_tokens]
-        elif olora_tp_enable():
-            o_proj_input = self.wo_a(o_proj_input)
-            output[...] = self.wo_b(o_proj_input)
         else:
             # A5 BF16 wo_a is reshaped to [groups, hidden, rank] at load time,
             # matching the A3 layout expected by npu_transpose_batchmatmul.
@@ -1898,6 +1895,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         # communication status, their quantize() outputs are equivalent.
         # Share the result instead of calling quantize() twice on the same input.
         # - W8A8 no-comm: saves one npu_dynamic_quant (full-tensor read + absmax).
+        # - MXFP8 no-comm: saves one npu_dynamic_mx_quant (full-tensor read +
+        #   per-group scale).
         # - W4A8 no-comm: saves one no-op pass-through (kernel launch + ref).
         # - TP comm: both return (hidden_states, None); shareable when custom_op
         #   types match (same communication path).
@@ -1939,9 +1938,12 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             )
             q_b_quant, q_b_scale = qr, qr_pertoken_scale
         else:
-            qr = self.q_norm(wq_a_result)
-            q_b_quant, q_b_scale = qr, None
-            qr_pertoken_scale = None
+            # MXFP8: the split-out quantize() (Vector) overlaps with kv_matmul
+            # (Cube) in Part2, and the pair is returned for the Indexer to
+            # reuse. Non-splittable schemes (W4A8, bf16) keep the pass-through
+            # (scale stays None).
+            q_b_quant, q_b_scale = self.cv_wq_b.quantize(self.q_norm(wq_a_result))
+            qr, qr_pertoken_scale = q_b_quant, q_b_scale
 
         # Part3: q_b_matmul[C]  ||  kv_norm[V] + rope[V] + scatter[AIV]
         e_part3_start = main_stream.record_event()

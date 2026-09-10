@@ -14,9 +14,28 @@ MAX_POSITION_EMBEDDINGS = [262144]
 
 # parameters for test_rotary_embedding_triton_kernel only
 # (head_size, rotary_dim)
+# Coverage rationale:
+#   (64, 64)   - full RoPE, small head, power-of-two (baseline)
+#   (64, 32)   - partial RoPE, rope_dim < head_dim (LLaMA-2 style)
+#   (128, 128) - full RoPE, large head, power-of-two (common case)
+#   (128, 96)  - non-power-of-two rotary_dim; triggers sin-offset bug
+#                where old code used pad_rope_dim//2=64 instead of
+#                rope_dim//2=48
+#   (128, 64)  - partial RoPE with non-power-of-two head_dim/rope_dim
+#                ratio; exercises rope_dim resolution path
+#   (256, 192) - large head_dim that triggers UB-based dynamic tile
+#                sizing (head_dim=192 exceeds old hardcoded threshold);
+#                also non-power-of-two rotary_dim
+#   (256, 256) - full RoPE, very large head, power-of-two; verifies
+#                dynamic tile sizing caps correctly at default_max
 HEAD_ROTARY_DIMS = [
+    (64, 64),
     (64, 32),
     (128, 128),
+    (128, 96),
+    (128, 64),
+    (256, 192),
+    (256, 256),
 ]
 # (num_q_heads, num_k_heads)
 NUM_QK_HEADS = [
@@ -25,8 +44,18 @@ NUM_QK_HEADS = [
 ]
 
 # parameters for test_rotary_embedding_triton_kernel_siso only
-SISO_HEAD_SIZES = [64, 128]
-SISO_ROTARY_DIMS = [32, 64]
+# Coverage rationale:
+#   32  - small power-of-two (baseline)
+#   64  - medium power-of-two
+#   96  - non-power-of-two; triggers sin-offset bug in siso kernel
+#         (old code: pad_rope_dim//2=64 vs correct rope_dim//2=48)
+#   128 - large power-of-two; verifies dynamic tile sizing scales down
+#         for larger half_dim within siso's 6-tensor memory model
+#   192 - large non-power-of-two; combined with head_size=256 exercises
+#         full-RoPE with non-power-of-two rotary_dim. Invalid combos
+#         (rotary_dim > head_size) are skipped at runtime.
+SISO_HEAD_SIZES = [64, 128, 256]
+SISO_ROTARY_DIMS = [32, 64, 96, 128, 192]
 SISO_NUM_HEADS = [64]
 
 NUM_TOKENS = [1, 4, 8, 16, 1024]
@@ -39,6 +68,13 @@ FP8_ROPE_CASES = [
     pytest.param(1, 2, 1, 128, 128, id="single-token-full-rope"),
     pytest.param(17, 8, 1, 128, 64, id="partial-rope"),
     pytest.param(1024, 8, 1, 128, 128, id="multi-row-grid"),
+    # Non-power-of-two rotary_dim: triggers sin-offset fix in fp8 kernel
+    # path; old code used pad_rope_dim//2=64 instead of rope_dim//2=48
+    # for rotary_dim=96 (pad_rope_dim=128).
+    pytest.param(17, 8, 1, 128, 96, id="non-pow2-rope"),
+    # Large head_dim with non-power-of-two rotary_dim: exercises both the
+    # sin-offset fix and UB-based dynamic tile sizing in fp8 path.
+    pytest.param(17, 8, 1, 256, 192, id="large-head-non-pow2-rope"),
 ]
 
 
@@ -319,6 +355,10 @@ def test_rotary_embedding_triton_kernel_siso(
 
     if rotary_dim == -1:
         rotary_dim = head_size
+    # Skip invalid combinations where rotary_dim > head_size (RoPE cannot
+    # rotate more dimensions than the head has).
+    if rotary_dim > head_size:
+        pytest.skip(f"rotary_dim {rotary_dim} > head_size {head_size}")
     sin = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     cos = torch.randn(num_tokens, rotary_dim // 2, dtype=dtype, device=device)
     q_trt = torch.randn(num_tokens, num_q_heads, head_size, dtype=dtype, device=device)

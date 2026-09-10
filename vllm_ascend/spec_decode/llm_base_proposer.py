@@ -63,7 +63,7 @@ from vllm_ascend.spec_decode.utils import (
     _maybe_eager_context,
     patch_tensor_parallel_group,
 )
-from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable
+from vllm_ascend.utils import check_gdn_layer, enable_sp, lmhead_tp_enable, vllm_version_is
 from vllm_ascend.worker.device_metadata import DeviceMetadataTask, DeviceMetadataTaskProvider
 
 # Currently we will fix block size to a small one since `num_reqs` can't be too large
@@ -100,29 +100,14 @@ def greedy_sample(logits: torch.Tensor) -> torch.Tensor:
 # TODO(lilinsiman): Remove this code segment after future versions of the GLM
 # series models support graph input for speculative inference.
 def _is_glm_model(model_config) -> bool:
-    """Return True if the given model config belongs to the GLM series.
+    """Return True if the target model belongs to the GLM series.
 
     Detection is based on the model_type string (covers glm, chatglm, glm4,
-    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc). Accepts a
-    draft ``ModelConfig`` as well, and tolerates ``None``.
+    glm4_moe, glm4_moe_lite, glm4_1v, glm_ocr, glm_moe_dsa, etc).
     """
     hf_text_config = getattr(model_config, "hf_text_config", None)
     model_type = getattr(hf_text_config, "model_type", "") or ""
     return "glm" in str(model_type).lower()
-
-
-# TODO(lilinsiman): Remove this code segment after future versions of the GLM
-# series models support graph input for speculative inference.
-def _glm_draft_requires_eager(model_config, draft_model_config) -> bool:
-    """Return True if the draft model has to fall back to eager mode.
-
-    The restriction lives in the GLM decoder layer itself (KDA state and the mHC
-    hyper-connection ops), so it only applies when the draft reuses those layers
-    -- an MTP head derived from the target. A draft carrying its own non-GLM
-    architecture (e.g. the Qwen3-shaped DFlash2 head published for
-    GLM-5.3-Flash) runs in graph mode like any other drafter.
-    """
-    return _is_glm_model(model_config) and _is_glm_model(draft_model_config)
 
 
 class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
@@ -197,7 +182,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self.decode_threshold = 1 + self.num_speculative_tokens
         self.query_start_loc = self.runner._make_buffer(self.runner.max_num_reqs + 2, dtype=torch.int32)
-        self.use_sequence_parallel_moe = enable_sp(vllm_config)
 
         self.dcp_size = self.runner.dcp_size
 
@@ -240,7 +224,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         # the target model's graph-mode setting untouched.
         # TODO(lilinsiman): Remove this code segment after future versions of the GLM
         # series models support graph input for speculative inference.
-        if _glm_draft_requires_eager(self.vllm_config.model_config, self.speculative_config.draft_model_config):
+        if _is_glm_model(self.vllm_config.model_config):
             if self.use_cuda_graph:
                 logger.warning(
                     "GLM series models with speculative decoding currently do "
@@ -292,7 +276,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         self.block_table_tensor_clone: torch.Tensor | None = None
 
         self._runnable = self._run_merged_draft
-        self.is_multimodal_model = self.vllm_config.model_config.is_multimodal_model
         if self.uses_mrope:
             self.mrope_positions = torch.zeros((3, self.max_num_tokens + 1), dtype=torch.int32, device=device)
         elif self.uses_xdrope_dim > 0 and self.draft_uses_xdrope_dim > 0:
@@ -673,10 +656,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         is_profile=False,
     ):
         (
-            num_tokens,
+            _,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_tokens = int(num_tokens_across_dp[self.dp_rank].item())
         dcp_manager = getattr(self.runner, "dcp_manager", None)
 
         multi_steps_attn_metadata = []
@@ -946,10 +931,12 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             num_input_tokens = num_tokens
 
         (
-            num_input_tokens,
+            _,
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_input_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if self.use_cuda_graph:
             aclgraph_runtime_mode, batch_descriptor = self.runner.cudagraph_dispatcher.dispatch(
@@ -1278,7 +1265,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             if self.pass_hidden_states_to_model:
                 model_hidden_states = self.hidden_states[:num_input_tokens]
-                model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
                 model_kwargs["hidden_states"] = model_hidden_states
                 if self.method == "mtp":
                     model_kwargs["positions"] = model_positions
@@ -1295,11 +1281,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         draft_model = getattr(self.model, "model", None)
         if self._share_mtp_indices and draft_model is not None and hasattr(draft_model, "set_skip_topk"):
             draft_model.set_skip_topk(True)
-
-        if self.method != "dflash":
-            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-                last_hidden_states, model_positions, hidden_states
-            )
 
         num_indices = token_indices_to_sample.shape[0]
         if lmhead_tp_enable():
@@ -1541,8 +1522,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             model_positions = self._get_positions(input_batch_size)
             model_hidden_states = self.hidden_states[:input_batch_size]
 
-            model_hidden_states, model_positions = self.maybe_pad_and_reduce(model_hidden_states, model_positions)
-
             forward_context.attn_metadata = (
                 multi_steps_attn_metadata[draft_index + 1] if multi_steps_attn_metadata else None
             )
@@ -1564,10 +1543,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
 
             ret_hidden_states = self.model(**model_kwargs)
             last_hidden_states, hidden_states = _split_draft_outputs(ret_hidden_states)
-
-            last_hidden_states, model_positions, hidden_states = self.maybe_all_gather_and_unpad(
-                last_hidden_states, model_positions, hidden_states
-            )
 
             num_indices = token_indices_to_sample.shape[0]
             if lmhead_tp_enable():
@@ -1799,13 +1774,16 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
             draft_model_config = getattr(self, "draft_model_config", None)
             hf_config = getattr(draft_model_config, "hf_config", None)
             architectures = getattr(hf_config, "architectures", []) or []
-            return bool(
-                {
-                    "DeepSeekMTPModel",
-                    "DeepseekV32MTPModel",
-                    "KimiK3MTPModel",
-                }.intersection(architectures)
-            )
+            if vllm_version_is("0.28.0"):
+                return bool({"DeepSeekMTPModel", "KimiK3MTPModel"}.intersection(architectures))
+            else:
+                return bool(
+                    {
+                        "DeepSeekMTPModel",
+                        "DeepseekV32MTPModel",
+                        "KimiK3MTPModel",
+                    }.intersection(architectures)
+                )
         return self.method not in ("mtp", "draft_model", "dflash", "dspark")
 
     def attn_update_stack_num_spec_norm(
@@ -2339,34 +2317,6 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
         else:
             tensor = tensor[:desired_size]
         return tensor
-
-    def maybe_pad_and_reduce(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        return hidden_states, positions
-
-    def maybe_all_gather_and_unpad(
-        self,
-        last_hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-        if self.method == "mtp":
-            if self.use_sequence_parallel_moe:
-                tp_group = get_tp_group()
-                last_hidden_states = torch.ops.vllm.all_gather(
-                    last_hidden_states.contiguous(), 0, tp_group.world_size, tp_group.unique_name
-                )
-                # in mm model, positions not need allgather, because it not reduced before(see maybe_pad_and_reduce())
-                if not self.is_multimodal_model:
-                    positions = torch.ops.vllm.all_gather(
-                        positions.contiguous(), 0, tp_group.world_size, tp_group.unique_name
-                    )
-                if hidden_states is not None:
-                    hidden_states = last_hidden_states
-        return last_hidden_states, positions, hidden_states
 
     # In the context of the dummy‑run accompaniment of p‑eagle, when num_indices becomes large,
     # enabling the LM head feature causes token_indices_to_sample to switch from padding to trimming.

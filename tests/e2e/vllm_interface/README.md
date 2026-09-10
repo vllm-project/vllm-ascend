@@ -1,6 +1,6 @@
 # vLLM PR compatibility with vllm-ascend
 
-This directory is collected by vLLM's existing Ascend NPU job. In addition to the hardware sampler smoke test,
+This directory is collected by vLLM's existing Ascend NPU job and contains only the interface compatibility test.
 `test_vllm_pr_interface_compatibility.py` performs a source-only compatibility check between the checked-out vLLM PR
 and the vllm-ascend revision installed by that job. The analysis does not import either project and does not require NPU
 execution.
@@ -11,7 +11,6 @@ All implementation code for this check is kept in this directory:
 tests/e2e/vllm_interface/
 ├── vllm_interface_contracts/  # source analyzer and CLI
 ├── test_vllm_pr_interface_compatibility.py
-├── singlecard/                # existing NPU sampler test
 └── README.md
 ```
 
@@ -85,8 +84,9 @@ and phase timings appear before the summary in separate collapsible log sections
 the affected vllm-ascend source location, and the proven compatibility impact without prescribing a fix in either
 repository. The vLLM Ascend NPU job is
 currently soft-fail, so this integration provides early awareness rather than a required merge gate. The analysis
-itself is CPU-only, but its first vLLM PR run must also confirm that the combined image-build, analysis, and sampler
-duration fits the existing job timeout.
+itself is CPU-only. The Qwen sampler smoke test has been removed from this directory; image-build and dependency
+installation changes must be made separately in vLLM's NPU job script. The combined image-build and analysis duration
+must still fit the existing job timeout.
 
 ## Local commands
 

@@ -57,7 +57,7 @@ from vllm_ascend.core.profiling_chunk_predictor import (
     _start_profiling_chunk_timing,
 )
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
-from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens
+from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 from vllm_ascend.worker.utils import disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import build_attn_state
@@ -515,16 +515,29 @@ class NPUModelRunner(GPUModelRunner):
             attn_state=attn_state,
         )
 
-        input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
-            self.pcp_manager,
-            input_batch,
-            padded_num_tokens=batch_desc.num_tokens,
-        )
+        # vLLM #53515 / #15196 pass padded_num_tokens into PCP partition on main;
+        # v0.28.0 maybe_partition_pcp_batch does not accept that kwarg.
+        if vllm_version_is("0.28.0"):
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+            )
+        else:
+            input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
+                self.pcp_manager,
+                input_batch,
+                padded_num_tokens=batch_desc.num_tokens,
+            )
 
         # For mla/sfa, update cos/sin. Here is for execute_model.
         update_cos_sin(input_batch.positions)
 
         return input_batch
+
+    def prepare_dummy_attn(self, input_batch: AscendInputBatch) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        if self.pcp_manager is None:
+            return super().prepare_dummy_attn(input_batch)
+        return self.pcp_manager.prepare_dummy_attn(input_batch)
 
     def _lmhead_tp_max_num_logits(self) -> int:
         """Logits row capacity shared by every rank of the lmhead-TP group.
@@ -702,15 +715,27 @@ class NPUModelRunner(GPUModelRunner):
         """
         # TODO: need refactor later, related to vllm PR #34043 this pr delete func
         # relax_for_mixed_batch_cudagraphs, num_reqs no longer equals the actual number of requests.
+        descriptor_num_reqs = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs_padded
+        # This checks query lengths, not request phase: short prefills can also
+        # match. Graph dispatch is responsible for excluding incompatible prefills.
+        has_uniform_decode_query_lens = np.all(np.diff(query_start_loc_np[: num_reqs + 1]) == self.decode_query_len)
+        matches_uniform_decode_graph_shape = (
+            has_uniform_decode_query_lens and num_tokens_padded == descriptor_num_reqs * self.decode_query_len
+        )
         if (
             cudagraph_runtime_mode == CUDAGraphMode.FULL
             and self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
+            and not matches_uniform_decode_graph_shape
         ):
             num_reqs_padded = num_reqs
         else:
-            num_reqs_padded = batch_desc_num_reqs if batch_desc_num_reqs is not None else num_reqs
+            # Preserve the captured request shape for uniform decode graphs.
+            # GDN full graphs capture metadata at request granularity, so
+            # collapsing all padded tokens into one request changes the graph
+            # topology between capture and replay.
+            num_reqs_padded = descriptor_num_reqs
 
-        if num_tokens_padded == num_reqs_padded * self.decode_query_len:
+        if has_uniform_decode_query_lens and num_tokens_padded == num_reqs_padded * self.decode_query_len:
             # Uniform-batch case: num_reqs must be no greater than num_reqs_padded
             assert num_reqs <= num_reqs_padded
 

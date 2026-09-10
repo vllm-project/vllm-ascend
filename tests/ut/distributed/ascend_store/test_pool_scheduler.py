@@ -85,6 +85,17 @@ class TestKVPoolScheduler(unittest.TestCase):
     def _make_config(self, kv_role="kv_producer", extra_config=None, block_size=16):
         return make_config(kv_role, extra_config, block_size)
 
+    def test_mooncake_layerwise_rejects_tp_mismatch(self):
+        config = self._make_config(
+            kv_role="kv_consumer",
+            extra_config={"backend": "mooncake", "prefill_tp_size": 4},
+        )
+        config.parallel_config.tensor_parallel_size = 2
+        config.model_config.get_total_num_kv_heads.return_value = 8
+
+        with self.assertRaisesRegex(ValueError, "TP mismatch"):
+            KVPoolScheduler(config, use_layerwise=True)
+
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_early_returns(self, mock_client_cls):
         for role, block_size, token_count in [("kv_consumer", 16, 64), ("kv_producer", 64, 32)]:
@@ -92,6 +103,21 @@ class TestKVPoolScheduler(unittest.TestCase):
                 scheduler = KVPoolScheduler(self._make_config(role, block_size=block_size), use_layerwise=False)
                 request = MagicMock(prompt_token_ids=list(range(token_count)))
                 self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+
+    def test_mooncake_layerwise_hit_requires_every_saving_rank(self):
+        config = self._make_config(extra_config={"backend": "mooncake", "use_layerwise": True})
+        config.parallel_config.tensor_parallel_size = 2
+        config.model_config.get_total_num_kv_heads.return_value = 2
+        scheduler = KVPoolScheduler(config, use_layerwise=True)
+        scheduler.store_scheduler.batch_is_exist.return_value = [1, 1, 1, 0, 1, 1]
+        request = MagicMock(request_id="r1", block_hashes=[b"h0", b"h1", b"h2"])
+
+        hit_tokens = scheduler._get_mooncake_layerwise_hit_tokens(request, 48, 0)
+
+        self.assertEqual(hit_tokens, 16)
+        queried_keys = scheduler.store_scheduler.batch_is_exist.call_args.args[0]
+        self.assertEqual(len(queried_keys), 3 * 2)
+        self.assertEqual(queried_keys[:2], ["llama-7b@6830@0", "llama-7b@6830@1"])
 
     @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
     def test_get_num_new_matched_tokens_hit(self, mock_client_cls):
@@ -677,9 +703,16 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
             with self.subTest(direction=direction, finished=finished):
                 scheduler = self._make_scheduler()
                 attribute = "_delayed_free_req_ids" if direction == "sending" else "_loading_req_ids"
-                setattr(scheduler, attribute, initial)
+                if direction == "sending":
+                    for req_id in initial:
+                        scheduler._set_delayed_free(req_id, 1)
+                else:
+                    setattr(scheduler, attribute, initial)
                 getattr(scheduler, f"update_finished_{direction}")(finished)
                 self.assertEqual(getattr(scheduler, attribute), expected)
+                if direction == "sending":
+                    self.assertEqual(scheduler._delayed_free_blocks_by_req, dict.fromkeys(expected, 1))
+                    self.assertEqual(scheduler._num_delayed_free_blocks, len(expected))
 
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
@@ -737,6 +770,19 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.update_connector_output(output)
         scheduler._block_pool.free_blocks.assert_not_called()
 
+    def test_finished_send_updates_delayed_release_metrics(self):
+        scheduler = self._make_scheduler()
+        scheduler._set_delayed_free("r1", 3)
+
+        entered = scheduler.get_stats()
+        self.assertEqual(entered.data["delayed_release_requests"], 1)
+        self.assertEqual(entered.data["delayed_release_blocks"], 3)
+
+        scheduler.update_finished_sending({"r1"})
+        released = scheduler.get_stats()
+        self.assertEqual(released.data["delayed_release_requests"], 0)
+        self.assertEqual(released.data["delayed_release_blocks"], 0)
+
 
 class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
     """Test request_finished_all_groups."""
@@ -785,7 +831,7 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request.request_id = "r1"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
         self.assertTrue(delay)
-        self.assertIn("r1", scheduler._delayed_free_req_ids)
+        self.assertEqual(scheduler._delayed_free_blocks_by_req["r1"], 2)
 
     def test_no_delay_empty_blocks(self):
         scheduler = self._make_scheduler()
