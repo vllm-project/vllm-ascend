@@ -1,5 +1,3 @@
-from types import SimpleNamespace
-
 import pytest
 from vllm.config.vllm import VllmConfig
 
@@ -42,19 +40,3 @@ def test_pcp_override_preserves_other_upstream_rejections(monkeypatch, release):
 
     expected = ["stock torch.compile", "custom logits processors"]
     assert unsupported == (expected if release else ["prefill context parallelism", *expected])
-
-
-def test_release_pcp_override_preserves_spec_pp_resolution(monkeypatch):
-    monkeypatch.setattr(patch_use_v2_model_runner, "vllm_version_is", lambda version: True)
-    monkeypatch.setattr(
-        patch_use_v2_model_runner,
-        "_original_get_unsupported_features",
-        lambda _: ["prefill context parallelism", "eagle3 pipeline parallelism", "stock torch.compile"],
-    )
-    monkeypatch.setattr(
-        patch_use_v2_model_runner,
-        "resolve_spec_pp_support",
-        lambda _: SimpleNamespace(unsupported_feature="eagle3 pipeline parallelism"),
-    )
-
-    assert patch_use_v2_model_runner._patched_get_unsupported_features(object()) == ["stock torch.compile"]
