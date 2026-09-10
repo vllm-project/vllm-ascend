@@ -605,7 +605,7 @@ class CodeChangeDetector:
                     # Rule: start line = old_start + 2, end line = old_start + old_count - 3
                     start_line = old_start + 2
                     end_line = old_start + old_count - 4
-                    if end_line <= start_line:
+                    if end_line < start_line:
                         end_line = old_start + old_count
                     # Collect all lines in hunk, check if there are new lines (starting with +)
                     hunk_lines = []
