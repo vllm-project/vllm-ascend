@@ -260,10 +260,10 @@ partition:
     count: 5
   a3-2:
     runner_label: linux-aarch64-a3-2
-    count: 2
+    count: 4
   a3-4:
     runner_label: linux-aarch64-a3-4
-    count: 2
+    count: 4
   a3-8:
     runner_label: linux-aarch64-a3-8
     count: 1
