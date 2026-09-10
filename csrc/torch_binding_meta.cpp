@@ -690,7 +690,7 @@ at::Tensor npu_rearrange_qkv_meta(
     (void)q_dim;
     (void)k_dim;
     (void)v_dim;
-    return at::empty_symint({x.sym_numel()}, x.options());
+    return at::empty_symint(c10::SymDimVector{x.sym_numel()}, x.options());
 }
 
 at::Tensor recurrent_kda_meta(
