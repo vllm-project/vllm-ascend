@@ -68,9 +68,8 @@ interfaces, and the service ports must not be blocked.
 
 ### 4.1 Docker Image Installation
 
-Select the tab for the target hardware. A3 uses the dedicated validation
-image. For A2, use the `main` nightly image after DeepSeek-V4.1 support is
-merged.
+Select the tab for the target hardware. A2 and A3 use separate validation
+images.
 
 === "A3 series"
 
@@ -123,7 +122,7 @@ merged.
     An A2 server exposes 8 devices. Run this command on all four A2 servers.
 
     ```shell
-    export IMAGE=quay.io/ascend/vllm-ascend:nightly-main
+    export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:deepseek-v4.1-flash
     export MODEL_ROOT="/data/weights"
 
     docker pull "$IMAGE"
