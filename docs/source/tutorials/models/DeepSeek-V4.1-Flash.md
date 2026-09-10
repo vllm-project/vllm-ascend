@@ -41,11 +41,14 @@ The official DeepSeek-V4.1-Flash checkpoint is available from
 [Hugging Face](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) and
 [ModelScope](https://www.modelscope.cn/models/deepseek-ai/DeepSeek-V4.1-Flash).
 
-The deployment command below requires an Ascend W8A8 checkpoint derived from
-the official weights, including the DSpark draft parameters and INT8 Engram
-tables. Use [ModelSlim](https://gitcode.com/Ascend/msmodelslim) to prepare a
-ModelSlim-compatible checkpoint. Record its absolute path on both servers;
-the examples use `<YOUR_MODEL_PATH>`.
+The Ascend W8A8 checkpoint used by this guide will be published as
+[Eco-Tech/DeepSeek-V4.1-Flash-w8a8](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4.1-Flash-w8a8)
+on ModelScope. It includes the DSpark draft parameters and INT8 Engram tables.
+After the checkpoint is available, download it to the same absolute path on
+every server; the examples use `<YOUR_MODEL_PATH>`.
+
+Alternatively, use [ModelSlim](https://gitcode.com/Ascend/msmodelslim) to
+prepare a ModelSlim-compatible W8A8 checkpoint from the official weights.
 
 Use one of the following hardware configurations:
 
