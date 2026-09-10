@@ -1,11 +1,30 @@
 from unittest.mock import MagicMock, patch
 
 import torch
+import torch.nn as nn
 
 from tests.ut.base import TestBase
 from tests.ut.quantization.conftest_quantization import create_linear_layer, identity
 from vllm_ascend.quantization.methods.w8a8_static import AscendW8A8LinearMethod
 from vllm_ascend.utils import COMPRESSED_TENSORS_METHOD
+
+
+def _create_process_weights_layer(
+    *,
+    ascend_quant_method: str | None = None,
+) -> nn.Module:
+    layer = nn.Module()
+    layer.register_parameter(
+        "weight",
+        nn.Parameter(torch.randint(-128, 127, (128, 256), dtype=torch.int8), requires_grad=False),
+    )
+    layer.register_parameter("input_scale", nn.Parameter(torch.tensor([0.1]), requires_grad=False))
+    layer.register_parameter("input_offset", nn.Parameter(torch.tensor([0], dtype=torch.int8), requires_grad=False))
+    layer.register_parameter("weight_scale", nn.Parameter(torch.randn(128, 1), requires_grad=False))
+    layer.register_parameter("weight_offset", nn.Parameter(torch.randn(128, 1), requires_grad=False))
+    if ascend_quant_method is not None:
+        layer.ascend_quant_method = ascend_quant_method
+    return layer
 
 
 class TestAscendW8A8LinearMethod(TestBase):
@@ -105,18 +124,12 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 1
         mock_get_config.return_value = mock_config
-        layer = MagicMock()
-
-        layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
-        layer.input_scale.data = torch.tensor([0.1])
-        layer.input_offset.data = torch.tensor([0])
-        layer.weight_scale.data = torch.randn(128, 1)
-        layer.weight_offset.data = torch.randn(128, 1)
+        layer = _create_process_weights_layer()
 
         mock_npu_format_cast.side_effect = identity
         self.method.process_weights_after_loading(layer)
 
-        expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
+        expected_offset = layer.input_offset.data.repeat(256).to(torch.float32)
         self.assertTrue(torch.equal(layer.aclnn_input_offset.data, expected_offset))
         self.assertFalse(layer.aclnn_input_offset.requires_grad)
 
@@ -124,7 +137,7 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.data.shape, (128,))
         self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_called_once()
-        self.assertTrue(isinstance(layer.deq_scale, MagicMock))
+        self.assertFalse(hasattr(layer, "deq_scale"))
 
     @patch("vllm_ascend.utils.get_ascend_config")
     @patch("torch_npu.npu_format_cast")
@@ -132,19 +145,12 @@ class TestAscendW8A8LinearMethod(TestBase):
         mock_config = MagicMock()
         mock_config.weight_nz_mode = 2
         mock_get_config.return_value = mock_config
-        layer = MagicMock()
-
-        layer.weight.data = torch.randint(-128, 127, (128, 256), dtype=torch.int8)
-        layer.input_scale.data = torch.tensor([0.1])
-        layer.input_offset.data = torch.tensor([0])
-        layer.weight_scale.data = torch.randn(128, 1)
-        layer.weight_offset.data = torch.randn(128, 1)
-        layer.ascend_quant_method = COMPRESSED_TENSORS_METHOD
+        layer = _create_process_weights_layer(ascend_quant_method=COMPRESSED_TENSORS_METHOD)
 
         mock_npu_format_cast.side_effect = identity
         self.method.process_weights_after_loading(layer)
 
-        expected_offset = torch.tensor([0]).repeat(256).to(torch.int8)
+        expected_offset = layer.input_offset.data.repeat(256).to(torch.float32)
         self.assertTrue(torch.equal(layer.aclnn_input_offset.data, expected_offset))
         self.assertFalse(layer.aclnn_input_offset.requires_grad)
 
@@ -152,7 +158,10 @@ class TestAscendW8A8LinearMethod(TestBase):
         self.assertEqual(layer.weight_scale.data.shape, (128,))
         self.assertEqual(layer.weight_offset.data.shape, (128,))
         mock_npu_format_cast.assert_called_once()
-        self.assertFalse(isinstance(layer.deq_scale, MagicMock))
+        self.assertTrue(hasattr(layer, "deq_scale"))
+        self.assertIsInstance(layer.deq_scale, nn.Parameter)
+        expected_deq_scale = layer.input_scale.data * layer.weight_scale.data
+        self.assertTrue(torch.equal(layer.deq_scale.data, expected_deq_scale))
 
 
 class TestAscendW8A8LinearMethodWithNpu(TestBase):
