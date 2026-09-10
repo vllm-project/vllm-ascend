@@ -243,6 +243,10 @@ SFA_FIA_DENSE_PREFILL_LATENT_DIM = 512
 SFA_FIA_DENSE_PREFILL_ROPE_DIM = 64
 SFA_FIA_DENSE_PREFILL_BLOCK_SIZE = 128
 SFA_FIA_SHARED_PREFILL_TOPK_WIDTH = 2048
+# Bounded scheduler-observed multi-request geometry. Keep each FIA call at
+# the existing 2048-row/visible-KV limit; broaden only with direct evidence.
+SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS = 3
+SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH = 2267
 
 
 def _get_indexer_types(configs: tuple[Any, ...]) -> Any | None:
@@ -403,8 +407,11 @@ class SFAForwardContext:
 class SFAFIASharedPrefillPlan:
     """CPU-built row plan for the experimental shared FIA prefill path."""
 
+    query_ends: tuple[int, ...]
+    kv_lengths: tuple[int, ...]
     eligible_lengths: tuple[int, ...]
     dense_requests: tuple[int, ...]
+    dense_group_sizes: tuple[int, ...]
     tail_requests: tuple[int, ...]
     dense_spans: tuple[tuple[int, int], ...]
     tail_spans: tuple[tuple[int, int], ...]
@@ -448,13 +455,14 @@ def _build_sfa_fia_shared_prefill_plan(
     if not query_ends or len(query_ends) != len(kv_lengths):
         return None
     previous = 0
-    query_lengths: list[int] = []
+    query_lengths_list: list[int] = []
     for query_end, kv_length in zip(query_ends, kv_lengths, strict=True):
         query_length = query_end - previous
         if query_length <= 0 or kv_length < query_length:
             return None
-        query_lengths.append(query_length)
+        query_lengths_list.append(query_length)
         previous = query_end
+    query_lengths = tuple(query_lengths_list)
     num_tokens = query_ends[-1]
     if num_actual_tokens != num_tokens or num_input_tokens != num_tokens:
         return None
@@ -469,11 +477,32 @@ def _build_sfa_fia_shared_prefill_plan(
         for query_length, kv_length in zip(query_lengths, kv_lengths, strict=True)
     )
     dense_total = sum(eligible_lengths)
-    # Only a full packed group is admitted; low-fill and whole-dense fall back.
+    exact_multi_segment = (
+        attn_state == AscendAttentionState.PrefillNoCache
+        and query_lengths
+        == (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH,) * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+        and kv_lengths
+        == (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH,) * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+    )
+    # General grouped FIA remains one full packed group. The only admitted
+    # multi-call plan is the bounded C4 PrefillNoCache geometry validated in
+    # the child PR, represented here as three independent dense groups.
     if dense_total != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH or dense_total >= num_tokens:
+        if not (
+            exact_multi_segment
+            and dense_total
+            == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+        ):
+            return None
+        dense_group_sizes = (1,) * SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS
+    else:
+        dense_group_sizes = (sum(1 for eligible in eligible_lengths if eligible),)
+    if any(size <= 0 for size in dense_group_sizes):
         return None
 
     dense_requests = tuple(i for i, eligible in enumerate(eligible_lengths) if eligible)
+    if sum(dense_group_sizes) != len(dense_requests):
+        return None
     tail_requests = tuple(
         i
         for i, (query_length, eligible) in enumerate(zip(query_lengths, eligible_lengths, strict=True))
@@ -484,11 +513,14 @@ def _build_sfa_fia_shared_prefill_plan(
 
     dense_query_ends_list: list[int] = []
     dense_kv_lengths_list: list[int] = []
-    running = 0
-    for request in dense_requests:
-        running += eligible_lengths[request]
-        dense_query_ends_list.append(running)
-        dense_kv_lengths_list.append(kv_lengths[request] - query_lengths[request] + eligible_lengths[request])
+    dense_cursor = 0
+    for dense_group_size in dense_group_sizes:
+        running = 0
+        for request in dense_requests[dense_cursor : dense_cursor + dense_group_size]:
+            running += eligible_lengths[request]
+            dense_query_ends_list.append(running)
+            dense_kv_lengths_list.append(kv_lengths[request] - query_lengths[request] + eligible_lengths[request])
+        dense_cursor += dense_group_size
 
     tail_query_ends_list: list[int] = []
     tail_kv_lengths_list: list[int] = []
@@ -499,8 +531,11 @@ def _build_sfa_fia_shared_prefill_plan(
         tail_kv_lengths_list.append(kv_lengths[request])
 
     return SFAFIASharedPrefillPlan(
+        query_ends=query_ends,
+        kv_lengths=kv_lengths,
         eligible_lengths=eligible_lengths,
         dense_requests=dense_requests,
+        dense_group_sizes=dense_group_sizes,
         tail_requests=tail_requests,
         dense_spans=dense_spans,
         tail_spans=tail_spans,
@@ -1804,6 +1839,8 @@ class AscendSFAImpl(MLAAttentionImpl):
         if lengths is None:
             return None
         query_ends, kv_lengths = lengths
+        if plan.query_ends != tuple(query_ends) or plan.kv_lengths != tuple(kv_lengths):
+            return None
         cum_query_lens = getattr(attn_metadata, "cum_query_lens", None)
         seq_lens = getattr(attn_metadata, "seq_lens", None)
         for lengths_tensor in (cum_query_lens, seq_lens):
@@ -1842,18 +1879,6 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return tensor[start:end]
             return torch.cat([tensor[start:end] for start, end in spans], dim=0)
 
-        dense_q = pack_rows(ql_nope, plan.dense_spans)
-        dense_rope = pack_rows(q_pe, plan.dense_spans)
-        dense_metadata = copy(attn_metadata)
-        dense_metadata.attn_state = AscendAttentionState.PrefillCacheHit
-        dense_metadata.block_table = attn_metadata.block_table[list(plan.dense_requests)]
-        dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(list(plan.dense_query_ends))
-        dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor(list(plan.dense_kv_lengths))
-        dense_metadata.num_actual_tokens = dense_q.shape[0]
-        dense_metadata.num_input_tokens = dense_q.shape[0]
-        if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
-            return None
-
         if (
             topk_indices.ndim != 3
             or topk_indices.shape[0] != num_tokens
@@ -1863,8 +1888,39 @@ class AscendSFAImpl(MLAAttentionImpl):
             or topk_indices.device != ql_nope.device
         ):
             return None
-        dense_output = self._execute_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata)
-        assert dense_output is not None, "Validated shared FIA group unexpectedly declined"
+
+        dense_inputs: list[tuple[torch.Tensor, torch.Tensor, M]] = []
+        dense_cursor = 0
+        for dense_group_size in plan.dense_group_sizes:
+            next_dense_cursor = dense_cursor + dense_group_size
+            dense_spans = plan.dense_spans[dense_cursor:next_dense_cursor]
+            dense_requests = plan.dense_requests[dense_cursor:next_dense_cursor]
+            dense_query_ends = plan.dense_query_ends[dense_cursor:next_dense_cursor]
+            dense_kv_lengths = plan.dense_kv_lengths[dense_cursor:next_dense_cursor]
+            dense_q = pack_rows(ql_nope, dense_spans)
+            dense_rope = pack_rows(q_pe, dense_spans)
+            dense_metadata = copy(attn_metadata)
+            dense_metadata.attn_state = AscendAttentionState.PrefillCacheHit
+            dense_metadata.block_table = attn_metadata.block_table[list(dense_requests)]
+            dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(list(dense_query_ends))
+            dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor(list(dense_kv_lengths))
+            dense_metadata.num_actual_tokens = dense_q.shape[0]
+            dense_metadata.num_input_tokens = dense_q.shape[0]
+            dense_inputs.append((dense_q, dense_rope, dense_metadata))
+            dense_cursor = next_dense_cursor
+
+        if dense_cursor != len(plan.dense_requests):
+            return None
+        for dense_q, dense_rope, dense_metadata in dense_inputs:
+            if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
+                return None
+
+        dense_outputs: list[torch.Tensor] = []
+        for dense_q, dense_rope, dense_metadata in dense_inputs:
+            dense_output = self._execute_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata)
+            assert dense_output is not None, "Validated shared FIA group unexpectedly declined"
+            dense_outputs.append(dense_output)
+        dense_output = torch.cat(dense_outputs, dim=0)
 
         tail_q = pack_rows(ql_nope, plan.tail_spans)
         tail_rope = pack_rows(q_pe, plan.tail_spans)

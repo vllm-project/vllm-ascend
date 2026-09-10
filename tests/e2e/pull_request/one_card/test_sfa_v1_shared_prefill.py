@@ -17,7 +17,12 @@ from vllm.config import set_current_vllm_config
 from tests.e2e.pull_request.one_card.attention_utils import create_vllm_config
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.sfa_v1 import SFA_FIA_SHARED_PREFILL_TOPK_WIDTH, AscendSFAImpl, AscendSFAMetadata
+from vllm_ascend.attention.sfa_v1 import (
+    SFA_FIA_SHARED_PREFILL_TOPK_WIDTH,
+    AscendSFAImpl,
+    AscendSFAMetadata,
+    _build_sfa_fia_shared_prefill_plan,
+)
 
 # Register the native torch.ops._C_ascend kernels without asking mypy to
 # statically analyze the binary extension module.
@@ -67,6 +72,7 @@ def _build_prefill_case(
     query_lens: tuple[int, ...],
     kv_lengths: tuple[int, ...],
     seed: int,
+    attn_state: AscendAttentionState = AscendAttentionState.PrefillCacheHit,
 ) -> tuple[AscendSFAMetadata, tuple[torch.Tensor, torch.Tensor], torch.Tensor, torch.Tensor, torch.Tensor]:
     torch.manual_seed(seed)
     assert len(query_lens) == len(kv_lengths)
@@ -147,14 +153,22 @@ def _build_prefill_case(
         sin=torch.empty(0, device=_DEVICE),
         cos=torch.empty(0, device=_DEVICE),
     )
-    metadata.attn_state = AscendAttentionState.PrefillCacheHit
+    metadata.attn_state = attn_state
     metadata.num_input_tokens = num_tokens
     metadata.num_actual_tokens = num_tokens
     metadata.num_decodes = 0
     metadata.num_decode_tokens = 0
     metadata.block_size = _DENSE_PREFILL_BLOCK_SIZE
     metadata.attn_mask = attn_mask
-    metadata._sfa_fia_shared_prefill_plan = None
+    metadata.sfa_fia_shared_prefill_plan = _build_sfa_fia_shared_prefill_plan(
+        attn_state=metadata.attn_state,
+        query_ends=tuple(cum_query_lens_cpu.tolist()),
+        kv_lengths=tuple(seq_lens_cpu.tolist()),
+        num_actual_tokens=metadata.num_actual_tokens,
+        num_input_tokens=metadata.num_input_tokens,
+        num_decodes=metadata.num_decodes,
+        num_decode_tokens=metadata.num_decode_tokens,
+    )
 
     topk_indices = _build_topk_indices(
         seq_lens=tuple(kv_lengths),
@@ -338,7 +352,7 @@ def _run_shared_prefill_case(
         expected_tail_rows=_expected_tail_rows(query_lens, kv_lengths),
     )
 
-    assert candidate_metadata._sfa_fia_shared_prefill_plan is not None
+    assert candidate_metadata.sfa_fia_shared_prefill_plan is not None
     _assert_no_input_mutation(candidate_metadata, snapshot, kv_cache, topk_indices)
     torch.testing.assert_close(
         candidate, candidate_repeat, rtol=_SHARED_PREFILL_RTOL, atol=_SHARED_PREFILL_ATOL, check_dtype=False
@@ -379,6 +393,76 @@ def test_shared_prefill_native_single_request_q4096_prefix2048_tail2048():
 
 def test_shared_prefill_native_grouped_request_q1536_kv2560_dense2048_tail1024():
     _compare_case((1536, 1536), (2560, 2560), 2027)
+
+
+def test_shared_prefill_native_exact_three_request_q2267_multisegment():
+    query_lens = (2267, 2267, 2267)
+    kv_lengths = (2267, 2267, 2267)
+    impl = _create_shared_prefill_impl(2028)
+    baseline_metadata, kv_cache, ql_nope, q_pe, topk_indices = _build_prefill_case(
+        query_lens,
+        kv_lengths,
+        2028,
+        attn_state=AscendAttentionState.PrefillNoCache,
+    )
+    candidate_metadata = copy.deepcopy(baseline_metadata)
+    snapshot = _snapshot_prefill_inputs(candidate_metadata, kv_cache, topk_indices)
+
+    baseline = impl._execute_sparse_flash_attention_process(
+        ql_nope,
+        q_pe,
+        kv_cache,
+        topk_indices,
+        baseline_metadata,
+        baseline_metadata.cum_query_lens,
+        baseline_metadata.seq_lens,
+        block_table=baseline_metadata.block_table,
+    )
+    with (
+        patch.object(
+            torch_npu,
+            "npu_fused_infer_attention_score",
+            wraps=torch_npu.npu_fused_infer_attention_score,
+        ) as fused_mock,
+        patch.object(
+            AscendSFAImpl,
+            "_execute_sparse_flash_attention_process",
+            wraps=impl._execute_sparse_flash_attention_process,
+        ) as sparse_mock,
+    ):
+        candidate = impl._try_sfa_fia_shared_prefill(ql_nope, q_pe, kv_cache, candidate_metadata, topk_indices)
+
+    assert candidate is not None
+    assert fused_mock.call_count == 3
+    for request, call in enumerate(fused_mock.call_args_list):
+        dense = call.kwargs
+        assert dense["query"].shape[0] == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
+        assert dense["actual_seq_lengths"] == [SFA_FIA_SHARED_PREFILL_TOPK_WIDTH]
+        assert dense["actual_seq_lengths_kv"] == [SFA_FIA_SHARED_PREFILL_TOPK_WIDTH]
+        torch.testing.assert_close(
+            dense["block_table"],
+            candidate_metadata.block_table[request : request + 1],
+        )
+
+    sparse_mock.assert_called_once()
+    tail = sparse_mock.call_args.args
+    assert tail[0].shape[0] == 657
+    assert tail[5].tolist() == [219, 438, 657]
+    assert tail[6].tolist() == [2267, 2267, 2267]
+    torch.testing.assert_close(sparse_mock.call_args.kwargs["block_table"], candidate_metadata.block_table)
+
+    candidate_repeat = impl._try_sfa_fia_shared_prefill(ql_nope, q_pe, kv_cache, candidate_metadata, topk_indices)
+    assert candidate_repeat is not None
+    assert candidate_metadata.sfa_fia_shared_prefill_plan is not None
+    _assert_no_input_mutation(candidate_metadata, snapshot, kv_cache, topk_indices)
+    torch.testing.assert_close(
+        candidate, candidate_repeat, rtol=_SHARED_PREFILL_RTOL, atol=_SHARED_PREFILL_ATOL, check_dtype=False
+    )
+    torch.testing.assert_close(
+        candidate, baseline, rtol=_SHARED_PREFILL_RTOL, atol=_SHARED_PREFILL_ATOL, check_dtype=False
+    )
+    assert torch.isfinite(candidate).all()
+    assert torch.isfinite(baseline).all()
 
 
 def test_shared_prefill_native_fallback_when_dense_total_not_admitted():
