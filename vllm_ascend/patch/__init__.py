@@ -671,6 +671,26 @@
 #       profiling startup and per-step timing callbacks without monkey-patching
 #       `EngineCore` and the multiprocess entry point.
 #
+# ** 18a. File: platform/patch_preflow_profile.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.engine.core.EngineCore.__init__`
+#   2. `vllm.v1.engine.core.EngineCoreProc.run_engine_core`
+#    Why:
+#       PREFLOW's scheduler decisions use a device-specific prefill cost model.
+#       Calibration must run after the model executor and KV cache are ready but
+#       before the engine accepts user requests.
+#    How:
+#       Wrap `EngineCore.__init__` and invoke
+#       `scheduler.run_preflow_startup_profile(self)` when the selected scheduler
+#       provides it. The module also wraps the EngineCore subprocess entry point
+#       so a spawned process reapplies the idempotent hook before construction;
+#       the platform installs both hooks while selecting the scheduler.
+#    Related PR (if no, explain why):
+#       No, vllm-ascend-specific scheduler calibration.
+#    Future Plan:
+#       Replace this patch when upstream provides a post-engine-initialization
+#       scheduler hook suitable for one-shot backend calibration.
+#
 # ** 19. File: platform/patch_speculative_config.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.config.speculative.SpeculativeConfig.hf_config_override`
