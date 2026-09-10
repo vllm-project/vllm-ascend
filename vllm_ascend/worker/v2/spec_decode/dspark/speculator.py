@@ -20,7 +20,7 @@ from typing import Any, cast
 import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -39,8 +39,6 @@ from vllm_ascend.worker.v2.attn_utils import (
     build_draft_attn_metadata_factory,
 )
 from vllm_ascend.worker.v2.spec_decode.pcp_utils import prepare_replicated_pcp_config
-
-logger = init_logger(__name__)
 
 DSPARK_AUX_HIDDEN_FORMAT_RAW = "raw"
 DSPARK_AUX_HIDDEN_FORMAT_MATERIALIZED = "materialized"
