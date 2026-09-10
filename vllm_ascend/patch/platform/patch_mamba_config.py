@@ -30,11 +30,10 @@ def _using_kv_store(vllm_config) -> bool:
 @classmethod
 def verify_and_update_config(cls, vllm_config) -> None:
     """
-    Ensure that page size of attention layers is greater than or
-    equal to the mamba layers. If not, automatically set the attention
-    block size to ensure that it is. If the attention page size is
-    strictly greater than the mamba page size, we pad the mamba page size
-    to make them equal.
+    Ensure that the attention K block page size exactly matches the
+    Mamba SSM block page size, as required by the contiguous hybrid cache
+    layout. Adjust the attention block size when necessary and pad the
+    Mamba page size to account for the convolution state.
 
     Args:
         vllm_config: vLLM Config
@@ -96,13 +95,12 @@ def verify_and_update_config(cls, vllm_config) -> None:
         "Cannot align ssm_page_size and attn_page_size."
     )
 
-    # override attention block size if either (a) the
-    # user has not set it or (b) the user has set it
-    # too small.
-    if cache_config.block_size is None or cache_config.block_size < attn_block_size:
+    # The contiguous hybrid cache layout requires the attention K block
+    # and SSM block to have exactly the same page size.
+    if cache_config.block_size != attn_block_size:
         cache_config.block_size = attn_block_size
         logger.info(
-            "Setting attention block size to %d tokens to ensure that attention page size is >= mamba page size.",
+            "Setting attention block size to %d tokens to ensure that attention page size matches mamba page size.",
             attn_block_size,
         )
 
