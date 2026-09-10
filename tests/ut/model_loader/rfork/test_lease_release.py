@@ -48,8 +48,9 @@ def runtime(monkeypatch):
     client = load("planner_client")
     session = load("session")
     monkeypatch.setattr(session.atexit, "register", lambda callback: None)
-    monkeypatch.setattr(session, "LEASE_RELEASE_RETRY_INTERVAL_SEC", 0)
-    cfg = config.RForkConfig("model", "strategy", "http://planner", request_timeout_sec=0.1)
+    cfg = config.RForkConfig(
+        "model", "strategy", "http://planner", request_timeout_sec=0.1, lease_release_retry_interval_sec=0.001
+    )
     identity = types.RForkIdentity(0, 0, compatibility_fingerprint="fingerprint")
     lease = types.SeedLease("127.0.0.1", 1234, "private-user-id", 0, "model-key")
     return SimpleNamespace(types=types, client=client, session=session, config=cfg, identity=identity, lease=lease)
@@ -105,14 +106,14 @@ def test_release_body_is_bounded_sanitized_and_redacts_lease(runtime, monkeypatc
 def test_transient_requests_are_bounded(runtime, monkeypatch):
     post = Mock(side_effect=requests.Timeout("slow"))
     monkeypatch.setattr(runtime.client.requests, "post", post)
-    client = runtime.client.RForkPlannerClient(runtime.config, runtime.identity, release_retry_backoff_sec=0)
+    client = runtime.client.RForkPlannerClient(runtime.config, runtime.identity)
     assert not client.release_seed(runtime.lease)
-    assert post.call_count == client.release_max_retries
+    assert post.call_count == runtime.config.lease_release_max_attempts
 
 
 def make_session(runtime):
     session = runtime.session.RForkSession(runtime.config, runtime.identity)
-    session.planner = Mock(release_max_retries=3, seed_key="model-key")
+    session.planner = Mock(seed_key="model-key")
     session.planner.acquire_seed.return_value = runtime.lease
     session.planner.remove_seed.return_value = True
     session.transfer_backend = Mock()

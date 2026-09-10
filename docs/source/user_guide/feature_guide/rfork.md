@@ -130,6 +130,9 @@ To enable RFork, pass `--load-format rfork` and provide RFork settings through `
 | **rfork_scheduler_url** | String | Base URL of the planner service used for seed allocation, release, and heartbeat. | Required for planner-based matching. Example: `http://127.0.0.1:1223`. |
 | **rfork_seed_timeout_sec** | Number | Timeout for waiting until the local seed HTTP service becomes healthy after startup. | Optional. Default: `5.0`. Must be greater than `0`. Invalid values fall back to the default. |
 | **rfork_request_timeout_sec** | Number | Timeout for every planner and seed HTTP request. | Optional. Default: `10.0`. Must be finite and greater than `0`; invalid values fall back to the default. |
+| **rfork_heartbeat_interval_sec** | Number | Delay before the next seed heartbeat after the previous heartbeat request completes. | Optional. Default: `30.0`. Must be a finite, positive JSON number. JSON-only `model-loader-extra-config` field; invalid explicit values raise `ValueError`; no environment fallback. |
+| **rfork_lease_release_max_attempts** | Integer | Maximum number of attempts for lease release, including the initial request. | Optional. Default: `3`. Must be a positive JSON integer. JSON-only `model-loader-extra-config` field; invalid explicit values raise `ValueError`; no environment fallback. Rejected responses stop immediately. |
+| **rfork_lease_release_retry_interval_sec** | Number | Wait between transient lease-release failures. | Optional. Default: `30.0`. Must be a finite, positive JSON number. JSON-only `model-loader-extra-config` field; invalid explicit values raise `ValueError`; no environment fallback. |
 | **rfork_seed_bind_host** | String | Local address/interface for the seed HTTP server. | Optional. Default: `0.0.0.0`. |
 | **rfork_seed_advertise_host** | String | Address reported to the planner for later receivers. | Optional. Default: auto-detect the local address. |
 
@@ -145,8 +148,19 @@ RFork manages its environment fallbacks in its own `RForkConfig` configuration m
 | `RFORK_SEED_BIND_HOST` | `0.0.0.0` | |
 | `RFORK_SEED_ADVERTISE_HOST` | auto-detect | |
 
-`model_loader_extra_config` takes precedence over environment values. Numeric
-values reject booleans, NaN, infinity, and non-positive values.
+`model_loader_extra_config` takes precedence over environment values for fields
+that support environment fallbacks. Numeric values reject booleans, NaN,
+infinity, and non-positive values. The three operational fields above are
+JSON-only; invalid explicit values raise `ValueError` rather than using an
+environment fallback.
+
+Heartbeat scheduling waits `rfork_heartbeat_interval_sec` after each heartbeat
+request completes (default: `30.0`); it is not a fixed-rate interval. Seed
+heartbeats report health and do not renew leases. The lease-release fields
+affect lease release only; the public synchronous release helper uses the same
+configured max-attempt and retry-interval values. Client-side seed deregistration
+(`remove_seed`) keeps its internal retry policy of three attempts with
+`0.1`-second linear backoff.
 
 ### How RFork Matches Seeds
 
@@ -174,7 +188,7 @@ Two instances must agree on model identity and parallel layout before the planne
 
 ### Planner Responsibilities
 
-Lease release runs asynchronously after transfer. Planner release requests never hold the session lock. The client makes at most three release attempts per lease, waiting 30 seconds between transient failures (network errors, HTTP 408/429, or 5xx). Other rejections stop immediately; HTTP 200 and 404 retain their existing acknowledgement semantics. Failed releases do not reload valid weights or prevent model loading from continuing, but the worker is not advertised as a new seed until release is acknowledged. After retry exhaustion, the unresolved lease remains recorded and requires planner-side investigation/recovery. Shutdown does not wait for release I/O and retains TransferEngine resources if release is unresolved.
+Lease release runs asynchronously after transfer. Planner release requests never hold the session lock. The client makes at most `rfork_lease_release_max_attempts` release attempts per lease (default: `3`, including the initial request), waiting `rfork_lease_release_retry_interval_sec` seconds (default: `30.0`) between transient failures (network errors, HTTP 408/429, or 5xx). These settings affect lease release only. Other rejected responses stop immediately even when attempts remain; HTTP 200 and 404 retain their existing acknowledgement semantics. The public synchronous release helper uses the same configured max-attempt and retry-interval values. Failed releases do not reload valid weights or prevent model loading from continuing, but the worker is not advertised as a new seed until release is acknowledged. After retry exhaustion, the unresolved lease remains recorded and requires planner-side investigation/recovery. Shutdown does not wait for release I/O and retains TransferEngine resources if release is unresolved.
 
 Release logs include a hashed lease identifier, attempt count, elapsed acquisition-to-release time, HTTP status and a bounded response excerpt with control characters removed and the lease ID redacted. These allow diagnosis without printing the raw USER_ID credential. Per-request timeouts are connect/read inactivity limits, not a strict total wall-clock deadline.
 
@@ -269,6 +283,9 @@ export RFORK_CONFIG='{
   "model_deploy_strategy_name": "<deploy_strategy>",
   "rfork_scheduler_url": "http://<planner_ip>:<planner_port>",
   "rfork_request_timeout_sec": 10.0,
+  "rfork_heartbeat_interval_sec": 30.0,
+  "rfork_lease_release_max_attempts": 3,
+  "rfork_lease_release_retry_interval_sec": 30.0,
   "rfork_seed_bind_host": "0.0.0.0",
   "rfork_seed_advertise_host": "<seed_ip>"
 }'

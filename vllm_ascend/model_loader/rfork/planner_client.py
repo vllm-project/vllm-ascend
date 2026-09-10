@@ -17,8 +17,8 @@ from vllm_ascend.model_loader.rfork.identity import build_seed_key
 from vllm_ascend.model_loader.rfork.types import LeaseReleaseResult, RForkIdentity, SeedAdvertisement, SeedLease
 
 HEARTBEAT_LOG_EVERY_N = 4
-RELEASE_MAX_RETRIES = 3
-RELEASE_RETRY_BACKOFF_SEC = 0.1
+SEED_REMOVAL_MAX_ATTEMPTS = 3
+SEED_REMOVAL_RETRY_BACKOFF_SEC = 0.1
 RESPONSE_LOG_MAX_CHARS = 256
 
 
@@ -32,31 +32,17 @@ class RForkPlannerClient:
         self,
         config: RForkConfig,
         identity: RForkIdentity,
-        *,
-        release_max_retries: int = RELEASE_MAX_RETRIES,
-        release_retry_backoff_sec: float = RELEASE_RETRY_BACKOFF_SEC,
     ) -> None:
         request_timeout_sec = config.request_timeout_sec
         if isinstance(request_timeout_sec, bool) or not isinstance(request_timeout_sec, (int, float)):
             raise ValueError("request_timeout_sec must be a finite positive number")
         if not math.isfinite(float(request_timeout_sec)) or float(request_timeout_sec) <= 0:
             raise ValueError("request_timeout_sec must be a finite positive number")
-        if (
-            isinstance(release_max_retries, bool)
-            or not isinstance(release_max_retries, int)
-            or release_max_retries <= 0
-        ):
-            raise ValueError("release_max_retries must be a positive integer")
-        if isinstance(release_retry_backoff_sec, bool) or not isinstance(release_retry_backoff_sec, (int, float)):
-            raise ValueError("release_retry_backoff_sec must be a finite non-negative number")
-        if not math.isfinite(float(release_retry_backoff_sec)) or float(release_retry_backoff_sec) < 0:
-            raise ValueError("release_retry_backoff_sec must be a finite non-negative number")
 
         self.planner_url = config.planner_url
         self.tp_rank = identity.tp_rank
         self.request_timeout_sec = float(request_timeout_sec)
-        self.release_max_retries = release_max_retries
-        self.release_retry_backoff_sec = float(release_retry_backoff_sec)
+        self.config = config
         self.last_advertisement: SeedAdvertisement | None = None
         compatibility_fingerprint = identity.compatibility_fingerprint
         if compatibility_fingerprint is None:
@@ -162,14 +148,14 @@ class RForkPlannerClient:
 
     def release_seed(self, lease: SeedLease) -> bool:
         """Synchronous bounded retry helper; startup uses release_seed_once in a worker."""
-        for attempt in range(self.release_max_retries):
+        for attempt in range(self.config.lease_release_max_attempts):
             result = self.release_seed_once(lease)
             if result is LeaseReleaseResult.RELEASED:
                 return True
             if result is LeaseReleaseResult.REJECTED:
                 return False
-            if attempt + 1 < self.release_max_retries and self.release_retry_backoff_sec > 0:
-                time.sleep(self.release_retry_backoff_sec * (attempt + 1))
+            if attempt + 1 < self.config.lease_release_max_attempts:
+                time.sleep(self.config.lease_release_retry_interval_sec)
         return False
 
     def remove_seed(self, advertisement: SeedAdvertisement | None = None) -> bool:
@@ -188,7 +174,7 @@ class RForkPlannerClient:
             "SEED_PORT": str(target.seed_port),
             "SEED_RANK": str(target.seed_rank),
         }
-        for attempt in range(self.release_max_retries):
+        for attempt in range(SEED_REMOVAL_MAX_ATTEMPTS):
             try:
                 response = requests.post(
                     f"{self.planner_url}/remove_seed",
@@ -202,18 +188,18 @@ class RForkPlannerClient:
                 logger.warning(
                     "RFork planner seed removal attempt %d/%d returned status=%s",
                     attempt + 1,
-                    self.release_max_retries,
+                    SEED_REMOVAL_MAX_ATTEMPTS,
                     response.status_code,
                 )
             except Exception as exc:
                 logger.warning(
                     "RFork planner seed removal attempt %d/%d failed: %s",
                     attempt + 1,
-                    self.release_max_retries,
+                    SEED_REMOVAL_MAX_ATTEMPTS,
                     exc,
                 )
-            if attempt + 1 < self.release_max_retries and self.release_retry_backoff_sec > 0:
-                time.sleep(self.release_retry_backoff_sec * (attempt + 1))
+            if attempt + 1 < SEED_REMOVAL_MAX_ATTEMPTS:
+                time.sleep(SEED_REMOVAL_RETRY_BACKOFF_SEC * (attempt + 1))
         return False
 
     def report_seed_once(self, port: int, seed_ip: str | None = None) -> bool:
@@ -243,11 +229,20 @@ class RForkPlannerClient:
     def run_seed_heartbeat(
         self,
         port: int,
-        sleep_interval: float = 30,
+        sleep_interval: float | None = None,
         stop_event: threading.Event | None = None,
         seed_ip: str | None = None,
         initial_delay: bool = False,
     ) -> None:
+        if sleep_interval is None:
+            sleep_interval = self.config.heartbeat_interval_sec
+        if (
+            isinstance(sleep_interval, bool)
+            or not isinstance(sleep_interval, (int, float))
+            or not math.isfinite(sleep_interval)
+            or sleep_interval <= 0
+        ):
+            raise ValueError("heartbeat sleep_interval must be a finite positive number")
         if initial_delay and stop_event is not None and stop_event.wait(sleep_interval):
             return
         heartbeat_index = 0

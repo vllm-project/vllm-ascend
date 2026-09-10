@@ -25,7 +25,6 @@ from vllm_ascend.model_loader.rfork.types import (
     SeedTransferInfo,
 )
 
-LEASE_RELEASE_RETRY_INTERVAL_SEC = 30.0
 HEARTBEAT_STOP_GRACE_SEC = 1.0
 
 
@@ -173,7 +172,7 @@ class RForkSession:
                         "RFork lease release outcome: lease=%s attempt=%d/%d result=%s held_elapsed=%.3fs",
                         lease_log_id(lease),
                         attempt,
-                        self.planner.release_max_retries,
+                        self.config.lease_release_max_attempts,
                         result.name,
                         time.monotonic() - acquired_at if acquired_at is not None else 0.0,
                     )
@@ -184,7 +183,7 @@ class RForkSession:
                             self.state = RForkLifecycleState.INITIALIZED
                         self._promote_deferred_seed_locked()
                         return
-                    if result is LeaseReleaseResult.REJECTED or attempt >= self.planner.release_max_retries:
+                    if result is LeaseReleaseResult.REJECTED or attempt >= self.config.lease_release_max_attempts:
                         self._lease_release_exhausted = True
                         self._deferred_seed_start = None
                         logger.error(
@@ -194,7 +193,7 @@ class RForkSession:
                             attempt,
                         )
                         return
-                self.lease_release_stop_event.wait(LEASE_RELEASE_RETRY_INTERVAL_SEC)
+                self.lease_release_stop_event.wait(self.config.lease_release_retry_interval_sec)
         finally:
             with self._lock:
                 if self.lease_release_thread is threading.current_thread():
@@ -347,6 +346,7 @@ class RForkSession:
                 target=self.planner.run_seed_heartbeat,
                 args=(handle.port,),
                 kwargs={
+                    "sleep_interval": self.config.heartbeat_interval_sec,
                     "stop_event": self.heartbeat_stop_event,
                     "seed_ip": self.config.seed_advertise_host,
                     "initial_delay": True,

@@ -76,7 +76,12 @@ seed-hit and seed-miss startup cost and memory on NPU before adopting the change
 ## Release retries and startup progress
 
 The release-decoupling implementation now uses one asynchronous worker per lease,
-with at most three single-request attempts and 30 seconds between transient failures.
+with three single-request attempts and 30 seconds between transient failures by default.
+Configure these through `rfork_lease_release_max_attempts` and
+`rfork_lease_release_retry_interval_sec` in `--model-loader-extra-config`.
+The synchronous lease-release helper uses the same settings; seed removal retains
+its independent internal retry policy. Seed heartbeat waits are configurable through
+`rfork_heartbeat_interval_sec` (default 30 seconds), without adding lease renewal.
 Release HTTP calls execute outside the session lock. Permanent rejection stops the
 worker immediately. Retry exhaustion retains an unresolved lease and suppresses seed
 promotion; it does not claim release success or fail a successfully transferred model.
