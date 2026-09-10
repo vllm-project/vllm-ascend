@@ -4,6 +4,13 @@ from vllm.config.vllm import VllmConfig
 from vllm_ascend.patch.platform import patch_use_v2_model_runner
 
 
+def test_use_v2_model_runner_is_driven_by_ascend_whitelist():
+    assert isinstance(VllmConfig.use_v2_model_runner, property)
+    from vllm_ascend.mrv2_utils import use_v2_model_runner
+
+    assert VllmConfig.use_v2_model_runner.fget is use_v2_model_runner
+
+
 def test_ascend_v1_supported_features_are_not_rejected(monkeypatch):
     if not hasattr(VllmConfig, "_get_v1_model_runner_unsupported_features"):
         pytest.skip("V1 model runner validation is only present on vLLM main")
