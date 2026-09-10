@@ -1204,6 +1204,7 @@ class MockVllmConfig:
         self.model_config.get_num_layers = MagicMock(return_value=32)
         self.parallel_config.tensor_parallel_size = 2
         self.parallel_config.data_parallel_rank = 0
+        self.parallel_config.data_parallel_index = 0
         self.parallel_config.data_parallel_size = 1
         self.parallel_config.data_parallel_size_local = 1
         self.parallel_config.pipeline_parallel_size = 1
@@ -1575,6 +1576,42 @@ class TestMooncakeConnector(unittest.TestCase):
         request = MockRequest("req1")
         connector.request_finished(request, [1, 2, 3])
         mock_method.assert_called_once_with(request, ([1, 2, 3],))
+
+
+class TestMooncakeConnectorHandshakePortUniquePerDPRank(unittest.TestCase):
+    """Regression: handshake base port must stay unique per DP rank even when
+    ``data_parallel_rank`` is reset to 0 (non-MoE internal DP, where
+    vllm/v1/engine/core.py treats each rank like DP=1). The port formula uses
+    ``data_parallel_index`` (preserved per DP rank) instead of
+    ``data_parallel_rank`` (reset to 0); otherwise DP ranks collide on the same
+    ZMQ port (``Address already in use``)."""
+
+    @staticmethod
+    def _make_scheduler(data_parallel_index: int, data_parallel_rank: int = 0):
+        cfg = MockVllmConfig()
+        cfg.parallel_config.data_parallel_index = data_parallel_index
+        cfg.parallel_config.data_parallel_rank = data_parallel_rank
+        with (
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p."
+                "mooncake_connector.init_ascend_config"
+            ),
+            patch(
+                "vllm_ascend.distributed.kv_transfer.kv_p2p."
+                "mooncake_connector.get_ascend_config",
+                return_value=MagicMock(),
+            ),
+        ):
+            return MooncakeConnectorScheduler(cfg, "test_engine", MockKVCacheConfig())
+
+    def test_port_differs_across_dp_ranks_with_reset_data_parallel_rank(self):
+        # MockVllmConfig defaults: kv_port=5000, tp=2, pp=1, pcp=1.
+        # side_channel_port = 5000 + data_parallel_index * 2 * 1 * 1
+        s0 = self._make_scheduler(data_parallel_index=0, data_parallel_rank=0)
+        s1 = self._make_scheduler(data_parallel_index=1, data_parallel_rank=0)
+        self.assertEqual(s0.side_channel_port, 5000)
+        self.assertEqual(s1.side_channel_port, 5002)
+        self.assertNotEqual(s0.side_channel_port, s1.side_channel_port)
 
 
 class TestMooncakeConnectorScheduler(unittest.TestCase):
