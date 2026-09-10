@@ -31,12 +31,13 @@ def make_input(tokens=17, dtype=torch.bfloat16, contiguous=True):
 
 
 @pytest.mark.parametrize("device_type", [AscendDeviceType.A2, AscendDeviceType.A3])
-def test_supported_layout_uses_custom_op(device_type):
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_supported_layout_uses_custom_op(device_type, dtype):
     layer = make_layer()
-    mixed_qkv = make_input()
+    mixed_qkv = make_input(dtype=dtype)
     source = torch.arange(17 * 5120, dtype=torch.float32).reshape(17, 5120)
     expected_parts = source.split([1024, 1024, 3072], dim=-1)
-    packed_qkv = torch.cat([part.flatten() for part in expected_parts]).to(torch.bfloat16)
+    packed_qkv = torch.cat([part.flatten() for part in expected_parts]).to(dtype)
     custom_op = Mock(return_value=packed_qkv)
 
     with (
@@ -53,7 +54,7 @@ def test_supported_layout_uses_custom_op(device_type):
     layer.rearrange_mixed_qkv.assert_not_called()
     for output, expected, heads in zip(outputs, expected_parts, (8, 8, 24)):
         assert output.shape == (1, 17, heads, 128)
-        torch.testing.assert_close(output.reshape(17, -1), expected.to(torch.bfloat16), rtol=0, atol=0)
+        torch.testing.assert_close(output.reshape(17, -1), expected.to(dtype), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("device_type", [AscendDeviceType._310P, AscendDeviceType.A5])
@@ -74,7 +75,7 @@ def test_unsupported_device_uses_original_implementation(device_type):
 @pytest.mark.parametrize(
     ("layer_attributes", "dtype", "contiguous"),
     [
-        ({}, torch.float16, True),
+        ({}, torch.float32, True),
         ({}, torch.bfloat16, False),
         ({"key_dim": 2032}, torch.bfloat16, True),
         ({"value_dim": 6128}, torch.bfloat16, True),

@@ -12,8 +12,8 @@ at::Tensor npu_rearrange_qkv(
     const at::Tensor& x, int64_t q_dim, int64_t k_dim, int64_t v_dim)
 {
     constexpr int64_t elements_per_datablock = 16;
-    TORCH_CHECK(x.scalar_type() == at::kBFloat16,
-                "npu_rearrange_qkv requires BF16 input");
+    TORCH_CHECK(x.scalar_type() == at::kBFloat16 || x.scalar_type() == at::kHalf,
+                "npu_rearrange_qkv requires BF16 or FP16 input");
     TORCH_CHECK(q_dim > 0 && k_dim > 0 && v_dim > 0,
                 "npu_rearrange_qkv requires positive Q/K/V dimensions");
     TORCH_CHECK(q_dim % elements_per_datablock == 0 &&

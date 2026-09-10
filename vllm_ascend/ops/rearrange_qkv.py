@@ -5,7 +5,7 @@ import torch
 
 from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
 
-# One 32-byte DMA block contains 16 BF16 elements.
+# One 32-byte DMA block contains 16 16-bit elements.
 DMA_ALIGNMENT_ELEMENTS = 16
 SUPPORTS_REARRANGE_QKV = get_ascend_device_type() in (AscendDeviceType.A2, AscendDeviceType.A3)
 
@@ -15,7 +15,7 @@ def rearrange_mixed_qkv(layer, mixed_qkv: torch.Tensor | None):
     if (
         mixed_qkv is None
         or not SUPPORTS_REARRANGE_QKV
-        or mixed_qkv.dtype != torch.bfloat16
+        or mixed_qkv.dtype not in (torch.bfloat16, torch.float16)
         or not mixed_qkv.is_contiguous()
     ):
         return layer.rearrange_mixed_qkv(mixed_qkv)

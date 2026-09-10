@@ -27,6 +27,8 @@ public:
         rowDim_ = tiling.rowDim;
         tileRows_ = tiling.tileRows;
         usedCoreNum_ = tiling.usedCoreNum;
+        // This kernel performs no arithmetic. bfloat16_t is only a 16-bit DMA
+        // storage type, so BF16 and FP16 payloads are copied bit-for-bit.
         x_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(x));
         y_.SetGlobalBuffer(reinterpret_cast<__gm__ bfloat16_t*>(y));
         x_.SetL2CacheHint(CacheMode::CACHE_MODE_NORMAL);

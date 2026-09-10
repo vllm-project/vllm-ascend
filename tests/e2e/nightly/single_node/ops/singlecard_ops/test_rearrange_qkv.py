@@ -10,6 +10,8 @@ import torch_npu  # noqa: F401
 from vllm_ascend.ops.rearrange_qkv import rearrange_mixed_qkv
 from vllm_ascend.utils import AscendDeviceType, enable_custom_op, get_ascend_device_type
 
+SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
+
 
 def reference(x, dims=(1024, 1024, 3072)):
     return torch.cat([part.reshape(-1) for part in x.split(dims, dim=-1)])
@@ -24,14 +26,16 @@ def load_op():
 
 @pytest.mark.parametrize("tokens", [1, 4, 15, 16, 17, 19, 20, 21, 64, 319, 320, 321, 1024, 4096])
 @pytest.mark.parametrize("offset", [0, 1])
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @torch.inference_mode()
-def test_bitwise_copy(tokens, offset):
+def test_bitwise_copy(tokens, offset, dtype):
     # Arbitrary bits cover NaNs, infinities, signed zero, and subnormals.
     bits = torch.randint(-32768, 32768, (tokens + offset, 5120), dtype=torch.int16)
-    mixed_qkv = bits.view(torch.bfloat16).npu()[offset:]
+    mixed_qkv = bits.view(dtype).npu()[offset:]
     actual = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, 1024, 1024, 3072)
 
     assert actual.shape == (tokens * 5120,)
+    assert actual.dtype == dtype
     assert torch.equal(actual.view(torch.int16).cpu(), reference(bits[offset:]))
 
 
@@ -39,9 +43,10 @@ def test_bitwise_copy(tokens, offset):
     ("q_dim", "v_dim", "tp_size"),
     [(128, 256, 1), (512, 1536, 4), (1024, 3072, 2), (2048, 6144, 1)],
 )
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @torch.inference_mode()
-def test_gdn_dispatch(q_dim, v_dim, tp_size):
-    mixed_qkv = torch.randn(37, 2 * q_dim + v_dim, device="npu", dtype=torch.bfloat16)
+def test_gdn_dispatch(q_dim, v_dim, tp_size, dtype):
+    mixed_qkv = torch.randn(37, 2 * q_dim + v_dim, device="npu", dtype=dtype)
 
     def unexpected_fallback(_):
         pytest.fail("Supported GDN layout did not use npu_rearrange_qkv")
@@ -67,11 +72,12 @@ def test_gdn_dispatch(q_dim, v_dim, tp_size):
     ("dims", "tokens"),
     [((1024, 1024, 3072), 321), ((16, 48, 80), 37), ((16, 16, 81904), 3)],
 )
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @torch.inference_mode()
-def test_nondefault_stream_and_graph_replay(dims, tokens):
+def test_nondefault_stream_and_graph_replay(dims, tokens, dtype):
     stream = torch.npu.Stream()
     with torch.npu.stream(stream):
-        mixed_qkv = torch.randn(tokens, sum(dims), device="npu", dtype=torch.bfloat16)
+        mixed_qkv = torch.randn(tokens, sum(dims), device="npu", dtype=dtype)
         for _ in range(3):
             eager = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, *dims)
     stream.synchronize()
@@ -91,7 +97,7 @@ def test_nondefault_stream_and_graph_replay(dims, tokens):
 @pytest.mark.parametrize("kind", ["dtype", "width", "rank", "stride"])
 def test_reject_unsafe_inputs(kind):
     if kind == "dtype":
-        mixed_qkv = torch.empty(2, 5120, device="npu", dtype=torch.float16)
+        mixed_qkv = torch.empty(2, 5120, device="npu", dtype=torch.float32)
     elif kind == "width":
         mixed_qkv = torch.empty(2, 2560, device="npu", dtype=torch.bfloat16)
     elif kind == "rank":
@@ -103,8 +109,9 @@ def test_reject_unsafe_inputs(kind):
         torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, 1024, 1024, 3072)
 
 
-def test_meta():
-    mixed_qkv = torch.empty(17, 5120, device="meta", dtype=torch.bfloat16)
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
+def test_meta(dtype):
+    mixed_qkv = torch.empty(17, 5120, device="meta", dtype=dtype)
     output = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, 1024, 1024, 3072)
     assert output.shape == (17 * 5120,)
     assert output.dtype == mixed_qkv.dtype
@@ -127,11 +134,12 @@ def test_meta():
     ],
 )
 @pytest.mark.parametrize("offset", [0, 16])
+@pytest.mark.parametrize("dtype", SUPPORTED_DTYPES)
 @torch.inference_mode()
-def test_aligned_dynamic_widths(dims, tokens, offset):
+def test_aligned_dynamic_widths(dims, tokens, offset, dtype):
     width = sum(dims)
     bits = torch.randint(-32768, 32768, (tokens * width + offset,), dtype=torch.int16)
-    mixed_qkv = bits.view(torch.bfloat16).npu()[offset:].view(tokens, width)
+    mixed_qkv = bits.view(dtype).npu()[offset:].view(tokens, width)
 
     actual = torch.ops._C_ascend.npu_rearrange_qkv(mixed_qkv, *dims)
     expected = reference(bits[offset:].view(tokens, width), dims)
