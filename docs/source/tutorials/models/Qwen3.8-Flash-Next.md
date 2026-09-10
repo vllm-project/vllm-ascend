@@ -226,7 +226,6 @@ unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
 export VLLM_SERVER_DEV_MODE=1
 export SOC_VERSION=ascend950dt_9582
 export MODEL_PATH=/models/Qwen3.8-Flash-Next-w8a8-mxfp8
@@ -253,7 +252,6 @@ vllm serve "$MODEL_PATH" \
     --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
 ```
 
-- `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` restricts the 950DT service to the first four devices.
 - `VLLM_SERVER_DEV_MODE=1` enables the server development mode required by this 950DT setup, including cache-clearing support.
 - `SOC_VERSION=ascend950dt_9582` selects the 950DT SoC target used by the image.
 - `--language-model-only` makes this 950DT example text-only and skips the vision encoder.
