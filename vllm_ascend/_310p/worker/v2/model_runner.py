@@ -318,6 +318,7 @@ class NPUModelRunner310V2(NPUModelRunner):
         )
         attn_state = build_attn_state(
             self.vllm_config,
+            self.kv_cache_config,
             seq_lens,
             num_reqs,
             num_scheduled,
