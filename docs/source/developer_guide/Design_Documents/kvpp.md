@@ -74,37 +74,3 @@ vllm serve <model-path> \
 ```
 
 `enable_kvpp` defaults to `false`. With PP enabled, each stage assigns owners and broadcasts within its own TP group.
-
-## 5. Test Plan
-
-Unit tests cover layout, budgeting, allocation, and scheduling. Device and communication dependencies use existing mocks; cache aliasing is checked with real tensor storage. One combined E2E scenario covers feature integration. The tables describe test expectations, not execution results. This version includes no KVPP nightly tests.
-
-### 5.1 Unit Tests
-
-Paths are relative to the repository root. Each row groups tests for one responsibility.
-
-| ID | Coverage | Scenarios and expected behavior | Test file |
-| --- | --- | --- | --- |
-| UT-01 | Configuration and support boundaries | Parse booleans and boolean strings; enabled group size equals TP size; reject unsupported combinations during configuration | `tests/ut/test_ascend_config.py` |
-| UT-02 | Communication groups | Keep KVPP groups within each PP stage; use single-rank groups when disabled; initialize and destroy independently of MC2 groups | `tests/ut/distributed/test_parallel_state.py` |
-| UT-03 | Owners and bundles | Uneven partitions, more ranks than layers, and unordered specifications produce deterministic assignments; components share an owner; MTP is excluded | `tests/ut/core/test_kvpp_cache_placement.py` |
-| UT-04 | Component layout | MLA, packed main KV, indexer data/scales, and different scale dtypes have correct byte sizes, offsets, and total lengths | `tests/ut/core/test_kvpp_cache_placement.py` |
-| UT-05 | Physical budget | Different ranks, ranks without owned targets, MTP-only stages, and empty stages; correctly floor capacity at complete-block boundaries | `tests/ut/core/test_kvpp_cache_placement.py` |
-| UT-06 | Allocation and aliasing | Reuse two scratch buffers by execution ordinal; keep owner/MTP storage independent; verify total storage size and isolation of writes | `tests/ut/worker/test_kvpp_cache.py` |
-| UT-07 | Worker budget integration | Preserve complete logical specifications; convert physical capacity into the planner's logical budget; leave the disabled-path budget unchanged | `tests/ut/worker/test_worker_v1.py` |
-| UT-08 | V1/V2 allocation entry points | Use the final block count; preserve typed-view dtypes, shapes, offsets, and storage aliases | `tests/ut/worker/test_model_runner_v1.py`, `tests/ut/worker/test_attn_utils_v2.py` |
-| UT-09 | Runtime binding | Convert nonzero storage offsets to byte offsets; broadcast complete bundles; bind hooks only to target main attention layers | `tests/ut/worker/test_kvpp.py` |
-| UT-10 | Layer prefetch | Skip prefetch without history; prefetch one layer ahead; reset state across forwards; propagate future failures without scheduling another layer | `tests/ut/worker/test_kvpp.py` |
-| UT-11 | Broadcast completion | Map owners to global ranks; transfer the entire payload once; complete the future only after device completion; preserve data outside the payload | `tests/ut/distributed/kv_transfer/kv_pool/test_broadcast_transport.py` |
-| UT-12 | History detection and lifecycle | V1/V2 use only actual requests and ignore padding; dummy/profile paths skip broadcasts; preserve lifecycle ordering | `tests/ut/worker/test_model_runner_v1.py`, `tests/ut/worker/test_model_runner_v2.py` |
-| UT-13 | Attention wait placement | MLA/SFA native and fused paths, with or without an indexer, wait once after projections and before the first cache access | `tests/ut/attention/test_mla_v1.py`, `tests/ut/attention/test_sfa_v1.py` |
-
-### 5.2 End-to-End Test
-
-The E2E test uses Model Runner V1; unit tests cover V2 integration. One pytest test runs KVPP-disabled and KVPP-enabled instances sequentially with otherwise identical settings.
-
-| ID | Configuration | Procedure | Expected behavior |
-| --- | --- | --- | --- |
-| E2E-01 | Four A3 devices; `vllm-ascend/DeepSeek-V3.2-W8A8-Pruning`; eager mode; TP=2, PP=2, EP; chunked prefill, prefix caching, asynchronous scheduling; one-step MTP; block size 128 and 64 logical blocks | Each instance processes two requests sequentially, sharing a 384-token prefix with different 16-token suffixes; token budget 128; generate 16 tokens per request | The first request requires multiple actual prefill steps with no cache hits; the second reuses at least 384 tokens; MTP caches exist and draft count is positive; KVPP groups stay within PP stages and target hooks exclude MTP; EP/async are enabled; output token IDs and text match with KVPP off and on |
-
-Test location: `tests/e2e/pull_request/four_card/test_kvpp.py::test_kvpp_combined_features`.
