@@ -223,6 +223,18 @@ class TestAscendConfig(TestBase):
 
     @_clean_up_ascend_config
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_sfa_dcp_sharded_indexer_flag_default_and_explicit_values(self, mock_fix_incompatible_config):
+        default_config = VllmConfig()
+        self.assertFalse(init_ascend_config(default_config).enable_sfa_dcp_sharded_indexer)
+
+        for value in (False, True):
+            clear_ascend_config()
+            test_vllm_config = VllmConfig()
+            test_vllm_config.additional_config = {"enable_sfa_dcp_sharded_indexer": value}
+            self.assertIs(init_ascend_config(test_vllm_config).enable_sfa_dcp_sharded_indexer, value)
+
+    @_clean_up_ascend_config
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
     def test_rl_config_enabled_applies_runtime_defaults(self, mock_fix_incompatible_config):
         test_vllm_config = VllmConfig()
         test_vllm_config.additional_config = {"rl_config": {"enabled": True}}
