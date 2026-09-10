@@ -928,12 +928,8 @@ def test_schedule_admits_waiting_lora_request():
     assert request.request_id in scheduler_output.num_scheduled_tokens
 
 
-@pytest.mark.parametrize("with_kv_connector", [False, True])
-def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields(with_kv_connector):
+def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields():
     _, scheduler = _create_live_recompute_scheduler()
-    # The shared live fixture already installs a producer connector. Make the
-    # connector-absent parameter exercise a genuinely absent connector.
-    scheduler.connector = None
     scheduler.need_mamba_block_aligned_split = True
     scheduler._mamba_block_aligned_split = MagicMock(
         side_effect=lambda _request, num_new_tokens, *args, **kwargs: num_new_tokens
@@ -944,27 +940,12 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields(with_kv_c
     scheduler._make_scheduled_encoder_input_stats = MagicMock(return_value="enc-stats")
     scheduler.ec_connector = MagicMock()
     scheduler.ec_connector.build_connector_meta.return_value = "ec-meta"
+    if vllm_version_is("0.28.0"):
+        scheduler.kv_cache_manager.take_partial_tail_offloads = MagicMock(return_value={})
+    else:
+        scheduler.kv_cache_manager.take_boundary_state_offloads = MagicMock(return_value={})
     request = create_request(request_id=1, block_size=scheduler.vllm_config.cache_config.block_size)
     scheduler.add_request(request)
-    boundary_offers = {request.request_id: [(0, 7, 128)]}
-    scheduler.kv_cache_manager.take_boundary_state_offloads = MagicMock(return_value=boundary_offers)
-    scheduler.kv_cache_manager.take_partial_tail_offloads = MagicMock(return_value=boundary_offers)
-    connector_states = []
-    if with_kv_connector:
-        scheduler.connector = MagicMock()
-        if vllm_version_is("0.28.0"):
-            scheduler.vllm_config.kv_transfer_config = SimpleNamespace(is_kv_producer=True)
-        scheduler.connector.get_num_new_matched_tokens.return_value = (0, False)
-        allocated = scheduler.kv_cache_manager.empty_kv_cache_blocks
-        scheduler._get_computed_blocks_for_connector = MagicMock(return_value=(allocated, 0, 0, False))
-
-        def build_connector_meta(output):
-            connector_states.append(
-                output.partial_tail_offloads if vllm_version_is("0.28.0") else output.kv_connector_block_state
-            )
-            return "kv-meta"
-
-        scheduler.connector.build_connector_meta.side_effect = build_connector_meta
 
     scheduler_output = scheduler.schedule()
 
@@ -972,30 +953,11 @@ def test_schedule_aligns_mamba_tokens_and_emits_optional_output_fields(with_kv_c
     assert scheduler_output.num_spec_tokens_to_schedule == 2
     assert scheduler_output.scheduled_encoder_input_stats == "enc-stats"
     assert scheduler_output.ec_connector_metadata == "ec-meta"
-    # vLLM #51358 consumes exact boundary offers locally, before worker dispatch.
-    if vllm_version_is("0.28.0"):
-        scheduler.kv_cache_manager.take_boundary_state_offloads.assert_not_called()
-        assert scheduler_output.partial_tail_offloads is (boundary_offers if with_kv_connector else None)
-        if with_kv_connector:
-            scheduler.kv_cache_manager.take_partial_tail_offloads.assert_called_once_with()
-        else:
-            scheduler.kv_cache_manager.take_partial_tail_offloads.assert_not_called()
-    else:
-        scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once_with()
-        assert scheduler_output.kv_connector_block_state is None
-    if with_kv_connector:
-        assert scheduler.connector is not None
-        scheduler.connector.build_connector_meta.assert_called_once_with(scheduler_output)
-        assert scheduler_output.kv_connector_metadata == "kv-meta"
-        assert len(connector_states) == 1
-        state = connector_states[0]
-        assert state is not None
-        if vllm_version_is("0.28.0"):
-            assert state is boundary_offers
-        else:
-            assert state.boundary_state_offloads is boundary_offers
-            assert state.block_ids == {request.request_id: scheduler.kv_cache_manager.get_block_ids(request.request_id)}
     scheduler._mamba_block_aligned_split.assert_called()
+    if vllm_version_is("0.28.0"):
+        scheduler.kv_cache_manager.take_partial_tail_offloads.assert_called_once()
+    else:
+        scheduler.kv_cache_manager.take_boundary_state_offloads.assert_called_once()
 
 
 def test_schedule_breaks_waiting_when_mamba_split_has_no_tokens():

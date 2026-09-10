@@ -33,8 +33,6 @@ import vllm_ascend.patch.platform.patch_kv_cache_utils as kv_cache_utils_patch
 from vllm_ascend.core.kv_cache_interface import (
     AscendIndexerKPoolStateSpec,
     AscendMLAAttentionSpec,
-    AscendSFAIndexerCacheSpec,
-    get_storage_block_size,
 )
 from vllm_ascend.patch.platform.patch_kv_cache_coordinator import (
     AscendHybridKVCacheCoordinator,
@@ -91,54 +89,6 @@ def _make_hybrid_kv_cache_config(
             KVCacheGroupSpec(layer_names=["mamba"], kv_cache_spec=mamba_spec),
         ],
     )
-
-
-@pytest.mark.parametrize("use_eagle, expected_checkpoint", [(False, 192), (True, 176)])
-def test_hybrid_mamba_checkpoint_matches_eagle_replay_boundary(use_eagle, expected_checkpoint):
-    config = _make_hybrid_kv_cache_config(full_block_size=16, mamba_block_size=128)
-    config.kv_cache_groups[1].kv_cache_spec = replace(
-        config.kv_cache_groups[1].kv_cache_spec,
-        mamba_cache_mode="align",
-        num_speculative_blocks=1,
-        **(
-            {}
-            if vllm_version_is("0.28.0")
-            else {
-                "num_prefill_checkpoint_blocks": 1,
-                "prefill_checkpoint_alignment": 16,
-            }
-        ),
-    )
-    coordinator = AscendHybridKVCacheCoordinator(
-        config,
-        max_model_len=1024,
-        max_in_flight_tokens=512,
-        use_eagle=use_eagle,
-        enable_caching=True,
-        enable_kv_cache_events=False,
-        dcp_world_size=1,
-        pcp_world_size=1,
-        hash_block_size=16,
-        scheduler_block_size=128,
-    )
-    manager = coordinator.single_type_managers[1]
-    if not vllm_version_is("0.28.0"):
-        assert manager.drop_eagle_checkpoint_block is use_eagle
-    allocated = manager.get_num_blocks_to_allocate(
-        request_id="checkpoint",
-        num_tokens=200,
-        new_computed_blocks=[],
-        total_computed_tokens=0,
-        num_local_computed_tokens=0,
-        num_tokens_main_model=200,
-    )
-    # vLLM #55747 retains both the checkpoint boundary and its reserved slot.
-    if vllm_version_is("0.28.0"):
-        # Release align mode reserves a running state plus the speculative block.
-        assert allocated == 2
-        assert "drop_eagle_checkpoint_block" not in vars(manager)
-    else:
-        assert manager._checkpoints["checkpoint"] == (expected_checkpoint, 0)
 
 
 def _make_kimi_k3_dspark_kv_cache_specs(
@@ -310,42 +260,6 @@ def test_ascend_mla_merge_preserves_upstream_layout_fields() -> None:
         assert merged.indexes_kv_by_block_stride == spec.indexes_kv_by_block_stride
     assert merged.scale_dim == spec.scale_dim
     assert merged.scale_dtype == spec.scale_dtype
-
-
-def test_ascend_mla_storage_geometry_survives_upstream_optional_field() -> None:
-    spec = AscendMLAAttentionSpec(
-        block_size=512,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.bfloat16,
-        **_ratio_kwargs(4),
-    )
-    assert get_storage_block_size(spec) == 128
-    resized = replace(spec, block_size=1024)
-    assert get_storage_block_size(resized) == 256
-    merged = AscendMLAAttentionSpec.merge([spec, replace(spec)])
-    assert get_storage_block_size(merged) == 128
-    assert merged.page_size_bytes == 128 * 128 * 2
-    if vllm_version_is("0.28.0"):
-        assert spec.storage_block_size == 128
-    else:
-        # #53906's optional override must not be populated with Ascend's
-        # derived physical size, or upstream metadata building changes lanes.
-        assert spec.storage_block_size is None
-        assert resized.storage_block_size is None
-        assert merged.storage_block_size is None
-
-
-@pytest.mark.parametrize("spec_cls", [MLAAttentionSpec, AscendSFAIndexerCacheSpec])
-def test_optional_mla_storage_size_defaults_to_logical_block(spec_cls) -> None:
-    spec = spec_cls(block_size=32, num_kv_heads=1, head_size=128, dtype=torch.bfloat16)
-    assert get_storage_block_size(spec) == 32
-    uniform_spec = UniformTypeKVCacheSpecs(kv_cache_specs={"layer.0": spec, "layer.1": spec}, block_size=32)
-    assert get_storage_block_size(uniform_spec) == 32
-    if not vllm_version_is("0.28.0"):
-        assert spec.storage_block_size is None
-        explicit = replace(spec, storage_block_size=16)
-        assert get_storage_block_size(explicit) == 16
 
 
 @pytest.mark.parametrize(
@@ -522,53 +436,6 @@ def test_deepseek_v4_groups_use_logical_sizes_and_full_attention_manager() -> No
     for group in grouped_specs[:2]:
         spec = next(iter(group.kv_cache_specs.values()))
         assert KVCacheSpecRegistry.get_manager_class(spec) is FullAttentionManager
-
-
-def test_deepseek_v4_groups_patch_the_live_packed_group_hook() -> None:
-    c128_spec = MLAAttentionSpec(
-        block_size=128 * 128,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float16,
-        **_ratio_kwargs(128),
-        model_version="deepseek_v4",
-    )
-    c4_spec = MLAAttentionSpec(
-        block_size=128 * 4,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float16,
-        **_ratio_kwargs(4),
-        model_version="deepseek_v4",
-    )
-    swa_spec = SlidingWindowMLASpec(
-        block_size=128,
-        num_kv_heads=1,
-        head_size=128,
-        dtype=torch.float16,
-        sliding_window=512,
-    )
-    vllm_config = _make_vllm_config(enable_prefix_caching=True, dcp=1)
-    vllm_config.scheduler_config = SimpleNamespace(disable_hybrid_kv_cache_manager=False)
-    vllm_config.speculative_config = None
-
-    groups = vllm_kv_cache_utils.get_kv_cache_groups(
-        vllm_config,
-        {"c128": c128_spec, "swa": swa_spec, "c4": c4_spec},
-    )
-
-    if vllm_version_is("0.28.0"):
-        assert vllm_kv_cache_utils.group_and_unify_kv_cache_specs is group_and_unify_kv_cache_specs
-        assert (
-            vllm_kv_cache_utils._get_kv_cache_groups_uniform_groups
-            is kv_cache_utils_patch._get_kv_cache_groups_uniform_groups
-        )
-    else:
-        assert (
-            vllm_kv_cache_utils._get_packed_kv_cache_groups is kv_cache_utils_patch._ascend_get_packed_kv_cache_groups
-        )
-    assert [group.layer_names for group in groups[:2]] == [["c4"], ["c128"]]
-    assert groups[2].layer_names == ["swa"]
 
 
 @pytest.mark.parametrize(

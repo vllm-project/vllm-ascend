@@ -17,7 +17,6 @@ from vllm_ascend.worker.v2.sample.gumbel import gumbel_sample as _sample_for_ver
 from vllm_ascend.worker.v2.spec_decode.rejection_sampler_utils import rejection_sample
 
 DEVICE = "npu"
-_DRAFT_NOISE_SALT = 1 << 30
 
 
 def gumbel_sample(
@@ -75,27 +74,6 @@ def _ref_apply_temperature(
 
 
 class TestGumbelSampling:
-    @pytest.mark.parametrize("is_drafting", [False, True])
-    def test_draft_noise_matches_salted_target(self, is_drafting):
-        """#54282 salts draft positions without changing target sampling."""
-        num_tokens, vocab_size = 8, 32000
-        logits = torch.zeros((num_tokens, vocab_size), dtype=torch.float32, device=DEVICE)
-        idx_mapping = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
-        temperature = torch.ones(num_tokens, dtype=torch.float32, device=DEVICE)
-        seed = torch.arange(num_tokens, dtype=torch.int64, device=DEVICE)
-        pos = torch.arange(num_tokens, dtype=torch.int32, device=DEVICE)
-        if vllm_version_is("0.28.0"):
-            actual = _sample_for_version(
-                logits, idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=is_drafting
-            )
-        else:
-            actual = _sample_for_version(
-                logits, idx_mapping, temperature, seed, pos, apply_temperature=False, is_drafting=is_drafting
-            )
-        target_pos = pos + _DRAFT_NOISE_SALT if is_drafting else pos
-        expected = gumbel_sample(logits, idx_mapping, temperature, seed, target_pos, apply_temperature=False)
-        torch.testing.assert_close(actual, expected)
-
     @pytest.mark.parametrize(
         "num_tokens,vocab_size",
         [

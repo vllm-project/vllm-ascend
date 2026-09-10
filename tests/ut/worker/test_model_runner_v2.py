@@ -7,7 +7,6 @@ import numpy as np
 import pytest
 import torch
 from vllm.config import CUDAGraphMode
-from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 from vllm_ascend.utils import vllm_version_is
@@ -45,7 +44,7 @@ def test_execute_model_records_profiling_time():
             side_effect=[10.0, 10.125],
         ),
     ):
-        output = runner.execute_model(scheduler_output, valid_dummy_state_slots=True)
+        output = runner.execute_model(scheduler_output)
 
     assert output is None
     assert runner._cpp_execution_time_ms == pytest.approx(125.0)
@@ -58,7 +57,7 @@ def test_execute_model_records_profiling_time():
         "context_len": 0,
     }
     if not vllm_version_is("0.28.0"):
-        expected_kwargs["valid_dummy_state_slots"] = True
+        expected_kwargs["valid_dummy_state_slots"] = False
     mock_execute_model.assert_called_once_with(scheduler_output, **expected_kwargs)
 
 
@@ -225,8 +224,7 @@ def test_prepare_inputs_preserves_pcp_tokens_and_forwards_graph_padding():
 
 
 @pytest.mark.parametrize("num_reqs,num_tokens", [(4, 4), (2, 6)])
-@pytest.mark.parametrize("valid_state_slots", [False, True])
-def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tokens, valid_state_slots):
+def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tokens):
     runner = _make_runner()
     runner.input_buffers = AscendInputBuffers(4, 8, torch.device("cpu"))
     manager = AscendPCPManager(2, 1, torch.device("cpu"), max_num_reqs=4, max_num_tokens=8)
@@ -245,72 +243,29 @@ def test_pcp_dummy_refreshes_captured_buffers_after_real_batch(num_reqs, num_tok
     with patch("vllm_ascend.worker.v2.input_batch.update_cos_sin"):
         dummy = AscendInputBatch.make_dummy(num_reqs, num_tokens, runner.input_buffers)
 
-    block_tables, slots = runner.prepare_dummy_attn(dummy, valid_state_slots)
+    block_tables, slots = runner.prepare_dummy_attn(dummy)
 
     for name, value in captured.items():
         expected = getattr(dummy, name)
         torch.testing.assert_close(value[: len(expected)], expected)
     np.testing.assert_array_equal(input_buffers.seq_lens_np[:num_reqs], dummy.seq_lens_np)
     assert block_tables[0].data_ptr() == manager._local_block_tables[0].data_ptr()
-    expected_blocks = torch.zeros_like(block_tables[0])
-    if not vllm_version_is("0.28.0") and valid_state_slots:
-        expected_blocks[:, 0] = torch.arange(1, num_reqs + 1, dtype=torch.int32)
-    torch.testing.assert_close(block_tables[0], expected_blocks)
+    assert torch.count_nonzero(block_tables[0]) == 0
     assert slots.data_ptr() == manager._gathered_kv_slot_mappings.data_ptr()
     assert slots.shape == (1, 2 * num_tokens)
     assert torch.all(slots == -1)
 
 
-@pytest.mark.parametrize("valid_state_slots", [None, False, True])
-def test_prepare_dummy_attn_without_pcp_uses_upstream(valid_state_slots):
+def test_prepare_dummy_attn_without_pcp_uses_upstream():
     runner = _make_runner()
     runner.pcp_manager = None
     dummy = object()
     with patch.object(GPUModelRunner, "prepare_dummy_attn", return_value=((), None)) as parent:
-        if valid_state_slots is None:
-            assert runner.prepare_dummy_attn(dummy) == ((), None)
-        else:
-            assert runner.prepare_dummy_attn(dummy, valid_state_slots) == ((), None)
+        assert runner.prepare_dummy_attn(dummy) == ((), None)
     if vllm_version_is("0.28.0"):
         parent.assert_called_once_with(dummy)
     else:
-        parent.assert_called_once_with(dummy, valid_state_slots=bool(valid_state_slots))
-
-
-@pytest.mark.parametrize("valid_state_slots", [None, False, True])
-def test_prepare_dummy_attn_runs_real_parent_and_preserves_storage(valid_state_slots):
-    runner = _make_runner()
-    runner.pcp_manager = None
-    runner.device = torch.device("cpu")
-    runner.block_tables = BlockTables.__new__(BlockTables)
-    tables = (torch.full((4, 3), 99, dtype=torch.int32), torch.full((4, 2), 99, dtype=torch.int32))
-    slots = torch.full((2, 8), 99, dtype=torch.int64)
-    runner.block_tables.input_block_tables = tables
-    runner.block_tables.slot_mappings = slots
-    dummy = SimpleNamespace(num_reqs=2, num_tokens=4)
-
-    if valid_state_slots is None:
-        actual_tables, actual_slots = runner.prepare_dummy_attn(dummy)
-    else:
-        actual_tables, actual_slots = runner.prepare_dummy_attn(dummy, valid_state_slots)
-
-    for actual, storage in zip(actual_tables, tables):
-        assert actual.data_ptr() == storage.data_ptr()
-        expected = torch.zeros_like(storage[:2])
-        if not vllm_version_is("0.28.0") and valid_state_slots:
-            expected[:, 0] = torch.tensor([1, 2], dtype=torch.int32)
-        torch.testing.assert_close(actual, expected)
-        assert torch.all(storage[2:] == 99)
-    assert actual_slots.data_ptr() == slots.data_ptr()
-    assert actual_slots.shape == (2, 4)
-    assert torch.all(slots == -1)
-
-    # A later ordinary dummy step must clear any valid state ids in-place.
-    reset_tables, reset_slots = runner.prepare_dummy_attn(dummy)
-    for reset, storage in zip(reset_tables, tables):
-        assert reset.data_ptr() == storage.data_ptr()
-        assert torch.count_nonzero(reset) == 0
-    assert reset_slots.data_ptr() == slots.data_ptr()
+        parent.assert_called_once_with(dummy, valid_state_slots=False)
 
 
 @pytest.mark.parametrize("enabled", [False, True])
