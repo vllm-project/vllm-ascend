@@ -16,22 +16,20 @@ if (BUILD_OPEN_PROJECT)
     )
 endif()
 
-# MsaIndexScore 的 device 侧实现直接依赖 3rdparty/catlass 的头文件模板库。
-# Catlass 为 header-only，只需把 include 根目录注入 kernel 编译选项即可。
-# CATLASS >= 1.5.0 按架构拆分 TileCopy/CopyGmToL1 等实现：A2/A3 必须定义 CATLASS_ARCH=2201，
-# 否则旧 notla API（TileCopy<ArchTag,A,B,C,Bias>）不会被实例化。
-# v1.3.1-notla 头文件不读取该宏（仅 include guard 含 CATLASS_ARCH_ 前缀），定义后为 no-op。
-#
-# MSA_INDEX_SCORE_DEBUG=1 打开 device 侧 printf/DumpTensor。
-# 大 shape 对齐测试必须关闭：DumpTensor/printf 会导致 device 子进程超时（E39007）。
+# Device 侧使用算子内拷贝的 Catlass 头文件（op_kernel/catlass，来源 v1.3.1-notla），
+# 不再依赖仓库级 3rdparty/catlass 子模块。与 ChunkKdaFwd 的 vendored 方式一致。
+set(MSA_CATLASS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../op_kernel")
+if(NOT EXISTS "${MSA_CATLASS_INCLUDE_DIR}/catlass/msa_catlass.hpp")
+    message(FATAL_ERROR
+        "MsaIndexScore requires vendored Catlass headers under op_kernel/catlass.")
+endif()
+
 add_ops_compile_options(
     OP_NAME MsaIndexScore
     OPTIONS --cce-auto-sync=off
             -Wno-deprecated-declarations
             -fpermissive
-    OPTIONS -I${CMAKE_SOURCE_DIR}/third_party/catlass/include
-    OPTIONS -DCATLASS_ARCH=2201
-    OPTIONS -DMSA_INDEX_SCORE_DEBUG=0
+    OPTIONS -I${MSA_CATLASS_INCLUDE_DIR}
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)
