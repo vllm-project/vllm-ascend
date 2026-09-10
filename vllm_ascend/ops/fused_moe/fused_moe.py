@@ -119,8 +119,10 @@ class AscendMoERunner(MoERunner):  # type: ignore[no-redef]
         # Internal-router gates recompute logits in FP32. Ask AscendUnquantizedLinearMethod
         # to materialize weight_fp32 during process_weights_after_loading so the hot path
         # (and ACLGraph capture) never emits a per-forward aclop Cast via weight.to(fp32).
-        if self.is_internal_router and self.gate is not None and not hasattr(self.gate, "weight_fp32"):
-            self.gate.precast_fp32_weight = True
+        # Use the ctor `gate` arg directly: nn.Module.__getattr__ can shadow
+        # `@property is_internal_router` / `gate` while __init__ is still running.
+        if gate is not None and not hasattr(gate, "weight_fp32"):
+            gate.precast_fp32_weight = True
 
         self.ascend_shared_experts = None
         if shared_experts is not None:
