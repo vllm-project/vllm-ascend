@@ -250,12 +250,17 @@ private:
             values = workBuf_.Get<CacheT>();
             Cast(values, logitsFloat, RoundMode::CAST_RINT, AlignUpU32(validElements, VECTOR_ALIGNMENT_ELEMENTS));
         }
-        PipeBarrier<PIPE_ALL>();
+        const event_t vectorToMte3 = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
+        SetFlag<HardEvent::V_MTE3>(vectorToMte3);
+        WaitFlag<HardEvent::V_MTE3>(vectorToMte3);
         DataCopyPad(
             cache[cacheOffset],
             values,
             DataCopyExtParams(1, validElements * static_cast<uint32_t>(sizeof(CacheT)), 0, 0, 0));
-        PipeBarrier<PIPE_ALL>();
+        // The caller reuses logitsFloat or workBuf_ after the cache copy.
+        const event_t mte3ToVector = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE3_V));
+        SetFlag<HardEvent::MTE3_V>(mte3ToVector);
+        WaitFlag<HardEvent::MTE3_V>(mte3ToVector);
     }
 
     __aicore__ inline LocalTensor<float> LoadTile(uint32_t row, uint32_t tileIndex, bool writeCache = false)
