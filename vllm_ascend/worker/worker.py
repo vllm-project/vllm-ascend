@@ -448,7 +448,7 @@ class NPUWorker(WorkerBase):
         torch.npu.empty_cache()
 
         if get_current_hardware_profile().supports(HardwareCapability.LOCAL_KV_COMM_RESOURCE):
-            setup_ascend_local_comm_res(self.local_rank, self.vllm_config.kv_transfer_config)
+            setup_ascend_local_comm_res(visible_device_index, self.vllm_config.kv_transfer_config)
 
         # take current memory snapshot
         self.init_snapshot = MemorySnapshot(device=device)
