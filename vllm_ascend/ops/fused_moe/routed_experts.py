@@ -53,13 +53,12 @@ def should_force_moe_load_balance(
     capturing: bool,
     cudagraph_runtime_mode: CUDAGraphMode | None,
 ) -> bool:
-    """Enable the explicit eager-only load probe without touching MegaMoe."""
+    """Enable the explicit eager-only load probe for supported MoE backends."""
     if in_profile_run:
         return True
     if (
         not ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE
         or quant_type != QuantType.W4A8MXFP
-        or use_mega_moe
     ):
         return False
     if capturing or cudagraph_runtime_mode not in (None, CUDAGraphMode.NONE):

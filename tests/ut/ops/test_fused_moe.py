@@ -82,7 +82,7 @@ def test_use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval
     assert use_multistage_eplb_load(dynamic_eplb, policy_type, collection_interval) is expected
 
 
-def test_force_load_balance_probe_is_explicit_and_keeps_megamoe_unchanged(monkeypatch):
+def test_force_load_balance_probe_is_explicit_and_supports_megamoe(monkeypatch):
     monkeypatch.setattr(routed_experts_module, "ENABLE_W4A8_MXFP_FORCE_LOAD_BALANCE", True)
 
     assert should_force_moe_load_balance(
@@ -92,7 +92,7 @@ def test_force_load_balance_probe_is_explicit_and_keeps_megamoe_unchanged(monkey
         capturing=False,
         cudagraph_runtime_mode=CUDAGraphMode.NONE,
     )
-    assert not should_force_moe_load_balance(
+    assert should_force_moe_load_balance(
         quant_type=QuantType.W4A8MXFP,
         in_profile_run=False,
         use_mega_moe=True,
