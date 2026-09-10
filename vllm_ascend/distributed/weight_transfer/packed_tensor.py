@@ -218,6 +218,8 @@ def packed_npu_ipc_producer(
         buffer_size_bytes: Exact capacity of the reusable IPC buffer.
     """
     ipc_buffer = torch.empty(buffer_size_bytes, dtype=torch.uint8, device="npu")
+    # Store only the rebuild args (drop the func); the consumer rebuilds with
+    # the well-known ``rebuild_npu_tensor``, mirroring upstream's CUDA IPC engine.
     _, ipc_args = reduce_tensor(ipc_buffer)
 
     names: list[str] = []
@@ -283,8 +285,8 @@ def packed_npu_ipc_consumer(
     IPC buffer across chunks.
 
     Args:
-        ipc_handle: Mapping of NPU UUID to a (func, args) tuple from
-            ``reduce_tensor``.
+        ipc_handle: Mapping of NPU UUID to a ``rebuild_npu_tensor`` args tuple
+            from ``reduce_tensor``.
         physical_npu_id: Physical NPU UUID string for the current process.
         names: Parameter names in the packed buffer.
         shapes: Parameter shapes.
@@ -292,17 +294,21 @@ def packed_npu_ipc_consumer(
         tensor_sizes: Size in bytes of each parameter in the packed buffer.
         device_index: Local NPU device index.
     """
+    # Lazy import: ``rebuild_npu_tensor`` lives in ``torch_npu`` and must not be
+    # imported at module load time on non-NPU hosts.
+    from torch_npu.multiprocessing.reductions import rebuild_npu_tensor
+
     if physical_npu_id not in ipc_handle:
         raise ValueError(
             f"IPC handle not found for NPU UUID {physical_npu_id}. Available UUIDs: {list(ipc_handle.keys())}"
         )
 
-    func, args = ipc_handle[physical_npu_id]
+    args = ipc_handle[physical_npu_id]
     list_args = list(args)
     # Index 6 of the args from reduce_tensor is the device_index.
     # Overwrite it with the receiver's device index.
     list_args[6] = device_index
-    packed = func(*list_args)
+    packed = rebuild_npu_tensor(*list_args)
 
     content_size = sum(tensor_sizes)
     packed = packed[:content_size]

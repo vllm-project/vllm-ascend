@@ -33,11 +33,13 @@ Run specific E2E tests under `tests/e2e/pull_request/`. Tests are automatically 
 
 > Only test paths under `tests/e2e/pull_request/` are supported. Tests in `tests/e2e/nightly/`, `tests/e2e/models/`, or `tests/e2e/doctests/` are not accepted by `/e2e`. Use `/nightly` for nightly tests.
 
+For doctests, run the **Doc Test** workflow manually in GitHub Actions, or let a relevant PR change trigger it automatically. See [Run doctest](../developer_guide/contribution/testing.md#run-doctest) for supported cases and local commands.
+
 Tests are run against both the community vLLM version and the latest release.
 
 ### `/nightly`
 
-Trigger specific nightly test cases on A2 and A3. Supports both PR and issue comments. Test case names correspond to the `test_config.name` entries defined in `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
+Trigger specific nightly test cases on A2 and A3. Supports only PR comments. Test case names correspond to the `test_config.name` entries defined in `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
 
 **Usage:**
 
@@ -45,8 +47,13 @@ Trigger specific nightly test cases on A2 and A3. Supports both PR and issue com
 |---|---|
 | `/nightly <test_cases>` | Runs on `main` branch |
 | `/nightly <test_cases> --branch <branch>` | Runs on the specified branch |
+| `/nightly <test_cases> --aop_enabled` | Enable AOP hooks (bisect / classify) on failure |
 
 Use `--branch <name>` to specify a target branch. Without `--branch`, all arguments are treated as test cases (separated by commas or spaces) and the branch defaults to `main`.
+
+Use `--aop_enabled` to enable the AOP (Aspect-Oriented Programming) pipeline, which
+automatically captures test results, classifies failures (env vs. code), and triggers
+binary bisect for genuine failures. By default, AOP hooks are disabled.
 
 > **Note**: When commenting on a PR, the tests run on the PR branch automatically in the triggered workflow; the `--branch` flag is primarily used in issue comments.
 
@@ -65,7 +72,7 @@ Use `--branch <name>` to specify a target branch. Without `--branch`, all argume
 /nightly qwen3-vl-32b-instruct-w8a8
 
 # Run on a specific release branch
-/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.23.0
+/nightly qwen3-vl-32b-instruct-w8a8 --branch releases/v0.24.0
 
 # Run all tests on a specific branch
 /nightly all --branch my-feature-branch
@@ -78,20 +85,95 @@ Use `--branch <name>` to specify a target branch. Without `--branch`, all argume
 
 # Run accuracy group tests (branch defaults to main)
 /nightly accuracy-group
+
+# Enable AOP bisect for all tests
+/nightly all --aop_enabled
+
+# Run specific test with AOP on a release branch
+/nightly test_custom_op --branch releases/v0.24.0 --aop_enabled
 ```
 
 This triggers `workflow_dispatch` on both `schedule_nightly_test_a2.yaml` and `schedule_nightly_test_a3.yaml`.
 
-### `/rerun`
+### `/cherry-pick`
 
-Re-run all failed workflow runs on the current PR commit. Useful when CI jobs failed due to infrastructure issues.
+Cherry-pick a PR's commits onto a specified target branch and create a new PR. This is useful for backporting fixes to release branches.
+
+**Usage:**
+
+| Syntax | Description |
+|---|---|
+| `/cherry-pick <target_branch>` | Cherry-pick onto the specified branch |
 
 **Examples:**
 
 ```text
-# Re-run all failed CI workflows on this PR
+# Cherry-pick to a release branch
+/cherry-pick releases/v0.24.0
+
+# Cherry-pick to main
+/cherry-pick main
+```
+
+A new PR will be created with the title format `[Cherry-pick] <original_title> (from #<PR_NUMBER>)` and a body linking back to the original PR.
+
+If the cherry-pick encounters merge conflicts, the command will report the failure and the cherry-pick must be done manually.
+
+### `/revert`
+
+Revert a merged PR by creating a new PR that reverses its changes. The revert targets the same base branch the original PR was merged into.
+
+**Usage:**
+
+| Syntax | Description |
+|---|---|
+| `/revert` | Revert this PR (no arguments needed) |
+
+**Example:**
+
+```text
+/revert
+```
+
+A new PR will be created with the title format `[Revert] Revert "original_title" (#PR_NUMBER)` and a body linking back to the original PR and its merge commit.
+
+Only merged PRs can be reverted. If the revert encounters merge conflicts (e.g., because the base branch has diverged significantly), the command will report the failure and the revert must be done manually.
+
+### `/rerun`
+
+Re-run failed CI workflows on the current PR commit. Useful when CI jobs failed or were cancelled due to infrastructure issues.
+
+Only jobs that did not complete successfully are re-run (failed, cancelled, timed out, or startup-failed). Jobs that already succeeded are left untouched. Runs with `cancelled` / `timed_out` / `startup_failure` conclusions are re-run per remaining job, and runs whose failure also contains cancelled jobs (e.g. a vLLM matrix leg cancelled by fail-fast) are handled the same way. Tests executed through reusable workflows (e.g. `Selected Tests`) are re-run via their caller job and are not duplicated.
+
+**Examples:**
+
+```text
+# Re-run failed / cancelled CI jobs on this PR
 /rerun
 ```
+
+### `/cancel`
+
+Force-cancel all workflow runs on the current PR commit. This cancels runs directly triggered on the PR head commit, such as the automatic E2E CI workflow (`pr_test.yaml`). Workflows triggered by slash commands (e.g., `/e2e`, `/rerun`, `/nightly`) or downstream nightly/weekly workflows are **not** affected, as those run on the `main` branch.
+
+**Scope:**
+
+| Cancelled | Not cancelled |
+|---|---|
+| `pr_test.yaml` (E2E) — automatic PR CI | `/e2e` command runs |
+| `schedule_doctest.yaml` | `/rerun` command runs |
+| `schedule_doc_linkcheck.yaml` | `/nightly` / `/weekly` command runs |
+| `schedule_image_build_and_push.yaml` (if labeled) | Downstream nightly/weekly test workflows |
+| `labeled_download_model_dataset.yaml` | Scheduled / `workflow_dispatch` / `push` runs |
+
+**Examples:**
+
+```text
+# Force-cancel all CI runs on this PR
+/cancel
+```
+
+> Note: This uses the `force-cancel` API endpoint, which can cancel runs even when they are in a pending or queued state waiting for runners.
 
 ## Behavior
 
@@ -105,7 +187,10 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|---|
 | `/e2e` | ✅ | ❌ |
 | `/rerun` | ✅ | ❌ |
-| `/nightly` | ✅ | ✅ |
+| `/cancel` | ✅ | ❌ |
+| `/cherry-pick` | ✅ | ❌ |
+| `/revert` | ✅ | ❌ |
+| `/nightly` | ✅ | ❌ |
 
 ## Permission
 
@@ -113,6 +198,9 @@ Re-run all failed workflow runs on the current PR commit. Useful when CI jobs fa
 |---|---|
 | `/e2e` | PR author, or users with triage+ permission on the repository |
 | `/rerun` | PR author, or users with triage+ permission on the repository |
+| `/cancel` | PR author, or users with triage+ permission on the repository |
+| `/cherry-pick` | PR author, or users with triage+ permission on the repository |
+| `/revert` | PR author, or users with triage+ permission on the repository |
 | `/nightly` | Users with triage+ permission on the repository only |
 
 Permission is verified via the GitHub API (`repos/{owner}/{repo}/collaborators/{user}/permission`).

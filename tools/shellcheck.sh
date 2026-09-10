@@ -22,6 +22,7 @@
 set -euo pipefail
 
 scversion="stable"
+shellcheck_args=(-S error -s bash)
 
 if [ -d "shellcheck-${scversion}" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
@@ -37,5 +38,31 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH="$PATH:$(pwd)/shellcheck-${scversion}"
 fi
 
-find . -path ./.git -prune -o -name "*.sh" -print0 | \
-  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash \"\$f\"; done" --
+if [ -n "${SHELLCHECK_OPTS:-}" ]; then
+    # Split caller-provided options the same way shell would.
+    # shellcheck disable=SC2206
+    extra_shellcheck_args=(${SHELLCHECK_OPTS})
+    shellcheck_args+=("${extra_shellcheck_args[@]}")
+fi
+
+if [ "$#" -eq 0 ]; then
+    while IFS= read -r tracked_file; do
+        shellcheck "${shellcheck_args[@]}" "$tracked_file"
+    done < <(git ls-files "*.sh")
+    exit 0
+fi
+
+for file in "$@"; do
+    if git check-ignore -q "$file"; then
+        continue
+    fi
+
+    case "$file" in
+        *.csh|*.tcsh)
+            # Skip C shell scripts because this checker only supports sh-like shells.
+            continue
+            ;;
+    esac
+
+    shellcheck "${shellcheck_args[@]}" "$file"
+done

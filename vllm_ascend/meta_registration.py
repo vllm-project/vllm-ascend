@@ -1,7 +1,7 @@
 import torch
 from torch.library import Library
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
 # This file provides a template and registration utilities for writing "meta" implementations
 # of custom operators in Python for the vllm_ascend project.
@@ -33,9 +33,7 @@ from vllm_ascend.utils import is_310p
 # 3. The registration utility will check if a meta implementation already exists for your op,
 #    and only register if necessary. This avoids duplicate registrations.
 #
-# 4. Example meta implementations are provided below for get_masked_input_and_mask.
-#
-# 5. When developing new custom ops, always provide a meta implementation to enable tracing,
+# 4. When developing new custom ops, always provide a meta implementation to enable tracing,
 #    export, and shape inference in PyTorch and vLLM to enable the capture of `torch.compile`
 #    and aclgraph.
 #
@@ -52,20 +50,6 @@ def register_meta_if_necessary(ns: str, op_name: str, fn, overload: str = ""):
     if schema_to_find in meta_impl_list:
         return
     lib.impl(op_name, fn, "Meta")
-
-
-def get_masked_input_and_mask_meta(
-    input: torch.Tensor,
-    org_vocab_start_index: int,
-    org_vocab_end_index: int,
-    num_org_vocab_padding: int,
-    added_vocab_start_index: int,
-    added_vocab_end_index: int,
-):
-    masked_input = torch.empty_like(input)
-    mask = torch.empty_like(input).to(torch.bool)
-
-    return masked_input, mask
 
 
 def bgmv_expand_meta(
@@ -88,7 +72,6 @@ def sgmv_expand_meta(
     return y_out
 
 
-if not is_310p():
-    register_meta_if_necessary("_C_ascend", "get_masked_input_and_mask", get_masked_input_and_mask_meta)
+if get_current_hardware_profile().supports(HardwareCapability.BGMV_SGMV_META_REGISTRATION):
     register_meta_if_necessary("_C_ascend", "bgmv_expand", bgmv_expand_meta)
     register_meta_if_necessary("_C_ascend", "sgmv_expand", sgmv_expand_meta)

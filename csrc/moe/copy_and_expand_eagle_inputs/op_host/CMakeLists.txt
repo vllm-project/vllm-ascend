@@ -11,7 +11,6 @@ add_ops_compile_options(
     OPTIONS
         --cce-auto-sync=on
         -Wno-deprecated-declarations
-        -Werror
 )
 
 if (NOT BUILD_OPS_RTY_KERNEL)

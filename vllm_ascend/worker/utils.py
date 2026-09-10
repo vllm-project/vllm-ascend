@@ -1,4 +1,5 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from itertools import product as iprod
 from typing import Any
 
@@ -9,6 +10,21 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from vllm.v1.worker.utils import AttentionGroup, KVBlockZeroer
 
 from vllm_ascend.ops.triton.triton_utils import get_vectorcore_num
+
+
+@contextmanager
+def disable_compilation(model: torch.nn.Module) -> Iterator[None]:
+    compilation_model = getattr(model, "model", model)
+    if not hasattr(compilation_model, "do_not_compile"):
+        yield
+        return
+
+    previous = compilation_model.do_not_compile
+    compilation_model.do_not_compile = True
+    try:
+        yield
+    finally:
+        compilation_model.do_not_compile = previous
 
 
 @triton.jit
@@ -69,7 +85,7 @@ class AscendKVBlockZeroer(KVBlockZeroer):
     def init_meta(
         self,
         attn_groups_iter: Iterable["AttentionGroup"],
-        kernel_block_sizes: list[int],
+        kernel_block_sizes: list[list[int]],
         cache_dtype: str,
         runner_only_attn_layers: set[str],
         static_forward_context: dict[str, Any],

@@ -8,7 +8,7 @@ test_cases:
     envs:
       VLLM_WORKER_MULTIPROC_METHOD: "spawn"
       SERVER_PORT: "DEFAULT_PORT"
-      HCCL_BUFFSIZE: "512"
+      HCCL_BUFFSIZE: "768"
     server_cmd:
       - "--enforce-eager"
       - "--no-enable-prefix-caching"
@@ -36,5 +36,5 @@ test_cases:
         max_out_len: 1500
         batch_size: 20
         request_rate: 0
-        baseline: 1
+        baseline: 260.858
         threshold: 0.97

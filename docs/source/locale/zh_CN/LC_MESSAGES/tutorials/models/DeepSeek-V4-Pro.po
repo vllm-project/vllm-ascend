@@ -1,353 +1,662 @@
 # SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
-#, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-06-07 05:04+0000\n"
-"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
-"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language: zh_CN\n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1
-msgid "DeepSeek-V4-Pro"
-msgstr "DeepSeek-V4-Pro"
+msgid "# DeepSeek-V4-Pro"
+msgstr "# DeepSeek-V4-Pro"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:3
-msgid "Introduction"
-msgstr "简介"
+msgid "## 1 Introduction"
+msgstr "## 1 引言"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:5
-msgid "DeepSeek-V4 is introducing several key upgrades over DeepSeek-V3."
-msgstr "DeepSeek-V4在DeepSeek-V3基础上引入了多项关键升级。"
+msgid "DeepSeek-V4 introduces several key upgrades over DeepSeek-V3:"
+msgstr "DeepSeek-V4 在 DeepSeek-V3 的基础上引入了多项关键升级："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:7
 msgid ""
-"The Manifold-Constrained Hyper-Connections (mHC) to strengthen "
-"conventional residual connections;"
-msgstr "流形约束超连接(mHC)增强传统残差连接；"
+"- The Manifold-Constrained Hyper-Connections (mHC) to strengthen conventional residual connections.\n"
+"- A hybrid attention architecture, which greatly improves long-context efficiency through Compress-4-Attention and Compress-128-Attention. For the Mixture-of-Experts (MoE) components, it still adopts the DeepSeekMoE architecture, with only minor adjustments."
+msgstr ""
+"- 流形约束超连接（mHC），用于增强传统的残差连接。\n"
+"- 混合注意力架构，通过 Compress-4-Attention 和 Compress-128-Attention 大幅提升长上下文效率。对于混合专家（MoE）组件，仍采用 DeepSeekMoE 架构，仅做了细微调整。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:8
 msgid ""
-"A hybrid attention architecture, which greatly improves long-context "
-"efficiency through Compress-4-Attention and Compress-128-Attention. For "
-"the Mixture-of Experts (MoE) components, it still adopt the DeepSeekMoE "
-"architecture, with only minor adjustments."
-msgstr "混合注意力架构，通过Compress-4-Attention和Compress-128-Attention大幅提升长上下文效率。对于混合专家(MoE)组件，仍采用DeepSeekMoE架构，仅做少量调整。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:10
-msgid ""
-"DeepSeek-V4-Pro, the maximum reasoning effort mode of DeepSeek-V4-Pro, "
+"DeepSeek-V4-Pro, the maximum reasoning effort mode of DeepSeek-V4, "
 "significantly advances the knowledge capabilities of open-source models, "
-"firmly establishing itself as the best open-source model available today."
-" It achieves top-tier performance in coding benchmarks and significantly "
-"bridges the gap with leading closed-source models on reasoning and "
-"agentic tasks."
-msgstr "DeepSeek-V4-Pro作为DeepSeek-V4-Pro的最大推理努力模式，显著提升了开源模型的知识能力，牢固确立了其作为当今最佳开源模型的地位。它在编码基准测试中达到顶级性能，并在推理和智能体任务上显著缩小了与领先闭源模型的差距。"
+"firmly establishing itself as the best open-source model available today. It"
+" achieves top-tier performance in coding benchmarks and significantly "
+"bridges the gap with leading closed-source models on reasoning and agentic "
+"tasks."
+msgstr ""
+"DeepSeek-V4-Pro 是 DeepSeek-V4 "
+"的最大推理努力模式，显著提升了开源模型的知识能力，牢固确立了其作为当前最佳开源模型的地位。它在编程基准测试中取得了顶级性能，并在推理和智能体任务上显著缩小了与领先闭源模型的差距。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:12
 msgid ""
-"This document will show the main verification steps of the model, "
-"including supported features, feature configuration, environment "
-"preparation, single-node and multi-node deployment, accuracy and "
-"performance evaluation."
-msgstr "本文档将展示该模型的主要验证步骤，包括支持特性、特性配置、环境准备、单节点和多节点部署、精度及性能评估。"
+"This document will show the main verification steps of the model, including "
+"supported features, feature configuration, environment preparation, single-"
+"node and multi-node deployment, accuracy and performance evaluation."
+msgstr "本文档将展示该模型的主要验证步骤，包括支持的特性、特性配置、环境准备、单节点和多节点部署、精度及性能评估。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:14
-msgid "Environment Preparation"
-msgstr "环境准备"
+msgid "## 2 Supported Features"
+msgstr "## 2 支持的特性"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:16
-msgid "Model Weight"
-msgstr "模型权重"
+msgid "## 3 Prerequisites"
+msgstr "## 3 前提条件"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:18
+msgid "### 3.1 Model Weight"
+msgstr "### 3.1 模型权重"
+
 msgid ""
-"`DeepSeek-V4-Pro-w4a8-mtp`(Quantized version): require 2 Atlas 800 A3 "
-"(128G × 8) node or 4 Atlas 800 A2 (64G × 8) node. [Download model "
-"weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-"
-"w4a8-mtp)"
-msgstr "`DeepSeek-V4-Pro-w4a8-mtp`(量化版本)：需要2个Atlas 800 A3(128G × 8)节点或4个Atlas 800 A2(64G × 8)节点。[下载模型权重](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)"
+"It is recommended to download the model weight to the shared directory of "
+"multiple nodes, such as `/root/.cache/`."
+msgstr "建议将模型权重下载到多节点的共享目录中，例如 `/root/.cache/`。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:20
+msgid "### 3.2 Verify Multi-node Communication (Optional)"
+msgstr "### 3.2 验证多节点通信（可选）"
+
+msgid "## 4 Installation"
+msgstr "## 4 安装"
+
+msgid "### 4.1 Docker Image Installation"
+msgstr "### 4.1 Docker 镜像安装"
+
+msgid "Start the docker image on each node."
+msgstr "在每个节点上启动 docker 镜像。"
+
 msgid ""
-"It is recommended to download the model weight to the shared directory of"
-" multiple nodes, such as `/root/.cache/`"
-msgstr "建议将模型权重下载到多节点共享目录，例如`/root/.cache/`"
+"After a successful docker run, you can verify the running container service "
+"by executing the `docker ps` command."
+msgstr "docker 运行成功后，可以通过执行 `docker ps` 命令验证正在运行的容器服务。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:22
-msgid "Verify Multi-node Communication(Optional)"
-msgstr "验证多节点通信(可选)"
+msgid "### 4.2 Source Code Installation"
+msgstr "### 4.2 源码安装"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:24
 msgid ""
-"If you want to deploy multi-node environment, you need to verify multi-"
-"node communication according to [verify multi-node communication "
-"environment](../../installation.md#verify-multi-node-communication)."
-msgstr "如需部署多节点环境，需按照[验证多节点通信环境](../../installation.md#verify-multi-node-communication)验证多节点通信。"
+"If you don't want to use the docker image as above, you can also build all "
+"from source:"
+msgstr "如果您不想像上面那样使用 docker 镜像，也可以从源码构建所有内容："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:26
-msgid "Installation"
-msgstr "安装"
+msgid ""
+"If you want to deploy a multi-node environment, you need to set up the "
+"environment on each node."
+msgstr "如果您想部署多节点环境，需要在每个节点上设置环境。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:28
-msgid "You can using our official docker image to run `DeepSeek-V4` directly."
-msgstr "您可以直接使用官方docker镜像运行`DeepSeek-V4`。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md
-msgid "A2 series"
-msgstr "A2系列"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:38
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:76
-msgid "Start the docker image on your each node."
-msgstr "在每个节点上启动docker镜像。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md
-msgid "A3 series"
-msgstr "A3系列"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:119
-msgid "Deployment"
-msgstr "部署"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:122
 msgid ""
 "In this tutorial, we suppose you downloaded the model weight to "
-"`/root/.cache/`. Feel free to change it to your own path."
-msgstr "在本教程中，我们假设您已将模型权重下载到`/root/.cache/`。您可以根据需要更改路径。"
+"`/root/.cache/modelscope/hub/models/vllm-ascend/`. Feel free to change it to"
+" your own path."
+msgstr ""
+"在本教程中，我们假设您已将模型权重下载到 `/root/.cache/modelscope/hub/models/vllm-"
+"ascend/`。您可以根据需要将其更改为自己的路径。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:125
-msgid "Multi-node Deployment"
-msgstr "多节点部署"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:127
 msgid ""
-"`DeepSeek-V4-Pro-w4a8-mtp`: require at least 2 Atlas 800 A3 (128G × 8) or"
-" 4 Atlas 800 A2 (64G × 8). Run the following scripts on each node "
-"respectively."
-msgstr "`DeepSeek-V4-Pro-w4a8-mtp`：至少需要2个Atlas 800 A3(128G × 8)或4个Atlas 800 A2(64G × 8)。请分别在每个节点上运行以下脚本。"
+"It is recommended that the following service code be encapsulated in a .sh "
+"script file and executed in Bash mode."
+msgstr "建议将以下服务代码封装在 .sh 脚本文件中，并以 Bash 模式执行。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:137
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:301
-msgid "**Node0**"
-msgstr "**Node0**"
+msgid "### 5.1 Multi-Node Online Deployment"
+msgstr "### 5.1 多节点在线部署"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:216
 msgid "**Node1-Node3**"
-msgstr "**Node1-Node3**"
+msgstr "**节点1-节点3**"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:361
 msgid "**Node1**"
-msgstr "**Node1**"
+msgstr "**节点1**"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:424
-msgid "Prefill-Decode Disaggregation"
-msgstr "预填充-解码分离"
+msgid "Service Verification:"
+msgstr "服务验证："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:426
+msgid "### 5.2 Multi-Node PD Separation Deployment"
+msgstr "### 5.2 多节点 PD 分离部署"
+
 msgid ""
-"We'd like to show the deployment guide of DeepSeek-V4 on Atlas 800 A3 "
-"(128G × 8) multi-node environment with 1P1D for better performance."
-msgstr "我们将展示在Atlas 800 A3(128G × 8)多节点环境中使用1P1D部署DeepSeek-V4的指南，以获得更佳性能。"
+"We recommend using Mooncake for deployment: "
+"[Mooncake](../features/pd_disaggregation_mooncake_multi_node.md)."
+msgstr ""
+"我们推荐使用 Mooncake "
+"进行部署：[Mooncake](../features/pd_disaggregation_mooncake_multi_node.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:428
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:794
-msgid "Before you start, please"
-msgstr "开始前，请"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:430
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:796
-msgid "prepare the script `launch_online_dp.py` on each node."
-msgstr "在每个节点上准备脚本`launch_online_dp.py`。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:533
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:898
-msgid "prepare the script `run_dp_template.sh` on each node."
-msgstr "在每个节点上准备脚本`run_dp_template.sh`。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:535
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:760
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1059
-msgid "Prefill node 0"
-msgstr "预填充节点0"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:607
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:767
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1066
-msgid "Prefill node 1"
-msgstr "预填充节点1"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:679
-msgid "Decode node (Same as another D node)"
-msgstr "解码节点(与另一个D节点相同)"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:758
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1057
 msgid ""
-"Once the preparation is done, you can start the server with the following"
-" command on each node:"
-msgstr "准备工作完成后，您可以在每个节点上使用以下命令启动服务器："
+"In the standard deployment mode, Prefill (prompt processing) and Decode "
+"(token generation) tasks run on the same set of NPUs. PD (Prefill-Decode) "
+"separation addresses this by running Prefill and Decode on dedicated node "
+"groups, each configured independently. This architecture is recommended for "
+"production deployments with concurrent multi-user workloads, where stable "
+"latency and high throughput are both required."
+msgstr ""
+"在标准部署模式下，Prefill（提示处理）和Decode（令牌生成）任务在同一组NPU上运行。PD（Prefill-"
+"Decode）分离通过将Prefill和Decode运行在专用节点组上（每组独立配置）来解决此问题。对于需要同时保证稳定延迟和高吞吐量的并发多用户工作负载的生产部署，建议采用此架构。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:774
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1087
-msgid "Decode node 0"
-msgstr "解码节点0"
+msgid "#### 5.2.1 A3 Series PD Separation Deployment"
+msgstr "#### 5.2.1 A3系列PD分离部署"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:781
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1094
-msgid "Decode node 1"
-msgstr "解码节点1"
+msgid "Parameter descriptions:"
+msgstr "参数说明："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:788
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1115
+msgid "#### 5.2.2 A2 Series PD Separation Deployment"
+msgstr "#### 5.2.2 A2系列PD分离部署"
+
+msgid "Before you start, please:"
+msgstr "开始前，请："
+
+msgid "1. Prefill node (4 P nodes share the same script)"
+msgstr "1. Prefill节点（4个P节点共享同一脚本）"
+
+msgid "2. Decode node (4 D nodes share the same script)"
+msgstr "2. Decode节点（4个D节点共享同一脚本）"
+
+msgid "1. Prefill node 0"
+msgstr "1. Prefill节点0"
+
+msgid "2. Prefill node 1"
+msgstr "2. Prefill节点1"
+
+msgid "3. Prefill node 2"
+msgstr "3. Prefill节点2"
+
+msgid "4. Prefill node 3"
+msgstr "4. Prefill节点3"
+
+msgid "5. Decode node 0"
+msgstr "5. Decode节点0"
+
+msgid "6. Decode node 1"
+msgstr "6. Decode节点1"
+
+msgid "7. Decode node 2"
+msgstr "7. Decode节点2"
+
+msgid "8. Decode node 3"
+msgstr "8. Decode节点3"
+
+msgid "4. Deploy the P-D disaggregation proxy."
+msgstr "4. 部署P-D分离代理。"
+
 msgid ""
-"Finally, Refer to [Prefill-Decode Disaggregation "
-"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to "
-"deploy the P-D disaggregation proxy."
-msgstr "最后，参考[预填充-解码分离(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)部署P-D分离代理。"
+"Refer to [Prefill-Decode Disaggregation "
+"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) to deploy "
+"the P-D disaggregation proxy."
+msgstr ""
+"请参考[Prefill-Decode分离 "
+"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)部署P-D分离代理。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:790
-msgid "A2 Prefill-Decode Disaggregation"
-msgstr "A2预填充-解码分离"
+msgid "Deployment Verification:"
+msgstr "部署验证："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:792
 msgid ""
-"We'd like to show the deployment guide of DeepSeek-V4 on Atlas 800 A2 "
-"(64G × 8) multi-node environment with 1P1D for better performance."
-msgstr "我们将展示在Atlas 800 A2(64G × 8)多节点环境中使用1P1D部署DeepSeek-V4的指南，以获得更佳性能。"
+"After the PD separation service is fully started, send a request through the"
+" proxy port on the prefill master node to verify that Prefill and Decode "
+"nodes are working correctly together. Refer to [Prefill-Decode "
+"Disaggregation "
+"(Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md) for the "
+"proxy verification method."
+msgstr ""
+"PD分离服务完全启动后，通过prefill主节点上的代理端口发送请求，验证Prefill和Decode节点是否协同正常工作。代理验证方法请参考[Prefill-"
+"Decode分离 (Deepseek)](../features/pd_disaggregation_mooncake_multi_node.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:900
-msgid "Prefill node  (4 P nodes share the same script)"
-msgstr "预填充节点(4个P节点共享相同脚本)"
+msgid "## 6 Functional Verification"
+msgstr "## 6 功能验证"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:978
-msgid "Decode node (4 D nodes share the same script)"
-msgstr "解码节点(4个D节点共享相同脚本)"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1073
-msgid "Prefill node 2"
-msgstr "预填充节点2"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1080
-msgid "Prefill node 3"
-msgstr "预填充节点3"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1101
-msgid "Decode node 2"
-msgstr "解码节点2"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1108
-msgid "Decode node 3"
-msgstr "解码节点3"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1117
-msgid "Functional Verification"
-msgstr "功能验证"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1119
-msgid "Once your server is started, you can query the model with input prompts:"
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
 msgstr "服务器启动后，您可以使用输入提示查询模型："
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1137
-msgid "Accuracy Evaluation"
-msgstr "精度评估"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1139
-msgid "Here are two accuracy evaluation methods."
-msgstr "以下是两种精度评估方法。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1141
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1167
-msgid "Using AISBench"
-msgstr "使用AISBench"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1143
 msgid ""
-"Refer to [Using "
-"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for "
-"details."
-msgstr "详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
+"In <node0_ip>:<port>, use the IP address and port number of the primary "
+"node. If the primary and standby nodes are separated, use the IP address and"
+" port number of the proxy node."
+msgstr "在<node0_ip>:<port>中，使用主节点的IP地址和端口号。如果主备节点分离，请使用代理节点的IP地址和端口号。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1145
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1163
-msgid "After execution, you can get the result."
-msgstr "执行后即可获取结果。"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1147
-msgid "Using Language Model Evaluation Harness"
-msgstr "使用Language Model Evaluation Harness"
-
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1149
 msgid ""
-"As an example, take the `gsm8k` dataset as a test dataset, and run "
-"accuracy evaluation of `DeepSeek-V4` in online mode."
-msgstr "例如，以`gsm8k`数据集作为测试数据集，在线模式下运行`DeepSeek-V4`的精度评估。"
+"The service returns HTTP 200 OK with a JSON response containing the "
+"`choices` field."
+msgstr "服务返回HTTP 200 OK，并返回包含`choices`字段的JSON响应。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1151
+msgid "## 7 Accuracy Evaluation"
+msgstr "## 7 精度评估"
+
 msgid ""
-"Refer to [Using "
-"lm_eval](../../developer_guide/evaluation/using_lm_eval.md) for `lm_eval`"
-" installation."
-msgstr "`lm_eval`安装请参考[使用lm_eval](../../developer_guide/evaluation/using_lm_eval.md)。"
+"1. Refer to [Using "
+"AISBench](../../developer_guide/evaluation/using_ais_bench.md) for details."
+msgstr ""
+"1. 详情请参考[使用AISBench](../../developer_guide/evaluation/using_ais_bench.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1153
-msgid "Run `lm_eval` to execute the accuracy evaluation."
-msgstr "运行`lm_eval`执行精度评估。"
+msgid "2. After execution, you can get the result."
+msgstr "2. 执行后，即可获取结果。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1165
-msgid "Performance"
-msgstr "性能"
+msgid "## 8 Performance Evaluation"
+msgstr "## 8 性能评估"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1169
 msgid ""
 "Refer to [Using AISBench for performance "
 "evaluation](../../developer_guide/evaluation/using_ais_bench.md#execute-"
 "performance-evaluation) for details."
-msgstr "详情请参考[使用AISBench进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-performance-evaluation)。"
+msgstr ""
+"详情请参考[使用 AISBench "
+"进行性能评估](../../developer_guide/evaluation/using_ais_bench.md#execute-"
+"performance-evaluation)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1171
-msgid "Using vLLM Benchmark"
-msgstr "使用vLLM Benchmark"
+msgid "### Using vLLM Benchmark"
+msgstr "### 使用 vLLM Benchmark"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1173
-msgid "Run performance evaluation of `DeepSeek-V4-Pro-w4a8-mtp` as an example."
-msgstr "以`DeepSeek-V4-Pro-w4a8-mtp`为例运行性能评估。"
+msgid "## 9 Performance Tuning"
+msgstr "## 9 性能调优"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1175
+msgid "### 9.1 Recommended Configurations"
+msgstr "### 9.1 推荐配置"
+
+msgid "#### Table 1: Scenario Overview"
+msgstr "#### 表 1：场景概览"
+
 msgid ""
-"Refer to [vllm "
-"benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html) "
-"for more details."
-msgstr "更多详情请参考[vllm benchmark](https://docs.vllm.ai/en/latest/contributing/benchmarks.html)。"
+"> `*Total NPUs` indicates the total number of NPUs used across all nodes."
+msgstr "> `*Total NPUs` 表示所有节点使用的 NPU 总数。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1177
-msgid "There are three `vllm bench` subcommand:"
-msgstr "`vllm bench`有三个子命令："
+msgid "#### Table 2: Detailed Node Configuration"
+msgstr "#### 表 2：详细节点配置"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1179
-msgid "`latency`: Benchmark the latency of a single batch of requests."
-msgstr "`latency`：基准测试单批次请求的延迟。"
+msgid "### 9.2 Tuning Guidelines"
+msgstr "### 9.2 调优指南"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1180
-msgid "`serve`: Benchmark the online serving throughput."
-msgstr "`serve`：基准测试在线服务吞吐量。"
+msgid "#### 9.2.1 General Tuning Reference"
+msgstr "#### 9.2.1 通用调优参考"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1181
-msgid "`throughput`: Benchmark offline inference throughput."
-msgstr "`throughput`：基准测试离线推理吞吐量。"
+msgid ""
+"Please refer to the [Public Performance Tuning "
+"Documentation](../../developer_guide/performance_and_debug/optimization_and_tuning.md)"
+" for tuning methods."
+msgstr ""
+"调优方法请参考[优化与调优](../../developer_guide/performance_and_debug/optimization_and_tuning.md)。"
 
-#: ../../source/tutorials/models/DeepSeek-V4-Pro.md:1183
-msgid "Take the `serve` as an example. Run the code as follows."
-msgstr "以`serve`为例，运行代码如下。"
+msgid "## 10 FAQ"
+msgstr "## 10 常见问题"
+
+msgid "=== \"A2 series\""
+msgstr "=== \"A2 系列\""
+
+msgid "=== \"A3 series\""
+msgstr "=== \"A3 系列\""
+
+msgid "**Node0**"
+msgstr "**节点0**"
+
+msgid "1. Prepare the script `launch_online_dp.py` on each node."
+msgstr "1. 在每个节点上准备脚本 `launch_online_dp.py`。"
+
+msgid "2. Prepare the script `run_dp_template.sh` on each node."
+msgstr "2. 在每个节点上准备脚本 `run_dp_template.sh`。"
+
+msgid "3. Start the server with the following command on each node."
+msgstr "3. 在每个节点上使用以下命令启动服务器。"
+
+msgid "Key Parameter Descriptions:"
+msgstr "关键参数说明："
+
+msgid "Expected Result:"
+msgstr "预期结果："
+
+msgid "### Using AISBench"
+msgstr "### 使用 AISBench"
+
+msgid "|Parameter|Type|Required|Default|Description|"
+msgstr "|参数|类型|必填|默认值|描述|"
+
+msgid "| dataset | version | metric | mode | vllm-api-general-chat | note |"
+msgstr "| 数据集 | 版本 | 指标 | 模式 | vllm-api-general-chat | 备注 |"
+
+msgid ""
+"    |`--dp-size`|int|Yes|-|Data parallel size (total number of DP ranks "
+"across all nodes).|"
+msgstr "    |`--dp-size`|int|是|-|数据并行大小（所有节点上的DP rank总数）。|"
+
+msgid "    |`--tp-size`|int|No|1|Tensor parallel size within each DP rank.|"
+msgstr "    |`--tp-size`|int|否|1|每个DP rank内的张量并行大小。|"
+
+msgid ""
+"    |`--dp-size-local`|int|No|(same as `--dp-size`)|Number of DP ranks on "
+"the current node. If not set, defaults to `--dp-size`.|"
+msgstr ""
+"    |`--dp-size-local`|int|否|(与`--dp-size`相同)|当前节点上的DP "
+"rank数量。如果未设置，默认为`--dp-size`。|"
+
+msgid ""
+"    |`--dp-rank-start`|int|No|0|Starting rank offset for data parallel ranks"
+" on this node.|"
+msgstr "    |`--dp-rank-start`|int|否|0|此节点上数据并行rank的起始偏移量。|"
+
+msgid ""
+"    |`--dp-address`|str|Yes|-|IP address of the data parallel master node.|"
+msgstr "    |`--dp-address`|str|是|-|数据并行主节点的IP地址。|"
+
+msgid ""
+"    |`--dp-rpc-port`|str|No|12345|RPC port for data parallel master "
+"communication.|"
+msgstr "    |`--dp-rpc-port`|str|否|12345|数据并行主节点通信的RPC端口。|"
+
+msgid ""
+"    |`--vllm-start-port`|int|No|9000|Starting port for each vLLM engine "
+"instance on this node.|"
+msgstr "    |`--vllm-start-port`|int|否|9000|此节点上每个vLLM引擎实例的起始端口。|"
+
+msgid ""
+"- `DeepSeek-V4-Pro-w4a8-mtp` (Quantized version): requires 2 Atlas 800 A3 "
+"(128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. [Download model "
+"weight](https://www.modelscope.cn/models/Eco-Tech/DeepSeek-V4-Pro-w4a8-mtp)"
+msgstr ""
+"- `DeepSeek-V4-Pro-w4a8-mtp`（量化版本）：需要2个Atlas 800 A3（128GB × 8）节点或4个Atlas 800"
+" A2（64GB × 8）节点。[下载模型权重](https://www.modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V4-Pro-w4a8-mtp)"
+
+msgid ""
+"The quantized model `DeepSeek-V4-Pro-w4a8-mtp` requires at least 2 Atlas 800"
+" A3 (128GB × 8) nodes or 4 Atlas 800 A2 (64GB × 8) nodes. Run the following "
+"scripts on each node respectively."
+msgstr ""
+"量化模型 `DeepSeek-V4-Pro-w4a8-mtp` 至少需要2个Atlas 800 A3（128GB × 8）节点或4个Atlas 800 "
+"A2（64GB × 8）节点。请分别在每个节点上运行以下脚本。"
+
+msgid ""
+"The following sections describe PD separation deployment on both Atlas 800 "
+"A3 (128GB × 8) and Atlas 800 A2 (64GB × 8) multi-node environments."
+msgstr "以下章节分别介绍在Atlas 800 A3（128GB × 8）和Atlas 800 A2（64GB × 8）多节点环境下的PD分离部署。"
+
+msgid ""
+"Refer to [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/) for "
+"more details."
+msgstr ""
+"更多详情请参考 [vllm benchmark](https://docs.vllm.ai/en/latest/benchmarking/)。"
+
+msgid ""
+"Refer to [Supported Features "
+"List](../../user_guide/support_matrix/supported_models.md) to get the "
+"model's supported feature matrix."
+msgstr ""
+"请参阅[支持特性列表](../../user_guide/support_matrix/supported_models.md)获取模型的支持特性矩阵。"
+
+msgid ""
+"Refer to [Feature Guide](../../user_guide/feature_guide/index.md) to get the"
+" feature's configuration."
+msgstr "请参阅[特性指南](../../user_guide/feature_guide/index.md)获取特性的配置。"
+
+msgid ""
+"Please refer to the [Feature "
+"Matrix](../../user_guide/support_matrix/feature_matrix.md) for detailed "
+"feature descriptions."
+msgstr ""
+"请参阅[特性矩阵](../../user_guide/support_matrix/feature_matrix.md)获取详细的特性描述。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues, please refer to the [Public "
+"FAQs](../../faqs.md) for troubleshooting."
+msgstr "常见问题提示：如果遇到问题，请参考[公共FAQ](../../faqs.md)进行故障排查。"
+
+msgid ""
+"Common Issues Tip: If you encounter issues with PD separation deployment, "
+"please refer to the [Public FAQs](../../faqs.md) for troubleshooting."
+msgstr "常见问题提示：如果遇到PD分离部署问题，请参考[公共FAQ](../../faqs.md)进行故障排查。"
+
+msgid ""
+"For common environment, installation, and general parameter issues, please "
+"refer to the [Public FAQs](../../faqs.md); this chapter only covers model-"
+"specific issues."
+msgstr "对于常见的环境、安装和一般参数问题，请参考[公共FAQ](../../faqs.md)；本章仅涵盖模型特定问题。"
+
+msgid ""
+"- `DeepSeek-V4-Pro-0813-w4a8` (Official release with DSpark after "
+"quantized): download the production weight from "
+"[ModelScope](https://modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V4-Pro-0813-w4a8). This checkpoint includes the DSpark draft "
+"weights, so no separate draft-model path is required."
+msgstr ""
+"- `DeepSeek-V4-Pro-0813-w4a8`（量化后带 DSpark 的官方发布版本）：从 "
+"[ModelScope](https://modelscope.cn/models/Eco-"
+"Tech/DeepSeek-V4-Pro-0813-w4a8) 下载生产权重。此检查点包含 DSpark 草稿权重，因此无需单独的草稿模型路径。"
+
+msgid ""
+"If you want to deploy a multi-node environment, you need to verify multi-"
+"node communication according to [verify multi-node communication "
+"environment](../../getting_started/installation.md#installation-multi-node-"
+"interconnect)."
+msgstr ""
+"如果您想部署多节点环境，需要按照[验证多节点通信环境](../../getting_started/installation.md#installation-"
+"multi-node-interconnect)验证多节点通信。"
+
+msgid ""
+"Select an image based on your machine type and start the docker image on "
+"your node, refer to [using "
+"docker](../../getting_started/installation.md#installation-prebuilt-image-"
+"selection)."
+msgstr ""
+"根据您的机器类型选择镜像，并在节点上启动 docker 镜像，请参考[使用 "
+"docker](../../getting_started/installation.md#installation-prebuilt-image-"
+"selection)。"
+
+msgid ""
+"- Install `vllm-ascend` from source, refer to "
+"[installation](../../getting_started/installation.md)."
+msgstr "- 从源码安装 `vllm-ascend`，请参考[安装](../../getting_started/installation.md)。"
+
+msgid "## 5 Online Service Deployment"
+msgstr "## 5 在线服务部署"
+
+msgid "=== \"A3 series with DSpark\""
+msgstr "=== \"A3 系列搭配 DSpark\""
+
+msgid ""
+"Use the official `DeepSeek-V4-Pro-0813-w4a8` checkpoint on both nodes. The "
+"example keeps the existing DP2/TP16 topology and changes only the DSpark-"
+"related and required runtime parameters."
+msgstr ""
+"在两个节点上使用官方 `DeepSeek-V4-Pro-0813-w4a8` 检查点。该示例保持现有的 DP2/TP16 拓扑，仅更改与 DSpark "
+"相关的参数和必需的运行时参数。"
+
+msgid ""
+"Use the same environment variables and command as Node0, with the following "
+"DP changes:"
+msgstr "使用与 Node0 相同的环境变量和命令，并进行以下 DP 更改："
+
+msgid ""
+"- `--data-parallel-size` sets the global number of data parallel ranks, and `--data-parallel-size-local` sets the number of DP ranks on the current node.\n"
+"- `--data-parallel-start-rank` specifies the starting data parallel rank of the current node. Each node must be set to a unique value (e.g., Node0 = 0, Node1 = 1).\n"
+"- `--data-parallel-address` specifies the IP address of the data parallel master node (Node0). It must be consistent across all nodes.\n"
+"- `--data-parallel-rpc-port` is the DP RPC port. Use the same value on all nodes and ensure the port is available.\n"
+"- `--tensor-parallel-size` sets the tensor parallel size within each DP rank. Configure it together with the DP sizes according to the deployment topology and available NPUs.\n"
+"- `--enable-expert-parallel` enables expert parallelism for MoE layers. Do not mix MoE tensor parallelism and expert parallelism in the same MoE layer.\n"
+"- `--headless` (used on non-master nodes) disables the API server on the node, since only the master node serves requests.\n"
+"- `--max-model-len` specifies the maximum context length. Adjust it according to your actual scenario.\n"
+"- `--max-num-seqs` indicates the maximum number of requests that each DP group is allowed to process. If the number of requests sent to the service exceeds this limit, the excess requests will remain in a waiting state and will not be scheduled. Note that the time spent in the waiting state is also counted in metrics such as TTFT and TPOT. Therefore, when testing performance, it is generally recommended that `--max-num-seqs` * `--data-parallel-size` >= the actual total concurrency.\n"
+"- `--max-num-batched-tokens` is the maximum number of tokens processed in one scheduler step. A larger value can improve prefill efficiency but consumes more activation memory.\n"
+"- `--tokenizer-mode deepseek_v4`, `--tool-call-parser deepseek_v4`, `--enable-auto-tool-choice`, and `--reasoning-parser deepseek_v4` enable the DeepSeek-V4 tokenizer behavior, automatic tool calling, and reasoning-output parsing.\n"
+"- `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.\n"
+"- `--block-size` sets the KV cache block size. To enable the experimental 4k prefix cache hit support, change it from `128` to `32`.\n"
+"- `--quantization ascend` enables Ascend quantization for the W4A8 model.\n"
+"- `--model-loader-extra-config='{\"enable_multithread_load\": true, \"num_threads\": 128}'` selects the multi-thread weight iterator. `enable_multithread_load` must be a JSON boolean and `num_threads` must be a positive integer.\n"
+"- `--safetensors-load-strategy prefetch` is an alternative that warms checkpoint files into the OS page cache before the normal iterator loads them. Do not combine it with multi-thread loading: the default loader rejects `prefetch`, `eager`, or `torchao` when `enable_multithread_load` is `true`. The examples in this document use only multi-thread loading.\n"
+"- `--speculative-config` configures speculative decoding. Use `mtp` for the preview MTP checkpoint and `dspark` for `DeepSeek-V4-Pro-0813-w4a8`. For DSpark, use the value declared by the checkpoint; the example uses five speculative tokens, and all ranks must use the same value.\n"
+"- `--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` enables full ACL graph execution in the decode phase to reduce scheduling latency.\n"
+"- `--additional-config` enables Ascend-specific optimizations. `enable_npugraph_ex` enables enhanced ACL graph execution, `enable_static_kernel: false` keeps static-kernel compilation disabled, `enable_cpu_binding` enables Ascend-native CPU binding, `enable_shared_expert_dp` enables data parallelism for shared experts, and `multistream_overlap_shared_expert` overlaps shared expert computation for better MoE throughput.\n"
+"- `enable_flashcomm1: true` in `--additional-config` enables the FlashComm1 communication optimization. This is the recommended replacement for the deprecated `VLLM_ASCEND_ENABLE_FLASHCOMM1` environment variable. Configure it explicitly whenever `enable_dsa_cp` is enabled.\n"
+"- `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` retains prefix-cache checkpoints every 4096 tokens. It takes effect only when prefix caching is enabled and must be a non-negative multiple of `--block-size`; `4096` matches the DSpark example's block size of `32`."
+msgstr ""
+"- `--data-parallel-size` 设置全局数据并行 rank 的数量，`--data-parallel-size-local` 设置当前节点上的 DP rank 数量。\n"
+"- `--data-parallel-start-rank` 指定当前节点的起始数据并行 rank。每个节点必须设置为唯一值（例如，Node0 = 0，Node1 = 1）。\n"
+"- `--data-parallel-address` 指定数据并行主节点（Node0）的 IP 地址。所有节点必须保持一致。\n"
+"- `--data-parallel-rpc-port` 是 DP RPC 端口。所有节点使用相同的值，并确保该端口可用。\n"
+"- `--tensor-parallel-size` 设置每个 DP rank 内的张量并行大小。根据部署拓扑和可用的 NPU，与 DP 大小一起配置。\n"
+"- `--enable-expert-parallel` 为 MoE 层启用专家并行。不要在同一个 MoE 层中混合使用 MoE 张量并行和专家并行。\n"
+"- `--headless`（用于非主节点）禁用节点上的 API 服务器，因为只有主节点提供服务请求。\n"
+"- `--max-model-len` 指定最大上下文长度。根据您的实际场景进行调整。\n"
+"- `--max-num-seqs` 表示每个 DP 组允许处理的最大请求数。如果发送到服务的请求数超过此限制，多余的请求将保持等待状态，不会被调度。请注意，等待状态所花费的时间也会计入 TTFT 和 TPOT 等指标中。因此，在进行性能测试时，通常建议 `--max-num-seqs` * `--data-parallel-size` >= 实际总并发数。\n"
+"- `--max-num-batched-tokens` 是调度器单步处理的最大 token 数。较大的值可以提高 prefill 效率，但会消耗更多的激活内存。\n"
+"- `--tokenizer-mode deepseek_v4`、`--tool-call-parser deepseek_v4`、`--enable-auto-tool-choice` 和 `--reasoning-parser deepseek_v4` 启用 DeepSeek-V4 tokenizer 行为、自动工具调用和推理输出解析。\n"
+"- `--no-enable-prefix-caching` 表示禁用前缀缓存。要启用它，请移除该选项。\n"
+"- `--block-size` 设置 KV 缓存块大小。要启用实验性的 4k 前缀缓存命中支持，请将其从 `128` 改为 `32`。\n"
+"- `--quantization ascend` 为 W4A8 模型启用 Ascend 量化。\n"
+"- `--model-loader-extra-config='{\"enable_multithread_load\": true, \"num_threads\": 128}'` 选择多线程权重迭代器。`enable_multithread_load` 必须是 JSON 布尔值，`num_threads` 必须是正整数。\n"
+"- `--safetensors-load-strategy prefetch` 是一种替代方案，在常规迭代器加载检查点文件之前，将其预热到操作系统页面缓存中。不要将其与多线程加载结合使用：当 `enable_multithread_load` 为 `true` 时，默认加载器会拒绝 `prefetch`、`eager` 或 `torchao`。本文档中的示例仅使用多线程加载。\n"
+"- `--speculative-config` 配置投机解码。对于预览版 MTP 检查点使用 `mtp`，对于 `DeepSeek-V4-Pro-0813-w4a8` 使用 `dspark`。对于 DSpark，使用检查点声明的值；示例使用五个投机 token，所有 rank 必须使用相同的值。\n"
+"- `--compilation-config '{\"cudagraph_mode\":\"FULL_DECODE_ONLY\"}'` 在解码阶段启用完整的 ACL 图执行，以减少调度延迟。\n"
+"- `--additional-config` 启用 Ascend 特定的优化。`enable_npugraph_ex` 启用增强的 ACL 图执行，`enable_static_kernel: false` 保持静态内核编译禁用，`enable_cpu_binding` 启用 Ascend 原生 CPU 绑定，`enable_shared_expert_dp` 为共享专家启用数据并行，`multistream_overlap_shared_expert` 重叠共享专家计算以提高 MoE 吞吐量。\n"
+"- `--additional-config` 中的 `enable_flashcomm1: true` 启用 FlashComm1 通信优化。这是已弃用的 `VLLM_ASCEND_ENABLE_FLASHCOMM1` 环境变量的推荐替代方案。每当启用 `enable_dsa_cp` 时，请显式配置它。\n"
+"- `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=4096` 每 4096 个 token 保留一次前缀缓存检查点。仅在启用前缀缓存时生效，且必须是 `--block-size` 的非负倍数；`4096` 与 DSpark 示例中 `32` 的块大小匹配。"
+
+msgid ""
+"This section shows a deployment with one Prefill pool and one Decode pool on"
+" Atlas 800 A3 (128GB × 8). The example uses two physical nodes for each "
+"pool."
+msgstr ""
+"本节展示了在 Atlas 800 A3（128GB × 8）上使用一个 Prefill 池和一个 Decode 池的部署。示例为每个池使用两个物理节点。"
+
+msgid ""
+"2. Select one of the following configurations and prepare "
+"`run_dp_template.sh` on each node."
+msgstr "2. 选择以下配置之一，并在每个节点上准备 `run_dp_template.sh`。"
+
+msgid "=== \"A3 series with MTP\""
+msgstr "=== \"A3 系列搭配 MTP\""
+
+msgid ""
+"Both Prefill nodes use the same template. Set `local_ip` to the IP address "
+"of the current node."
+msgstr "两个 Prefill 节点使用相同的模板。将 `local_ip` 设置为当前节点的 IP 地址。"
+
+msgid "**Prefill nodes**"
+msgstr "**Prefill 节点**"
+
+msgid ""
+"Both Decode nodes also use one shared template. Set `local_ip` to the IP "
+"address of the current node."
+msgstr "两个 Decode 节点也使用同一个共享模板。将 `local_ip` 设置为当前节点的 IP 地址。"
+
+msgid "**Decode nodes**"
+msgstr "**Decode 节点**"
+
+msgid ""
+"Start the two Prefill nodes and two Decode nodes. The two Prefill commands "
+"are both required because each node owns a different DP rank range."
+msgstr ""
+"启动两个 Prefill 节点和两个 Decode 节点。两个 Prefill 命令都是必需的，因为每个节点拥有不同的 DP rank 范围。"
+
+msgid ""
+"The official `DeepSeek-V4-Pro-0813-w4a8` checkpoint supports DSpark without "
+"a separate draft-model path. Reuse `launch_online_dp.py` above and use the "
+"following role-specific templates."
+msgstr ""
+"官方 `DeepSeek-V4-Pro-0813-w4a8` 检查点支持 DSpark，无需单独的草稿模型路径。复用上面的 "
+"`launch_online_dp.py`，并使用以下按角色区分的模板。"
+
+msgid ""
+"Start the two Prefill nodes and two Decode nodes. Replace the addresses with"
+" the Prefill and Decode master-node IPs respectively."
+msgstr "启动两个 Prefill 节点和两个 Decode 节点。将地址分别替换为 Prefill 和 Decode 主节点的 IP。"
+
+msgid "3. Deploy the P-D disaggregation proxy."
+msgstr "3. 部署 P-D 分离代理。"
+
+msgid ""
+"This section shows a deployment with one Prefill pool and one Decode pool on"
+" Atlas 800 A2 (64GB × 8). The example uses four physical nodes for each "
+"pool."
+msgstr ""
+"本节展示在 Atlas 800 A2（64GB × 8）上部署一个 Prefill 池和一个 Decode 池的示例。该示例为每个池使用四个物理节点。"
+
+msgid ""
+"- `--no-disable-hybrid-kv-cache-manager` keeps the hybrid KV cache manager enabled. DeepSeek-V4 KV Pool deployments require this flag; otherwise, the service may OOM during startup.\n"
+"- `--enforce-eager` forces eager execution on prefill nodes instead of graph compilation.\n"
+"- `--trust-remote-code` allows the model repository's custom code to be loaded. Only use trusted model repositories.\n"
+"- `enable_dsa_cp: true` enables DSA context parallelism on Prefill nodes. DSA-CP depends on FlashComm1, so the same `--additional-config` object must also set `\"enable_flashcomm1\": true`.\n"
+"- `--kv-transfer-config` configures KV cache transfer between the prefill producer and decode consumer in PD separation.\n"
+"- `kv_connector_extra_config.prefill.dp_size/tp_size` and `decode.dp_size/tp_size` must match the actual global DP and TP layout on the prefill and decode sides.\n"
+"- `additional_config.enable_fused_mc2=1`: enables the Fused MC2 fusion operator to accelerate communication on Prefill nodes (A3 series).\n"
+"- `scheduler_config.recompute_scheduler_enable: true`: enables the recomputation scheduler. When the KV Cache of the Decode node is insufficient, requests are sent to Prefill for KV Cache recomputation. Enable it only on PD Decode nodes; the legacy top-level key is deprecated.\n"
+"- `--speculative-config`: Prefill and Decode must use the same DSpark `num_speculative_tokens` value. Use the value declared by the checkpoint; this example uses `5`. The nested `enforce_eager` applies to DSpark draft execution, while the top-level `--enforce-eager` keeps the Prefill target model in eager mode.\n"
+"- `MooncakeHybridConnector`: the KV transfer connector used for PD separation, transferring KV Cache between prefill and decode nodes."
+msgstr ""
+"- `--no-disable-hybrid-kv-cache-manager` 保持混合 KV 缓存管理器处于启用状态。DeepSeek-V4 KV Pool 部署需要此标志；否则服务在启动过程中可能发生 OOM。\n"
+"- `--enforce-eager` 强制 Prefill 节点使用 eager 执行而非图编译。\n"
+"- `--trust-remote-code` 允许加载模型仓库中的自定义代码。仅使用受信任的模型仓库。\n"
+"- `enable_dsa_cp: true` 在 Prefill 节点上启用 DSA 上下文并行。DSA-CP 依赖 FlashComm1，因此同一个 `--additional-config` 对象还必须设置 `\"enable_flashcomm1\": true`。\n"
+"- `--kv-transfer-config` 配置 PD 分离中 Prefill 生产者与 Decode 消费者之间的 KV 缓存传输。\n"
+"- `kv_connector_extra_config.prefill.dp_size/tp_size` 和 `decode.dp_size/tp_size` 必须与 Prefill 和 Decode 两侧实际全局 DP 和 TP 布局一致。\n"
+"- `additional_config.enable_fused_mc2=1`：启用 Fused MC2 融合算子以加速 Prefill 节点（A3 系列）上的通信。\n"
+"- `scheduler_config.recompute_scheduler_enable: true`：启用重计算调度器。当 Decode 节点的 KV Cache 不足时，请求会被发送到 Prefill 进行 KV Cache 重计算。仅在 PD Decode 节点上启用；旧的顶层键已弃用。\n"
+"- `--speculative-config`：Prefill 和 Decode 必须使用相同的 DSpark `num_speculative_tokens` 值。使用检查点声明的值；本示例使用 `5`。嵌套的 `enforce_eager` 适用于 DSpark 草稿执行，而顶层 `--enforce-eager` 保持 Prefill 目标模型处于 eager 模式。\n"
+"- `MooncakeHybridConnector`：用于 PD 分离的 KV 传输连接器，在 Prefill 和 Decode 节点之间传输 KV Cache。"
+
+msgid ""
+"> **Note**: The following configurations are based on the Chapter 5 "
+"deployment examples and specific test environments. They are for reference "
+"only and are not globally optimal. In particular, the long-context "
+"configuration is a suggested starting point for inputs around 1M tokens and "
+"must be validated against the actual input/output length, prefix cache hit "
+"rate, concurrency, memory usage, and deployment environment. Refer to "
+"Section 9.2 for further tuning."
+msgstr ""
+"> **注意**：以下配置基于第 5 章的部署示例和特定测试环境，仅供参考，并非全局最优。特别是，长上下文配置是针对约 1M token "
+"输入的建议起点，必须根据实际输入/输出长度、前缀缓存命中率、并发度、内存使用情况和部署环境进行验证。进一步调优请参考第 9.2 节。"
+
+msgid ""
+"| Scenario | Deployment Mode | *Total NPUs | Weight Version | Key "
+"Considerations |"
+msgstr "| 场景 | 部署模式 | *NPU 总数 | 权重版本 | 关键考量 |"
+
+msgid ""
+"| Short Sequence / High Throughput | 1P1D deployment (2 Prefill + 2 Decode "
+"A3 nodes) | 64 (A3) | DeepSeek-V4-Pro-0813-w4a8 | Compared with the long-"
+"context configuration, use higher DP and concurrency: Prefill uses DP4/TP8 "
+"with 16 sequences, while Decode uses DP16/TP2 with 8 sequences. Enable "
+"FUSED_MC2 on Prefill to prioritize throughput. |"
+msgstr ""
+"| 短序列 / 高吞吐 | 1P1D 部署（2 个 Prefill + 2 个 Decode A3 节点） | 64 (A3) | "
+"DeepSeek-V4-Pro-0813-w4a8 | 与长上下文配置相比，使用更高的 DP 和并发度：Prefill 使用 DP4/TP8 并支持 "
+"16 个序列，而 Decode 使用 DP16/TP2 并支持 8 个序列。在 Prefill 上启用 FUSED_MC2 以优先保证吞吐量。 |"
+
+msgid ""
+"| Long Context (~1M Input, Reference) | 1P1D deployment (2 Prefill + 2 "
+"Decode A3 nodes) | 64 (A3) | DeepSeek-V4-Pro-0813-w4a8 | Compared with the "
+"short-sequence configuration, use DP2/TP16 on both sides, reduce both sides "
+"to 2 sequences, and reduce Decode batched tokens to 16 to reserve memory for"
+" a 1M-token context. |"
+msgstr ""
+"| 长上下文（约 1M 输入，参考） | 1P1D 部署（2 个 Prefill + 2 个 Decode A3 节点） | 64 (A3) | "
+"DeepSeek-V4-Pro-0813-w4a8 | 与短序列配置相比，两侧均使用 DP2/TP16，将两侧序列数减少到 2，并将 Decode "
+"批处理 token 数减少到 16，以便为 1M token 上下文预留内存。 |"
+
+msgid ""
+"| Scenario | Configuration | NPUs | TP | DP | Max Num Seqs | Max Num Batched"
+" Tokens | Max Model Len | DSpark Speculation Num | FUSED_MC2 | EP Switch | "
+"FC / DSA-CP Switch |"
+msgstr ""
+"| 场景 | 配置 | NPU 数 | TP | DP | 最大序列数 | 最大批处理 token 数 | 最大模型长度 | DSpark 投机数量 |"
+" FUSED_MC2 | EP 开关 | FC / DSA-CP 开关 |"
+
+msgid ""
+"> `FC / DSA-CP Switch` reports the FlashComm1 and DSA context-parallel switches respectively. For the long-context Prefill configuration, set `\"enable_flashcomm1\": true` and `\"enable_dsa_cp\": false` in `--additional-config`. On Decode, configure recomputation as `\"scheduler_config\": {\"recompute_scheduler_enable\": true}`. Keep the role-specific `--kv-transfer-config` as the final argument, using `\"kv_port\": \"30100\"` and `\"engine_id\": \"1\"` for Prefill, and `\"kv_port\": \"30800\"` and `\"engine_id\": \"8\"` for Decode.\n"
+">\n"
+"> FUSED_MC2 is disabled in the long-context reference configuration because it increases memory usage. If sufficient memory is available and higher performance is the priority, enabling FUSED_MC2 on Prefill is recommended.\n"
+">\n"
+"> `--max-model-len 1048576` is the total context budget for prompt and generated tokens, not an additional output budget on top of a 1M-token prompt. Reduce `--max-num-seqs` or the actual input length if memory is insufficient.\n"
+">\n"
+"> For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment)."
+msgstr ""
+"> `FC / DSA-CP 开关`分别表示 FlashComm1 和 DSA 上下文并行开关。对于长上下文 Prefill 配置，在 `--additional-config` 中设置 `\"enable_flashcomm1\": true` 和 `\"enable_dsa_cp\": false`。在 Decode 上，将重计算配置为 `\"scheduler_config\": {\"recompute_scheduler_enable\": true}`。将角色特定的 `--kv-transfer-config` 保留为最后一个参数，Prefill 使用 `\"kv_port\": \"30100\"` 和 `\"engine_id\": \"1\"`，Decode 使用 `\"kv_port\": \"30800\"` 和 `\"engine_id\": \"8\"`。\n"
+">\n"
+"> 在长上下文参考配置中禁用了 FUSED_MC2，因为它会增加内存使用。如果内存充足且优先追求更高性能，建议在 Prefill 上启用 FUSED_MC2。\n"
+">\n"
+"> `--max-model-len 1048576` 是提示词和生成 token 的总上下文预算，不是 1M token 提示词之外的额外输出预算。如果内存不足，请减少 `--max-num-seqs` 或实际输入长度。\n"
+">\n"
+"> 完整的启动命令和参数说明，请参考[第 5 章](#5-online-service-deployment)中的部署示例。"

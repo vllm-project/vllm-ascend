@@ -21,6 +21,8 @@ from vllm.compilation.passes.inductor_pass import get_pass_context
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import VllmConfig
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+
 
 class GraphFusionPassManager:
     """
@@ -47,33 +49,25 @@ class GraphFusionPassManager:
         self.passes.append(pass_)
 
     def configure(self, config: VllmConfig):
-        from vllm_ascend.utils import is_310p
+        from vllm_ascend.ascend_config import get_ascend_config
 
-        # By default, we enable the graph fusion and quantization fusion pass.
-        self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
-        if self.ascend_compilation_config.get("fuse_norm_quant", True) and not is_310p():
+        # Consume the recursively validated config rather than re-reading the
+        # raw additional_config dict (where e.g. "false" is truthy).
+        self.ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        profile = get_current_hardware_profile()
+        if self.ascend_compilation_config.fuse_norm_quant and profile.supports(
+            HardwareCapability.GRAPH_NORM_QUANT_FUSION
+        ):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
 
             self.passes.append(AddRMSNormQuantFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_qknorm_rope", True):
+        if self.ascend_compilation_config.fuse_qknorm_rope:
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
 
             self.passes.append(QKNormRopeFusionPass(config))
 
-        if self.ascend_compilation_config.get("fuse_allreduce_rms", True):
-            from .passes.allreduce_rmsnorm_fusion_pass import MatmulAllReduceAddRMSNormPass
-
-            self.passes.append(MatmulAllReduceAddRMSNormPass(config))
-
-        if self.ascend_compilation_config.get("fuse_muls_add", True) and not is_310p():
+        if self.ascend_compilation_config.fuse_muls_add and profile.supports(HardwareCapability.GRAPH_MULS_ADD_FUSION):
             from .passes.muls_add_pass import MulsAddFusionPass
 
             self.passes.append(MulsAddFusionPass(config))
-
-        if config.compilation_config.pass_config.enable_sp:
-            from .passes.sequence_parallelism import SequenceParallelismPass
-            from .passes.sequence_parallelism_moe import SequenceParallelismMoePass
-
-            self.passes.append(SequenceParallelismPass(config))
-            self.passes.append(SequenceParallelismMoePass(config))

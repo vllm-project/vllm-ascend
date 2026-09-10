@@ -247,7 +247,7 @@ __aicore__ inline void HC_PRE_CUBE_COMPUTE_TEMPLATE_CLASS::Fixp(const AscendC::G
         mmParams.curML1,
         mmParams.curNL1,
         true,
-        mmParams.nOutSize);  // m,n 512B aligned
+        mmParams.nOutSize);  // ND M/N are 512B aligned.
 }
 
 HC_PRE_CUBE_COMPUTE_TEMPLATE_PARAM

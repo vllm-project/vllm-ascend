@@ -1,0 +1,240 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+name: Selected Tests Upstream
+
+on:
+  workflow_call:
+    inputs:
+      vllm:
+        type: string
+        required: true
+        description: 'The vllm commit hash or tag to test.'
+      test_groups:
+        type: string
+        required: true
+        description: 'JSON array of test groups from select_tests.py'
+      ref:
+        type: string
+        required: false
+        default: ''
+        description: 'The vllm-ascend ref to test.'
+      base_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'The base branch to rebase onto (e.g. main, v0.8.x).'
+      base_sha:
+        type: string
+        required: false
+        default: ''
+        description: 'The fixed base commit to rebase onto.'
+      upload_timing:
+        type: boolean
+        required: false
+        default: false
+        description: 'Upload test_timing_data.json as artifact'
+      continue_on_error:
+        type: boolean
+        required: false
+        default: false
+        description: 'Continue running the job even if tests fail'
+      enable-coverage:
+        type: boolean
+        required: false
+        default: false
+        description: 'Whether to run tests with coverage enabled.'
+    secrets:
+      OBS_ACCESS_KEY_PRECISION:
+        required: false
+      OBS_SECRET_ACCESS_KEY_PRECISION:
+        required: false
+
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 1 card / 4 cards test type
+concurrency:
+  group: upstream-${{ github.workflow }}-${{ github.ref }}-${{ inputs.vllm }}
+  cancel-in-progress: true
+
+env:
+  UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+  UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+  UV_INDEX_STRATEGY: unsafe-best-match
+  UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+  UV_HTTP_TIMEOUT: 120
+  UV_NO_CACHE: 1
+  UV_SYSTEM_PYTHON: 1
+
+jobs:
+    e2e-upstream_pr:
+        runs-on: linux-aarch64-a2b3-1
+        strategy:
+          fail-fast: false
+          matrix:
+            part: [0]
+            image_tag: [9.1.0-910b-ubuntu22.04-py3.12]
+            num_npus: [1]
+        container:
+          image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+          env:
+            VLLM_LOGGING_LEVEL: ERROR
+            HF_HUB_OFFLINE: 1
+        steps:
+          - name: Checkout vllm-project/vllm-ascend repo
+            uses: actions/checkout@v7
+            with:
+              ref: ${{ inputs.ref || github.ref }}
+              fetch-depth: 0
+              submodules: recursive
+          - name: Check npu and CANN info
+            run: |
+              npu-smi info
+              cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+          - name: Config mirrors
+            run: |
+              sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+              pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+              pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+              apt-get update -y
+              apt install git zstd -y
+              git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          - name: Install system dependencies
+            run: |
+              apt-get -y install `cat packages.txt`
+              apt-get -y install gcc g++ cmake libnuma-dev clang-15
+              update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20
+              update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20
+              pip install uv
+
+          - name: Rebase on ${{ inputs.base_ref }} snapshot
+            env:
+              BASE_REF: ${{ inputs.base_ref }}
+              FIXED_BASE_SHA: ${{ inputs.base_sha }}
+            run: |
+              # Reproduce the snapshot used by the cache coordinator. Falling
+              # back to FETCH_HEAD supports callers without a fixed base SHA.
+              git config user.name "vllm-ascend-ci"
+              git config user.email "vllm-ascend-ci@users.noreply.github.com"
+              git fetch origin "$BASE_REF"
+              BASE_SHA="$FIXED_BASE_SHA"
+              if [ -z "$BASE_SHA" ]; then
+                BASE_SHA=$(git rev-parse FETCH_HEAD)
+              fi
+              git cat-file -e "${BASE_SHA}^{commit}"
+              git rebase "$BASE_SHA"
+              git submodule sync --recursive
+              git submodule update --init --recursive
+
+          - name: Checkout vllm-project/vllm repo
+            uses: actions/checkout@v7
+            with:
+              repository: vllm-project/vllm
+              ref: ${{ inputs.vllm }}
+              path: ./vllm-empty
+              fetch-depth: 1
+
+          - name: Install vllm-project/vllm from source
+            working-directory: ./vllm-empty
+            run: |
+              VLLM_TARGET_DEVICE=empty uv pip install -e .
+              pip uninstall -y triton
+              sed -i '5i\import vllm_ascend.patch.platform\nimport vllm_ascend.patch.worker' tests/conftest.py
+
+          - name: Get csrc hash
+            id: get_csrc_hash
+            run: |
+              # Fail closed so a git error cannot become sha256(empty) and then
+              # appear to be an ordinary cache miss.
+              set -euo pipefail
+              git config --global --add safe.directory "$GITHUB_WORKSPACE"
+              cd "$GITHUB_WORKSPACE"
+
+              # Match the cache producer's tracked csrc build inputs exactly.
+              CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+              if [ -z "$CSRC_MANIFEST" ]; then
+                echo "::error::No tracked csrc inputs found."
+                exit 1
+              fi
+
+              CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
+              echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+
+          - name: Get architecture
+            id: get_arch
+            run: |
+              ARCH=$(uname -m)
+              case "$ARCH" in
+                x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
+                aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
+                *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
+              esac
+
+          - name: Restore vllm-ascend csrc cache
+            id: cache-csrc
+            uses: runs-on/cache/restore@v5
+            with:
+              path: |
+                vllm_ascend/_cann_ops_custom
+                vllm_ascend/*.so
+                vllm_ascend/lib
+                vllm_ascend/include
+              key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+              # During the rollout, tolerate misses so CI can fall back to the
+              # existing NPU build while CPU cache production proves stable.
+              # Restore fail-on-cache-miss to true after the transition period.
+              fail-on-cache-miss: false
+
+          - name: Install vllm-project/vllm-ascend with device
+            env:
+              CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+            run: |
+              export MAX_JOBS=$(( ${{ matrix.num_npus }} * 23 ))
+              pip install uc-manager
+              uv pip install -r requirements-dev.txt
+              uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
+              # Preserve CI availability during the transition by compiling on
+              # the NPU only when the CPU-produced cache is unavailable.
+              if [ "$CSRC_CACHE_HIT" = "true" ]; then
+                echo "csrc cache hit: skip kernel compilation"
+                COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+              else
+                echo "csrc cache miss: compile kernels on the NPU runner"
+                uv pip install -e . --no-build-isolation
+              fi
+              uv pip install tblib
+
+          - name: Run vllm-project/vllm test
+            working-directory: ./vllm-empty
+            env:
+              PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+              VLLM_WORKER_MULTIPROC_METHOD: spawn
+              TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+            run: |
+              python3 ../.github/workflows/scripts/run_suite.py \
+                --suite e2e-upstream_pr \
+                --auto-partition-id "${{ matrix.part }}" \
+                --auto-partition-size 1 \
+                --continue-on-error

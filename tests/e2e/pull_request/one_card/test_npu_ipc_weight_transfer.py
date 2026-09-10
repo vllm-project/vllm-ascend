@@ -1,0 +1,166 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+"""End-to-end test for the NPU IPC weight transfer engine.
+
+Unlike the HCCL engine, NPU IPC requires the trainer and the inference worker
+to be co-located on the *same* physical NPU chip, so only a single NPU is
+needed. The trainer model is built from the architecture config with random
+weights (download-free); set ``WEIGHT_TRANSFER_TEST_MODEL=/path/to/checkpoint``
+to share real weights instead. See ``examples/rl/rlhf_http_npu_ipc.py`` for the
+end-user workflow.
+"""
+
+import os
+
+import pytest
+import requests
+import torch
+import torch_npu  # noqa: F401  # registers the NPU backend
+from transformers import AutoConfig, AutoModelForCausalLM
+
+from tests.e2e.conftest import RemoteOpenAIServer
+
+MODEL_NAME = "Qwen/Qwen3-0.6B"
+
+INFERENCE_DEVICE_INDEX = 0
+
+PROMPTS = [
+    "Hello, my name is",
+    "The capital of France is",
+]
+
+UPDATE_TIMEOUT = 300
+CONTROL_TIMEOUT = 60
+
+
+def _build_trainer_model(device_index: int):
+    device = f"npu:{device_index}"
+    override_path = os.getenv("WEIGHT_TRANSFER_TEST_MODEL")
+    if override_path:
+        model = AutoModelForCausalLM.from_pretrained(override_path, dtype=torch.bfloat16)
+    else:
+        config = AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_config(config)
+    model = model.to(device=device, dtype=torch.bfloat16)
+    model.eval()
+    return model
+
+
+def _post(server: RemoteOpenAIServer, route: str, *, json=None, timeout=CONTROL_TIMEOUT):
+    response = requests.post(server.url_for(route), json=json, timeout=timeout)
+    response.raise_for_status()
+    return response
+
+
+def _generate(client, model, prompts):
+    completions = []
+    for prompt in prompts:
+        response = client.completions.create(model=model, prompt=prompt, max_tokens=16, temperature=0)
+        completions.append(response.choices[0].text)
+    return completions
+
+
+@pytest.mark.skipif(
+    torch.npu.device_count() < 1,
+    reason="NPU IPC weight transfer e2e test requires at least 1 NPU.",
+)
+def test_npu_ipc_weight_transfer_updates_server_weights():
+    from vllm.utils.network_utils import get_open_port
+
+    port = get_open_port()
+    server_args = [
+        "--enforce-eager",
+        "--load-format",
+        "dummy",
+        "--weight-transfer-config",
+        '{"backend": "npu_ipc"}',
+        "--max-model-len",
+        "1024",
+        # IPC co-locates the trainer on the same NPU, so leave room for it.
+        "--gpu-memory-utilization",
+        "0.5",
+        "--port",
+        str(port),
+        "--trust-remote-code",
+        "--additional-config",
+        '{"weight_nz_mode": 0}',
+    ]
+    # VLLM_SERVER_DEV_MODE registers the dev endpoints; insecure serialization
+    # lets the server unpickle the IPC handles sent over HTTP. Pin the server to
+    # physical NPU 0 so its IPC UUID matches the trainer below.
+    env_dict = {
+        "VLLM_SERVER_DEV_MODE": "1",
+        "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",
+        "ASCEND_RT_VISIBLE_DEVICES": str(INFERENCE_DEVICE_INDEX),
+    }
+
+    with RemoteOpenAIServer(
+        MODEL_NAME,
+        vllm_serve_args=server_args,
+        server_host="127.0.0.1",
+        server_port=port,
+        env_dict=env_dict,
+        auto_port=False,
+    ) as server:
+        client = server.get_client()
+
+        outputs_before = _generate(client, MODEL_NAME, PROMPTS)
+
+        # Trainer shares physical NPU 0 with the server. It leaves
+        # ASCEND_RT_VISIBLE_DEVICES unset (identity mapping logical 0 ->
+        # physical 0) so both processes resolve to the same IPC UUID.
+        torch.npu.set_device(INFERENCE_DEVICE_INDEX)
+        train_model = _build_trainer_model(INFERENCE_DEVICE_INDEX)
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+        from vllm.distributed.weight_transfer.base import ModuleSource
+        from vllm.distributed.weight_transfer.clients import HTTPVLLMWeightSyncClient
+        from vllm.distributed.weight_transfer.factory import (
+            WeightTransferTrainerFactory,
+        )
+
+        from vllm_ascend.distributed.weight_transfer import register_engine
+        from vllm_ascend.distributed.weight_transfer.npu_ipc_engine import (
+            NPUIPCTrainerInitInfo,
+        )
+
+        _post(server, "init_weight_transfer_engine", json={"init_info": {}})
+
+        _post(server, "pause")
+        _post(server, "start_weight_update")
+
+        register_engine()
+
+        # The lifecycle probe above left a weight update active; the
+        # stateful engine drives its own start/finish lifecycle, so close
+        # the probe's update first.
+        _post(server, "finish_weight_update")
+
+        init_info = NPUIPCTrainerInitInfo(rank=0, packed=False)
+        engine = WeightTransferTrainerFactory.trainer_init(
+            init_info,
+            client=HTTPVLLMWeightSyncClient(base_url=server.url_root),
+            source=ModuleSource(train_model),
+        )
+        engine.send_weights()
+
+        _post(server, "resume")
+
+        outputs_after = _generate(client, MODEL_NAME, PROMPTS)
+
+    assert outputs_after != outputs_before, "server weights did not change after NPU IPC transfer"

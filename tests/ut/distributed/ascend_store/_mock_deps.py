@@ -23,20 +23,27 @@ Usage at the top of each test file:
     import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 """
 
+import importlib
+import importlib.util
 import logging
 import os
 import sys
 import types
+from dataclasses import dataclass, field
+from typing import Any
 from unittest.mock import MagicMock
+
+from prometheus_client import Counter, Gauge, Histogram
 
 # ---------------------------------------------------------------------------
 # Mock torch / torch_npu
 # ---------------------------------------------------------------------------
-if "torch" not in sys.modules:
+if "torch" not in sys.modules and importlib.util.find_spec("torch") is None:
     _torch = types.ModuleType("torch")
     _torch.Tensor = MagicMock  # type: ignore[attr-defined]
     _torch.bool = "bool"  # type: ignore[attr-defined]
     _torch.float16 = "float16"  # type: ignore[attr-defined]
+    _torch.float32 = "float32"  # type: ignore[attr-defined]
     _torch.zeros = MagicMock(return_value=MagicMock())  # type: ignore[attr-defined]
     _torch.sum = MagicMock(return_value=0)  # type: ignore[attr-defined]
     _torch.device = MagicMock()  # type: ignore[attr-defined]
@@ -56,6 +63,7 @@ if "torch_npu" not in sys.modules:
 # ---------------------------------------------------------------------------
 # Mock vllm modules
 # ---------------------------------------------------------------------------
+_MOCK_VLLM_DEPS = importlib.util.find_spec("vllm") is None
 _vllm_mock_modules = [
     "vllm",
     "vllm.config",
@@ -66,6 +74,7 @@ _vllm_mock_modules = [
     "vllm.distributed.kv_transfer.kv_connector.factory",
     "vllm.distributed.kv_transfer.kv_connector.v1",
     "vllm.distributed.kv_transfer.kv_connector.v1.base",
+    "vllm.distributed.kv_transfer.kv_connector.v1.metrics",
     "vllm.distributed.parallel_state",
     "vllm.envs",
     "vllm.forward_context",
@@ -88,19 +97,28 @@ _vllm_mock_modules = [
     "vllm.v1.core.kv_cache_utils",
     "vllm.v1.core.sched",
     "vllm.v1.core.sched.output",
+    "vllm.v1.core.single_type_kv_cache_manager",
     "vllm.v1.kv_cache_interface",
+    "vllm.v1.kv_cache_spec_registry",
+    "vllm.v1.metrics",
+    "vllm.v1.metrics.utils",
     "vllm.v1.outputs",
     "vllm.v1.request",
     "vllm.v1.serial_utils",
+    "vllm.v1.worker",
 ]
-for _mod_name in _vllm_mock_modules:
-    if _mod_name not in sys.modules:
-        sys.modules[_mod_name] = MagicMock()
+if _MOCK_VLLM_DEPS:
+    for _mod_name in _vllm_mock_modules:
+        if _mod_name not in sys.modules:
+            sys.modules[_mod_name] = MagicMock()
 
-sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
-sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.utils.math_utils"].cdiv = lambda a, b: -(-a // b)  # type: ignore[attr-defined]
+    sys.modules["vllm.logger"].logger = logging.getLogger("vllm")  # type: ignore[attr-defined]
 
-_base_mod = sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"]
+_base_mod: Any = (
+    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.base"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
 _base_mod.KVConnectorBase_V1 = type("KVConnectorBase_V1", (), {"__init__": lambda self, **kw: None})  # type: ignore[attr-defined]
 _base_mod.KVConnectorMetadata = type("KVConnectorMetadata", (), {})  # type: ignore[attr-defined]
 _base_mod.KVConnectorWorkerMetadata = type("KVConnectorWorkerMetadata", (), {})  # type: ignore[attr-defined]
@@ -109,7 +127,40 @@ _base_mod.KVConnectorRole.SCHEDULER = "SCHEDULER"
 _base_mod.KVConnectorRole.WORKER = "WORKER"
 _base_mod.SupportsHMA = type("SupportsHMA", (), {})  # type: ignore[attr-defined]
 
-_events_mod = sys.modules["vllm.distributed.kv_events"]
+
+@dataclass
+class _MockKVConnectorStats:
+    data: dict = field(default_factory=dict)
+
+
+class _MockKVConnectorPromMetrics:
+    def __init__(
+        self,
+        vllm_config,
+        metric_types,
+        labelnames,
+        per_engine_labelvalues,
+    ):
+        self._gauge_cls = metric_types[Gauge]
+        self._counter_cls = metric_types[Counter]
+        self._histogram_cls = metric_types[Histogram]
+        self.per_engine_labelvalues = per_engine_labelvalues
+
+
+_metrics_mod: Any = (
+    sys.modules["vllm.distributed.kv_transfer.kv_connector.v1.metrics"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
+_metrics_mod.KVConnectorStats = _MockKVConnectorStats
+_metrics_mod.KVConnectorPromMetrics = _MockKVConnectorPromMetrics
+_metrics_mod.PromMetric = type("PromMetric", (), {})
+_metrics_mod.PromMetricT = type("PromMetricT", (), {})
+
+_metrics_utils_mod: Any = sys.modules["vllm.v1.metrics.utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+_metrics_utils_mod.create_metric_per_engine = lambda metric, labelvalues: {
+    engine_idx: metric.labels(*values) for engine_idx, values in labelvalues.items()
+}
+
+_events_mod: Any = sys.modules["vllm.distributed.kv_events"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _events_mod.KVCacheEvent = type("KVCacheEvent", (), {})  # type: ignore[attr-defined]
 _events_mod.KVConnectorKVEvents = type("KVConnectorKVEvents", (), {})  # type: ignore[attr-defined]
 
@@ -129,14 +180,217 @@ _events_mod.BlockStored = type(  # type: ignore[attr-defined]
     {"__init__": lambda self, **kwargs: self.__dict__.update(kwargs)},
 )
 
-_kv_cache_utils_mod = sys.modules["vllm.v1.core.kv_cache_utils"]
+_kv_cache_utils_mod: Any = sys.modules["vllm.v1.core.kv_cache_utils"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _kv_cache_utils_mod.BlockHash = bytes  # type: ignore[attr-defined]
 _kv_cache_utils_mod.maybe_convert_block_hash = lambda x: x  # type: ignore[attr-defined]
 
-_sched_output_mod = sys.modules["vllm.v1.core.sched.output"]
+
+class _FakeKVCacheBlock:
+    def __init__(self, block_id=0, **kwargs):
+        self.block_id = block_id
+        self.__dict__.update(kwargs)
+
+
+class _FakeKVCacheSpec:
+    def __init__(self, block_size=16, **kwargs):
+        self.block_size = block_size
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    def __eq__(self, other):
+        return type(self) is type(other) and self.__dict__ == getattr(other, "__dict__", {})
+
+    def copy_with_new_block_size(self, block_size):
+        kwargs = self.__dict__.copy()
+        kwargs["block_size"] = block_size
+        return type(self)(**kwargs)
+
+    @property
+    def page_size_bytes(self):
+        num_kv_heads = getattr(self, "num_kv_heads", 1)
+        head_size = getattr(self, "head_size", 1)
+        dtype = getattr(self, "dtype", None)
+        dtype_size = getattr(dtype, "itemsize", None)
+        if dtype_size is None and dtype is not None and hasattr(dtype, "element_size"):
+            dtype_size = dtype.element_size()
+        return self.block_size * num_kv_heads * head_size * int(dtype_size or 1) * 2
+
+
+class _FakeAttentionSpec(_FakeKVCacheSpec):
+    pass
+
+
+class _FakeFullAttentionSpec(_FakeAttentionSpec):
+    pass
+
+
+class _FakeSlidingWindowSpec(_FakeKVCacheSpec):
+    def __init__(self, block_size=16, sliding_window=32, **kwargs):
+        super().__init__(block_size=block_size, sliding_window=sliding_window, **kwargs)
+
+
+class _FakeMambaSpec(_FakeKVCacheSpec):
+    def __init__(self, block_size=16, **kwargs):
+        super().__init__(block_size=block_size, **kwargs)
+        self.num_speculative_blocks = getattr(self, "num_speculative_blocks", 0)
+
+
+class _FakeUniformTypeKVCacheSpecs(_FakeKVCacheSpec):
+    def __init__(self, block_size=16, kv_cache_specs=None, **kwargs):
+        super().__init__(block_size=block_size, **kwargs)
+        self.kv_cache_specs = kv_cache_specs or {}
+
+    @classmethod
+    def from_specs(cls, kv_cache_specs):
+        if not kv_cache_specs:
+            return None
+        first_spec = next(iter(kv_cache_specs.values()))
+        return cls(
+            block_size=getattr(first_spec, "block_size", 16),
+            kv_cache_specs=kv_cache_specs,
+        )
+
+
+class _FakeKVCacheGroupSpec:
+    def __init__(self, layer_names=None, kv_cache_spec=None, is_eagle_group=False):
+        self.layer_names = layer_names or []
+        self.kv_cache_spec = kv_cache_spec or _FakeFullAttentionSpec()
+        self.is_eagle_group = is_eagle_group
+
+
+class _FakeKVCacheConfig:
+    def __init__(self, num_blocks=1, kv_cache_tensors=None, kv_cache_groups=None):
+        self.num_blocks = num_blocks
+        self.kv_cache_tensors = kv_cache_tensors or []
+        self.kv_cache_groups = kv_cache_groups or []
+
+
+_kv_cache_utils_mod.KVCacheBlock = _FakeKVCacheBlock  # type: ignore[attr-defined]
+_kv_cache_utils_mod.BlockHashList = list  # type: ignore[attr-defined]
+
+
+class _FakeBlockPool:
+    def __init__(self, *args, **kwargs):
+        self.null_block = _FakeKVCacheBlock(block_id=0)
+        self._next_block_id = 1
+
+    def get_new_blocks(self, num_blocks):
+        blocks = []
+        for _ in range(num_blocks):
+            blocks.append(_FakeKVCacheBlock(block_id=self._next_block_id))
+            self._next_block_id += 1
+        return blocks
+
+
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.v1.core.block_pool"].BlockPool = _FakeBlockPool  # type: ignore[attr-defined]
+
+
+class _FakeSingleTypeKVCacheManager:
+    def __init__(self, *args, **kwargs):
+        self._mock = MagicMock()
+
+    def __getattr__(self, name):
+        return getattr(self._mock, name)
+
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block,
+        end_block,
+        alignment_tokens,
+        kv_cache_spec,
+        use_eagle,
+        retention_interval=None,
+        num_prompt_tokens=None,
+    ):
+        return None
+
+    @classmethod
+    def find_longest_cache_hit(
+        cls,
+        block_hashes,
+        max_length,
+        kv_cache_group_ids,
+        block_pool,
+        kv_cache_spec,
+        drop_eagle_block=False,
+        alignment_tokens=16,
+        dcp_world_size=1,
+        pcp_world_size=1,
+    ):
+        computed: tuple[list[object], ...] = tuple([] for _ in kv_cache_group_ids)
+        max_blocks = max_length // kv_cache_spec.block_size
+        for block_hash in list(block_hashes)[:max_blocks]:
+            cached = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
+            if not cached:
+                break
+            for blocks, block in zip(computed, cached):
+                blocks.append(block)
+        if drop_eagle_block and computed and computed[0]:
+            for blocks in computed:
+                blocks.pop()
+        return computed
+
+
+class _FakeSlidingWindowManager(_FakeSingleTypeKVCacheManager):
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block,
+        end_block,
+        alignment_tokens,
+        kv_cache_spec,
+        use_eagle,
+        retention_interval=None,
+        num_prompt_tokens=None,
+    ):
+        if alignment_tokens is None:
+            return None
+        per_segment = max(alignment_tokens // kv_cache_spec.block_size, 1)
+        return [(idx + 1) % per_segment == 0 for idx in range(start_block, end_block)]
+
+
+_single_type_mod: Any = (
+    sys.modules["vllm.v1.core.single_type_kv_cache_manager"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+)
+_single_type_mod.SingleTypeKVCacheManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.FullAttentionManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.SlidingWindowManager = _FakeSlidingWindowManager  # type: ignore[attr-defined]
+_single_type_mod.MambaManager = _FakeSingleTypeKVCacheManager  # type: ignore[attr-defined]
+_single_type_mod.spec_manager_map = {  # type: ignore[attr-defined]
+    _FakeFullAttentionSpec: _FakeSingleTypeKVCacheManager,
+    _FakeSlidingWindowSpec: _FakeSlidingWindowManager,
+    _FakeMambaSpec: _FakeSingleTypeKVCacheManager,
+}
+
+_kv_interface_mod: Any = sys.modules["vllm.v1.kv_cache_interface"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
+_kv_interface_mod.KVCacheSpec = _FakeKVCacheSpec  # type: ignore[attr-defined]
+_kv_interface_mod.AttentionSpec = _FakeAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.FullAttentionSpec = _FakeFullAttentionSpec  # type: ignore[attr-defined]
+_kv_interface_mod.SlidingWindowSpec = _FakeSlidingWindowSpec  # type: ignore[attr-defined]
+_kv_interface_mod.MambaSpec = _FakeMambaSpec  # type: ignore[attr-defined]
+_kv_interface_mod.UniformTypeKVCacheSpecs = _FakeUniformTypeKVCacheSpecs  # type: ignore[attr-defined]
+_kv_interface_mod.KVCacheGroupSpec = _FakeKVCacheGroupSpec  # type: ignore[attr-defined]
+_kv_interface_mod.KVCacheConfig = _FakeKVCacheConfig  # type: ignore[attr-defined]
+
+
+class _FakeKVCacheSpecRegistry:
+    @classmethod
+    def get_manager_class(cls, kv_cache_spec):
+        if isinstance(kv_cache_spec, _FakeSlidingWindowSpec):
+            return _FakeSlidingWindowManager
+        return _FakeSingleTypeKVCacheManager
+
+
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.v1.kv_cache_spec_registry"].KVCacheSpecRegistry = _FakeKVCacheSpecRegistry  # type: ignore[attr-defined]
+
+_sched_output_mod: Any = sys.modules["vllm.v1.core.sched.output"] if _MOCK_VLLM_DEPS else types.SimpleNamespace()
 _sched_output_mod.NewRequestData = MagicMock  # type: ignore[attr-defined]
 
-sys.modules["vllm.envs"].VLLM_RPC_BASE_PATH = "/tmp/vllm_rpc"  # type: ignore[attr-defined]
+if _MOCK_VLLM_DEPS:
+    sys.modules["vllm.envs"].VLLM_RPC_BASE_PATH = "/tmp/vllm_rpc"  # type: ignore[attr-defined]
 
 # ---------------------------------------------------------------------------
 # Mock external backends
@@ -168,19 +422,57 @@ def _make_pkg(name, path=""):
     return mod
 
 
-for _pkg in ["vllm_ascend", "vllm_ascend.distributed"]:
+_vllm_ascend_real_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "vllm_ascend"))
+_vllm_ascend_package_paths = {
+    "vllm_ascend": _vllm_ascend_real_path,
+    "vllm_ascend.distributed": os.path.join(_vllm_ascend_real_path, "distributed"),
+}
+for _pkg, _path in _vllm_ascend_package_paths.items():
     if _pkg not in sys.modules:
-        sys.modules[_pkg] = _make_pkg(_pkg)
+        sys.modules[_pkg] = _make_pkg(_pkg, _path)
 
-_kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer")
-_kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
-sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
+_distributed_utils = types.ModuleType("vllm_ascend.distributed.utils")
+_distributed_utils.all_gather_async = MagicMock()  # type: ignore[attr-defined]
+_distributed_utils.get_decode_context_model_parallel_rank = MagicMock(  # type: ignore[attr-defined]
+    return_value=0
+)
+_distributed_utils.get_decode_context_model_parallel_world_size = MagicMock(  # type: ignore[attr-defined]
+    return_value=1
+)
+sys.modules["vllm_ascend.distributed.utils"] = _distributed_utils
 
-_kv_utils_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.utils")
+# mooncake_backend imports get_global_rank from the real
+# vllm_ascend.distributed.parallel_state, whose import chain pulls in vllm.
+# Only mock it when vllm is absent; otherwise keep the real module so the
+# mock does not leak into other UTs collected in the same process.
+if _MOCK_VLLM_DEPS:
+    _ascend_parallel_state = _make_pkg("vllm_ascend.distributed.parallel_state")
+    _ascend_parallel_state.get_global_rank = MagicMock(return_value=0)  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend.distributed.parallel_state"] = _ascend_parallel_state
+
+_kv_transfer_real_path = os.path.join(_vllm_ascend_real_path, "distributed", "kv_transfer")
+if _MOCK_VLLM_DEPS:
+    _kv_transfer_init = _make_pkg("vllm_ascend.distributed.kv_transfer", _kv_transfer_real_path)
+    _kv_transfer_init.register_connector = MagicMock()  # type: ignore[attr-defined]
+    sys.modules["vllm_ascend.distributed.kv_transfer"] = _kv_transfer_init
+else:
+    # Preserve the real registration entry point when vLLM is installed. This
+    # helper is imported while pytest collects the ascend_store tests, so
+    # replacing the package here would leak a MagicMock into later KV-transfer
+    # tests in the same CPU-UT process.
+    _kv_transfer_init = importlib.import_module("vllm_ascend.distributed.kv_transfer")
+
+_kv_utils_pkg = _make_pkg(
+    "vllm_ascend.distributed.kv_transfer.utils",
+    os.path.join(_kv_transfer_real_path, "utils"),
+)
 sys.modules["vllm_ascend.distributed.kv_transfer.utils"] = _kv_utils_pkg
 sys.modules["vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine"] = MagicMock()
 
-_kv_pool_pkg = _make_pkg("vllm_ascend.distributed.kv_transfer.kv_pool")
+_kv_pool_pkg = _make_pkg(
+    "vllm_ascend.distributed.kv_transfer.kv_pool",
+    os.path.join(_kv_transfer_real_path, "kv_pool"),
+)
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool"] = _kv_pool_pkg
 
 _ascend_store_real_path = os.path.join(
@@ -207,24 +499,24 @@ _backend_pkg = _make_pkg(
 )
 sys.modules["vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend"] = _backend_pkg
 
-# Mirror the real backend/__init__.py entry points. The scheduler/worker resolve
-# the backend class dynamically via ``importlib.import_module(path)``; tests that
-# exercise those paths patch ``<module>.importlib`` locally (see
-# test_pool_scheduler.py / test_pool_worker.py) so the backend resolves to a
-# MagicMock. Do NOT register the backends in sys.modules or globally wrap
-# import_module here: test_backend.py imports the real backend classes and also
-# relies on ``mock.patch`` (which itself calls importlib.import_module) resolving
+# Execute the real backend/__init__.py inside the stub package so that
+# backend_map always stays in sync with the source of truth. The stub
+# package shadows the real package for these tests; without this, any
+# ``from ...backend import backend_map`` in the real modules would fail
+# with ImportError under the stub. (Submodules such as
+# backend.memcache_backend resolve through the stub package's __path__ and
+# need no special casing.)
+# The scheduler/worker resolve the backend class dynamically via
+# ``importlib.import_module(path)``; tests that exercise those paths patch
+# ``<module>.importlib`` locally (see test_pool_scheduler.py /
+# test_pool_worker.py) so the backend resolves to a MagicMock. Do NOT
+# register the backends in sys.modules or globally wrap import_module here:
+# test_backend.py imports the real backend classes and also relies on
+# ``mock.patch`` (which itself calls importlib.import_module) resolving
 # those real modules.
-_backend_module_paths = {
-    "mooncake": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend",
-    "memcache": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.memcache_backend",
-    "yuanrong": "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.yuanrong_backend",
-}
-_backend_pkg.backend_map = {  # type: ignore[attr-defined]
-    "mooncake": {"name": "MooncakeBackend", "path": _backend_module_paths["mooncake"]},
-    "memcache": {"name": "MemcacheBackend", "path": _backend_module_paths["memcache"]},
-    "yuanrong": {"name": "YuanrongBackend", "path": _backend_module_paths["yuanrong"]},
-}
+_backend_init_path = os.path.join(_backend_pkg.__path__[0], "__init__.py")  # type: ignore[attr-defined]
+with open(_backend_init_path, encoding="utf-8") as _backend_init_file:
+    exec(compile(_backend_init_file.read(), _backend_init_path, "exec"), vars(_backend_pkg))  # type: ignore[arg-type]
 
 if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascend.utils"], "AscendDeviceType"):
     _ascend_utils = MagicMock()
@@ -232,7 +524,7 @@ if "vllm_ascend.utils" not in sys.modules or not hasattr(sys.modules["vllm_ascen
     _ascend_utils.get_ascend_device_type = MagicMock()
     sys.modules["vllm_ascend.utils"] = _ascend_utils
 
-# NOTE: vllm_ascend.{ascend_config, memcache_comm_fence} and their helpers
+# NOTE: vllm_ascend.{ascend_config, attention_fence} and their helpers
 # (get_ascend_config, AttentionComputeStartGate, ...) are intentionally NOT
 # mocked here. Doing so by mutating these real modules leaks into every other
 # UT in the same pytest session (breaking test_ascend_config / test_platform,

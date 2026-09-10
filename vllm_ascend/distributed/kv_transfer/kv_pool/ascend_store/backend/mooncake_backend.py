@@ -16,12 +16,18 @@ from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import logger
 from vllm.utils.network_utils import get_ip
 
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.backend import Backend
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.base import (
+    QOS_VALUE_MAX,
+    QOS_VALUE_MIN,
+    Backend,
+    parse_qos_from_extra_config,
+)
 from vllm_ascend.distributed.kv_transfer.utils.mooncake_transfer_engine import global_te
 from vllm_ascend.distributed.parallel_state import get_global_rank
 
 DEFAULT_GLOBAL_SEGMENT_SIZE = 1073741824  # 1.0 GiB
 DEFAULT_LOCAL_BUFFER_SIZE = 1073741824  # 1.0 GiB
+DEFAULT_TENANT_ID = "default"
 
 
 @functools.lru_cache(maxsize=1)
@@ -59,15 +65,117 @@ def _ssd_setup_kwargs(config: "MooncakeStoreConfig") -> dict[str, object]:
     }
 
 
+def _validate_store_qos() -> None:
+    """Validate the store QoS configured via ASCEND_GLOBAL_RESOURCE_CONFIG.
+
+    KV pool transfers go through the Mooncake store, whose HIXL QoS comes from
+    the ``store.comm_resource_config.qos`` field. The top-level
+    ``comm_resource_config.qos`` belongs to other HIXL users and is not
+    validated here. Only integers in [QOS_VALUE_MIN, QOS_VALUE_MAX] are
+    supported; an invalid value fails fast with a clear error instead of an
+    obscure failure inside the transfer engine.
+    """
+    config_str = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")
+    if not config_str:
+        return
+    try:
+        config = json.loads(config_str)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"ASCEND_GLOBAL_RESOURCE_CONFIG is not valid JSON: {e}. "
+            'Expected e.g. \'{"store": {"comm_resource_config": {"qos": 3}}}\'.'
+        ) from e
+    if not isinstance(config, dict):
+        return
+    store_config = config.get("store")
+    if not isinstance(store_config, dict):
+        return
+    comm_resource_config = store_config.get("comm_resource_config")
+    if not isinstance(comm_resource_config, dict) or "qos" not in comm_resource_config:
+        return
+    qos = comm_resource_config["qos"]
+    if isinstance(qos, bool) or not isinstance(qos, int) or not (QOS_VALUE_MIN <= qos <= QOS_VALUE_MAX):
+        raise ValueError(
+            f"Invalid store QoS {qos!r} in ASCEND_GLOBAL_RESOURCE_CONFIG "
+            f"(store.comm_resource_config.qos): QoS must be an integer in "
+            f"[{QOS_VALUE_MIN}, {QOS_VALUE_MAX}]."
+        )
+
+
+def _inject_store_qos(extra_config: dict[str, Any] | None) -> None:
+    """Inject the QoS from kv_connector_extra_config into the
+    ``store.comm_resource_config.qos`` field of ASCEND_GLOBAL_RESOURCE_CONFIG.
+
+    The QoS is parsed from the connector's extra_config passed by the pool
+    worker; the call is a no-op when no qos is configured. Merges into the
+    existing config so other HIXL fields (protocol_desc, listen_port, ...)
+    are preserved. An explicit extra-config value overrides a qos already
+    present in the environment.
+    """
+    qos = parse_qos_from_extra_config(extra_config)
+    if qos is None:
+        return
+    config_str = os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")
+    config: dict[str, Any] = {}
+    if config_str is not None and config_str.strip():
+        try:
+            config = json.loads(config_str)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"ASCEND_GLOBAL_RESOURCE_CONFIG is not valid JSON: {e}. "
+                'Expected e.g. \'{"store": {"comm_resource_config": {"qos": 3}}}\'.'
+            ) from e
+        if not isinstance(config, dict):
+            raise ValueError(
+                "ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object when qos_priority "
+                "is set in kv_connector_extra_config."
+            )
+    store_config = config.setdefault("store", {})
+    if not isinstance(store_config, dict):
+        raise ValueError("The 'store' field of ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object.")
+    comm_resource_config = store_config.setdefault("comm_resource_config", {})
+    if not isinstance(comm_resource_config, dict):
+        raise ValueError(
+            "The 'store.comm_resource_config' field of ASCEND_GLOBAL_RESOURCE_CONFIG must be a JSON object."
+        )
+    existing_qos = comm_resource_config.get("qos")
+    if existing_qos is not None and existing_qos != qos:
+        logger.warning(
+            "Overriding store.comm_resource_config.qos=%s from ASCEND_GLOBAL_RESOURCE_CONFIG "
+            "with qos=%s from kv_connector_extra_config.",
+            existing_qos,
+            qos,
+        )
+    comm_resource_config["qos"] = qos
+    os.environ["ASCEND_GLOBAL_RESOURCE_CONFIG"] = json.dumps(config)
+    logger.info(
+        "Injected store.comm_resource_config.qos=%d from kv_connector_extra_config into ASCEND_GLOBAL_RESOURCE_CONFIG.",
+        qos,
+    )
+
+
 class MooncakeBackend(Backend):
-    def __init__(self, parallel_config: ParallelConfig, lazy_init: bool = False, contribute_memory: bool = True):
+    def __init__(
+        self,
+        parallel_config: ParallelConfig,
+        lazy_init: bool = False,
+        contribute_memory: bool = True,
+        extra_config: dict[str, Any] | None = None,
+    ):
+        self.parallel_config = parallel_config
         self.config = MooncakeStoreConfig.load_from_env()
         if self.config.protocol != "ascend":
             raise NotImplementedError(f"MooncakeBackend does not support protocol {self.config.protocol!r}.")
+        _inject_store_qos(extra_config)
+        _validate_store_qos()
 
         self.store: Any | None = None
         self.local_seg: str | None = None
         self._use_fabric_mem = os.getenv("ASCEND_ENABLE_USE_FABRIC_MEM", "0") == "1"
+        # ASCEND_GLOBAL_RESOURCE_CONFIG: dual-protocol / RoCE Store path where the store
+        # operates independently of the global transfer engine; setup goes through store
+        # and buffers are registered via store.register_buffer() instead of global_te.
+        self._use_store_independent_te = bool(os.getenv("ASCEND_GLOBAL_RESOURCE_CONFIG")) and not self._use_fabric_mem
         self._lazy_init = lazy_init and self._use_fabric_mem
         self._contribute_memory = contribute_memory
         self._store_initialized = False
@@ -77,7 +185,7 @@ class MooncakeBackend(Backend):
             self.store = self._setup_store()
             self._store_initialized = True
 
-    def _ensure_initialized(self):
+    def ensure_initialized(self):
         if self._store_initialized:
             return
 
@@ -102,20 +210,26 @@ class MooncakeBackend(Backend):
         store = MooncakeDistributedStore()
         local_hostname = get_ip()
         ssd_kwargs = _ssd_setup_kwargs(self.config)
-        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path"):
-            # Per-rank SSD directory keyed by the globally unique rank so that
-            # DP/TP/PP/CP replicas never share a directory (dense and MoE alike).
-            global_rank = get_global_rank()
+        # Each rank that contributes memory to the pool uses its own SSD
+        # directory to avoid bucket file collisions. Key by the globally unique
+        # rank so that DP/TP/PP/CP replicas never share a directory (dense and
+        # MoE alike); only ranks that contribute memory need an offload dir.
+        if ssd_kwargs and ssd_kwargs.get("ssd_offload_path") and self._contribute_memory:
+            global_rank = get_global_rank(self.parallel_config)
             rank_path = os.path.join(str(ssd_kwargs["ssd_offload_path"]), f"rank_{global_rank}")
             try:
                 os.makedirs(rank_path, exist_ok=True)
             except OSError as e:
                 raise RuntimeError(f"Failed to create per-rank SSD offload directory: {rank_path!r} ({e})")
             ssd_kwargs["ssd_offload_path"] = rank_path
+        setup_kwargs = dict(ssd_kwargs)
+        if self.config.tenant_id != DEFAULT_TENANT_ID:
+            setup_kwargs["tenant_id"] = self.config.tenant_id
         # ASCEND_ENABLE_USE_FABRIC_MEM: Enable unified memory address direct transmission scheme
         # and only can be used for 800 I/T A3 series.
         # Required supporting hardware versions are as follows:
-        if not self._use_fabric_mem:
+        # ASCEND_GLOBAL_RESOURCE_CONFIG takes the same store-independent-TE setup path as fabric-mem.
+        if not self._use_fabric_mem and not self._use_store_independent_te:
             transfer_engine = global_te.get_transfer_engine(local_hostname, device_name=None)
             self.local_seg = local_hostname + ":" + str(transfer_engine.get_rpc_port())
             ret = store.setup(
@@ -127,7 +241,7 @@ class MooncakeBackend(Backend):
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
                 engine=transfer_engine.get_engine(),
-                **ssd_kwargs,
+                **setup_kwargs,
             )
         else:
             self.local_seg = local_hostname
@@ -139,7 +253,7 @@ class MooncakeBackend(Backend):
                 protocol=self.config.protocol,
                 rdma_devices=self.config.device_name,
                 master_server_addr=self.config.master_server_address,
-                **ssd_kwargs,
+                **setup_kwargs,
             )
 
         if ret != 0:
@@ -155,6 +269,7 @@ class MooncakeBackend(Backend):
                 "Mooncake SSD offload enabled (Mode A): path=%s",
                 self.config.ssd_offload_path,
             )
+        logger.info("Mooncake tenant_id=%s", self.config.tenant_id)
         return store
 
     @classmethod
@@ -168,7 +283,18 @@ class MooncakeBackend(Backend):
         torch.npu.set_device(device)
 
     def register_buffer(self, ptrs: list[int], lengths: list[int]):
-        if not self._use_fabric_mem:
+        if self._use_store_independent_te:
+            assert self.store is not None
+            for ptr, length in zip(ptrs, lengths):
+                ret = self.store.register_buffer(ptr, length)
+                if ret != 0:
+                    logger.error(
+                        "Failed to register buffer via store: ptr=%s, length=%s, ret=%s",
+                        ptr,
+                        length,
+                        ret,
+                    )
+        elif not self._use_fabric_mem:
             local_hostname = get_ip()
             global_te.get_transfer_engine(local_hostname, device_name=None)
             global_te.register_buffer(ptrs, lengths)
@@ -184,9 +310,9 @@ class MooncakeBackend(Backend):
         return self.store.batch_is_exist(keys)
 
     def put(self, keys: list[str], addrs: list[list[int]], sizes: list[list[int]]):
+        self.ensure_initialized()
+        assert self.store is not None
         try:
-            self._ensure_initialized()
-            assert self.store is not None
             config = ReplicateConfig()
             if self.config.preferred_segment:
                 config.preferred_segment = self.local_seg
@@ -207,16 +333,13 @@ class MooncakeBackend(Backend):
                     logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
         except Exception as e:
             logger.error(
-                "Failed to put %d keys out of %d. Check store state and memory.",
+                "Failed to put %d keys out of %d. type=%s, error=%s. Check store state and memory.",
                 len(keys),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to put key details. keys=%s, type=%s, error=%s",
-                keys,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to put key details. keys=%s", keys)
             if self._lazy_init:
                 logger.warning("First DSV4(compress) request failure is expected. This is normal behavior.")
 
@@ -256,16 +379,13 @@ class MooncakeBackend(Backend):
             return res_list
         except Exception as e:
             logger.error(
-                "Failed to get %d keys out of %d. Check store state and network.",
+                "Failed to get %d keys out of %d. type=%s, error=%s. Check store state and network.",
                 len(keys),
                 len(keys),
-            )
-            logger.debug(
-                "Failed to get key details. keys=%s, type=%s, error=%s",
-                keys,
                 type(e).__name__,
                 e,
             )
+            logger.debug("Failed to get key details. keys=%s", keys)
             return None
 
 
@@ -281,6 +401,7 @@ class MooncakeStoreConfig:
     prefer_alloc_in_same_node: bool
     enable_ssd_offload: bool = False
     ssd_offload_path: str = ""
+    tenant_id: str = DEFAULT_TENANT_ID
 
     def __post_init__(self) -> None:
         if not self.enable_ssd_offload:
@@ -315,6 +436,7 @@ class MooncakeStoreConfig:
             prefer_alloc_in_same_node=config.get("prefer_alloc_in_same_node", True),
             enable_ssd_offload=bool(config.get("enable_ssd_offload", False)),
             ssd_offload_path=config.get("ssd_offload_path", ""),
+            tenant_id=_normalize_tenant_id(config.get("tenant_id", DEFAULT_TENANT_ID)),
         )
 
     @staticmethod
@@ -323,6 +445,15 @@ class MooncakeStoreConfig:
         if not config_path:
             raise ValueError("The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
         return MooncakeStoreConfig.from_file(config_path)
+
+
+def _normalize_tenant_id(value: Any) -> str:
+    if value is None:
+        return DEFAULT_TENANT_ID
+    if not isinstance(value, str):
+        raise TypeError(f"tenant_id must be a string or null, got {type(value).__name__}: {value!r}")
+    tenant_id = value.strip()
+    return tenant_id if tenant_id else DEFAULT_TENANT_ID
 
 
 def _parse_global_segment_size(value) -> int:

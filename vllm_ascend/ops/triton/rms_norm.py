@@ -2,26 +2,30 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(
+    do_not_specialize=[
+        "total_batch",
+    ]
+)
 def triton_rms_kernel(
     hidden_state_ptr,
     hidden_state_stride_bs,
     norm_output_ptr,
     variance_epsilon,
-    TOTAL_BATCH: tl.constexpr,
+    total_batch,
     DIM: tl.constexpr,
     BLOCK_M: tl.constexpr,
 ):
     core_id = tl.program_id(0)
     core_num = tl.num_programs(0)
-    batch_per_core = tl.cdiv(TOTAL_BATCH, core_num)
+    batch_per_core = tl.cdiv(total_batch, core_num)
     start_batch = core_id * batch_per_core
-    end_batch = tl.minimum(start_batch + batch_per_core, TOTAL_BATCH)
+    end_batch = tl.minimum(start_batch + batch_per_core, total_batch)
     offset_d = tl.arange(0, DIM)
 
     for row_start in tl.range(start_batch, end_batch, BLOCK_M):
         offset_row = row_start + tl.arange(0, BLOCK_M)
-        mask_r = offset_row < TOTAL_BATCH
+        mask_r = offset_row < total_batch
         mask_row = mask_r[:, None]
         offset_hidden = offset_row[:, None] * hidden_state_stride_bs + offset_d[None, :]
 
@@ -49,7 +53,8 @@ def triton_q_rms(
 
     ROW_BLOCK_SIZE = 16  # A safe default balancing parallelism and register pressure.
     batch_per_core = triton.cdiv(total_batch, num_vectorcore)
-    BLOCK_M = min(ROW_BLOCK_SIZE, batch_per_core)
+    raw = min(ROW_BLOCK_SIZE, batch_per_core)
+    BLOCK_M = 1 << (raw.bit_length() - 1)
 
     grid = (num_vectorcore,)
     norm_output = torch.empty_like(q)

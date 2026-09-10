@@ -63,7 +63,6 @@ from multiprocessing import Process
 from time import sleep
 
 import torch
-from safetensors.torch import load_file
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment,
@@ -75,32 +74,6 @@ from vllm.utils.network_utils import get_open_port
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-
-def patch_vllm_moe_model_weight_loader(model):
-    model = getattr(model, "model", None) or getattr(model, "language_model", None)
-    if model is None:
-        raise ValueError("The provided model does not have a valid 'model' or 'language_model' attribute.")
-    for layer in model.layers:
-        mlp_attr = "mlp"
-        mlp = getattr(layer, mlp_attr)
-        param_dict = dict(mlp.named_parameters())
-        for name, param in param_dict.items():
-            if "w13_weight" in name or "w2_weight" in name:
-                param.weight_loader = mlp.experts.weight_loader
-
-
-def load_and_merge_safetensors(directory):
-    if not os.path.isdir(directory):
-        raise ValueError(f"The provided directory does not exist: {directory}")
-    merged_dict = {}
-    for filename in os.listdir(directory):
-        if filename.endswith(".safetensors"):
-            file_path = os.path.join(directory, filename)
-            print(f"loading file: {file_path}")
-            f = load_file(file_path)
-            merged_dict.update(f)
-    return merged_dict
 
 
 def parse_args():
@@ -137,7 +110,10 @@ def parse_args():
         type=int,
         choices=[1, 2],
         default=1,
-        help="Sleep mode level: 1 or 2. This example of level 2 is only supported for dense model.",
+        help=(
+            "Sleep mode level: 1 restores weights on wake_up; "
+            "2 discards weights and reloads them after wake_up(tags=['weights'])."
+        ),
     )
 
     args = parser.parse_args()
@@ -210,6 +186,7 @@ def main(
     if enable_sleep_mode:
         if rank == 0:
             free_bytes_before_sleep, total = torch.npu.mem_get_info()
+            print(f"Using sleep mode level: {sleep_mode_level}")
         llm.sleep(level=sleep_mode_level)
         if rank == 0:
             free_bytes_after_sleep, total = torch.npu.mem_get_info()
@@ -222,16 +199,14 @@ def main(
             llm.wake_up()
         else:
             llm.wake_up(tags=["weights"])
-            run_model = llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
-            patch_vllm_moe_model_weight_loader(run_model)
-            sd = load_and_merge_safetensors(model)
-            run_model.load_weights(sd.items())
+            llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
             llm.wake_up(tags=["kv_cache"])
 
         outputs_after_wakeup = llm.generate(prompts, sampling_params)
         if rank == 0:
-            # cmp output
-            assert outputs[0].outputs[0].text == outputs_after_wakeup[0].outputs[0].text
+            token_ids = [output.outputs[0].token_ids for output in outputs]
+            token_ids_after_wakeup = [output.outputs[0].token_ids for output in outputs_after_wakeup]
+            assert token_ids == token_ids_after_wakeup
             print("Sleep and wake up successfully!!")
 
     for i, output in enumerate(outputs):

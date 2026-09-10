@@ -16,14 +16,16 @@ from vllm.v1.core.kv_cache_coordinator import (
     KVCacheCoordinator,
     get_kv_cache_coordinator,
 )
+from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import SlidingWindowSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import MambaSpec, SlidingWindowSpec, UniformTypeKVCacheSpecs
 from vllm.v1.outputs import KVConnectorOutput
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.recompute_cpu_offload.metadata import (
     RecomputeCPUOffloadMetadata,
     RecomputeCPUOffloadWorkerMetadata,
 )
+from vllm_ascend.utils import get_kv_cache_tensor_layers, vllm_version_is
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -69,9 +71,13 @@ class RecomputeCPUOffloadScheduler:
         assert kv_cache_config is not None
         self.vllm_config = vllm_config
         self.enable_offload_prefix_caching = enable_offload_prefix_caching
+        self.num_spec_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens if vllm_config.speculative_config else 0
+        )
         self.cpu_kv_cache_config = self._derive_cpu_config(kv_cache_config, cpu_capacity_bytes)
         self.num_cpu_blocks = self.cpu_kv_cache_config.num_blocks
         self._group_is_sliding_window = self._get_group_is_sliding_window(kv_cache_config)
+        self._group_is_mamba = self._get_group_is_mamba(kv_cache_config)
         self.enable_kv_cache_events = (
             vllm_config.kv_events_config is not None and vllm_config.kv_events_config.enable_kv_cache_events
         )
@@ -86,6 +92,7 @@ class RecomputeCPUOffloadScheduler:
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
         assert dcp_world_size == 1 and pcp_world_size == 1
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
         self.cpu_coordinator: KVCacheCoordinator = get_kv_cache_coordinator(
             kv_cache_config=self.cpu_kv_cache_config,
             max_model_len=vllm_config.model_config.max_model_len,
@@ -95,7 +102,8 @@ class RecomputeCPUOffloadScheduler:
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
-            hash_block_size=vllm_config.cache_config.block_size,
+            scheduler_block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
         )
         self.cpu_block_pool: BlockPool = self.cpu_coordinator.block_pool
         self._gpu_block_pool: BlockPool | None = None
@@ -127,6 +135,18 @@ class RecomputeCPUOffloadScheduler:
         return group_is_sliding_window
 
     @staticmethod
+    def _get_group_is_mamba(kv_cache_config: "KVCacheConfig") -> list[bool]:
+        group_is_mamba: list[bool] = []
+        for group in kv_cache_config.kv_cache_groups:
+            if isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs):
+                group_is_mamba.append(
+                    any(isinstance(spec, MambaSpec) for spec in group.kv_cache_spec.kv_cache_specs.values())
+                )
+            else:
+                group_is_mamba.append(isinstance(group.kv_cache_spec, MambaSpec))
+        return group_is_mamba
+
+    @staticmethod
     def _derive_cpu_config(gpu_config: "KVCacheConfig", cpu_capacity_bytes: int) -> "KVCacheConfig":
         from vllm.v1.kv_cache_interface import KVCacheConfig as KVCacheConfigCls
         from vllm.v1.kv_cache_interface import KVCacheTensor
@@ -134,18 +154,30 @@ class RecomputeCPUOffloadScheduler:
         assert gpu_config.kv_cache_tensors
         gpu_kv_cache_tensors = []
         for t in gpu_config.kv_cache_tensors:
-            if t.shared_by:
+            if get_kv_cache_tensor_layers(t):
                 gpu_kv_cache_tensors.append(t)
         gpu_total_bytes = sum(t.size for t in gpu_kv_cache_tensors)
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
-        cpu_tensors = [
-            KVCacheTensor(
-                size=t.size // num_gpu_blocks * num_cpu_blocks,
-                shared_by=list(t.shared_by),
-            )
-            for t in gpu_kv_cache_tensors
-        ]
+        if vllm_version_is("0.28.0"):
+            cpu_tensors = [
+                KVCacheTensor(
+                    size=t.size // num_gpu_blocks * num_cpu_blocks,
+                    shared_by=list(t.shared_by),
+                )
+                for t in gpu_kv_cache_tensors
+            ]
+        else:
+            cpu_tensors = [
+                KVCacheTensor(
+                    size=t.size // num_gpu_blocks * num_cpu_blocks,
+                    layers=list(t.layers),
+                    layer_stride=t.layer_stride,
+                    block_stride=t.block_stride,
+                    offset=t.offset,
+                )
+                for t in gpu_kv_cache_tensors
+            ]
         return KVCacheConfigCls(
             num_blocks=num_cpu_blocks,
             kv_cache_tensors=cpu_tensors,
@@ -244,53 +276,49 @@ class RecomputeCPUOffloadScheduler:
         group_gpu_hashes: list[list[BlockHashWithGroupId | None]] = []
         missing_hashes: set[BlockHashWithGroupId] = set()
         num_unhashed = 0
+        num_mamba_blocks = 0
 
         for g, group_gpu_ids in enumerate(block_ids_by_group):
-            group_block_size = kv_cache_groups[g].kv_cache_spec.block_size
-            logical_num_blocks = cdiv(num_computed_tokens, group_block_size)
-            aligned_group_gpu_ids = self._align_group_block_ids(g, group_gpu_ids, logical_num_blocks)
-            eviction_group_gpu_ids = self._align_group_block_ids(
-                g,
-                group_gpu_ids,
-                max(logical_num_blocks, len(group_gpu_ids)),
-            )
             gpu_blocks: list[KVCacheBlock | None] = []
             effective_hashes: list[BlockHashWithGroupId | None] = []
+            if self._group_is_mamba[g]:
+                # For Mamba cache, only the last `1 + num_spec_tokens` blocks need to offload
+                offload_start_idx = len(group_gpu_ids) - self.num_spec_tokens - 1
+                for block_idx, block_id in enumerate(group_gpu_ids):
+                    if block_idx >= offload_start_idx:
+                        num_mamba_blocks += 1
+                        gpu_block = self._gpu_block_pool.blocks[block_id]
+                        gpu_blocks.append(gpu_block)
+                        effective_hashes.append(None)
+            else:
+                group_block_size = kv_cache_groups[g].kv_cache_spec.block_size
+                logical_num_blocks = cdiv(num_computed_tokens, group_block_size)
+                aligned_group_gpu_ids = self._align_group_block_ids(g, group_gpu_ids, logical_num_blocks)
 
-            for block_idx, block_id in enumerate(eviction_group_gpu_ids):
-                if block_id <= 0:
-                    continue
-                gpu_block = self._gpu_block_pool.blocks[block_id]
-                block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
-                if not block_is_computed and gpu_block.block_hash is not None:
-                    # allocate_slots() may assign a hash using tokens planned
-                    # for this scheduling step. If the request is then
-                    # preempted before forward, that block does not contain the
-                    # hashed KV and must not remain in the GPU prefix cache.
-                    self._gpu_block_pool._maybe_evict_cached_block(gpu_block)
+                for block_idx, block_id in enumerate(aligned_group_gpu_ids):
+                    if block_id <= 0:
+                        gpu_blocks.append(None)
+                        effective_hashes.append(None)
+                        continue
 
-            for block_idx, block_id in enumerate(aligned_group_gpu_ids):
-                if block_id <= 0:
-                    gpu_blocks.append(None)
-                    effective_hashes.append(None)
-                    continue
-
-                gpu_block = self._gpu_block_pool.blocks[block_id]
-                block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
-                block_hash = gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
-                gpu_blocks.append(gpu_block)
-                effective_hashes.append(block_hash)
-                if block_hash is None:
-                    num_unhashed += 1
-                elif (
-                    self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash) is None
-                    and block_hash not in self._pending_hash_blocks
-                ):
-                    missing_hashes.add(block_hash)
+                    gpu_block = self._gpu_block_pool.blocks[block_id]
+                    block_is_computed = (block_idx + 1) * group_block_size <= num_computed_tokens
+                    block_hash = (
+                        gpu_block.block_hash if block_is_computed and self.enable_offload_prefix_caching else None
+                    )
+                    gpu_blocks.append(gpu_block)
+                    effective_hashes.append(block_hash)
+                    if block_hash is None:
+                        num_unhashed += 1
+                    elif (
+                        self.cpu_block_pool.cached_block_hash_to_block.get_one_block(block_hash) is None
+                        and block_hash not in self._pending_hash_blocks
+                    ):
+                        missing_hashes.add(block_hash)
             group_gpu_blocks.append(gpu_blocks)
             group_gpu_hashes.append(effective_hashes)
 
-        num_needed = num_unhashed + len(missing_hashes)
+        num_needed = num_unhashed + len(missing_hashes) + num_mamba_blocks
         if not any(any(gpu_block is not None for gpu_block in group) for group in group_gpu_blocks):
             return False
         if num_needed > self.cpu_block_pool.get_num_free_blocks():
@@ -407,45 +435,50 @@ class RecomputeCPUOffloadScheduler:
         gpu_block_ids: list[int] = []
         cpu_block_ids: list[int] = []
         for g, group_cpu_ids in enumerate(state.cpu_block_ids):
-            group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
-            start_block = load_start_tokens // group_block_size
-            end_block = min(
-                len(group_cpu_ids),
-                len(
-                    self._align_group_block_ids(
-                        g,
-                        block_ids_by_group[g],
-                        max(
-                            cdiv(load_end_tokens, group_block_size),
-                            len(block_ids_by_group[g]),
-                        ),
-                    )
-                ),
-                cdiv(load_end_tokens, group_block_size),
-            )
-            if end_block == start_block:
-                continue
-            if end_block < start_block:
-                raise RuntimeError(
-                    "Recompute H2D produced an empty block range: "
-                    f"req_id={request.request_id}, group={g}, "
-                    f"start_block={start_block}, end_block={end_block}, "
-                    f"gpu_blocks={len(block_ids_by_group[g])}, "
-                    f"cpu_blocks={len(group_cpu_ids)}"
+            if self._group_is_mamba[g]:
+                accept_token_idx = self.num_spec_tokens - (state.num_computed_tokens - request.num_tokens + 1)
+                cpu_block_ids.append(group_cpu_ids[accept_token_idx])
+                gpu_block_ids.append(block_ids_by_group[g][0])
+            else:
+                group_block_size = self.cpu_kv_cache_config.kv_cache_groups[g].kv_cache_spec.block_size
+                start_block = load_start_tokens // group_block_size
+                end_block = min(
+                    len(group_cpu_ids),
+                    len(
+                        self._align_group_block_ids(
+                            g,
+                            block_ids_by_group[g],
+                            max(
+                                cdiv(load_end_tokens, group_block_size),
+                                len(block_ids_by_group[g]),
+                            ),
+                        )
+                    ),
+                    cdiv(load_end_tokens, group_block_size),
                 )
-
-            aligned_group_gpu_ids = self._align_group_block_ids(
-                g,
-                block_ids_by_group[g],
-                end_block,
-            )
-            for block_idx in range(start_block, end_block):
-                cpu_block_id = group_cpu_ids[block_idx]
-                gpu_block_id = aligned_group_gpu_ids[block_idx]
-                if cpu_block_id <= 0 or gpu_block_id <= 0:
+                if end_block == start_block:
                     continue
-                cpu_block_ids.append(cpu_block_id)
-                gpu_block_ids.append(gpu_block_id)
+                if end_block < start_block:
+                    raise RuntimeError(
+                        "Recompute H2D produced an empty block range: "
+                        f"req_id={request.request_id}, group={g}, "
+                        f"start_block={start_block}, end_block={end_block}, "
+                        f"gpu_blocks={len(block_ids_by_group[g])}, "
+                        f"cpu_blocks={len(group_cpu_ids)}"
+                    )
+
+                aligned_group_gpu_ids = self._align_group_block_ids(
+                    g,
+                    block_ids_by_group[g],
+                    end_block,
+                )
+                for block_idx in range(start_block, end_block):
+                    cpu_block_id = group_cpu_ids[block_idx]
+                    gpu_block_id = aligned_group_gpu_ids[block_idx]
+                    if cpu_block_id <= 0 or gpu_block_id <= 0:
+                        continue
+                    cpu_block_ids.append(cpu_block_id)
+                    gpu_block_ids.append(gpu_block_id)
 
         if not cpu_block_ids or len(cpu_block_ids) != len(gpu_block_ids):
             raise RuntimeError(

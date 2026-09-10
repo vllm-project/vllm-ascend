@@ -1,310 +1,300 @@
 # SOME DESCRIPTIVE TITLE.
-# Copyright (C) 2025, vllm-ascend team
-# This file is distributed under the same license as the vllm-ascend
-# package.
+# Copyright (C) 2026, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
 #
 msgid ""
 msgstr ""
-"Project-Id-Version: vllm-ascend \n"
+"Project-Id-Version: vllm-ascend\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-04-21 02:03+0000\n"
-"PO-Revision-Date: 2026-01-22 18:20+0800\n"
-"Last-Translator: Gemini\n"
-"Language: zh_CN\n"
+"POT-Creation-Date: 2026-07-08 14:01+0000\n"
+"PO-Revision-Date: 2026-07-08 14:01+0000\n"
+"Last-Translator: \n"
 "Language-Team: zh_CN <LL@li.org>\n"
-"Plural-Forms: nplurals=1; plural=0;\n"
+"Language: zh_CN\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Generated-By: Babel 2.18.0\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: detect_po_changes.py\n"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:1
-msgid "Context Parallel Guide"
-msgstr "上下文并行指南"
+msgid "## Overview"
+msgstr "## 概述"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:3
-msgid "Overview"
-msgstr "概述"
+msgid "## Supported Scenarios"
+msgstr "## 支持场景"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:5
 msgid ""
-"This guide shows how to use Context Parallel, a long sequence inference "
-"optimization technique. Context Parallel includes `PCP` (Prefill Context "
-"Parallel) and `DCP` (Decode Context Parallel), which reduces NPU memory "
-"usage and improves inference speed in long sequence LLM inference."
+"DCP supports eager and graph execution, prefix caching, chunked prefill, "
+"speculative decoding, P/D disaggregation, and MLAPO on the model and "
+"hardware combinations documented by vLLM Ascend. The following table shows "
+"whether each feature can be combined with DCP across devices and attention "
+"backends:"
 msgstr ""
-"本指南介绍如何使用上下文并行（Context Parallel），这是一种长序列推理优化技术。上下文并行包括 `PCP`（预填充上下文并行）和 "
-"`DCP`（解码上下文并行），能够降低长序列 LLM 推理中的 NPU 内存占用并提升推理速度。"
+"DCP在vLLM "
+"Ascend记录的模型和硬件组合上支持eager和图执行、前缀缓存、分块预填充、推测解码、P/D分离以及MLAPO。下表显示了各功能在设备和注意力后端上是否可以与DCP组合使用："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:7
-msgid "Benefits of Context Parallel"
-msgstr "上下文并行的优势"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:9
 msgid ""
-"Context parallel mainly solves the problem of serving long context "
-"requests. As prefill and decode present quite different characteristics "
-"and have quite different SLO (service level objectives), we need to "
-"implement context parallel separately for them. The major considerations "
-"are:"
-msgstr "上下文并行主要解决长上下文请求的服务问题。由于预填充（Prefill）和解码（Decode）具有显著不同的特性及服务水平目标（SLO），我们需要分别为它们实现上下文并行。主要考量点包括："
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:11
-msgid ""
-"For long context prefill, we can use context parallel to reduce TTFT "
-"(time to first token) by amortizing the computation time of the prefill "
-"across query tokens."
-msgstr "对于长上下文预填充，我们可以使用上下文并行，通过在查询令牌间分摊预填充的计算时间来降低首令牌延迟（TTFT）。"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:12
-msgid ""
-"For long context decode, we can use context parallel to reduce KV cache "
-"duplication and offer more space for KV cache to increase the batch size "
-"(and hence the throughput)."
-msgstr "对于长上下文解码，我们可以使用上下文并行来减少 KV 缓存的重复，从而为 KV 缓存腾出更多空间以增加批次大小（进而提升吞吐量）。"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:14
-msgid ""
-"To learn more about the theory and implementation details of context "
-"parallel, please refer to the [context parallel developer "
-"guide](../../developer_guide/Design_Documents/context_parallel.md)."
+"| Device | Attention Backend | Chunked Prefill + DCP | Prefix Caching + DCP "
+"| Graph Mode + DCP | P/D Disaggregation + DCP | MLAPO + DCP | Speculative "
+"Decoding + DCP |"
 msgstr ""
-"欲了解更多关于上下文并行的理论和实现细节，请参阅 "
-"[上下文并行开发者指南](../../developer_guide/Design_Documents/context_parallel.md)。"
+"| 设备 | 注意力后端 | 分块预填充 + DCP | 前缀缓存 + DCP | 图模式 + DCP | P/D分离 + DCP | MLAPO + "
+"DCP | 推测解码 + DCP |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:16
-msgid "Supported Scenarios"
-msgstr "支持场景"
+msgid "## Usage"
+msgstr "## 使用方法"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:18
+msgid "DCP reuses the TP devices and does not increase the world size."
+msgstr "DCP复用TP设备，不会增加世界大小。"
+
 msgid ""
-"Currently context parallel can be used together with most other features,"
-" supported features are as follows:"
-msgstr "目前上下文并行可与大多数其他功能结合使用，支持的功能如下："
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Eager"
-msgstr "Eager 模式"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Graph"
-msgstr "图模式"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Prefix <br> Cache"
-msgstr "前缀缓存 <br>"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Chunked <br> Prefill"
-msgstr "分块预填充 <br>"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "SpecDecode <br> (MTP)"
-msgstr "投机解码 <br> (MTP)"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "PD <br> disaggregation"
-msgstr "PD 分离 <br>"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "MLAPO"
-msgstr "MLAPO"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "**PCP**"
-msgstr "**PCP**"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "✅"
-msgstr "✅"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "**DCP**"
-msgstr "**DCP**"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:25
-msgid "How to use Context Parallel"
-msgstr "如何使用上下文并行"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:27
-msgid ""
-"You can enable `PCP` and `DCP` by `prefill_context_parallel_size` and "
-"`decode_context_parallel_size`, refer to the following example:"
+"- For an MLA model such as DeepSeek-R1:\n"
+"    - `tensor_parallel_size >= decode_context_parallel_size`\n"
+"    - `tensor_parallel_size % decode_context_parallel_size == 0`\n"
+"- For a GQA model such as Qwen3-235B:\n"
+"    - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`\n"
+"    - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`\n"
+"- In a KV-cache transfer scenario such as KV pooling or P/D disaggregation, set `cp_kv_cache_interleave_size` to the KV-cache `block_size` (default: 128):"
 msgstr ""
-"您可以通过 `prefill_context_parallel_size` 和 `decode_context_parallel_size` 启用"
-" `PCP` 和 `DCP`，请参考以下示例："
+"- 对于MLA模型（如DeepSeek-R1）：\n"
+"    - `tensor_parallel_size >= decode_context_parallel_size`\n"
+"    - `tensor_parallel_size % decode_context_parallel_size == 0`\n"
+"- 对于GQA模型（如Qwen3-235B）：\n"
+"    - `(tensor_parallel_size // num_key_value_heads) >= decode_context_parallel_size`\n"
+"    - `(tensor_parallel_size // num_key_value_heads) % decode_context_parallel_size == 0`\n"
+"- 在KV缓存传输场景（如KV池化或P/D分离）中，将`cp_kv_cache_interleave_size`设置为KV缓存的`block_size`（默认值：128）："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:29
-msgid "Offline example:"
-msgstr "离线示例："
+msgid "# Context Parallel Guide"
+msgstr "# 上下文并行指南"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:48
-msgid "Online example:"
-msgstr "在线示例："
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:57
 msgid ""
-"The total world size is `tensor_parallel_size` * "
-"`prefill_context_parallel_size`, so the examples above need 4 NPUs for "
-"each."
-msgstr ""
-"总的世界大小为 `tensor_parallel_size` * "
-"`prefill_context_parallel_size`，因此上述每个示例都需要 4 个 NPU。"
+"DSA-CP supports prefix caching, chunked prefill, speculative decoding, P/D "
+"disaggregation on the model and hardware combinations documented by vLLM "
+"Ascend."
+msgstr "DSA-CP支持vLLM Ascend文档中记录的模型和硬件组合上的前缀缓存、分块预填充、推测解码和P/D分离。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:59
-msgid "Constraints"
-msgstr "约束条件"
+msgid "### DSA-CP"
+msgstr "### DSA-CP"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:61
-msgid "While using DCP, the following constraints must be met:"
-msgstr "使用 DCP 时，必须满足以下约束条件："
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:62
-msgid "For MLA-based model, such as DeepSeek-R1:"
-msgstr "对于基于 MLA 的模型，例如 DeepSeek-R1："
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:63
-msgid "`tensor_parallel_size >= decode_context_parallel_size`"
-msgstr "`tensor_parallel_size >= decode_context_parallel_size`"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:64
-#, python-format
-msgid "`tensor_parallel_size % decode_context_parallel_size == 0`"
-msgstr "`tensor_parallel_size % decode_context_parallel_size == 0`"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:65
-msgid "For GQA-based model, such as Qwen3-235B:"
-msgstr "对于基于 GQA 的模型，例如 Qwen3-235B："
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:66
 msgid ""
-"`(tensor_parallel_size // num_key_value_heads) >= "
-"decode_context_parallel_size`"
+"For implementation details, see the [Context Parallel design "
+"document](../../developer_guide/Design_Documents/context_parallel.md)."
 msgstr ""
-"`(tensor_parallel_size // num_key_value_heads) >= "
-"decode_context_parallel_size`"
+"有关实现细节，请参阅[上下文并行设计文档](../../developer_guide/Design_Documents/context_parallel.md)。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:67
-#, python-format
 msgid ""
-"`(tensor_parallel_size // num_key_value_heads) % "
-"decode_context_parallel_size == 0`"
-msgstr ""
-"`(tensor_parallel_size // num_key_value_heads) % "
-"decode_context_parallel_size == 0`"
+"Context Parallel (CP) serves long-context requests by splitting work or KV-"
+"cache storage along the sequence dimension:"
+msgstr "上下文并行（CP）通过沿序列维度拆分工作或KV缓存存储来服务长上下文请求："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:69
 msgid ""
-"While using Context Parallel in KV cache transfer-needed scenario (e.g. "
-"KV pooling, PD disaggregation), to simplify KV cache transmission, "
-"`cp_kv_cache_interleave_size` must be set to the same value of KV cache "
-"`block_size`(default: 128), which specifies CP to split KV cache in a "
-"block-interleave style. For example:"
+"- Prefill Context Parallel (PCP) splits the prefill tokens of a long prefill request across additional ranks. Each rank computes a different part of the sequence, reducing time to first token (TTFT).\n"
+"- Decode Context Parallel (DCP) shards the KV cache across ranks in a DCP group, which may reuse ranks from the PCP group, the Tensor Parallel (TP) group, or both, depending on the parallel configuration. It reduces duplicated KV-cache storage and can increase decode throughput."
 msgstr ""
-"在需要传输 KV 缓存的场景（例如 KV 池化、PD 分离）中使用上下文并行时，为简化 KV 缓存传输，必须将 "
-"`cp_kv_cache_interleave_size` 设置为与 KV 缓存 "
-"`block_size`（默认值：128）相同的值，这指定了上下文并行以块交错方式切分 KV 缓存。例如："
+"- 预填充上下文并行（PCP）将长预填充请求的预填充令牌拆分到额外的秩上。每个秩计算序列的不同部分，从而减少首令牌时间（TTFT）。\n"
+"- 解码上下文并行（DCP）将KV缓存分片到DCP组中的各秩上，该组可能复用PCP组、张量并行（TP）组或两者的秩，具体取决于并行配置。它减少了重复的KV缓存存储，并可以提高解码吞吐量。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:80
-msgid "Experimental Results"
-msgstr "实验结果"
-
-#: ../../source/user_guide/feature_guide/context_parallel.md:82
 msgid ""
-"To evaluate the effectiveness of Context Parallel in long sequence LLM "
-"inference scenarios, we use **DeepSeek-R1-W8A8** and **Qwen3-235B**, "
-"deploy PD disaggregate instances in the environment of 64 cards Ascend "
-"Atlas A3 inference products*64G (A3), the configuration and performance "
-"data are as follows."
+"For a general introduction to these two strategies, see the upstream [vLLM "
+"Context Parallel "
+"Deployment](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/)"
+" guide."
 msgstr ""
-"为评估上下文并行在长序列 LLM 推理场景中的有效性，我们使用 **DeepSeek-R1-W8A8** 和 **Qwen3-235B** "
-"模型，在 64 卡 Ascend Atlas A3 推理产品*64G (A3) 环境下部署 PD 分离实例，配置和性能数据如下。"
+"有关这两种策略的通用介绍，请参阅上游[vLLM上下文并行部署](https://docs.vllm.ai/en/latest/serving/context_parallel_deployment/)指南。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:84
-msgid "DeepSeek-R1-W8A8:"
-msgstr "DeepSeek-R1-W8A8："
+msgid ""
+"DSA-CP is a separate sparse-attention optimization controlled by "
+"`additional_config.enable_dsa_cp`. It will be removed once PCP support is "
+"stable. See [Additional "
+"Configuration](../configuration/additional_config.md) for its configuration "
+"and model requirements."
+msgstr ""
+"DSA-"
+"CP是一种由`additional_config.enable_dsa_cp`控制的独立稀疏注意力优化。一旦PCP支持稳定，它将被移除。有关其配置和模型要求，请参阅[附加配置](../configuration/additional_config.md)。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Configuration"
-msgstr "配置"
+msgid "### Prefill Context Parallel"
+msgstr "### 预填充上下文并行"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Input length <br> 32k"
-msgstr "输入长度 <br> 32k"
+msgid ""
+"PCP support is experimental and available only with ModelRunner V2. The "
+"following table shows the basic backend support and whether each feature can"
+" be combined with PCP:"
+msgstr "PCP支持是实验性的，仅适用于ModelRunner V2。下表显示了基本后端支持情况以及每个功能是否可以与PCP组合："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Input length <br> 64k"
-msgstr "输入长度 <br> 64k"
+msgid ""
+"| Attention Backend | Basic PCP | Prefix Caching + PCP | Chunked Prefill + "
+"PCP | MLAPO + PCP | Speculative Decoding + PCP | P/D Disaggregation + PCP | "
+"Sequence Parallelism (SP) + PCP |"
+msgstr ""
+"| 注意力后端 | 基本PCP | 前缀缓存 + PCP | 分块预填充 + PCP | MLAPO + PCP | 投机解码 + PCP | "
+"P/D分离 + PCP | 序列并行（SP） + PCP |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Input length <br> 128k"
-msgstr "输入长度 <br> 128k"
+msgid "### Decode Context Parallel"
+msgstr "### 解码上下文并行"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "P node: (DP2 TP8 EP16) *2 <br> D node: (DP32 EP32)*1"
-msgstr "P 节点: (DP2 TP8 EP16) *2 <br> D 节点: (DP32 EP32)*1"
+msgid ""
+"| Ascend A2/A3 | MLA/GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ "
+"Full compatibility | ✅ Full compatibility | ✅ Full compatibility (MLA)<br>— "
+"Not applicable (GQA) | ✅ P/D disaggregation<br>❌ PD-mixed deployment |"
+msgstr ""
+"| Ascend A2/A3 | MLA/GQA | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | ✅ "
+"完全兼容（MLA）<br>— 不适用（GQA） | ✅ P/D分离<br>❌ PD混合部署 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 9.3s <br> TPOT: 72ms"
-msgstr "TTFT: 9.3s <br> TPOT: 72ms"
+msgid ""
+"| Ascend A2/A3 | SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full "
+"compatibility | ✅ Full compatibility | ✅ Full compatibility | ✅ Full "
+"compatibility |"
+msgstr ""
+"| Ascend A2/A3 | SFA | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 22.8s <br> TPOT: 74ms"
-msgstr "TTFT: 22.8s <br> TPOT: 74ms"
+msgid ""
+"| Ascend 950 | MLA/GQA | 🟠 Partial compatibility | 🟠 Partial compatibility |"
+" 🟠 Partial compatibility | 🟠 Partial compatibility | 🟠 Partial compatibility"
+" (MLA)<br>— Not applicable (GQA) | 🟠 P/D disaggregation<br>❌ PD-mixed "
+"deployment |"
+msgstr ""
+"| Ascend 950 | MLA/GQA | 🟠 部分兼容 | 🟠 部分兼容 | 🟠 部分兼容 | 🟠 部分兼容 | 🟠 "
+"部分兼容（MLA）<br>— 不适用（GQA） | 🟠 P/D分离<br>❌ PD混合部署 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 73.2s <br> TPOT: 82ms"
-msgstr "TTFT: 73.2s <br> TPOT: 82ms"
+msgid ""
+"| Ascend 950 | SFA | ❌ No compatibility | ❌ No compatibility | ❌ No "
+"compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No compatibility"
+" |"
+msgstr "| Ascend 950 | SFA | ❌ 不兼容 | ❌ 不兼容 | ❌ 不兼容 | ❌ 不兼容 | ❌ 不兼容 | ❌ 不兼容 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "P node: (PCP2 TP8 DCP8 EP16) *2 <br> D node: (DP32 EP32)*1"
-msgstr "P 节点: (PCP2 TP8 DCP8 EP16) *2 <br> D 节点: (DP32 EP32)*1"
+msgid ""
+"- ✅ **Full compatibility**: Combining the feature with DCP is supported.\n"
+"- 🟠 **Partial compatibility**: Combining the feature with DCP is experimentally supported; interfaces and functionality may change.\n"
+"- ❌ **No compatibility**: Combining the feature with DCP is not supported.\n"
+"- **Not applicable**: The feature does not apply to this attention backend."
+msgstr ""
+"- ✅ **完全兼容**：支持将该功能与DCP组合。\n"
+"- 🟠 **部分兼容**：将该功能与DCP组合为实验性支持；接口和功能可能会更改。\n"
+"- ❌ **不兼容**：不支持将该功能与DCP组合。\n"
+"- **不适用**：该功能不适用于此注意力后端。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 7.9s <br> TPOT: 74ms"
-msgstr "TTFT: 7.9s <br> TPOT: 74ms"
+msgid ""
+"Enable ModelRunner V2 and set `prefill_context_parallel_size` to the number "
+"of PCP ranks:"
+msgstr "启用ModelRunner V2并将`prefill_context_parallel_size`设置为PCP秩的数量："
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 15.9s <br> TPOT: 78ms"
-msgstr "TTFT: 15.9s <br> TPOT: 78ms"
+msgid ""
+"Unlike DCP, PCP adds extra ranks: `world_size_with_pcp = "
+"prefill_context_parallel_size * original_world_size`."
+msgstr ""
+"与DCP不同，PCP会增加额外的秩：`world_size_with_pcp = prefill_context_parallel_size * "
+"original_world_size`。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 46.0s <br> TPOT: 83ms"
-msgstr "TTFT: 46.0s <br> TPOT: 83ms"
+msgid "#### Constraints"
+msgstr "#### 约束"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md:91
-msgid "Qwen3-235B:"
-msgstr "Qwen3-235B："
+msgid ""
+"| MLA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |"
+" ✅ Full compatibility | 🟠 Partial compatibility (MTP, eager and "
+"`FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |"
+msgstr ""
+"| MLA | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | 🟠 部分兼容（MTP、eager 和 "
+"`FULL_DECODE_ONLY`） | ❌ 不兼容 | ❌ 不兼容 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "Input length <br> 120k"
-msgstr "输入长度 <br> 120k"
+msgid ""
+"| GQA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |"
+" — Not applicable | 🟠 Partial compatibility (Eagle3, eager and "
+"`FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |"
+msgstr ""
+"| GQA | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | — 不适用 | 🟠 部分兼容（Eagle3、eager 和 "
+"`FULL_DECODE_ONLY`） | ❌ 不兼容 | ❌ 不兼容 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 5.1s <br> TPOT: 65ms"
-msgstr "TTFT: 5.1s <br> TPOT: 65ms"
+msgid ""
+"| SFA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |"
+" ❌ No compatibility | ❌ No compatibility | ❌ No compatibility | ❌ No "
+"compatibility |"
+msgstr "| SFA | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | ❌ 不兼容 | ❌ 不兼容 | ❌ 不兼容 | ❌ 不兼容 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 13.1s <br> TPOT: 85ms"
-msgstr "TTFT: 13.1s <br> TPOT: 85ms"
+msgid ""
+"| DSA | ✅ Full compatibility | ✅ Full compatibility | ✅ Full compatibility |"
+" — Not applicable | 🟠 Partial compatibility (MTP, eager and "
+"`FULL_DECODE_ONLY`) | ❌ No compatibility | ❌ No compatibility |"
+msgstr ""
+"| DSA | ✅ 完全兼容 | ✅ 完全兼容 | ✅ 完全兼容 | — 不适用 | 🟠 部分兼容（MTP、eager 和 "
+"`FULL_DECODE_ONLY`） | ❌ 不兼容 | ❌ 不兼容 |"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 33.9s <br> TPOT: 120ms"
-msgstr "TTFT: 33.9s <br> TPOT: 120ms"
+msgid ""
+"- ✅ **Full compatibility**: The basic path or feature combination is supported.\n"
+"- 🟠 **Partial compatibility**: The basic path or feature combination is supported with the stated limitations.\n"
+"- ❌ **No compatibility**: The backend or feature combination is not supported by the current MRV2 PCP implementation.\n"
+"- **Not applicable**: The feature does not apply to the attention backend."
+msgstr ""
+"- ✅ **完全兼容**：支持基本路径或功能组合。\n"
+"- 🟠 **部分兼容**：支持基本路径或功能组合，但存在所述限制。\n"
+"- ❌ **不兼容**：当前 MRV2 PCP 实现不支持该后端或功能组合。\n"
+"- **不适用**：该功能不适用于此注意力后端。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "P node: (PCP2 TP8 DCP2 EP16) *2 <br> D node: (DP32 EP32)*1"
-msgstr "P 节点: (PCP2 TP8 DCP2 EP16) *2 <br> D 节点: (DP32 EP32)*1"
+msgid "#### Speculative Decoding"
+msgstr "#### 推测解码"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 3.0s <br> TPOT: 66ms"
-msgstr "TTFT: 3.0s <br> TPOT: 66ms"
+msgid ""
+"MRV2 PCP supports MTP with MLA models and Eagle3 with GQA models. The target"
+" model runs with the configured PCP topology, while the draft model is "
+"replicated on every PCP rank and runs with a logical PCP size of `1`. "
+"Configure PCP only for the target model."
+msgstr ""
+"MRV2 PCP 支持 MLA 模型的 MTP 和 GQA 模型的 Eagle3。目标模型以配置的 PCP 拓扑运行，而草稿模型在每个 PCP rank"
+" 上复制，并以逻辑 PCP 大小为 `1` 运行。仅需为目标模型配置 PCP。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 8.9s <br> TPOT: 86ms"
-msgstr "TTFT: 8.9s <br> TPOT: 86ms"
+msgid ""
+"For general speculative decoding configuration and model requirements, see "
+"[Speculative Decoding](speculative_decoding.md)."
+msgstr "有关一般推测解码配置和模型要求，请参阅[推测解码](speculative_decoding.md)。"
 
-#: ../../source/user_guide/feature_guide/context_parallel.md
-msgid "TTFT: 22.7s <br> TPOT: 121ms"
-msgstr "TTFT: 22.7s <br> TPOT: 121ms"
+msgid "##### MTP with MLA"
+msgstr "##### 使用 MLA 的 MTP"
+
+msgid "##### Eagle3 with GQA"
+msgstr "##### 使用 GQA 的 Eagle3"
+
+msgid ""
+"For either method, remove `--enforce-eager` and add the following option to "
+"use the supported graph mode:"
+msgstr "对于任一方法，请移除 `--enforce-eager` 并添加以下选项以使用支持的图模式："
+
+msgid ""
+"- PCP is supported only with ModelRunner V2.\n"
+"- PCP speculative decoding supports only MTP with MLA models and Eagle3 with GQA models.\n"
+"- Draft sampling must use the greedy method.\n"
+"- Full graph execution with PCP is limited to `FULL_DECODE_ONLY`.\n"
+"- Pipeline parallelism, encoder-decoder models, multimodal inputs, and LoRA are not supported with MRV2 PCP.\n"
+"- DSA and SFA draft attention are not supported with PCP speculative decoding.\n"
+"- PCP and DCP cannot be enabled simultaneously.\n"
+"- Adaptive verification is not supported with PCP speculative decoding.\n"
+"- Dynamic draft lengths are outside the currently validated scope.\n"
+"- PCP and [DSA-CP](#dsa-cp) cannot be enabled simultaneously with the DSA backend."
+msgstr ""
+"- PCP 仅支持 ModelRunner V2。\n"
+"- PCP 推测解码仅支持 MLA 模型的 MTP 和 GQA 模型的 Eagle3。\n"
+"- 草稿采样必须使用贪心方法。\n"
+"- 使用 PCP 的完整图执行仅限于 `FULL_DECODE_ONLY`。\n"
+"- MRV2 PCP 不支持流水线并行、编码器-解码器模型、多模态输入和 LoRA。\n"
+"- PCP 推测解码不支持 DSA 和 SFA 草稿注意力。\n"
+"- PCP 和 DCP 不能同时启用。\n"
+"- PCP 推测解码不支持自适应验证。\n"
+"- 动态草稿长度不在当前验证范围内。\n"
+"- 使用 DSA 后端时，PCP 和 [DSA-CP](#dsa-cp) 不能同时启用。"
+
+msgid ""
+"DSA-CP will be fully deprecated once PCP is ready. PCP is currently experimental,\n"
+"with support for some feature combinations still in progress."
+msgstr ""
+"一旦 PCP 就绪，DSA-CP 将被完全弃用。PCP 目前处于实验阶段，\n"
+"某些功能组合的支持仍在进行中。"
+
+msgid ""
+"To try PCP with the same world size, replace TP size `N > 1` with\n"
+"`--tensor-parallel-size 1 --prefill-context-parallel-size N` and remove\n"
+"`enable_dsa_cp` from `additional_config`. With TP size 1, PCP requires additional\n"
+"ranks. Check the compatibility and limitations above before migrating."
+msgstr ""
+"要以相同的 world size 尝试 PCP，请将 TP 大小 `N > 1` 替换为\n"
+"`--tensor-parallel-size 1 --prefill-context-parallel-size N`，并从\n"
+"`additional_config` 中移除 `enable_dsa_cp`。使用 TP 大小 1 时，PCP 需要额外的\n"
+"ranks。迁移前请检查上述兼容性和限制。"

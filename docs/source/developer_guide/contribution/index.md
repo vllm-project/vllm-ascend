@@ -22,7 +22,7 @@ python3 -m venv .venv
 source ./.venv/bin/activate
 
 # Clone vllm-ascend and install
-git clone https://github.com/vllm-project/vllm-ascend.git
+git clone --branch main https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 
 # Install lint requirement and enable pre-commit hook
@@ -36,12 +36,14 @@ bash format.sh
 
 After completing "Run lint" setup, you can run CI (Continuous integration) locally:
 
-```{code-block} bash
-   :substitutions:
+```bash
 cd ~/vllm-project/
 
-# Run CI needs vLLM installed
-git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
+# Install the vLLM commit verified by the main-branch plugin checkout.
+VLLM_COMMIT=$(tr -d '[:space:]' < vllm-ascend/.github/vllm-main-verified.commit)
+git init vllm
+git -C vllm fetch --depth 1 https://github.com/vllm-project/vllm.git "$VLLM_COMMIT"
+git -C vllm checkout --detach FETCH_HEAD
 cd vllm
 pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
@@ -95,21 +97,11 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[CI]` for build or continuous integration improvements.
 - `[Misc]` for PRs that do not fit the above categories. Please use this sparingly.
 
-:::{note}
-If the PR spans more than one category, please include all relevant prefixes.
-:::
+!!! note
+
+    If the PR spans more than one category, please include all relevant prefixes.
 
 ## Others
 
 You may find more information about contributing to vLLM Ascend backend plugin on [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing).
 If you encounter any problems while contributing, feel free to submit a PR to improve the documentation to help other developers.
-
-:::{toctree}
-:caption: Index
-:maxdepth: 1
-testing
-doc_writing
-multi_node_test
-nightly_ci_test
-e2e_ci_test
-:::

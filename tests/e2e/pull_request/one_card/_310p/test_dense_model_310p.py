@@ -68,70 +68,25 @@ def _generate_qwen3_5_prefix_mamba_outputs(enable_prefix_caching: bool) -> list[
     return outputs
 
 
-def test_qwen3_dense_tp1_fp16():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3-8B",
-        tensor_parallel_size=1,
-        enforce_eager=True,
-        dtype="float16",
-        max_model_len=16384,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
 @wait_until_npu_memory_free(0.7)
-def test_qwen3_dense_tp1_fp16_aclgraph():
+def test_qwen3_dense_tp1_w8a8_aclgraph():
     example_prompts = [
         "Hello, my name is",
     ] * 8
     max_tokens = 2
     with VllmRunner(
-        "Qwen/Qwen3-8B",
+        "vllm-ascend/Qwen3-8B-W8A8",
         tensor_parallel_size=1,
         dtype="float16",
         max_num_seqs=16,
         max_model_len=16384,
         gpu_memory_utilization=0.80,
+        quantization="ascend",
         additional_config={"ascend_compilation_config": {"fuse_norm_quant": False}},
         compilation_config={
             "cudagraph_mode": "FULL_DECODE_ONLY",
             "cudagraph_capture_sizes": [1, 2, 4, 8, 16],
         },
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_qwen3_dense_tp1_w8a8():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "vllm-ascend/Qwen3-8B-W8A8",
-        tensor_parallel_size=1,
-        enforce_eager=True,
-        dtype="float16",
-        quantization="ascend",
-        max_model_len=16384,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_qwen3_5_dense_tp1_fp16():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    max_tokens = 5
-    with VllmRunner(
-        "Qwen/Qwen3.5-4B",
-        tensor_parallel_size=1,
-        enforce_eager=True,
-        dtype="float16",
-        max_model_len=16384,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 

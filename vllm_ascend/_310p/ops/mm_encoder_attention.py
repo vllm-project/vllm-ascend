@@ -35,6 +35,10 @@ MAX_PAD_SIZE: int = 128  # max_size to pad weight
 seq_lens_cpu_cache: torch.Tensor = None
 
 
+def is_approximate_calculation_supported() -> bool:
+    return hasattr(torch_npu, "_npu_flash_attention_unpad_v2")
+
+
 class AscendMMEncoderAttention310(MMEncoderAttention):
     def __init__(
         self,
@@ -64,6 +68,7 @@ class AscendMMEncoderAttention310(MMEncoderAttention):
 
         self.enable_pad = self.head_size > MIN_PAD_SIZE and self.head_size < MAX_PAD_SIZE
         self.scale_value = self.head_size**-0.5
+        self.support_approximate_calculation = is_approximate_calculation_supported()
 
     def _reshape_qkv_to_3d(
         self,
@@ -119,18 +124,32 @@ class AscendMMEncoderAttention310(MMEncoderAttention):
             v = F.pad(v, (0, pad_len), mode="constant", value=0)
 
         context_layer = torch.empty_like(q)
-
-        # operator requires pta version >= 2.5.1
-        torch_npu._npu_flash_attention_unpad(
-            query=q,
-            key=k,
-            value=v,
-            seq_len=seq_lens_cpu,
-            scale_value=self.scale_value,
-            num_heads=self.num_heads,
-            num_kv_heads=self.num_kv_heads,
-            out=context_layer,
-        )
+        # TODO: The current torch_npu version 2.10.0 does not support
+        # _npu_flash_attention_unpad_v2. Once it is supported, drop the
+        # else branch below and always use the v2 op.
+        if self.support_approximate_calculation:
+            torch_npu._npu_flash_attention_unpad_v2(
+                query=q,
+                key=k,
+                value=v,
+                seq_len=seq_lens_cpu,
+                scale_value=self.scale_value,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=context_layer,
+                kernel_type=2,
+            )
+        else:
+            torch_npu._npu_flash_attention_unpad(
+                query=q,
+                key=k,
+                value=v,
+                seq_len=seq_lens_cpu,
+                scale_value=self.scale_value,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=context_layer,
+            )
 
         if self.enable_pad:
             context_layer = context_layer[..., :origin_shape]

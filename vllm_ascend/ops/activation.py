@@ -17,9 +17,13 @@
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul, SiluAndMulWithClamp, SwigluOAIAndMul
-
-from vllm_ascend.utils import get_weight_prefetch_method
+from vllm.model_executor.layers.activation import (
+    QuickGELU,
+    SiluAndMul,
+    SiluAndMulWithClamp,
+    SwigluOAIAndMul,
+    SwigluStepAndMul,
+)
 
 
 class AscendQuickGELU(QuickGELU):
@@ -30,23 +34,17 @@ class AscendQuickGELU(QuickGELU):
 
 class AscendSiluAndMul(SiluAndMul):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
         out = torch_npu.npu_swiglu(x)
-        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
 
 
 class AscendSiluAndMulWithClamp(SiluAndMulWithClamp):
     def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        weight_prefetch_method = get_weight_prefetch_method()
-        weight_prefetch_method.maybe_prefetch_mlp_weight_preprocess(weight_prefetch_method.MLP_DOWN, x)
         d = x.shape[-1] // 2
         gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
         up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
         x = torch.cat([gate, up], dim=-1)
         out = torch_npu.npu_swiglu(x)
-        weight_prefetch_method.maybe_prefetch_mlp_weight_postprocess(out)
         return out
 
 
@@ -61,18 +59,28 @@ class AscendSwigluOAIAndMul:
         return SwigluOAIAndMul.forward_native(layer, x)
 
 
-def swiglustep_and_mul(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
-    """Out-variant of swiglustep activation.
+class AscendSwigluStepAndMul:
+    def swiglustep_forward(x: torch.Tensor, limit: float = 7.0) -> torch.Tensor:
+        if limit is None:
+            raise ValueError("SwigluStepAndMul requires limit to be set.")
 
-    Computes:
-     silu(x[:d]).clamp(max=limit) * x[d:].clamp(-limit, limit)
+        # Triton fused path: 1D-grid row-loop kernel that fuses
+        # silu + clamp + mul into a single launch (see
+        # vllm_ascend/ops/triton/activation/swiglustep.py). Numerically
+        # equivalent to forward_native below.
+        from vllm.triton_utils import HAS_TRITON
 
-    This is the custom activation used by Step-3.7-Flash's final MoE layers
-    (layers 43-44) to prevent numerical overflow via clamp truncation.
-    """
-    gate, up = x.chunk(2, dim=-1)
-    gate = torch.nn.functional.silu(gate)
-    gate = gate.clamp(max=limit)
-    up = up.clamp(min=-limit, max=limit)
-    out = gate * up
-    return out
+        if HAS_TRITON:
+            from vllm_ascend.ops.triton.activation.swiglustep import (
+                swiglustep_forward_triton,
+            )
+
+            return swiglustep_forward_triton(x, limit)
+
+        # Fallback when triton is unavailable: vllm's native silu+clamp+mul.
+        class MinimalSwigluStepAndMul:
+            def __init__(self):
+                self.limit = limit
+
+        layer = MinimalSwigluStepAndMul()
+        return SwigluStepAndMul.forward_native(layer, x)

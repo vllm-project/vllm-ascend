@@ -17,11 +17,15 @@
 import gc
 import json
 import time
+from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, ClassVar, cast
+from weakref import ReferenceType, ref
 
 import torch
 from torch import nn
-from vllm.config import LoadConfig, ModelConfig, VllmConfig
+from vllm.config import LoadConfig, ModelConfig, VllmConfig, get_current_vllm_config_or_none
 from vllm.logger import logger
 from vllm.model_executor.model_loader import register_model_loader
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
@@ -29,11 +33,69 @@ from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.utils import initialize_model, process_weights_after_loading
 from vllm.utils.torch_utils import set_default_torch_dtype
 
+from .executor.elastic_load import cache_processed_layout_transfer_manifest, synchronize_npu
 from .interaction.elastic import ElasticServer
 from .load import elastic_load
 from .utils import find_free_port, is_valid_path_prefix
 
 DRAFT_PORT_OFFSET = 10000
+MAX_FREE_PORT_RETRIES = 5
+MAX_FALLBACK_MEMORY_RECLAIM_ATTEMPTS = 2
+BYTES_PER_MIB = 1024**2
+
+
+@dataclass
+class _FallbackCleanupContext:
+    context_keys: dict[int, set[Any]]
+    static_all_moe_layers: dict[int, tuple[list[Any], list[Any]]]
+    rope_cache: dict[Any, Any] | None
+    eplb_layers: list[nn.Module]
+    eplb_layer_count: int
+    memory_baseline: tuple[int, int] | None
+
+
+@dataclass
+class _FallbackReclaimResult:
+    attempts: int
+    before: tuple[int, int] | None
+    after: tuple[int, int] | None
+    reached_baseline: bool
+
+
+@contextmanager
+def pre_transfer_weight_processing(model: nn.Module):
+    """Unwrap MoE shared-expert validation during pre-transfer process_weights."""
+    try:
+        from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner
+    except ImportError:
+        AscendMoERunner = None  # type: ignore[misc, assignment]
+
+    restored: list[tuple[Any, object]] = []
+    seen_quant_methods: set[int] = set()
+
+    def _unwrap_quant_method(quant_method: Any) -> None:
+        if quant_method is None or id(quant_method) in seen_quant_methods:
+            return
+
+        process_weights = getattr(quant_method, "process_weights_after_loading", None)
+        original_process_weights = getattr(process_weights, "__wrapped__", None)
+        if original_process_weights is None:
+            return
+
+        quant_method = cast(Any, quant_method)
+        seen_quant_methods.add(id(quant_method))
+        restored.append((quant_method, process_weights))
+        quant_method.process_weights_after_loading = original_process_weights
+
+    for module in model.modules():
+        if AscendMoERunner is not None and isinstance(module, AscendMoERunner):
+            _unwrap_quant_method(module._quant_method)
+
+    try:
+        yield
+    finally:
+        for quant_method, process_weights in restored:
+            quant_method.process_weights_after_loading = process_weights
 
 
 @register_model_loader("netloader")
@@ -41,6 +103,10 @@ class ModelNetLoaderElastic(BaseModelLoader):
     """
     A model loader that uses elastic loading for loading weights.
     """
+
+    # Shared across loader instances in one worker: draft uses a separate
+    # draft_vllm_config, so an instance/config flag would not be visible there.
+    _target_elastic_fallback: ClassVar[bool] = False
 
     source: list[dict] | None
     model_path: str | None
@@ -136,6 +202,233 @@ class ModelNetLoaderElastic(BaseModelLoader):
         """Check whether the model_config corresponds to a draft model for speculative decoding."""
         return getattr(model_config, "runner_type", None) == "draft"
 
+    @staticmethod
+    def _sync_target_netloader_before_draft(vllm_config: VllmConfig) -> None:
+        if getattr(vllm_config, "speculative_config", None) is None:
+            return
+        if not torch.distributed.is_available() or not torch.distributed.is_initialized():
+            return
+
+        world_size = torch.distributed.get_world_size()
+        rank = torch.distributed.get_rank()
+        local_world_size = getattr(vllm_config.parallel_config, "local_world_size", world_size)
+        if not isinstance(local_world_size, int) or local_world_size <= 0 or world_size % local_world_size != 0:
+            local_world_size = world_size
+        if local_world_size == 1:
+            return
+
+        # Same-node ranks only; skip cross-node wait for disk/HBM/NIC contention.
+        group = None
+        if local_world_size < world_size:
+            my_node = rank // local_world_size
+            # new_group is world-collective: every rank must create every node group.
+            for node_idx in range(world_size // local_world_size):
+                ranks = list(range(node_idx * local_world_size, (node_idx + 1) * local_world_size))
+                pg = torch.distributed.new_group(ranks=ranks)
+                if node_idx == my_node:
+                    group = pg
+
+        logger.info(
+            "Waiting for local target netloader ranks before loading draft model (local_world_size=%s)",
+            local_world_size,
+        )
+        barrier_start = time.perf_counter()
+        torch.distributed.barrier(group=group)
+        logger.info(
+            "Target netloader barrier before draft model time: %s",
+            time.perf_counter() - barrier_start,
+        )
+
+    @staticmethod
+    def _get_static_forward_context(vllm_config: VllmConfig):
+        compilation_config = getattr(vllm_config, "compilation_config", None)
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+        if static_forward_context is None or not hasattr(static_forward_context, "clear"):
+            return None
+        return static_forward_context
+
+    @staticmethod
+    def _iter_compilation_configs(vllm_config: VllmConfig):
+        """Yield unique compilation configs for the passed and current vLLM configs."""
+        candidates = [("vllm_config", vllm_config)]
+        current_vllm_config = get_current_vllm_config_or_none()
+        if current_vllm_config is not None:
+            candidates.append(("current_vllm_config", current_vllm_config))
+
+        seen_config_ids: set[int] = set()
+        for source, config in candidates:
+            compilation_config = getattr(config, "compilation_config", None)
+            if compilation_config is None:
+                continue
+            config_id = id(compilation_config)
+            if config_id in seen_config_ids:
+                continue
+            seen_config_ids.add(config_id)
+            yield source, compilation_config
+
+    @staticmethod
+    def _iter_static_forward_contexts(vllm_config: VllmConfig):
+        """Yield unique (source_name, context_dict) pairs for this and current vllm config."""
+        seen_context_ids: set[int] = set()
+        for source, compilation_config in ModelNetLoaderElastic._iter_compilation_configs(vllm_config):
+            static_forward_context = getattr(compilation_config, "static_forward_context", None)
+            if static_forward_context is None or not hasattr(static_forward_context, "clear"):
+                continue
+            context_id = id(static_forward_context)
+            if context_id in seen_context_ids:
+                continue
+            seen_context_ids.add(context_id)
+            yield source, static_forward_context
+
+    @staticmethod
+    def _snapshot_static_forward_context_keys(vllm_config: VllmConfig) -> dict[int, set[Any]]:
+        """Snapshot context keys before initialize_model so fallback can drop only new ones."""
+        snapshots: dict[int, set[Any]] = {}
+        for _, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
+            try:
+                snapshots[id(static_forward_context)] = set(static_forward_context.keys())
+            except TypeError:
+                snapshots[id(static_forward_context)] = set()
+        return snapshots
+
+    @staticmethod
+    def _remove_new_static_forward_context_keys(
+        vllm_config: VllmConfig,
+        snapshots: dict[int, set[Any]],
+        failed_model: nn.Module | None = None,
+    ) -> None:
+        """Remove new keys and any registrations owned by the failed model."""
+        stale_module_ids = {id(module) for module in failed_model.modules()} if failed_model is not None else set()
+        for _, static_forward_context in ModelNetLoaderElastic._iter_static_forward_contexts(vllm_config):
+            keep_keys = snapshots.get(id(static_forward_context), set())
+            new_keys = [
+                key
+                for key, module in list(static_forward_context.items())
+                if key not in keep_keys or id(module) in stale_module_ids
+            ]
+            for key in new_keys:
+                del static_forward_context[key]
+
+    @staticmethod
+    def _snapshot_static_all_moe_layers(
+        vllm_config: VllmConfig,
+    ) -> dict[int, tuple[list[Any], list[Any]]]:
+        """Snapshot shared MoE registries so fallback preserves existing target layers."""
+        snapshots: dict[int, tuple[list[Any], list[Any]]] = {}
+        for _, compilation_config in ModelNetLoaderElastic._iter_compilation_configs(vllm_config):
+            static_all_moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
+            if isinstance(static_all_moe_layers, list) and id(static_all_moe_layers) not in snapshots:
+                snapshots[id(static_all_moe_layers)] = (static_all_moe_layers, list(static_all_moe_layers))
+        return snapshots
+
+    @staticmethod
+    def _restore_static_all_moe_layers(snapshots: dict[int, tuple[list[Any], list[Any]]]) -> None:
+        for static_all_moe_layers, baseline_layers in snapshots.values():
+            static_all_moe_layers[:] = baseline_layers
+
+    @staticmethod
+    def _snapshot_rope_cache() -> dict[Any, Any] | None:
+        try:
+            from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+            return dict(_ROPE_DICT) if isinstance(_ROPE_DICT, dict) else None
+        except Exception as exc:
+            logger.debug("Netloader fallback: skip snapshotting _ROPE_DICT: %s", exc)
+            return None
+
+    @staticmethod
+    def _restore_rope_cache(snapshot: dict[Any, Any] | None) -> None:
+        if snapshot is None:
+            return
+        try:
+            from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+            if isinstance(_ROPE_DICT, dict):
+                _ROPE_DICT.clear()
+                _ROPE_DICT.update(snapshot)
+        except Exception as exc:
+            logger.debug("Netloader fallback: skip restoring _ROPE_DICT: %s", exc)
+
+    @staticmethod
+    def _cleanup_compilation_hooks(model: nn.Module) -> None:
+        """Remove bytecode hooks that otherwise pin a failed compiled model."""
+        try:
+            from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
+
+            for module in model.modules():
+                if isinstance(module, TorchCompileWithNoGuardsWrapper):
+                    module.cleanup()
+        except Exception as exc:
+            logger.warning("Netloader fallback: failed to remove compilation bytecode hooks: %s", exc)
+
+    @classmethod
+    def _create_fallback_cleanup_context(
+        cls,
+        vllm_config: VllmConfig,
+        device_type: str,
+    ) -> _FallbackCleanupContext:
+        from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+
+        eplb_layers = VllmEplbAdaptor._registered_moe_layers
+        return _FallbackCleanupContext(
+            context_keys=cls._snapshot_static_forward_context_keys(vllm_config),
+            static_all_moe_layers=cls._snapshot_static_all_moe_layers(vllm_config),
+            rope_cache=cls._snapshot_rope_cache(),
+            eplb_layers=eplb_layers,
+            eplb_layer_count=len(eplb_layers),
+            memory_baseline=cls._get_npu_memory_usage(device_type),
+        )
+
+    @classmethod
+    def _release_failed_model_references(
+        cls,
+        model: nn.Module,
+        vllm_config: VllmConfig,
+        context: _FallbackCleanupContext,
+    ) -> ReferenceType[nn.Module]:
+        """Detach process-global references before the caller drops the model."""
+        model_ref = ref(model)
+        cls._cleanup_compilation_hooks(model)
+        cls._remove_new_static_forward_context_keys(vllm_config, context.context_keys, model)
+        cls._restore_static_all_moe_layers(context.static_all_moe_layers)
+        cls._restore_rope_cache(context.rope_cache)
+        del context.eplb_layers[context.eplb_layer_count :]
+        return model_ref
+
+    @staticmethod
+    def _get_npu_memory_usage(device_type: str) -> tuple[int, int] | None:
+        if device_type != "npu":
+            return None
+        try:
+            return int(torch.npu.memory_allocated()), int(torch.npu.memory_reserved())
+        except Exception as exc:
+            logger.debug("Netloader fallback: failed to query NPU memory usage: %s", exc)
+            return None
+
+    @staticmethod
+    def _reclaim_failed_model_memory(
+        device_type: str,
+        memory_baseline: tuple[int, int] | None,
+    ) -> _FallbackReclaimResult:
+        if device_type != "npu":
+            gc.collect()
+            if device_type == "cuda":
+                torch.cuda.empty_cache()
+            return _FallbackReclaimResult(1, None, None, False)
+
+        baseline_allocated = memory_baseline[0] if memory_baseline is not None else None
+        before = ModelNetLoaderElastic._get_npu_memory_usage(device_type)
+        after = None
+        reached_baseline = False
+        for attempt in range(1, MAX_FALLBACK_MEMORY_RECLAIM_ATTEMPTS + 1):
+            gc.collect()
+            torch.npu.empty_cache()
+            after = ModelNetLoaderElastic._get_npu_memory_usage(device_type)
+            reached_baseline = baseline_allocated is not None and after is not None and after[0] <= baseline_allocated
+            if reached_baseline:
+                break
+        return _FallbackReclaimResult(attempt, before, after, reached_baseline)
+
     def load_model(self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = "") -> nn.Module:
         """
         Loads the model using the specified configuration.
@@ -160,22 +453,35 @@ class ModelNetLoaderElastic(BaseModelLoader):
 
         device_id = torch.distributed.get_rank()
         is_draft = self._is_draft_model(model_config)
+        load_int8_cache = "hbm" if is_draft and self.int8_cache != "no" else self.int8_cache
 
         if is_draft:
             logger.info("Loading draft model via netloader, model_path: %s", model_config.model)
         else:
             logger.info("Loading target model via netloader, model_path: %s", model_config.model)
 
-        if (
-            self.source is None
-            or not isinstance(self.source, list)
-            or device_id
-            not in [
+        # After target elastic fallback, skip another draft P2P attempt on the same rank.
+        skip_draft_elastic = is_draft and ModelNetLoaderElastic._target_elastic_fallback
+        has_valid_source = (
+            self.source is not None
+            and isinstance(self.source, list)
+            and device_id
+            in [
                 one_device["device_id"]
                 for one_device in self.source
                 if isinstance(one_device, dict) and "device_id" in one_device
             ]
-        ):
+        )
+
+        if skip_draft_elastic:
+            logger.warning(
+                "Target netloader already fell back to DefaultModelLoader; "
+                "skip draft elastic load and use DefaultModelLoader"
+            )
+            model, need_process_weights_after_loading = self.revert_to_default(
+                model_config, vllm_config, device_config, prefix
+            )
+        elif not has_valid_source:
             logger.warning("Did not get valid source info, use DefaultModelLoader")
             model, need_process_weights_after_loading = self.revert_to_default(
                 model_config, vllm_config, device_config, prefix
@@ -187,14 +493,36 @@ class ModelNetLoaderElastic(BaseModelLoader):
             _quant_config = getattr(vllm_config, "quant_config", None)
             _quant_config = deepcopy(_quant_config) if _quant_config is not None else None
             model_config_backup = deepcopy(model_config)
+            fallback_cleanup_context = self._create_fallback_cleanup_context(
+                vllm_config,
+                device_config.device_type,
+            )
 
             with set_default_torch_dtype(model_config.dtype):
                 with target_device:
                     model = initialize_model(vllm_config=vllm_config, model_config=model_config, prefix=prefix)
+                elastic_model = model
+                fallback_reason = "elastic load failed"
 
-                start_elastic_load = time.perf_counter()
-
-                sources = self.source
+                if load_int8_cache == "no":
+                    try:
+                        with pre_transfer_weight_processing(model):
+                            process_weights_after_loading(model, model_config, torch.device(device_config.device))
+                        synchronize_npu(device_config.device_type)
+                        manifest_build_start = time.perf_counter()
+                        manifest_count = cache_processed_layout_transfer_manifest(model)
+                        logger.info(
+                            "Netloader manifest build time: %s, rank: %s, manifest=%s",
+                            time.perf_counter() - manifest_build_start,
+                            device_id,
+                            manifest_count,
+                        )
+                    except Exception as exc:
+                        fallback_reason = f"pre-recv preparation failed: {exc}"
+                        model = None
+                # Narrowed by has_valid_source above.
+                assert self.source is not None
+                sources: list[dict] = self.source
                 if is_draft:
                     sources = [
                         {
@@ -207,44 +535,93 @@ class ModelNetLoaderElastic(BaseModelLoader):
                                 and parts[1].isdigit()
                             ],
                         }
-                        for s in self.source
+                        for s in sources
                         if isinstance(s, dict) and "device_id" in s
                     ]
+                    if any(int(addr.rsplit(":", 1)[1]) > 65535 for s in sources for addr in s.get("sources", [])):
+                        fallback_reason = "draft source port exceeds 65535"
+                        model = None
 
-                model = elastic_load(
-                    model=model,
-                    device_id=device_id,
-                    model_path=model_config.model,
-                    sources=sources,
-                    tp=parallel_config.tensor_parallel_size,
-                    pp=parallel_config.pipeline_parallel_size,
-                    group_name="netloader_draft" if is_draft else "netloader",
-                )
-                end_elastic_load = time.perf_counter()
-                logger.info("Elastic load time: %s, rank: %s", end_elastic_load - start_elastic_load, device_id)
-                need_process_weights_after_loading = True
+                if model is not None:
+                    model = elastic_load(
+                        model=elastic_model,
+                        device_id=device_id,
+                        model_path=model_config.model,
+                        sources=sources,
+                        tp=parallel_config.tensor_parallel_size,
+                        pp=parallel_config.pipeline_parallel_size,
+                        group_name="netloader_draft" if is_draft else "netloader",
+                        int8_cache=load_int8_cache,
+                    )
+                need_process_weights_after_loading = load_int8_cache != "no"
 
                 if model is None:
-                    logger.warning("Netloader elastic loading fails, use load format DefaultModelLoader")
+                    logger.warning(
+                        "Netloader load failed, fallback to DefaultModelLoader, rank=%s, reason=%s",
+                        device_id,
+                        fallback_reason,
+                    )
 
                     if hasattr(vllm_config, "quant_config"):
                         vllm_config.quant_config = _quant_config
                     model_config = model_config_backup
 
-                    del model
-                    gc.collect()
-                    if device_config.device_type == "npu":
-                        logger.info("Empty NPU cache")
-                        torch.npu.empty_cache()
-                    elif device_config.device_type == "cuda":
-                        logger.info("Empty CUDA cache")
-                        torch.cuda.empty_cache()
+                    elastic_model_ref = self._release_failed_model_references(
+                        elastic_model,
+                        vllm_config,
+                        fallback_cleanup_context,
+                    )
+                    elastic_model = None
+                    reclaim_result = self._reclaim_failed_model_memory(
+                        device_config.device_type,
+                        fallback_cleanup_context.memory_baseline,
+                    )
+                    baseline_allocated = (
+                        fallback_cleanup_context.memory_baseline[0]
+                        if fallback_cleanup_context.memory_baseline is not None
+                        else None
+                    )
+                    logger.info(
+                        "[netloader_client] stage=fallback_cleanup rank=%s attempts=%s model_released=%s "
+                        "baseline_allocated_mib=%s before_allocated_mib=%s after_allocated_mib=%s "
+                        "after_reserved_mib=%s reached_baseline=%s",
+                        device_id,
+                        reclaim_result.attempts,
+                        elastic_model_ref() is None,
+                        f"{baseline_allocated / BYTES_PER_MIB:.2f}" if baseline_allocated is not None else "unknown",
+                        f"{reclaim_result.before[0] / BYTES_PER_MIB:.2f}"
+                        if reclaim_result.before is not None
+                        else "unknown",
+                        f"{reclaim_result.after[0] / BYTES_PER_MIB:.2f}"
+                        if reclaim_result.after is not None
+                        else "unknown",
+                        f"{reclaim_result.after[1] / BYTES_PER_MIB:.2f}"
+                        if reclaim_result.after is not None
+                        else "unknown",
+                        reclaim_result.reached_baseline,
+                    )
+
+                    if not is_draft:
+                        ModelNetLoaderElastic._target_elastic_fallback = True
 
                     model, need_process_weights_after_loading = self.revert_to_default(
                         model_config, vllm_config, device_config, prefix
                     )
+                elif not is_draft:
+                    ModelNetLoaderElastic._target_elastic_fallback = False
 
-        start_elastic_server = time.perf_counter()
+        if load_int8_cache == "no" and need_process_weights_after_loading:
+            process_weights_after_loading(model, model_config, torch.device(device_config.device))
+            synchronize_npu(device_config.device_type)
+            manifest_count = cache_processed_layout_transfer_manifest(model)
+            need_process_weights_after_loading = False
+            logger.info(
+                "Netloader seed process_weights done, rank: %s, manifest=%s",
+                device_id,
+                manifest_count,
+            )
+
+        elastic_server = None
         # start elastic server
         if model is not None and (
             (self.listen_port and self.listen_port in range(1024, 65535)) or (self.listen_port is None)
@@ -258,72 +635,97 @@ class ModelNetLoaderElastic(BaseModelLoader):
             else:
                 if self.listen_port is None:
                     listen_port = find_free_port()
+                    for _ in range(MAX_FREE_PORT_RETRIES):
+                        if listen_port <= 65535 - DRAFT_PORT_OFFSET:
+                            break
+                        listen_port = find_free_port()
+                    else:
+                        logger.warning(
+                            "Failed to find listen port <= %s after %s retries; skip Netloader server",
+                            65535 - DRAFT_PORT_OFFSET,
+                            MAX_FREE_PORT_RETRIES,
+                        )
+                        listen_port = -1
                 else:
                     listen_port = self.listen_port + device_id
                 if is_draft:
                     listen_port += DRAFT_PORT_OFFSET
-                self.listen_port = listen_port
+                if listen_port < 1024 or listen_port > 65535:
+                    logger.warning(
+                        "Skip %s Netloader server due to invalid listen port: %s",
+                        "draft" if is_draft else "target",
+                        listen_port,
+                    )
+                else:
+                    self.listen_port = listen_port
 
-                group_name = "netloader_draft" if is_draft else "netloader"
+                    group_name = "netloader_draft" if is_draft else "netloader"
 
-                logger.info(
-                    "Start elastic Netloader server, rank: %s, listen port: %s:%s, group: %s",
-                    device_id,
-                    driver_ip,
-                    listen_port,
-                    group_name,
-                )
-
-                if self.output_prefix is not None and not is_draft:
-                    try:
-                        with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
-                            file.write(f"{driver_ip}:{listen_port}")
-                        logger.info(
-                            "Successfully wrote server address to file: %s", self.output_prefix + str(device_id)
-                        )
-                    except FileNotFoundError:
-                        logger.error("File path %s does not exist.", self.output_prefix + str(device_id))
-                    except PermissionError:
-                        logger.error("No permission to write to file %s.", self.output_prefix + str(device_id))
-                    except OSError as e:
-                        logger.error(
-                            "I/O error occurred while writing to file %s: %s", self.output_prefix + str(device_id), e
-                        )
-                    except Exception as e:
-                        logger.error("Unknown error: %s", e)
-
-                try:
-                    elastic_server = ElasticServer(
+                    logger.info(
+                        "Start elastic Netloader server, rank: %s, listen port: %s:%s, group: %s",
+                        device_id,
                         driver_ip,
                         listen_port,
-                        model,
-                        device_id,
-                        model_config.model,
-                        parallel_config.tensor_parallel_size,
-                        parallel_config.pipeline_parallel_size,
-                        self.int8_cache,
-                        self.int8_cache_name,
-                        group_name=group_name,
+                        group_name,
                     )
-                    elastic_server.start()
-                    if is_draft:
-                        self._draft_elastic_server = elastic_server
-                    else:
-                        self._target_elastic_server = elastic_server
-                except Exception as e:
-                    logger.error("Failed to start Netloader server for rank: %s, details: %s", device_id, e)
+
+                    if self.output_prefix is not None and not is_draft:
+                        try:
+                            with open(self.output_prefix + str(device_id) + ".txt", "w") as file:
+                                file.write(f"{driver_ip}:{listen_port}")
+                            logger.info(
+                                "Successfully wrote server address to file: %s", self.output_prefix + str(device_id)
+                            )
+                        except FileNotFoundError:
+                            logger.error("File path %s does not exist.", self.output_prefix + str(device_id))
+                        except PermissionError:
+                            logger.error("No permission to write to file %s.", self.output_prefix + str(device_id))
+                        except OSError as e:
+                            logger.error(
+                                "I/O error occurred while writing to file %s: %s",
+                                self.output_prefix + str(device_id),
+                                e,
+                            )
+                        except Exception as e:
+                            logger.error("Unknown error: %s", e)
+
+                    try:
+                        elastic_server = ElasticServer(
+                            driver_ip,
+                            listen_port,
+                            model,
+                            device_id,
+                            model_config.model,
+                            parallel_config.tensor_parallel_size,
+                            parallel_config.pipeline_parallel_size,
+                            load_int8_cache,
+                            self.int8_cache_name,
+                            group_name=group_name,
+                        )
+                        if load_int8_cache == "no":
+                            elastic_server.register_transfer_manifest(model)
+                        elastic_server.start()
+                        logger.info("Elastic server started, rank: %s, group: %s", device_id, group_name)
+                        if is_draft:
+                            self._draft_elastic_server = elastic_server
+                        else:
+                            self._target_elastic_server = elastic_server
+                    except Exception as e:
+                        logger.error("Failed to start Netloader server for rank: %s, details: %s", device_id, e)
         else:
             logger.info("Skip to start Netloader server")
 
-        end_elastic_server = time.perf_counter()
-        logger.info("Elastic server start time: %s, rank: %s", end_elastic_server - start_elastic_server, device_id)
-
         if need_process_weights_after_loading:
             process_weights_after_loading(model, model_config, torch.device(device_config.device))
+            synchronize_npu(device_config.device_type)
+            logger.info("Netloader final process_weights done, rank: %s", device_id)
+
+        if not is_draft:
+            self._sync_target_netloader_before_draft(vllm_config)
 
         if model is None:
             logger.error("NetLoader elastic loads model fails")
-            return None
+            raise RuntimeError("NetLoader elastic loads model fails")
 
         return model.eval()
 

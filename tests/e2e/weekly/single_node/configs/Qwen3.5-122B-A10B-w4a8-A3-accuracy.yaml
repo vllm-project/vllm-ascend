@@ -1,0 +1,67 @@
+# ==========================================
+# ACTUAL TEST CASES
+# ==========================================
+test_cases:
+  - name: "Qwen3.5-122B-A10B-w4a8-A3-accuracy"
+    model: "Eco-Tech/Qwen3.5-122B-A10B-w4a8"
+    envs:
+      HCCL_OP_EXPANSION_MODE: "AIV"
+      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
+      OMP_PROC_BIND: "false"
+      OMP_NUM_THREADS: "1"
+      TASK_QUEUE_ENABLE: "1"
+      HCCL_BUFFSIZE: "1024"
+      SERVER_PORT: "DEFAULT_PORT"
+    server_cmd:
+      - "--quantization"
+      - "ascend"
+      - "--allowed-local-media-path"
+      - "/"
+      - "--trust-remote-code"
+      - "--data-parallel-size"
+      - "1"
+      - "--tensor-parallel-size"
+      - "16"
+      - "--enable-expert-parallel"
+      - "--port"
+      - "$SERVER_PORT"
+      - "--max-num-seqs"
+      - "36"
+      - "--max-model-len"
+      - "65536"
+      - "--max-num-batched-tokens"
+      - "8192"
+      - "--gpu-memory-utilization"
+      - "0.9"
+      - "--seed"
+      - "1024"
+      - "--no-enable-prefix-caching"
+      - "--async-scheduling"
+      - "--compilation-config"
+      - '{"cudagraph_capture_sizes":[1,4,8,16,24,32,48,64,96,108,128,192],"cudagraph_mode":"FULL_DECODE_ONLY"}'
+      - "--speculative_config"
+      - '{"method": "qwen3_5_mtp","num_speculative_tokens": 3}'
+      - "--additional-config"
+      - '{"enable_cpu_binding":true,"enable_fused_mc2":0,"scheduler_config":{"enable_balance_scheduling":true}}'
+      - "--profiler-config"
+      - '{"profiler": "torch","torch_profiler_dir": "./profiling","torch_profiler_with_stack": false}'
+      - "--mm-processor-cache-gb"
+      - "0"
+      - "--mm-encoder-tp-mode"
+      - "data"
+    benchmarks:
+      acc:
+        case_type: accuracy
+        dataset_path: vllm-ascend/aime2025
+        request_conf: vllm_api_general_chat
+        dataset_conf: aime2025/aime2025_gen_0_shot_chat_prompt
+        max_out_len: 61440
+        batch_size: 32
+        baseline: 90
+        threshold: 10
+        temperature: 1.0
+        top_p: 0.95
+        top_k: 20
+        min_p: 0.0
+        presence_penalty: 1.5
+        repetition_penalty: 1.0

@@ -35,7 +35,7 @@ test_cases:
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
       - "--speculative_config"
-      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3,"enforce_eager": true}'
+      - '{"method": "qwen3_5_mtp", "num_speculative_tokens": 3}'
       - "--compilation-config"
       - '{"cudagraph_capture_sizes":[1,4,8,12,16,24,32,48,56,64,72,84,96,108,112,128,160,172,196,200,212,232,256,272,288,312,328,344,360,384,400,416,432,448,480,512], "cudagraph_mode":"FULL_DECODE_ONLY"}'
       - "--mm-processor-cache-gb"
@@ -140,7 +140,7 @@ test_cases:
         max_out_len: 512
         batch_size: 14
         request_rate: 0
-        baseline: 232.94
+        baseline: 197.00
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in64k-16-4"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -230,7 +230,7 @@ test_cases:
         max_out_len: 1024
         batch_size: 12
         request_rate: 0
-        baseline: 204.44
+        baseline: 195.87
         threshold: 0.97
   - name: "Qwen3.5-27B-w8a8-in128k-28-7"
     model: "Eco-Tech/Qwen3.5-27B-w8a8-mtp"
@@ -535,6 +535,54 @@ test_cases:
       - "0"
       - "--additional-config"
       - '{"enable_cpu_binding":true}'
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "qwen3_coder"
+      - "--limit-mm-per-prompt"
+      - '{"image":3}'
+    test_content:
+      - "image"
+      - "messages"
+    mm_request:
+      images:
+        - "vllm-ascend/mm_request"
+      messages:
+        - role: user
+          content:
+            - type: "text"
+              text: "compare these three pictures"
+            - type: image_url
+              image_url:
+                url: "{IMAGE_0}"
+            - type: image_url
+              image_url:
+                url: "http://image.huawei.com/tiny-lts/v1/images/99d58af0586928f6ecd61f3013996fbd_1180x200.png"
+            - type: image_url
+              image_url:
+                url: "http://image.huawei.com/tiny-lts/v1/images/89c4e25feaddc849ddc7_400x60.png"
+      api_args:
+        max_tokens: 500
+    expected_response:
+      assert_not_empty: true
+      status_code: 200
+    # messages
+    prompts:
+      - "Hello!"
+      - "What is the weather in Shanghai?"
+      - "Count to 5."
+    api_keyword_args:
+      - max_tokens: 100
+      - max_tokens: 100
+        tools:
+          - name: "get_weather"
+            description: "Get weather info"
+            input_schema:
+              type: "object"
+              properties:
+                location:
+                  type: "string"
+      - max_tokens: 50
+        stream: true
     benchmarks:
       perf:
         case_type: performance

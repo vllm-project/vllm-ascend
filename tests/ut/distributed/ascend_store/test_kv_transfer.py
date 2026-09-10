@@ -17,24 +17,28 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
-from vllm.distributed.kv_events import BlockStored
 
+# isort: off
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
-from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.config_data import (
+from vllm.distributed.kv_events import BlockStored
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
+    ChunkedTokenDatabase,
     KeyMetadata,
     LayerBlockRange,
     LayerLoadTask,
+    LayerBatchReqMeta,
+    LayerPoolKey,
     LayerTransferTask,
     LoadSpec,
-    PoolKey,
     ReqMeta,
     SharedBlockData,
 )
+
+# isort: on
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import (
-    KVCacheStoreKeyLayerRecvingThread,
     KVCacheStoreKeyLayerSendingThread,
     KVCacheStoreLayerRecvingThread,
     KVCacheStoreLayerSendingThread,
@@ -42,14 +46,12 @@ from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer import
     KVCacheStoreSendingThread,
     KVTransferThread,
     LayerBatchBuilder,
-    _circular_shift,
-    _circular_shift_array,
-    record_failed_blocks,
 )
 
 
 class FakeStore:
     def __init__(self, exists_result=None):
+        self.requires_exists_before_put = True
         self.exists_result = exists_result or []
         self.put_calls = []
         self.get_calls = []
@@ -67,117 +69,63 @@ class FakeStore:
         self.get_calls.append((list(keys), list(addrs), list(sizes)))
 
 
-class FakeKey:
-    def __init__(self, val):
-        self._val = val
-
-    def to_string(self):
-        return self._val
-
-
-class FakeTokenDatabase:
+class FakeTokenDatabase(ChunkedTokenDatabase):
     def __init__(self, block_size=16):
-        self.block_size = block_size
-        self.group_block_len = {0: [block_size]}
-        self.group_kv_caches_base_addr = {0: [1000]}
-
-    def process_tokens(self, token_len, block_hashes, mask_num=0):
-        meta = KeyMetadata("m", 0, 0, 0, 0)
-        for i, h in enumerate(block_hashes):
-            start = i * self.block_size
-            if start >= token_len:
-                break
-            end = min(start + self.block_size, token_len)
-            if start < mask_num:
-                continue
-            yield start, end, PoolKey(meta, f"k{i}")
-
-    def prepare_value(self, start, end, block_ids):
-        block_id = block_ids[start // self.block_size]
-        return [1000 + block_id], [end - start], block_id
-
-    def prepare_value_layer(self, start, end, block_ids, layer_id):
-        block_id = block_ids[start // self.block_size]
-        return [2000 + layer_id * 100 + block_id], [end - start], block_id
-
-    def decode_adaptor_prefill_pp(self, keys, addrs, sizes):
-        return keys, addrs, sizes
+        super().__init__([KeyMetadata("m", 0, 0, 0, 0)], [block_size], None)
+        self.set_group_buffers({0: [1000]}, {0: [block_size]}, {0: [1]}, group_num_layers={0: 1})
 
 
-class _FakeTokenDB:
-    """Minimal ChunkedTokenDatabase-like object for LayerBatchBuilder.
+class MaskedFakeTokenDatabase(FakeTokenDatabase):
+    def __init__(self, block_size=16, masks=([True],)):
+        super().__init__(block_size)
+        self.masks = masks
 
-    ``block_lens`` describes a single layer's caches and is tiled ``num_layers``
-    times to match the flat [layer0_caches..., layer1_caches...] layout that
-    ``_infer_cache_group_metadata`` produces in production. ``base_addrs`` is
-    already expected flat (one entry per cache per layer).
-    """
+    def store_mask(self, token_len, num_prompt_tokens=None):
+        return self.masks
 
-    def __init__(self, block_lens=None, base_addrs=None, num_layers=1, block_strides=None):
-        per_layer = block_lens or [128, 256]
-        flat_block_len = list(per_layer) * num_layers
-        self.group_block_len = {0: flat_block_len}
-        self.group_kv_caches_base_addr = {0: base_addrs or [1000, 2000]}
-        # group_block_stride mirrors group_block_len when not provided.
-        self.group_block_stride = {0: block_strides or flat_block_len}
+    def load_mask(self, block_hashes, token_len):
+        return self.masks
 
-
-class _FakePoolKey:
-    def __init__(self, chunk_hash):
-        self.chunk_hash = chunk_hash
-
-    def split_layers(self, num_layers):
-        return [_FakePoolKey(f"{self.chunk_hash}_L{i}") for i in range(num_layers)]
-
-    def to_string(self):
-        return f"key_{self.chunk_hash}"
+    def mask_allows_chunk(self, masks, kv_cache_group_id, start):
+        if masks is None:
+            return True
+        block_idx = start // self.get_block_size(kv_cache_group_id)
+        return block_idx < len(masks[kv_cache_group_id]) and masks[kv_cache_group_id][block_idx]
 
 
-class _FakeStore:
-    def __init__(self, exists_result=None):
-        self.exists_result = exists_result or []
-        self.put_calls = []
-        self.get_calls = []
+class TestLayerBatchBuilderOffsets(unittest.TestCase):
+    def test_uses_real_offsets_for_variable_cache_entries_per_layer(self):
+        database = FakeTokenDatabase()
+        database.set_group_buffers(
+            {0: [1000, 2000, 3000]},
+            {0: [10, 20, 30]},
+            {0: [100, 200, 300]},
+            group_num_layers={0: 2},
+            group_layer_cache_entry_offsets={0: [0, 2, 3]},
+        )
+        builder = LayerBatchBuilder(
+            database,
+            page_size_bytes=60,
+            num_layers=2,
+        )
 
-    def set_device(self):
-        pass
+        layer_0 = builder._build_transfer_arrays(
+            np.asarray([2]),
+            np.asarray([500]),
+            layer_id=0,
+        )
+        layer_1 = builder._build_transfer_arrays(
+            np.asarray([2]),
+            np.asarray([500]),
+            layer_id=1,
+        )
 
-    def exists(self, keys):
-        return self.exists_result[: len(keys)]
-
-    def put(self, keys, addrs, sizes):
-        self.put_calls.append((list(keys), list(addrs), list(sizes)))
-
-    def get(self, keys, addrs, sizes):
-        self.get_calls.append((list(keys), list(addrs), list(sizes)))
-
-
-class _FakeDB:
-    def __init__(self, block_size=16):
-        self.block_size = block_size
-        self._hash_block_size = block_size
-        self.group_block_len = {0: [block_size]}
-        self.group_kv_caches_base_addr = {0: [1000]}
-        # LayerBatchBuilder reads group_block_stride; mirror group_block_len.
-        self.group_block_stride = {0: [block_size]}
-
-    def _make_key_by_hash(self, chunk_hash, **kwargs):
-        return _FakePoolKey(chunk_hash)
-
-    def process_tokens(self, token_len, block_hashes, mask_num=0):
-        meta = KeyMetadata("m", 0, 0, 0, 0)
-        for i, h in enumerate(block_hashes):
-            start = i * self.block_size
-            if start >= token_len:
-                break
-            end = min(start + self.block_size, token_len)
-            if start < mask_num:
-                continue
-            yield start, end, PoolKey(meta, f"k{i}")
-
-    def prepare_value_layer(self, start, end, block_ids, layer_id):
-        block_id = block_ids[start // self.block_size]
-        return [2000 + layer_id * 100 + block_id], [end - start], block_id
+        np.testing.assert_array_equal(layer_0[0], [1200, 2400])
+        np.testing.assert_array_equal(layer_0[1], [10, 20])
+        np.testing.assert_array_equal(layer_0[2], [500, 510])
+        np.testing.assert_array_equal(layer_1[0], [3600])
+        np.testing.assert_array_equal(layer_1[1], [30])
+        np.testing.assert_array_equal(layer_1[2], [530])
 
 
 class TestKVTransferThread(unittest.TestCase):
@@ -195,35 +143,39 @@ class TestKVTransferThread(unittest.TestCase):
         )
         return t, store
 
-    def test_add_request(self):
+    def test_queue_lifecycle(self):
         t, _ = self._make_thread()
         req = MagicMock()
         t.add_request(req)
         self.assertFalse(t.request_queue.empty())
 
-    def test_get_and_clear_finished_requests(self):
-        t, _ = self._make_thread()
         t.set_finished_request("r1")
         t.set_finished_request("r2")
-        finished = t.get_and_clear_finished_requests()
-        self.assertEqual(finished, {"r1", "r2"})
+        self.assertEqual(t.get_and_clear_finished_requests(), {"r1", "r2"})
         self.assertEqual(t.get_and_clear_finished_requests(), set())
 
-    def test_lookup_all_exist(self):
-        t, _ = self._make_thread([1, 1, 1])
-        result = t.lookup(["k1", "k2", "k3"])
-        self.assertEqual(result, [True, True, True])
+    def test_lookup(self):
+        for exists_result, expected in (
+            ([1, 1, 1], [True, True, True]),
+            ([1, 0, 1], [True, False, True]),
+        ):
+            with self.subTest(exists_result=exists_result):
+                t, _ = self._make_thread(exists_result)
+                self.assertEqual(t.lookup(["k1", "k2", "k3"]), expected)
 
-    def test_lookup_partial(self):
-        t, _ = self._make_thread([1, 0, 1])
-        result = t.lookup(["k1", "k2", "k3"])
-        self.assertEqual(result, [True, False, True])
-
-    def test_lookup_exception(self):
         t, store = self._make_thread()
         store.exists = MagicMock(side_effect=Exception("conn fail"))
-        result = t.lookup(["k1"])
-        self.assertEqual(result, [False])
+        self.assertEqual(t.lookup(["k1"]), [False])
+
+    def test_get_missing_indices_skips_lookup_when_not_required(self):
+        t, store = self._make_thread([1, 1])
+        store.requires_exists_before_put = False
+        store.exists = MagicMock(side_effect=AssertionError("exists should not be called"))
+
+        result = t._get_missing_indices(["k1", "k2"])
+
+        self.assertEqual(result, [0, 1])
+        store.exists.assert_not_called()
 
     def test_update_and_get_kv_events(self):
         t, _ = self._make_thread()
@@ -256,15 +208,250 @@ class TestKVTransferThread(unittest.TestCase):
         # Base class _handle_request does nothing
         t._handle_request(MagicMock())
 
+    def test_fatal_error_stops_before_next_queued_task(self):
+        t, _ = self._make_thread()
+        handled = []
+
+        def fail(request):
+            handled.append(request)
+            raise RuntimeError("transfer failed")
+
+        t._handle_request = fail
+        t.add_request("first")
+        t.add_request("second")
+
+        t.start()
+        t.join(timeout=1)
+
+        self.assertFalse(t.is_alive())
+        self.assertEqual(handled, ["first"])
+        self.assertEqual(t.request_queue.qsize(), 1)
+        with self.assertRaisesRegex(RuntimeError, "asynchronous transfer"):
+            t.raise_if_failed()
+
+
+class TestGVALayerTransferFailures(unittest.TestCase):
+    def _make_sending_thread(self):
+        # Plain mock store: the layerwise threads are backend-agnostic.
+        # `.store` is attached explicitly to pin batch_copy's return value.
+        store = MagicMock()
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
+        store.batch_write_finish.return_value = [0]
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerBatchReqMeta(
+            req_ids=["r1"],
+            layer_id=0,
+            is_last_chunks=[True],
+            addr_array=np.asarray([10]),
+            size_array=np.asarray([16]),
+            gvas_array=np.asarray([100]),
+        )
+        save_finished = threading.Event()
+        thread = KVCacheStoreLayerSendingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            page_size_bytes=16,
+            ready_event=threading.Event(),
+            num_layers=1,
+            layer_save_finished_events=[save_finished],
+            sync_save_events=[MagicMock()],
+            group_builders=[builder],
+        )
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([0]),
+                block_gvas_arr=np.asarray([100]),
+                req_ids=["r1"],
+                is_last_chunks=[True],
+                save_keys=["k0"],
+            ),
+            write_finish_keys=["k0"],
+        )
+        thread.add_stored_request("r1")
+        thread.request_queue.put([task])
+        return thread, store, save_finished, task
+
+    def test_write_finish_failure_does_not_complete_layer(self):
+        thread, store, save_finished, task = self._make_sending_thread()
+        store.batch_write_finish.return_value = [1]
+
+        with self.assertRaisesRegex(RuntimeError, "batch_write_finish failed"):
+            thread._handle_request([task])
+
+        self.assertEqual(thread.get_and_clear_finished_requests(), set())
+        self.assertFalse(save_finished.is_set())
+
+    def test_write_finish_uses_last_actual_save_task(self):
+        thread, store, _, task = self._make_sending_thread()
+        thread.final_layer_id = 1
+
+        thread._handle_request([task])
+
+        store.batch_write_finish.assert_called_once_with(["k0"], [0])
+
+
+class TestGVALayerReceivingTaskOwnership(unittest.TestCase):
+    def _make_thread(self, external_slot_release_waiter=None, save_failure_checker=None):
+        # Plain mock store: the layerwise threads are backend-agnostic.
+        # `.store` is attached explicitly to pin batch_copy's return value.
+        store = MagicMock()
+        store.store = MagicMock(batch_copy=MagicMock(return_value=0))
+        load_finished = [threading.Event(), threading.Event()]
+        save_finished = [threading.Event(), threading.Event()]
+        sync_events = [MagicMock(), MagicMock()]
+        builder = MagicMock()
+        builder.build_addrs.return_value = LayerBatchReqMeta(
+            req_ids=["r1"],
+            layer_id=1,
+            is_last_chunks=[False],
+            addr_array=np.asarray([10]),
+            size_array=np.asarray([16]),
+            gvas_array=np.asarray([100]),
+        )
+        thread = KVCacheStoreLayerRecvingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            page_size_bytes=16,
+            ready_event=threading.Event(),
+            get_event=threading.Event(),
+            layer_load_finished_events=load_finished,
+            layer_save_finished_events=save_finished,
+            sync_save_events=sync_events,
+            num_layers=2,
+            group_builders=[builder],
+            external_slot_release_waiter=external_slot_release_waiter,
+            save_failure_checker=save_failure_checker,
+        )
+        return thread, load_finished, save_finished, sync_events
+
+    def test_handle_request_does_not_clear_worker_owned_tasks(self):
+        thread, _, _, _ = self._make_thread()
+        task = LayerTransferTask(
+            layer_id=1,
+            block_ranges=[],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([0]),
+                block_gvas_arr=np.asarray([100]),
+                req_ids=["r1"],
+                is_last_chunks=[False],
+            ),
+        )
+        transfer_tasks = [task]
+        load_task = LayerLoadTask(
+            wait_for_save_layer=None,
+            transfer_tasks=transfer_tasks,
+            layer_id=1,
+        )
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        self.assertEqual(transfer_tasks, [task])
+
+    def test_empty_reuse_gate_waits_for_non_saving_rank_compute(self):
+        thread, load_finished, save_finished, sync_events = self._make_thread()
+        save_finished[0].set()
+        load_task = LayerLoadTask(
+            wait_for_save_layer=0,
+            transfer_tasks=[],
+            layer_id=1,
+        )
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        sync_events[0].synchronize.assert_called_once_with()
+        self.assertFalse(save_finished[0].is_set())
+        self.assertTrue(load_finished[1].is_set())
+
+    def test_source_save_failure_stops_receiver_wait(self):
+        save_failure_checker = MagicMock(side_effect=RuntimeError("save thread failed"))
+        thread, _, save_finished, _ = self._make_thread(save_failure_checker=save_failure_checker)
+        save_finished[0] = MagicMock()
+        save_finished[0].wait.return_value = False
+        load_task = LayerLoadTask(
+            wait_for_save_layer=0,
+            transfer_tasks=[],
+            layer_id=1,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "save thread failed"):
+            thread._handle_request(load_task)
+
+        save_failure_checker.assert_called_once_with()
+
+    def test_h2d_waits_for_source_save_then_target_layer_reuse(self):
+        call_order: list[tuple[str, int]] = []
+        thread, _, save_finished, sync_events = self._make_thread(
+            external_slot_release_waiter=lambda layer_id: call_order.append(("reuse", layer_id))
+        )
+        save_finished[0].set()
+        sync_events[0].synchronize.side_effect = lambda: call_order.append(("save", 0))
+
+        def record_h2d(*_args) -> int:
+            call_order.append(("h2d", 1))
+            return 0
+
+        thread._batch_copy_with_limits = MagicMock(side_effect=record_h2d)
+        task = LayerTransferTask(
+            layer_id=1,
+            block_ranges=[],
+            shared_block_data=SharedBlockData(
+                block_ids_arr=np.asarray([0]),
+                block_gvas_arr=np.asarray([100]),
+                req_ids=["r1"],
+                is_last_chunks=[False],
+            ),
+        )
+        load_task = LayerLoadTask(wait_for_save_layer=0, transfer_tasks=[task], layer_id=1)
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        self.assertEqual(call_order, [("save", 0), ("reuse", 1), ("h2d", 1)])
+
+    def test_empty_load_waits_for_target_layer_reuse_before_finish(self):
+        load_finished_observed: list[bool] = []
+        thread = None
+
+        def wait_for_reuse(layer_id):
+            assert thread is not None
+            load_finished_observed.append(thread.layer_load_finished_events[layer_id].is_set())
+
+        thread, load_finished, _, _ = self._make_thread(external_slot_release_waiter=wait_for_reuse)
+        load_task = LayerLoadTask(wait_for_save_layer=None, transfer_tasks=[], layer_id=1)
+        thread.request_queue.put(load_task)
+
+        thread._handle_request(load_task)
+
+        self.assertEqual(load_finished_observed, [False])
+        self.assertTrue(load_finished[1].is_set())
+
 
 class TestKVCacheStoreSendingThread(unittest.TestCase):
-    def _make_thread(self, exists_result=None, kv_role="kv_producer", enable_kv_event=False):
+    def _make_thread(
+        self,
+        exists_result=None,
+        kv_role="kv_producer",
+        enable_kv_event=False,
+        block_size=16,
+    ):
         store = FakeStore(exists_result or [0, 0, 0, 0])
-        db = FakeTokenDatabase()
+        db = FakeTokenDatabase(block_size=block_size)
         t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
-            block_size=16,
+            block_size=block_size,
             tp_rank=0,
             dcp_size=1,
             put_step=1,
@@ -275,24 +462,35 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         return t, store
 
-    def test_handle_request_puts_missing_keys(self):
-        t, store = self._make_thread([1, 0, 1, 0])
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=64,
-            block_ids=[0, 1, 2, 3],
-            block_hashes=[b"h0", b"h1", b"h2", b"h3"],  # type: ignore[arg-type]
-            current_event=None,
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(len(store.put_calls), 1)
-        keys, _, _ = store.put_calls[0]
-        self.assertEqual(len(keys), 2)
+    def test_handle_request_save_decisions(self):
+        cases = [
+            ([1, 0, 1, 0], "kv_producer", True, 1, 2),
+            ([1, 1], "kv_producer", True, 0, 0),
+            ([0], "kv_producer", False, 0, 0),
+            ([0], "kv_consumer", True, 1, 1),
+        ]
+        for exists, role, tracked, put_count, key_count in cases:
+            with self.subTest(exists=exists, role=role, tracked=tracked):
+                t, store = self._make_thread(exists, kv_role=role)
+                req = ReqMeta(
+                    req_id="r1",
+                    token_len_chunk=16 * len(exists),
+                    block_ids=list(range(len(exists))),
+                    block_hashes=[f"h{i}" for i in range(len(exists))],
+                    current_event=None,
+                )
+                if tracked:
+                    t.add_stored_request("r1")
+                t.request_queue.put(req)
+                t._handle_request(req)
+                self.assertEqual(len(store.put_calls), put_count)
+                if put_count:
+                    self.assertEqual(len(store.put_calls[0][0]), key_count)
 
-    def test_handle_request_all_exist_no_put(self):
+    def test_handle_request_puts_all_keys_without_exists_check(self):
         t, store = self._make_thread([1, 1])
+        store.requires_exists_before_put = False
+        store.exists = MagicMock(side_effect=AssertionError("exists should not be called"))
         req = ReqMeta(
             req_id="r1",
             token_len_chunk=32,
@@ -302,21 +500,35 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         )
         t.add_stored_request("r1")
         t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(len(store.put_calls), 0)
 
-    def test_handle_request_not_in_stored(self):
-        t, store = self._make_thread([0])
+        t._handle_request(req)
+
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        store.exists.assert_not_called()
+
+    def test_handle_request_keeps_exists_check_for_kv_events(self):
+        t, store = self._make_thread([1, 0], enable_kv_event=True)
+        store.requires_exists_before_put = False
+        store.exists = MagicMock(return_value=[1, 0])
         req = ReqMeta(
             req_id="r1",
-            token_len_chunk=16,
-            block_ids=[0],
-            block_hashes=[b"h0"],  # type: ignore[arg-type]
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
             current_event=None,
+            token_ids=list(range(32)),
+            original_block_size=16,
         )
+        t.add_stored_request("r1")
         t.request_queue.put(req)
+
         t._handle_request(req)
-        self.assertEqual(len(store.put_calls), 0)
+
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(len(t.get_kv_events()), 1)
+        store.exists.assert_called_once()
 
     def test_handle_request_with_kv_event(self):
         t, store = self._make_thread([0], enable_kv_event=True)
@@ -335,39 +547,20 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         events = t.get_kv_events()
         self.assertEqual(len(events), 1)
 
-    def test_handle_request_consumer_role(self):
-        t, store = self._make_thread([0], kv_role="kv_consumer")
-        req = ReqMeta(
-            req_id="r1",
-            token_len_chunk=16,
-            block_ids=[0],
-            block_hashes=[b"h0"],  # type: ignore[arg-type]
-            current_event=None,
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put(req)
-        t._handle_request(req)
-        self.assertEqual(len(store.put_calls), 1)
-
     def test_add_dec_delete_stored_request(self):
         t, _ = self._make_thread()
         t.add_stored_request("r1")
         t.add_stored_request("r1")
         self.assertEqual(t.stored_requests["r1"], 2)
+        t.dec_stored_request("nonexistent")
+        t.delete_finished_stored_request("nonexistent")
+        self.assertEqual(t.stored_requests, {"r1": 2})
         t.dec_stored_request("r1")
         self.assertEqual(t.stored_requests["r1"], 1)
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
 
-    def test_dec_nonexistent_request(self):
-        t, _ = self._make_thread()
-        t.dec_stored_request("nonexist")  # should not raise
-
-    def test_delete_nonexistent_request(self):
-        t, _ = self._make_thread()
-        t.delete_finished_stored_request("nonexist")  # should not raise
-
-    def test_handle_request_with_current_event(self):
+    def test_handle_request_sync_and_dcp(self):
         t, store = self._make_thread([0])
         event = MagicMock()
         req = ReqMeta(
@@ -382,7 +575,6 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         event.synchronize.assert_called_once()
 
-    def test_handle_request_dcp_size_gt_1(self):
         store = FakeStore([0, 0])
         db = FakeTokenDatabase()
         t = KVCacheStoreSendingThread(
@@ -408,6 +600,117 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t._handle_request(req)
         # dcp_size > 1 means no slicing
         self.assertEqual(len(store.put_calls), 1)
+
+    def test_handle_request_applies_store_mask(self):
+        store = FakeStore([0, 0])
+        db = MaskedFakeTokenDatabase(masks=([True, False],))
+        t = KVCacheStoreSendingThread(
+            m_store=store,
+            token_database=db,
+            block_size=16,
+            tp_rank=0,
+            dcp_size=1,
+            put_step=1,
+            kv_role="kv_producer",
+            ready_event=threading.Event(),
+            group_uses_align_state=[False],
+        )
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            current_event=None,
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+
+    def test_handle_request_skips_compressed_hit_in_raw_token_domain(self):
+        t, store = self._make_thread([0, 0], block_size=64)
+        t.token_database.group_cache_families["kv"][0] = "c4"
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=128,
+            block_ids=[0, 1],
+            block_hashes=[f"h{i}" for i in range(8)],
+            load_spec=LoadSpec(
+                vllm_cached_tokens=0,
+                kvpool_cached_tokens=63,
+                kvpool_store_skip_tokens=64,
+                can_load=True,
+            ),
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, addrs, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 1)
+        self.assertEqual(addrs, [[1001]])
+
+    def test_save_exception_cleans_queue_lifecycle(self):
+        t, store = self._make_thread([0])
+        store.put = MagicMock(side_effect=RuntimeError("put failed"))
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+        )
+        t.add_stored_request("r1")
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
+        self.assertNotIn("r1", t.stored_requests)
+
+
+class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
+    def test_handle_request_puts_all_keys_without_exists_check(self):
+        store = FakeStore([1, 1])
+        store.requires_exists_before_put = False
+        sync_event = MagicMock()
+        thread = KVCacheStoreKeyLayerSendingThread(
+            m_store=store,
+            token_database=FakeTokenDatabase(),
+            block_size=16,
+            tp_rank=0,
+            tp_size=1,
+            dcp_size=1,
+            put_step=1,
+            ready_event=threading.Event(),
+            num_layers=1,
+            layer_save_finished_events=[threading.Event()],
+            sync_save_events=[sync_event],
+        )
+        request = ReqMeta(
+            req_id="r1",
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            is_last_chunk=False,
+        )
+        metadata = KeyMetadata("m", 0, 0, 0, 0)
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[LayerBlockRange(request=request, start_block=0, end_block=2)],
+            cached_process_tokens={
+                0: [
+                    (0, 16, [LayerPoolKey(metadata, "h0", 0)]),
+                    (16, 32, [LayerPoolKey(metadata, "h1", 0)]),
+                ]
+            },
+        )
+        thread.request_queue.put([task])
+
+        with patch.object(store, "exists", side_effect=AssertionError("exists should not be called")) as mock_exists:
+            thread._handle_request([task])
+
+        keys, _, _ = store.put_calls[0]
+        self.assertEqual(len(keys), 2)
+        mock_exists.assert_not_called()
+        sync_event.synchronize.assert_called_once()
 
 
 class TestKVCacheStoreRecvingThread(unittest.TestCase):
@@ -438,1064 +741,218 @@ class TestKVCacheStoreRecvingThread(unittest.TestCase):
         finished = t.get_and_clear_finished_requests()
         self.assertIn("r1", finished)
 
-
-# ===========================================================================
-# _circular_shift / _circular_shift_array
-# ===========================================================================
-class TestCircularShift(unittest.TestCase):
-    def test_empty(self):
-        self.assertEqual(_circular_shift([], 3), [])
-
-    def test_zero_offset(self):
-        self.assertEqual(_circular_shift([1, 2, 3], 0), [1, 2, 3])
-
-    def test_positive_offset(self):
-        self.assertEqual(_circular_shift([1, 2, 3, 4], 2), [3, 4, 1, 2])
-
-    def test_offset_equals_length(self):
-        self.assertEqual(_circular_shift([1, 2, 3], 3), [1, 2, 3])
-
-    def test_single_element(self):
-        self.assertEqual(_circular_shift([42], 1), [42])
-
-
-class TestCircularShiftArray(unittest.TestCase):
-    def test_empty(self):
-        result = _circular_shift_array(np.array([], dtype=np.int64), 3)
-        self.assertEqual(len(result), 0)
-
-    def test_zero_offset(self):
-        arr = np.array([1, 2, 3], dtype=np.int64)
-        result = _circular_shift_array(arr, 0)
-        np.testing.assert_array_equal(result, arr)
-
-    def test_positive_offset(self):
-        arr = np.array([10, 20, 30, 40], dtype=np.int64)
-        result = _circular_shift_array(arr, 2)
-        np.testing.assert_array_equal(result, [30, 40, 10, 20])
-
-    def test_offset_mod(self):
-        arr = np.array([1, 2, 3], dtype=np.int64)
-        # offset=5 => 5%3=2
-        result = _circular_shift_array(arr, 5)
-        np.testing.assert_array_equal(result, [3, 1, 2])
-
-    def test_offset_equals_length(self):
-        arr = np.array([1, 2, 3], dtype=np.int64)
-        # offset=3 => 3%3=0, should return original
-        result = _circular_shift_array(arr, 3)
-        np.testing.assert_array_equal(result, arr)
-
-
-# ===========================================================================
-# record_failed_blocks
-# ===========================================================================
-class TestRecordFailedBlocks(unittest.TestCase):
-    def test_all_success(self):
-        result = record_failed_blocks([10, 20, 30], [0, 0, 0])
-        self.assertEqual(result, set())
-
-    def test_some_failed(self):
-        result = record_failed_blocks([10, 20, 30], [0, -1, 0])
-        self.assertEqual(result, {20})
-
-    def test_all_failed(self):
-        result = record_failed_blocks([5, 6], [-1, -1])
-        self.assertEqual(result, {5, 6})
-
-    def test_empty(self):
-        result = record_failed_blocks([], [])
-        self.assertEqual(result, set())
-
-
-# ===========================================================================
-# LayerBatchBuilder
-# ===========================================================================
-class TestLayerBatchBuilderBuildTransferArrays(unittest.TestCase):
-    """Test _build_transfer_arrays which computes per-layer addresses."""
-
-    def _make_builder(self, block_lens=None, base_addrs=None, num_ranks=1, page_size=4096, num_layers=1):
-        db = _FakeTokenDB(block_lens=block_lens, base_addrs=base_addrs, num_layers=num_layers)
-        return LayerBatchBuilder(
-            token_database=db,
-            my_key_index=0,
-            num_ranks_per_layer=num_ranks,
-            page_size_bytes=page_size,
-            num_layers=num_layers,
-        )
-
-    def test_single_block_single_rank(self):
-        builder = self._make_builder(block_lens=[100], base_addrs=[1000], num_ranks=1, page_size=4096)
-        block_ids = np.array([5], dtype=np.int64)
-        base_gvas = np.array([0x10000], dtype=np.int64)
-        addrs, sizes, gvas = builder._build_transfer_arrays(block_ids, base_gvas, layer_id=0)
-        # 1 block * 1 sub-block per block = 1 entry
-        self.assertEqual(len(addrs), 1)
-        self.assertEqual(len(sizes), 1)
-        self.assertEqual(len(gvas), 1)
-        self.assertEqual(addrs[0], 1000 + 5 * 100)
-        self.assertEqual(sizes[0], 100)
-        # gva = base_gva + (layer_id * num_ranks + my_key_index) * page_size + inner_offset
-        # layer_id=0, inner_offset=0
-        self.assertEqual(gvas[0], 0x10000 + 0 * 4096 + 0)
-
-    def test_two_sub_blocks_per_block(self):
-        builder = self._make_builder(block_lens=[50, 60], base_addrs=[1000, 2000])
-        block_ids = np.array([3], dtype=np.int64)
-        base_gvas = np.array([0x20000], dtype=np.int64)
-        addrs, sizes, gvas = builder._build_transfer_arrays(block_ids, base_gvas, layer_id=0)
-        # 1 block * 2 sub-blocks = 2 entries
-        self.assertEqual(len(addrs), 2)
-        self.assertEqual(sizes[0], 50)
-        self.assertEqual(sizes[1], 60)
-
-    def test_multi_block(self):
-        builder = self._make_builder(block_lens=[100], base_addrs=[1000])
-        block_ids = np.array([1, 2, 3], dtype=np.int64)
-        base_gvas = np.array([0x10000, 0x20000, 0x30000], dtype=np.int64)
-        addrs, sizes, gvas = builder._build_transfer_arrays(block_ids, base_gvas, layer_id=0)
-        self.assertEqual(len(addrs), 3)
-        self.assertEqual(addrs[0], 1000 + 1 * 100)
-        self.assertEqual(addrs[1], 1000 + 2 * 100)
-        self.assertEqual(addrs[2], 1000 + 3 * 100)
-
-    def test_layer_offset(self):
-        builder = self._make_builder(
-            block_lens=[100, 200],
-            base_addrs=[1000, 2000, 3000, 4000],  # 2 caches * 2 layers (flat)
-            num_ranks=2,
-            page_size=4096,
-            num_layers=2,
-        )
-        block_ids = np.array([0], dtype=np.int64)
-        base_gvas = np.array([0x10000], dtype=np.int64)
-        addrs, sizes, gvas = builder._build_transfer_arrays(block_ids, base_gvas, layer_id=1)
-        # layer_id=1 => base_offset=1*2=2, so uses addrs[2], addrs[3]
-        self.assertEqual(addrs[0], 3000)
-        self.assertEqual(addrs[1], 4000)
-        # gva: rank_layer_offset = (1*2+0)*4096 = 8192
-        expected_gva_offset = (1 * 2 + 0) * 4096
-        self.assertEqual(gvas[0], 0x10000 + expected_gva_offset)
-
-    def test_non_zero_my_key_index(self):
-        """GVA offset uses my_key_index correctly."""
-        db = _FakeTokenDB(block_lens=[100], base_addrs=[1000])
-        builder = LayerBatchBuilder(
-            token_database=db,
-            my_key_index=2,
-            num_ranks_per_layer=4,
-            page_size_bytes=4096,
-            num_layers=1,
-        )
-        block_ids = np.array([0], dtype=np.int64)
-        base_gvas = np.array([0x50000], dtype=np.int64)
-        addrs, sizes, gvas = builder._build_transfer_arrays(block_ids, base_gvas, layer_id=1)
-        # rank_layer_offset = (layer_id * num_ranks + my_key_index) * page_size
-        # = (1 * 4 + 2) * 4096 = 6 * 4096 = 24576
-        expected_gva_offset = (1 * 4 + 2) * 4096
-        self.assertEqual(gvas[0], 0x50000 + expected_gva_offset)
-
-
-class TestLayerBatchBuilderDedupe(unittest.TestCase):
-    def test_single_element(self):
-        ids = np.array([1], dtype=np.int64)
-        gvas = np.array([100], dtype=np.int64)
-        out_ids, out_gvas = LayerBatchBuilder._dedupe_transfer_blocks(ids, gvas)
-        np.testing.assert_array_equal(out_ids, ids)
-        np.testing.assert_array_equal(out_gvas, gvas)
-
-    def test_no_duplicates(self):
-        ids = np.array([1, 2, 3], dtype=np.int64)
-        gvas = np.array([100, 200, 300], dtype=np.int64)
-        out_ids, out_gvas = LayerBatchBuilder._dedupe_transfer_blocks(ids, gvas)
-        self.assertEqual(len(out_ids), 3)
-
-    def test_with_duplicates(self):
-        ids = np.array([1, 2, 1], dtype=np.int64)
-        gvas = np.array([100, 200, 100], dtype=np.int64)
-        out_ids, out_gvas = LayerBatchBuilder._dedupe_transfer_blocks(ids, gvas)
-        self.assertEqual(len(out_ids), 2)
-
-
-class TestLayerBatchBuilderBuildShared(unittest.TestCase):
-    """Test build_shared which pre-computes SharedBlockData."""
-
-    def _make_builder(self):
-        db = _FakeTokenDB(block_lens=[100], base_addrs=[1000])
-        return LayerBatchBuilder(
-            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
-        )
-
-    def _make_req(self, req_id="r1", block_ids=None, gvas=None, is_last_chunk=True, last_block_gva=None):
-        block_ids = block_ids or [5, 6]
-        gvas = gvas or [0x1000, 0x2000]
-        return ReqMeta(
-            req_id=req_id,
-            block_ids_by_group=[block_ids],
-            block_hashes=[b"\xaa", b"\xbb"],
-            can_save=True,
-            is_last_chunk=is_last_chunk,
-            block_ids_np=np.asarray(block_ids, dtype=np.int64),
-            block_gvas_np=np.asarray(gvas, dtype=np.int64),
-            gva_block_offset=0,
-            last_block_gva=last_block_gva,
-        )
-
-    def test_empty_block_ranges(self):
-        builder = self._make_builder()
-        task = LayerTransferTask(layer_id=0, block_ranges=[])
-        result = builder.build_shared(task)
-        self.assertIsNone(result)
-
-    def test_single_range_two_blocks(self):
-        builder = self._make_builder()
-        req = self._make_req()
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=2)],
-        )
-        result = builder.build_shared(task)
-        self.assertIsNotNone(result)
-        self.assertIsInstance(result, SharedBlockData)
-        self.assertEqual(result.req_ids, ["r1"])
-        self.assertEqual(result.is_last_chunks, [True])
-        np.testing.assert_array_equal(result.block_ids_arr, [5, 6])
-        np.testing.assert_array_equal(result.block_gvas_arr, [0x1000, 0x2000])
-
-    def test_partial_block(self):
-        builder = self._make_builder()
-        req = self._make_req(block_ids=[5, 6, 7], gvas=[0x1000, 0x2000, 0x3000], last_block_gva=0x9999)
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[
-                LayerBlockRange(request=req, start_block=0, end_block=2, partial_block_index=2),
-            ],
-        )
-        result = builder.build_shared(task)
-        self.assertIsNotNone(result)
-        # Should have 2 full blocks + 1 partial block
-        self.assertEqual(len(result.block_ids_arr), 3)
-        self.assertEqual(result.block_ids_arr[2], 7)
-        self.assertEqual(result.block_gvas_arr[2], 0x9999)
-
-    def test_multiple_ranges_dedup(self):
-        builder = self._make_builder()
-        req1 = self._make_req(req_id="r1", block_ids=[5, 6], gvas=[0x1000, 0x2000])
-        req2 = self._make_req(req_id="r2", block_ids=[5, 7], gvas=[0x1000, 0x3000])
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[
-                LayerBlockRange(request=req1, start_block=0, end_block=2),
-                LayerBlockRange(request=req2, start_block=0, end_block=2),
-            ],
-        )
-        result = builder.build_shared(task)
-        # block_id=5 appears in both ranges (with same gva), should be deduped
-        self.assertIsNotNone(result)
-        unique_block_ids = set(result.block_ids_arr.tolist())
-        self.assertIn(5, unique_block_ids)
-
-    def test_gva_offset_out_of_range_raises(self):
-        """build_shared raises RuntimeError when gva offset exceeds block_gvas_np."""
-        builder = self._make_builder()
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=1,  # offset=1 but only 1 element => gva_start=1 > len=1
-        )
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        with self.assertRaises(RuntimeError):
-            builder.build_shared(task)
-
-    def test_gva_negative_offset_raises(self):
-        """build_shared raises RuntimeError when computed gva_start is negative."""
-        builder = self._make_builder()
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=-1,
-        )
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        with self.assertRaises(RuntimeError):
-            builder.build_shared(task)
-
-
-class TestLayerBatchBuilderBuildAddrs(unittest.TestCase):
-    """Test build_addrs which computes per-layer addresses from shared data."""
-
-    def _make_builder(self):
-        db = _FakeTokenDB(block_lens=[100], base_addrs=[1000])
-        return LayerBatchBuilder(
-            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
-        )
-
-    def test_basic(self):
-        builder = self._make_builder()
-        shared = SharedBlockData(
-            block_ids_arr=np.array([5], dtype=np.int64),
-            block_gvas_arr=np.array([0x10000], dtype=np.int64),
-            req_ids=["r1"],
-            is_last_chunks=[True],
-        )
-        result = builder.build_addrs(shared, layer_id=0)
-        self.assertEqual(result.layer_id, 0)
-        self.assertEqual(result.req_ids, ["r1"])
-        self.assertEqual(len(result.addr_array), 1)
-        self.assertEqual(result.addr_array[0], 1000 + 5 * 100)
-
-
-class TestLayerBatchBuilderBuild(unittest.TestCase):
-    """Test full build method (build_shared + build_addrs)."""
-
-    def _make_builder(self):
-        db = _FakeTokenDB(block_lens=[100], base_addrs=[1000])
-        return LayerBatchBuilder(
-            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
-        )
-
-    def test_empty_task(self):
-        builder = self._make_builder()
-        task = LayerTransferTask(layer_id=0, block_ranges=[])
-        result = builder.build(task)
-        self.assertIsNone(result)
-
-    def test_full_build(self):
-        builder = self._make_builder()
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x10000], dtype=np.int64),
-            gva_block_offset=0,
-        )
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        result = builder.build(task)
-        self.assertIsNotNone(result)
-        self.assertEqual(result.layer_id, 0)
-        self.assertEqual(len(result.addr_array), 1)
-
-
-class TestLayerBatchBuilderRequireRequestArrays(unittest.TestCase):
-    def test_missing_block_ids_np(self):
-        db = _FakeTokenDB()
-        _builder = LayerBatchBuilder(
-            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
-        )
-        req = ReqMeta(req_id="r1")
-        block_range = LayerBlockRange(request=req, start_block=0, end_block=1)
-        with self.assertRaises(RuntimeError):
-            LayerBatchBuilder._require_request_arrays(block_range)
-
-    def test_valid_arrays(self):
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_np=np.asarray([1, 2], dtype=np.int64),
-            block_gvas_np=np.asarray([100, 200], dtype=np.int64),
-        )
-        block_range = LayerBlockRange(request=req, start_block=0, end_block=1)
-        ids, gvas = LayerBatchBuilder._require_request_arrays(block_range)
-        np.testing.assert_array_equal(ids, [1, 2])
-        np.testing.assert_array_equal(gvas, [100, 200])
-
-
-class TestLayerBatchBuilderScratchArray(unittest.TestCase):
-    def _make_builder(self):
-        db = _FakeTokenDB()
-        return LayerBatchBuilder(
-            token_database=db, my_key_index=0, num_ranks_per_layer=1, page_size_bytes=4096, num_layers=1
-        )
-
-    def test_ensure_creates_new(self):
-        builder = self._make_builder()
-        ids, gvas = builder._ensure_buf(10)
-        self.assertEqual(ids.shape[0], 10)
-        self.assertEqual(gvas.shape[0], 10)
-
-    def test_ensure_reuses(self):
-        builder = self._make_builder()
-        ids1, _ = builder._ensure_buf(10)
-        ids1[0] = 42
-        # Requesting a smaller view reuses the existing buffer.
-        ids2, _ = builder._ensure_buf(5)
-        self.assertEqual(ids2[0], 42)
-
-    def test_ensure_grows(self):
-        builder = self._make_builder()
-        builder._ensure_buf(5)
-        ids, _ = builder._ensure_buf(20)
-        self.assertEqual(ids.shape[0], 20)
-
-
-# ===========================================================================
-# _split_transfer_packets
-# ===========================================================================
-class TestSplitTransferPackets(unittest.TestCase):
-    def _call(self, sizes, max_bytes):
-        gvas: np.ndarray = np.arange(len(sizes), dtype=np.int64)
-        addrs: np.ndarray = np.arange(len(sizes), dtype=np.int64) * 100
-        sizes_arr = np.array(sizes, dtype=np.int64)
-        out_gvas, out_addrs, out_sizes = KVTransferThread._split_transfer_packets(gvas, addrs, sizes_arr, max_bytes)
-        return out_gvas, out_addrs, out_sizes
-
-    def test_no_split_when_disabled(self):
-        gvas, addrs, sizes = self._call([100, 200], max_bytes=0)
-        self.assertEqual(len(gvas), 2)
-
-    def test_no_split_when_sizes_fit(self):
-        gvas, addrs, sizes = self._call([50, 50], max_bytes=100)
-        self.assertEqual(len(gvas), 2)
-
-    def test_split_large_entry(self):
-        gvas, addrs, sizes = self._call([100], max_bytes=30)
-        # 100/30=4 splits => 30+30+30+10
-        self.assertEqual(len(gvas), 4)
-        self.assertEqual(sizes[0], 30)
-        self.assertEqual(sizes[-1], 10)
-
-    def test_split_preserves_gvas_and_addrs(self):
-        gvas, addrs, sizes = self._call([100], max_bytes=50)
-        # 100/50=2 splits
-        self.assertEqual(len(gvas), 2)
-        self.assertEqual(gvas[0], 0)
-        self.assertEqual(gvas[1], 50)
-        self.assertEqual(addrs[0], 0)
-        self.assertEqual(addrs[1], 50)
-
-
-# ===========================================================================
-# KVCacheStoreKeyLayerSendingThread
-# ===========================================================================
-class TestKVCacheStoreKeyLayerSendingThread(unittest.TestCase):
-    def _make_thread(self, exists_result=None, num_layers=2):
-        store = _FakeStore(exists_result or [0, 0])
-        db = _FakeDB()
-        t = KVCacheStoreKeyLayerSendingThread(
+    def test_handle_request_applies_load_mask(self):
+        store = FakeStore()
+        db = MaskedFakeTokenDatabase(masks=([True, False],))
+        t = KVCacheStoreRecvingThread(
             m_store=store,
             token_database=db,
             block_size=16,
             tp_rank=0,
-            tp_size=1,
             dcp_size=1,
-            put_step=1,
             ready_event=threading.Event(),
-            num_layers=num_layers,
-            layer_save_finished_events=[threading.Event() for _ in range(num_layers)],
-            sync_save_events=[MagicMock() for _ in range(num_layers)],
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
         )
-        return t, store
-
-    def test_empty_tasks(self):
-        t, store = self._make_thread()
-        t.request_queue.put([])
-        t._handle_request([])
-        self.assertEqual(len(store.put_calls), 0)
-
-    def test_too_many_tasks_raises(self):
-        t, store = self._make_thread()
-        task1 = LayerTransferTask(layer_id=0, block_ranges=[])
-        task2 = LayerTransferTask(layer_id=1, block_ranges=[])
-        with self.assertRaises(ValueError):
-            t._handle_request([task1, task2])
-
-    def test_puts_missing_keys(self):
-        t, store = self._make_thread(exists_result=[1, 0], num_layers=2)
+        load_spec = LoadSpec(vllm_cached_tokens=0, kvpool_cached_tokens=32, can_load=True, token_len=32)
         req = ReqMeta(
             req_id="r1",
-            block_ids_by_group=[[0, 1]],
-            block_hashes=[b"\xaa", b"\xbb"],
-            can_save=True,
-            save_end_token=32,
-            save_start_token=0,
+            token_len_chunk=32,
+            block_ids=[0, 1],
+            block_hashes=[b"h0", b"h1"],  # type: ignore[arg-type]
+            load_spec=load_spec,
         )
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=2)],
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put([task])
-        t._handle_request([task])
-        self.assertEqual(len(store.put_calls), 1)
-        keys, _, _ = store.put_calls[0]
+        t.request_queue.put(req)
+        t._handle_request(req)
+        keys, _, _ = store.get_calls[0]
         self.assertEqual(len(keys), 1)
 
-    def test_final_layer_marks_finished(self):
-        t, store = self._make_thread(exists_result=[0], num_layers=2)
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[0]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            save_end_token=16,
-            save_start_token=0,
-            is_last_chunk=True,
+
+class TestLayerBatchBuilder(unittest.TestCase):
+    def _make_builder(self):
+        db = FakeTokenDatabase()
+        db.set_group_buffers(
+            {0: [1000, 2000, 3000, 4000]},
+            {0: [10, 20, 10, 20]},
+            {0: [10, 20, 10, 20]},
+            group_num_layers={0: 2},
         )
+        return LayerBatchBuilder(
+            db,
+            page_size_bytes=100,
+            num_layers=2,
+        )
+
+    @staticmethod
+    def _make_request(**overrides):
+        values = {
+            "req_id": "r1",
+            "block_ids_by_group": [[2, 3]],
+            "block_ids_by_group_np": [np.asarray([2, 3])],
+            "block_gvas_by_group_np": [np.asarray([10000, 20000])],
+            "load_block_gvas_by_group_np": [np.asarray([30000, 40000])],
+            "is_last_chunk": True,
+        }
+        values.update(overrides)
+        return ReqMeta(**values)
+
+    def test_builds_layer_addresses(self):
+        request = self._make_request()
         task = LayerTransferTask(
             layer_id=1,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
+            layer_idx_in_group=1,
+            block_ranges=[LayerBlockRange(request, 0, 2)],
         )
-        t.add_stored_request("r1")
-        t.request_queue.put([task])
-        t._handle_request([task])
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
 
-    def test_non_final_layer_no_finish(self):
-        t, store = self._make_thread(exists_result=[0], num_layers=2)
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[0]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            save_end_token=16,
-            save_start_token=0,
-            is_last_chunk=True,
+        result = self._make_builder().build(task)
+
+        self.assertEqual(result.req_ids, ["r1"])
+        np.testing.assert_array_equal(result.addr_array, [3020, 4040, 3030, 4060])
+        np.testing.assert_array_equal(result.size_array, [10, 20, 10, 20])
+        np.testing.assert_array_equal(result.gvas_array, [10030, 10040, 20030, 20040])
+
+    def test_filters_and_deduplicates_blocks(self):
+        request = self._make_request(
+            block_ids_by_group=[[1, 1, 2]],
+            block_ids_by_group_np=[np.asarray([1, 1, 2])],
+            block_gvas_by_group_np=[np.asarray([100, 100, 0])],
         )
         task = LayerTransferTask(
             layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
+            block_ranges=[LayerBlockRange(request, 0, 3)],
         )
-        t.add_stored_request("r1")
-        t.request_queue.put([task])
-        t._handle_request([task])
-        finished = t.get_and_clear_finished_requests()
-        self.assertNotIn("r1", finished)
 
-    def test_cached_process_tokens(self):
-        t, store = self._make_thread(exists_result=[0], num_layers=2)
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[0]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            save_end_token=16,
-            save_start_token=0,
+        result = self._make_builder().build_shared(task)
+
+        np.testing.assert_array_equal(result.block_ids_arr, [1])
+        np.testing.assert_array_equal(result.block_gvas_arr, [100])
+
+    def test_load_offset_and_missing_metadata(self):
+        builder = self._make_builder()
+        request = self._make_request(
+            load_block_gvas_by_group_np=[np.asarray([500])],
+            load_gva_block_offset=1,
         )
-        task = LayerTransferTask(layer_id=0, block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)])
-        cached = t.build_cached_process_tokens(task)
-        self.assertIsNotNone(cached)
-        self.assertIn(0, cached)
+        task = LayerTransferTask(
+            layer_id=0,
+            block_ranges=[LayerBlockRange(request, 1, 2)],
+        )
+        result = builder.build_shared(task, is_save=False)
+        np.testing.assert_array_equal(result.block_ids_arr, [3])
+        np.testing.assert_array_equal(result.block_gvas_arr, [500])
+
+        request.load_block_gvas_by_group_np = None
+        request.load_block_gvas_np = None
+        with self.assertRaises(RuntimeError):
+            builder.build_shared(task, is_save=False)
 
 
-# ===========================================================================
-# KVCacheStoreKeyLayerRecvingThread
-# ===========================================================================
-class TestKVCacheStoreKeyLayerRecvingThread(unittest.TestCase):
-    def _make_thread(self, num_layers=2):
-        store = _FakeStore()
-        db = _FakeDB()
-        get_event = threading.Event()
-        t = KVCacheStoreKeyLayerRecvingThread(
+class TestKVTransferTpMismatchDispatch(unittest.TestCase):
+    """TP-mismatch worker dispatch wiring for Sending/Recving threads."""
+
+    def _make_sending(self, worker=None, exists_result=None):
+        store = FakeStore(exists_result or [0, 0, 0, 0])
+        db = FakeTokenDatabase()
+        t = KVCacheStoreSendingThread(
             m_store=store,
             token_database=db,
             block_size=16,
             tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            ready_event=threading.Event(),
-            get_event=get_event,
-            layer_load_finished_events=[threading.Event() for _ in range(num_layers)],
-            layer_save_finished_events=[threading.Event() for _ in range(num_layers)],
-            num_layers=num_layers,
-        )
-        return t, store, get_event
-
-    def test_empty_transfer_tasks(self):
-        t, store, get_event = self._make_thread()
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[],
-            layer_id=0,
-        )
-        t.request_queue.put(data)
-        t._handle_request(data)
-        self.assertTrue(t.layer_load_finished_events[0].is_set())
-        # get_event is always set at the end of _handle_request
-        self.assertTrue(get_event.is_set())
-
-    def test_basic_recv(self):
-        t, store, get_event = self._make_thread()
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[0]],
-            block_hashes=[b"\xaa"],
-            load_spec=MagicMock(
-                vllm_cached_tokens=0,
-                kvpool_cached_tokens=16,
-                can_load=True,
-                token_len=16,
-            ),
-        )
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[task],
-            layer_id=0,
-        )
-        t.request_queue.put(data)
-        t._handle_request(data)
-        self.assertEqual(len(store.get_calls), 1)
-        self.assertTrue(get_event.is_set())
-        self.assertTrue(t.layer_load_finished_events[0].is_set())
-
-    def test_final_layer_marks_finished(self):
-        t, store, get_event = self._make_thread(num_layers=2)
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[0]],
-            block_hashes=[b"\xaa"],
-            is_last_chunk=True,
-        )
-        task = LayerTransferTask(
-            layer_id=1,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[task],
-            layer_id=1,
-        )
-        t.request_queue.put(data)
-        t._handle_request(data)
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
-
-    def test_too_many_tasks_raises(self):
-        t, store, get_event = self._make_thread()
-        task1 = LayerTransferTask(layer_id=0, block_ranges=[])
-        task2 = LayerTransferTask(layer_id=1, block_ranges=[])
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[task1, task2],
-            layer_id=0,
-        )
-        with self.assertRaises(ValueError):
-            t._handle_request(data)
-
-
-# ===========================================================================
-# KVCacheStoreLayerSendingThread (GVA path additional tests)
-# ===========================================================================
-class TestKVCacheStoreLayerSendingThreadGVA(unittest.TestCase):
-    def _make_thread(self, num_layers=2, max_transfer_blocks=0, max_transfer_bytes=0):
-        store = _FakeStore([0, 0])
-        db = _FakeDB()
-        t = KVCacheStoreLayerSendingThread(
-            m_store=store,
-            token_database=db,
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
             dcp_size=1,
             put_step=1,
-            my_key_index=0,
-            num_ranks_per_layer=1,
-            page_size_bytes=4096,
+            kv_role="kv_producer",
             ready_event=threading.Event(),
-            num_layers=num_layers,
-            layer_save_finished_events=[threading.Event() for _ in range(num_layers)],
-            sync_save_events=[MagicMock() for _ in range(num_layers)],
-            max_transfer_blocks=max_transfer_blocks,
-            max_transfer_bytes=max_transfer_bytes,
+            group_uses_align_state=[False],
+            enable_kv_event=False,
+            worker=worker,
         )
         return t, store
 
-    def test_build_shared_data(self):
-        t, store = self._make_thread()
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            save_end_token=16,
-            save_start_token=0,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=0,
-        )
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        shared = t.build_shared_data(task)
-        self.assertIsNotNone(shared)
-        np.testing.assert_array_equal(shared.block_ids_arr, [5])
-
-    def test_stored_request_management(self):
-        t, _ = self._make_thread()
-        t.add_stored_request("r1")
-        t.add_stored_request("r1")
-        self.assertEqual(t.stored_requests["r1"], 2)
-        t.dec_stored_request("r1")
-        self.assertEqual(t.stored_requests["r1"], 1)
-        t.delete_finished_stored_request("r1")
-        self.assertNotIn("r1", t.stored_requests)
-
-    def test_empty_tasks_gva_path(self):
-        t, store = self._make_thread()
-        t.request_queue.put([])
-        t._handle_request([])
-        self.assertEqual(len(store.put_calls), 0)
-        # Empty task path returns immediately without setting save finished event
-        self.assertFalse(t.layer_save_finished_events[0].is_set())
-
-    def test_too_many_tasks_raises(self):
-        t, store = self._make_thread()
-        task1 = LayerTransferTask(layer_id=0, block_ranges=[])
-        task2 = LayerTransferTask(layer_id=1, block_ranges=[])
-        with self.assertRaises(ValueError):
-            t._handle_request([task1, task2])
-
-    def test_gva_path_with_shared_block_data(self):
-        """Test the GVA batch_copy path when shared_block_data is provided."""
-        t, store = self._make_thread(num_layers=2)
-        t.m_store.store = MagicMock()
-        t.m_store.store.batch_copy.return_value = 0
-
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            save_end_token=16,
-            save_start_token=0,
-            is_last_chunk=True,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=0,
-        )
-        shared = SharedBlockData(
-            block_ids_arr=np.array([5], dtype=np.int64),
-            block_gvas_arr=np.array([0x1000], dtype=np.int64),
-            req_ids=["r1"],
-            is_last_chunks=[True],
-        )
-        task = LayerTransferTask(
-            layer_id=1,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-            shared_block_data=shared,
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put([task])
-        t._handle_request([task])
-        # GVA path calls batch_copy
-        t.m_store.store.batch_copy.assert_called_once()
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
-
-    def test_gva_path_batch_copy_failure(self):
-        """Test GVA path when batch_copy returns non-zero."""
-        t, store = self._make_thread(num_layers=2)
-        t.m_store.store = MagicMock()
-        t.m_store.store.batch_copy.return_value = -1
-
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            can_save=True,
-            save_end_token=16,
-            save_start_token=0,
-            is_last_chunk=True,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=0,
-        )
-        shared = SharedBlockData(
-            block_ids_arr=np.array([5], dtype=np.int64),
-            block_gvas_arr=np.array([0x1000], dtype=np.int64),
-            req_ids=["r1"],
-            is_last_chunks=[True],
-        )
-        task = LayerTransferTask(
-            layer_id=1,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-            shared_block_data=shared,
-        )
-        t.add_stored_request("r1")
-        t.request_queue.put([task])
-        t._handle_request([task])
-        # batch_copy failure is logged but the request is still reported as
-        # finished (best-effort transfer) so the pipeline is not stalled.
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
-
-
-# ===========================================================================
-# KVCacheStoreLayerRecvingThread (GVA path additional tests)
-# ===========================================================================
-class TestKVCacheStoreLayerRecvingThreadGVA(unittest.TestCase):
-    def _make_thread(self, num_layers=2, stagger_us=0):
-        store = _FakeStore()
-        db = _FakeDB()
-        get_event = threading.Event()
-        t = KVCacheStoreLayerRecvingThread(
-            m_store=store,
-            token_database=db,
-            block_size=16,
-            tp_rank=0,
-            tp_size=1,
-            dcp_size=1,
-            my_key_index=0,
-            num_ranks_per_layer=1,
-            page_size_bytes=4096,
-            ready_event=threading.Event(),
-            get_event=get_event,
-            layer_load_finished_events=[threading.Event() for _ in range(num_layers)],
-            layer_save_finished_events=[threading.Event() for _ in range(num_layers)],
-            num_layers=num_layers,
-            h2d_stagger_us=stagger_us,
-        )
-        return t, store, get_event
-
-    def test_empty_transfer_tasks(self):
-        t, store, get_event = self._make_thread()
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[],
-            layer_id=0,
-        )
-        t.request_queue.put(data)
-        t._handle_request(data)
-        self.assertTrue(t.layer_load_finished_events[0].is_set())
-
-    def test_too_many_tasks_raises(self):
-        t, store, get_event = self._make_thread()
-        task1 = LayerTransferTask(layer_id=0, block_ranges=[])
-        task2 = LayerTransferTask(layer_id=1, block_ranges=[])
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[task1, task2],
-            layer_id=0,
-        )
-        with self.assertRaises(ValueError):
-            t._handle_request(data)
-
-    def test_stagger_delay_zero(self):
-        t, _, _ = self._make_thread(stagger_us=0)
-        delay = t._get_h2d_stagger_delay_us(layer_id=0)
-        self.assertEqual(delay, 0)
-
-    def test_stagger_delay_basic(self):
-        t, _, _ = self._make_thread(stagger_us=100)
-        # tp_rank=0, layer_id=0, tp_size=1 => slot=0 => delay=0
-        delay = t._get_h2d_stagger_delay_us(layer_id=0)
-        self.assertEqual(delay, 0)
-        # tp_rank=0, layer_id=1, tp_size=4 => slot=(0+1)%4=1 => delay=1*100
-        t.tp_size = 4
-        delay = t._get_h2d_stagger_delay_us(layer_id=1)
-        self.assertEqual(delay, 100)
-
-    def test_gva_recv_with_task(self):
-        """Test GVA recv path with a transfer task that has shared_block_data."""
-        t, store, get_event = self._make_thread(num_layers=2)
-        t.m_store.store = MagicMock()
-        t.m_store.store.batch_copy.return_value = 0
-
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            is_last_chunk=True,
-            save_end_token=16,
-            save_start_token=0,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=0,
-        )
-        task = LayerTransferTask(
-            layer_id=0,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[task],
-            layer_id=0,
-        )
-        t.request_queue.put(data)
-        t._handle_request(data)
-        t.m_store.store.batch_copy.assert_called_once()
-        self.assertTrue(get_event.is_set())
-        self.assertTrue(t.layer_load_finished_events[0].is_set())
-
-    def test_gva_recv_final_layer_marks_finished(self):
-        t, store, get_event = self._make_thread(num_layers=2)
-        t.m_store.store = MagicMock()
-        t.m_store.store.batch_copy.return_value = 0
-
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            is_last_chunk=True,
-            save_end_token=16,
-            save_start_token=0,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=0,
-        )
-        task = LayerTransferTask(
-            layer_id=1,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[task],
-            layer_id=1,
-        )
-        t.request_queue.put(data)
-        t._handle_request(data)
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
-
-    def test_gva_recv_batch_copy_failure(self):
-        t, store, get_event = self._make_thread(num_layers=2)
-        t.m_store.store = MagicMock()
-        t.m_store.store.batch_copy.return_value = -1
-
-        req = ReqMeta(
-            req_id="r1",
-            block_ids_by_group=[[5]],
-            block_hashes=[b"\xaa"],
-            is_last_chunk=True,
-            save_end_token=16,
-            save_start_token=0,
-            block_ids_np=np.asarray([5], dtype=np.int64),
-            block_gvas_np=np.asarray([0x1000], dtype=np.int64),
-            gva_block_offset=0,
-        )
-        task = LayerTransferTask(
-            layer_id=1,
-            block_ranges=[LayerBlockRange(request=req, start_block=0, end_block=1)],
-        )
-        data = LayerLoadTask(
-            wait_for_save_layer=None,
-            transfer_tasks=[task],
-            layer_id=1,
-        )
-        t.request_queue.put(data)
-        t._handle_request(data)
-        # batch_copy failure is logged but the request is still reported as
-        # finished (best-effort transfer) so the pipeline is not stalled.
-        finished = t.get_and_clear_finished_requests()
-        self.assertIn("r1", finished)
-
-
-# ===========================================================================
-# KVTransferThread base class additional tests
-# ===========================================================================
-class TestKVTransferThreadBase(unittest.TestCase):
-    def test_discard_finished_requests(self):
-        store = _FakeStore()
-        db = _FakeDB()
-        t = KVTransferThread(
+    def _make_recving(self, worker=None):
+        store = FakeStore([0, 0, 0, 0])
+        db = FakeTokenDatabase()
+        t = KVCacheStoreRecvingThread(
             m_store=store,
             token_database=db,
             block_size=16,
             tp_rank=0,
             dcp_size=1,
             ready_event=threading.Event(),
-            name="test",
+            invalid_block_ids=set(),
+            invalid_block_ids_lock=threading.Lock(),
+            worker=worker,
         )
-        t.set_finished_request("r1")
-        t.set_finished_request("r2")
-        t.discard_finished_requests({"r1"})
-        finished = t.get_and_clear_finished_requests()
-        self.assertNotIn("r1", finished)
-        self.assertIn("r2", finished)
+        return t, store
 
-    def test_try_finish_and_delete_stored_request(self):
-        store = _FakeStore()
-        db = _FakeDB()
-        t = KVTransferThread(
-            m_store=store,
-            token_database=db,
-            block_size=16,
-            tp_rank=0,
-            dcp_size=1,
-            ready_event=threading.Event(),
-            name="test",
+    def test_sending_dispatch_and_normal_path(self):
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t, _ = self._make_sending(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
         )
-        # Not yet stored
-        self.assertFalse(t.try_finish_and_delete_stored_request("r1"))
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._store_kv_tp_mismatch.assert_called_once_with(req)
+
+        t, store = self._make_sending(worker=None, exists_result=[1, 0, 1, 0])
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=64,
+            block_ids=[0, 1, 2, 3],
+            block_hashes=[b"h0", b"h1", b"h2", b"h3"],
+            current_event=None,
+        )
         t.add_stored_request("r1")
-        # Count is 1, not 0
-        self.assertFalse(t.try_finish_and_delete_stored_request("r1"))
-        t.dec_stored_request("r1")
-        # Count is 0 now
-        self.assertTrue(t.try_finish_and_delete_stored_request("r1"))
+        t.request_queue.put(req)
+        t._handle_request(req)
+        self.assertEqual(len(store.put_calls), 1)  # normal path executed
 
-    def test_get_block_size_list(self):
-        store = _FakeStore()
-        db = _FakeDB()
-        t = KVTransferThread(
-            m_store=store,
-            token_database=db,
-            block_size=[16, 32],
-            tp_rank=0,
-            dcp_size=1,
-            ready_event=threading.Event(),
-            name="test",
+    def test_recving_dispatches_to_worker_when_tp_mismatch(self):
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t, _ = self._make_recving(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
         )
-        self.assertEqual(t._get_block_size(0), 16)
-        self.assertEqual(t._get_block_size(1), 32)
-        # Out of range returns first
-        self.assertEqual(t._get_block_size(5), 16)
+        req.load_spec = MagicMock()
+        req.load_spec.token_len = 16
+        req.load_spec.vllm_cached_tokens = 0
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._load_kv_tp_mismatch.assert_called_once()
+        args = worker._load_kv_tp_mismatch.call_args.args
+        # (block_hashes, block_ids, token_len, mask_num)
+        self.assertEqual(args[2], 16)  # token_len
+        self.assertEqual(args[3], 0)  # mask_num
 
-    def test_skip_null_blocks(self):
-        store = _FakeStore()
-        db = _FakeDB()
-        KVTransferThread(
-            m_store=store,
-            token_database=db,
-            block_size=16,
-            tp_rank=0,
-            dcp_size=1,
-            ready_event=threading.Event(),
-            name="test",
+    def test_recving_tp_mismatch_terminal_paths(self):
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        t, _ = self._make_recving(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
         )
-        req = ReqMeta(req_id="r1", skip_null_blocks_by_group=[True])
-        self.assertTrue(KVTransferThread._skip_null_blocks(req, 0))
-        self.assertFalse(KVTransferThread._skip_null_blocks(req, 1))  # out of range
+        t.request_queue.put(req)
+        t._handle_request(req)
+        worker._load_kv_tp_mismatch.assert_not_called()
+        self.assertEqual(t.get_and_clear_finished_requests(), {"r1"})
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
 
-        req2 = ReqMeta(req_id="r2")
-        self.assertFalse(KVTransferThread._skip_null_blocks(req2, 0))
-
-    def test_skip_null_blocks_non_kv_role(self):
-        store = _FakeStore()
-        db = _FakeDB()
-        KVTransferThread(
-            m_store=store,
-            token_database=db,
-            block_size=16,
-            tp_rank=0,
-            dcp_size=1,
-            ready_event=threading.Event(),
-            name="test",
+        worker = MagicMock()
+        worker.tp_mismatch = True
+        worker._load_kv_tp_mismatch.side_effect = RuntimeError("load failed")
+        t, _ = self._make_recving(worker=worker)
+        req = ReqMeta(
+            req_id="r1", token_len_chunk=16, block_ids_by_group=[[0]], block_hashes=[b"h0"], current_event=None
         )
-        req = ReqMeta(req_id="r1", skip_null_blocks_by_group=[True])
-        self.assertFalse(KVTransferThread._skip_null_blocks(req, 0, cache_role="state"))
+        req.load_spec = MagicMock()
+        req.load_spec.token_len = 16
+        req.load_spec.vllm_cached_tokens = 0
+        t.request_queue.put(req)
+        with self.assertRaises(RuntimeError):
+            t._handle_request(req)
+        self.assertEqual(t.request_queue.unfinished_tasks, 0)
 
 
 if __name__ == "__main__":

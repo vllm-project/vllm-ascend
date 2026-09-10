@@ -8,25 +8,20 @@ from vllm.model_executor.models.qwen3_vl import (
     pos_embed_interpolate_native,
 )
 
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.ops.rotary_embedding import AscendMRotaryEmbedding
+from vllm_ascend.utils import enable_sp
 
 
 def tensor_parallel_wrap(func):
     def wrap(*args, **kwargs):
         deepstack_input_embeds = func(*args, **kwargs)
-        if deepstack_input_embeds is None:
+        if deepstack_input_embeds is None or not enable_sp():
             return deepstack_input_embeds
-        try:
-            flash_comm_v1_enabled = _EXTRA_CTX.flash_comm_v1_enabled
-        except (AssertionError, AttributeError, KeyError):
-            flash_comm_v1_enabled = False
-        if flash_comm_v1_enabled:
-            tp_size = get_tensor_model_parallel_world_size()
-            tp_rank = get_tensor_model_parallel_rank()
-            deepstack_input_embeds.tensors = {
-                k: v.chunk(tp_size)[tp_rank] for k, v in deepstack_input_embeds.tensors.items()
-            }
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        deepstack_input_embeds.tensors = {
+            k: v.chunk(tp_size)[tp_rank] for k, v in deepstack_input_embeds.tensors.items()
+        }
         return deepstack_input_embeds
 
     return wrap

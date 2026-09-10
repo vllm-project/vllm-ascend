@@ -16,11 +16,43 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import os
 from collections.abc import Callable, Sequence
+from importlib.metadata import version
 
 import numpy as np
 import torch
 import vllm.v1.worker.gpu.buffer_utils
+from vllm.logger import logger
+
+
+def check_triton_ascend_version_valid() -> bool:
+    """
+    Check triton-ascend version and warn about UVA feature disablement.
+    If the installed version isn't affected by the UVA issue, return True.
+    """
+    # Triton Ascend versions affected by the UVA pointer validation issue.
+    UVA_INCOMPATIBLE_VERSIONS = ("3.2.1", "3.2.2")
+    installed_version = version("triton-ascend")
+    if installed_version in UVA_INCOMPATIBLE_VERSIONS:
+        logger.warning(
+            "triton-ascend %s disables the UVA feature.\n"
+            "Related bug issue: https://github.com/triton-lang/triton-ascend/issues/783",
+            installed_version,
+        )
+        return False
+    return True
+
+
+def is_uva_available() -> bool:
+    """check if uva feature is supported in this environment"""
+    # FIXME(chenboxun): Some triton-ascend versions reject pinned CPU tensors.
+    # Thus UVA is disabled for affected versions.
+    # (Related bug issue link: https://github.com/triton-lang/triton-ascend/issues/783)
+    return (
+        "pinned_mem_register:True" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", {})
+        and check_triton_ascend_version_valid()
+    )
 
 
 def get_row_indices_from_key(key: int | slice | tuple, dim_size: int) -> set[int]:
@@ -89,35 +121,49 @@ class MonitoredTorchTensor:
 
 
 class UvaBufferWrapper:
-    """Ascend NPU doesn't support UVA tensors directly. This is a wrapper class
-    that provides CPU and NPU views of a UVA tensor."""
+    """
+    Ascend NPU doesn't support UVA tensors directly.
+    This is a wrapper class that provides CPU and NPU views of a UVA tensor.
+    However if users add environment parameter below, UVA feature is Supported.
+    os.environ['PYTORCH_NPU_ALLOC_CONF'] = 'pinned_mem_register:True'
+    """
 
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         self._cpu: torch.Tensor = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=True)
-        self._np = self._cpu.numpy()
-        self._uva: torch.Tensor = torch.zeros_like(self._cpu, device="npu")
+        self._np: np.ndarray = self._cpu.numpy()
         self._modified_indices: set[int] = set()
+        self._uva: torch.Tensor = self._cpu if is_uva_available() else torch.zeros_like(self._cpu, device="npu")
 
     def _mark_cpu_modified(self, key: int):
         self._modified_indices.add(key)
 
     @property
     def cpu(self):
-        return MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
+        return self._cpu if is_uva_available() else MonitoredTorchTensor(self._cpu, self._mark_cpu_modified)
 
     @property
     def np(self):
-        return MonitoredNumPyArray(self._np, self._mark_cpu_modified)
+        return self._np if is_uva_available() else MonitoredNumPyArray(self._np, self._mark_cpu_modified)
 
     @property
     def uva(self):
         """Get the device data of the buffer."""
-        if self._modified_indices:
-            # Sort for better memory access locality
+        if not is_uva_available() and self._modified_indices:
             dirty_rows = sorted(self._modified_indices)
-            # can't use copy_ method, because copy_ for index tensor
-            #  will malloc new memory.
-            self._uva[dirty_rows] = self._cpu[dirty_rows].to(device="npu", non_blocking=True)
+            n_dirty = len(dirty_rows)
+            if dirty_rows[0] == 0 and dirty_rows[-1] == n_dirty - 1:
+                # Common path: dirty rows are a contiguous prefix [0..n-1].
+                # This is always the case when copy_to_uva writes via
+                # dst[:n] = x.  Contiguous slice copy_ keeps the CPU source
+                # pinned and enables true async DMA without an intermediate
+                # tensor or stream sync.
+                self._uva[:n_dirty].copy_(self._cpu[:n_dirty], non_blocking=True)
+            else:
+                # Sparse modification pattern — fall back to indexed copy.
+                # Explicitly re-pin the CPU source so that non_blocking is
+                # not silently degraded.
+                src = self._cpu[dirty_rows].pin_memory()
+                self._uva[dirty_rows] = src.to(device="npu", non_blocking=True)
             self._modified_indices.clear()
         return self._uva
 

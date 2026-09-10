@@ -2,6 +2,10 @@
 
 ## Version Specific FAQs
 
+- [[v0.26.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/14766)
+- [[v0.23.0] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12916)
+- [[v0.23.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/12238)
+- [[v0.22.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/10593)
 - [[v0.21.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9970)
 - [[v0.20.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/9586)
 - [[v0.19.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/8819)
@@ -25,7 +29,7 @@ Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
 - Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet
 
-From a technical view, vllm-ascend supports devices if torch-npu is supported. Otherwise, we have to implement it by using custom ops. We also welcome you to join us to improve together.
+From a technical view, vllm-ascend supports devices if TorchNPU is supported. Otherwise, we have to implement it by using custom ops. We also welcome you to join us to improve together.
 
 ### 2. How to get our docker containers?
 
@@ -47,10 +51,9 @@ If you want to use container image for offline environments (no internet connect
 
 **Exporting Docker images:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Pull the image on a machine with internet access
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker pull quay.io/ascend/vllm-ascend:$TAG
 
 # Export the image to a tar file and compress to tar.gz
@@ -59,17 +62,16 @@ docker save quay.io/ascend/vllm-ascend:$TAG | gzip > vllm-ascend-$TAG.tar.gz
 
 **Importing Docker images in environment without internet access:**
 
-```{code-block} bash
-   :substitutions:
+```bash
 # Transfer the tar/tar.gz file to the offline environment and load it
-TAG=|vllm_ascend_version|
+TAG={{ vllm_ascend_version }}
 docker load -i vllm-ascend-$TAG.tar.gz
 
 # Verify the image is loaded
 docker images | grep vllm-ascend
 ```
 
-### 3. What models does vllm-ascend supports?
+### 3. What models does vllm-ascend support?
 
 Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_models.html).
 
@@ -82,7 +84,7 @@ There are many channels that you can communicate with our community developers /
 - Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-ascend/issues/227) group and ask your questions.
 - Join our ascend channel in [<u>vLLM forums</u>](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support/6) and publish your topics.
 
-### 5. What features does vllm-ascend V1 supports?
+### 5. What features does vllm-ascend V1 support?
 
 Find more details [<u>here</u>](https://docs.vllm.ai/projects/ascend/en/latest/user_guide/support_matrix/supported_features.html).
 
@@ -104,7 +106,7 @@ import vllm
 
 If all above steps are not working, feel free to submit a GitHub issue.
 
-### 7. How vllm-ascend work with vLLM?
+### 7. How does vllm-ascend work with vLLM?
 
 `vllm-ascend` is a hardware plugin for vLLM. Stable releases usually align with the same vLLM version, while RC releases may use the corresponding vLLM final release version. For example, `vllm-ascend` `v0.18.0rc1` matches vLLM `v0.18.0`. For the main branch, we ensure that `vllm-ascend` and `vllm` are compatible at every commit.
 
@@ -199,7 +201,7 @@ There are several factors that affect output determinism:
    export ATB_LLM_LCOC_ENABLE=0
    ```
 
-### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models？
+### 16. How to fix the error "ImportError: Please install vllm[audio] for audio support" for the multi-modal models?
 
 Some multi-modal models requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met, for Qwen-omni, run `pip install qwen-omni-utils`.
 This package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring that the audio processing functionality works correctly.
@@ -227,7 +229,7 @@ ACL graph capture can still fail when the runtime resources required by the sele
 
 ### 18. How to install custom version of torch_npu?
 
-torch-npu will be overridden  when installing vllm-ascend. If you need to install a specific version of torch-npu, you can manually install the specified version of torch-npu after vllm-ascend is installed.
+TorchNPU will be overridden when installing vllm-ascend. If you need to install a specific version of TorchNPU, you can manually install the specified version of TorchNPU after vllm-ascend is installed.
 
 ### 19. On certain systems (e.g., Kylin OS), `docker pull` may fail with an `invalid tar header` error
 
@@ -246,7 +248,7 @@ This is often due to system compatibility issues. You can resolve this by using 
    export IMAGE_NAME="quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
    # If in China region, uncomment to use a mirror:
    # export IMAGE_NAME="m.daocloud.io/quay.io/ascend/vllm-ascend:${IMAGE_TAG}"
-   
+
    # Pull the image for the ARM64 platform and save it
    docker pull --platform linux/arm64 "${IMAGE_NAME}"
    docker save -o "vllm_ascend_${IMAGE_TAG}.tar" "${IMAGE_NAME}"
@@ -280,7 +282,7 @@ export SOC_VERSION="ascend310p1"
 export SOC_VERSION="<value starting with ascend950>"
 ```
 
-### 22. Why TPOT increases drastically as concurrency grows?
+### 22. Why does TPOT increase drastically as concurrency grows?
 
 When testing a vLLM server, one may find that TPOT increases as concurrency increases (for example, TPOT increases by 0.5 ~ 1ms when concurrency increases by 4). This phenomenon is normal in most cases. However, sometimes TPOT may increase dramatically (10 to 100ms for example) as concurrency grows. This is possibly caused by [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption) in vLLM.
 Generally, when your server hits KV cache limits, vLLM tries to free KV cache of requests to ensure sufficient space for other requests, which is called preemption in vLLM. When a request is preempted, the default behavior is to recompute the KV cache of this request again in the future, which is why the performance might drop significantly. There are several ways to verify this:
@@ -289,3 +291,17 @@ Generally, when your server hits KV cache limits, vLLM tries to free KV cache of
 - When launching a vLLM server, you will see logs like `GPU KV cache size: 66340 tokens` and `Maximum concurrency for 16,384 tokens per request: 4.05`. These are estimated KV cache capacity for a single DP group. You can adjust the overall request traffic according to this.
 
 Preemption cannot be avoided completely since KV cache usage always has a limit. But there are methods to reduce the chances of preemption. As is suggested in [**PREEMPTION**](https://docs.vllm.ai/en/latest/configuration/optimization/#preemption), the core strategy is to increase available KV cache. For example, one can increase `--gpu-memory-utilization` or decrease `--max-num-seqs` && `--max-num-batched-tokens`.
+
+### 23. How do I choose between single-node and multi-node deployment?
+
+Single-node deployment is recommended when the model fits within the memory of a single node's NPUs. For models like Qwen3-32B (BF16), which requires 4 × 64GB cards, multi-NPU within a single node (TP) is sufficient. Multi-node deployment is only needed when the total NPU count exceeds a single node's capacity.
+
+### 24. What quantization method should I use?
+
+- **BF16**: Best accuracy, highest memory footprint. Use for accuracy-critical applications or when memory is sufficient.
+- **W8A8**: Good balance of accuracy and memory reduction. Use for large models (e.g., 32B) on memory-constrained hardware.
+- **W4A8/W4A4**: Maximum memory reduction. Suitable for deploying larger models on smaller hardware configurations, with some accuracy trade-off.
+
+### 25. What is the difference between FIA and PA operators for attention?
+
+FIA (Flash Attention) is the default attention operator in vLLM-Ascend. In some batch-size settings (particularly medium concurrency), FIA may exhibit suboptimal performance. The PA (Page Attention) operator can be manually enabled via `pa_shape_list` in `--additional-config`. When the runtime batch size matches a value in `pa_shape_list`, the framework switches to PA. This is a temporary tuning knob — future FIA optimizations will make this parameter obsolete.
