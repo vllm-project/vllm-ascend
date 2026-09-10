@@ -61,8 +61,8 @@ from vllm_ascend.quantization.utils import enable_fa_quant
 from vllm_ascend.utils import (
     calc_split_factor,
     enable_sfa,
-    get_sfa_dcp_indexer_cache_factor,
     get_kv_cache_tensor_layers,
+    get_sfa_dcp_indexer_cache_factor,
     is_hidden_state_cache_spec,
     vllm_version_is,
 )
