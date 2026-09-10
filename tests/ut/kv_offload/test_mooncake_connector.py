@@ -1640,6 +1640,46 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertFalse(delay_free)
         self.assertIsNone(params)
 
+    def test_request_finished_remote_prefill_rejection_enqueue_empty_recv(self):
+        request = MockRequest(
+            "req_reject",
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "remote_block_ids": ([10, 11, 12], [20]),
+                "remote_engine_id": "prefill_engine",
+                "remote_request_id": "prefill_req",
+                "remote_host": "127.0.0.1",
+                "remote_port": 5000,
+            },
+            status=RequestStatus.FINISHED_ABORTED,
+        )
+        delay_free, params = self.scheduler.request_finished(request, [])
+        self.assertFalse(delay_free)
+        self.assertIsNone(params)
+        self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
+        self.assertIn("req_reject", self.scheduler._reqs_need_recv)
+        req, local_blocks, full_blocks, num_external = self.scheduler._reqs_need_recv["req_reject"]
+        self.assertIs(req, request)
+        self.assertEqual(local_blocks, ([], []))
+        self.assertEqual(full_blocks, tuple())
+        self.assertEqual(num_external, 0)
+
+        meta = self.scheduler.build_connector_meta(MockSchedulerOutput())
+        self.assertIn("req_reject", meta.requests)
+        self.assertEqual(meta.requests["req_reject"].local_block_ids, ([], []))
+        self.assertEqual(meta.requests["req_reject"].num_external_tokens, 0)
+        self.assertEqual(len(self.scheduler._reqs_need_recv), 0)
+
+    def test_empty_local_block_ids_for_rejection_fallback(self):
+        self.assertEqual(
+            self.scheduler._empty_local_block_ids_for_rejection({"remote_block_ids": [1, 2, 3]}),
+            ([],),
+        )
+        self.assertEqual(
+            self.scheduler._empty_local_block_ids_for_rejection({}),
+            ([],),
+        )
+
     def test_get_transfer_block_ids_trims_attention_mtp_blocks(self):
         self.scheduler.group_transfer_info = [
             types.SimpleNamespace(  # type: ignore[list-item]
