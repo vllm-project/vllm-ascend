@@ -17,6 +17,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX
 from vllm_ascend.compilation.acl_graph import (
+    get_draft_graph_params,
     set_draft_graph_params,
     update_full_graph_params,
 )
@@ -117,6 +118,7 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
             desc.num_reqs,
             self.speculator.input_batch.seq_lens_cpu_upper_bound,
         )
+        self._validate_graph_param_cardinality(get_draft_graph_params(), num_tokens, draft_attn_metadatas)
         self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
@@ -162,3 +164,32 @@ class DFlashAclGraphManager(DFlashCudaGraphManager):
                 draft_attn_metadatas=draft_attn_metadatas,
             )
         return ret
+
+    @staticmethod
+    def _validate_graph_param_cardinality(graph_params: Any, num_tokens: int, metadatas: Any) -> None:
+        """Reject incomplete update buckets before submitting graph replay."""
+        if graph_params is None:
+            raise RuntimeError("Draft ACLGraph parameters have not been initialized.")
+        buckets = [getattr(graph_params, field).get(num_tokens) for field in ("attn_params", "handles", "events")]
+        if any(bucket is None for bucket in buckets):
+            raise RuntimeError(f"Draft ACLGraph has no complete parameter bucket for {num_tokens} tokens.")
+        counts = [len(bucket) for bucket in buckets]
+        if not counts[0] or len(set(counts)) != 1:
+            raise RuntimeError(f"Draft ACLGraph update cardinality mismatch: params/handles/events={counts}.")
+        steps = [metadatas] if isinstance(metadatas, dict) else metadatas
+        if not steps or any(not step for step in steps):
+            raise RuntimeError("Draft ACLGraph requires nonempty attention metadata.")
+        # MLA updates only decode attention entries; hybrid state metadata is
+        # not an FIA task. Match the backend's filtering rather than counting
+        # every state entry as an attention layer.
+        uses_mla_metadata = any(hasattr(meta, "decode") for step in steps for meta in step.values())
+        layer_count = sum(
+            sum(getattr(meta, "decode", None) is not None for meta in step.values()) if uses_mla_metadata else len(step)
+            for step in steps
+        )
+        if not layer_count:
+            raise RuntimeError("Draft ACLGraph has no attention layers to update.")
+        if counts[0] % layer_count:
+            raise RuntimeError(
+                f"Draft ACLGraph task count {counts[0]} is not divisible by metadata layer count {layer_count}."
+            )

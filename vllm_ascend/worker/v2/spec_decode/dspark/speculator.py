@@ -215,7 +215,7 @@ class AscendDSparkSpeculator(DSparkSpeculator):
             for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
                 layer_names = kv_cache_group_spec.layer_names
                 if active_layer_names is not None:
-                    layer_names = list(active_layer_names.intersection(layer_names))
+                    layer_names = [name for name in layer_names if name in active_layer_names]
 
                 layer_type = cast(type[Any], AttentionLayerBase)
                 attn_layers = get_layers_from_vllm_config(self.vllm_config, layer_type, layer_names)

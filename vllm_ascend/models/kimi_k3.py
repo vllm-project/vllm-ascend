@@ -129,6 +129,24 @@ def _apply_ascend_attn_res(
     return torch.matmul(probabilities, values_fp32).squeeze(1).to(values.dtype)
 
 
+class AscendKimiMLP(KimiMLP):
+    """Run dense TP projections on matching token rows under sequence parallelism."""
+
+    def __init__(self, *args, use_sequence_parallel: bool = False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.use_sequence_parallel = use_sequence_parallel
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.use_sequence_parallel:
+            hidden_states = sp_all_gather(hidden_states)
+        hidden_states = super().forward(hidden_states)
+        if self.use_sequence_parallel:
+            # The upstream down projection already all-reduces TP partials.
+            # Only shard here: reduce-scatter would sum the result twice.
+            hidden_states = sp_shard(hidden_states)
+        return hidden_states
+
+
 class AscendKimiMoE(nn.Module):
     """Kimi K3 MoE assembled from the standard vLLM MoE interfaces."""
 
@@ -420,7 +438,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
             )
             self.mlp = self.block_sparse_moe
         else:
-            self.mlp = KimiMLP(
+            self.mlp = AscendKimiMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -428,6 +446,7 @@ class AscendKimiDecoderLayer(UpstreamKimiDecoderLayer):
                 prefix=f"{prefix}.mlp",
                 activation_situ_beta=config.activation_situ_beta,
                 activation_situ_linear_beta=config.activation_situ_linear_beta,
+                use_sequence_parallel=use_sequence_parallel,
             )
         self.input_layernorm = RMSNorm(
             config.hidden_size,

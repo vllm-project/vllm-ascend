@@ -9,7 +9,50 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
+
+
+def _validation_method():
+    source = Path(__file__).resolve().parents[3] / "vllm_ascend/worker/v2/spec_decode/dflash/aclgraph.py"
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    manager = next(
+        node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DFlashAclGraphManager"
+    )
+    method = next(
+        node
+        for node in manager.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_validate_graph_param_cardinality"
+    )
+    method.decorator_list = []
+    namespace = {"Any": object}
+    exec(compile(ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])), str(source), "exec"), namespace)
+    return namespace[method.name]
+
+
+@pytest.mark.parametrize("counts", [(0, 0, 0), (3, 2, 3), (3, 3, 2), (2, 2, 2)])
+def test_incomplete_graph_update_is_rejected(counts):
+    params = SimpleNamespace(
+        **{name: {6: [object()] * count} for name, count in zip(("attn_params", "handles", "events"), counts)}
+    )
+    with pytest.raises(RuntimeError):
+        _validation_method()(params, 6, [{str(i): object() for i in range(3)}])
+
+
+@pytest.mark.parametrize("params", [None, SimpleNamespace(attn_params={}, handles={}, events={})])
+def test_missing_graph_bucket_is_rejected(params):
+    with pytest.raises(RuntimeError):
+        _validation_method()(params, 6, [{"draft": object()}])
+
+
+def test_graph_validation_accepts_complete_repeated_layer_updates():
+    params = SimpleNamespace(**{name: {6: [object()] * 6} for name in ("attn_params", "handles", "events")})
+    _validation_method()(params, 6, [{str(i): SimpleNamespace(decode=object()) for i in range(3)}])
+
+
+def test_graph_validation_does_not_count_hybrid_state_as_mla_task():
+    params = SimpleNamespace(**{name: {6: [object()] * 3} for name in ("attn_params", "handles", "events")})
+    _validation_method()(params, 6, [{"mla": SimpleNamespace(decode=object()), "state": object()}])
 
 
 class TestDFlashDPMetadata(unittest.TestCase):
@@ -71,9 +114,13 @@ class TestDFlashDPMetadata(unittest.TestCase):
             "get_forward_context": lambda: context,
             "update_full_graph_params": update,
             "_EXTRA_CTX": SimpleNamespace(),
+            "get_draft_graph_params": lambda: SimpleNamespace(
+                attn_params={6: [object()]}, handles={6: [object()]}, events={6: [object()]}
+            ),
         }
         exec(compile(ast.fix_missing_locations(module), str(source), "exec"), namespace)
         instance = namespace[manager.name]()
+        instance._validate_graph_param_cardinality = _validation_method()
         instance.device = torch.device("meta")
         instance.decode_query_len = 6
         instance.update_stream = SimpleNamespace(wait_stream=wait_stream)

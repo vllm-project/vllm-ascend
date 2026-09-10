@@ -1154,14 +1154,6 @@ def _setup_compile_backend(
     compilation_config.cudagraph_num_of_warmups = 1
     vllm_config._set_cudagraph_sizes()
     additional_config = vllm_config.additional_config or {}
-    if (
-        not additional_config.get("enable_flashcomm1", False)
-        and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
-    ):
-        vllm_config.parallel_config.all2all_backend = (
-            "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
-        )
-        logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
     requires_tp_aligned_capture_sizes = enable_sp(vllm_config) or enable_shared_expert_dp or enable_dsa_cp
     if (
         vllm_config.parallel_config.tensor_parallel_size > 1
@@ -1246,15 +1238,6 @@ def _setup_worker_and_scheduler(
     # Select worker class and refresh block size
     parallel_config = vllm_config.parallel_config
     if parallel_config and parallel_config.worker_cls == "auto":
-        additional_config = vllm_config.additional_config or {}
-        if (
-            not additional_config.get("enable_flashcomm1", False)
-            and int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM1", "0")) == 0
-        ):
-            parallel_config.all2all_backend = (
-                "flashinfer_all2allv"  # TODO: a tricky way to disable SP moe. Disable this when SP is supported.
-            )
-            logger.info_once("FlashComm1 is disabled. Using flashinfer_all2allv as the all2all backend.")
         hardware_profile = get_current_hardware_profile()
         if ascend_config.xlite_graph_config.enabled and hardware_profile.supports(
             HardwareCapability.STANDARD_WORKER_PATCHES
@@ -1301,22 +1284,22 @@ def _validate_sfa_dcp_kv_sp(vllm_config: VllmConfig) -> None:
     cache_config = vllm_config.cache_config
     model_config = vllm_config.model_config
 
-    cp_size = parallel_config.prefill_context_parallel_size * parallel_config.decode_context_parallel_size
+    dcp_enabled = parallel_config.decode_context_parallel_size > 1
     use_sparse = model_uses_sfa_sparse(model_config)
     if (
         vllm_config.kv_transfer_config is not None
         and cache_config.block_size != parallel_config.cp_kv_cache_interleave_size
-        and cp_size > 1
+        and dcp_enabled
     ):
         raise AssertionError(
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size}) "
             f"and block_size({cache_config.block_size}) "
-            "needs to be equal if PCP or DCP is enabled in P/D disaggregate and kv pool scenario."
+            "needs to be equal if DCP is enabled in P/D disaggregate and kv pool scenario."
         )
 
-    if use_sparse and cp_size > 1 and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
+    if use_sparse and dcp_enabled and parallel_config.cp_kv_cache_interleave_size != cache_config.block_size:
         logger.warning_once(
-            "The current SFA context-parallel implementation requires "
+            "The current SFA decode-context-parallel implementation requires "
             f"cp_kv_cache_interleave_size({parallel_config.cp_kv_cache_interleave_size})"
             f" == block_size({cache_config.block_size}). "
             f"Override cp_kv_cache_interleave_size to {cache_config.block_size}."

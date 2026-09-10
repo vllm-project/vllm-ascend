@@ -205,14 +205,20 @@ def test_copy_config_with_draft_capture_sizes_preserves_runtime_state():
     assert compilation_config.max_cudagraph_capture_size == 32
 
 
-@pytest.mark.parametrize("layer_names", [["draft.mla"], [], ["draft.mla", "draft.other"]])
-def test_set_attn_preserves_pcp_context_and_backend_validation(monkeypatch, layer_names):
+@pytest.mark.parametrize("homogeneous", [False, True])
+@pytest.mark.parametrize(
+    "layer_names", [["draft.mla"], [], ["draft.mla", "draft.other"], ["draft.2", "draft.0", "draft.1"]]
+)
+def test_set_attn_preserves_pcp_context_and_backend_validation(monkeypatch, layer_names, homogeneous):
     spec = _spec(SimpleNamespace())
     draft_config = object()
     monkeypatch.setattr(AscendDSparkSpeculator, "attn_vllm_config", property(lambda self: draft_config))
     spec.draft_attn_layer_names = set(layer_names) or {"draft.mla"}
     spec._context_slot_mappings = torch.zeros(2, dtype=torch.int64)
     backends = {name: type(f"Backend{idx}", (), {}) for idx, name in enumerate(layer_names)}
+    if homogeneous and backends:
+        backend = next(iter(backends.values()))
+        backends = dict.fromkeys(layer_names, backend)
     context_active = False
     parent_calls = []
 
@@ -241,7 +247,9 @@ def test_set_attn_preserves_pcp_context_and_backend_validation(monkeypatch, laye
     monkeypatch.setattr(DSparkSpeculator, "set_attn", parent_set_attn)
     cache_config = SimpleNamespace(kv_cache_groups=[SimpleNamespace(layer_names=layer_names)])
     expected_error = (
-        pytest.raises(RuntimeError, match="no KV-cache backend|homogeneous") if len(layer_names) != 1 else nullcontext()
+        pytest.raises(RuntimeError, match="no KV-cache backend|homogeneous")
+        if not layer_names or (len(layer_names) != 1 and not homogeneous)
+        else nullcontext()
     )
     with expected_error:
         spec.set_attn(object(), cache_config, object(), object(), object())
@@ -249,9 +257,10 @@ def test_set_attn_preserves_pcp_context_and_backend_validation(monkeypatch, laye
     assert len(parent_calls) == 1
     assert not context_active
     assert spec._context_slot_mappings.dtype == torch.int32
-    if len(layer_names) == 1:
+    if layer_names and (len(layer_names) == 1 or homogeneous):
         assert spec.attn_backends == backends
-        assert spec.attn_backend is backends["draft.mla"]
+        assert list(spec.attn_backends) == layer_names
+        assert spec.attn_backend is backends[layer_names[0]]
 
 
 @pytest.mark.parametrize("enforce_eager", [False, True])
