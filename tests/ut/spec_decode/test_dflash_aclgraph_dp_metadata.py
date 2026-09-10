@@ -8,6 +8,7 @@ import unittest
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import torch
 
@@ -64,7 +65,7 @@ class TestDFlashDPMetadata(unittest.TestCase):
             body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), isolated_class],
             type_ignores=[],
         )
-        namespace = {
+        namespace: dict[str, Any] = {
             "GraphBase": GraphBase,
             "torch": SimpleNamespace(full=torch.full, npu=SimpleNamespace(current_stream=lambda: stream)),
             "set_forward_context": forward_context,
