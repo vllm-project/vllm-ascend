@@ -172,6 +172,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished_all_groups(request, block_ids)
 
+    def has_pending_push_work(self) -> bool:
+        return self.connector_scheduler is not None and self.connector_scheduler.has_pending_push_work()
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
         Update KVConnector state from worker-side connectors output.
@@ -298,7 +301,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_worker is not None
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
-    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+    def get_finished(self, _finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """Get the finished recving and sending requests."""
         assert self.connector_worker is not None
         metadata = self._get_connector_metadata()
@@ -307,7 +310,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
                 self.connector_worker.ensure_store_initialized()
             finally:
                 self._current_step_has_real_forward = False
-        done_sending, done_recving = self.connector_worker.get_finished(finished_req_ids, metadata)
+        done_sending, done_recving = self.connector_worker.get_finished(metadata)
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -337,8 +340,6 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         return self.connector_worker.build_connector_worker_meta()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_scheduler is not None:
-            return self.connector_scheduler.get_stats()
         if self.connector_worker is not None:
             return self.connector_worker.get_stats()
         return None

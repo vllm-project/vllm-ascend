@@ -48,16 +48,10 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
             self.data.setdefault("load_get_duration_seconds", []).extend(durations)
         if num_keys := other.data.get("load_get_keys"):
             self.data["load_get_keys"] = self.data.get("load_get_keys", 0) + num_keys
-        if "delayed_release_requests" in other.data:
-            self.data["delayed_release_requests"] = other.data["delayed_release_requests"]
-            self.data["delayed_release_blocks"] = other.data["delayed_release_blocks"]
         return self
 
     def reduce(self) -> dict[str, int | float]:
-        reduced: dict[str, int | float] = {
-            "ascend_store_delayed_release_requests": self.data.get("delayed_release_requests", 0),
-            "ascend_store_delayed_release_blocks": self.data.get("delayed_release_blocks", 0),
-        }
+        reduced: dict[str, int | float] = {}
         if durations := self.data.get("load_get_duration_seconds"):
             reduced["ascend_store_load_get_count"] = len(durations)
             reduced["ascend_store_load_get_avg_ms"] = round(fmean(durations) * 1e3, 3)
@@ -70,10 +64,6 @@ class AscendStoreKVConnectorStats(KVConnectorStats):
         self.data.setdefault("load_get_duration_seconds", []).append(duration_seconds)
         self.data["load_get_keys"] = self.data.get("load_get_keys", 0) + num_keys
 
-    def set_delayed_release(self, num_requests: int, num_blocks: int) -> None:
-        self.data["delayed_release_requests"] = num_requests
-        self.data["delayed_release_blocks"] = num_blocks
-
 
 class AscendStorePromMetrics(KVConnectorPromMetrics):
     def __init__(
@@ -84,28 +74,6 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         per_engine_labelvalues: dict[int, list[object]],
     ) -> None:
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
-        self._delayed_release_requests = create_metric_per_engine(
-            self._gauge_cls(
-                name="vllm:ascend_store_delayed_release_requests",
-                documentation=(
-                    "Number of finished requests whose KV cache block release is "
-                    "delayed by an asynchronous AscendStore save."
-                ),
-                labelnames=labelnames,
-            ),
-            per_engine_labelvalues,
-        )
-        self._delayed_release_blocks = create_metric_per_engine(
-            self._gauge_cls(
-                name="vllm:ascend_store_delayed_release_blocks",
-                documentation=(
-                    "Number of KV cache block references retained for finished "
-                    "requests while asynchronous AscendStore saves complete."
-                ),
-                labelnames=labelnames,
-            ),
-            per_engine_labelvalues,
-        )
         self._load_get_duration = create_metric_per_engine(
             self._histogram_cls(
                 name="vllm:ascend_store_load_get_duration_seconds",
@@ -132,11 +100,3 @@ class AscendStorePromMetrics(KVConnectorPromMetrics):
         metric = self._load_get_keys.get(engine_idx)
         if metric is not None:
             metric.inc(transfer_stats_data.get("load_get_keys", 0))
-        metric = self._delayed_release_requests.get(engine_idx)
-        if metric is not None:
-            if "delayed_release_requests" in transfer_stats_data:
-                metric.set(transfer_stats_data["delayed_release_requests"])
-        metric = self._delayed_release_blocks.get(engine_idx)
-        if metric is not None:
-            if "delayed_release_blocks" in transfer_stats_data:
-                metric.set(transfer_stats_data["delayed_release_blocks"])
