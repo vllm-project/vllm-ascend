@@ -110,14 +110,12 @@ class NPUModelRunner(GPUModelRunner):
         if spec_pp_support is not None and spec_pp_support.needs_aux_hidden_states:
             self.use_aux_hidden_state_outputs = True
 
-        # Fine-grained TP features with cross-DP collectives (o_proj TP today,
-        # mlp TP when it lands) need every DP rank to forward the same token
-        # count per step; eager steps are aligned by `eager_dp_padding`.
-        self._dp_padding_enabled = (
-            self.ascend_config.finegrained_tp_config.oproj_tensor_parallel_size > 0 and self.dp_size > 1
-        )
-        self._dp_padding_group_max = 0
-        self._dp_padding_real_tokens = 0
+        # Fine-grained TP features with cross-DP collectives (o_proj TP, mlp TP) need every DP rank to
+        # forward the same token count per step; eager steps are aligned by `eager_dp_padding`.
+        finegrained_tp_config = self.ascend_config.finegrained_tp_config
+        self._dp_padding_enabled = finegrained_tp_config.oproj_tensor_parallel_size > 0 and self.dp_size > 1
+        self._dp_padding_aligned_tokens = 0
+        self._dp_padding_original_tokens = 0
 
         self.use_aclgraph = (
             self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -275,26 +273,18 @@ class NPUModelRunner(GPUModelRunner):
         context_len: int = 0,
     ):
         self._cpp_execution_time_ms = None
-        self._dp_padding_group_max = 0
-        self._dp_padding_real_tokens = 0
-        # _dp_padding_enabled is set in __init__; bare mock runners built via
-        # object.__new__ in upstream tests lack it, hence the default.
-        # PCP and adaptive verification rewrite the dispatched token count
-        # after this point and are skipped until validated.
+        self._dp_padding_aligned_tokens = 0
+        self._dp_padding_original_tokens = 0
         if (
             getattr(self, "_dp_padding_enabled", False)
             and not is_profile
-            and getattr(self, "pcp_manager", None) is None
-            and getattr(self, "adaptive_verification", None) is None
-            # Zero-token real steps return from the parent before dispatch
-            # (posting ours there would hang it against busy/dummy steps).
             and (dummy_run or scheduler_output.total_num_scheduled_tokens > 0)
         ):
-            intent = 0 if dummy_run else scheduler_output.total_num_scheduled_tokens
-            self._dp_padding_group_max = sync_dp_group_max_tokens(intent, self.dp_size, self.dp_rank)
-            self._dp_padding_real_tokens = intent
-            if dummy_run and self._dp_padding_group_max > 0:
-                scheduler_output = make_dp_padded_dummy_output(scheduler_output, self._dp_padding_group_max)
+            self._dp_padding_aligned_tokens = sync_dp_group_max_tokens(
+                0 if dummy_run else scheduler_output.total_num_scheduled_tokens, self.dp_size, self.dp_rank
+            )
+            if dummy_run and self._dp_padding_aligned_tokens > 0:
+                scheduler_output = make_dp_padded_dummy_output(scheduler_output, self._dp_padding_aligned_tokens)
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
@@ -338,12 +328,13 @@ class NPUModelRunner(GPUModelRunner):
 
     def gather_batch_req_state(self, scheduler_output, dummy_run):
         batch_req_state, uniform_tok_count = super().gather_batch_req_state(scheduler_output, dummy_run)
-        # DP padding: report the agreed group max so the dispatch input
-        # already carries the padded size (the eager branch publishes it
-        # both as the descriptor and as this rank's counts entry, keeping
-        # the forward-context counts[dp_rank] == batch size invariant).
-        if batch_req_state is not None and self._dp_padding_group_max > batch_req_state.num_tokens:
-            batch_req_state = batch_req_state._replace(num_tokens=self._dp_padding_group_max)
+        if batch_req_state is None:
+            return batch_req_state, uniform_tok_count
+        # Keep the real token count before the DP-aligned one replaces it below.
+        self._dp_padding_original_tokens = batch_req_state.num_tokens
+        # Report the agreed group max so eager dispatch steps are DP-padded.
+        if self._dp_padding_aligned_tokens > batch_req_state.num_tokens:
+            batch_req_state = batch_req_state._replace(num_tokens=self._dp_padding_aligned_tokens)
         return batch_req_state, uniform_tok_count
 
     def prepare_inputs(  # type: ignore[misc]
@@ -356,11 +347,9 @@ class NPUModelRunner(GPUModelRunner):
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
-        # DP padding: gather reported the padded size, so restore the real
-        # extent for everything that treats num_tokens as real work
-        # (query_start_loc trailing fill, InputBatch.num_tokens).
-        if self._dp_padding_group_max > 0:
-            num_tokens = self._dp_padding_real_tokens
+        # Restore the real token extent; gather reported the padded size.
+        if self._dp_padding_aligned_tokens > 0:
+            num_tokens = self._dp_padding_original_tokens
         else:
             num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
