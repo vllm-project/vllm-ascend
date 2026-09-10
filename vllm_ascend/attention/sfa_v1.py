@@ -1680,110 +1680,117 @@ class AscendSFAImpl(MLAAttentionImpl):
             or getattr(attn_metadata, "num_decode_tokens", None) != 0
         ):
             return None
-        if len(query_lengths) > 1:
-            if attn_metadata.attn_state != AscendAttentionState.PrefillNoCache:
-                return None
-            if (
-                getattr(attn_metadata, "num_decodes", None) != 0
-                or getattr(attn_metadata, "num_decode_tokens", None) != 0
-            ):
-                return None
-            if (
-                topk_indices.ndim != 3
-                or topk_indices.shape[0] != num_tokens
-                or topk_indices.shape[1] != 1
-                or topk_indices.shape[2] != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
-                or topk_indices.dtype != torch.int32
-                or topk_indices.device != ql_nope.device
-            ):
-                return None
-
+        eligible_lengths = tuple(
+            min(query_length, max(0, SFA_FIA_SHARED_PREFILL_TOPK_WIDTH - (kv_length - query_length)))
+            for query_length, kv_length in zip(query_lengths, kv_lengths, strict=True)
+        )
+        dense_total = sum(eligible_lengths)
+        legacy_grouped_candidate = dense_total == SFA_FIA_SHARED_PREFILL_TOPK_WIDTH and dense_total < num_tokens
+        if (
+            len(query_lengths) > 1
+            and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache
+            and getattr(attn_metadata, "num_decodes", None) == 0
+            and getattr(attn_metadata, "num_decode_tokens", None) == 0
+            and not legacy_grouped_candidate
+        ):
             multifia_plan = _build_sfa_multifia_prefill_plan(query_ends, kv_lengths)
-            if multifia_plan is None:
-                return None
-            _, eligible_lengths, dense_segments, tail_spans, tail_query_ends, tail_kv_lengths, tail_requests = (
-                multifia_plan
-            )
-
-            dense_prevalidations = []
-            for request, start, end in dense_segments:
-                dense_q = ql_nope[start:end]
-                dense_rope = q_pe[start:end]
-                dense_metadata = copy(attn_metadata)
-                dense_metadata.attn_state = AscendAttentionState.PrefillCacheHit
-                dense_metadata.block_table = attn_metadata.block_table[request : request + 1]
-                dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor([end - start])
-                dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor([eligible_lengths[request]])
-                dense_metadata.num_actual_tokens = end - start
-                dense_metadata.num_input_tokens = end - start
-                if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
-                    return None
-                dense_prevalidations.append((request, dense_q, dense_rope, dense_metadata))
-
-            def pack_multifia_rows(tensor: torch.Tensor, spans: tuple[tuple[int, int], ...]) -> torch.Tensor:
-                if len(spans) == 1:
-                    start, end = spans[0]
-                    return tensor[start:end]
-                return torch.cat([tensor[start:end] for start, end in spans], dim=0)
-
-            dense_outputs = {}
-            for request, dense_q, dense_rope, dense_metadata in dense_prevalidations:
-                dense_output = self._execute_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata)
-                assert dense_output is not None, "Validated shared FIA group unexpectedly declined"
-                dense_outputs[request] = dense_output
-
-            tail_output = None
-            if tail_spans:
-                tail_q = pack_multifia_rows(ql_nope, tail_spans)
-                tail_rope = pack_multifia_rows(q_pe, tail_spans)
-                tail_indices = pack_multifia_rows(topk_indices, tail_spans)
-                tail_metadata = copy(attn_metadata)
-                tail_metadata.block_table = attn_metadata.block_table[list(tail_requests)]
-                tail_metadata.cum_query_lens = cum_query_lens.new_tensor(list(tail_query_ends))
-                tail_metadata.seq_lens = seq_lens.new_tensor(list(tail_kv_lengths))
-                tail_output = self._execute_sparse_flash_attention_process(
-                    tail_q,
-                    tail_rope,
-                    kv_cache,
-                    tail_indices,
-                    tail_metadata,
-                    tail_metadata.cum_query_lens,
-                    tail_metadata.seq_lens,
-                    block_table=tail_metadata.block_table,
-                )
+            if multifia_plan is not None:
                 if (
-                    tail_output.shape != tail_q.shape
-                    or tail_output.dtype != tail_q.dtype
-                    or tail_output.device != tail_q.device
+                    topk_indices.ndim != 3
+                    or topk_indices.shape[0] != num_tokens
+                    or topk_indices.shape[1] != 1
+                    or topk_indices.shape[2] != SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
+                    or topk_indices.dtype != torch.int32
+                    or topk_indices.device != ql_nope.device
+                ):
+                    return None
+                _, eligible_lengths, dense_segments, tail_spans, tail_query_ends, tail_kv_lengths, tail_requests = (
+                    multifia_plan
+                )
+
+                dense_prevalidations = []
+                for request, start, end in dense_segments:
+                    dense_q = ql_nope[start:end]
+                    dense_rope = q_pe[start:end]
+                    dense_kv_length = kv_lengths[request] - query_lengths[request] + eligible_lengths[request]
+                    dense_metadata = copy(attn_metadata)
+                    dense_metadata.attn_state = AscendAttentionState.PrefillCacheHit
+                    dense_metadata.block_table = attn_metadata.block_table[request : request + 1]
+                    dense_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor([end - start])
+                    dense_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor([dense_kv_length])
+                    dense_metadata.cum_query_lens = cum_query_lens.new_tensor([end - start])
+                    dense_metadata.seq_lens = seq_lens.new_tensor([dense_kv_length])
+                    dense_metadata.num_actual_tokens = end - start
+                    dense_metadata.num_input_tokens = end - start
+                    if self._validate_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata) is None:
+                        return None
+                    dense_prevalidations.append((request, dense_q, dense_rope, dense_metadata))
+
+                def pack_multifia_rows(tensor: torch.Tensor, spans: tuple[tuple[int, int], ...]) -> torch.Tensor:
+                    if len(spans) == 1:
+                        start, end = spans[0]
+                        return tensor[start:end]
+                    return torch.cat([tensor[start:end] for start, end in spans], dim=0)
+
+                dense_outputs = {}
+                for request, dense_q, dense_rope, dense_metadata in dense_prevalidations:
+                    dense_output = self._execute_sfa_fia_shared_group(dense_q, dense_rope, kv_cache, dense_metadata)
+                    assert dense_output is not None, "Validated shared FIA group unexpectedly declined"
+                    dense_outputs[request] = dense_output
+
+                tail_output = None
+                if tail_spans:
+                    tail_q = pack_multifia_rows(ql_nope, tail_spans)
+                    tail_rope = pack_multifia_rows(q_pe, tail_spans)
+                    tail_indices = pack_multifia_rows(topk_indices, tail_spans)
+                    tail_metadata = copy(attn_metadata)
+                    tail_metadata.block_table = attn_metadata.block_table[list(tail_requests)]
+                    tail_metadata.cum_query_lens = cum_query_lens.new_tensor(list(tail_query_ends))
+                    tail_metadata.seq_lens = seq_lens.new_tensor(list(tail_kv_lengths))
+                    tail_output = self._execute_sparse_flash_attention_process(
+                        tail_q,
+                        tail_rope,
+                        kv_cache,
+                        tail_indices,
+                        tail_metadata,
+                        tail_metadata.cum_query_lens,
+                        tail_metadata.seq_lens,
+                        block_table=tail_metadata.block_table,
+                    )
+                    if (
+                        tail_output.shape != tail_q.shape
+                        or tail_output.dtype != tail_q.dtype
+                        or tail_output.device != tail_q.device
+                    ):
+                        raise RuntimeError(
+                            "Grouped shared SFA tail returned an incompatible output: "
+                            f"expected shape={tuple(tail_q.shape)}, dtype={tail_q.dtype}, device={tail_q.device}; "
+                            f"got shape={tuple(tail_output.shape)}, dtype={tail_output.dtype}, "
+                            f"device={tail_output.device}."
+                        )
+
+                outputs = []
+                tail_cursor = 0
+                for request, (query_length, eligible) in enumerate(zip(query_lengths, eligible_lengths, strict=True)):
+                    if eligible:
+                        outputs.append(dense_outputs[request])
+                    tail_length = query_length - eligible
+                    if tail_length:
+                        assert tail_output is not None
+                        outputs.append(tail_output[tail_cursor : tail_cursor + tail_length])
+                        tail_cursor += tail_length
+                attn_output = torch.cat(outputs, dim=0)
+                if (
+                    attn_output.shape != ql_nope.shape
+                    or attn_output.dtype != ql_nope.dtype
+                    or attn_output.device != ql_nope.device
                 ):
                     raise RuntimeError(
-                        "Grouped shared SFA tail returned an incompatible output: "
-                        f"expected shape={tuple(tail_q.shape)}, dtype={tail_q.dtype}, device={tail_q.device}; "
-                        f"got shape={tuple(tail_output.shape)}, dtype={tail_output.dtype}, device={tail_output.device}."
+                        "Grouped shared prefill row restoration returned an incompatible output: "
+                        f"expected shape={tuple(ql_nope.shape)}, dtype={ql_nope.dtype}, device={ql_nope.device}; "
+                        f"got shape={tuple(attn_output.shape)}, dtype={attn_output.dtype}, device={attn_output.device}."
                     )
-
-            outputs = []
-            tail_cursor = 0
-            for request, (query_length, eligible) in enumerate(zip(query_lengths, eligible_lengths, strict=True)):
-                if eligible:
-                    outputs.append(dense_outputs[request])
-                tail_length = query_length - eligible
-                if tail_length:
-                    assert tail_output is not None
-                    outputs.append(tail_output[tail_cursor : tail_cursor + tail_length])
-                    tail_cursor += tail_length
-            attn_output = torch.cat(outputs, dim=0)
-            if (
-                attn_output.shape != ql_nope.shape
-                or attn_output.dtype != ql_nope.dtype
-                or attn_output.device != ql_nope.device
-            ):
-                raise RuntimeError(
-                    "Grouped shared prefill row restoration returned an incompatible output: "
-                    f"expected shape={tuple(ql_nope.shape)}, dtype={ql_nope.dtype}, device={ql_nope.device}; "
-                    f"got shape={tuple(attn_output.shape)}, dtype={attn_output.dtype}, device={attn_output.device}."
-                )
-            return attn_output
+                return attn_output
 
         signature = (tuple(query_ends), tuple(kv_lengths))
         plan = getattr(attn_metadata, "_sfa_fia_shared_prefill_plan", None)
