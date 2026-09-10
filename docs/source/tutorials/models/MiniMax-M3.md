@@ -147,7 +147,7 @@ Single-node deployment completes both Prefill and Decode within the same node. B
     --max-model-len 131072 \
     --tensor-parallel-size 4 \
     --data-parallel-size 4 \
-    --api_server_count 1 \
+    --api-server-count 1 \
     --max-num-batched-tokens 32768 \
     --long-prefill-token-threshold 4096 \
     --enable-expert-parallel \
@@ -1227,11 +1227,11 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| GSM8K   | 8 H200 (141GB × 8)     | 96.72 | 65536         | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
+| GSM8K   | 8 H20 (96G × 8)     | 96.72 | 65536         | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
 | GSM8K   | 8 Atlas 800 A3 (64GB × 16)      | 96.36 | 10240         | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
-| AIME2025 | 8 H200 (141GB × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
+| AIME2025 | 8 H20 (96G × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
 | AIME2025 | 8 Atlas 800 A3 (64GB × 16)      | 93.3@repeat2    | 131072        | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
-| GPQA-Diamond | 8 H200 (141GB × 8)     | 92.42    | 81920      | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 H20 (96G × 8)     | 92.42    | 81920      | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
 | GPQA-Diamond | 8 Atlas 800 A3 (64GB × 16)      | 92.42    | 131072      | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
 | GPQA-Diamond | 8 950DT products (96GB × 8)      | 92.9    | 133000      | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
 | MMMU-pro | 8 950DT products (96GB × 8)      | 78.9    | 133000      | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
