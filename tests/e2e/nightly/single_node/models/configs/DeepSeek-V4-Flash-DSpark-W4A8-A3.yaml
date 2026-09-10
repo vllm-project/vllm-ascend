@@ -36,7 +36,7 @@ test_cases:
       - "--reasoning-parser"
       - "deepseek_v4"
       - "--model-loader-extra-config"
-      - '{"enable_mutithread_load": ture, "num_threads": 128}'
+      - '{"enable_mutithread_load": true, "num_threads": 128}'
       - "--quantization"
       - "ascend"
       - "--port"
