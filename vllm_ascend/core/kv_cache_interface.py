@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -33,6 +34,23 @@ def get_storage_block_size(kv_cache_spec: KVCacheSpec) -> int:
     return getattr(kv_cache_spec, "storage_block_size", kv_cache_spec.block_size)
 
 
+def is_deepseek_v4_kv_cache_spec(kv_cache_spec: KVCacheSpec) -> bool:
+    """Whether a KV cache spec (or its nested specs) targets DeepSeekV4."""
+    if getattr(kv_cache_spec, "model_version", None) == "deepseek_v4":
+        return True
+
+    nested_specs = getattr(kv_cache_spec, "kv_cache_specs", None)
+    if nested_specs is None:
+        return False
+
+    if isinstance(nested_specs, Mapping):
+        nested_specs = nested_specs.values()
+    elif not isinstance(nested_specs, (list, tuple, set)):
+        return False
+
+    return any(getattr(spec, "model_version", None) == "deepseek_v4" for spec in nested_specs)
+
+
 @dataclass(frozen=True, kw_only=True)
 class AscendMLAAttentionSpec(MLAAttentionSpec):
     """MLA cache spec with Ascend-specific layout metadata.
@@ -61,6 +79,12 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         if vllm_version_is("0.28.0"):
             return self.block_size // self.compress_ratio
         return self.block_size // self.tokens_per_state
+
+    @storage_block_size.setter
+    def storage_block_size(self, value: int) -> None:
+        # vLLM #53906 adds a nullable dataclass field with this name on main;
+        # keep Ascend's derived layout and ignore the upstream value.
+        pass
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -204,6 +228,11 @@ class AscendSlidingWindowMLASpec(SlidingWindowMLASpec):
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
+
+    @storage_block_size.setter
+    def storage_block_size(self, value: int) -> None:
+        # vLLM #53906 adds a nullable dataclass field with this name on main.
+        pass
 
     @property
     def real_page_size_bytes(self) -> int:

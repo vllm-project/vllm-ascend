@@ -11,6 +11,7 @@ def bind_kv_cache(
     forward_context: dict[str, Attention],
     runner_kv_caches: list[torch.Tensor],
     num_attn_module: int = 1,
+    kv_cache_groups=None,  # vLLM #52506: upstream metadata; unused on Ascend
 ) -> None:
     """
     Bind the allocated KV cache to both ModelRunner and forward context so

@@ -28,10 +28,8 @@ from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
 from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
-from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.worker.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -361,9 +359,7 @@ def _make_kv_cache_tensor(
     layer_names: list[str],
     page_size: int,
 ) -> KVCacheTensor:
-    """Build the lane-specific descriptor changed by vLLM #51718."""
-    if "shared_by" in KVCacheTensor.__dataclass_fields__:
-        return KVCacheTensor(size=per_layer_size, shared_by=layer_names)
+    """Build the vLLM main descriptor changed by vLLM #51718."""
     return KVCacheTensor(
         size=per_layer_size * len(layer_names),
         layers=layer_names,
@@ -375,8 +371,6 @@ def _make_kv_cache_tensor(
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """Map the MLA compression field renamed by vLLM #51718."""
-    if vllm_version_is("0.28.0"):
-        return {"compress_ratio": ratio}
     return {"tokens_per_state": ratio}
 
 
@@ -587,14 +581,9 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        if vllm_version_is("0.28.0"):
-            assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
-        else:
-            assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
-            assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
+        assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
+        assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
 
-    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
         mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
@@ -664,12 +653,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
-    @unittest.skipIf(
-        vllm_version_is("0.28.0"),
-        "vLLM #51718 only changed the main planner",
-    )
     @patch(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm.v1.core.kv_cache_planning._may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,
     )
     def test_dsv4_main_materializes_real_planner_geometry_once(
@@ -924,8 +909,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ]
         raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
 
-        with patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False):
-            cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: raw})[layer_name]
+        cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: raw})[layer_name]
 
         self.assertEqual(cache.shape, (2, 2, 4, 3))
 
@@ -976,7 +960,6 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             runner.hybrid_with_attn_and_mamba = hybrid_flag
             with (
                 self.subTest(layout=layout),
-                patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False),
             ):
                 k_cache, v_cache = runner._reshape_kv_cache_tensors(
                     kv_cache_config,

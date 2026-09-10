@@ -14,7 +14,12 @@ import msgspec
 import torch
 import zmq
 from vllm.utils.network_utils import make_zmq_path
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config_from_groups, is_kv_cache_spec_uniform
+
+try:
+    from vllm.v1.core.kv_cache_planning import is_kv_cache_spec_uniform
+except ImportError:  # early #53558 still used the private name
+    from vllm.v1.core.kv_cache_planning import _is_kv_cache_spec_uniform as is_kv_cache_spec_uniform
+from vllm.v1.core.kv_cache_planning import get_kv_cache_config_from_groups
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
