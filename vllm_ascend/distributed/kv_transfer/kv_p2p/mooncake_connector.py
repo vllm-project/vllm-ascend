@@ -195,10 +195,11 @@ class KVCacheTaskTracker:
             self.finished_requests.add(request_id)
             self.reqs_to_process.discard(request_id)
 
-    def update_done_task_count(self, request_id: str):
+    def update_done_task_count(self, request_id: str, report_finished: bool = True):
         with self.done_task_lock:
             if request_id in self.reqs_to_process:
-                self.finished_requests.add(request_id)
+                if report_finished:
+                    self.finished_requests.add(request_id)
                 self.reqs_to_process.discard(request_id)
                 self.delayed_free_requests.pop(request_id, None)
             else:
@@ -582,6 +583,7 @@ class KVCacheRecvingThread(threading.Thread):
         shard_idx: int = 0,
         local_block_ids_replicate_k: BlockIds | None = None,
         remote_block_ids_replicate_k: BlockIds | None = None,
+        report_finished: bool = True,
     ):
         """Add a new request to the queue for processing."""
         if remote_port_send_num is None:
@@ -602,6 +604,7 @@ class KVCacheRecvingThread(threading.Thread):
             "all_task_done": all_task_done,
             "shard_idx": shard_idx,
             "remote_block_size": remote_block_size,
+            "report_finished": report_finished,
         }
         logger.debug("Adding request %s to the queue.Trans info:%s", request_id, trans_info)
         self.request_queue.put(trans_info)
@@ -758,7 +761,10 @@ class KVCacheRecvingThread(threading.Thread):
                             remote_request_id,
                             e,
                         )
-                self.task_tracker.update_done_task_count(request_id)
+                self.task_tracker.update_done_task_count(
+                    request_id,
+                    report_finished=req_meta.get("report_finished", True),
+                )
                 with self.proc_not_transfer_request_lock:
                     self.proc_not_transfer_request.pop(remote_request_id, None)
                 self._clear_failed_recv_request(request_id)
@@ -1947,7 +1953,11 @@ class MooncakeConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host", "remote_port", "remote_request_id")):
-                    local_block_ids = blocks.get_unhashed_block_ids_all_groups() if num_external_tokens > 0 else []
+                    local_block_ids = (
+                        blocks.get_unhashed_block_ids_all_groups()
+                        if num_external_tokens > 0
+                        else tuple([] for _ in self.kv_cache_groups)
+                    )
                     local_full_block_ids = blocks.get_block_ids() if num_external_tokens > 0 else tuple()
                     # Get unhashed blocks to pull from remote.
                     self._reqs_need_recv[request.request_id] = (
@@ -3791,6 +3801,7 @@ class MooncakeConnectorWorker:
                         remote_block_size=meta.remote_block_size,
                         local_block_ids_replicate_k=local_block_ids_replicate_k_for_port,
                         remote_block_ids_replicate_k=remote_block_ids_replicate_k_for_port,
+                        report_finished=(getattr(meta, "num_external_tokens", 1) > 0),
                     )
 
         if self.kv_send_thread is not None and self.dcp_size == 1:

@@ -1156,7 +1156,10 @@ class TestCoreFunctionality(unittest.TestCase):
 
                 mock_transfer.assert_called_once_with(self.test_req)
                 mock_send.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-                self.thread.task_tracker.update_done_task_count.assert_called_once_with("req1")
+                self.thread.task_tracker.update_done_task_count.assert_called_once_with(
+                    "req1",
+                    report_finished=True,
+                )
                 self.mock_queue.task_done.assert_called_once()
                 expected_errors = {1, 2} if transfer_error else set()
                 self.assertEqual(self.thread.get_and_clear_invalid_block_ids(), expected_errors)
@@ -1167,13 +1170,17 @@ class TestCoreFunctionality(unittest.TestCase):
         req = dict(self.test_req)
         req["local_block_ids"] = ([],)
         req["remote_block_ids"] = ([3, 4],)
+        req["report_finished"] = False
 
         self.thread._handle_request(req)
 
         self.engine.batch_transfer_sync_read.assert_not_called()
         mock_free_remote_port.assert_called_once_with("req1", "localhost", {6666: 1})
         mock_send_done.assert_called_once_with("req1", "localhost", 6666, {6666: 1})
-        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with("req1")
+        cast(Any, self.thread.task_tracker).update_done_task_count.assert_called_once_with(
+            "req1",
+            report_finished=False,
+        )
         self.mock_queue.task_done.assert_called_once()
 
     @patch.object(KVCacheRecvingThread, "_get_remote_metadata")
@@ -1841,6 +1848,16 @@ class TestKVCacheTaskTracker(unittest.TestCase):
         self.assertEqual(len(result_delayed), 0)
         self.assertEqual(len(self.tracker.reqs_to_process), 0)
 
+    def test_update_done_task_count_without_reporting_completion(self):
+        self.tracker.add_req_to_process("req_1")
+        self.tracker.add_delayed_request("req_1", time.time())
+
+        self.tracker.update_done_task_count("req_1", report_finished=False)
+
+        self.assertEqual(self.tracker.finished_requests, set())
+        self.assertEqual(self.tracker.delayed_free_requests, {})
+        self.assertEqual(self.tracker.reqs_to_process, set())
+
     def test_updtate_add_delayed_request(self) -> None:
         self.tracker.update_done_task_count("req2")
         self.tracker.add_delayed_request("req2", time.time())
@@ -2200,6 +2217,37 @@ class TestMooncakeConnectorScheduler(unittest.TestCase):
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][0], request)
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][1], ([4, 5, 6],))
         self.assertEqual(self.scheduler._reqs_need_recv["req1"][2], ([1, 2, 4, 5, 6],))
+
+    def test_update_state_after_alloc_preserves_hybrid_groups_for_zero_byte_completion(self):
+        request = MockRequest(
+            "req1",
+            kv_transfer_params={
+                "do_remote_prefill": True,
+                "remote_block_ids": ([1, 2, 3], [4]),
+                "remote_engine_id": "remote",
+                "remote_request_id": "remote_req1",
+                "remote_host": "localhost",
+                "remote_port": 5000,
+            },
+        )
+        blocks = MagicMock()
+        self.scheduler.kv_cache_groups = [MockKVCacheGroup(), MockKVCacheGroup()]
+
+        self.scheduler.update_state_after_alloc(request, blocks, 0)
+
+        self.assertIn("req1", self.scheduler._reqs_need_recv)
+        self.assertIn("req1", self.scheduler._reqs_in_batch)
+        self.assertEqual(
+            self.scheduler._reqs_need_recv["req1"][1],
+            ([], []),
+        )
+        self.assertEqual(
+            self.scheduler._reqs_need_recv["req1"][2],
+            tuple(),
+        )
+        blocks.get_unhashed_block_ids_all_groups.assert_not_called()
+        blocks.get_block_ids.assert_not_called()
+        self.assertFalse(request.kv_transfer_params["do_remote_prefill"])
 
     def test_request_finished_no_remote_decode(self):
         request = MockRequest("req1")
