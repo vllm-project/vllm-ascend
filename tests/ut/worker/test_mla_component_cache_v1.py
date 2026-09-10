@@ -11,6 +11,7 @@ import vllm.v1.worker.utils as upstream_utils
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
@@ -27,12 +28,14 @@ from vllm_ascend.patch.worker.patch_copy_kv_cache import (
     copy_kv_cache_blocks_inplace,
 )
 from vllm_ascend.worker.mla_component_cache_v1 import (
+    MLAComponentCacheCapability,
     _typed_empty_like_storage,
     allocate_mla_component_cache,
     get_mla_component_cache_capability,
     materialize_hybrid_mla_component_cache,
     use_mla_component_cache,
 )
+from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
 
 class _FakeMLABackend:
@@ -80,6 +83,7 @@ def _make_vllm_config(
     *,
     use_v2_model_runner=False,
     compress_ratios=None,
+    speculative_config=None,
 ):
     hf_text_config = SimpleNamespace()
     if compress_ratios is not None:
@@ -87,6 +91,7 @@ def _make_vllm_config(
     return SimpleNamespace(
         use_v2_model_runner=use_v2_model_runner,
         kv_transfer_config=None,
+        speculative_config=speculative_config,
         model_config=SimpleNamespace(hf_text_config=hf_text_config),
         compilation_config=SimpleNamespace(static_forward_context=layers),
     )
@@ -178,10 +183,12 @@ def _make_k3_hybrid_plan(*, num_blocks=3, manager_block_size=384):
         kv_cache_layout=KVCacheLayout.LBNHC.name,
     )
     vllm_config = _make_vllm_config(layers)
-    capability = get_mla_component_cache_capability(vllm_config)
-    assert capability is not None
-    assert capability.mode == "K3_HYBRID_V1"
-    assert capability.kernel_block_size == kernel_block_size
+    capability = MLAComponentCacheCapability(
+        mode="K3_HYBRID_V1",
+        mla_layer_names=tuple(mla_layers),
+        manager_block_size=manager_block_size,
+        kernel_block_size=kernel_block_size,
+    )
     return (
         vllm_config,
         config,
@@ -669,6 +676,7 @@ def test_materialize_k3_component_cache_kernel_slot_geometry(manager_block_size)
 
 
 def test_k3_component_cow_copies_all_kernel_slots_in_manager_block(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
     (
         vllm_config,
         config,
@@ -708,3 +716,181 @@ def test_k3_component_cow_copies_all_kernel_slots_in_manager_block(monkeypatch):
         torch.testing.assert_close(page_view[:3], originals[layer][6:9])
         torch.testing.assert_close(page_view[3:6], originals[layer][3:6])
         torch.testing.assert_close(page_view[6:9], originals[layer][6:9])
+
+
+def test_dense_capability_allows_speculative_decoding(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
+    monkeypatch.setattr(mla_component_cache_v1, "vllm_version_is", lambda _version: False)
+    spec = _make_spec(
+        block_size=128,
+        num_kv_heads=1,
+        nope_dim=512,
+        rope_dim=64,
+        dtype=torch.bfloat16,
+    )
+    layers = {"layer": _FakeMLAAttention(spec=spec, nope_dim=512, rope_dim=64)}
+    capability = get_mla_component_cache_capability(
+        _make_vllm_config(layers, speculative_config=SimpleNamespace(method="mtp"))
+    )
+    assert capability is not None
+    assert capability.mode == "DENSE_V1"
+    assert capability.manager_block_size == capability.kernel_block_size == 128
+
+
+def test_k3_materializer_rejects_non_lbnhc_layout():
+    (
+        vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        _physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan()
+    config.kv_cache_layout = KVCacheLayout.LBHNC.name
+    with pytest.raises(ValueError, match="LBNHC layout"):
+        materialize_hybrid_mla_component_cache(
+            raw_kv_cache_tensors=raw_tensors,
+            kv_cache_config=config,
+            static_forward_context=vllm_config.compilation_config.static_forward_context,
+            kernel_block_sizes=[[128], [384]],
+            capability=capability,
+            vllm_config=vllm_config,
+        )
+
+
+def test_k3_materializer_rejects_descriptor_layer_mismatch():
+    (
+        vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        _physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan()
+    removed_layer = config.kv_cache_tensors.pop().layers[0]
+    raw_tensors.pop(removed_layer)
+    with pytest.raises(ValueError, match="group/descriptor layer mismatch"):
+        materialize_hybrid_mla_component_cache(
+            raw_kv_cache_tensors=raw_tensors,
+            kv_cache_config=config,
+            static_forward_context=vllm_config.compilation_config.static_forward_context,
+            kernel_block_sizes=[[128], [384]],
+            capability=capability,
+            vllm_config=vllm_config,
+        )
+
+
+def test_k3_materializer_rejects_inconsistent_descriptor_sizes():
+    (
+        vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        _physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan()
+    config.kv_cache_tensors[0].size += 1
+    with pytest.raises(ValueError, match="share one backing size"):
+        materialize_hybrid_mla_component_cache(
+            raw_kv_cache_tensors=raw_tensors,
+            kv_cache_config=config,
+            static_forward_context=vllm_config.compilation_config.static_forward_context,
+            kernel_block_sizes=[[128], [384]],
+            capability=capability,
+            vllm_config=vllm_config,
+        )
+
+
+def test_k3_materializer_rejects_multiple_backings():
+    (
+        vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        _physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan()
+    first_layer = next(iter(raw_tensors))
+    raw_tensors[first_layer] = raw_tensors[first_layer].clone()
+    with pytest.raises(ValueError, match="one standardized HMA backing"):
+        materialize_hybrid_mla_component_cache(
+            raw_kv_cache_tensors=raw_tensors,
+            kv_cache_config=config,
+            static_forward_context=vllm_config.compilation_config.static_forward_context,
+            kernel_block_sizes=[[128], [384]],
+            capability=capability,
+            vllm_config=vllm_config,
+        )
+
+
+def test_k3_materializer_rejects_unknown_non_mla_group():
+    (
+        vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        _physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan()
+    config.kv_cache_groups[1].kv_cache_spec = FullAttentionSpec(
+        block_size=384,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.bfloat16,
+    )
+    with pytest.raises(ValueError, match="only MambaSpec/KDA"):
+        materialize_hybrid_mla_component_cache(
+            raw_kv_cache_tensors=raw_tensors,
+            kv_cache_config=config,
+            static_forward_context=vllm_config.compilation_config.static_forward_context,
+            kernel_block_sizes=[[128], [384]],
+            capability=capability,
+            vllm_config=vllm_config,
+        )
+
+
+def test_k3_zeroer_registers_one_manager_page_segment_per_mla_layer():
+    (
+        vllm_config,
+        config,
+        _raw_tensors,
+        _capability,
+        physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan(num_blocks=3, manager_block_size=384)
+
+    component_layers: dict[str, object] = {}
+    static_context: dict[str, object] = {}
+    for layer_name in config.kv_cache_groups[0].layer_names:
+        component_layers[layer_name] = materialize_hybrid_mla_component_cache(
+            raw_kv_cache_tensors=_raw_tensors,
+            kv_cache_config=config,
+            static_forward_context=vllm_config.compilation_config.static_forward_context,
+            kernel_block_sizes=[[128], [384]],
+            capability=_capability,
+            vllm_config=vllm_config,
+        )[layer_name]
+        static_context[layer_name] = SimpleNamespace(kv_cache=component_layers[layer_name])
+
+    zeroer = AscendKVBlockZeroer.__new__(AscendKVBlockZeroer)
+    zeroer.device = torch.device("cpu")
+    zeroer.pin_memory = False
+    zeroer.init_meta(
+        attn_groups_iter=[
+            SimpleNamespace(
+                kv_cache_spec=config.kv_cache_groups[0].kv_cache_spec,
+                kv_cache_group_id=0,
+                layer_names=list(static_context),
+            )
+        ],
+        kernel_block_sizes=[[128], [384]],
+        cache_dtype="auto",
+        runner_only_attn_layers=set(),
+        static_forward_context=static_context,
+    )
+
+    assert zeroer._meta is not None
+    segments, page_size_el, _block_size, num_segments = zeroer._meta
+    assert num_segments == len(static_context)
+    assert page_size_el == physical_page // 4
+    assert segments.tolist() == [component_layers[name][0].data_ptr() for name in static_context]

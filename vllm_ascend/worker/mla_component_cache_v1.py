@@ -165,8 +165,6 @@ def get_mla_component_cache_capability(
         raise _unsupported("the standardized KVCacheTensor plan requires vLLM main")
     if vllm_config.kv_transfer_config is not None:
         raise _unsupported("KV transfer/offload is not supported")
-    if getattr(vllm_config, "speculative_config", None) is not None:
-        raise _unsupported("speculative decoding is outside the first K3 hybrid capability")
 
     model_config = getattr(vllm_config, "model_config", None)
     hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -197,6 +195,9 @@ def get_mla_component_cache_capability(
             has_mamba_cache = True
             continue
         if isinstance(spec, EncoderOnlyAttentionSpec):
+            # Encoder-only attention is runner-only and has no persistent KV
+            # cache allocation, so it neither participates in nor blocks the
+            # component-cache capability.
             continue
         raise _unsupported(
             f"layer {layer_name} is {type(layer).__name__} with {type(spec).__name__}; "
@@ -205,6 +206,8 @@ def get_mla_component_cache_capability(
 
     if not mla_layers:
         raise _unsupported("the model has no MLA layers")
+    if has_mamba_cache and getattr(vllm_config, "speculative_config", None) is not None:
+        raise _unsupported("speculative decoding is outside the first K3 hybrid capability")
 
     first_geometry: _MLAGeometry | None = None
     first_spec: MLAAttentionSpec | None = None
@@ -246,6 +249,11 @@ def get_mla_component_cache_capability(
             raise _unsupported(f"layer {layer_name} has different MLA cache geometry")
 
     assert first_geometry is not None and first_spec is not None and selected_kernel_size is not None
+    if not has_mamba_cache and first_geometry.block_size != selected_kernel_size:
+        raise _unsupported(
+            f"dense MLA requires manager and kernel block sizes to match, got manager={first_geometry.block_size} "
+            f"kernel={selected_kernel_size}"
+        )
     return MLAComponentCacheCapability(
         mode="K3_HYBRID_V1" if has_mamba_cache else "DENSE_V1",
         mla_layer_names=tuple(mla_layers),
@@ -534,6 +542,62 @@ def allocate_mla_component_cache(
     return kv_caches
 
 
+def _validate_hybrid_plan_structure(
+    *,
+    kv_cache_config: KVCacheConfig,
+    static_forward_context: Mapping[str, AttentionLayerBase],
+    raw_kv_cache_tensors: Mapping[str, torch.Tensor],
+) -> tuple[dict[str, tuple[KVCacheTensor, int]], int]:
+    """Validate group/descriptor layer coverage and the one HMA backing."""
+    descriptor_layers = _descriptor_layer_map(kv_cache_config)
+    persistent_group_layers: set[str] = set()
+
+    for group in kv_cache_config.kv_cache_groups:
+        if not group.layer_names:
+            raise ValueError("The K3 hybrid KV cache plan contains an empty group")
+        representative_spec = _unwrap_layer_spec(group.kv_cache_spec, group.layer_names[0])
+        if isinstance(representative_spec, EncoderOnlyAttentionSpec):
+            continue
+
+        for layer_name in group.layer_names:
+            layer_spec = _unwrap_layer_spec(group.kv_cache_spec, layer_name)
+            layer = static_forward_context.get(layer_name)
+            if isinstance(layer, MLAAttention):
+                if type(layer_spec) is not MLAAttentionSpec:
+                    raise ValueError(f"Hybrid MLA layer {layer_name} does not use an exact upstream spec")
+            elif not isinstance(layer_spec, MambaSpec):
+                raise ValueError(
+                    f"Hybrid non-MLA layer {layer_name} uses {type(layer_spec).__name__}; "
+                    "only MambaSpec/KDA is supported"
+                )
+            persistent_group_layers.add(layer_name)
+
+    if persistent_group_layers != set(descriptor_layers):
+        missing = sorted(persistent_group_layers - set(descriptor_layers))
+        extra = sorted(set(descriptor_layers) - persistent_group_layers)
+        raise ValueError(f"Hybrid KV cache group/descriptor layer mismatch: missing={missing}, extra={extra}")
+
+    if set(raw_kv_cache_tensors) != persistent_group_layers:
+        missing = sorted(persistent_group_layers - set(raw_kv_cache_tensors))
+        extra = sorted(set(raw_kv_cache_tensors) - persistent_group_layers)
+        raise ValueError(f"Hybrid raw tensor layer mismatch: missing={missing}, extra={extra}")
+
+    descriptor_sizes = {descriptor.size for descriptor in kv_cache_config.kv_cache_tensors}
+    if len(descriptor_sizes) != 1:
+        raise ValueError(f"Hybrid KV cache descriptors must share one backing size, got {sorted(descriptor_sizes)}")
+    backing_size = next(iter(descriptor_sizes))
+
+    storage_ptrs: set[int] = set()
+    for layer_name, raw in raw_kv_cache_tensors.items():
+        if not isinstance(raw, torch.Tensor):
+            raise ValueError(f"Hybrid raw cache for {layer_name} is not a tensor")
+        storage_ptrs.add(raw.untyped_storage().data_ptr())
+    if len(storage_ptrs) != 1:
+        raise ValueError("The K3 hybrid component cache requires one standardized HMA backing allocation")
+
+    return descriptor_layers, backing_size
+
+
 def materialize_hybrid_mla_component_cache(
     *,
     raw_kv_cache_tensors: Mapping[str, torch.Tensor],
@@ -554,7 +618,15 @@ def materialize_hybrid_mla_component_cache(
     2. KDA/Mamba raw region保持旧路径语义；
     3. 所有persistent region必须来自同一个backing。
     """
-    descriptor_layers = _descriptor_layer_map(kv_cache_config)
+    if kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
+        raise ValueError(
+            f"The K3 hybrid MLA component cache requires the LBNHC layout, got {kv_cache_config.kv_cache_layout!r}"
+        )
+    descriptor_layers, backing_size = _validate_hybrid_plan_structure(
+        kv_cache_config=kv_cache_config,
+        static_forward_context=static_forward_context,
+        raw_kv_cache_tensors=raw_kv_cache_tensors,
+    )
     component_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     mla_layer_set = set(capability.mla_layer_names)
     persistent_group_idx = -1
@@ -586,8 +658,14 @@ def materialize_hybrid_mla_component_cache(
 
             logical_spec = layer.get_attn_backend().customize_spec(layer.get_kv_cache_spec(vllm_config))
             geometry = _layer_geometry(layer, logical_spec, layer_name)
-            if geometry.block_size != group_spec.block_size or geometry.dtype != group_spec.dtype:
-                raise ValueError(f"Hybrid MLA layer {layer_name} disagrees with its merged spec")
+            if (
+                capability.manager_block_size != geometry.block_size
+                or geometry.block_size != group_spec.block_size
+                or geometry.dtype != group_spec.dtype
+                or geometry.num_kv_heads != group_spec.num_kv_heads
+                or geometry.nope_dim + geometry.rope_dim != group_spec.head_size
+            ):
+                raise ValueError(f"Hybrid MLA layer {layer_name} disagrees with its merged spec or capability")
             if kernel_block_size != capability.kernel_block_size:
                 raise ValueError(
                     f"Hybrid MLA layer {layer_name} kernel size {kernel_block_size} does not match capability "
@@ -601,12 +679,27 @@ def materialize_hybrid_mla_component_cache(
 
             num_blocks = kv_cache_config.num_blocks
             physical_page_bytes = group_spec.page_size_bytes
+            real_manager_page_bytes = (
+                geometry.block_size
+                * geometry.num_kv_heads
+                * (geometry.nope_dim + geometry.rope_dim)
+                * geometry.element_size
+            )
+            if physical_page_bytes < real_manager_page_bytes:
+                raise ValueError(
+                    f"Hybrid MLA physical page {physical_page_bytes} is smaller than "
+                    f"real page {real_manager_page_bytes}"
+                )
+            if physical_page_bytes % geometry.element_size != 0:
+                raise ValueError(f"Hybrid MLA physical page {physical_page_bytes} is not dtype-aligned")
             ratio = geometry.block_size // kernel_block_size
             if physical_page_bytes % ratio != 0:
                 raise ValueError(
                     f"Hybrid MLA physical page {physical_page_bytes} cannot be divided into {ratio} kernel slots"
                 )
             slot_bytes = physical_page_bytes // ratio
+            if slot_bytes % geometry.element_size != 0:
+                raise ValueError(f"Hybrid MLA kernel slot {slot_bytes} is not dtype-aligned")
             nope_slot_bytes = kernel_block_size * geometry.num_kv_heads * geometry.nope_dim * geometry.element_size
             rope_slot_bytes = kernel_block_size * geometry.num_kv_heads * geometry.rope_dim * geometry.element_size
             if nope_slot_bytes + rope_slot_bytes > slot_bytes:
@@ -624,7 +717,7 @@ def materialize_hybrid_mla_component_cache(
                 raise ValueError(f"Hybrid MLA raw offset is inconsistent for {layer_name}")
             if raw.numel() != expected_layer_stride:
                 raise ValueError(f"Hybrid MLA raw size is inconsistent for {layer_name}")
-            if expected_offset + expected_layer_stride > descriptor.size:
+            if descriptor.size != backing_size or expected_offset + expected_layer_stride > backing_size:
                 raise ValueError(f"Hybrid MLA descriptor range exceeds backing for {layer_name}")
 
             typed_raw = _typed_empty_like_storage(raw, geometry.dtype)
@@ -648,9 +741,4 @@ def materialize_hybrid_mla_component_cache(
         extra = sorted(set(component_caches) - mla_layer_set)
         raise ValueError(f"Hybrid MLA layer mismatch: missing={missing}, extra={extra}")
 
-    storages = {
-        raw.untyped_storage().data_ptr() for raw in raw_kv_cache_tensors.values() if isinstance(raw, torch.Tensor)
-    }
-    if len(storages) != 1:
-        raise ValueError("The K3 hybrid component cache requires one standardized HMA backing allocation")
     return component_caches
