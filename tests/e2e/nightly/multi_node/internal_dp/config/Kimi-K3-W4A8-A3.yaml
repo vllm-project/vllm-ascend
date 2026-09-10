@@ -50,7 +50,6 @@ deployment:
     server_cmd: >
       env -u HCCL_OP_EXPANSION_MODE vllm serve Eco-Tech/Kimi-K3-w4a8
         --host 0.0.0.0
-        --headless
         --port $SERVER_PORT
         --quantization ascend
         --allowed-local-media-path /
@@ -82,7 +81,6 @@ deployment:
     server_cmd: >
       env -u HCCL_OP_EXPANSION_MODE vllm serve Eco-Tech/Kimi-K3-w4a8
         --host 0.0.0.0
-        --headless
         --port $SERVER_PORT
         --quantization ascend
         --allowed-local-media-path /
@@ -114,7 +112,6 @@ deployment:
     server_cmd: >
       env -u HCCL_OP_EXPANSION_MODE vllm serve Eco-Tech/Kimi-K3-w4a8
         --host 0.0.0.0
-        --headless
         --port $SERVER_PORT
         --quantization ascend
         --allowed-local-media-path /
