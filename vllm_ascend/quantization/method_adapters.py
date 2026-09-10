@@ -48,6 +48,13 @@ def _make_mx_scale_weight_loader(
     """Load scales without losing the global MX group phase at TP boundaries."""
 
     def mx_scale_weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+        # Some checkpoint loaders provide an already sharded tensor. Accept an
+        # exact local shape before applying any global TP offset to avoid
+        # slicing the same shard twice.
+        if loaded_weight.shape == param.shape:
+            param.data.copy_(loaded_weight)
+            return None
+
         input_dim = getattr(param, "input_dim", None)
         if input_dim is not None and input_size_per_partition % group_size != 0:
             global_start = tp_rank * input_size_per_partition
