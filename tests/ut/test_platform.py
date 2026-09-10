@@ -22,6 +22,7 @@ from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
     AscendDeviceType,
+    vllm_version_is,
 )
 
 
@@ -73,7 +74,8 @@ class TestNPUPlatform(TestBase):
         mock_ascend_config.scheduler_config.recompute_scheduler_enable = False
         mock_ascend_config.scheduler_config.enable_balance_scheduling = False
         mock_ascend_config.scheduler_config.batch_job_sched_config.enabled = False
-        mock_ascend_config.mc2_comm_alg = ""
+        mock_ascend_config.get_mc2_comm_alg = MagicMock()
+        mock_ascend_config.get_mc2_comm_alg.return_value = ""
         mock_ascend_config.enable_fused_mc2 = False
         mock_ascend_config.enable_shared_expert_dp = False
         mock_ascend_config.scheduler_config.short_request_first_config.enabled = False
@@ -1730,30 +1732,32 @@ class TestNPUPlatform(TestBase):
         )
         for use_mla, use_pcp, use_dcp, expected_backend in cases:
             with self.subTest(use_mla=use_mla, use_pcp=use_pcp, use_dcp=use_dcp):
-                attn_selector_config = AttentionSelectorConfig(
-                    dtype=torch.float16,
-                    head_size=0,
-                    kv_cache_dtype=None,
-                    block_size=128,
-                    use_mla=use_mla,
-                    use_sparse=False,
-                    use_pcp=use_pcp,
-                    use_dcp=use_dcp,
-                )
+                # use_dcp is a main-only AttentionSelectorConfig field; keep the
+                # attribute available on 0.28.0 via SimpleNamespace.
+                if vllm_version_is("0.28.0"):
+                    attn_selector_config = SimpleNamespace(
+                        dtype=torch.float16,
+                        head_size=0,
+                        kv_cache_dtype=None,
+                        block_size=128,
+                        use_mla=use_mla,
+                        use_sparse=False,
+                        use_pcp=use_pcp,
+                        use_dcp=use_dcp,
+                    )
+                else:
+                    attn_selector_config = AttentionSelectorConfig(
+                        dtype=torch.float16,
+                        head_size=0,
+                        kv_cache_dtype=None,
+                        block_size=128,
+                        use_mla=use_mla,
+                        use_sparse=False,
+                        use_pcp=use_pcp,
+                        use_dcp=use_dcp,
+                    )
                 result = self.platform.get_attn_backend_cls("ascend", attn_selector_config)
                 self.assertEqual(result, expected_backend)
-
-    def test_get_attn_backend_cls_rejects_pcp_and_dcp(self):
-        attn_selector_config = AttentionSelectorConfig(
-            dtype=torch.float16,
-            head_size=0,
-            kv_cache_dtype=None,
-            block_size=128,
-            use_pcp=True,
-            use_dcp=True,
-        )
-        with self.assertRaisesRegex(NotImplementedError, "does not support PCP and DCP simultaneously"):
-            self.platform.get_attn_backend_cls("ascend", attn_selector_config)
 
     def test_get_attn_backend_cls_supports_legacy_config_without_use_dcp(self):
         attn_selector_config = SimpleNamespace(

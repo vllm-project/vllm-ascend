@@ -18,6 +18,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
@@ -26,9 +27,17 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.attention.mla_v1 import AscendMLABackend
 from vllm_ascend.attention.utils import get_sfa_qsfa_packed_head_dim
-from vllm_ascend.core.kv_cache_interface import AscendMLAAttentionSpec, AscendSFAIndexerCacheSpec
+from vllm_ascend.core.kv_cache_interface import (
+    AscendIndexerKPoolStateSpec,
+    AscendMLAAttentionSpec,
+    AscendSFAIndexerCacheSpec,
+)
 from vllm_ascend.device.hardware_profile import get_hardware_profile
-from vllm_ascend.utils import AscendDeviceType
+from vllm_ascend.models.glm5next.kv_cache import (
+    Glm5NextIndexerCache,
+    Glm5NextStateCache,
+)
+from vllm_ascend.utils import AscendDeviceType, vllm_version_is
 from vllm_ascend.worker.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -360,7 +369,9 @@ def _make_kv_cache_tensor(
     layer_names: list[str],
     page_size: int,
 ) -> KVCacheTensor:
-    """Build the vLLM main descriptor changed by vLLM #51718."""
+    """Build the lane-specific descriptor changed by vLLM #51718."""
+    if "shared_by" in KVCacheTensor.__dataclass_fields__:
+        return KVCacheTensor(size=per_layer_size, shared_by=layer_names)
     return KVCacheTensor(
         size=per_layer_size * len(layer_names),
         layers=layer_names,
@@ -372,6 +383,8 @@ def _make_kv_cache_tensor(
 
 def _ratio_kwargs(ratio: int) -> dict[str, int]:
     """Map the MLA compression field renamed by vLLM #51718."""
+    if vllm_version_is("0.28.0"):
+        return {"compress_ratio": ratio}
     return {"tokens_per_state": ratio}
 
 
@@ -433,6 +446,106 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         self.assertEqual(k_cache_raw.numel(), kv_cache_spec.page_size_bytes)
         self.assertEqual(v_cache_raw.numel(), kv_cache_spec.page_size_bytes)
+
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mla_spec_preserves_block_stride_layout_contract(
+        self,
+        mock_get_layers,
+    ):
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+
+        layer_name = "model.layers.1.self_attn.attn"
+        source_spec = MLAAttentionSpec(
+            block_size=128,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.bfloat16,
+        )
+        attn_module = MLAAttention.__new__(MLAAttention)
+        torch.nn.Module.__init__(attn_module)
+        attn_module.impl = SimpleNamespace(fa_quant_layer=False)
+        attn_module.model_version = "glm5_next"
+        attn_module.indexes_kv_by_block_stride = True
+        attn_module.get_kv_cache_spec = MagicMock(return_value=source_spec)
+        mock_get_layers.return_value = {layer_name: attn_module}
+
+        spec = runner.get_kv_cache_spec()[layer_name]
+
+        self.assertIsInstance(spec, AscendMLAAttentionSpec)
+        self.assertEqual(spec.model_version, attn_module.model_version)
+        self.assertTrue(spec.indexes_kv_by_block_stride)
+
+    @patch("vllm_ascend.worker.model_runner_v1.has_ec_transfer", return_value=False)
+    @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
+    def test_mamba_alignment_excludes_auxiliary_glm_caches(
+        self,
+        mock_get_layers,
+        _mock_has_ec_transfer,
+    ):
+        class FakeMamba:
+            def __init__(self, spec):
+                self.spec = spec
+
+            def get_kv_cache_spec(self, _vllm_config):
+                return self.spec
+
+        runner = self._build_runner()
+        runner.shared_kv_cache_layers = {}
+
+        main_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+        )
+        indexer_spec = AscendMLAAttentionSpec(
+            block_size=8,
+            num_kv_heads=1,
+            head_size=4,
+            dtype=torch.bfloat16,
+            model_version="glm5_next",
+            indexes_kv_by_block_stride=True,
+            **_ratio_kwargs(2),
+        )
+        state_spec = AscendIndexerKPoolStateSpec(
+            block_size=2,
+            sliding_window=2,
+            num_kv_heads=1,
+            head_size=3,
+            dtype=torch.float32,
+        )
+        mamba_spec = MambaSpec(
+            block_size=8,
+            shapes=((128,),),
+            dtypes=(torch.float32,),
+        )
+
+        main_module = SimpleNamespace(get_kv_cache_spec=lambda _config: main_spec)
+        indexer_module = Glm5NextIndexerCache.__new__(Glm5NextIndexerCache)
+        torch.nn.Module.__init__(indexer_module)
+        indexer_module.get_kv_cache_spec = lambda _config: indexer_spec
+        state_module = Glm5NextStateCache.__new__(Glm5NextStateCache)
+        torch.nn.Module.__init__(state_module)
+        state_module.get_kv_cache_spec = lambda _config: state_spec
+        mock_get_layers.return_value = {
+            "model.layers.1.attn": main_module,
+            "model.layers.1.indexer.k_cache": indexer_module,
+            "model.layers.1.indexer.state_cache": state_module,
+            "model.layers.0.linear_attn": FakeMamba(mamba_spec),
+        }
+
+        with patch("vllm_ascend.worker.model_runner_v1.MambaBase", FakeMamba):
+            specs = runner.get_kv_cache_spec()
+
+        self.assertEqual(
+            specs["model.layers.1.attn"].page_size_padded,
+            mamba_spec.page_size_bytes,
+        )
+        self.assertIsNone(specs["model.layers.1.indexer.k_cache"].page_size_padded)
+        self.assertIsNone(specs["model.layers.1.indexer.state_cache"].page_size_padded)
 
     @patch("vllm_ascend.worker.model_runner_v1.get_layers_from_vllm_config")
     def test_mla_rope_modes_and_cache_layers_use_separate_metadata_groups(self, mock_get_layers):
@@ -582,9 +695,14 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
 
         raw_caches = runner._allocate_kv_cache_tensors(kv_cache_config)
 
-        assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
-        assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
+        if vllm_version_is("0.28.0"):
+            assert raw_caches[layer_names[0]][0] is raw_caches[layer_names[1]][0]
+            assert raw_caches[layer_names[0]][1] is raw_caches[layer_names[1]][1]
+        else:
+            assert raw_caches[layer_names[0]][0] is not raw_caches[layer_names[1]][0]
+            assert raw_caches[layer_names[0]][1] is not raw_caches[layer_names[1]][1]
 
+    @unittest.skipIf(vllm_version_is("0.28.0"), "vLLM #51718 only changed the main planner")
     def test_hybrid_descriptors_share_standardized_backing_allocation(self):
         attn_names = ["model.layers.0.self_attn.attn", "model.layers.2.self_attn.attn"]
         mamba_names = ["model.layers.1.linear_attn", "model.layers.3.linear_attn"]
@@ -630,6 +748,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         for kv_transfer_config in (
             None,
             SimpleNamespace(kv_connector="ExampleHiddenStatesConnector"),
+            SimpleNamespace(kv_connector="MooncakeConnectorV2"),
+            SimpleNamespace(kv_connector="MooncakePullConnector"),
         ):
             with self.subTest(kv_transfer_config=kv_transfer_config):
                 runner = self._build_runner()
@@ -652,6 +772,10 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
                     base_offset + layer_size,
                 )
 
+    @unittest.skipIf(
+        vllm_version_is("0.28.0"),
+        "vLLM #51718 only changed the main planner",
+    )
     @patch(
         "vllm.v1.core.kv_cache_planning.may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,
@@ -908,7 +1032,8 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         ]
         raw = torch.zeros(spec.page_size_bytes * 2, dtype=torch.int8)
 
-        cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: raw})[layer_name]
+        with patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False):
+            cache = runner._reshape_kv_cache_tensors(kv_cache_config, {layer_name: raw})[layer_name]
 
         self.assertEqual(cache.shape, (2, 2, 4, 3))
 
@@ -959,6 +1084,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
             runner.hybrid_with_attn_and_mamba = hybrid_flag
             with (
                 self.subTest(layout=layout),
+                patch("vllm_ascend.worker.model_runner_v1.vllm_version_is", return_value=False),
             ):
                 k_cache, v_cache = runner._reshape_kv_cache_tensors(
                     kv_cache_config,

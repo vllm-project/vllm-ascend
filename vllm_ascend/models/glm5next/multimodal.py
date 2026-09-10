@@ -600,13 +600,13 @@ class Glm5NextProcessingInfo(Glm4vProcessingInfo):
     """
 
     @cached_property
-    def _glm5_hf_processor(self):
+    def _glm5_next_hf_processor(self):
         from vllm_ascend.models.glm5next.processor import Glm5NextProcessor
 
         return Glm5NextProcessor.from_pretrained(self.ctx.model_config.model)
 
     def get_hf_processor(self, **kwargs: object):
-        return self._glm5_hf_processor
+        return self._glm5_next_hf_processor
 
     def _processor_pixel_budget(self, proc) -> tuple[int, int]:
         from vllm_ascend.models.glm5next.processor import _pixel_budget

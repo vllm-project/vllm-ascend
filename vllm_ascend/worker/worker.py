@@ -48,7 +48,11 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+
+try:  # vLLM PR #53558 moved the KV cache planning entry to kv_cache_planning.
+    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+except ImportError:  # Older vLLM lanes (v0.28.0 / pre-#53558 main) keep it in kv_cache_utils.
+    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -95,6 +99,7 @@ from vllm_ascend.utils import (
     enable_sp,
     register_ascend_customop,
     setup_ascend_local_comm_res,
+    vllm_version_is,
 )
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -292,6 +297,10 @@ class NPUWorker(WorkerBase):
                 if name in self._sleep_saved_buffers:
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
+
+        # vLLM main removed the post-KV-cache wake hook; keep it on v0.28.0.
+        if (tags is None or "kv_cache" in tags) and vllm_version_is("0.28.0"):
+            self.model_runner.post_kv_cache_wake_up()
 
         rl_config = get_ascend_config().rl_config
         cleanup_enabled = rl_config.enabled and rl_config.sleep_mode_extra_cleanup
@@ -654,6 +663,11 @@ class NPUWorker(WorkerBase):
         derives a num_blocks (and block pool) small enough for the per-layer
         buffers to fit.
         """
+        # v0.28.0 keeps shared_by aliasing (one alloc per descriptor); the
+        # #51718 multi-group scale is main-only. Also avoids
+        # CacheConfig.get_resolved_kv_cache_layout which does not exist on release.
+        if vllm_version_is("0.28.0"):
+            return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):
             return available_memory

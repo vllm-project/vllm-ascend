@@ -12,6 +12,7 @@ from vllm_ascend.ops.triton.v2.block_table.compute_slot_mappings import (
     _compute_slot_mappings_kernel as ascend_compute_slot_mappings_kernel,
 )
 from vllm_ascend.worker.v2.block_table import (
+    _MAX_STAGED_BLOCK_TABLE_PAD_SIZE,
     AscendBlockTables,
 )
 
@@ -75,12 +76,72 @@ def test_compute_slot_mapping_npu_kernel_cp(cp_size: int, cp_rank: int, cp_inter
         cp_rank,
         **kernel_kwargs,
         BLOCK_TABLE_PAD_SIZE=triton.next_power_of_2(max(table.stride(0) for table in block_tables)),
+        USE_BLOCK_TABLE_STAGING=True,
     )
     ref_compute_slot_mappings_kernel[grid](
         *kernel_args,
         ref_slot_mappings,
         ref_slot_mappings.stride(0),
         cp_rank,
+        **kernel_kwargs,
+    )
+
+    torch.testing.assert_close(slot_mappings, ref_slot_mappings)
+
+
+@pytest.mark.parametrize(
+    ("block_table_width", "use_block_table_staging"),
+    [
+        pytest.param(_MAX_STAGED_BLOCK_TABLE_PAD_SIZE, True, id="staged-boundary"),
+        pytest.param(131072, False, id="long-row-direct-load"),
+    ],
+)
+def test_compute_slot_mapping_npu_kernel_long_block_table(
+    block_table_width: int, use_block_table_staging: bool
+) -> None:
+    """Long rows must compile without overflowing UB and match upstream."""
+    device = "npu"
+    max_num_tokens = 2048
+    idx_mapping = torch.tensor([1], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 1025], dtype=torch.int32, device=device)
+    positions = torch.arange(1025, dtype=torch.int64, device=device)
+    block_table = torch.arange(2 * block_table_width, dtype=torch.int32, device=device).reshape(2, block_table_width)
+    block_table_ptrs = torch.tensor([block_table.data_ptr()], dtype=torch.uint64, device=device)
+    block_table_strides = torch.tensor([block_table.stride(0)], dtype=torch.int64, device=device)
+    block_sizes = torch.tensor([64], dtype=torch.int32, device=device)
+    slot_mappings = torch.zeros((1, max_num_tokens), dtype=torch.int32, device=device)
+    ref_slot_mappings = torch.zeros_like(slot_mappings)
+    kernel_args = (
+        max_num_tokens,
+        idx_mapping,
+        query_start_loc,
+        positions,
+        block_table_ptrs,
+        block_table_strides,
+        block_sizes,
+    )
+    kernel_kwargs = {
+        "CP_SIZE": 1,
+        "CP_INTERLEAVE": 1,
+        "PAD_ID": -1,
+        "TRITON_BLOCK_SIZE": 1024,
+    }
+    grid = (1, 2)
+
+    ascend_compute_slot_mappings_kernel[grid](
+        *kernel_args,
+        slot_mappings,
+        slot_mappings.stride(0),
+        0,
+        **kernel_kwargs,
+        BLOCK_TABLE_PAD_SIZE=triton.next_power_of_2(block_table_width),
+        USE_BLOCK_TABLE_STAGING=use_block_table_staging,
+    )
+    ref_compute_slot_mappings_kernel[grid](
+        *kernel_args,
+        ref_slot_mappings,
+        ref_slot_mappings.stride(0),
+        0,
         **kernel_kwargs,
     )
 

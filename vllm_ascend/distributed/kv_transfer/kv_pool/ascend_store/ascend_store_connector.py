@@ -16,6 +16,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -30,6 +36,10 @@ from vllm.v1.serial_utils import MsgpackDecoder
 from vllm.v1.worker import mamba_utils
 
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import AscendStoreKVConnectorWorkerMetadata
+from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metrics import (
+    AscendStoreKVConnectorStats,
+    AscendStorePromMetrics,
+)
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
     KVPoolScheduler,
     get_zmq_rpc_path_lookup,
@@ -103,6 +113,9 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         self._current_step_has_real_forward = False
         self._mamba_copy_bufs = None
         self.requires_mamba_state_copy_after_layer_load = self.use_layerwise
+
+        self.connector_scheduler: KVPoolScheduler | None = None
+        self.connector_worker: KVPoolWorker | None = None
 
         if role == KVConnectorRole.SCHEDULER:
             assert kv_cache_config is not None
@@ -208,7 +221,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         class of regression structurally impossible and supersedes the
         connector-side flag entirely.
         """
-        if getattr(self, "connector_worker", None) is None:
+        if self.connector_worker is None:
             return False
         return self.connector_worker.set_external_slot_release_waiter(waiter)
 
@@ -239,6 +252,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def wait_for_layer_load(self, layer_name: str) -> None:
         if not self.use_layerwise:
             return
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_layer_load()
         if self._mamba_copy_bufs is not None:
             mamba_utils.do_mamba_copy_block_for_layer(
@@ -270,6 +284,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.kv_role == "kv_consumer" and not self.consumer_is_to_put:
             # A load-only consumer does not publish KV.
             return
+        assert self.connector_worker is not None
         self.connector_worker.save_kv_layer(self._get_connector_metadata())
 
     def wait_for_save(self):
@@ -280,6 +295,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         if self.use_layerwise:
             return
 
+        assert self.connector_worker is not None
         self.connector_worker.wait_for_save(self._get_connector_metadata())
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
@@ -303,6 +319,7 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        assert self.connector_worker is not None
         events = self.connector_worker.get_kv_events()
         if not events:
             return None
@@ -318,6 +335,32 @@ class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def build_connector_worker_meta(self) -> AscendStoreKVConnectorWorkerMetadata | None:
         assert self.connector_worker is not None
         return self.connector_worker.build_connector_worker_meta()
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
+        if self.connector_worker is not None:
+            return self.connector_worker.get_stats()
+        return None
+
+    @classmethod
+    def build_kv_connector_stats(cls, data: dict[str, Any] | None = None) -> KVConnectorStats:
+        return AscendStoreKVConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return AscendStorePromMetrics(
+            vllm_config,
+            metric_types,
+            labelnames,
+            per_engine_labelvalues,
+        )
 
 
 class LookupKeyServer:

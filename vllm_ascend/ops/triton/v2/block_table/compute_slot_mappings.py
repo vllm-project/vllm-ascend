@@ -22,8 +22,7 @@ def _compute_slot_mappings_kernel(
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
     BLOCK_TABLE_PAD_SIZE: tl.constexpr,
-    slot_mapping_enabled=None,
-    HAS_SLOT_MAPPING_ENABLED: tl.constexpr = False,
+    USE_BLOCK_TABLE_STAGING: tl.constexpr,
 ):
     group_id = tl.program_id(0)
     batch_idx = tl.program_id(1)
@@ -36,17 +35,6 @@ def _compute_slot_mappings_kernel(
             tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
         return
 
-    if HAS_SLOT_MAPPING_ENABLED:
-        if not tl.load(slot_mapping_enabled + group_id):
-            # Circular-buffer groups have state slots, not token-position
-            # block tables. Do not index their rows using token positions.
-            start_idx = tl.load(query_start_loc + batch_idx)
-            end_idx = tl.load(query_start_loc + batch_idx + 1)
-            for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
-                offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
-                tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < end_idx)
-            return
-
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
     block_size = tl.load(block_sizes + group_id)
@@ -55,14 +43,17 @@ def _compute_slot_mappings_kernel(
     end_idx = tl.load(query_start_loc + batch_idx + 1)
 
     lane_offsets = tl.arange(0, TRITON_BLOCK_SIZE)
-    # BLOCK_TABLE_PAD_SIZE is a compile-time upper bound for every group's row.
-    # The runtime stride mask keeps loads within the current group's row.
-    block_table_offsets = tl.arange(0, BLOCK_TABLE_PAD_SIZE)
-    block_table_values = tl.load(
-        block_table_ptr + req_state_idx * block_table_stride + block_table_offsets,
-        mask=block_table_offsets < block_table_stride,
-        other=0,
-    ).to(tl.float32)
+    if USE_BLOCK_TABLE_STAGING:
+        # BLOCK_TABLE_PAD_SIZE is a compile-time upper bound for every group's
+        # row. The runtime stride mask keeps loads within the current group's
+        # row. Large rows deliberately skip this allocation because staging a
+        # complete fp32 row can exceed UB during Triton compilation.
+        block_table_offsets = tl.arange(0, BLOCK_TABLE_PAD_SIZE)
+        block_table_values = tl.load(
+            block_table_ptr + req_state_idx * block_table_stride + block_table_offsets,
+            mask=block_table_offsets < block_table_stride,
+            other=0,
+        ).to(tl.float32)
 
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
         offset = i + lane_offsets
@@ -72,7 +63,10 @@ def _compute_slot_mappings_kernel(
         # block_offset = positions % (block_size * CP_SIZE). Replacing the
         # remainder with multiply/subtract avoids scalar fallback on Ascend.
         block_offsets = positions - (block_size * CP_SIZE) * block_indices
-        block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
+        if USE_BLOCK_TABLE_STAGING:
+            block_numbers = tl.gather(block_table_values, block_indices, 0).to(tl.int32)
+        else:
+            block_numbers = tl.load(block_table_ptr + req_state_idx * block_table_stride + block_indices)
 
         if CP_SIZE == 1:
             slot_ids = block_numbers * block_size + block_offsets
