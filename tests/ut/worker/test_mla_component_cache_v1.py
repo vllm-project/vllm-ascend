@@ -1,19 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright (c) 2026 The vllm-ascend contributors
 
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 import vllm.v1.worker.utils as upstream_utils
-from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
 )
 
@@ -27,6 +29,8 @@ from vllm_ascend.patch.worker.patch_copy_kv_cache import (
 from vllm_ascend.worker.mla_component_cache_v1 import (
     _typed_empty_like_storage,
     allocate_mla_component_cache,
+    get_mla_component_cache_capability,
+    materialize_hybrid_mla_component_cache,
     use_mla_component_cache,
 )
 
@@ -106,6 +110,86 @@ def _make_plan(layers, spec, *, num_blocks=5):
         kv_cache_layout=KVCacheLayout.LBNHC.name,
     )
     return config
+
+
+class _FakeKDALayer(Attention):
+    def __init__(self, spec):
+        self._spec = spec
+        self.kv_sharing_target_layer_name = None
+
+    def get_kv_cache_spec(self, _vllm_config):
+        return self._spec
+
+
+def _make_k3_hybrid_plan(*, num_blocks=3, manager_block_size=384):
+    kernel_block_size = 128
+    element_size = torch.empty((), dtype=torch.bfloat16).element_size()
+    logical_spec = _make_spec(
+        block_size=manager_block_size,
+        num_kv_heads=1,
+        nope_dim=512,
+        rope_dim=64,
+        dtype=torch.bfloat16,
+    )
+    physical_page = 488448 if manager_block_size == 384 else 976896
+    padded_spec = replace(logical_spec, page_size_padded=physical_page)
+
+    mla_layers = {
+        f"language_model.model.layers.{index}.self_attn": _FakeMLAAttention(
+            spec=logical_spec,
+            nope_dim=512,
+            rope_dim=64,
+        )
+        for index in range(2)
+    }
+    kda_spec = MambaSpec(
+        block_size=manager_block_size,
+        shapes=((1,),),
+        dtypes=(torch.float32,),
+        page_size_padded=physical_page,
+    )
+    kda_layers = {f"language_model.model.layers.{index}.linear_attn": _FakeKDALayer(kda_spec) for index in range(2, 5)}
+    layers = {**mla_layers, **kda_layers}
+    layer_stride = physical_page * num_blocks
+    backing_size = len(layers) * layer_stride
+    backing = torch.zeros(backing_size, dtype=torch.int8)
+    tensors = []
+    raw_tensors = {}
+    for layer_idx, (layer_name, spec) in enumerate(layers.items()):
+        offset = layer_idx * layer_stride
+        tensors.append(
+            KVCacheTensor(
+                size=backing_size,
+                layers=[layer_name],
+                layer_stride=layer_stride,
+                block_stride=physical_page,
+                offset=offset,
+            )
+        )
+        raw_tensors[layer_name] = backing[offset : offset + layer_stride]
+
+    config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=tensors,
+        kv_cache_groups=[
+            KVCacheGroupSpec(list(mla_layers), padded_spec),
+            KVCacheGroupSpec(list(kda_layers), kda_spec),
+        ],
+        kv_cache_layout=KVCacheLayout.LBNHC.name,
+    )
+    vllm_config = _make_vllm_config(layers)
+    capability = get_mla_component_cache_capability(vllm_config)
+    assert capability is not None
+    assert capability.mode == "K3_HYBRID_V1"
+    assert capability.kernel_block_size == kernel_block_size
+    return (
+        vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        physical_page,
+        element_size,
+    )
 
 
 def _install_cpu_h2d(monkeypatch):
@@ -516,3 +600,111 @@ def test_cow_patch_disabled_feature_uses_upstream_copy(monkeypatch):
     copies = [KVCacheBlockCopy(src_block_id=1, dst_block_id=0)]
     copy_kv_cache_blocks_inplace([], 2, copies)
     original_copy.assert_called_once_with([], 2, copies)
+
+
+def test_k3_capability_selects_hybrid_mode(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
+    monkeypatch.setattr(mla_component_cache_v1, "vllm_version_is", lambda _version: False)
+    (
+        vllm_config,
+        _config,
+        _raw_tensors,
+        capability,
+        _physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan()
+    assert capability.mode == "K3_HYBRID_V1"
+    assert capability.manager_block_size == 384
+    assert capability.kernel_block_size == 128
+    assert use_mla_component_cache(vllm_config)
+
+
+def test_k3_capability_rejects_speculative_decoding(monkeypatch):
+    monkeypatch.setenv("VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE", "1")
+    monkeypatch.setattr(mla_component_cache_v1, "vllm_version_is", lambda _version: False)
+    vllm_config, *_ = _make_k3_hybrid_plan()
+    vllm_config.speculative_config = SimpleNamespace(method="dspark")
+    with pytest.raises(ValueError, match="speculative decoding"):
+        get_mla_component_cache_capability(vllm_config)
+
+
+@pytest.mark.parametrize("manager_block_size", [384, 768])
+def test_materialize_k3_component_cache_kernel_slot_geometry(manager_block_size):
+    (
+        _vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        physical_page,
+        element_size,
+    ) = _make_k3_hybrid_plan(num_blocks=3, manager_block_size=manager_block_size)
+    original_kda_tensors = {name: tensor.clone() for name, tensor in raw_tensors.items() if ".linear_attn" in name}
+    caches = materialize_hybrid_mla_component_cache(
+        raw_kv_cache_tensors=raw_tensors,
+        kv_cache_config=config,
+        static_forward_context=_vllm_config.compilation_config.static_forward_context,
+        kernel_block_sizes=[[128], [384]],
+        capability=capability,
+        vllm_config=_vllm_config,
+    )
+
+    assert set(caches) == {
+        "language_model.model.layers.0.self_attn",
+        "language_model.model.layers.1.self_attn",
+    }
+    ratio = manager_block_size // 128
+    slot_bytes = physical_page // ratio
+    slot_elements = slot_bytes // element_size
+    for nope, rope in caches.values():
+        assert nope.shape == (3 * ratio, 128, 1, 512)
+        assert rope.shape == (3 * ratio, 128, 1, 64)
+        assert nope.stride() == (slot_elements, 512, 512, 1)
+        assert rope.stride() == (slot_elements, 64, 64, 1)
+        assert rope.data_ptr() == nope.data_ptr() + 128 * 1 * 512 * element_size
+        assert nope.stride(0) > 128 * 1 * 512
+        assert rope.stride(0) > 128 * 1 * 64
+
+    for name, tensor in original_kda_tensors.items():
+        torch.testing.assert_close(raw_tensors[name], tensor)
+
+
+def test_k3_component_cow_copies_all_kernel_slots_in_manager_block(monkeypatch):
+    (
+        vllm_config,
+        config,
+        raw_tensors,
+        capability,
+        physical_page,
+        _element_size,
+    ) = _make_k3_hybrid_plan(num_blocks=3, manager_block_size=384)
+    caches = materialize_hybrid_mla_component_cache(
+        raw_kv_cache_tensors=raw_tensors,
+        kv_cache_config=config,
+        static_forward_context=vllm_config.compilation_config.static_forward_context,
+        kernel_block_sizes=[[128], [384]],
+        capability=capability,
+        vllm_config=vllm_config,
+    )
+
+    slot_bytes = physical_page // 3
+    page_views = [_component_page_view(*cache) for cache in caches.values()]
+    originals = [
+        [_page_payload(slot_bytes, layer * page_views[0].shape[0] + slot) for slot in range(page_views[0].shape[0])]
+        for layer in range(len(page_views))
+    ]
+    for layer, page_view in enumerate(page_views):
+        for slot, payload in enumerate(originals[layer]):
+            payload[-1] = 0xA5
+            payload[128 * 1 * 512 * 2] = 0x5A
+            page_view[slot].copy_(payload)
+
+    _install_cpu_h2d(monkeypatch)
+    copy_kv_cache_blocks_inplace(
+        list(caches.values()),
+        3,
+        [KVCacheBlockCopy(src_block_id=2, dst_block_id=0)],
+    )
+    for layer, page_view in enumerate(page_views):
+        torch.testing.assert_close(page_view[:3], originals[layer][6:9])
+        torch.testing.assert_close(page_view[3:6], originals[layer][3:6])
+        torch.testing.assert_close(page_view[6:9], originals[layer][6:9])

@@ -122,7 +122,17 @@ class AscendKVBlockZeroer(KVBlockZeroer):
                     continue
                 kv_tuple = static_forward_context[layer_name].kv_cache
                 assert len(kv_tuple) == 2, "K and V are not stored separately"
-                for kv in kv_tuple:
+
+                # K3 MLA manager page由r个连续kernel slot组成，每个slot内是
+                # [nope | rope | padding]。zeroer从nope起点按manager page大小
+                # 一次清零；如果分别把nope/rope当独立page起点，会重复清零并越界。
+                from vllm_ascend.worker.mla_component_cache_v1 import is_mla_component_pair
+
+                if is_mla_component_pair(kv_tuple):
+                    kv_tensors = (kv_tuple[0],)
+                else:
+                    kv_tensors = kv_tuple
+                for kv in kv_tensors:
                     block_dim = 0
                     dp = kv.data_ptr()
                     if dp in seen_ptrs:

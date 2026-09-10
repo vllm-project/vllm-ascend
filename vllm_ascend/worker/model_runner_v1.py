@@ -220,7 +220,8 @@ from vllm_ascend.worker.device_metadata import (
 )
 from vllm_ascend.worker.mla_component_cache_v1 import (
     allocate_mla_component_cache,
-    use_mla_component_cache,
+    get_mla_component_cache_capability,
+    materialize_hybrid_mla_component_cache,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
@@ -343,6 +344,7 @@ class NPUModelRunner(GPUModelRunner):
             hf_config is not None and hasattr(hf_config, "compress_ratios")
         )
         self._use_mla_component_cache = False
+        self._mla_component_cache_capability = None
 
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
@@ -4185,7 +4187,8 @@ class NPUModelRunner(GPUModelRunner):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        self._use_mla_component_cache = use_mla_component_cache(self.vllm_config)
+        self._mla_component_cache_capability = get_mla_component_cache_capability(self.vllm_config)
+        self._use_mla_component_cache = self._mla_component_cache_capability is not None
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self._mamba_bufs = None
@@ -4265,7 +4268,8 @@ class NPUModelRunner(GPUModelRunner):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        if self._use_mla_component_cache:
+        capability = self._mla_component_cache_capability
+        if capability is not None and capability.mode == "DENSE_V1":
             self.hybrid_with_attn_and_mamba = False
             kv_caches = allocate_mla_component_cache(
                 vllm_config=self.vllm_config,
@@ -4273,6 +4277,26 @@ class NPUModelRunner(GPUModelRunner):
                 static_forward_context=self.compilation_config.static_forward_context,
                 device=self.device,
                 kernel_block_sizes=self.kernel_block_sizes,
+            )
+        elif capability is not None and capability.mode == "K3_HYBRID_V1":
+            # The standardized hybrid allocator first materializes MLA and
+            # Mamba/KDA raw regions from one HMA backing.  Replace only the MLA
+            # regions with component-major views; the legacy reshape continues
+            # to own Mamba/KDA state materialization.
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+            component_caches = materialize_hybrid_mla_component_cache(
+                raw_kv_cache_tensors=kv_cache_raw_tensors,
+                kv_cache_config=kv_cache_config,
+                static_forward_context=self.compilation_config.static_forward_context,
+                kernel_block_sizes=self.kernel_block_sizes,
+                capability=capability,
+                vllm_config=self.vllm_config,
+            )
+            kv_cache_raw_tensors.update(component_caches)
+            kv_caches = self._reshape_kv_cache_tensors(
+                kv_cache_config,
+                kv_cache_raw_tensors,
+                mla_component_layers=set(component_caches),
             )
         else:
             # Initialize the memory buffer for KV cache
@@ -4943,7 +4967,8 @@ class NPUModelRunner(GPUModelRunner):
         self,
         kv_cache_config: KVCacheConfig,
         kv_cache_raw_tensors: dict[str, torch.Tensor],
-    ) -> dict[str, torch.Tensor]:
+        mla_component_layers: set[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Reshape the KV cache tensors to the desired shape and dtype.
 
@@ -4962,6 +4987,9 @@ class NPUModelRunner(GPUModelRunner):
             current_kv_cache_spec = group.kv_cache_spec
             for layer_name in group.layer_names:
                 if layer_name in self.runner_only_attn_layers:
+                    continue
+                if mla_component_layers is not None and layer_name in mla_component_layers:
+                    kv_caches[layer_name] = kv_cache_raw_tensors[layer_name]
                     continue
 
                 current_kv_cache_spec = layer_kv_cache_spec[layer_name]
@@ -5585,7 +5613,8 @@ class NPUModelRunner(GPUModelRunner):
         if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
 
-        self._use_mla_component_cache = use_mla_component_cache(self.vllm_config)
+        self._mla_component_cache_capability = get_mla_component_cache_capability(self.vllm_config)
+        self._use_mla_component_cache = self._mla_component_cache_capability is not None
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
@@ -5616,7 +5645,8 @@ class NPUModelRunner(GPUModelRunner):
                     attn_layer_names.add(layer_name)
 
             elif isinstance(attn_module, MLAAttention):
-                # 开启首轴非连续场景，确保走MLAAttention，并且跳过AscendMLAAttentionSpec重建路径
+                # 开启首轴非连续场景时，dense V3和K3 hybrid的MLA layer都保留exact
+                # MLAAttentionSpec，并跳过AscendMLAAttentionSpec重建路径。
                 if self._use_mla_component_cache:
                     spec = attn_module.get_kv_cache_spec(self.vllm_config)
                     if type(spec) is not MLAAttentionSpec:

@@ -1,6 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright (c) 2026 The vllm-ascend contributors
-"""Allocation and validation of the V1 dense-MLA component-major cache."""
+"""Allocation and validation of the V1 MLA component-major cache.
+
+The dense path keeps the original DeepSeek-V3 contract: one exact MLA group,
+one backing, and one unpadded component-major page per kernel block.  The K3
+hybrid path keeps MLA and Mamba/KDA regions in the standardized HMA backing,
+splits each MLA manager page into component-major kernel slots, and leaves
+Mamba/KDA state materialization to the legacy runner path.
+"""
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -11,11 +18,14 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import (
+    EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheLayout,
     KVCacheTensor,
     KVQuantMode,
+    MambaSpec,
     MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
 )
 
 from vllm_ascend import envs
@@ -47,6 +57,16 @@ class _MLAGeometry:
         return self.nope_segment_bytes + self.rope_segment_bytes
 
 
+@dataclass(frozen=True)
+class MLAComponentCacheCapability:
+    """The component-cache mode selected before the KV-cache plan exists."""
+
+    mode: str
+    mla_layer_names: tuple[str, ...]
+    manager_block_size: int
+    kernel_block_size: int
+
+
 def _feature_enabled() -> bool:
     return bool(envs.VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE)
 
@@ -54,12 +74,14 @@ def _feature_enabled() -> bool:
 def _unsupported(reason: str) -> ValueError:
     return ValueError(
         "VLLM_ASCEND_ENABLE_MLA_COMPONENT_CACHE=1 is enabled, but the model "
-        f"does not satisfy the dense-MLA component-cache capability: {reason}"
+        f"does not satisfy the MLA component-cache capability: {reason}"
     )
 
 
 def _validate_exact_spec(spec: Any, layer_name: str) -> None:
-    # 没有任何扩展、没有量化、没有压缩、没有 padding、没有 sliding window 的 exact upstream MLAAttentionSpec
+    """Require an unpadded, exact, dense upstream MLA spec."""
+    # 这里校验的是MLA layer在hybrid page统一前的logical spec：
+    # 必须是没有任何扩展、量化、压缩、padding和sliding window的exact upstream MLAAttentionSpec。
     if type(spec) is not MLAAttentionSpec:
         raise _unsupported(
             f"layer {layer_name} returned {type(spec).__name__}, expected the exact upstream MLAAttentionSpec"
@@ -93,6 +115,7 @@ def _layer_geometry(
     spec: MLAAttentionSpec,
     layer_name: str,
 ) -> _MLAGeometry:
+    """Derive the logical N/H/Dk/Dr geometry from an MLA layer and its spec."""
     # 构造NHD的描述对象，并校验spec满足nope+rope
     _validate_exact_spec(spec, layer_name)
     nope_dim = layer.kv_lora_rank
@@ -119,19 +142,22 @@ def _layer_geometry(
     return geometry
 
 
-def use_mla_component_cache(vllm_config: VllmConfig) -> bool:
-    """Return whether the runner can use the V1 component-major MLA cache.
+def _select_kernel_block_size(manager_block_size: int, supported_block_sizes: Sequence[int]) -> int:
+    divisors = [size for size in supported_block_sizes if isinstance(size, int) and manager_block_size % size == 0]
+    if not divisors:
+        raise _unsupported(
+            f"manager block size {manager_block_size} cannot be split by any supported "
+            f"kernel block size {list(supported_block_sizes)}"
+        )
+    return max(divisors)
 
-    The feature is intentionally explicit.  When it is enabled, an MLA model
-    outside the documented dense capability fails fast instead of silently
-    falling back to the legacy Ascend MLA spec path.
-    判断当前是否使用MLA首轴非连续能力。
-    在 feature 开启时,判断当前是否是“单一、均匀、dense、可 stride 寻址的 MLA cache group”
-    满足则返回 True 走 component-major nope/rope 布局
-    不满足则启动阶段直接失败，避免静默 fallback 到不兼容路径
-    """
+
+def get_mla_component_cache_capability(
+    vllm_config: VllmConfig,
+) -> MLAComponentCacheCapability | None:
+    """Classify a model as dense-V1 or K3-hybrid-V1 before grouping."""
     if not _feature_enabled():
-        return False
+        return None
 
     if getattr(vllm_config, "use_v2_model_runner", False):
         raise _unsupported("ModelRunner V2 is outside the V1-only scope")
@@ -139,6 +165,8 @@ def use_mla_component_cache(vllm_config: VllmConfig) -> bool:
         raise _unsupported("the standardized KVCacheTensor plan requires vLLM main")
     if vllm_config.kv_transfer_config is not None:
         raise _unsupported("KV transfer/offload is not supported")
+    if getattr(vllm_config, "speculative_config", None) is not None:
+        raise _unsupported("speculative decoding is outside the first K3 hybrid capability")
 
     model_config = getattr(vllm_config, "model_config", None)
     hf_text_config = getattr(model_config, "hf_text_config", None)
@@ -146,31 +174,41 @@ def use_mla_component_cache(vllm_config: VllmConfig) -> bool:
         raise _unsupported("compressed MLA cache is not supported")
 
     forward_context = vllm_config.compilation_config.static_forward_context
+    if not isinstance(forward_context, Mapping):
+        raise _unsupported("the static forward context is not a mapping")
+
     layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     mla_layers: dict[str, MLAAttention] = {}
+    has_mamba_cache = False
     for layer_name, layer in layers.items():
         if getattr(layer, "kv_sharing_target_layer_name", None) is not None:
             raise _unsupported(f"layer {layer_name} uses cross-layer KV sharing")
         if isinstance(layer, MLAAttention):
             mla_layers[layer_name] = layer
             continue
+
         try:
-            has_non_mla_cache = layer.get_kv_cache_spec(vllm_config) is not None
+            spec = layer.get_kv_cache_spec(vllm_config)
         except Exception as exc:
             raise _unsupported(f"cannot inspect the KV cache spec of non-MLA layer {layer_name}") from exc
-        if has_non_mla_cache:
-            raise _unsupported(
-                f"layer {layer_name} is {type(layer).__name__}; the component "
-                "cache only supports one dense MLA cache group"
-            )
+        if spec is None:
+            continue
+        if isinstance(spec, MambaSpec):
+            has_mamba_cache = True
+            continue
+        if isinstance(spec, EncoderOnlyAttentionSpec):
+            continue
+        raise _unsupported(
+            f"layer {layer_name} is {type(layer).__name__} with {type(spec).__name__}; "
+            "only MLA and Mamba/KDA cache groups are supported"
+        )
 
     if not mla_layers:
         raise _unsupported("the model has no MLA layers")
-    if not isinstance(forward_context, Mapping):
-        raise _unsupported("the static forward context is not a mapping")
 
     first_geometry: _MLAGeometry | None = None
     first_spec: MLAAttentionSpec | None = None
+    selected_kernel_size: int | None = None
     for layer_name, layer in mla_layers.items():
         impl = layer.impl
         if getattr(impl, "fa_quant_layer", False):
@@ -191,12 +229,15 @@ def use_mla_component_cache(vllm_config: VllmConfig) -> bool:
         supported_layouts = backend.supported_kv_cache_layouts()
         if supported_layouts is None or KVCacheLayout.LBNHC not in supported_layouts:
             raise _unsupported(f"layer {layer_name} backend does not support LBNHC")
-        supported_block_sizes = backend.get_supported_kernel_block_sizes()
-        if geometry.block_size not in supported_block_sizes:
-            raise _unsupported(
-                f"layer {layer_name} block size {geometry.block_size} is not in "
-                f"the backend supported sizes {supported_block_sizes}"
-            )
+
+        kernel_size = _select_kernel_block_size(
+            geometry.block_size,
+            backend.get_supported_kernel_block_sizes(),
+        )
+        if selected_kernel_size is None:
+            selected_kernel_size = kernel_size
+        elif kernel_size != selected_kernel_size:
+            raise _unsupported(f"layer {layer_name} selects a different kernel block size")
 
         if first_geometry is None:
             first_geometry = geometry
@@ -204,8 +245,26 @@ def use_mla_component_cache(vllm_config: VllmConfig) -> bool:
         elif geometry != first_geometry or spec != first_spec:
             raise _unsupported(f"layer {layer_name} has different MLA cache geometry")
 
-    assert first_geometry is not None and first_spec is not None
-    return True
+    assert first_geometry is not None and first_spec is not None and selected_kernel_size is not None
+    return MLAComponentCacheCapability(
+        mode="K3_HYBRID_V1" if has_mamba_cache else "DENSE_V1",
+        mla_layer_names=tuple(mla_layers),
+        manager_block_size=first_geometry.block_size,
+        kernel_block_size=selected_kernel_size,
+    )
+
+
+def use_mla_component_cache(vllm_config: VllmConfig) -> bool:
+    """Return whether the V1 runner can use the component-major MLA cache.
+
+    判断当前是否使用MLA首轴非连续能力。
+    feature开启时先做结构化能力分类：
+    1. DeepSeek V3类dense MLA归入DENSE_V1；
+    2. K3类“MLA subset + Mamba/KDA subset”归入K3_HYBRID_V1；
+    3. 两条路径都使用component-major nope/rope布局；
+    4. 不满足能力边界时启动阶段直接失败，避免静默fallback到不兼容路径。
+    """
+    return get_mla_component_cache_capability(vllm_config) is not None
 
 
 def _typed_empty_like_storage(raw: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -228,35 +287,135 @@ def _typed_empty_like_storage(raw: torch.Tensor, dtype: torch.dtype) -> torch.Te
     return typed
 
 
+def _component_views(
+    typed_raw: torch.Tensor,
+    *,
+    num_blocks: int,
+    kernel_blocks_per_manager: int,
+    kernel_block_size: int,
+    num_kv_heads: int,
+    nope_dim: int,
+    rope_dim: int,
+    slot_bytes: int,
+    nope_slot_bytes: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Construct 4D first-axis-strided nope/rope views over kernel slots."""
+    element_size = typed_raw.element_size()
+    slot_elements = slot_bytes // element_size
+    nope = torch.as_strided(
+        typed_raw,
+        size=(num_blocks * kernel_blocks_per_manager, kernel_block_size, num_kv_heads, nope_dim),
+        stride=(slot_elements, num_kv_heads * nope_dim, nope_dim, 1),
+        storage_offset=typed_raw.storage_offset(),
+    )
+    rope = torch.as_strided(
+        typed_raw,
+        size=(num_blocks * kernel_blocks_per_manager, kernel_block_size, num_kv_heads, rope_dim),
+        stride=(slot_elements, num_kv_heads * rope_dim, rope_dim, 1),
+        storage_offset=typed_raw.storage_offset() + nope_slot_bytes // element_size,
+    )
+    return nope, rope
+
+
+def _validate_component_pair_tensors(nope: torch.Tensor, rope: torch.Tensor) -> bool:
+    """Recognize a dynamically laid-out ``(nope, rope)`` MLA cache pair."""
+    if nope.ndim != 4 or rope.ndim != 4 or nope.dtype != rope.dtype:
+        return False
+    if nope.device != rope.device or nope.shape[:3] != rope.shape[:3]:
+        return False
+    if any(dim <= 0 for dim in (*nope.shape[:3], nope.shape[3], rope.shape[3])):
+        return False
+
+    element_size = nope.element_size()
+    slot_bytes = nope.stride(0) * element_size
+    if slot_bytes <= 0 or slot_bytes != rope.stride(0) * element_size:
+        return False
+
+    nope_strides = (
+        slot_bytes // element_size,
+        nope.shape[2] * nope.shape[3],
+        nope.shape[3],
+        1,
+    )
+    rope_strides = (
+        slot_bytes // element_size,
+        rope.shape[2] * rope.shape[3],
+        rope.shape[3],
+        1,
+    )
+    if nope.stride() != nope_strides or rope.stride() != rope_strides:
+        return False
+
+    nope_storage = nope.untyped_storage()
+    rope_storage = rope.untyped_storage()
+    nope_slot_bytes = nope.shape[1] * nope.shape[2] * nope.shape[3] * element_size
+    rope_slot_bytes = rope.shape[1] * rope.shape[2] * rope.shape[3] * element_size
+    return (
+        nope_storage.data_ptr() == rope_storage.data_ptr()
+        and nope_storage.nbytes() == rope_storage.nbytes()
+        and rope.data_ptr() == nope.data_ptr() + nope_slot_bytes
+        and nope_slot_bytes + rope_slot_bytes <= slot_bytes
+    )
+
+
+def is_mla_component_pair(kv_cache: object) -> bool:
+    """Return whether ``kv_cache`` is a component-major MLA tuple."""
+    if not isinstance(kv_cache, tuple) or len(kv_cache) != 2:
+        return False
+    nope, rope = kv_cache
+    if not isinstance(nope, torch.Tensor) or not isinstance(rope, torch.Tensor):
+        return False
+    return _validate_component_pair_tensors(nope, rope)
+
+
 def _validate_kernel_block_sizes(
     kernel_block_sizes: Sequence[int] | Sequence[Sequence[int]],
     block_size: int,
-) -> None:
-    # 校验kernel_block_sizes是否符合要求，必须是一个长度为1的序列，并且必须等于block_size匹配
-    # 当前只能支持单一group的MLA，如deepseek v3
+) -> int:
+    # 校验dense路径的kernel_block_sizes：必须是长度为1的序列，且kernel block size等于manager block size。
+    # 当前dense路径只能支持单一group的MLA，如deepseek v3
     if len(kernel_block_sizes) != 1:
         raise ValueError(
-            f"The MLA component cache requires one cache group, but got kernel block sizes {kernel_block_sizes!r}"
+            f"The dense MLA component cache requires one cache group, but got kernel block sizes {kernel_block_sizes!r}"
         )
     kernel_size = kernel_block_sizes[0]
     if isinstance(kernel_size, Sequence):
         valid = len(kernel_size) == 1 and kernel_size[0] == block_size
+        kernel_size = kernel_size[0]
     else:
         valid = kernel_size == block_size
     if not valid:
         raise ValueError(
-            "Manager and kernel block sizes must match for the MLA component "
+            "Manager and kernel block sizes must match for the dense MLA component "
             f"cache: manager={block_size}, kernels={kernel_block_sizes!r}"
         )
+    return int(kernel_size)
 
 
-def _validate_plan(
+def _unwrap_layer_spec(group_spec: Any, layer_name: str) -> Any:
+    if isinstance(group_spec, UniformTypeKVCacheSpecs):
+        return group_spec.kv_cache_specs[layer_name]
+    return group_spec
+
+
+def _descriptor_layer_map(
+    kv_cache_config: KVCacheConfig,
+) -> dict[str, tuple[KVCacheTensor, int]]:
+    result: dict[str, tuple[KVCacheTensor, int]] = {}
+    for descriptor in kv_cache_config.kv_cache_tensors:
+        for layer_idx, layer_name in enumerate(descriptor.layers):
+            if layer_name in result:
+                raise ValueError(f"KV cache descriptor repeats layer {layer_name}")
+            result[layer_name] = (descriptor, layer_idx)
+    return result
+
+
+def _validate_dense_plan(
     *,
     vllm_config: VllmConfig,
     kv_cache_config: KVCacheConfig,
     static_forward_context: Mapping[str, AttentionLayerBase],
 ) -> tuple[_MLAGeometry, KVCacheTensor, Sequence[str]]:
-
     """确保以下内容：
     1. 逻辑上确实是单一 dense MLA group；
     2. 每个 layer 的 spec/geometry 能推导出同一个 page size；
@@ -264,11 +423,9 @@ def _validate_plan(
     4. resolved layout 确实是 LBNHC；
     5. 没有 sharing / padding / overlay / multi-backing 等未支持情况。
     """
-
     if len(kv_cache_config.kv_cache_groups) != 1:
         raise ValueError(
-            "The MLA component cache requires exactly one dense MLA group, got "
-            f"{len(kv_cache_config.kv_cache_groups)} groups"
+            f"The dense MLA component cache requires exactly one group, got {len(kv_cache_config.kv_cache_groups)}"
         )
     group = kv_cache_config.kv_cache_groups[0]
     group_spec = group.kv_cache_spec
@@ -277,10 +434,10 @@ def _validate_plan(
         raise ValueError("The MLA component cache group has no layers")
     if kv_cache_config.num_blocks <= 0:
         raise ValueError("The MLA component cache requires at least one block")
-
     if len(kv_cache_config.kv_cache_tensors) != 1:
         raise ValueError(
-            f"The MLA component cache requires one backing descriptor, got {len(kv_cache_config.kv_cache_tensors)}"
+            "The dense MLA component cache requires one backing descriptor, got "
+            f"{len(kv_cache_config.kv_cache_tensors)}"
         )
     descriptor = kv_cache_config.kv_cache_tensors[0]
 
@@ -318,17 +475,15 @@ def _validate_plan(
     num_blocks = kv_cache_config.num_blocks
     expected_layer_stride = geometry.page_bytes * num_blocks
     if descriptor.offset != 0:
-        raise ValueError("The MLA component cache requires a zero descriptor offset")
+        raise ValueError("The dense MLA component cache requires a zero descriptor offset")
     if descriptor.block_stride != geometry.page_bytes:
         raise ValueError("The MLA component descriptor block stride is inconsistent")
     if descriptor.layer_stride != expected_layer_stride:
         raise ValueError("The MLA component descriptor layer stride is inconsistent")
     if descriptor.size != len(descriptor_layers) * expected_layer_stride:
         raise ValueError("The MLA component descriptor size is inconsistent")
-
-    layout_name = kv_cache_config.kv_cache_layout
-    if layout_name != KVCacheLayout.LBNHC.name:
-        raise ValueError(f"The MLA component cache requires the LBNHC layout, got {layout_name!r}")
+    if kv_cache_config.kv_cache_layout != KVCacheLayout.LBNHC.name:
+        raise ValueError(f"The MLA component cache requires the LBNHC layout, got {kv_cache_config.kv_cache_layout!r}")
     return geometry, descriptor, descriptor_layers
 
 
@@ -340,70 +495,162 @@ def allocate_mla_component_cache(
     device: torch.device,
     kernel_block_sizes: Sequence[int] | Sequence[Sequence[int]],
 ) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
-    """Allocate one backing and return per-layer ``(nope, rope)`` views."""
-    geometry, descriptor, layer_names = _validate_plan(
+    """Allocate one dense backing and return per-layer ``(nope, rope)`` views."""
+    # 分配一个物理backing，并为每个MLA layer构造首轴非连续的nope/rope view。
+    geometry, descriptor, layer_names = _validate_dense_plan(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         static_forward_context=static_forward_context,
     )
-    _validate_kernel_block_sizes(kernel_block_sizes, geometry.block_size)
+    kernel_block_size = _validate_kernel_block_sizes(kernel_block_sizes, geometry.block_size)
+    if kernel_block_size != geometry.block_size:
+        raise ValueError("The dense MLA component cache does not support kernel block splitting")
 
     raw = torch.zeros(descriptor.size, dtype=torch.int8, device=device)
     typed_raw = _typed_empty_like_storage(raw, geometry.dtype)
-    page_elements = geometry.page_bytes // geometry.element_size
-    nope_page_elements = geometry.nope_segment_bytes // geometry.element_size
-    rope_page_elements = geometry.rope_segment_bytes // geometry.element_size
     num_blocks = kv_cache_config.num_blocks
-
     kv_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     for layer_idx, layer_name in enumerate(layer_names):
         layer_base_bytes = layer_idx * descriptor.layer_stride
-        nope = torch.as_strided(
-            typed_raw,
-            size=(num_blocks, geometry.block_size, geometry.num_kv_heads, geometry.nope_dim),
-            stride=(
-                page_elements,
-                geometry.num_kv_heads * geometry.nope_dim,
-                geometry.nope_dim,
-                1,
-            ),
-            storage_offset=typed_raw.storage_offset() + layer_base_bytes // geometry.element_size,
+        layer_typed = typed_raw.narrow(
+            0,
+            layer_base_bytes // geometry.element_size,
+            descriptor.layer_stride // geometry.element_size,
         )
-        rope = torch.as_strided(
-            typed_raw,
-            size=(num_blocks, geometry.block_size, geometry.num_kv_heads, geometry.rope_dim),
-            stride=(
-                page_elements,
-                geometry.num_kv_heads * geometry.rope_dim,
-                geometry.rope_dim,
-                1,
-            ),
-            storage_offset=(
-                typed_raw.storage_offset() + (layer_base_bytes + geometry.nope_segment_bytes) // geometry.element_size
-            ),
+        nope, rope = _component_views(
+            layer_typed,
+            num_blocks=num_blocks,
+            kernel_blocks_per_manager=1,
+            kernel_block_size=geometry.block_size,
+            num_kv_heads=geometry.num_kv_heads,
+            nope_dim=geometry.nope_dim,
+            rope_dim=geometry.rope_dim,
+            slot_bytes=geometry.page_bytes,
+            nope_slot_bytes=geometry.nope_segment_bytes,
         )
-
-        expected_nope_stride = (
-            page_elements,
-            geometry.num_kv_heads * geometry.nope_dim,
-            geometry.nope_dim,
-            1,
-        )
-        expected_rope_stride = (
-            page_elements,
-            geometry.num_kv_heads * geometry.rope_dim,
-            geometry.rope_dim,
-            1,
-        )
-        if nope.stride() != expected_nope_stride or rope.stride() != expected_rope_stride:
-            raise ValueError("Failed to construct the MLA component-cache strides")
-        if (
-            nope.untyped_storage().data_ptr() != rope.untyped_storage().data_ptr()
-            or rope.data_ptr() != nope.data_ptr() + geometry.nope_segment_bytes
-        ):
-            raise ValueError("Failed to construct the MLA component-cache storage views")
-        if nope_page_elements + rope_page_elements != page_elements:
-            raise ValueError("MLA component page contains unexpected padding")
-
+        if not is_mla_component_pair((nope, rope)):
+            raise ValueError("Failed to construct the dense MLA component-cache views")
         kv_caches[layer_name] = (nope, rope)
     return kv_caches
+
+
+def materialize_hybrid_mla_component_cache(
+    *,
+    raw_kv_cache_tensors: Mapping[str, torch.Tensor],
+    kv_cache_config: KVCacheConfig,
+    static_forward_context: Mapping[str, AttentionLayerBase],
+    kernel_block_sizes: Sequence[int] | Sequence[Sequence[int]],
+    capability: MLAComponentCacheCapability,
+    vllm_config: VllmConfig,
+) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
+    """Convert hybrid MLA raw layer regions into component-major tuple views.
+
+    The legacy allocator has already materialized all standardized descriptor
+    regions.  This function replaces only the MLA entries; Mamba/KDA raw tensors
+    remain untouched for the legacy reshape path.
+
+    K3 hybrid复用standardized allocator生成的HMA raw region：
+    1. 只把MLA raw region重排成component-major tuple；
+    2. KDA/Mamba raw region保持旧路径语义；
+    3. 所有persistent region必须来自同一个backing。
+    """
+    descriptor_layers = _descriptor_layer_map(kv_cache_config)
+    component_caches: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+    mla_layer_set = set(capability.mla_layer_names)
+    persistent_group_idx = -1
+
+    for group in kv_cache_config.kv_cache_groups:
+        representative_spec = _unwrap_layer_spec(group.kv_cache_spec, group.layer_names[0])
+        if isinstance(representative_spec, EncoderOnlyAttentionSpec):
+            continue
+        persistent_group_idx += 1
+        if persistent_group_idx >= len(kernel_block_sizes):
+            raise ValueError(f"Missing kernel block size for KV cache group {persistent_group_idx}")
+        selected = kernel_block_sizes[persistent_group_idx]
+        kernel_block_size = selected[0] if isinstance(selected, Sequence) else selected
+
+        for layer_name in group.layer_names:
+            layer = static_forward_context.get(layer_name)
+            if not isinstance(layer, MLAAttention):
+                continue
+
+            group_spec = _unwrap_layer_spec(group.kv_cache_spec, layer_name)
+            if type(group_spec) is not MLAAttentionSpec:
+                raise ValueError(f"Hybrid MLA layer {layer_name} does not use an exact upstream spec")
+            if layer_name not in descriptor_layers:
+                raise ValueError(f"Hybrid MLA layer {layer_name} has no descriptor")
+            descriptor, layer_idx = descriptor_layers[layer_name]
+            raw = raw_kv_cache_tensors.get(layer_name)
+            if not isinstance(raw, torch.Tensor):
+                raise ValueError(f"Hybrid MLA layer {layer_name} has no raw backing slice")
+
+            logical_spec = layer.get_attn_backend().customize_spec(layer.get_kv_cache_spec(vllm_config))
+            geometry = _layer_geometry(layer, logical_spec, layer_name)
+            if geometry.block_size != group_spec.block_size or geometry.dtype != group_spec.dtype:
+                raise ValueError(f"Hybrid MLA layer {layer_name} disagrees with its merged spec")
+            if kernel_block_size != capability.kernel_block_size:
+                raise ValueError(
+                    f"Hybrid MLA layer {layer_name} kernel size {kernel_block_size} does not match capability "
+                    f"{capability.kernel_block_size}"
+                )
+            if geometry.block_size % kernel_block_size != 0:
+                raise ValueError(
+                    f"Hybrid MLA manager block size {geometry.block_size} is not divisible by "
+                    f"kernel size {kernel_block_size}"
+                )
+
+            num_blocks = kv_cache_config.num_blocks
+            physical_page_bytes = group_spec.page_size_bytes
+            ratio = geometry.block_size // kernel_block_size
+            if physical_page_bytes % ratio != 0:
+                raise ValueError(
+                    f"Hybrid MLA physical page {physical_page_bytes} cannot be divided into {ratio} kernel slots"
+                )
+            slot_bytes = physical_page_bytes // ratio
+            nope_slot_bytes = kernel_block_size * geometry.num_kv_heads * geometry.nope_dim * geometry.element_size
+            rope_slot_bytes = kernel_block_size * geometry.num_kv_heads * geometry.rope_dim * geometry.element_size
+            if nope_slot_bytes + rope_slot_bytes > slot_bytes:
+                raise ValueError(
+                    f"Hybrid MLA kernel slot {slot_bytes} is smaller than nope+rope {nope_slot_bytes + rope_slot_bytes}"
+                )
+
+            expected_layer_stride = physical_page_bytes * num_blocks
+            if descriptor.block_stride != physical_page_bytes:
+                raise ValueError(f"Hybrid MLA descriptor block stride is inconsistent for {layer_name}")
+            if descriptor.layer_stride != expected_layer_stride:
+                raise ValueError(f"Hybrid MLA descriptor layer stride is inconsistent for {layer_name}")
+            expected_offset = descriptor.offset + layer_idx * descriptor.layer_stride
+            if raw.storage_offset() != expected_offset:
+                raise ValueError(f"Hybrid MLA raw offset is inconsistent for {layer_name}")
+            if raw.numel() != expected_layer_stride:
+                raise ValueError(f"Hybrid MLA raw size is inconsistent for {layer_name}")
+            if expected_offset + expected_layer_stride > descriptor.size:
+                raise ValueError(f"Hybrid MLA descriptor range exceeds backing for {layer_name}")
+
+            typed_raw = _typed_empty_like_storage(raw, geometry.dtype)
+            nope, rope = _component_views(
+                typed_raw,
+                num_blocks=num_blocks,
+                kernel_blocks_per_manager=ratio,
+                kernel_block_size=kernel_block_size,
+                num_kv_heads=geometry.num_kv_heads,
+                nope_dim=geometry.nope_dim,
+                rope_dim=geometry.rope_dim,
+                slot_bytes=slot_bytes,
+                nope_slot_bytes=nope_slot_bytes,
+            )
+            if not is_mla_component_pair((nope, rope)):
+                raise ValueError(f"Failed to construct hybrid MLA component-cache views for {layer_name}")
+            component_caches[layer_name] = (nope, rope)
+
+    if set(component_caches) != mla_layer_set:
+        missing = sorted(mla_layer_set - set(component_caches))
+        extra = sorted(set(component_caches) - mla_layer_set)
+        raise ValueError(f"Hybrid MLA layer mismatch: missing={missing}, extra={extra}")
+
+    storages = {
+        raw.untyped_storage().data_ptr() for raw in raw_kv_cache_tensors.values() if isinstance(raw, torch.Tensor)
+    }
+    if len(storages) != 1:
+        raise ValueError("The K3 hybrid component cache requires one standardized HMA backing allocation")
+    return component_caches
