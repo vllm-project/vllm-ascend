@@ -1,0 +1,749 @@
+#
+# Copyright (c) 2026 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+# Resident E2E runners for the main2main external E2E (A2/A3/310P chips).
+#
+# The main2main flow runs on a CPU runner; E2E tests run on the NPU
+# runners.  ARC gives every job a fresh pod with an empty workspace, so a
+# per-round exec job could never see a prepare job's environment — this
+# workflow therefore runs ONE resident job per chip for the whole main
+# run:
+#
+# - the main workflow dispatches this workflow once at start (its
+#   "Pre-start E2E runner envs" step) and waits until each prepare-<chip>
+#   job passes the NPU availability check;
+# - the prepare-<chip> job builds the persistent environment ONCE (vllm +
+#   vllm-ascend editable install + csrc cache restore/compile + deps)
+#   under $GITHUB_WORKSPACE, then enters a resident command loop: it polls
+#   the signal branch, and every new commit there (pushed by the flow,
+#   carrying the accumulated patch + test_groups.json + command.json with
+#   the round number) is served IN PLACE — checkout (swaps the adapted
+#   python code; kernels and the vllm checkout stay exactly as prepared),
+#   run_tests.py with the chip's tests, results pushed to the per-chip
+#   results branch.  No cache re-fetch, no reinstall, no kernel rebuild,
+#   no new job per round.
+# - the flow waits for each round's results on the results branches
+#   (main2main-e2e round layout under round-<N>/) and pushes the next
+#   round's command when it needs one;
+# - the loop exits only when the main run completes (incl. cancelled) or
+#   the hold budget is exhausted — the runners are ours until the main
+#   run ends.
+
+# run-name identifies the main run (Main2Main-E2E-<main_run_id>): the
+# prepared env belongs to one main run (one fixed vllm commit).  The main
+# workflow's pre-start step matches this name to find its prep run.
+run-name: Main2Main-E2E-${{ inputs.main_run_id || '-' }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm:
+        type: string
+        required: true
+        description: 'The vllm commit hash or tag to test (TARGET_COMMIT).'
+      base_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'The vllm-ascend base ref (for csrc diff + env marker).'
+      signal_branch:
+        type: string
+        required: false
+        default: 'main2main_e2e'
+        description: 'Fork branch carrying the accumulated patch + test_groups.json + command.json.'
+      signal_repo:
+        type: string
+        required: false
+        default: ''
+        description: 'Fork repo carrying the signal branch (the adapted code); empty = this repo.'
+      image_tag_a3:
+        type: string
+        required: false
+        default: '9.1.0-a3-ubuntu22.04-py3.12'
+        description: 'CANN image tag for the A3 (800i) runner container.'
+      flow_ref:
+        type: string
+        required: false
+        default: 'main'
+        description: 'main2main_flow ref providing run_tests.py (installed before serving rounds).'
+      main_run_id:
+        type: string
+        required: false
+        default: ''
+        description: 'run id of the dispatching main run; identifies the prepare jobs and the resident loop.'
+      main_run_repo:
+        type: string
+        required: false
+        default: ''
+        description: 'repo of the dispatching main run (for the completion probe; empty = this repo).'
+      hold_minutes:
+        type: number
+        required: false
+        default: 1440
+        description: 'Max minutes the resident jobs live (guard until the main run ends).'
+
+defaults:
+  run:
+    shell: bash -el {0}
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  prepare:
+    # The main_run_id suffix is the unique per-main-run identifier the
+    # pre-start step matches on when waiting for all NPU runners.
+    name: prepare-${{ matrix.chip }}-${{ inputs.main_run_id }}
+    # The job is resident for the whole main run (env build + command
+    # loop), so the timeout is the hold budget.
+    timeout-minutes: ${{ fromJSON(inputs.hold_minutes) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - chip: a2
+            runner: linux-aarch64-a2-1
+            image_tag: 9.1.0-910b-ubuntu22.04-py3.12
+            # A2 cards are single-die — pair alignment does not apply (it
+            # is the A3 dual-die package's constraint); enforcing it here
+            # crashes run_tests.py's device assignment with
+            # "visible devices must form complete dual-die pairs".
+            pair_aligned: ''
+          - chip: a3
+            runner: linux-aarch64-a3-800i-2-cn12-001
+            image_tag: ${{ inputs.image_tag_a3 }}
+            # 800i-2 exposes two independently usable NPUs; single-card
+            # cases get one device each, so die-pair alignment (an
+            # 800i-16 device-plugin property) does not apply here.
+            pair_aligned: ''
+          - chip: 310p
+            runner: linux-aarch64-310p-1
+            image_tag: 9.1.0-310p-ubuntu22.04-py3.12
+            pair_aligned: ''
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:${{ matrix.image_tag }}
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+        HF_HUB_OFFLINE: 1
+        MAX_JOBS: 4
+        UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+        UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi http://cache-service.nginx-pypi-cache.svc.cluster.local/whl/cpu/"
+        UV_INDEX_STRATEGY: unsafe-best-match
+        UV_INSECURE_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+        UV_HTTP_TIMEOUT: 120
+        UV_NO_CACHE: 1
+        UV_SYSTEM_PYTHON: 1
+    steps:
+      - name: Check NPU availability
+        run: |
+          npu-smi info
+
+      - name: Check env freshness
+        id: env-check
+        run: |
+          marker="$GITHUB_WORKSPACE/.ready"
+          fresh=false
+          if [ -f "$marker" ] \
+            && grep -qx "vllm=${{ inputs.vllm }}" "$marker" \
+            && grep -qx "base_ref=${{ inputs.base_ref }}" "$marker" \
+            && grep -q "^base_sha=" "$marker" \
+            && grep -qx "image_tag=${{ matrix.image_tag }}" "$marker" \
+            && [ -x "$GITHUB_WORKSPACE/.venv/bin/activate" ] \
+            && [ -d "$GITHUB_WORKSPACE/vllm-empty/.git" ] \
+            && [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            fresh=true
+            echo "Reusing prepared env at $GITHUB_WORKSPACE (marker match)"
+          else
+            echo "Env missing or stale (vllm/base_ref/image_tag changed) - rebuilding"
+          fi
+          echo "fresh=$fresh" >> "$GITHUB_OUTPUT"
+
+      - name: Install system deps
+        if: steps.env-check.outputs.fresh != 'true'
+        run: |
+          set -euxo pipefail
+          # The ascend checkout below resets the workspace repo; wipe the
+          # parts checkout never touches (venv + vllm checkout + marker).
+          rm -rf "$GITHUB_WORKSPACE/vllm-empty" \
+                 "$GITHUB_WORKSPACE/.venv" \
+                 "$GITHUB_WORKSPACE/.ready" \
+                 "$GITHUB_WORKSPACE"/main2main-e2e-results
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2 zstd
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          pip install uv
+
+      # Checkout the ascend repo FIRST: actions/checkout deletes the
+      # workspace contents when it finds no .git, so anything created before
+      # this checkout (the .venv) would be wiped.  Pre-creating the repo with
+      # git init was tried instead, but the k8s container implementation
+      # drops the freshly created .git within the step (git config right
+      # after git init: "fatal: not in a git directory") — the
+      # checkout-created .git is reliable.
+      - name: Checkout vllm-project/vllm-ascend repo
+        if: steps.env-check.outputs.fresh != 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.base_ref }}
+          fetch-depth: 0
+          submodules: recursive
+          # Keep untracked leftovers (main2main_flow, results dirs) across
+          # rebuilds; tracked files are still reset to base_ref.
+          clean: false
+          # Without this, checkout persists http.<...>.extraheader with the
+          # repo-scoped GITHUB_TOKEN into the workspace .git — that header
+          # OVERRIDES the PAT embedded in the resident loop's push URLs, so
+          # results pushes authenticate as github-actions[bot] and are
+          # denied on the signal fork (observed 2026-08-28 run 33142811816).
+          persist-credentials: false
+
+      - name: Checkout vllm-project/vllm repo
+        if: steps.env-check.outputs.fresh != 'true'
+        uses: actions/checkout@v7
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm }}
+          path: ./vllm-empty
+
+      - name: Create workspace venv
+        if: steps.env-check.outputs.fresh != 'true'
+        run: |
+          set -euxo pipefail
+          # --system-site-packages: the CANN container's system python holds
+          # torch/torch_npu; the venv only layers the project deps on top.
+          # Built after both checkouts so nothing can wipe it.
+          uv venv --system-site-packages "$GITHUB_WORKSPACE/.venv" \
+            || python3 -m venv --system-site-packages "$GITHUB_WORKSPACE/.venv"
+          "$GITHUB_WORKSPACE/.venv/bin/python" -m pip install --upgrade uv || true
+
+      - name: Install vllm-project/vllm from source
+        if: steps.env-check.outputs.fresh != 'true'
+        working-directory: ./vllm-empty
+        run: |
+          source "$GITHUB_WORKSPACE/.venv/bin/activate"
+          VLLM_TARGET_DEVICE=empty uv pip install .
+          pip uninstall -y triton
+
+      - name: Get csrc hash
+        id: get_csrc_hash
+        if: steps.env-check.outputs.fresh != 'true'
+        run: |
+          # Fail closed so a git error cannot be converted into sha256(empty)
+          # and then appear to be a legitimate cache miss.
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+
+          # Match the cache producer's tracked csrc build inputs exactly.
+          CSRC_MANIFEST=$(git ls-files -s -- csrc setup.py CMakeLists.txt cmake)
+          if [ -z "$CSRC_MANIFEST" ]; then
+            echo "::error::No tracked csrc inputs found."
+            exit 1
+          fi
+
+          CSRC_HASH=$(printf '%s\n' "$CSRC_MANIFEST" | sha256sum | awk '{print $1}')
+          echo "CSRC_HASH=$CSRC_HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Get architecture
+        id: get_arch
+        if: steps.env-check.outputs.fresh != 'true'
+        run: |
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64) echo "arch=X64" >> "$GITHUB_OUTPUT" ;;
+            aarch64) echo "arch=ARM64" >> "$GITHUB_OUTPUT" ;;
+            *) echo "arch=$ARCH" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Restore vllm-ascend csrc cache
+        id: cache-csrc
+        if: steps.env-check.outputs.fresh != 'true'
+        uses: runs-on/cache/restore@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+          # Same tolerance as PR CI: a miss compiles on the NPU runner once,
+          # after which the artifacts persist in the cache.
+          fail-on-cache-miss: false
+
+      - name: Install Mooncake wheel
+        if: steps.env-check.outputs.fresh != 'true'
+        run: |
+          set -euxo pipefail
+
+          apt-get install -y --no-install-recommends \
+            libibverbs1 \
+            ibverbs-providers \
+            librdmacm1 \
+            libnuma1
+          ldconfig
+
+          source "$GITHUB_WORKSPACE/.venv/bin/activate"
+          pip install --no-cache-dir --no-deps \
+            -i https://mirrors.aliyun.com/pypi/simple/ \
+            mooncake-transfer-engine-npu==0.3.11.post1
+
+          pip show mooncake-transfer-engine-npu || true
+
+      - name: Install vllm-project/vllm-ascend with device
+        if: steps.env-check.outputs.fresh != 'true'
+        env:
+          CSRC_CACHE_HIT: ${{ steps.cache-csrc.outputs.cache-hit }}
+        run: |
+          source "$GITHUB_WORKSPACE/.venv/bin/activate"
+          # Same as vllm-ascend CI (_e2e_nightly_single_node.yaml "Set
+          # MAX_JOBS based on runner"): MAX_JOBS = cards x 23.  The CPU
+          # cache-builder parallelism (matrix.max_jobs=184) OOM-killed all
+          # 54 opc compiles on the a2 runner; a2-1/310p-1 give 23.
+          CARDS=$(echo "${{ matrix.runner }}" | grep -oE '[0-9]+$')
+          export MAX_JOBS=$((CARDS * 23))
+          pip install uc-manager
+          uv pip install -r requirements-dev.txt
+          uv pip install --force-reinstall --no-deps triton-ascend==3.2.2
+          # Preserve CI availability during the transition by compiling on the
+          # NPU only when the new CPU-produced cache is unavailable.
+          if [ "$CSRC_CACHE_HIT" = "true" ]; then
+            echo "csrc cache hit: skip kernel compilation"
+            COMPILE_CUSTOM_KERNELS=0 uv pip install -e .
+          else
+            echo "csrc cache miss: compile kernels on the NPU runner"
+            uv pip install -e . --no-build-isolation
+          fi
+
+      - name: Save vllm-ascend csrc cache
+        # Same as vllm-ascend CI's cache pipeline: restore -> (miss) build
+        # -> save, so the next pod with the same csrc state hits instead of
+        # recompiling.  Save only what we compiled here (a restored cache
+        # must not be re-uploaded).
+        if: ${{ steps.env-check.outputs.fresh != 'true' && steps.cache-csrc.outputs.cache-hit != 'true' }}
+        uses: runs-on/cache/save@v5
+        with:
+          path: |
+            vllm_ascend/_cann_ops_custom
+            vllm_ascend/*.so
+            vllm_ascend/lib
+            vllm_ascend/include
+          key: vllm-ascend-build-v2-${{ steps.get_arch.outputs.arch }}-${{ matrix.image_tag }}-${{ steps.get_csrc_hash.outputs.CSRC_HASH }}
+
+      - name: Verify required AscendC custom ops are registered (310p)
+        if: ${{ steps.env-check.outputs.fresh != 'true' && matrix.image_tag == '9.1.0-310p-ubuntu22.04-py3.12' }}
+        run: |
+          source "$GITHUB_WORKSPACE/.venv/bin/activate"
+          python - <<'PY'
+          import sys, torch
+          import vllm_ascend.vllm_ascend_C  # noqa: F401
+          ops = torch.ops._C_ascend
+          missing = [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if not hasattr(ops, n)]
+          if missing:
+              print(f"::error::Missing AscendC ops after install: {missing}. "
+                      f"Cache contents are stale or build skipped registration.", file=sys.stderr)
+              sys.exit(1)
+          print("AscendC chunk-gdr ops registered:",
+                [n for n in ("chunk_gated_delta_rule_fwd_h", "chunk_fwd_o") if hasattr(ops, n)])
+          PY
+
+      - name: Uninstall Triton for 310P tests
+        if: ${{ steps.env-check.outputs.fresh != 'true' && matrix.image_tag == '9.1.0-310p-ubuntu22.04-py3.12' }}
+        run: |
+          source "$GITHUB_WORKSPACE/.venv/bin/activate"
+          pip uninstall -y triton-ascend triton
+
+      - name: Write freshness marker
+        if: steps.env-check.outputs.fresh != 'true'
+        run: |
+          # base_sha freezes the commit the env was built on: the resident
+          # loop diffs each round's signal commit against THIS sha to decide
+          # on a kernel rebuild — never against the moving branch tip.
+          base_sha=$(git rev-parse HEAD)
+          cat > "$GITHUB_WORKSPACE/.ready" <<EOF
+          vllm=${{ inputs.vllm }}
+          base_ref=${{ inputs.base_ref }}
+          base_sha=${base_sha}
+          image_tag=${{ matrix.image_tag }}
+          ready=true
+          EOF
+          echo "Prepared main2main E2E env:"
+          cat "$GITHUB_WORKSPACE/.ready"
+
+      - name: Report
+        run: |
+          if [ "${{ steps.env-check.outputs.fresh }}" = "true" ]; then
+            echo "main2main E2E env already prepared and fresh - no-op"
+          else
+            echo "main2main E2E env prepared"
+            ls -la "$GITHUB_WORKSPACE/.ready"
+          fi
+
+      # Resident command loop: the main2main flow force-pushes the signal
+      # branch once per E2E round (accumulated patch + test_groups.json +
+      # command.json = {"round": N, "main_run_id": ...}); this job picks
+      # every new commit up IN PLACE — same pod, same env, no cache
+      # re-fetch, no reinstall, no new job — runs the chip's tests, and
+      # pushes the round results to the per-chip results branch, where the
+      # flow finds them.  Exits (releasing the runner) only when the main
+      # run completes or the hold budget is exhausted.
+      - name: Serve E2E rounds (command loop)
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          CHIP: ${{ matrix.chip }}
+          PAIR_ALIGNED: ${{ matrix.pair_aligned }}
+          SIGNAL_BRANCH: ${{ inputs.signal_branch }}
+          SIGNAL_REPO: ${{ inputs.signal_repo || github.repository }}
+          FLOW_REF: ${{ inputs.flow_ref }}
+          MAIN_RUN_ID: ${{ inputs.main_run_id }}
+          MAIN_RUN_REPO: ${{ inputs.main_run_repo }}
+          VLLM_COMMIT: ${{ inputs.vllm }}
+          HOLD_MINUTES: ${{ inputs.hold_minutes }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re, shutil, subprocess, sys, tempfile, time
+          import glob
+          import urllib.request
+
+          ws = os.environ["GITHUB_WORKSPACE"]
+          chip = os.environ["CHIP"]
+          pair_aligned = os.environ.get("PAIR_ALIGNED") == "true"
+          repo = os.environ["GITHUB_REPOSITORY"]
+          signal_branch = os.environ["SIGNAL_BRANCH"]
+          flow_ref = os.environ["FLOW_REF"]
+          main_run_id = os.environ["MAIN_RUN_ID"]
+          main_run_repo = os.environ["MAIN_RUN_REPO"] or repo
+          hold_minutes = int(os.environ["HOLD_MINUTES"])
+          token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN", "")
+          git_url = ("https://x-access-token:" + token + "@github.com/"
+                     + os.environ["SIGNAL_REPO"])
+          results_branch = signal_branch + "_results_" + chip
+          results_dir = os.path.join(ws, "main2main-e2e-results")
+          run_tests_py = os.path.join(ws, "main2main_flow",
+                                      "main2main_flow", "scripts", "utils",
+                                      "run_tests.py")
+
+          def log(msg):
+              print(f"[serve {chip}] {time.strftime('%H:%M:%S')} {msg}",
+                    flush=True)
+
+          def git(*args, cwd=ws, check=True):
+              r = subprocess.run(["git", *args], cwd=cwd,
+                                 capture_output=True, text=True)
+              if check and r.returncode != 0:
+                  raise RuntimeError("git " + " ".join(args[:4]) + ": "
+                                     + r.stderr.strip()[-400:])
+              return r
+
+          def gh_get(url):
+              req = urllib.request.Request(url, headers={
+                  "Authorization": "Bearer " + token,
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28"})
+              with urllib.request.urlopen(req, timeout=30) as resp:
+                  return json.load(resp)
+
+          def remote_sha(ref):
+              out = git("ls-remote", git_url, ref, check=False).stdout.split()
+              return out[0] if out else ""
+
+          # Sync main2main_flow (run_tests.py source) once before serving.
+          flow_dir = os.path.join(ws, "main2main_flow")
+          if not os.path.isdir(os.path.join(flow_dir, ".git")):
+              git("clone", "--branch", flow_ref,
+                  "https://github.com/vllm-ascend/main2main_flow.git",
+                  flow_dir)
+          else:
+              git("-C", flow_dir, "fetch", "origin", flow_ref)
+              git("-C", flow_dir, "checkout", "--detach", "FETCH_HEAD")
+          subprocess.run(
+              ["bash", "-c",
+               'source "' + ws + '/.venv/bin/activate" && '
+               'pip install -e "' + flow_dir + '"'], check=True)
+
+          def write_empty_result(round_no):
+              out = {"can_commit": True, "ci_result": "passed",
+                     "suite_results": {},
+                     "rounds": [{"round": round_no, "tests": [],
+                                 "cards_used": 0, "total_cards": 0,
+                                 "elapsed_s": 0.0}], "elapsed_s": 0.0}
+              json.dump(out, open(os.path.join(
+                  results_dir, "0", "tests",
+                  "round-" + str(round_no) + "-result.json"), "w"), indent=2)
+
+          # Per-test progress lines run_tests.py writes to stdout; the flow
+          # relays them into the main run's log while the round is pending.
+          # The jobs' own log API is not readable mid-run, so every event is
+          # also pushed to round-<N>-progress.json on the results branch.
+          _RE_STARTED = re.compile(r"\[([^\[\]]+)\] started \(\d+ card")
+          _RE_DONE = re.compile(
+              r"\[([^\[\]]+)\] done: exit=(-?\d+), result=(\S+), "
+              r"bugs=(\d+), flakes=(\d+)")
+
+          def push_progress(round_no, events):
+              try:
+                  pd = tempfile.mkdtemp(prefix="m2m-progress-")
+                  subprocess.run(["git", "init", "-q"], cwd=pd, check=True)
+                  body = json.dumps({"round": round_no,
+                                     "main_run_id": main_run_id,
+                                     "events": events}, indent=2) + "\n"
+                  open(os.path.join(pd, "round-" + str(round_no)
+                                    + "-progress.json"), "w").write(body)
+                  subprocess.run(["git", "add", "-A"], cwd=pd, check=True)
+                  subprocess.run(
+                      ["git", "-c", "user.name=main2main-bot",
+                       "-c", "user.email=main2main-bot@users.noreply.github.com",
+                       "commit", "-q", "-m",
+                       "main2main e2e round " + str(round_no)
+                       + " progress (" + chip + ")"], cwd=pd, check=True)
+                  subprocess.run(
+                      ["git", "push", "-q", "--force", git_url,
+                       "HEAD:refs/heads/" + results_branch],
+                      cwd=pd, check=True, capture_output=True)
+                  shutil.rmtree(pd, ignore_errors=True)
+              except Exception as exc:
+                  log("round " + str(round_no) + ": progress push failed: "
+                      + str(exc))
+
+          def run_tests_streaming(round_no, script):
+              """Run the tests, mirroring stdout and pushing per-test
+              started/done events to the results branch as they happen."""
+              events = []
+              proc = subprocess.Popen(
+                  ["bash", "-c", script], stdout=subprocess.PIPE,
+                  stderr=subprocess.STDOUT, text=True, bufsize=1)
+              assert proc.stdout is not None
+              for line in proc.stdout:
+                  sys.stdout.write(line)
+                  sys.stdout.flush()
+                  m = _RE_STARTED.search(line)
+                  if m:
+                      events.append({"test": m.group(1), "event": "started"})
+                      push_progress(round_no, events)
+                      continue
+                  m = _RE_DONE.search(line)
+                  if m:
+                      events.append({"test": m.group(1), "event": "done",
+                                     "exit": int(m.group(2)),
+                                     "result": m.group(3),
+                                     "bugs": int(m.group(4)),
+                                     "flakes": int(m.group(5))})
+                      push_progress(round_no, events)
+              proc.wait()
+              return proc.returncode
+
+          def serve_round(round_no):
+              shutil.rmtree(results_dir, ignore_errors=True)
+              tests_dir = os.path.join(results_dir, "0", "tests")
+              os.makedirs(tests_dir)
+              groups = json.load(open(os.path.join(ws, "test_groups.json")))
+              mine = [g for g in groups if g.get("npu_type") == chip]
+              expected, cases = [], []
+              for g in mine:
+                  cards = int(g.get("num_npus", 1))
+                  for t in g.get("tests", "").split():
+                      expected.append({"test": t, "cards_required": cards})
+                      cases.append(t + "@" + str(cards))
+              json.dump(expected, open(os.path.join(
+                  tests_dir, "expected_tests.json"), "w"), indent=2)
+              open(os.path.join(results_dir, "test_cases.txt"), "w").write(
+                  "\n".join(cases))
+              log("round " + str(round_no) + ": "
+                  + str(len(cases)) + " test(s) selected")
+              if not cases:
+                  write_empty_result(round_no)
+                  return
+              # Rounds only swap the adapted python code (the in-place
+              # checkout above); the prep-built env — kernels, venv, and
+              # the vllm checkout at the run's fixed commit — is reused
+              # untouched.  A mid-run reinstall/rebuild is explicitly not
+              # wanted here: a base_sha diff spans different repo histories
+              # (prep repo vs signal fork) and always looked "changed",
+              # triggering a full kernel rebuild per round.  Runner-side
+              # env issues are debugged separately on the runner.
+              log("reusing prep-built env (no kernel rebuild)")
+              # Devices appear under their HOST physical id in /dev and
+              # npu-smi (a2: NPU 7, 310p: NPU 14), but acl enumerates them
+              # 0-based inside the container.  Deriving the visible set
+              # here keeps run_tests.py's ASCEND_RT_VISIBLE_DEVICES
+              # assignment within what torch_npu can actually open —
+              # passing the host id left it an empty device set (aclInit
+              # 107001, "Expected value: [0, 0)", 2026-08-28 iteration 2).
+              visible = ",".join(
+                  str(i) for i in range(len(glob.glob(
+                      "/dev/davinci[0-9]*"))))
+              script = (
+                  'set -uo pipefail\n'
+                  'source "' + ws + '/.venv/bin/activate"\n'
+                  '. /usr/local/Ascend/ascend-toolkit/set_env.sh\n'
+                  'export VLLM_WORKER_MULTIPROC_METHOD=spawn\n'
+                  'export ASCEND_RT_VISIBLE_DEVICES="' + visible + '"\n'
+                  'cd "' + ws + '"\n')
+              quoted_cases = " ".join('"' + c + '"' for c in cases)
+              script += (
+                  'python3 "' + run_tests_py + '" '
+                  '--vllm-path "' + ws + '/vllm-empty" '
+                  '--vllm-commit "' + os.environ["VLLM_COMMIT"] + '" '
+                  '--ascend-path "' + ws + '" '
+                  '--ascend-commit "' + git("rev-parse", "HEAD").stdout.strip()
+                  + '" '
+                  '--step-id 0 '
+                  '--round ' + str(round_no) + ' '
+                  '--skip-setup '
+                  '--log-dir "' + results_dir + '" '
+                  + ("--pair-aligned-devices " if pair_aligned else "")
+                  + '--test-cases ' + quoted_cases + '\n')
+              rc = run_tests_streaming(round_no, script)
+              log("round " + str(round_no)
+                  + ": tests exited " + str(rc))
+
+          def push_results(round_no, cmd_sha):
+              wt = tempfile.mkdtemp(prefix="m2m-results-")
+              try:
+                  git("worktree", "add", "-f", "--detach", wt, "HEAD")
+                  dst = os.path.join(wt, "round-" + str(round_no))
+                  shutil.copytree(os.path.join(results_dir, "0", "tests"),
+                                  dst)
+                  # Identity: lets the flow reject results left over from an
+                  # earlier same-numbered round (previous step / chained run).
+                  json.dump({"round": round_no, "main_run_id": main_run_id,
+                             "command_sha": cmd_sha},
+                            open(os.path.join(dst, "round-meta.json"), "w"),
+                            indent=2)
+                  # -f: the repo's .gitignore excludes *.log, which would
+                  # silently drop every per-test log from the results
+                  # branch (observed 2026-08-28 round 1: summaries pushed,
+                  # all logs missing).
+                  git("add", "-A", "-f", "round-" + str(round_no), cwd=wt)
+                  git("-c", "user.name=main2main-bot",
+                      "-c", "user.email=main2main-bot@users.noreply.github.com",
+                      "commit", "-m",
+                      "main2main e2e round " + str(round_no)
+                      + " results (" + chip + ")", cwd=wt)
+                  git("push", "--force", git_url,
+                      "HEAD:refs/heads/" + results_branch, cwd=wt)
+                  log("round " + str(round_no) + ": results pushed to "
+                      + results_branch)
+              finally:
+                  git("worktree", "remove", "--force", wt, check=False)
+
+          deadline = time.time() + hold_minutes * 60
+          seen = ""
+          served = set()
+          checkout_fails = 0
+          last_beat = time.time()
+          log("resident loop up (signal=" + signal_branch
+              + ", results=" + results_branch
+              + ", hold=" + str(hold_minutes) + "min)")
+          while time.time() < deadline:
+              if main_run_id:
+                  # Stop when the main run reaches a terminal state
+                  # (incl. cancelled) — the runners are ours only while it
+                  # lives.
+                  try:
+                      r = gh_get("https://api.github.com/repos/"
+                                 + main_run_repo + "/actions/runs/"
+                                 + main_run_id)
+                      if r.get("status") == "completed":
+                          log("main run " + main_run_id + " completed ("
+                              + str(r.get("conclusion"))
+                              + ") - releasing runner")
+                          break
+                  except Exception as exc:
+                      log("main-run probe failed: " + str(exc))
+              sha = remote_sha(signal_branch)
+              if sha and sha != seen:
+                  # Nothing below may raise out of the loop: an unhandled
+                  # exception would kill the resident while the main run
+                  # still lives.
+                  cmd = {}
+                  ok = True
+                  try:
+                      git("fetch", "--force", "--no-tags", git_url,
+                          signal_branch)
+                      raw = git("show", "FETCH_HEAD:command.json",
+                                check=False).stdout
+                      cmd = json.loads(raw) if raw.strip() else {}
+                  except Exception as exc:
+                      ok = False
+                      log("command fetch failed (will retry): " + str(exc))
+                  if ok and cmd.get("main_run_id") != main_run_id:
+                      log("signal commit " + sha[:12]
+                          + " is not for this main run - ignored")
+                      seen = sha
+                  elif ok:
+                      try:
+                          round_no = int(cmd.get("round", -1))
+                      except (TypeError, ValueError):
+                          round_no = -1
+                      if round_no < 0 or round_no in served:
+                          log("round " + str(round_no)
+                              + ": nothing to serve - skip")
+                          seen = sha
+                      else:
+                          log("round " + str(round_no)
+                              + ": command received (" + sha[:12] + ")")
+                          try:
+                              # Check the signal snapshot out in place (same
+                              # pod/env — only the tracked files move).
+                              git("checkout", "--force", "--detach",
+                                  "FETCH_HEAD")
+                              git("submodule", "sync", "--recursive")
+                              git("submodule", "update", "--init",
+                                  "--recursive")
+                              log("signal HEAD: "
+                                  + git("log", "-1",
+                                        "--oneline").stdout.strip())
+                          except Exception as exc:
+                              # Transient network/checkout failure: retry
+                              # the same sha on the next poll; give up after
+                              # 3 consecutive failures (the flow times the
+                              # round out and pushes a new command).
+                              checkout_fails += 1
+                              log("round " + str(round_no)
+                                  + " checkout FAILED (attempt "
+                                  + str(checkout_fails) + "/3): "
+                                  + str(exc))
+                              if checkout_fails >= 3:
+                                  served.add(round_no)
+                                  seen = sha
+                                  checkout_fails = 0
+                          else:
+                              served.add(round_no)
+                              seen = sha
+                              checkout_fails = 0
+                              try:
+                                  serve_round(round_no)
+                              except Exception as exc:
+                                  log("round " + str(round_no)
+                                      + " FAILED: " + str(exc))
+                              try:
+                                  push_results(round_no, sha)
+                              except Exception as exc:
+                                  log("round " + str(round_no)
+                                      + " results push FAILED: " + str(exc))
+              if time.time() - last_beat > 600:
+                  last_beat = time.time()
+                  log("heartbeat (holding the runner)")
+              time.sleep(20)
+          log("hold budget exhausted - releasing runner")
+          sys.exit(0)
+          PY
