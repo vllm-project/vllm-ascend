@@ -1643,7 +1643,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 return None
 
             dense_inputs: list[tuple[torch.Tensor, torch.Tensor, M]] = []
-            tail_spans: list[tuple[int, int]] = []
+            exact_tail_spans: list[tuple[int, int]] = []
             for request, start in enumerate(query_starts):
                 dense_end = start + SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
                 dense_q = ql_nope[start:dense_end]
@@ -1657,7 +1657,7 @@ class AscendSFAImpl(MLAAttentionImpl):
                 dense_metadata.num_actual_tokens = SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
                 dense_metadata.num_input_tokens = SFA_FIA_SHARED_PREFILL_TOPK_WIDTH
                 dense_inputs.append((dense_q, dense_rope, dense_metadata))
-                tail_spans.append((dense_end, query_ends[request]))
+                exact_tail_spans.append((dense_end, query_ends[request]))
 
             # Validate every segment before submitting the first FIA kernel. A
             # late per-segment decline must never replay the incumbent after an
@@ -1672,18 +1672,18 @@ class AscendSFAImpl(MLAAttentionImpl):
                     return tensor[start:end]
                 return torch.cat([tensor[start:end] for start, end in spans], dim=0)
 
-            tail_q = pack_exact_rows(ql_nope, tuple(tail_spans))
-            tail_rope = pack_exact_rows(q_pe, tuple(tail_spans))
-            tail_indices = pack_exact_rows(topk_indices, tuple(tail_spans))
+            tail_q = pack_exact_rows(ql_nope, tuple(exact_tail_spans))
+            tail_rope = pack_exact_rows(q_pe, tuple(exact_tail_spans))
+            tail_indices = pack_exact_rows(topk_indices, tuple(exact_tail_spans))
             tail_metadata = copy(attn_metadata)
             tail_metadata.block_table = attn_metadata.block_table
-            tail_query_ends = [
+            exact_tail_query_ends = [
                 (request + 1) * (SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_QUERY_LENGTH - SFA_FIA_SHARED_PREFILL_TOPK_WIDTH)
                 for request in range(SFA_FIA_SHARED_PREFILL_MULTI_SEGMENT_REQUESTS)
             ]
-            tail_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(tail_query_ends)
+            tail_metadata.cum_query_lens_cpu = cum_query_lens_cpu.new_tensor(exact_tail_query_ends)
             tail_metadata.seq_lens_cpu = seq_lens_cpu.new_tensor(kv_lengths)
-            tail_metadata.cum_query_lens = cum_query_lens.new_tensor(tail_query_ends)
+            tail_metadata.cum_query_lens = cum_query_lens.new_tensor(exact_tail_query_ends)
             tail_metadata.seq_lens = seq_lens.new_tensor(kv_lengths)
             tail_metadata.num_actual_tokens = tail_q.shape[0]
             tail_metadata.num_input_tokens = tail_q.shape[0]
@@ -1717,7 +1717,7 @@ class AscendSFAImpl(MLAAttentionImpl):
 
             outputs = []
             tail_cursor = 0
-            for dense_output, (tail_start, tail_end) in zip(dense_outputs, tail_spans, strict=True):
+            for dense_output, (tail_start, tail_end) in zip(dense_outputs, exact_tail_spans, strict=True):
                 outputs.append(dense_output)
                 tail_length = tail_end - tail_start
                 outputs.append(tail_output[tail_cursor : tail_cursor + tail_length])
