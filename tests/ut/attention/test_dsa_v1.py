@@ -260,9 +260,10 @@ def test_num_compressor_metadata_rows(
     assert builder._num_compressor_metadata_rows(num_reqs) == expected_rows
 
 
+@pytest.mark.parametrize("a5_bf16", [False, True])
 @pytest.mark.parametrize("use_sparse_flash", [False, True])
 @patch("vllm_ascend.attention.dsa_v1._draft_uses_sparse_flash_mla")
-def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_sparse_flash):
+def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_sparse_flash, a5_bf16):
     draft_uses_sparse_flash.return_value = use_sparse_flash
     builder = _make_builder(1, num_speculative_tokens=3)
     builder.enable_dspark_device_metadata(max_num_tokens=16)
@@ -277,6 +278,7 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
 
     with (
         patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla_metadata", metadata_op),
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=a5_bf16),
         patch.object(
             DeviceOperator,
             "get_dsa_decode_cu_seqlens_ori_kv",
@@ -310,7 +312,7 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
             assert kwargs["ori_topk"] == metadata.dspark_swa_indices.shape[-1]
             assert kwargs["ori_topk_length"] is lengths
             assert kwargs["ori_mask_mode"] == 0
-            assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == 0
+            assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == (-1 if a5_bf16 else 0)
         first_indices = metadata.dspark_swa_indices.clone()
         next_metadata = _build_draft_req_metadata(
             builder,
@@ -2164,8 +2166,9 @@ def test_dspark_indices_preserve_physical_fallback(logical_indices):
     assert lengths.flatten().tolist() == [6] * 3
 
 
+@pytest.mark.parametrize("a5_bf16", [False, True])
 @pytest.mark.parametrize("is_draft", [False, True])
-def test_sparse_flash_forward_requires_draft_metadata(is_draft):
+def test_sparse_flash_forward_requires_draft_metadata(is_draft, a5_bf16):
     impl = _make_impl()
     impl.compress_ratio = 1
     impl.multistream_dsv4_dsa_overlap = False
@@ -2186,7 +2189,7 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     with (
         patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
         patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla", draft_op),
-        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=a5_bf16),
         patch.object(
             DeviceOperator, "unpack_dsa_forward_kv_cache", return_value=(None, torch.empty(0), None, None, None, None)
         ),
@@ -2204,6 +2207,6 @@ def test_sparse_flash_forward_requires_draft_metadata(is_draft):
     assert kwargs["ori_mask_mode"] == (0 if is_draft else 4)
     if is_draft:
         assert kwargs["ori_topk_length"] is req.dspark_swa_topk_lengths
-        assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == 0
+        assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == (-1 if a5_bf16 else 0)
     else:
         assert "ori_topk_length" not in kwargs

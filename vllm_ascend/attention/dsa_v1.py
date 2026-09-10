@@ -197,8 +197,11 @@ def _has_weight_scale(linear) -> bool:
     return getattr(linear, "weight_scale", None) is not None
 
 
-# The explicit sparse SWA template uses indices to express draft visibility.
-_DRAFT_SPARSE_FLASH_MLA_KWARGS = dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=3, ori_win_left=0, ori_win_right=0)
+def _draft_sparse_flash_mla_kwargs(vllm_config: VllmConfig) -> dict[str, int]:
+    # Visibility comes from explicit indices. A5 disables band windows with -1;
+    # the A2/A3 explicit sparse template requires non-negative window values.
+    window = -1 if is_a5_bf16_kv_enabled(vllm_config) else 0
+    return dict(cmp_ratio=1, ori_mask_mode=0, cmp_mask_mode=3, ori_win_left=window, ori_win_right=window)
 
 
 def _draft_uses_sparse_flash_mla(vllm_config: VllmConfig) -> bool:
@@ -1416,7 +1419,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         if use_sparse_flash:
             assert dspark_swa_indices is not None
             metadata_op = sparse_flash_mla_metadata
-            metadata_kwargs.update(_DRAFT_SPARSE_FLASH_MLA_KWARGS)
+            metadata_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
             metadata_kwargs.update(
                 ori_topk_length=dspark_swa_topk_lengths,
                 ori_topk=dspark_swa_indices.shape[-1],
@@ -2271,7 +2274,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
                 assert common_metadata.dspark_swa_indices is not None
                 assert common_metadata.dspark_swa_topk_lengths is not None
                 attn_op = sparse_flash_mla
-                attn_kwargs.update(_DRAFT_SPARSE_FLASH_MLA_KWARGS)
+                attn_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
                 attn_kwargs.update(
                     ori_sparse_indices=common_metadata.dspark_swa_indices,
                     ori_topk_length=common_metadata.dspark_swa_topk_lengths,
