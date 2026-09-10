@@ -3,15 +3,12 @@
 import math
 from collections import defaultdict
 
+import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils
 from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils.math_utils import cdiv, round_up
-
-try:  # vLLM PR #53558 moved these planning helpers into kv_cache_planning.
-    from vllm.v1.core.kv_cache_planning import _approximate_gcd, may_override_num_blocks
-except ImportError:  # v0.28.0 / pre-#53558 lanes keep them in kv_cache_utils.
-    from vllm.v1.core.kv_cache_utils import _approximate_gcd, may_override_num_blocks
+from vllm.v1.core.kv_cache_planning import _approximate_gcd, may_override_num_blocks
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -40,34 +37,14 @@ _KIMI_K3_TARGET_LAYER_PREFIX = "language_model.model.layers."
 _KIMI_K3_DRAFT_LAYER_PREFIX = "model.layers."
 
 
-def _resolve_patch_target():
-    """Return the module owning the KV cache planning entry points.
-
-    vLLM PR #53558 split group planning out of ``kv_cache_utils`` into
-    ``kv_cache_planning``; older lanes (v0.28.0 and pre-#53558 main) keep the
-    entry points in ``kv_cache_utils``.
-    """
-    try:
-        import vllm.v1.core.kv_cache_planning as planning
-
-        return planning
-    except ImportError:
-        return vllm.v1.core.kv_cache_utils
-
-
-_PATCH_TARGET = _resolve_patch_target()
-
-
-def _orig_attr(name: str):
-    return getattr(_PATCH_TARGET, name, getattr(vllm.v1.core.kv_cache_utils, name, None))
-
-
-_orig_resolve_kv_cache_block_sizes = _orig_attr("resolve_kv_cache_block_sizes")
-_orig_get_kv_cache_groups_uniform_page_size = _orig_attr("_get_kv_cache_groups_uniform_page_size")
-_orig_get_kv_cache_groups = _orig_attr("get_kv_cache_groups")
-_orig_get_kv_cache_config_from_groups = _orig_attr("get_kv_cache_config_from_groups")
-_orig_max_memory_usage_bytes_from_groups = _orig_attr("_max_memory_usage_bytes_from_groups")
-_orig_pool_bytes_per_block = _orig_attr("_pool_bytes_per_block")
+# vLLM PR #53558 split group planning out of ``kv_cache_utils`` into
+# ``kv_cache_planning``; the planning entry points are patched there.
+_orig_resolve_kv_cache_block_sizes = vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes
+_orig_get_kv_cache_groups_uniform_page_size = kv_cache_planning._get_kv_cache_groups_uniform_page_size
+_orig_get_kv_cache_groups = kv_cache_planning.get_kv_cache_groups
+_orig_get_kv_cache_config_from_groups = kv_cache_planning.get_kv_cache_config_from_groups
+_orig_max_memory_usage_bytes_from_groups = kv_cache_planning._max_memory_usage_bytes_from_groups
+_orig_pool_bytes_per_block = kv_cache_planning._pool_bytes_per_block
 
 
 if UniformTypeKVCacheSpecs.max_num_blocks_per_req is KVCacheSpec.max_num_blocks_per_req:
@@ -602,24 +579,26 @@ def _ascend_get_kv_cache_config_from_groups(
     )
 
 
-# ``resolve_kv_cache_block_sizes`` stays in kv_cache_utils on every lane.
+# ``resolve_kv_cache_block_sizes`` still lives in kv_cache_utils on the
+# vLLM lane carrying PR #53558; the plan-related entry points were split out
+# into kv_cache_planning and are patched there.
 vllm.v1.core.kv_cache_utils.resolve_kv_cache_block_sizes = _ascend_resolve_kv_cache_block_sizes
-_PATCH_TARGET.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
-_PATCH_TARGET._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
-_PATCH_TARGET._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
+kv_cache_planning.group_and_unify_kv_cache_specs = group_and_unify_kv_cache_specs
+kv_cache_planning._get_kv_cache_groups_uniform_groups = _get_kv_cache_groups_uniform_groups
+kv_cache_planning._get_kv_cache_groups_uniform_page_size = _get_kv_cache_groups_uniform_page_size
 # vLLM v0.24.0 renamed _get_kv_cache_config_deepseek_v4 to
 # _get_kv_cache_config_packed. The v0.28.0 planner still consumes shared_by;
 # main uses _ascend_get_kv_cache_config_from_groups and the stride-aware planner.
 if vllm_version_is("0.28.0"):
-    _PATCH_TARGET._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
-_PATCH_TARGET.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
+    kv_cache_planning._get_kv_cache_config_packed = _get_kv_cache_config_deepseek_v4
+kv_cache_planning.get_kv_cache_groups = _get_glm5_next_kv_cache_groups
 KVCacheConfig.has_mamba_layers = property(  # type: ignore[assignment]
     _kv_cache_config_has_mamba_layers
 )
-_PATCH_TARGET.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
-_PATCH_TARGET._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
+kv_cache_planning.get_kv_cache_config_from_groups = _ascend_get_kv_cache_config_from_groups
+kv_cache_planning._max_memory_usage_bytes_from_groups = _ascend_max_memory_usage_bytes_from_groups
 if not vllm_version_is("0.28.0"):
-    _PATCH_TARGET._pool_bytes_per_block = _ascend_pool_bytes_per_block
+    kv_cache_planning._pool_bytes_per_block = _ascend_pool_bytes_per_block
 
 # Also patch the reference used by engine/core.py which imports the function directly.
 import vllm.v1.engine.core  # noqa: E402

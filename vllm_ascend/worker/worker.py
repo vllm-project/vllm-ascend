@@ -48,11 +48,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-
-try:  # vLLM PR #53558 moved the KV cache planning entry to kv_cache_planning.
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
-except ImportError:  # Older vLLM lanes (v0.28.0 / pre-#53558 main) keep it in kv_cache_utils.
-    from vllm.v1.core.kv_cache_utils import get_kv_cache_groups
+from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,

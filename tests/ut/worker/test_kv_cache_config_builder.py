@@ -7,22 +7,12 @@ Covers the DeepSeekV4 grouping + non-packed shared-tensor layout in
 ``NPUPlatform.get_kv_cache_config_builder_cls``, vLLM PR #53558).
 """
 
-import pytest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-# Only the vLLM lane carrying PR #53558 (kv_cache_planning) wires the pluggable
-# KV cache config builder; older lanes (v0.28.0 / pre-#53558 main) are covered by
-# tests/ut/patch/platform/test_prefix_cache_cp_patches.py.
-pytest.importorskip(
-    "vllm.v1.core.kv_cache_planning",
-    reason="AscendKVCacheConfigBuilder requires vLLM PR #53558.",
-)
-
-from types import SimpleNamespace  # noqa: E402
-from unittest.mock import patch  # noqa: E402
-
-import torch  # noqa: E402
-import vllm.v1.core.kv_cache_planning as kv_cache_planning  # noqa: E402
-from vllm.v1.kv_cache_interface import (  # noqa: E402
+import torch
+import vllm.v1.core.kv_cache_planning as kv_cache_planning
+from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     KVCacheSpec,
@@ -31,7 +21,7 @@ from vllm.v1.kv_cache_interface import (  # noqa: E402
     UniformTypeKVCacheSpecs,
 )
 
-from vllm_ascend.worker.kv_cache_config_builder import (  # noqa: E402
+from vllm_ascend.worker.kv_cache_config_builder import (
     AscendKVCacheConfigBuilder,
     _ascend_get_kv_cache_config_from_groups,
     _ascend_get_kv_cache_groups_uniform_groups,
