@@ -488,6 +488,8 @@ class TestProfilingChunkScheduler(TestBase):
         self.assertEqual(ProfilingChunkScheduler._build_rpc_kwargs(NoRank()), {})
 
         class WithRank:
+            vllm_config = None
+
             def collective_rpc(self, method, args=(), unique_reply_rank=None):
                 pass
 
