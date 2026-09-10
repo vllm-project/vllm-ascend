@@ -1669,7 +1669,7 @@ class MooncakeConnectorWorker:
                     cur_tensor_group_idx.append(layer_group_idx[layer_name])
                     kv_cache_tuple = kv_caches[layer_name]
                     if not isinstance(kv_cache_tuple, (tuple, list)):
-                        kv_cache_tuple = kv_cache_tuple
+                        kv_cache_tuple = [kv_cache_tuple]
                     for single_tensor in kv_cache_tuple:
                         tensor_addr = single_tensor.data_ptr()
                         if tensor_addr in share_tensor_addr or tensor_addr in self.kv_caches_base_addr:
