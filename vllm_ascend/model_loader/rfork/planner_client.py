@@ -3,6 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
+import hashlib
 import math
 import threading
 import time
@@ -13,11 +14,17 @@ from vllm.utils.network_utils import get_ip
 
 from vllm_ascend.model_loader.rfork.config import RForkConfig
 from vllm_ascend.model_loader.rfork.identity import build_seed_key
-from vllm_ascend.model_loader.rfork.types import RForkIdentity, SeedAdvertisement, SeedLease
+from vllm_ascend.model_loader.rfork.types import LeaseReleaseResult, RForkIdentity, SeedAdvertisement, SeedLease
 
 HEARTBEAT_LOG_EVERY_N = 4
 RELEASE_MAX_RETRIES = 3
 RELEASE_RETRY_BACKOFF_SEC = 0.1
+RESPONSE_LOG_MAX_CHARS = 256
+
+
+def lease_log_id(lease: SeedLease) -> str:
+    """Correlate attempts without logging the lease credential itself."""
+    return hashlib.sha256(lease.user_id.encode()).hexdigest()[:12]
 
 
 class RForkPlannerClient:
@@ -107,12 +114,13 @@ class RForkPlannerClient:
             logger.warning("RFork planner seed acquisition failed: %s", exc)
             return None
 
-    def release_seed(self, lease: SeedLease) -> bool:
+    def release_seed_once(self, lease: SeedLease) -> LeaseReleaseResult:
+        """Send one bounded-timeout request; the session owns background retries."""
         try:
             self._require_planner()
         except RuntimeError as exc:
             logger.warning("RFork planner lease release setup failed: %s", exc)
-            return False
+            return LeaseReleaseResult.REJECTED
 
         headers = {
             "SEED_IP": lease.seed_ip,
@@ -120,28 +128,46 @@ class RForkPlannerClient:
             "USER_ID": lease.user_id,
             "SEED_RANK": str(lease.seed_rank),
         }
-        for attempt in range(self.release_max_retries):
-            try:
-                response = requests.post(
-                    f"{self.planner_url}/put_seed",
-                    headers=headers,
-                    timeout=self.request_timeout_sec,
-                )
-                if response.status_code in (200, 404):
-                    return True
-                logger.warning(
-                    "RFork planner lease release attempt %d/%d returned status=%s",
-                    attempt + 1,
-                    self.release_max_retries,
+        try:
+            response = requests.post(
+                f"{self.planner_url}/put_seed",
+                headers=headers,
+                timeout=self.request_timeout_sec,
+                allow_redirects=False,
+            )
+            if response.status_code in (200, 404):
+                logger.info(
+                    "RFork lease release acknowledged: lease=%s status=%s "
+                    "(404 means absent, not verified timely release)",
+                    lease_log_id(lease),
                     response.status_code,
                 )
-            except Exception as exc:
-                logger.warning(
-                    "RFork planner lease release attempt %d/%d failed: %s",
-                    attempt + 1,
-                    self.release_max_retries,
-                    exc,
-                )
+                return LeaseReleaseResult.RELEASED
+            body = response.text.replace(lease.user_id, "<lease-id>") if lease.user_id else response.text
+            body = "".join(char if char.isprintable() else " " for char in body[:RESPONSE_LOG_MAX_CHARS])
+            logger.warning(
+                "RFork planner lease release rejected: lease=%s status=%s response=%r",
+                lease_log_id(lease),
+                response.status_code,
+                body,
+            )
+            if response.status_code in (408, 429) or 500 <= response.status_code < 600:
+                return LeaseReleaseResult.RETRYABLE
+            return LeaseReleaseResult.REJECTED
+        except requests.RequestException as exc:
+            logger.warning(
+                "RFork lease release request failed: lease=%s error=%s", lease_log_id(lease), type(exc).__name__
+            )
+            return LeaseReleaseResult.RETRYABLE
+
+    def release_seed(self, lease: SeedLease) -> bool:
+        """Synchronous bounded retry helper; startup uses release_seed_once in a worker."""
+        for attempt in range(self.release_max_retries):
+            result = self.release_seed_once(lease)
+            if result is LeaseReleaseResult.RELEASED:
+                return True
+            if result is LeaseReleaseResult.REJECTED:
+                return False
             if attempt + 1 < self.release_max_retries and self.release_retry_backoff_sec > 0:
                 time.sleep(self.release_retry_backoff_sec * (attempt + 1))
         return False

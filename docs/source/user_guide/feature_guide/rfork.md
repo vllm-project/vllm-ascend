@@ -174,6 +174,10 @@ Two instances must agree on model identity and parallel layout before the planne
 
 ### Planner Responsibilities
 
+Lease release runs asynchronously after transfer. Planner release requests never hold the session lock. The client makes at most three release attempts per lease, waiting 30 seconds between transient failures (network errors, HTTP 408/429, or 5xx). Other rejections stop immediately; HTTP 200 and 404 retain their existing acknowledgement semantics. Failed releases do not reload valid weights or prevent model loading from continuing, but the worker is not advertised as a new seed until release is acknowledged. After retry exhaustion, the unresolved lease remains recorded and requires planner-side investigation/recovery. Shutdown does not wait for release I/O and retains TransferEngine resources if release is unresolved.
+
+Release logs include a hashed lease identifier, attempt count, elapsed acquisition-to-release time, HTTP status and a bounded response excerpt with control characters removed and the lease ID redacted. These allow diagnosis without printing the raw USER_ID credential. Per-request timeouts are connect/read inactivity limits, not a strict total wall-clock deadline.
+
 The example planner reclaims abandoned leases after 60 seconds by default, independently of seed heartbeat expiry. Configure a positive integer duration with `--lease-ttl-sec` or `RFORK_MOCK_LEASE_TTL_SEC`; an explicit CLI value takes precedence over a valid environment value. The lease starts at seed acquisition, before model initialization and layout preparation, so size this timeout for the entire acquisition-to-release interval, not just weight transfer. Seed heartbeats do not renew leases. Expired leases return 404 on release, which the current client accepts as already released; successful startup alone does not prove that the lease remained valid throughout transfer.
 
 For example, start the planner with a 60-second lease TTL:

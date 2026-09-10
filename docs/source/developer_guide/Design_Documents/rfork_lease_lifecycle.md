@@ -72,10 +72,20 @@ seed-hit and seed-miss startup cost and memory on NPU before adopting the change
 
 ## Release retries and startup progress
 
-Release failure is also a startup-latency problem in the current client. After a
-successful transfer, the startup thread synchronously calls `release_seed`, which
-can make three HTTP attempts. The subsequent background retry has no total attempt
-or lifetime budget and performs network I/O while holding the session RLock.
+The release-decoupling implementation now uses one asynchronous worker per lease,
+with at most three single-request attempts and 30 seconds between transient failures.
+Release HTTP calls execute outside the session lock. Permanent rejection stops the
+worker immediately. Retry exhaustion retains an unresolved lease and suppresses seed
+promotion; it does not claim release success or fail a successfully transferred model.
+Shutdown signals cancellation without waiting for release I/O, and retains resources
+until release has been acknowledged. Per-request timeouts remain inactivity limits.
+An event-controlled CPU test verifies startup progress and shutdown while release
+I/O is blocked. NPU and customer-planner integration remain to be validated.
+
+Before this change, release failure was also a startup-latency problem. After a
+successful transfer, the startup thread synchronously called `release_seed`, which
+could make three HTTP attempts. The subsequent background retry had no total attempt
+or lifetime budget and performed network I/O while holding the session RLock.
 `start_seed_service` needs the same lock, so a background network stall can delay the
 startup thread before it even returns DEFERRED. Requests connect/read timeouts are
 not a strict end-to-end deadline. Fast 400 responses alone do not prove a permanent

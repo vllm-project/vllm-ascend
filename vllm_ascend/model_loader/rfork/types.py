@@ -17,6 +17,12 @@ class RForkLifecycleState(Enum):
     FINALIZED = auto()
 
 
+class LeaseReleaseResult(Enum):
+    RELEASED = auto()
+    RETRYABLE = auto()
+    REJECTED = auto()
+
+
 class RForkSeedServiceStartResult(Enum):
     STARTED = auto()
     DEFERRED = auto()
