@@ -227,7 +227,7 @@ from vllm_ascend.worker.device_metadata import (
 from vllm_ascend.worker.kvpp_cache import allocate_kvpp_cache
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
 from vllm_ascend.worker.sfa_kv_layout import (
-    sfa_kv_parent_supported_for_transfer,
+    should_use_sfa_kv_parent_layout,
     split_sfa_kv_parent,
 )
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
@@ -4392,7 +4392,7 @@ class NPUModelRunner(GPUModelRunner):
         # Model-level use_sparse also covers heterogeneous GQA draft layers.
         if (
             not self.use_sparse
-            or not sfa_kv_parent_supported_for_transfer(self.vllm_config.kv_transfer_config)
+            or not should_use_sfa_kv_parent_layout(self.vllm_config.kv_transfer_config)
             or self.use_compress
             or self.hybrid_with_attn_and_mamba
             or self.sparse_kv_offload_enabled

@@ -118,8 +118,8 @@ def test_reconstruction_rejects_non_parent_views(kind):
         ("MemcacheConnector", None, False),
     ],
 )
-def test_transfer_policy_keeps_unadapted_connectors_on_legacy_layout(connector, module, expected):
+def test_parent_layout_keeps_unadapted_connectors_on_legacy_layout(connector, module, expected):
     from types import SimpleNamespace
 
     config = None if connector is None else SimpleNamespace(kv_connector=connector, kv_connector_module_path=module)
-    assert _layout.sfa_kv_parent_supported_for_transfer(config) is expected
+    assert _layout.should_use_sfa_kv_parent_layout(config) is expected

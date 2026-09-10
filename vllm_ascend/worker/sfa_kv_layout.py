@@ -86,12 +86,14 @@ def get_sfa_kv_parent(nope: torch.Tensor, rope: torch.Tensor) -> torch.Tensor:
     return torch.as_strided(nope, shape, strides, storage_offset=nope.storage_offset())
 
 
-def sfa_kv_parent_supported_for_transfer(kv_transfer_config: object | None) -> bool:
-    """Only the native route-A connector may receive token-concat pages.
+def should_use_sfa_kv_parent_layout(kv_transfer_config: object | None) -> bool:
+    """Decide whether unquantized SFA main KV uses the token-concat parent layout.
 
-    Unadapted connectors (including MultiConnector and external implementations
+    Local inference with no KV transfer uses this layout. With transfer
+    configured, only the native route-A connector is adapted; unadapted
+    connectors (including MultiConnector and external implementations
     reusing the native name) keep the established separate contiguous layout.
-    This is a transport policy, not a statement about operator compatibility.
+    This is a storage-layout policy, not a statement about operator compatibility.
     """
     if kv_transfer_config is None:
         return True
