@@ -7,6 +7,7 @@ from math import lcm
 import vllm
 import vllm.envs as envs_vllm
 import vllm.v1.core.kv_cache_coordinator as vllm_kv_cache_coordinator
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import (
     HybridKVCacheCoordinator,
@@ -340,9 +341,13 @@ class AscendHybridKVCacheCoordinator(HybridKVCacheCoordinator):
         # have prefix cache block hit.
         # Due to slidingwindow attn, deepseek-v4 decode node can't have
         # any prefix cache hit, because `hit_length` of SWA is 0.
-        spec, group_ids, _ = self.attention_groups[0]
-        if isinstance(spec, FullAttentionSpec):
-            num_blocks = hit_length // self._get_effective_block_size(spec)
+        for spec, group_ids, _ in self.attention_groups:
+            if not isinstance(spec, FullAttentionSpec):
+                continue
+            num_blocks = cdiv(
+                hit_length,
+                self._get_effective_block_size(spec),
+            )
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
