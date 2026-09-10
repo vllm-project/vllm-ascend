@@ -253,7 +253,7 @@ jobs:
           BISECT_NO_VERIFY_BAD: ${{ inputs.bisect_no_verify_bad }}
           BISECT_FORCE_INITIAL_BUILD: ${{ inputs.bisect_force_initial_build }}
           BISECT_CONFIG_BASE_PATH: ${{ inputs.bisect_config_base_path }}
-          OPENLIBING_SECRET: ${{ inputs.openlibing_secret }}
+          OPENLIBING_SECRET: ${{ secrets.OPENLIBING_SECRET }}
         run: |
           set -euo pipefail
 
