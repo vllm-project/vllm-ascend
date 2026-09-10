@@ -409,8 +409,9 @@ def test_partition_batch_pads_decode_requests_when_tokens_are_already_padded():
     assert torch.equal(result.is_padding, torch.tensor([False, False, False, True]))
     assert result.attn_state is local_attn_state
     args = build_attn_state.call_args.args
-    assert args[2] == 3
-    np.testing.assert_array_equal(args[1], np.array([11, 21, 31], dtype=np.int32))
+    assert args[1] is manager.kv_cache_config
+    np.testing.assert_array_equal(args[2], np.array([11, 21, 31], dtype=np.int32))
+    assert args[3] == 3
 
 
 @pytest.mark.skipif(vllm_version_is("0.28.0"), reason="padded_num_tokens is a vLLM main PCP contract")
