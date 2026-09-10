@@ -292,6 +292,9 @@ class TestKVCacheSendingThread(unittest.TestCase):
 
         sock.close()
         context.term()
+        thread.stop()
+        thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
 
     def test_reformat_kv_cache_hybrid_linear_uses_cache_block_size(self):
         block_size = 4

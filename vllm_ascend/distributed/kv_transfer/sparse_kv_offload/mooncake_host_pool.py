@@ -48,7 +48,6 @@ class HostMemoryRegion:
     handle: Any = None
     release_callback: Callable[[Any], None] | None = None
     segment_offset: int = 0
-    segment_offset: int = 0
     _released: bool = field(default=False, init=False)
 
     def release(self) -> None:
@@ -239,6 +238,7 @@ class MooncakeHostPool:
         if any(a[1] > b[0] for a, b in zip(ranges, ranges[1:])):
             raise ValueError("overlapping Host views")
         return self.region.segment_offset, self.nbytes, tuple(entries)
+
     def close(self) -> None:
         if self._closed:
             return

@@ -182,7 +182,7 @@ def test_current_kv_index_copy_descriptors_survive_graph_replays(
     src_idx = torch.zeros(max_num_tokens, dtype=torch.int64)
     dst_idx = torch.zeros(max_num_tokens, dtype=torch.int64)
     count = torch.zeros(1, dtype=torch.int32)
-    side_stream_marker = torch.zeros(1, device="npu")
+    _side_stream_marker = torch.zeros(1, device="npu")
     graph = torch.npu.NPUGraph()
     current_stream = torch_npu.npu.current_stream()
     save_stream = torch_npu.npu.Stream()

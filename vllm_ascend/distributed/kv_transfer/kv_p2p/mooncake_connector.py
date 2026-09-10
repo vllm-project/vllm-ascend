@@ -382,8 +382,13 @@ class KVCacheSendingThread(threading.Thread):
         self.kv_caches = kv_caches
         self.pcp_rank = pcp_rank
         self.port_send_num: dict[str, int] = {}
+        self._stop_event = threading.Event()
 
         self.task_tracker = KVCacheTaskTracker()
+
+    def stop(self) -> None:
+        """Stop serving metadata before its registered buffers are released."""
+        self._stop_event.set()
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -438,8 +443,10 @@ class KVCacheSendingThread(threading.Thread):
             logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes", str(size_in_bytes))
 
         decoder = msgspec.msgpack.Decoder(type=tuple)
-        while True:
+        while not self._stop_event.is_set():
             try:
+                if not sock.poll(timeout=100):
+                    continue
                 frames = sock.recv_multipart()
                 if len(frames) < 2:
                     logger.error(
@@ -493,7 +500,7 @@ class KVCacheSendingThread(threading.Thread):
                     else:
                         self.task_tracker.update_done_task_count(request_id)
                     # Acknowledge the request completion.
-                    while True:
+                    while not self._stop_event.is_set():
                         try:
                             # Send ACK to the sender.
                             sock.send_multipart((identity, b"", b"ACK"), flags=zmq.NOBLOCK)  # type: ignore
@@ -2809,6 +2816,8 @@ class MooncakeConnectorWorker:
             self._dsa_active_commands: dict[str, DsaStepRequest] = {}
             self._dsa_cancel_events: dict[str, threading.Event] = {}
             self._dsa_results: queue.SimpleQueue[DsaLocalResult] = queue.SimpleQueue()
+            self._dsa_dispatch_lock = threading.Lock()
+            self._closing = False
 
     def _get_prefill_decode_size(self, vllm_config: VllmConfig):
         # get prefill tp and dp size from extra config
@@ -4528,14 +4537,20 @@ class MooncakeConnectorWorker:
                 self.kv_send_thread.add_delayed_request(req_id, delay_start_time)
 
     def shutdown(self) -> None:
-        self._closing = True
-        if self.kv_recv_thread is not None:
-            self.kv_recv_thread.request_queue.join()
-            self.kv_recv_thread.request_queue.put(None)
-            self.kv_recv_thread.join()
-            self.kv_recv_thread.executor.shutdown(wait=True)
-            if self._dsa_decode:
-                get_sparse_kv_offload_manager().get_mooncake_host_pool().unregister()
+        if self._dsa_decode:
+            with self._dsa_dispatch_lock:
+                self._closing = True
+        try:
+            if self.kv_send_thread is not None:
+                self.kv_send_thread.stop()
+                self.kv_send_thread.join()
+            if self.kv_recv_thread is not None:
+                self.kv_recv_thread.request_queue.join()
+                self.kv_recv_thread.request_queue.put(None)
+                self.kv_recv_thread.join()
+                self.kv_recv_thread.executor.shutdown(wait=True)
+        finally:
+            global_te.unregister_buffer()
 
     def _plan_dsa_endpoints(self, command: DsaStepRequest):
         """Adapt ordinary source participants; writer filtering cannot remove tasks."""
@@ -4597,8 +4612,14 @@ class MooncakeConnectorWorker:
         return tasks
 
     def _dispatch_dsa_commands(self, commands: tuple[DsaStepRequest, ...]) -> None:
-        if not self._dsa_decode or getattr(self, "_closing", False):
+        if not self._dsa_decode:
             raise RuntimeError("DSA commands require an active Decode consumer")
+        with self._dsa_dispatch_lock:
+            if self._closing:
+                raise RuntimeError("DSA commands require an active Decode consumer")
+            self._enqueue_dsa_commands(commands)
+
+    def _enqueue_dsa_commands(self, commands: tuple[DsaStepRequest, ...]) -> None:
         for command in commands:
             existing = self._dsa_active_commands.get(command.request_id)
             if existing is not None:

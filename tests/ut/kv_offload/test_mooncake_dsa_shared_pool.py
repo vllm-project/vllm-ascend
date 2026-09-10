@@ -43,6 +43,8 @@ def make_worker(rank=0, ptp=8, dcp=8, dtp=4):
     worker._dsa_active_commands = {}
     worker._dsa_cancel_events = {}
     worker._dsa_results = queue.SimpleQueue()
+    worker._dsa_dispatch_lock = threading.Lock()
+    worker._closing = False
     worker.vllm_config = SimpleNamespace(
         model_config=SimpleNamespace(is_deepseek_mla=True),
         parallel_config=SimpleNamespace(tensor_parallel_size=dtp),
