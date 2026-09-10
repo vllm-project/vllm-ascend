@@ -24,7 +24,6 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.rotary_embedding import update_cos_sin
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendInputBuffers(InputBuffers):
@@ -85,19 +84,12 @@ class AscendInputBatch(InputBatch):
         max_query_len: int | None = None,
     ) -> "AscendInputBatch":
         """Override the make_dummy method to calculate seq_lens_np."""
-        if vllm_version_is("0.27.1"):
-            input_batch = InputBatch.make_dummy(
-                num_reqs,
-                num_tokens,
-                input_buffers,
-            )
-        else:
-            input_batch = InputBatch.make_dummy(
-                num_reqs,
-                num_tokens,
-                input_buffers,
-                max_query_len=max_query_len,
-            )
+        input_batch = InputBatch.make_dummy(
+            num_reqs,
+            num_tokens,
+            input_buffers,
+            max_query_len=max_query_len,
+        )
         base_tokens = num_tokens // num_reqs
         num_extra = num_tokens % num_reqs
         input_buffers.seq_lens_np[: num_reqs - num_extra] = base_tokens

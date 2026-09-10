@@ -853,7 +853,7 @@ def test_mrv2_allocates_and_reshapes_hidden_state_cache(monkeypatch):
     # vLLM #51718 standardized cache-only writes as kv_cache[block, :, pos].
     expected_shape = (
         (num_blocks, block_size, num_kv_heads, head_size)
-        if attn_utils.vllm_version_is("0.27.1") or attn_utils.vllm_version_is("0.28.0")
+        if attn_utils.vllm_version_is("0.28.0")
         else (num_blocks, num_kv_heads, block_size, head_size)
     )
     assert cache.shape == expected_shape

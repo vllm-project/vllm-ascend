@@ -35,7 +35,7 @@ from vllm_ascend.worker.v2.model_states.mamba_hybrid import (
 
 
 def _uses_legacy_kv_tensor_api() -> bool:
-    return vllm_version_is("0.27.1") or vllm_version_is("0.28.0")
+    return vllm_version_is("0.28.0")
 
 
 def _make_kv_cache_tensor(
@@ -135,7 +135,7 @@ def test_validate_kv_cache_tensor_layouts_rejects_invalid_descriptions(tensors, 
 
 
 @pytest.mark.skipif(
-    not _uses_legacy_kv_tensor_api(), reason="legacy shared_by descriptor is used by v0.27.1 and v0.28.0"
+    not _uses_legacy_kv_tensor_api(), reason="legacy shared_by descriptor is used by v0.28.0"
 )
 def test_validate_v028_shared_kv_tensor_descriptor():
     validate_kv_cache_tensor_layouts(_layout_config([_make_kv_cache_tensor(48, ["attn"], 16)]))

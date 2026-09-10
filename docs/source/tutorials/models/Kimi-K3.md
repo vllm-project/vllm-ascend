@@ -126,11 +126,9 @@ release versions in the generic examples.
 
 ### 4.3 Model Runner V2 Target-Only Validation
 
-Use the vLLM main revision paired with this vLLM Ascend main checkout.
-Earlier dependency validation used vLLM `v0.27.1` at `6e448d0`; those
-results are historical and do not qualify this main-based integration.
-The integration uses main's `layers`, `layer_stride`, and `block_stride`
-cache descriptors and retains main's MRV2 DP synchronization interfaces.
+Use vLLM 0.28.0 with this vLLM Ascend integration. The integration uses its
+`shared_by` cache descriptors and retains its MRV2 DP synchronization
+interfaces.
 
 Set the following environment variable before starting a target-only MRV2
 functional test:
@@ -196,10 +194,10 @@ The functional test starts independent target-only and MLA DSpARK eager
 engines with the same seed. It compares exact token IDs across block boundaries
 and cold/repeated/reset requests with prefix caching enabled, and requires the
 draft-token metric to be non-zero so speculative decoding cannot be bypassed
-silently. The target-only oracle must report a real prefix-cache hit. vLLM
-0.27.1 does not report a reusable prefix-cache hit for the same request while
-DSpARK is enabled, so the draft run validates deterministic output but does not
-claim draft + prefix-cache state reuse.
+silently. The target-only oracle must report a real prefix-cache hit. The
+current DSpARK path does not report a reusable prefix-cache hit for the same
+request, so the draft run validates deterministic output but does not claim
+draft + prefix-cache state reuse.
 
 This reduced dummy test does not validate checkpoint loading, QuaRot, draft
 acceptance patterns, or model accuracy. Before accepting the MLA eager gate,

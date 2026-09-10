@@ -462,7 +462,7 @@ def _run_k3_mrv2_mla_dspark_eager(
         assert reset.num_cached_tokens == 0
         if not with_draft:
             # Prefix-cache hit/reuse is a target-state Gate 1 requirement. The
-            # vLLM 0.27.1 DSpark path recreates the aligned page instead of
+            # The current DSpark path recreates the aligned page instead of
             # reporting a reusable hit, so Gate 2 validates deterministic
             # draft execution across the same cold/warm/reset traffic without
             # claiming support for draft + prefix-cache state reuse.

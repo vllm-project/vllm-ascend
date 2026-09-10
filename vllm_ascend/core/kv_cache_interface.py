@@ -69,7 +69,7 @@ class AscendMLAAttentionSpec(MLAAttentionSpec):
         ``AttentionSpec.tokens_per_state`` on main. Both express how many
         logical tokens one physical stored state covers.
         """
-        if vllm_version_is("0.27.1") or vllm_version_is("0.28.0"):
+        if vllm_version_is("0.28.0"):
             return self.block_size // self.compress_ratio
         return self.block_size // self.tokens_per_state
 

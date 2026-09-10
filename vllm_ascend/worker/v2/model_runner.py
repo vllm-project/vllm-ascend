@@ -18,8 +18,6 @@
 #
 
 from contextlib import contextmanager
-from types import SimpleNamespace
-
 import numpy as np
 import torch
 from vllm.compilation import breakable_cudagraph
@@ -38,7 +36,11 @@ from vllm.v1.worker.gpu.input_batch import (
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
-from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
+from vllm.v1.worker.gpu.model_runner import (
+    BatchReqState,
+    ExecuteModelState,
+    GPUModelRunner,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import (
@@ -56,10 +58,6 @@ from vllm_ascend.core.profiling_chunk_predictor import (
 from vllm_ascend.ops.rotary_embedding import set_cos_and_sin, update_cos_sin
 from vllm_ascend.utils import lmhead_tp_enable, set_potential_max_tokens, vllm_version_is
 
-if vllm_version_is("0.27.1"):
-    from vllm.v1.worker.gpu.model_runner import sort_batch_req_ids
-else:
-    from vllm.v1.worker.gpu.model_runner import BatchReqState
 from vllm_ascend.worker.utils import AscendKVBlockZeroer, disable_compilation
 from vllm_ascend.worker.v2.aclgraph_utils import ModelAclGraphManager
 from vllm_ascend.worker.v2.attn_utils import (
@@ -290,15 +288,14 @@ class NPUModelRunner(GPUModelRunner):
             scheduler_output,
         )
 
-        execute_kwargs = {
-            "intermediate_tensors": intermediate_tensors,
-            "dummy_run": dummy_run,
-            "skip_attn_for_dummy_run": skip_attn_for_dummy_run,
-            "is_profile": is_profile,
-        }
-        if not vllm_version_is("0.27.1"):
-            execute_kwargs["context_len"] = context_len
-        output = super().execute_model(scheduler_output, **execute_kwargs)
+        output = super().execute_model(
+            scheduler_output,
+            intermediate_tensors=intermediate_tensors,
+            dummy_run=dummy_run,
+            skip_attn_for_dummy_run=skip_attn_for_dummy_run,
+            is_profile=is_profile,
+            context_len=context_len,
+        )
 
         self._cpp_execution_time_ms = _finish_profiling_chunk_timing(
             profiling_config,
@@ -329,42 +326,13 @@ class NPUModelRunner(GPUModelRunner):
     def prepare_inputs(  # type: ignore[misc]
         self,
         scheduler_output: SchedulerOutput,
-        batch_req_state: "BatchReqState | BatchExecutionDescriptor",
-        batch_desc: BatchExecutionDescriptor | None = None,
+        batch_req_state: BatchReqState,
+        batch_desc: BatchExecutionDescriptor,
     ) -> AscendInputBatch:
         """Override GPUModelRunner.prepare_inputs for Ascend NPUs.
         npu attention backends need seq_lens_cpu to work.
         so we need to prepare seq_lens_cpu here.
         """
-        if batch_desc is None:
-            # vLLM 0.27.1 passes only (scheduler_output, batch_desc). Rebuild
-            # the CPU batch state introduced in 0.28 from the same request
-            # arrays, preserving the legacy request ordering.
-            assert vllm_version_is("0.27.1")
-            batch_desc = batch_req_state  # type: ignore[assignment]
-            num_tokens_per_req = scheduler_output.num_scheduled_tokens
-            req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
-            num_reqs = len(req_ids)
-            num_scheduled_tokens = np.fromiter(map(num_tokens_per_req.get, req_ids), dtype=np.int32, count=num_reqs)
-            idx_mapping_np = np.fromiter(
-                map(self.req_states.req_id_to_index.get, req_ids),
-                dtype=np.int32,
-                count=num_reqs,
-            )
-            prefill_len_np = self.req_states.prefill_len.np[idx_mapping_np]
-            num_computed_prefill_tokens_np = self.req_states.num_computed_prefill_tokens[idx_mapping_np]
-            is_prefilling_np = num_computed_prefill_tokens_np < prefill_len_np
-            batch_req_state = SimpleNamespace(
-                req_ids=req_ids,
-                num_scheduled_tokens=num_scheduled_tokens,
-                num_tokens=scheduler_output.total_num_scheduled_tokens,
-                idx_mapping_np=idx_mapping_np,
-                prefill_len_np=prefill_len_np,
-                num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
-                is_prefilling_np=is_prefilling_np,
-                has_prefill=bool(is_prefilling_np.any()),
-            )
-
         num_tokens = batch_req_state.num_tokens
         num_tokens_after_padding = max(num_tokens, batch_desc.num_tokens)
         assert num_tokens > 0
@@ -569,7 +537,7 @@ class NPUModelRunner(GPUModelRunner):
 
         # vLLM #53515 / #15196 pass padded_num_tokens into PCP partition on main;
         # v0.28.0 maybe_partition_pcp_batch does not accept that kwarg.
-        if vllm_version_is("0.27.1") or vllm_version_is("0.28.0"):
+        if vllm_version_is("0.28.0"):
             input_batch = vllm_model_runner.pcp.maybe_partition_pcp_batch(
                 self.pcp_manager,
                 input_batch,

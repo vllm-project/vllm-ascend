@@ -661,7 +661,7 @@ class NPUWorker(WorkerBase):
         # v0.28.0 keeps shared_by aliasing (one alloc per descriptor); the
         # #51718 multi-group scale is main-only. Also avoids
         # CacheConfig.get_resolved_kv_cache_layout which does not exist on release.
-        if vllm_version_is("0.27.1") or vllm_version_is("0.28.0"):
+        if vllm_version_is("0.28.0"):
             return available_memory
         kv_cache_spec = self.get_kv_cache_spec()
         if not isinstance(kv_cache_spec, dict):

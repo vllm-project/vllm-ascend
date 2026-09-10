@@ -570,7 +570,7 @@ class AscendKimiLinearModel(UpstreamKimiLinearModel):
         layer_idx: int,
         hidden_states: torch.Tensor,
     ) -> list[torch.Tensor]:
-        """Capture the vLLM 0.27.1 K3 AttnRes auxiliary stream.
+        """Capture the K3 AttnRes auxiliary stream.
 
         Ascend decoder layers return the running prefix with the pending MLP
         output already folded into ``hidden_states``.  Their ``residual`` is a
