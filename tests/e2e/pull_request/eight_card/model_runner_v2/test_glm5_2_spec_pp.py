@@ -15,11 +15,12 @@
 # This file is a part of the vllm-ascend project.
 """GLM-5.2 W4A8 DSpark with pipeline parallelism on Model Runner V2.
 
-Mirrors ``test_spec_pp_accuracy.py`` (DeepSeek-V4 DSpark + PP) for GLM-5.2,
-which can additionally run the target in graph mode while keeping async
-scheduling, prefix caching and chunked prefill enabled. Pooling (PD/memcache)
-and EPLB are intentionally out of scope of this case.
+Eight-card case (PP2 x TP4) mirroring ``test_spec_pp_accuracy.py`` (DeepSeek-V4
+DSpark + PP) for GLM-5.2, which can additionally run the target in graph mode
+while keeping async scheduling, prefix caching and chunked prefill enabled.
+Pooling (PD/memcache) and EPLB are intentionally out of scope of this case.
 
+``GLM52_TP_SIZE`` / ``GLM52_PP_SIZE`` widen the parallelism for larger hosts.
 The same request is repeated ``GLM52_DSPARK_PP_REPEAT`` times (default 1) so the
 case doubles as a stability retest of the PP speculative path.
 """
@@ -45,6 +46,9 @@ GLM52_DRAFT_MODEL = os.environ.get(
 # GLM-5.2 has 78 layers and layer 42 is a full-Indexer layer, so the manual PP
 # split has to land there; the last stage also carries the local drafter.
 GLM52_PP_LAYER_PARTITION = os.environ.get("GLM52_PP_LAYER_PARTITION", "42,36")
+# Eight-card default (PP2 x TP4); override for wider hosts.
+GLM52_TP_SIZE = int(os.environ.get("GLM52_TP_SIZE", "4"))
+GLM52_PP_SIZE = int(os.environ.get("GLM52_PP_SIZE", "2"))
 REPEAT = int(os.environ.get("GLM52_DSPARK_PP_REPEAT", "1"))
 
 GSM8K_PROMPT = (
@@ -115,14 +119,14 @@ def test_glm5_2_dspark_pp_full_decode_only() -> None:
     with VllmRunner(
         GLM52_MODEL,
         quantization="ascend",
-        tensor_parallel_size=8,
-        pipeline_parallel_size=2,
+        tensor_parallel_size=GLM52_TP_SIZE,
+        pipeline_parallel_size=GLM52_PP_SIZE,
         enable_expert_parallel=True,
         distributed_executor_backend="mp",
         max_model_len=8192,
-        max_num_seqs=8,
+        max_num_seqs=4,
         max_num_batched_tokens=2048,
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=0.92,
         enable_chunked_prefill=True,
         enable_prefix_caching=True,
         async_scheduling=True,
