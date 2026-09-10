@@ -1,21 +1,25 @@
-"""Unit tests for lmhead TP support in the Ascend V2 model runner.
+"""Unit tests for fine-grained TP support in the Ascend V2 model runner.
 
 Pure-mock tests (CPU tensors, no NPU): they lock the runner-side pad/trim
 contract of sample()/_dummy_run and guard the copied dispatch tail with a
-canary that compares it call-by-call against upstream GPUModelRunner.sample.
-Collective behavior of the LM head itself is validated on real hardware.
+canary that compares it call-by-call against upstream GPUModelRunner.sample,
+plus the eager DP padding contract of o_proj TP. Collective behavior of the
+LM head and the OTP exchange itself is validated on real hardware.
 """
 
 from types import SimpleNamespace
 from unittest.mock import MagicMock, create_autospec, patch
 
+import numpy as np
 import pytest
 import torch
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu.model_runner import BatchReqState, GPUModelRunner
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
+from vllm_ascend.worker.v2.eager_dp_padding import sync_dp_group_max_tokens
 from vllm_ascend.worker.v2.model_runner import NPUModelRunner
 
 
@@ -211,6 +215,142 @@ def test_dummy_run_joins_lmhead_collectives_at_capacity():
     torch.testing.assert_close(dummy_input, hidden_states[torch.zeros(16, dtype=torch.long)])
     # return contract is a pure passthrough of the parent's values
     assert result == (hidden_states, sample_hidden)
+
+
+def _make_dp_padding_runner(enabled=True, aligned_tokens=0):
+    """Bare runner carrying only the eager-DP-padding state."""
+    runner = object.__new__(NPUModelRunner)
+    runner._dp_padding_enabled = enabled
+    runner._dp_padding_aligned_tokens = aligned_tokens
+    runner._dp_padding_original_tokens = 0
+    runner.dp_size = 8
+    runner.dp_rank = 3
+    # need_timing=False keeps both profiling helpers pure no-ops (no NPU sync).
+    runner.ascend_config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(profiling_chunk_config=SimpleNamespace(need_timing=False))
+    )
+    return runner
+
+
+def _make_scheduler_output(total, num_scheduled_tokens=None):
+    return SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=MagicMock(),
+        num_scheduled_tokens=dict(num_scheduled_tokens or {}),
+        total_num_scheduled_tokens=total,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids={"done-r0"},
+        free_encoder_mm_hashes=[],
+    )
+
+
+def _make_batch_req_state(num_tokens):
+    return BatchReqState(
+        req_ids=["r0"],
+        num_scheduled_tokens=np.array([num_tokens], dtype=np.int32),
+        num_tokens=num_tokens,
+        idx_mapping_np=np.array([0], dtype=np.intp),
+        prefill_len_np=np.array([0], dtype=np.int32),
+        num_computed_prefill_tokens_np=np.array([0], dtype=np.int32),
+        is_prefilling_np=np.array([False]),
+        has_prefill=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "enabled,dummy_run,is_profile,total,expected_calls",
+    [
+        (True, False, False, 5, 1),  # real step with work: agree the group max
+        # A real step with nothing scheduled returns from the parent before
+        # dispatch without posting any DP collective, so an all_reduce here
+        # would desync the gloo op stream against busy/dummy steps.
+        (True, False, False, 0, 0),
+        (True, True, False, 0, 1),  # dummy step (idle rank): report zero
+        (True, False, True, 5, 0),  # profile run
+        (False, False, False, 5, 0),  # feature off
+    ],
+)
+def test_dp_padding_execute_model_gate(enabled, dummy_run, is_profile, total, expected_calls):
+    runner = _make_dp_padding_runner(enabled=enabled)
+    scheduler_output = _make_scheduler_output(total, {"r0": total} if total else {})
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.sync_dp_group_max_tokens", return_value=0) as sync,
+        patch("vllm_ascend.worker.v2.model_runner.make_dp_padded_dummy_output") as make_dummy,
+        patch.object(NPUModelRunner.__bases__[0], "execute_model", return_value="out") as super_execute,
+    ):
+        assert runner.execute_model(scheduler_output, dummy_run=dummy_run, is_profile=is_profile) == "out"
+
+    assert sync.call_count == expected_calls
+    if expected_calls:
+        # dummy ranks report zero, so only real work raises the group max
+        assert sync.call_args.args == (0 if dummy_run else total, 8, 3)
+    make_dummy.assert_not_called()
+    assert super_execute.call_args.args[0] is scheduler_output
+
+
+def test_dp_padding_dummy_step_forwards_group_max():
+    """An idle rank must run its dummy batch at the group's agreed size, and the
+    rewrite must leave the rest of the synthetic output intact."""
+    runner = _make_dp_padding_runner()
+    scheduler_output = _make_scheduler_output(0)
+
+    with (
+        patch("vllm_ascend.worker.v2.model_runner.sync_dp_group_max_tokens", return_value=4),
+        patch.object(NPUModelRunner.__bases__[0], "execute_model", return_value="out") as super_execute,
+    ):
+        runner.execute_model(scheduler_output, dummy_run=True)
+
+    forwarded = super_execute.call_args.args[0]
+    assert forwarded.total_num_scheduled_tokens == 4
+    assert forwarded.num_scheduled_tokens == {"_dummy_dp_padding": 4}
+    assert forwarded.finished_req_ids == {"done-r0"}
+
+
+@pytest.mark.parametrize(
+    "aligned,parent_tokens,expected_reported,expected_original",
+    [
+        (8, 5, 8, 5),  # dispatch sees the group max, the real extent stays recoverable
+        (8, 8, 8, 8),  # this rank already is the group max
+        (0, 5, 5, 5),  # padding inactive
+        (8, None, None, 0),  # dummy step: no parent state to pad or record
+    ],
+)
+def test_dp_padding_gather_reports_group_max(aligned, parent_tokens, expected_reported, expected_original):
+    runner = _make_dp_padding_runner(aligned_tokens=aligned)
+    dummy_run = parent_tokens is None
+    parent = (None, 4) if dummy_run else (_make_batch_req_state(parent_tokens), None)
+
+    with patch.object(NPUModelRunner.__bases__[0], "gather_batch_req_state", return_value=parent):
+        # the scheduler output still reports the untrimmed total
+        batch_req_state, uniform_tok_count = runner.gather_batch_req_state(_make_scheduler_output(8), dummy_run)
+
+    assert (None if batch_req_state is None else batch_req_state.num_tokens) == expected_reported
+    assert runner._dp_padding_original_tokens == expected_original
+    assert uniform_tok_count == (4 if dummy_run else None)
+
+
+def test_dp_padding_sync_is_one_hot_then_max():
+    """The agreement mirrors dp_utils.sync_cudagraph_and_dp_padding: only this
+    rank's slot carries a count, and the returned value is the vector max."""
+    seen = {}
+
+    def fake_all_reduce(tensor, group=None):
+        seen["sent"] = tensor.clone()
+        seen["group"] = group
+        tensor[2] = 5  # some rank in the group reported 5 tokens
+
+    with (
+        patch("vllm_ascend.worker.v2.eager_dp_padding.get_dp_group", return_value=SimpleNamespace(cpu_group="dp-cpu")),
+        patch("vllm_ascend.worker.v2.eager_dp_padding.dist.all_reduce", fake_all_reduce),
+    ):
+        group_max = sync_dp_group_max_tokens(3, dp_size=4, dp_rank=1)
+
+    assert seen["sent"].tolist() == [0, 3, 0, 0]
+    assert seen["group"] == "dp-cpu"
+    assert group_max == 5
 
 
 def test_dummy_run_lmhead_disabled_or_profile_skips_collectives():

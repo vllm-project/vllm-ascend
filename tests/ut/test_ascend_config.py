@@ -872,6 +872,24 @@ class TestSubconfigPydanticTypeValidation(TestBase):
         with self.assertRaisesRegex(ValueError, "lmhead_tensor_parallel_size must be non-negative"):
             FinegrainedTPConfig(lmhead_tensor_parallel_size=-1)
 
+    def test_oproj_tp_requires_graph_mode(self):
+        from vllm.config.compilation import CUDAGraphMode
+
+        def vllm_config(cudagraph_mode):
+            return SimpleNamespace(
+                parallel_config=SimpleNamespace(tensor_parallel_size=1, data_parallel_size=8),
+                compilation_config=SimpleNamespace(cudagraph_mode=cudagraph_mode),
+                kv_transfer_config=SimpleNamespace(is_kv_consumer=True),
+                model_config=SimpleNamespace(is_moe=True),
+            )
+
+        config = FinegrainedTPConfig(oproj_tensor_parallel_size=2)
+        # VllmConfig.__post_init__ normalizes enforce_eager into NONE, so this
+        # single check covers both spellings of "no graph mode".
+        with self.assertRaisesRegex(AssertionError, "only supported in graph mode"):
+            config._validate_preconditions(vllm_config(CUDAGraphMode.NONE))
+        config._validate_preconditions(vllm_config(CUDAGraphMode.FULL_DECODE_ONLY))
+
     def test_eplb_config_int_field_lax(self):
         cfg = EplbConfig(eplb_policy_type="2")
         self.assertEqual(cfg.eplb_policy_type, 2)
