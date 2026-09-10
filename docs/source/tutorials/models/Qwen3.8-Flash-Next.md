@@ -4,7 +4,7 @@
 
 Qwen3.8-Flash-Next is a multimodal Mixture-of-Experts (MoE) model and an experimental preview of the architecture that will underpin Qwen4. Its language model combines Gated DeltaNet and Qwen Sparse Attention (QSA), gated residual connections, Position Learning Enhancement (PLE), and a native Multi-Token Prediction (MTP) head.
 
-This tutorial describes the W8A8 deployment on Atlas 800 A3 and Ascend 950DT. Text and multimodal input have been validated on A3. The 950DT example in this tutorial starts a text-only service.
+This tutorial describes the W8A8 deployment on Atlas 800 A3 and Ascend 950DT. Text and multimodal input have been validated on both hardware platforms.
 
 !!! warning
 
@@ -25,7 +25,7 @@ The following table summarizes the features covered by this tutorial.
 | Function calling | Supported | Uses `qwen3_xml` |
 | Reasoning parsing | Supported | Uses `qwen3` |
 | Automatic Prefix Caching | **Unsupported** | `--no-enable-prefix-caching` is required |
-| Multimodal input | Supported | Image-and-text input has been validated on A3 |
+| Multimodal input | Supported | Image-and-text input has been validated on A3 and 950DT |
 
 Refer to the [Supported Features List](../../user_guide/support_matrix/supported_models.md) for the general model support matrix and the [Feature Guide](../../user_guide/feature_guide/index.md) for feature configuration.
 
@@ -111,10 +111,10 @@ pip show vllm vllm-ascend
 
 ### 4.2 950DT Image and Container
 
-Use the following x86_64 image for Ascend 950DT:
+The following example uses the ARM64 image for Ascend 950DT:
 
 ```bash
-export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a5-ubuntu-34178549844-2-amd64-temp
+export IMAGE=quay.io/atlas-ci/vllm-atlas-temp:qwen3.8-next-a5-ubuntu-34178549844-2-arm64-temp
 
 docker pull "$IMAGE"
 
@@ -219,7 +219,7 @@ curl -sf http://127.0.0.1:8088/v1/models
 
 ### 5.2 950DT Single-Node Online Deployment
 
-The following command starts a DP1 × TP4 text-only service on Ascend 950DT. It uses the 950DT MXFP8 checkpoint.
+The following command starts a DP1 × TP4 service on Ascend 950DT. It uses the 950DT MXFP8 checkpoint and supports both text and multimodal input.
 
 ```bash
 unset CPLUS_INCLUDE_PATH CPATH C_INCLUDE_PATH
@@ -246,7 +246,6 @@ vllm serve "$MODEL_PATH" \
     --max-num-batched-tokens 4096 \
     --gpu-memory-utilization 0.95 \
     --no-enable-prefix-caching \
-    --language-model-only \
     --compilation-config '{"cudagraph_capture_sizes":[4,8,12,16,20,24,28,32],"cudagraph_mode":"FULL_DECODE_ONLY"}' \
     --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":3,"enforce_eager":true}' \
     --additional-config '{"enable_cpu_binding":true,"ascend_compilation_config":{"fuse_norm_quant":false}}'
@@ -254,7 +253,7 @@ vllm serve "$MODEL_PATH" \
 
 - `VLLM_SERVER_DEV_MODE=1` enables the server development mode required by this 950DT setup, including cache-clearing support.
 - `SOC_VERSION=ascend950dt_9582` selects the 950DT SoC target used by the image.
-- `--language-model-only` makes this 950DT example text-only and skips the vision encoder.
+- `--language-model-only` is optional. Add it only when a text-only service is desired and the vision encoder should not be loaded.
 - Prefix Caching remains unavailable on 950DT, so `--no-enable-prefix-caching` is required.
 
 The minimal 950DT command above does not enable automatic Function Calling or reasoning parsing. To use the verification requests in Sections 6.3 and 6.4, add:
@@ -271,7 +270,7 @@ curl -sf http://127.0.0.1:8089/v1/models
 
 ## 6 Functional Verification
 
-The requests below target the A3 example at port `8088` with served model name `qwen3.8-flash-next`. For 950DT, use port `8089` and model name `qwen38-flash-next-950dt`. The multimodal request in Section 6.2 applies to the validated A3 deployment; the 950DT example is started with `--language-model-only`.
+The requests below target the A3 example at port `8088` with served model name `qwen3.8-flash-next`. For 950DT, use port `8089` and model name `qwen38-flash-next-950dt`. The multimodal request in Section 6.2 has been validated on both hardware platforms.
 
 ### 6.1 Basic Chat Completion
 
@@ -439,6 +438,5 @@ The A3 W8A8 deployment described in Section 5.1 was validated on GPQA Diamond wi
 
 - Atlas 800 A3 and Ascend 950DT are currently supported.
 - Automatic Prefix Caching is currently unavailable. Always use `--no-enable-prefix-caching`.
-- Text and multimodal input have been validated on A3. The 950DT example is text-only because it uses `--language-model-only`.
+- Text and multimodal input have been validated on A3 and 950DT. Add `--language-model-only` only for an optional text-only deployment.
 - The GPQA Diamond score in this tutorial was measured on A3 and must not be treated as a 950DT accuracy result.
-- Performance data is intentionally not included in this tutorial.
