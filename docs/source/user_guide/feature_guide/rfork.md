@@ -60,8 +60,8 @@ The RFork loading flow is:
 
 1. vLLM starts with `--load-format rfork`.
 2. RFork builds a **seed key** from the model identity and deployment topology.
-3. RFork asks the planner for an available seed matching that key.
-4. If a seed is returned, the new instance initializes the model structure on its local NPU, registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.
+3. RFork initializes the local model and prepares/synchronizes any required processed tensor layout, then asks the planner for a seed matching that key.
+4. If a seed is returned, the new instance registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.
 5. If no seed is available, or any transfer step fails, RFork cleans up and falls back to the default loader.
 6. RFork completes post-load processing and switches the model to evaluation mode before it starts a local seed service and advertises it to the planner. A seed-service startup failure does not reload the valid model; RFork only cleans up its registered memory.
 
@@ -81,14 +81,14 @@ The seed remains a normal serving instance. RFork does not ask it to reread the 
 
 ### Destination-Side Loading
 
-When a destination receives a seed lease from the planner, it performs the following steps for each worker rank:
+The destination performs the following steps for each worker rank:
 
 1. Build the destination model structure and allocate the final NPU tensor layout.
-2. Register the destination tensor ranges with its local TransferEngine session.
+2. After required layout preparation and synchronization, acquire a seed lease and register the destination tensor ranges with its local TransferEngine session.
 3. Fetch the matching seed worker's session and tensor manifest over HTTP.
 4. Verify tensor names, element counts, element sizes, and shapes before transferring data.
 5. Group tensors into bounded chunks and use batched synchronous reads to copy them into the destination buffers.
-6. Release the planner lease after the transfer, whether it succeeds or falls back.
+6. Schedule bounded asynchronous lease release after the transfer, whether it succeeds or falls back.
 
 Once loading completes, the destination can publish itself as another seed. A deployment can therefore grow from one storage-loaded instance into a pool of reusable NPU-resident weight sources.
 
@@ -178,7 +178,9 @@ Lease release runs asynchronously after transfer. Planner release requests never
 
 Release logs include a hashed lease identifier, attempt count, elapsed acquisition-to-release time, HTTP status and a bounded response excerpt with control characters removed and the lease ID redacted. These allow diagnosis without printing the raw USER_ID credential. Per-request timeouts are connect/read inactivity limits, not a strict total wall-clock deadline.
 
-The example planner reclaims abandoned leases after 60 seconds by default, independently of seed heartbeat expiry. Configure a positive integer duration with `--lease-ttl-sec` or `RFORK_MOCK_LEASE_TTL_SEC`; an explicit CLI value takes precedence over a valid environment value. The lease starts at seed acquisition, before model initialization and layout preparation, so size this timeout for the entire acquisition-to-release interval, not just weight transfer. Seed heartbeats do not renew leases. Expired leases return 404 on release, which the current client accepts as already released; successful startup alone does not prove that the lease remained valid throughout transfer.
+The example planner reclaims abandoned leases after 60 seconds by default, independently of seed heartbeat expiry. Configure a positive integer duration with `--lease-ttl-sec` or `RFORK_MOCK_LEASE_TTL_SEC`; an explicit CLI value takes precedence over a valid environment value. The loader acquires its lease after model initialization and any required layout preparation/synchronization. Size the timeout for memory registration, metadata fetch, transfer and asynchronous release, including retry delays. Initialization and layout timings are logged separately. Seed heartbeats do not renew leases. Expired leases return 404 on release, which the current client accepts as already released; successful startup alone does not prove that the lease remained valid throughout transfer.
+
+If no seed is available after preparation, the loader discards the prepared model and loads from the checkpoint. This adds preparation cost to a seed miss. Before fallback, it restores the pre-attempt compilation registries and rotary cache so shared main/draft state is preserved. Model construction and rollback in a worker are assumed to be serialized. Lease renewal is not enabled: it requires explicit support from both planner and client.
 
 For example, start the planner with a 60-second lease TTL:
 

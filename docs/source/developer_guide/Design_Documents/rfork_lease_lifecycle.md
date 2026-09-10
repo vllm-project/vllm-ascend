@@ -5,8 +5,9 @@
 This change sets the example planner's default lease TTL to 60 seconds. The existing
 `RFORK_MOCK_LEASE_TTL_SEC` environment variable and `--lease-ttl-sec` option remain
 available. CLI values override valid environment values; durations must be positive
-integer seconds. Seed heartbeat expiry remains independent. Acquisition placement
-and lease renewal are assessed below, not implemented in this change.
+integer seconds. Seed heartbeat expiry remains independent. Release decoupling and
+late acquisition are implemented in separate follow-up commits. Renewal remains a
+proposal because the customer planner cannot currently be changed.
 
 The reported run completed weight transfers and then received HTTP 400 on release.
 The captured log does not include the response body of those real release requests.
@@ -37,13 +38,15 @@ the source's capacity to the pool while a transfer was still active.
 
 ## Late acquisition
 
-The current order in `RForkModelLoader.load_model` is acquisition, initialization,
-optional processed-layout conversion and NPU synchronization, then registration and
-transfer. `RForkSession.transfer_from_seed` releases immediately after a successful
-read. Its timing log does not measure the initialization or layout preparation phase.
+Before late acquisition, `RForkModelLoader.load_model` acquired a lease before
+initialization and optional processed-layout conversion/NPU synchronization.
+It now prepares the model first, then acquires the lease immediately before
+registration and transfer. `RForkSession.transfer_from_seed` schedules asynchronous
+release after a successful read. Initialization, layout, acquisition, registration,
+metadata, read and lease-holding durations are observable separately.
 
-A minimal change can move acquisition after layout synchronization but before
-`transfer_from_seed`. Initialization and layout preparation do not consume the lease;
+Acquisition now follows layout synchronization and precedes `transfer_from_seed`.
+Initialization and layout preparation do not consume the lease;
 the session can stay INITIALIZED until acquisition succeeds. Keep model eval and seed
 advertisement after successful loading. Handle main and draft sessions consistently.
 
@@ -51,11 +54,11 @@ This reduces the lifetime to registration, metadata fetch, transfer, and release
 The observed roughly 23-second registration/transfer interval is one measurement,
 not an upper bound. A 60-second TTL can still expire under load or network stalls.
 
-The seed-miss path needs deliberate validation. Existing cleanup deletes the prepared
-model and reloads it through the default loader. It removes model-owned compilation
-registrations, but also clears the global rotary-embedding cache. The existing
-seed-miss test expects no initialization and preservation of preexisting global state;
-simply moving acquisition invalidates that expectation. Main/draft shared storage,
+The seed-miss path deletes the prepared model and reloads it through the default loader.
+It now snapshots the compilation registries and rotary cache before construction and
+restores that baseline on fallback, including partially failed construction. This
+assumes serialized model construction in each worker. CPU tests exercise late seed
+miss and preservation of preexisting shared state. Main/draft shared storage,
 partial initialization failures, stale layer registrations, and NPU memory retention
 must be checked. Reusing an already transformed empty model for checkpoint loading is
 not automatically safe for quantized layouts.
@@ -163,13 +166,15 @@ or gain shared atomic state; renewal does not solve cross-replica state loss.
 2. Inspect the deployed Go reclaim/health-check/get/put implementations and actual
    failed responses. Do not treat every 400 as released, or infer a lease TTL from a
    seed timeout name. Even 404 requires an agreed protocol meaning.
-3. Implement and benchmark late acquisition after initialization/layout preparation,
+3. Benchmark the implemented late acquisition after initialization/layout preparation,
    including the seed-miss cleanup regression cases. Compare actual lease duration
    with 60 seconds under representative load. Retain a configurable larger TTL when
    the observed tail duration requires it.
-4. Add negotiated renewal to example and client together, then integrate with the Go
-   planner. Test real NPU progress, failure handling and reader lifetime before rollout.
+4. Defer renewal while the customer planner cannot be changed. When server support
+   becomes possible, add negotiated renewal to example and client together, then
+   integrate with the Go planner. Test NPU progress and reader lifetime before rollout.
 
-The recommended direction is late acquisition plus negotiated renewal. A configurable
-fixed TTL remains necessary for compatibility and recovery; it is not proof that the
+The current direction is bounded asynchronous release plus late acquisition, without
+client-only renewal. Negotiated renewal remains a future option. A configurable fixed
+TTL remains necessary for compatibility and recovery; it is not proof that the
 reported deployment's release failures were caused by expiry.

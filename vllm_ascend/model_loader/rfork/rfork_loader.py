@@ -19,6 +19,7 @@ import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import copy
+from dataclasses import dataclass
 from typing import Any, cast
 
 import torch
@@ -51,6 +52,15 @@ from vllm_ascend.model_loader.rfork.types import (
 
 class _RForkSeedUnavailable(RuntimeError):
     pass
+
+
+@dataclass
+class _RForkProcessGlobalModelState:
+    """Snapshot process-global model registries before an RFork model attempt."""
+
+    static_forward_context: tuple[dict[Any, Any], dict[Any, Any]] | None
+    static_all_moe_layers: tuple[list[Any], list[Any]] | None
+    rope_cache: dict[Any, Any] | None
 
 
 def _is_rfork_summary_rank(session: RForkSession) -> bool:
@@ -162,41 +172,91 @@ def _make_fallback_load_config(load_config: LoadConfig) -> LoadConfig:
     return fallback_load_config
 
 
-def _reset_process_global_model_state(vllm_config: VllmConfig, model: Module | None = None) -> None:
-    """Remove process-global layer registries a discarded RFork model left behind."""
-    stale_modules = set(model.modules()) if model is not None else None
-    removed_names: set[str] = set()
+def _snapshot_process_global_model_state(vllm_config: VllmConfig) -> _RForkProcessGlobalModelState:
+    """Snapshot registries that model construction can mutate in the process."""
+    static_forward_context: tuple[dict[Any, Any], dict[Any, Any]] | None = None
+    static_all_moe_layers: tuple[list[Any], list[Any]] | None = None
     compilation_config = getattr(vllm_config, "compilation_config", None)
     if compilation_config is not None:
-        static_forward_context = getattr(compilation_config, "static_forward_context", None)
-        if isinstance(static_forward_context, dict):
-            if stale_modules is None:
-                removed_names.update(static_forward_context)
-                static_forward_context.clear()
-            else:
-                for name, module in list(static_forward_context.items()):
-                    if module in stale_modules:
-                        removed_names.add(name)
-                        del static_forward_context[name]
-        static_all_moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
-        if isinstance(static_all_moe_layers, list):
-            if stale_modules is None:
-                static_all_moe_layers.clear()
-            else:
-                static_all_moe_layers[:] = [
-                    layer
-                    for layer in static_all_moe_layers
-                    if layer not in stale_modules and layer not in removed_names
-                ]
+        forward_context = getattr(compilation_config, "static_forward_context", None)
+        if isinstance(forward_context, dict):
+            static_forward_context = (
+                forward_context,
+                dict(forward_context),
+            )
+        moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
+        if isinstance(moe_layers, list):
+            static_all_moe_layers = (moe_layers, list(moe_layers))
 
-    # ROPE instances are cached globally and keyed by config; rebuild fresh rope.
+    rope_cache: dict[Any, Any] | None = None
     try:
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
 
         if isinstance(_ROPE_DICT, dict):
-            _ROPE_DICT.clear()
+            rope_cache = dict(_ROPE_DICT)
     except Exception as e:  # pragma: no cover - best-effort across vLLM versions
-        logger.debug("RFork fallback: skip clearing _ROPE_DICT: %s", e)
+        logger.debug("RFork fallback: skip snapshotting _ROPE_DICT: %s", e)
+
+    return _RForkProcessGlobalModelState(static_forward_context, static_all_moe_layers, rope_cache)
+
+
+def _reset_process_global_model_state(
+    vllm_config: VllmConfig,
+    model: Module | None = None,
+    snapshot: _RForkProcessGlobalModelState | None = None,
+) -> None:
+    """Remove state owned by a discarded RFork model attempt.
+
+    Model construction is serialized in a worker process, so restoring the exact
+    pre-attempt snapshots preserves shared main/draft registrations as well as
+    entries that were added by an earlier successful model load.
+    """
+    stale_module_ids = {id(module) for module in model.modules()} if model is not None else set()
+    removed_names: set[Any] = set()
+    compilation_config = getattr(vllm_config, "compilation_config", None)
+    if compilation_config is not None:
+        static_forward_context = getattr(compilation_config, "static_forward_context", None)
+        if snapshot is not None and snapshot.static_forward_context is not None:
+            baseline_context, baseline_values = snapshot.static_forward_context
+            baseline_context.clear()
+            baseline_context.update(baseline_values)
+            if static_forward_context is not baseline_context:
+                compilation_config.static_forward_context = baseline_context
+        elif isinstance(static_forward_context, dict):
+            for name, module in list(static_forward_context.items()):
+                if stale_module_ids and id(module) in stale_module_ids:
+                    removed_names.add(name)
+                    del static_forward_context[name]
+            if not stale_module_ids:
+                static_forward_context.clear()
+
+        static_all_moe_layers = getattr(compilation_config, "static_all_moe_layers", None)
+        if snapshot is not None and snapshot.static_all_moe_layers is not None:
+            baseline_moe_layers, baseline_values = snapshot.static_all_moe_layers
+            baseline_moe_layers[:] = baseline_values
+            if static_all_moe_layers is not baseline_moe_layers:
+                compilation_config.static_all_moe_layers = baseline_moe_layers
+        elif isinstance(static_all_moe_layers, list):
+            if stale_module_ids:
+                static_all_moe_layers[:] = [
+                    layer
+                    for layer in static_all_moe_layers
+                    if id(layer) not in stale_module_ids and (not isinstance(layer, str) or layer not in removed_names)
+                ]
+            else:
+                static_all_moe_layers.clear()
+
+    try:
+        from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
+
+        if isinstance(_ROPE_DICT, dict):
+            if snapshot is not None and snapshot.rope_cache is not None:
+                _ROPE_DICT.clear()
+                _ROPE_DICT.update(snapshot.rope_cache)
+            else:
+                _ROPE_DICT.clear()
+    except Exception as e:  # pragma: no cover - best-effort across vLLM versions
+        logger.debug("RFork fallback: skip resetting _ROPE_DICT: %s", e)
 
 
 def _iter_ascend_moe_quant_methods(model: Module) -> Iterator[Any]:
@@ -395,8 +455,10 @@ class RForkModelLoader(BaseModelLoader):
 
         with set_default_torch_dtype(model_config.dtype):
             need_del = False
+            model_init_started = False
             model: Module | None = None
             session: RForkSession | None = None
+            model_state_snapshot: _RForkProcessGlobalModelState | None = None
             exclude_blocks: list[tuple[int, int]] = []
             processed_layout_transfer = self._requires_processed_layout_transfer(model_config)
             bypass_reason = None
@@ -428,9 +490,10 @@ class RForkModelLoader(BaseModelLoader):
                 session = self._ensure_rfork_session(vllm_config, model_config)
                 # Avoid re-registering target-model storage shared by draft workers.
                 exclude_blocks = self._get_target_registered_blocks(vllm_config, model_config)
-                if not session.acquire_seed():
-                    raise _RForkSeedUnavailable("planner returned no compatible seed")
 
+                model_state_snapshot = _snapshot_process_global_model_state(vllm_config)
+                model_init_started = True
+                model_init_start_time = time.perf_counter()
                 with target_device:
                     model = initialize_model(
                         vllm_config=vllm_config,
@@ -438,8 +501,14 @@ class RForkModelLoader(BaseModelLoader):
                         prefix=prefix,
                     )
                     need_del = True
+                logger.info(
+                    "RFork %s model initialization took %.2f seconds",
+                    _rfork_model_kind(session),
+                    time.perf_counter() - model_init_start_time,
+                )
 
                 if processed_layout_transfer:
+                    layout_start_time = time.perf_counter()
                     log_layout = logger.info if _is_rfork_summary_rank(session) else logger.debug
                     log_layout(
                         "RFork %s model uses post-load tensor layout transfer.",
@@ -449,6 +518,23 @@ class RForkModelLoader(BaseModelLoader):
                         process_weights_after_loading(model, model_config, target_device)
                     # Complete async NPU layout conversion before exposing buffers.
                     torch.npu.synchronize()
+                    logger.info(
+                        "RFork %s model layout processing took %.2f seconds",
+                        _rfork_model_kind(session),
+                        time.perf_counter() - layout_start_time,
+                    )
+
+                acquire_seed_start_time = time.perf_counter()
+                try:
+                    acquired_seed = session.acquire_seed()
+                finally:
+                    logger.info(
+                        "RFork %s seed acquisition took %.2f seconds",
+                        _rfork_model_kind(session),
+                        time.perf_counter() - acquire_seed_start_time,
+                    )
+                if not acquired_seed:
+                    raise _RForkSeedUnavailable("planner returned no compatible seed")
 
                 weight_load_start_time = time.perf_counter()
                 if not session.transfer_from_seed(model, processed_layout_transfer, exclude_blocks):
@@ -487,9 +573,10 @@ class RForkModelLoader(BaseModelLoader):
             if session is not None:
                 cleanup_result = session.prepare_for_fallback()
 
-            if need_del and model is not None:
-                _reset_process_global_model_state(vllm_config, model)
+            if model_init_started:
+                _reset_process_global_model_state(vllm_config, model, model_state_snapshot)
 
+            if need_del and model is not None:
                 del model
                 gc.collect()
                 torch.npu.empty_cache()

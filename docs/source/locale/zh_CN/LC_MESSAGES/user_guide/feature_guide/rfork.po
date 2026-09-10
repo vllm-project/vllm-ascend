@@ -125,11 +125,11 @@ msgstr "1. 使用 `--load-format rfork` 启动 vLLM。"
 msgid "2. RFork builds a **seed key** from the model identity and deployment topology."
 msgstr "2. RFork 根据模型标识和部署拓扑构建 **seed key**。"
 
-msgid "3. RFork asks the planner for an available seed matching that key."
-msgstr "3. RFork 向规划器请求与该 key 匹配的可用 seed。"
+msgid "3. RFork initializes the local model and prepares/synchronizes any required processed tensor layout, then asks the planner for a seed matching that key."
+msgstr "3. RFork 初始化本地模型并完成必要的张量布局准备和同步，然后向规划器请求与该 key 匹配的 seed。"
 
-msgid "4. If a seed is returned, the new instance initializes the model structure on its local NPU, registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers."
-msgstr "4. 如果规划器返回 seed，新实例会在本地 NPU 上初始化模型结构、注册本地权重内存、从 seed 获取远端 TransferEngine 元数据，并将权重批量传输到本地参数缓冲区。"
+msgid "4. If a seed is returned, the new instance registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers."
+msgstr "4. 如果规划器返回 seed，新实例会注册本地权重内存、从 seed 获取远端 TransferEngine 元数据，并将权重批量传输到本地参数缓冲区。"
 
 msgid "5. If no seed is available, or any step fails, RFork cleans up and falls back to the default loader."
 msgstr "5. 如果没有可用 seed，或任一步骤失败，RFork 会清理状态并回退到默认加载器。"
@@ -167,14 +167,14 @@ msgstr "Seed 仍是正常提供服务的实例。RFork 不会要求它重新读�
 msgid "### Destination-Side Loading"
 msgstr "### 目标端加载"
 
-msgid "When a destination receives a seed lease from the planner, it performs the following steps for each worker rank:"
-msgstr "目标端从规划器获得 seed 租约后，会为每个 worker rank 执行以下步骤："
+msgid "The destination performs the following steps for each worker rank:"
+msgstr "目标端为每个 worker rank 执行以下步骤："
 
 msgid "1. Build the destination model structure and allocate the final NPU tensor layout."
 msgstr "1. 构建目标端模型结构并分配最终的 NPU 张量布局。"
 
-msgid "2. Register the destination tensor ranges with its local TransferEngine session."
-msgstr "2. 使用本地 TransferEngine 会话注册目标端张量范围。"
+msgid "2. After required layout preparation and synchronization, acquire a seed lease and register the destination tensor ranges with its local TransferEngine session."
+msgstr "2. 完成必要的布局准备和同步后，获取 seed 租约并使用本地 TransferEngine 会话注册目标端张量范围。"
 
 msgid "3. Fetch the matching seed worker's session and tensor manifest over HTTP."
 msgstr "3. 通过 HTTP 获取匹配 seed worker 的会话和张量清单。"
@@ -185,8 +185,8 @@ msgstr "4. 传输前校验张量名称、元素数量、元素大小和 shape。
 msgid "5. Group tensors into bounded chunks and use batched synchronous reads to copy them into the destination buffers."
 msgstr "5. 将张量划分为大小受限的分块，并通过批量同步读取复制到目标缓冲区。"
 
-msgid "6. Release the planner lease after the transfer, whether it succeeds or falls back."
-msgstr "6. 无论传输成功还是触发回退，传输结束后都会释放规划器租约。"
+msgid "6. Schedule bounded asynchronous lease release after the transfer, whether it succeeds or falls back."
+msgstr "6. 无论传输成功还是触发回退，传输结束后都会调度重试次数有限的异步租约释放。"
 
 msgid "Once loading completes, the destination can publish itself as another seed. A deployment can therefore grow from one storage-loaded instance into a pool of reusable NPU-resident weight sources."
 msgstr "加载完成后，目标端也可以将自身发布为新的 seed。因此，一个部署可以从单个通过存储加载的实例扩展为可复用的 NPU 驻留权重源池。"
@@ -461,15 +461,15 @@ msgstr "| Kimi2.5-W4A8 | W4A8 | A2 | 已测试 | RFork 传输已验证通过。 
 msgid ""
 "1. vLLM starts with `--load-format rfork`.\n"
 "2. RFork builds a **seed key** from the model identity and deployment topology.\n"
-"3. RFork asks the planner for an available seed matching that key.\n"
-"4. If a seed is returned, the new instance initializes the model structure on its local NPU, registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.\n"
+"3. RFork initializes the local model and prepares/synchronizes any required processed tensor layout, then asks the planner for a seed matching that key.\n"
+"4. If a seed is returned, the new instance registers local weight memory, fetches the remote transfer-engine metadata from the seed, and performs batch weight transfer into local parameter buffers.\n"
 "5. If no seed is available, or any transfer step fails, RFork cleans up and falls back to the default loader.\n"
 "6. RFork completes post-load processing and switches the model to evaluation mode before it starts a local seed service and advertises it to the planner. A seed-service startup failure does not reload the valid model; RFork only cleans up its registered memory."
 msgstr ""
 "1. vLLM 使用 `--load-format rfork` 启动。\n"
 "2. RFork 根据模型身份和部署拓扑构建**种子键**。\n"
-"3. RFork 向规划器请求与该键匹配的可用种子。\n"
-"4. 如果返回了种子，新实例会在本地 NPU 上初始化模型结构、注册本地权重内存、从种子获取远端传输引擎元数据，并将权重批量传输到本地参数缓冲区。\n"
+"3. RFork 初始化本地模型并完成必要的张量布局准备和同步，然后向规划器请求与该键匹配的种子。\n"
+"4. 如果返回了种子，新实例会注册本地权重内存、从种子获取远端传输引擎元数据，并将权重批量传输到本地参数缓冲区。\n"
 "5. 如果没有可用种子或任一传输步骤失败，RFork 会清理资源并回退到默认加载器。\n"
 "6. RFork 完成加载后处理并将模型切换到评估模式后，才启动本地种子服务并向规划器上报。种子服务启动失败不会重新加载已有效的模型；RFork 只清理其注册内存。"
 
@@ -562,8 +562,11 @@ msgstr ""
 msgid "### Planner Responsibilities"
 msgstr "### 规划器职责"
 
-msgid "The example planner reclaims abandoned leases after 60 seconds by default, independently of seed heartbeat expiry. Configure a positive integer duration with `--lease-ttl-sec` or `RFORK_MOCK_LEASE_TTL_SEC`; an explicit CLI value takes precedence over a valid environment value. The lease starts at seed acquisition, before model initialization and layout preparation, so size this timeout for the entire acquisition-to-release interval, not just weight transfer. Seed heartbeats do not renew leases. Expired leases return 404 on release, which the current client accepts as already released; successful startup alone does not prove that the lease remained valid throughout transfer."
-msgstr "示例规划器默认在 60 秒后回收遗留租约，此机制独立于 seed 心跳过期。可通过 `--lease-ttl-sec` 或 `RFORK_MOCK_LEASE_TTL_SEC` 设置正整数秒数；显式 CLI 值优先于有效的环境变量值。租约从获取 seed 时开始计时，早于模型初始化和布局准备，因此超时必须覆盖获取到释放的完整时段，而不只是权重传输。Seed 心跳不会续租。过期租约释放时返回 404，当前客户端将其视为已经释放；启动成功并不证明租约在整个传输期间都有效。"
+msgid "The example planner reclaims abandoned leases after 60 seconds by default, independently of seed heartbeat expiry. Configure a positive integer duration with `--lease-ttl-sec` or `RFORK_MOCK_LEASE_TTL_SEC`; an explicit CLI value takes precedence over a valid environment value. The loader acquires its lease after model initialization and any required layout preparation/synchronization. Size the timeout for memory registration, metadata fetch, transfer and asynchronous release, including retry delays. Initialization and layout timings are logged separately. Seed heartbeats do not renew leases. Expired leases return 404 on release, which the current client accepts as already released; successful startup alone does not prove that the lease remained valid throughout transfer."
+msgstr "示例规划器默认在 60 秒后回收遗留租约，此机制独立于 seed 心跳过期。可通过 `--lease-ttl-sec` 或 `RFORK_MOCK_LEASE_TTL_SEC` 设置正整数秒数；显式 CLI 值优先于有效的环境变量值。加载器在模型初始化及必要的布局准备和同步完成后才获取租约。超时应覆盖内存注册、元数据获取、传输及异步释放，包括重试等待。初始化和布局处理耗时分别记录。Seed 心跳不会续租。过期租约释放时返回 404，当前客户端将其视为已经释放；启动成功并不证明租约在整个传输期间都有效。"
+
+msgid "If no seed is available after preparation, the loader discards the prepared model and loads from the checkpoint. This adds preparation cost to a seed miss. Before fallback, it restores the pre-attempt compilation registries and rotary cache so shared main/draft state is preserved. Model construction and rollback in a worker are assumed to be serialized. Lease renewal is not enabled: it requires explicit support from both planner and client."
+msgstr "准备完成后如果没有可用 seed，加载器会丢弃已准备的模型并从检查点加载，因此 seed 未命中会增加准备成本。回退前会恢复本次尝试之前的编译注册表和旋转位置编码缓存，保留 main/draft 共享状态。此逻辑假设同一 worker 内的模型构造和回退串行执行。当前未启用租约续租，因为这需要规划器和客户端双方明确支持。"
 
 msgid "After an instance becomes ready, each worker periodically reports its seed metadata to the planner. A new instance asks the planner for a seed with the same seed key; the planner selects one with available capacity and returns a lease. A missing or unhealthy seed is not fatal because the destination can use the default loader and later join the seed pool itself."
 msgstr "实例就绪后，每个 worker 会定期向规划器上报 seed 元数据。新实例使用相同的 seed key 向规划器请求 seed；规划器选择仍有可用容量的 seed 并返回租约。缺失或不健康的 seed 不会导致致命错误，因为目标实例可以改用默认加载器，并在随后自行加入 seed 池。"
