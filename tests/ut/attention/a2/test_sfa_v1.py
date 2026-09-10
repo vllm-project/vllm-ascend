@@ -643,6 +643,60 @@ class TestAscendSFAMetadataBuilder(TestBase):
         assert metadata.num_actual_tokens == common_attn_metadata.num_actual_tokens
         assert metadata.slot_mapping.shape == (100, 4, 1024)
 
+    @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
+    @patch("vllm_ascend.attention.sfa_v1.get_tp_group")
+    def test_dsa_cp_metadata_builder_masks_graph_padding(
+        self,
+        mock_get_tp_group,
+        mock_get_cos_and_sin_mla,
+    ):
+        # TP8, graph size 80 and MTP3 produce 20 four-token request slots. With
+        # nine real requests, rank 6 splits a padded slot at its local boundary.
+        tp_group = MagicMock()
+        tp_group.world_size = 8
+        tp_group.rank_in_group = 6
+        mock_get_tp_group.return_value = tp_group
+        mock_get_cos_and_sin_mla.return_value = (
+            torch.zeros(80, 1, 1, 64),
+            torch.zeros(80, 1, 1, 64),
+        )
+
+        builder = AscendSFAMetadataBuilder.__new__(AscendSFAMetadataBuilder)
+        builder.kernel_block_size = 128
+        builder.model_config = MagicMock()
+        builder.model_config.get_head_size.return_value = 64
+        builder.attn_mask_builder = MagicMock()
+        builder.enable_dsa_cp = True
+        builder.actual_seq_lengths_query = torch.zeros(21, dtype=torch.int32)
+        builder.actual_seq_lengths_key = torch.zeros(21, dtype=torch.int32)
+        builder.spec_actual_seq_lengths_query = None
+        builder.spec_actual_seq_lengths_key = None
+        builder.metadata_cls = AscendSFAMetadata
+
+        common_attn_metadata = MagicMock()
+        common_attn_metadata.num_reqs = 20
+        common_attn_metadata.num_actual_tokens = 36
+        common_attn_metadata.num_input_tokens = 80
+        common_attn_metadata.query_start_loc = torch.arange(0, 81, 4, dtype=torch.int32)
+        common_attn_metadata.seq_lens = torch.zeros(20, dtype=torch.int32)
+        common_attn_metadata.seq_lens[:9] = torch.arange(128, 137, dtype=torch.int32)
+        common_attn_metadata._seq_lens_cpu = common_attn_metadata.seq_lens.clone()
+        common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens.clone()
+        common_attn_metadata.block_table_tensor = torch.zeros(20, 1, dtype=torch.int32)
+        common_attn_metadata.slot_mapping = torch.arange(80, dtype=torch.int64)
+        common_attn_metadata.positions = torch.arange(80, dtype=torch.int64)
+        common_attn_metadata.attn_state = AscendAttentionState.DecodeOnly
+        common_attn_metadata.causal = True
+        common_attn_metadata.group_len = None
+        common_attn_metadata.group_key_idx = None
+        common_attn_metadata.group_key_cache_idx = None
+
+        metadata = builder._build(common_attn_metadata)
+
+        local_seq_lens = metadata.dsa_cp_context.actual_seq_lengths_key
+        assert local_seq_lens[17].item() == 0
+        assert torch.all(local_seq_lens >= 0)
+
     @patch("vllm_ascend.attention.sfa_v1.get_current_vllm_config")
     @patch("vllm_ascend.attention.sfa_v1.get_cos_and_sin_mla")
     @patch("vllm_ascend.attention.sfa_v1.enable_dsa_cp", return_value=False)

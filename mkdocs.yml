@@ -165,7 +165,7 @@ extra:
   main_python_version: ">= 3.10, < 3.13"
   main_cann_version: "9.1.0"
   main_pytorch_torch_npu_version: "2.10.0 / 2.10.0.post4"
-  main_triton_ascend_version: "3.2.1"
+  main_triton_ascend_version: "3.2.2"
   social:
     - icon: fontawesome/brands/github
       link: https://github.com/vllm-project/vllm-ascend

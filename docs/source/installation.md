@@ -9,7 +9,7 @@ This document describes how to install vllm-ascend manually.
 - Hardware with Ascend NPUs. It's usually the Atlas 800 A2 series and Atlas inference products.
 - Software:
 
-    === "Atlas A2 inference products / Atlas A3 inference products"
+    === "Atlas A2/A3/950DT inference products"
 
         | Software      | Supported version                | Note                                      |
         |---------------|----------------------------------|-------------------------------------------|
@@ -204,7 +204,7 @@ Then you can install `vllm` and `vllm-ascend` from a **pre-built wheel** using o
 
         To install `triton-ascend`, run:
 
-        pip install triton-ascend==3.2.1 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+        pip install triton-ascend==3.2.2 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 
         If you are installing via `uv`, make sure to install `triton-ascend` **last**, after all other packages have been installed, to avoid dependency resolution conflicts.
 
@@ -266,7 +266,7 @@ python -m pip install \
     torch==2.10.0 torchvision==0.25.0 torchaudio==2.10.0
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
-    torch-npu==2.10.0.post4 triton-ascend==3.2.1
+    torch-npu==2.10.0.post4 triton-ascend==3.2.2
 python -m pip install \
     --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi \
     -r requirements.txt
@@ -305,7 +305,7 @@ examples and NPU-specific tests when no device is available.
     - Atlas A2: `export SOC_VERSION=ascend910b1`
     - Atlas A3: `export SOC_VERSION=ascend910_9391`
     - Atlas inference products: `export SOC_VERSION=ascend310p1`
-    - Ascend 950 Products: `export SOC_VERSION=<value starting with "ascend950">`
+    - Atlas 950DT: `export SOC_VERSION=ascend950dt_9582`
 
 !!! note
 
@@ -326,6 +326,8 @@ Supported images as following.
 | vllm-ascend:{{ vllm_ascend_version }}-a3-openeuler | Atlas A3 | openEuler |
 | vllm-ascend:{{ vllm_ascend_version }}-310p | Atlas inference products | Ubuntu |
 | vllm-ascend:{{ vllm_ascend_version }}-310p-openeuler | Atlas inference products | openEuler |
+| vllm-ascend:{{ vllm_ascend_version }}-950dt | Atlas 950DT | Ubuntu |
+| vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler | Atlas 950DT | openEuler |
 
 ??? "Click here to see 'Build from Dockerfile'"
 
@@ -341,7 +343,7 @@ Supported images as following.
 
     ```bash
 
-    # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15]).
+    # Update --device according to your device (Atlas A2: /dev/davinci[0-7] Atlas A3:/dev/davinci[0-15] Atlas 950DT: /dev/davinci[0-7]).
     # Update the vllm-ascend image according to your environment.
     # Note you should download the weight to /root/.cache in advance.
     export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}
@@ -525,7 +527,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..7}; do hccn_tool -i $i -link -g ; done
      # Check the network health status
@@ -542,7 +544,7 @@ Execute the following commands on each node in sequence. The results must all be
 
     ```bash
      # Check the remote switch ports
-     for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done 
+     for i in {0..15}; do hccn_tool -i $i -lldp -g | grep Ifname; done
      # Get the link status of the Ethernet ports (UP or DOWN)
      for i in {0..15}; do hccn_tool -i $i -link -g ; done
      # Check the network health status
@@ -551,6 +553,23 @@ Execute the following commands on each node in sequence. The results must all be
      for i in {0..15}; do hccn_tool -i $i -netdetect -g ; done
      # View gateway configuration
      for i in {0..15}; do hccn_tool -i $i -gateway -g ; done
+     # View NPU network configuration
+     cat /etc/hccn.conf
+    ```
+
+=== "950DT series"
+
+    ```bash
+     # Check the remote switch ports
+     for i in {0..7}; do hccn_tool -i $i -lldp -g | grep Ifname; done
+     # Get the link status of the Ethernet ports (UP or DOWN)
+     for i in {0..7}; do hccn_tool -i $i -link -g ; done
+     # Check the network health status
+     for i in {0..7}; do hccn_tool -i $i -net_health -g ; done
+     # View the network detected IP configuration
+     for i in {0..7}; do hccn_tool -i $i -netdetect -g ; done
+     # View gateway configuration
+     for i in {0..7}; do hccn_tool -i $i -gateway -g ; done
      # View NPU network configuration
      cat /etc/hccn.conf
     ```
@@ -571,12 +590,26 @@ Execute the following commands on each node in sequence. The results must all be
     for i in {0..15}; do hccn_tool -i $i -ip -g | grep ipaddr; done
     ```
 
+=== "950DT series"
+
+    ```bash
+    for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
+    ```
+
 ##### 2. Cross-Node PING Test
 
 ```bash
 # Execute on the target node (replace with actual IP)
 hccn_tool -i 0 -ping -g address x.x.x.x
 ```
+
+### Atlas 950 Series Server Pre-check
+
+This pre-check applies only to Atlas 950 series servers. Other server series can skip it.
+
+- **Prepare HiXLEP configuration paths**
+
+    When deploying an inference service on Atlas 950 series servers, verify on each server that `/lib/route.conf`, `/etc/hccl_rootinfo.json`, and the `/etc/hixlep` directory (which describes the UB link topology) exist and are configured correctly. If any of them are missing or incorrect, follow the [HiXLEP configuration file generation guide](https://gitcode.com/cann/hixl/wiki/A5%20LocalCommRes%E9%85%8D%E7%BD%AE%E6%8C%87%E5%8D%97.md) to generate the required content. When generating `/etc/hixlep`, use the "D2D scenario".
 
 ### Run Container In Each Node
 
@@ -655,6 +688,44 @@ Run the following command to start the container in each node (You should downlo
     --device /dev/davinci13 \
     --device /dev/davinci14 \
     --device /dev/davinci15 \
+    --device /dev/davinci_manager \
+    --device /dev/devmm_svm \
+    --device /dev/hisi_hdc \
+    -v /usr/local/dcmi:/usr/local/dcmi \
+    -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
+    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+    -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+    -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+    -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
+    -it $IMAGE bash
+    ```
+
+=== "950DT series"
+
+    ```bash
+    # Update the vllm-ascend image
+    # openEuler:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt-openeuler
+    # Ubuntu:
+    # export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt
+    export IMAGE=quay.io/ascend/vllm-ascend:{{ vllm_ascend_version }}-950dt
+
+    # Run the container using the defined variables
+    # Note if you are running bridge network with docker, Please expose available ports
+    # for multiple nodes communication in advance
+    docker run --rm \
+    --name vllm-ascend \
+    --net=host \
+    --shm-size=1g \
+    --device /dev/davinci0 \
+    --device /dev/davinci1 \
+    --device /dev/davinci2 \
+    --device /dev/davinci3 \
+    --device /dev/davinci4 \
+    --device /dev/davinci5 \
+    --device /dev/davinci6 \
+    --device /dev/davinci7 \
     --device /dev/davinci_manager \
     --device /dev/devmm_svm \
     --device /dev/hisi_hdc \

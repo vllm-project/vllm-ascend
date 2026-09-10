@@ -52,8 +52,8 @@ def test_sfa_dcp_builder_sizes_replicated_view_from_padded_block_table() -> None
             torch.device("cpu"),
         )
 
-    assert builder.block_table_replicated_view_buf.shape == (5, 16)
-    assert builder.arange_buffer.shape == (16,)
+    assert builder.block_table_replicated_view_buf.shape == (5, 8)
+    assert builder.arange_buffer.shape == (8,)
 
 
 def _make_builder(rank: int = 0) -> AscendSFADCPMetadataBuilder:

@@ -74,7 +74,7 @@ _benchmarks: &benchmarks
     batch_size: 2
     trust_remote_code: true
     request_rate: 0
-    baseline: 1
+    baseline: 34.2463
     threshold: 0.97
 
 # ==========================================

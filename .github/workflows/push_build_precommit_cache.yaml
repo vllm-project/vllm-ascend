@@ -88,7 +88,7 @@ jobs:
           pre-commit run --all-files --hook-stage manual --show-diff-on-failure
 
       - name: Save pre-commit cache
-        if: always() && steps.check-cache.outputs.cache-hit != 'true'
+        if: ${{ !cancelled() && steps.check-cache.outputs.cache-hit != 'true' }}
         uses: runs-on/cache/save@v5
         with:
           path: /tmp/pre-commit-cache

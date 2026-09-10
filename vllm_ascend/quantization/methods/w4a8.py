@@ -26,7 +26,7 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ascend_forward_context import _EXTRA_CTX, _MEGA_MOE_SUPPORTED, MoECommType
+from vllm_ascend.ascend_forward_context import _EXTRA_CTX, use_cann_megamoe
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe.experts_selector import select_experts
 from vllm_ascend.ops.fused_moe.moe_runtime_args import build_fused_experts_input
@@ -568,11 +568,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             w2_scale = layer.w2_weight_scale_list
             w1_scale_bias = layer.w13_scale_bias_list
             w2_scale_bias = layer.w2_scale_bias_list
-        elif (
-            _EXTRA_CTX.moe_comm_type == MoECommType.FUSED_MC2
-            and get_ascend_config().enable_fused_mc2 == 1
-            and _MEGA_MOE_SUPPORTED
-        ):
+        elif _EXTRA_CTX.use_mega_moe:
             w1 = layer.cann_mega_moe_w13_weight_list
             w1_scale = layer.cann_mega_moe_w13_weight_scale_list
             w2 = layer.cann_mega_moe_w2_weight_list
@@ -748,7 +744,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
         # FIX(mega W4A8 all-route): with MegaMoe on, keep ND int8 (skip trans_nz + pack_to_int32);
         # _maybe_build_cann_mega_moe_lists casts each expert slice to FRACTAL_NZ individually. See
         # the modelslim path below for the full rationale. Non-mega keeps the standard NZ-int32 form.
-        if get_ascend_config().enable_fused_mc2 == 1 and not self.dynamic_eplb and _MEGA_MOE_SUPPORTED:
+        if not self.dynamic_eplb and use_cann_megamoe(get_current_vllm_config()):
             self._maybe_build_cann_mega_moe_lists(layer)
         else:
             layer.w13_weight.data = maybe_trans_nz(layer.w13_weight.data)
@@ -828,7 +824,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             del layer.w13_scale_bias
             del layer.w2_scale_bias
         # keep weights as ND int8 when MegaMoe is on (skip trans_nz).
-        elif get_ascend_config().enable_fused_mc2 == 1 and _MEGA_MOE_SUPPORTED:
+        elif use_cann_megamoe(get_current_vllm_config()):
             self._maybe_build_cann_mega_moe_lists(layer)
 
         else:

@@ -78,6 +78,11 @@ class AscendStoreKVEvents(KVConnectorKVEvents):
 
 
 class AscendStoreConnector(KVConnectorBase_V1, SupportsHMA):
+    @property
+    def requires_kv_delivery(self) -> bool:
+        # AscendStore is a best-effort cache: a dropped save is a future miss.
+        return False
+
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """

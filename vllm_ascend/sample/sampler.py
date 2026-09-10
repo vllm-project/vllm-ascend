@@ -40,6 +40,7 @@ def random_sample(
             for i, generator in generators.items():
                 q[i].exponential_(generator=generator)
     torch.npu.current_stream().wait_stream(global_stream())
+    q.record_stream(torch.npu.current_stream())
     return probs.div_(q).argmax(dim=-1).view(-1)
 
 
@@ -258,9 +259,10 @@ def _apply_top_k_top_p_torch_npu(
             gathered_vals = torch_npu.npu_top_k_top_p(gathered_vals, k=k, p=p)
         return gathered_vals, gathered_idx
 
-    if p is None and k is None:
-        return logits
-    return torch_npu.npu_top_k_top_p(logits, k=k, p=p)
+    # Non-reduce_sample mode: use sort-based pytorch implementation.
+    # npu_top_k_top_p degrades severely (5-28ms) when k is large or batch
+    # contains mixed k values, while sort+mask is consistently ~1ms.
+    return _apply_top_k_top_p_pytorch(logits, k, p)
 
 
 apply_top_k_top_p = (

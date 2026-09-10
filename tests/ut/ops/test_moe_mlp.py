@@ -668,6 +668,42 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
             )
         self.assertEqual(m.gmm.call_args.kwargs["scale"][0].dtype, torch.bfloat16)
 
+    def test_alltoall_dynamic_eplb_swigluoai_passes_all_w1_scales_to_gmm1(self):
+        self._ctx_mock.moe_comm_type = MoECommType.ALLTOALL
+        scale0 = torch.arange(8, dtype=torch.float32)
+        scale1 = torch.arange(8, 16, dtype=torch.float32)
+        with (
+            _mock_w8a8_gelu_compute(torch.zeros(1, 8)) as m,
+            patch("torch_npu.npu_clipped_swiglu", return_value=torch.zeros(1, 4), create=True),
+            patch.object(DeviceOperator, "npu_dynamic_quant", return_value=(torch.zeros(1, 4), torch.ones(1))),
+        ):
+            kwargs = self._common_w8a8_kwargs(
+                activation="swigluoai_uninterleave",
+                w2_scale_dtype=torch.bfloat16,
+            )
+            kwargs.update(
+                {
+                    "w1": [torch.randn(8, 4), torch.randn(8, 4)],
+                    "w1_scale": [scale0, scale1],
+                    "w2": [torch.randn(4, 4), torch.randn(4, 4)],
+                    "w2_scale": [
+                        torch.randn(4, dtype=torch.bfloat16),
+                        torch.randn(4, dtype=torch.bfloat16),
+                    ],
+                    "group_list": torch.tensor([1, 1], dtype=torch.int64),
+                    "dynamic_eplb": True,
+                }
+            )
+            quant_apply_mlp(**kwargs)
+
+        gmm1_kwargs = m.gmm.call_args.kwargs
+        self.assertEqual(len(gmm1_kwargs["weight"]), 2)
+        self.assertEqual(len(gmm1_kwargs["scale"]), 2)
+        self.assertEqual(gmm1_kwargs["scale"][0].dtype, torch.bfloat16)
+        self.assertEqual(gmm1_kwargs["scale"][1].dtype, torch.bfloat16)
+        torch.testing.assert_close(gmm1_kwargs["scale"][0], scale0.bfloat16())
+        torch.testing.assert_close(gmm1_kwargs["scale"][1], scale1.bfloat16())
+
     def test_gelu_path_does_not_call_swiglu_op(self):
         """GELU path must use torch.gelu, never the SwiGLU NPU op."""
         with _mock_w8a8_gelu_compute(torch.zeros(1, 8)), patch("torch_npu.npu_swiglu", create=True) as mock_swiglu:
@@ -708,6 +744,82 @@ class TestQuantApplyMlpGeluPath(_GeluPathBase):
         mock_fused.assert_not_called()
         # Non-fused dequant GMM1 IS used instead.
         self.assertIn("scale", m.gmm.call_args.kwargs)
+
+    def test_mc2_dynamic_eplb_swigluoai_stacks_w1_scale(self):
+        self._ctx_mock.moe_comm_type = MoECommType.MC2
+        gate_up_out = torch.zeros(1, 8, dtype=torch.int32)
+        expected = torch.zeros(1, 4, dtype=torch.float32)
+        scale0 = torch.arange(8, dtype=torch.bfloat16)
+        scale1 = torch.arange(8, 16, dtype=torch.bfloat16)
+
+        kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
+        kwargs.update(
+            {
+                "w1": [torch.randn(8, 4), torch.randn(8, 4)],
+                "w1_scale": [scale0, scale1],
+                "w2": [torch.randn(4, 4), torch.randn(4, 4)],
+                "w2_scale": [torch.randn(4), torch.randn(4)],
+                "group_list": torch.tensor([1, 1], dtype=torch.int64),
+                "dynamic_eplb": True,
+            }
+        )
+
+        with (
+            _patch_npu_stream()[0],
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
+            patch(
+                "torch.ops._C_ascend.npu_dequant_swiglu_quant",
+                return_value=(torch.zeros(1, 4, dtype=torch.int8), torch.ones(1)),
+                create=True,
+            ) as mock_dequant_swiglu,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=expected),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            out, _ = quant_apply_mlp(**kwargs)
+
+        weight_scale = mock_dequant_swiglu.call_args.kwargs["weight_scale"]
+        self.assertEqual(weight_scale.shape, torch.Size([2, 8]))
+        self.assertEqual(weight_scale.dtype, torch.float32)
+        torch.testing.assert_close(weight_scale[0], scale0.float())
+        torch.testing.assert_close(weight_scale[1], scale1.float())
+        self.assertIs(out, expected)
+
+    def test_mc2_swigluoai_preserves_single_list_w1_scale_shape(self):
+        self._ctx_mock.moe_comm_type = MoECommType.MC2
+        gate_up_out = torch.zeros(1, 8, dtype=torch.int32)
+        expected = torch.zeros(1, 4, dtype=torch.float32)
+        weight_scale = torch.arange(12, dtype=torch.bfloat16).view(3, 4)
+
+        kwargs = self._common_w8a8_kwargs(activation="swigluoai_uninterleave")
+        kwargs.update(
+            {
+                "w1": [torch.randn(8, 4)],
+                "w1_scale": [weight_scale],
+                "w2": [torch.randn(4, 4)],
+                "w2_scale": [torch.randn(4)],
+                "group_list": torch.tensor([1], dtype=torch.int64),
+                "dynamic_eplb": False,
+            }
+        )
+
+        with (
+            _patch_npu_stream()[0],
+            patch("torch_npu.npu_grouped_matmul", return_value=[gate_up_out], create=True),
+            patch(
+                "torch.ops._C_ascend.npu_dequant_swiglu_quant",
+                return_value=(torch.zeros(1, 4, dtype=torch.int8), torch.ones(1)),
+                create=True,
+            ) as mock_dequant_swiglu,
+            patch.object(DeviceOperator, "npu_grouped_matmul_gmm2", return_value=expected),
+            patch(f"{MOE_MLP}.dispose_tensor"),
+        ):
+            out, _ = quant_apply_mlp(**kwargs)
+
+        packed_scale = mock_dequant_swiglu.call_args.kwargs["weight_scale"]
+        self.assertEqual(packed_scale.shape, torch.Size([3, 4]))
+        self.assertEqual(packed_scale.dtype, torch.float32)
+        torch.testing.assert_close(packed_scale, weight_scale.float())
+        self.assertIs(out, expected)
 
 
 class TestQuantApplyMlpNoGeluImpact(_GeluPathBase):

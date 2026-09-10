@@ -1177,6 +1177,11 @@ class VllmRunner:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        # Shut down the engine explicitly instead of relying on garbage
+        # collection. Consecutive tests can otherwise start before a retained
+        # EngineCore releases its NPU memory.
+        with contextlib.suppress(Exception):
+            self.model.llm_engine.engine_core.shutdown()
         del self.model
         clear_ascend_config()
         cleanup_dist_env_and_memory()

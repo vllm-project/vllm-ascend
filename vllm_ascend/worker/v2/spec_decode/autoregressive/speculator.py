@@ -22,6 +22,7 @@ from copy import copy
 from typing import Any, cast
 
 import torch
+import vllm.v1.worker.gpu.spec_decode.speculator as vllm_speculator
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -42,15 +43,35 @@ from vllm_ascend.worker.v2.input_batch import AscendInputBuffers
 logger = logging.getLogger(__name__)
 
 
+@contextmanager
+def build_draft_attn_metadata_factory(positions, pad):
+    """Wrap build_attn_metadata to forward MLA rotary positions for the block.
+
+    MLA reads positions inside build_decode_metadata for cos/sin; the flat
+    super() path doesn't forward them. Must run inside build_attn_metadata_wrapper().
+    TODO:This field is removed when the external cos/sin solution is removed from the MLA.
+    """
+    raw = vllm_speculator.build_attn_metadata  # cache
+
+    def build_attn_metadata(*args, **kwargs):
+        kwargs["positions"] = positions[:pad]
+        return raw(*args, **kwargs)
+
+    try:
+        vllm_speculator.build_attn_metadata = build_attn_metadata
+        yield
+    finally:
+        vllm_speculator.build_attn_metadata = raw  # restore
+
+
 class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     """Shared Ascend spec-decode loop for AscendEagle/AscendMTPSpeculator.
 
-    Subclasses AutoRegressiveSpeculator (the common base of EagleSpeculator and
-    MTPSpeculator) so the Ascend overrides are type-checked against a concrete
-    base. Each override keeps its ``super()`` call; on a combined subclass
-    (e.g. AscendEagleSpeculator) the cooperative MRO routes ``super()`` to the
-    concrete upstream speculator (Eagle/MTP) before reaching
-    AutoRegressiveSpeculator.
+    GQA and MLA draft decode state share one path, branched on
+    ``self.attn_architecture == "MLA"``:
+    MLA's per-step state lives in ``.decode`` (cloned per step, written via an
+    alias), GQA's is top-level. MLA also rebuilds the base (live ``.decode`` is
+    None/wrong-batch) and forwards rotary ``positions`` into build_attn_metadata.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
@@ -61,6 +82,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         AscendInputBuffers after super().__init__.
         """
         super().__init__(vllm_config, device)
+
+        # Attention architecture of the (draft) model; gates the MLA branches
+        # below. "MLA" for MLA models, None otherwise. Extensible to other
+        # architectures.
+        self.attn_architecture = "MLA" if vllm_config.model_config.is_deepseek_mla else None
 
         del self.input_buffers
         # AscendInputBuffers has extra `seq_lens_cpu` attribute.
@@ -79,11 +105,6 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 for _ in range(self.num_speculative_steps - 1)
             ]
 
-        # we need to update full graph params in run_fullgraph,
-        # so create a stream to update full graph params.
-        if cudagraph_mode.has_full_cudagraphs():
-            self.update_stream: torch.npu.Stream = torch.npu.Stream()
-
         # when in decode phase of eagle speculator, we need some value in
         # draft model's input_batch. so we keep a reference here.
         self.input_batch: InputBatch | None = None
@@ -95,6 +116,8 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
         # They need this speculator to update full-graph params, so set it here.
         self.prefill_cudagraph_manager.speculator = self
         self.decode_cudagraph_manager.speculator = self
+        self.prefill_cudagraph_manager.update_stream = self.update_stream
+        self.decode_cudagraph_manager.update_stream = self.update_stream
 
     def propose(
         self,
@@ -304,13 +327,14 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_query_per_req: int = 1,
             causal: bool = True,
         ) -> dict[str, Any] | None:
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs,
-                num_reqs_padded,
-                num_tokens_padded,
-                num_query_per_req=num_query_per_req,
-                causal=causal,
-            )
+            with build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded):
+                attn_metadata = super()._build_draft_attn_metadata(
+                    num_reqs,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                    num_query_per_req=num_query_per_req,
+                    causal=causal,
+                )
             if attn_metadata is not None:
                 # Ascend-specific: force DecodeOnly attention state for the draft model.
                 for metadata in attn_metadata.values():
@@ -350,15 +374,16 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             num_query_per_req: int = 1,
             causal: bool = True,
         ) -> dict[str, Any] | None:
-            attn_metadata = super()._build_draft_attn_metadata(
-                num_reqs,
-                num_reqs_padded,
-                num_tokens_padded,
-                seq_lens_cpu_upper_bound,
-                step,
-                num_query_per_req,
-                causal,
-            )
+            with build_draft_attn_metadata_factory(self.input_buffers.positions, num_tokens_padded):
+                attn_metadata = super()._build_draft_attn_metadata(
+                    num_reqs,
+                    num_reqs_padded,
+                    num_tokens_padded,
+                    seq_lens_cpu_upper_bound,
+                    step,
+                    num_query_per_req,
+                    causal,
+                )
             if attn_metadata is not None:
                 # Ascend-specific: force DecodeOnly attention state for the draft model.
                 for metadata in attn_metadata.values():
@@ -391,9 +416,31 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
                 attn_meta.seq_len_list = attn_meta.seq_lens.tolist()
 
     def _init_decode_draft_attn_metadatas(self, attn_metadata: dict[str, Any] | None, num_reqs_padded: int):
-        """Initialize attention metadata for decode phase in graph mode on Ascend NPUs."""
+        """Initialize per-step decode attention metadata for graph mode."""
         if attn_metadata is None:
             return
+
+        # TODO: _build_draft_attn_metadata pulls data (seq_lens, block_table,
+        # ...) from input_buffers internally; future may pass these as CPU
+        # params directly to build_attn_metadata, decoupling from input_buffers.
+        if self.attn_architecture == "MLA":
+            assert self.input_batch is not None
+            if vllm_version_is("0.26.0"):
+                attn_metadata = self._build_draft_attn_metadata(
+                    num_reqs=self.input_batch.num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_reqs_padded,
+                )
+            else:
+                attn_metadata = self._build_draft_attn_metadata(  # type: ignore[call-arg]
+                    num_reqs=self.input_batch.num_reqs,
+                    num_reqs_padded=num_reqs_padded,
+                    num_tokens_padded=num_reqs_padded,
+                    seq_lens_cpu_upper_bound=self.input_batch.seq_lens_cpu_upper_bound,
+                    step=1,
+                )
+            if attn_metadata is None:
+                return
 
         attn_state = AscendAttentionState.DecodeOnly
 
@@ -407,6 +454,9 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
             for metadata in per_step_attn_metadata.values():
                 metadata.attn_state = attn_state
                 metadata.seq_lens_cpu = seq_lens_cpu
+                if self.attn_architecture == "MLA":
+                    # clone .decode so per-step seq_lens_list writes don't alias.
+                    metadata.decode = copy(metadata.decode)
             draft_attn_metadatas.append(per_step_attn_metadata)
 
         return draft_attn_metadatas
@@ -414,7 +464,7 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
     def _update_decode_attn_metadata(
         self, attn_metadata: dict[str, Any] | None, step: int, num_reqs: int | None = None
     ):
-        """Update attention metadata for decode phase on Ascend NPUs."""
+        """Update per-step decode attention metadata on Ascend."""
         if attn_metadata is None:
             return
 
@@ -426,12 +476,11 @@ class AscendAutoRegressiveSpeculator(AutoRegressiveSpeculator):
 
         query_lens_list = [i for i in range(1, num_reqs_padded + 1)]
         seq_lens_list = next_seq_lens_cpu.tolist()
-        # attn_metadata is build in vllm's super class.
-        # We need to update attn_state for each layer's metadata.
         for metadata in attn_metadata.values():
-            metadata.actual_seq_lengths_q = query_lens_list
+            decode_metadata = metadata.decode if self.attn_architecture == "MLA" else metadata
+            decode_metadata.seq_lens_list = seq_lens_list
+            decode_metadata.actual_seq_lengths_q = query_lens_list
             metadata.seq_lens_cpu.copy_(next_seq_lens_cpu)
-            metadata.seq_lens_list = seq_lens_list
 
     def _calc_next_seq_lens_cpu(self, seq_lens_cpu, num_reqs, num_reqs_padded, step):
         # NOTE(drslark) to achieve fully alignment with vllm, `num_rejected` should be subtracted from `seq_lens`

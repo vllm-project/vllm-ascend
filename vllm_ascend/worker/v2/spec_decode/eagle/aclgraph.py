@@ -140,7 +140,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             logger.info_once("DecodeEagleAclGraphManager: draft run_fullgraph with num_tokens=%s", num_tokens)
 
         draft_attn_metadatas = self.speculator.build_draft_attn_metadatas(desc.num_reqs, self.is_draft_model_prefill)
-
+        self.update_stream.wait_stream(torch.npu.current_stream())
         ret = super().run_fullgraph(desc)
 
         # refer to vllm.v1.worker.gpu.dp_utils.sync_cudagraph_and_dp_padding to
@@ -165,7 +165,7 @@ class EagleAclGraphManager(SpeculatorCudaGraphManager):
             update_full_graph_params(
                 # FIXME(Ronald1995): support hybrid attn backend
                 list(self.speculator.attn_backends.values())[0],
-                self.speculator.update_stream,
+                self.update_stream,
                 forward_context,
                 num_tokens,
                 self.vllm_config,

@@ -229,8 +229,8 @@ class AscendDflashProposer(AscendEagleProposer):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)
                 self.model(
-                    input_ids=self.input_ids[:num_query_total],
-                    positions=self._get_positions(num_query_total),
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self._get_positions(num_input_tokens),
                     inputs_embeds=None,
                 )
 

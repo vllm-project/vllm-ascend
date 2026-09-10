@@ -119,6 +119,25 @@ def test_collect_paths_and_basic_path_helpers():
     assert select_tests._is_ut_path("tests/ut/a.py")
     assert select_tests._is_e2e_path("tests/e2e")
     assert select_tests._is_e2e_path("tests/e2e/a.py")
+    assert select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(
+        [
+            "tests/e2e/pull_request/one_card/test_x.py",
+            ".github/workflows/schedule_nightly_test_a5.yaml",
+        ]
+    )
+    assert not select_tests._is_cpu_ut_scoped_change(["docs/source/developer_guide/testing.md"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py", "vllm_ascend/worker/model_runner_v1.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py", "csrc/build.sh"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tests/ut/test_x.py", ".github/workflows/pr_test.yaml"])
+    assert select_tests._is_cpu_ut_scoped_change(["tools/docs_codegen/scanner.py"])
+    assert select_tests._is_cpu_ut_scoped_change(
+        ["tools/docs_codegen/scanner.py", "tests/ut/_tools/test_docs_codegen.py"]
+    )
+    assert select_tests._is_cpu_ut_scoped_change(["tools/docs_codegen/scanner.py", "tests/ut/test_envs.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tools/docs_codegen/scanner.py", "vllm_ascend/envs.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tools/bisect/runner.py"])
+    assert not select_tests._is_cpu_ut_scoped_change(["tools/bisect/runner.py", "tools/docs_codegen/scanner.py"])
     assert select_tests._configured_nodeid_targets_for_file(
         "tests/e2e/pull_request/two_card/test_split.py",
         nodeid_config,
@@ -475,10 +494,15 @@ def test_main_end_to_end_changed_files_options_and_skip(tmp_path, monkeypatch, c
             str(config_path),
             "--changed-files",
             "tests/e2e/pull_request/two_card/test_two_card.py",
+            ".github/workflows/schedule_nightly_test_a5.yaml",
+            "--filtered-changed-files-json",
+            json.dumps(["tests/e2e/pull_request/two_card/test_two_card.py"]),
         ],
     )
     select_tests.main()
-    out = capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "Detected CPU-UT-scoped change" in captured.err
+    out = captured.out
     groups_line = next(line for line in out.splitlines() if line.startswith("test_groups="))
     test_groups = json.loads(groups_line.removeprefix("test_groups="))
     selected_tests = set(test_groups[0]["tests"].split())
@@ -522,7 +546,7 @@ def test_bisect_tool_scoped_change_skips_global_modules(tmp_path, monkeypatch, c
         },
         {
             "name": "_tools",
-            "optional": False,
+            "optional": True,
             "source_file_dependencies": ["tools/"],
             "tests": ["tests/ut/_tools"],
         },
@@ -576,6 +600,31 @@ def test_bisect_tool_scoped_change_skips_global_modules(tmp_path, monkeypatch, c
     }
     assert "tests/ut/default/test_default.py" not in selected_tests
     assert "tests/e2e/pull_request/one_card/test_model.py" not in selected_tests
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "select_tests.py",
+            "--config",
+            str(config_path),
+            "--changed-files",
+            "tools/docs_codegen/scanner.py",
+            "tests/ut/_tools/test_base_tool.py",
+        ],
+    )
+    select_tests.main()
+    captured = capsys.readouterr()
+    assert "Detected CPU-UT-scoped change" in captured.err
+    assert "matched_modules=default_cpu_ut" in captured.out
+    groups_line = next(line for line in captured.out.splitlines() if line.startswith("test_groups="))
+    test_groups = json.loads(groups_line.removeprefix("test_groups="))
+    selected_tests = {test for group in test_groups for test in group["tests"].split()}
+    assert selected_tests == {
+        "tests/ut/_tools/test_base_tool.py",
+        "tests/ut/default/test_default.py",
+        "tests/ut/tools/bisect/test_auto_bisect.py",
+    }
 
 
 def test_default_cpu_ut_always_runs(tmp_path, monkeypatch, capsys):

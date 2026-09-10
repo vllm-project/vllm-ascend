@@ -1,4 +1,6 @@
+import importlib
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -8,6 +10,7 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
 from tests.ut.base import TestBase
 
 init_cached_hf_modules_path = "vllm.utils.import_utils.init_cached_hf_modules"
+kw_module = importlib.import_module("vllm_ascend.model_executor.warmup.kernel_warmup")
 
 
 class TestNPUWorker(TestBase):
@@ -389,6 +392,65 @@ class TestNPUWorker(TestBase):
 
             mock_allocator.wake_up.assert_called_once_with(tags=["test_tag"])
             worker.sleep_wakeup_manager.wakeup.assert_called_once_with(["test_tag"])
+            mock_model_runner.post_kv_cache_wake_up.assert_not_called()
+
+            worker.wake_up(tags=["kv_cache"])
+            mock_model_runner.post_kv_cache_wake_up.assert_called_once_with()
+
+    @staticmethod
+    def _make_unquantized_moe_model():
+        model = torch.nn.Module()
+        model.mlp = torch.nn.Module()
+        model.mlp.experts = torch.nn.Module()
+        model.mlp.experts.routed_experts = torch.nn.Module()
+        routed_experts = model.mlp.experts.routed_experts
+        routed_experts.w13_weight = torch.nn.Parameter(torch.empty(2, 4, 6))
+        routed_experts.w2_weight = torch.nn.Parameter(torch.empty(2, 3, 4))
+        routed_experts.w13_weight.weight_loader = MagicMock()
+        routed_experts.w2_weight.weight_loader = MagicMock()
+        return model
+
+    @patch("vllm_ascend.worker.worker.CaMemAllocator")
+    @patch("vllm_ascend.worker.worker.get_ascend_config")
+    def test_wake_up_does_not_transpose_moe_weights(self, mock_get_config, mock_allocator_class):
+        """Level-2 reload uses reload_weights; wake_up must not transpose MoE layout."""
+        from vllm_ascend.worker.worker import NPUWorker
+
+        target_model = self._make_unquantized_moe_model()
+        draft_model = self._make_unquantized_moe_model()
+        weight_loaders = [
+            (
+                model.mlp.experts.routed_experts.w13_weight.weight_loader,
+                model.mlp.experts.routed_experts.w2_weight.weight_loader,
+            )
+            for model in (target_model, draft_model)
+        ]
+        mock_get_config.return_value = SimpleNamespace(weight_nz_mode=0, enable_sleep_mode_extra_cleanup=False)
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+        worker.model_runner = SimpleNamespace(
+            model=target_model,
+            drafter=SimpleNamespace(model=draft_model),
+            post_kv_cache_wake_up=MagicMock(),
+        )
+        worker.vllm_config = SimpleNamespace(
+            model_config=SimpleNamespace(hf_text_config=SimpleNamespace(hidden_size=4)),
+            quant_config=None,
+            speculative_config=SimpleNamespace(method="mtp"),
+        )
+        worker._sleep_saved_buffers = {}
+
+        worker.wake_up(tags=["weights"])
+
+        for model, (w13_loader, w2_loader) in zip((target_model, draft_model), weight_loaders):
+            routed_experts = model.mlp.experts.routed_experts
+            # Keep execution layout; do not transpose back to loadable layout.
+            self.assertEqual(routed_experts.w13_weight.shape, (2, 4, 6))
+            self.assertEqual(routed_experts.w2_weight.shape, (2, 3, 4))
+            self.assertIs(routed_experts.w13_weight.weight_loader, w13_loader)
+            self.assertIs(routed_experts.w2_weight.weight_loader, w2_loader)
+        mock_allocator_class.get_instance.return_value.wake_up.assert_called_once_with(tags=["weights"])
 
     @patch("vllm_ascend.worker.worker.current_platform")
     @patch("vllm_ascend.worker.worker.MemorySnapshot")
@@ -1213,7 +1275,10 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
@@ -1248,6 +1313,7 @@ class TestNPUWorker(TestBase):
 
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
+            mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.set_random_seed")
     @patch("vllm_ascend.worker.worker.get_ascend_device_type")
@@ -1277,7 +1343,10 @@ class TestNPUWorker(TestBase):
         from vllm_ascend.worker.worker import NPUWorker
 
         # Create worker mock
-        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+        with (
+            patch.object(NPUWorker, "__init__", lambda x, **kwargs: None),
+            patch.object(kw_module, "kernel_warmup") as mock_kernel_warmup,
+        ):
             worker = NPUWorker()
             worker.model_runner = MagicMock()
             worker.vllm_config = MagicMock()
@@ -1306,6 +1375,7 @@ class TestNPUWorker(TestBase):
 
             # Verify atb warm up
             mock_warm_up_atb.assert_called_once()
+            mock_kernel_warmup.assert_called_once_with(worker)
 
     @patch("vllm_ascend.worker.worker.ensure_kv_transfer_initialized")
     @patch("vllm_ascend.worker.worker.CaMemAllocator")
