@@ -630,8 +630,8 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         worker.m_store.register_buffer.assert_called_once()
 
     def test_start_load_kv_sync(self):
-        worker = self._make_worker()
-        worker.m_store.get = MagicMock()
+        worker = self._make_worker(extra_config={"load_async": False})
+        worker.m_store.get = MagicMock(return_value=[0])
         # Setup token database
         worker.token_database.set_group_buffers({0: [1000, 2000]}, {0: [160]})
 
@@ -647,6 +647,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
         meta.add_request(req)
         worker.start_load_kv(meta)
         worker.m_store.get.assert_called_once()
+        stats = worker.get_stats()
+        self.assertEqual(stats.data["load_get_keys"], 1)
+        self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
     @patch(
         "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_worker.KVCacheStoreRecvingThread.start",
@@ -673,6 +676,9 @@ class TestKVPoolWorkerRegisterAndTransfer(unittest.TestCase):
 
         recv_thread = worker.kv_recv_thread
         recv_thread._handle_request(recv_thread.request_queue.get_nowait())
+        stats = worker.get_stats()
+        self.assertEqual(stats.data["load_get_keys"], 1)
+        self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
         self.assertEqual(worker.get_block_ids_with_load_errors(), {7})
         self.assertEqual(worker.get_block_ids_with_load_errors(), set())
 
@@ -1693,6 +1699,9 @@ class TestKVPoolWorkerTpMismatch(unittest.TestCase):
 
         worker._load_kv_tp_mismatch(block_hashes=[b"h0"], block_ids=[5], token_len=4, mask_num=0)
         worker.m_store.get.assert_called_once()
+        stats = worker.get_stats()
+        self.assertEqual(stats.data["load_get_keys"], len(worker.m_store.get.call_args.args[0]))
+        self.assertEqual(len(stats.data["load_get_duration_seconds"]), 1)
 
     def test_store_kv_tp_mismatch_skips_when_not_stored(self):
         worker = self._make_worker(extra_config={"backend": "mooncake", "prefill_tp_size": 4}, num_kv_heads=8)

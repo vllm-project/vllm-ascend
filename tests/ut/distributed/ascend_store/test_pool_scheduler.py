@@ -677,9 +677,16 @@ class TestKVPoolSchedulerUpdateFinished(unittest.TestCase):
             with self.subTest(direction=direction, finished=finished):
                 scheduler = self._make_scheduler()
                 attribute = "_delayed_free_req_ids" if direction == "sending" else "_loading_req_ids"
-                setattr(scheduler, attribute, initial)
+                if direction == "sending":
+                    for req_id in initial:
+                        scheduler._set_delayed_free(req_id, 1)
+                else:
+                    setattr(scheduler, attribute, initial)
                 getattr(scheduler, f"update_finished_{direction}")(finished)
                 self.assertEqual(getattr(scheduler, attribute), expected)
+                if direction == "sending":
+                    self.assertEqual(scheduler._delayed_free_blocks_by_req, dict.fromkeys(expected, 1))
+                    self.assertEqual(scheduler._num_delayed_free_blocks, len(expected))
 
 
 class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
@@ -737,6 +744,19 @@ class TestKVPoolSchedulerUpdateConnectorOutput(unittest.TestCase):
         scheduler.update_connector_output(output)
         scheduler._block_pool.free_blocks.assert_not_called()
 
+    def test_finished_send_updates_delayed_release_metrics(self):
+        scheduler = self._make_scheduler()
+        scheduler._set_delayed_free("r1", 3)
+
+        entered = scheduler.get_stats()
+        self.assertEqual(entered.data["delayed_release_requests"], 1)
+        self.assertEqual(entered.data["delayed_release_blocks"], 3)
+
+        scheduler.update_finished_sending({"r1"})
+        released = scheduler.get_stats()
+        self.assertEqual(released.data["delayed_release_requests"], 0)
+        self.assertEqual(released.data["delayed_release_blocks"], 0)
+
 
 class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
     """Test request_finished_all_groups."""
@@ -785,7 +805,7 @@ class TestKVPoolSchedulerRequestFinishedAllGroups(unittest.TestCase):
         request.request_id = "r1"
         delay, _ = scheduler.request_finished_all_groups(request, ([1, 2],))
         self.assertTrue(delay)
-        self.assertIn("r1", scheduler._delayed_free_req_ids)
+        self.assertEqual(scheduler._delayed_free_blocks_by_req["r1"], 2)
 
     def test_no_delay_empty_blocks(self):
         scheduler = self._make_scheduler()
