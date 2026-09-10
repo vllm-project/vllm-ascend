@@ -1798,3 +1798,145 @@ def test_forward_impl_keeps_full_width_input_for_shared_experts(monkeypatch):
     }
     assert result[0] is shared_out
     assert result[1] is routed_out
+
+
+def _stub_moe_runner_init(monkeypatch, *, gate=None, shared_experts=None):
+    """Construct AscendMoERunner with a lightweight MoERunner.__init__ stub."""
+    moe_config = SimpleNamespace(hidden_dim=4, ep_size=1)
+    routed_experts = SimpleNamespace(
+        quant_type=QuantType.NONE,
+        quant_method=object(),
+        return_with_event=False,
+        router=None,
+    )
+
+    def init_base_runner(
+        runner,
+        layer_name,
+        config,
+        _router,
+        experts,
+        _enable_dbo,
+        gate_arg,
+        shared_experts_arg,
+        _shared_expert_gate,
+        routed_input_transform,
+        routed_output_transform,
+        routed_scaling_factor,
+    ):
+        nn.Module.__init__(runner)
+        runner.layer_name = layer_name
+        runner.moe_config = config
+        runner.routed_experts = experts
+        runner._shared_experts = shared_experts_arg
+        runner._gate = gate_arg
+        runner.routed_input_transform = routed_input_transform
+        runner.routed_output_transform = routed_output_transform
+        runner.routed_scaling_factor = routed_scaling_factor
+        runner._forward_entry = object()
+
+    monkeypatch.setattr(fused_moe_module.MoERunner, "__init__", init_base_runner)
+    monkeypatch.setattr(fused_moe_module, "AscendSharedExperts", MagicMock(return_value=SimpleNamespace()))
+    monkeypatch.setattr(fused_moe_module, "get_tp_group", MagicMock(return_value=object()))
+    monkeypatch.setattr(fused_moe_module, "get_dp_group", MagicMock(return_value=object()))
+    monkeypatch.setattr(fused_moe_module, "setup_moe_comm_method", MagicMock())
+    monkeypatch.setattr(fused_moe_module, "get_moe_comm_method", MagicMock(return_value=None))
+
+    return AscendMoERunner(
+        "model.layers.0.mlp",
+        moe_config,
+        router=object(),
+        routed_experts=routed_experts,
+        gate=gate,
+        shared_experts=shared_experts,
+    )
+
+
+def test_runner_sets_precast_fp32_weight_for_internal_router(monkeypatch):
+    gate = SimpleNamespace()
+    runner = _stub_moe_runner_init(monkeypatch, gate=gate)
+
+    assert runner._gate is gate
+    assert gate.precast_fp32_weight is True
+
+
+def test_runner_skips_precast_when_weight_fp32_already_exists(monkeypatch):
+    gate = SimpleNamespace(weight_fp32=torch.randn(8, 4, dtype=torch.float32))
+    runner = _stub_moe_runner_init(monkeypatch, gate=gate)
+
+    assert runner._gate is gate
+    assert not hasattr(gate, "precast_fp32_weight")
+
+
+def test_runner_skips_precast_without_internal_router(monkeypatch):
+    runner = _stub_moe_runner_init(monkeypatch, gate=None)
+    assert runner._gate is None
+
+
+def test_gate_weight_fp32_returns_existing_buffer_without_cast():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    weight_fp32 = torch.randn(8, 4, dtype=torch.float32)
+    weight = MagicMock()
+    weight.data.to = MagicMock(side_effect=AssertionError("hot-path Cast must not run"))
+    gate = SimpleNamespace(weight=weight, weight_fp32=weight_fp32)
+    runner._gate = gate
+    runner.gate = gate
+
+    assert runner._gate_weight_fp32() is weight_fp32
+    weight.data.to.assert_not_called()
+
+
+def test_gate_weight_fp32_caches_cast_once():
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    weight_fp16 = torch.randn(8, 4, dtype=torch.float16)
+    gate = SimpleNamespace(weight=SimpleNamespace(data=weight_fp16))
+    runner._gate = gate
+    runner.gate = gate
+
+    first = runner._gate_weight_fp32()
+    second = runner._gate_weight_fp32()
+
+    assert first.dtype == torch.float32
+    assert first is second
+    assert gate.weight_fp32 is first
+
+
+def test_forward_impl_uses_precast_gate_weight_fp32(monkeypatch):
+    runner = AscendMoERunner.__new__(AscendMoERunner)
+    nn.Module.__init__(runner)
+    hidden_states = torch.randn(2, 4, dtype=torch.float16)
+    # FP16 router_logits forces the path that uses hidden_states.float() + gate weight.
+    router_logits = torch.randn(2, 3, dtype=torch.float16)
+    weight_fp32 = torch.randn(3, 4, dtype=torch.float32)
+    weight = MagicMock()
+    weight.data.to = MagicMock(side_effect=AssertionError("forward must not Cast gate.weight"))
+    gate = SimpleNamespace(weight=weight, weight_fp32=weight_fp32)
+    routed_out = torch.randn(2, 4)
+    recomputed_logits = torch.randn(2, 3, dtype=torch.float32)
+
+    def fake_linear(x, w):
+        assert w is weight_fp32
+        assert x.dtype == torch.float32
+        return recomputed_logits
+
+    runner._gate = gate
+    runner.gate = gate
+    runner.ascend_shared_experts = None
+    runner.routed_experts = SimpleNamespace(forward_impl=MagicMock(return_value=routed_out))
+    runner._sequence_parallel_context = MagicMock(return_value=nullcontext())
+    monkeypatch.setattr(fused_moe_module.F, "linear", fake_linear)
+
+    result = runner._forward_impl(
+        hidden_states,
+        router_logits,
+        shared_experts_input=None,
+        input_ids=None,
+    )
+
+    assert result is routed_out
+    weight.data.to.assert_not_called()
+    runner.routed_experts.forward_impl.assert_called_once_with(
+        hidden_states=hidden_states,
+        router_logits=recomputed_logits,
+        input_ids=None,
+    )

@@ -101,6 +101,29 @@ class TestAscendUnquantizedLinearMethod(TestBase):
 
         mock_format_cast.assert_not_called()
 
+    @patch("vllm_ascend.utils.get_ascend_config")
+    @mock.patch("vllm_ascend.ops.linear.maybe_trans_nz", side_effect=lambda x: x)
+    @mock.patch("torch_npu.npu_format_cast")
+    def test_process_weights_after_loading_precasts_fp32_weight(
+        self, mock_format_cast, mock_maybe_trans_nz, mock_get_config
+    ):
+        mock_config = MagicMock()
+        mock_config.weight_nz_mode = 0
+        mock_get_config.return_value = mock_config
+
+        weight = torch.randn(8, 4, dtype=torch.float16)
+        layer = mock.MagicMock()
+        layer.weight.data = weight
+        layer.prefix = "model.layers.0.mlp.gate"
+        layer.precast_fp32_weight = True
+        layer.skip_weight_nz_conversion = True
+
+        self.method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight_fp32.dtype, torch.float32)
+        torch.testing.assert_close(layer.weight_fp32, weight.to(torch.float32))
+        mock_format_cast.assert_not_called()
+
 
 class TestAscendRowParallelLinear(BaseLinearTest):
     @patch("vllm_ascend.ops.linear.get_current_vllm_config", return_value=MagicMock())
