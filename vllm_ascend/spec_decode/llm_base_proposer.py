@@ -1419,7 +1419,9 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                             if hasattr(self.model, "map_draft_to_target"):
                                 next_token_ids = self.model.map_draft_to_target(next_token_ids)
                             else:
-                                bias = torch.index_select(self.model.draft_id_to_target_id, dim=0, index=next_token_ids.view(-1)).view(next_token_ids.shape)
+                                bias = torch.index_select(
+                                    self.model.draft_id_to_target_id, dim=0, index=next_token_ids.view(-1)
+                                ).view(next_token_ids.shape)
                                 next_token_ids = next_token_ids + bias
                         draft_token_ids[:, idx + 1].copy_(next_token_ids)
 

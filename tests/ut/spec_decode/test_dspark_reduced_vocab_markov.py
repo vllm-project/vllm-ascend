@@ -84,9 +84,7 @@ class _ReducedVocabDrafter:
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         self.compute_logits_calls += 1
-        raise AssertionError(
-            "reduced-vocab drafter must use compute_draft_logits, not compute_logits"
-        )
+        raise AssertionError("reduced-vocab drafter must use compute_draft_logits, not compute_logits")
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         self.markov_embed_inputs.append(token_ids.clone())
@@ -172,9 +170,7 @@ def _make_proposer(model, monkeypatch) -> AscendSpecDecodeBaseProposer:
     proposer._share_mtp_indices = False
     proposer._context_slot_mapping_buffers = MagicMock()
     proposer.build_model_inputs_first_pass = MagicMock()
-    proposer.maybe_all_gather_and_unpad = (
-        lambda last_hidden, positions, hidden=None: (last_hidden, positions, hidden)
-    )
+    proposer.maybe_all_gather_and_unpad = lambda last_hidden, positions, hidden=None: (last_hidden, positions, hidden)
 
     # dspark persistent buffers: [max_batch, K + 1] and [max_batch]
     proposer._dspark_draft_buffer = torch.zeros((_NUM_BLK, _NUM_SPEC + 1), dtype=torch.int64)
@@ -232,9 +228,7 @@ class TestReducedVocabDrafter:
         # 3) full deterministic chain:
         #    seed 5 -> draft 5 -> target 155; 155 % 8 = 3 -> target 133; ...
         #    seed 7 -> draft 7 -> target 177; 177 % 8 = 1 -> target 111; ...
-        expected = torch.tensor(
-            [[155, 133, 155], [177, 111, 177]], dtype=torch.int64
-        )
+        expected = torch.tensor([[155, 133, 155], [177, 111, 177]], dtype=torch.int64)
         assert torch.equal(draft_tokens, expected)
 
     def test_bias_added_in_draft_space_shape(self, monkeypatch):
@@ -295,4 +289,3 @@ class TestBackwardCompatibility:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
