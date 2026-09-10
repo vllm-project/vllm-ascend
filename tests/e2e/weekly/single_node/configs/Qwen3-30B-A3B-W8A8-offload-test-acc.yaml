@@ -46,9 +46,9 @@ test_cases:
     benchmarks:
       acc:
         case_type: accuracy
-        dataset_path_local: vllm-ascend/gsm8k
+        dataset_path_local: vllm-ascend/gsm8k-lite
         request_conf: vllm_api_general_chat
-        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_str
+        dataset_conf: gsm8k/gsm8k_gen_0_shot_cot_chat_prompt
         max_out_len: 28000
         batch_size: 32
         baseline: 94.79
