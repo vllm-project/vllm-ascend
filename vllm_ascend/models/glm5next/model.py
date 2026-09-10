@@ -83,9 +83,9 @@ from .attention import Glm5NextMLAAttention
 from .config import Glm5NextConfig
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
+    AscendGlm5NextVisionTransformer,
     Glm5NextMultiModalProcessor,
     Glm5NextProcessingInfo,
-    Glm5NextVisionTransformer,
 )
 from .ops.mhc_ops import hc_contract, hc_expand
 
@@ -951,20 +951,10 @@ class Glm5NextForConditionalGeneration(Glm4vForConditionalGeneration, HasInnerSt
         self.is_multimodal_pruning_enabled = multimodal_config.is_multimodal_pruning_enabled()
 
         with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Glm5NextVisionTransformer(
+            self.visual = AscendGlm5NextVisionTransformer(
                 config.text_config,
                 config.vision_config,
-                # Read eps from the VISION sub-config, not the top-level
-                # `config.rms_norm_eps`: Glm5NextConfig.__getattribute__ mirrors
-                # the latter onto text_config (1e-5), silently ignoring the
-                # vision tower's own (1e-6) rms_norm_eps.
                 norm_eps=config.vision_config.rms_norm_eps,
-                # Vision tower ships BF16 weights in this fp8 checkpoint (no
-                # weight_scale_inv for visual.*), so it must NOT inherit the
-                # global fp8 quant_config -- doing so incorrectly quantizes
-                # the tower
-                # and yields NaN image features. Mirrors the MLA/KDA proj
-                # pattern (quant_config=None for BF16 submodules).
                 quant_config=None,
                 prefix=maybe_prefix(prefix, "visual"),
             )
