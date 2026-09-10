@@ -68,7 +68,7 @@ def test_deepseek_v4_dspark_spec_decoding_dp4_full_graph() -> None:
         tokenizer_mode="deepseek_v4",
         block_size=128,
         distributed_executor_backend="mp",
-        gpu_memory_utilization=0.8,
+        gpu_memory_utilization=0.93,
         quantization="ascend",
         enforce_eager=False,
         async_scheduling=True,
