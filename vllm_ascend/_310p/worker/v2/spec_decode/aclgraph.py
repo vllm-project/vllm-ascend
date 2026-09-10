@@ -53,9 +53,17 @@ class AutoRegressiveAclGraphManager310(AutoRegressiveAclGraphManager):
         kv_cache_config: KVCacheConfig,
         progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        # Draft-decode (q_len=1) stays DecodeOnly/PA. Draft-prefill (K=1 →
-        # q_len=2) must capture SpecDecoding like MRv1 MTP / target FULL.
-        if not self.is_draft_model_prefill or not self.cudagraph_mode.has_full_cudagraphs():
+        # Draft-decode (q_len=1 / K>1 multi-step) needs host CPU slot_mapping
+        # (D2H). NPU GLOBAL capture forbids sync memcpy → skip decode graphs;
+        # runtime stays on the eager ``_multi_step_decode`` path.
+        if not self.is_draft_model_prefill:
+            logger.info(
+                "Skipping 310P draft-decode ACLGraph capture "
+                "(CPU slot_mapping D2H incompatible with NPU graph capture)."
+            )
+            return
+
+        if not self.cudagraph_mode.has_full_cudagraphs():
             return super().capture(
                 forward_fn,
                 model_state,

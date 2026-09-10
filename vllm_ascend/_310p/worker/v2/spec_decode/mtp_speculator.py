@@ -100,9 +100,14 @@ class AscendMTPSpeculator310(AscendAutoRegressiveSpeculator, MTPSpeculator):
             AscendRotaryEmbedding310.set_rope_position_flag_310p(False)
 
     def capture(self) -> None:
-        """Capture draft-prefill FULL (K=1) with SpecDecoding make_dummy patch."""
+        """Capture draft-prefill FULL; skip draft-decode graphs on 310P.
+
+        K>1 decode capture would run ``_multi_step_decode`` → CPU slot_mapping
+        D2H under NPU graph capture (GLOBAL), which fails with aclrtMemcpy
+        107030. Prefill FULL remains; multi-step draft stays eager.
+        """
         self.last_token_indices.zero_()
-        logger.info("Capturing 310P MTP draft ACLGraph (K=1 draft-prefill FULL; SpecDecoding capture).")
+        logger.info("Capturing 310P MTP draft ACLGraph (draft-prefill FULL + SpecDecoding; draft-decode skipped).")
         super().capture()
 
     @torch.inference_mode()
