@@ -32,7 +32,7 @@ For multi-node deployment, verify the communication environment by following [Ve
 
 ### 4.1 Docker Image Installation
 
-You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../installation.md#set-up-using-docker).
+You can use the official all-in-one Docker image. For the available image tags and published versions, refer to [Using Docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 - Step 1: Download the latest Docker image
 
@@ -202,7 +202,6 @@ Single-node deployment completes both Prefill and Decode within the same node. B
       --max-num-seqs 500 \
       --enable-prefix-caching \
       --async-scheduling \
-      --api-server-count=1 \
       --reasoning-parser minimax_m3 \
       --limit-mm-per-prompt '{"image":1,"video":0}' \
       --gpu-memory-utilization 0.92 \
@@ -689,51 +688,6 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
-    Key Parameter Descriptions:
-
-    **`launch_online_dp.py` parameters:**
-
-    | Parameter | Type | Required | Default | Description |
-    | --------- | ---- | -------- | ------- | ----------- |
-    | `--dp-size` | int | Yes | - | Data parallel size (total number of DP ranks across all nodes). |
-    | `--tp-size` | int | No | 1 | Tensor parallel size within each DP rank. |
-    | `--pp-size` | int | No | 1 | Pipeline parallel size within each DP rank. Each rank occupies `tp_size * pp_size` NPUs. |
-    | `--dp-size-local` | int | No | (same as `--dp-size`) | Number of DP ranks on the current node. |
-    | `--dp-rank-start` | int | No | 0 | Starting rank offset for data parallel ranks on this node. |
-    | `--dp-address` | str | Yes | - | IP address of the data parallel master node. |
-    | `--dp-rpc-port` | str | No | 12321 | RPC port for data parallel master communication. |
-    | `--vllm-start-port` | int | No | 8000 | Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index. |
-
-    **Prefill node-specific configurations:**
-
-    - `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The Ascend 950DT launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
-    - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
-    - `--speculative-config '{"method":"eagle3", ...}'`: Enables the MiniMax-M3 EAGLE3 draft model. Do not replace this with GLM MTP options.
-    - `--no-async-scheduling` (950DT): Used by the verified MXFP8 Prefill launch.
-
-    **Decode node-specific configurations:**
-
-    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
-    - `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The Ascend 950DT launch does not set this flag and keeps prefix caching enabled.
-    - `--max-num-seqs 64`: Decode concurrency used by the verified 1P1D launches.
-
-    **Mooncake KV transfer configuration (`--kv-transfer-config`):**
-
-    - `"kv_connector": "MooncakeConnectorV1"`: Uses Mooncake as the KV cache transfer connector between prefill and decode nodes.
-    - `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
-    - `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT `30000`/`26900`.
-    - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
-    - `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT only): Required for UBOE / Ascend direct communication on 950DT.
-    - `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
-
-    **Request forwarding (proxy):**
-
-    - Wait until every Prefill and Decode rank prints `Application startup complete` before starting the proxy.
-    - The proxy maps every prefill engine endpoint and every decode engine endpoint to a single entry point on port `8009`.
-    - If requests reach the proxy but no output is returned, check that the proxy host list includes every healthy Prefill and Decode port, and that both nodes still have free NPU memory after the previous run.
-
-    Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
-
 === "Ascend 950DT series"
 
     Prefill-Decode disaggregation can be deployed on 2 Ascend 950DT (96GB × 8) for `MiniMax-M3-MXFP8` with EAGLE3. Mount `/etc/hixlep/` in the container for UBOE / Ascend direct KV transfer.
@@ -903,50 +857,50 @@ Then prepare `run_dp_template.sh` on each node and start the engines.
 
     The service is then accessible at `http://<proxy_ip>:8009`. For PD disaggregation, use this proxy endpoint in Section 7.
 
-    Key Parameter Descriptions:
+Key Parameter Descriptions:
 
-    **`launch_online_dp.py` parameters:**
+**`launch_online_dp.py` parameters:**
 
-    | Parameter | Type | Required | Default | Description |
-    | --------- | ---- | -------- | ------- | ----------- |
-    | `--dp-size` | int | Yes | - | Data parallel size (total number of DP ranks across all nodes). |
-    | `--tp-size` | int | No | 1 | Tensor parallel size within each DP rank. |
-    | `--pp-size` | int | No | 1 | Pipeline parallel size within each DP rank. Each rank occupies `tp_size * pp_size` NPUs. |
-    | `--dp-size-local` | int | No | (same as `--dp-size`) | Number of DP ranks on the current node. |
-    | `--dp-rank-start` | int | No | 0 | Starting rank offset for data parallel ranks on this node. |
-    | `--dp-address` | str | Yes | - | IP address of the data parallel master node. |
-    | `--dp-rpc-port` | str | No | 12321 | RPC port for data parallel master communication. |
-    | `--vllm-start-port` | int | No | 8000 | Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index. |
+| Parameter | Type | Required | Default | Description |
+| --------- | ---- | -------- | ------- | ----------- |
+| `--dp-size` | int | Yes | - | Data parallel size (total number of DP ranks across all nodes). |
+| `--tp-size` | int | No | 1 | Tensor parallel size within each DP rank. |
+| `--pp-size` | int | No | 1 | Pipeline parallel size within each DP rank. Each rank occupies `tp_size * pp_size` NPUs. |
+| `--dp-size-local` | int | No | (same as `--dp-size`) | Number of DP ranks on the current node. |
+| `--dp-rank-start` | int | No | 0 | Starting rank offset for data parallel ranks on this node. |
+| `--dp-address` | str | Yes | - | IP address of the data parallel master node. |
+| `--dp-rpc-port` | str | No | 12321 | RPC port for data parallel master communication. |
+| `--vllm-start-port` | int | No | 8000 | Starting port for each vLLM engine instance on this node. Each DP rank's engine port = `vllm_start_port` + local rank index. |
 
-    **Prefill node-specific configurations:**
+**Prefill node-specific configurations:**
 
-    - `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The Ascend 950DT launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
-    - `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
-    - `--speculative-config '{"method":"eagle3", ...}'`: Enables the MiniMax-M3 EAGLE3 draft model. Do not replace this with GLM MTP options.
-    - `--no-async-scheduling` (950DT): Used by the verified MXFP8 Prefill launch.
+- `--pipeline-parallel-size` (A3 Prefill: `2`): Splits the 60 MiniMax-M3 layers across two pipeline stages. A3 sets `VLLM_PP_LAYER_PARTITION=30,30` and also writes `pp_layer_partition` into the Mooncake extra config. The Ascend 950DT launch uses `--pp-size 1` on both Prefill and Decode (no pipeline parallel), so no layer partition is needed.
+- `--enforce-eager`: Prefill nodes do not capture CUDA/ACL graphs.
+- `--speculative-config '{"method":"eagle3", ...}'`: Enables the MiniMax-M3 EAGLE3 draft model. Do not replace this with GLM MTP options.
+- `--no-async-scheduling` (950DT): Used by the verified MXFP8 Prefill launch.
 
-    **Decode node-specific configurations:**
+**Decode node-specific configurations:**
 
-    - `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
-    - `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The Ascend 950DT launch does not set this flag and keeps prefix caching enabled.
-    - `--max-num-seqs 256`: Decode concurrency used by the verified 950DT 1P1D launch. A3 uses `64`.
+- `--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`: Graph capture for the decode phase only.
+- `--no-enable-prefix-caching` (A3 Decode): Disables prefix caching on the Decode node to avoid the D-node prefix-cache known issue tracked in [#7944](https://github.com/vllm-project/vllm-ascend/issues/7944). The Ascend 950DT launch does not set this flag and keeps prefix caching enabled.
+- `--max-num-seqs 256`: Decode concurrency used by the verified 950DT 1P1D launch. A3 uses `64`.
 
-    **Mooncake KV transfer configuration (`--kv-transfer-config`):**
+**Mooncake KV transfer configuration (`--kv-transfer-config`):**
 
-    - `"kv_connector": "MooncakeConnectorV1"`: Uses Mooncake as the KV cache transfer connector between prefill and decode nodes.
-    - `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
-    - `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT `30000`/`26900`.
-    - `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
-    - `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT only): Required for UBOE / Ascend direct communication on 950DT.
-    - `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
+- `"kv_connector": "MooncakeConnectorV1"`: Uses Mooncake as the KV cache transfer connector between prefill and decode nodes.
+- `"kv_role": "kv_producer"` / `"kv_consumer"`: `kv_producer` on prefill nodes, `kv_consumer` on decode nodes.
+- `"kv_port"`: Port for Mooncake KV transfer. Use different ports for prefill and decode. The verified values are A3 `36000`/`36100` and 950DT `30000`/`26900`.
+- `"use_ascend_direct": true`: Enables Ascend direct transfer for KV cache.
+- `"ascend_local_comm_res_path": "/etc/hixlep"` (950DT only): Required for UBOE / Ascend direct communication on 950DT.
+- `"prefill"` / `"decode"` sections: `dp_size`, `tp_size`, and `pp_size` must match the actual global layout on both nodes. A3 uses `prefill: dp2 tp4 pp2` and `decode: dp4 tp4 pp1`. 950DT uses `prefill: dp2 tp4 pp1` and `decode: dp2 tp4 pp1`.
 
-    **Request forwarding (proxy):**
+**Request forwarding (proxy):**
 
-    - Wait until every Prefill and Decode rank prints `Application startup complete` before starting the proxy.
-    - The proxy maps every prefill engine endpoint and every decode engine endpoint to a single entry point on port `8009`.
-    - If requests reach the proxy but no output is returned, check that the proxy host list includes every healthy Prefill and Decode port, and that both nodes still have free NPU memory after the previous run.
+- Wait until every Prefill and Decode rank prints `Application startup complete` before starting the proxy.
+- The proxy maps every prefill engine endpoint and every decode engine endpoint to a single entry point on port `8009`.
+- If requests reach the proxy but no output is returned, check that the proxy host list includes every healthy Prefill and Decode port, and that both nodes still have free NPU memory after the previous run.
 
-    Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
+Please refer to [envs.py](https://github.com/vllm-project/vllm-ascend/blob/main/vllm_ascend/envs.py) for further explanation and restrictions of the environment variables above.
 
 ### 5.4 Multimodal and ViT DP (Optional)
 
@@ -1158,7 +1112,7 @@ curl http://{ip}:{port}/v1/chat/completions \
     "messages": [
       {
         "role": "user",
-        "content": "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\nA student regrets that he fell asleep during a lecture in electrochemistry, facing the following incomplete statement in a test:\nThermodynamically, oxygen is a …… oxidant in basic solutions. Kinetically, oxygen reacts …… in acidic solutions.\nWhich combination of weaker/stronger and faster/slower is correct?\n\nA) weaker – faster\nB) stronger – faster\nC) weaker - slower\nD) stronger – slower"
+        "content": "Answer the following multiple choice question. The last line of your response should be of the following format: 'Answer: LETTER' (without quotes) where LETTER is one of ABCD. Think step by step before answering.\n\nA student regrets that he fell asleep during a lecture in electrochemistry, facing the following incomplete statement in a test:\nThermodynamically, oxygen is a …oxidant in basic solutions. Kinetically, oxygen reacts …in acidic solutions.\nWhich combination of weaker/stronger and faster/slower is correct?\n\nA) weaker —faster\nB) stronger —faster\nC) weaker - slower\nD) stronger —slower"
       }
     ],
     "max_tokens": 8000,
@@ -1272,12 +1226,14 @@ For detailed instructions, refer to [Using AISBench for accuracy evaluation](../
 
 | Dataset | Hardware | Score | max-model-len | max-num-seqs | max_out_len | batch_size | generation_kwargs |
 |---------|----------|-------|---------------|--------------|-------------|------------|-------------------|
-| GSM8K   | GPU      | 96.72 | 65536         | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
-| GSM8K   | NPU      | 96.36 | 10240         | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
-| AIME2025 | GPU     | 95@repeat4 | -        | -            | -           | -          | -                 |
-| AIME2025 | NPU     | 93.3@repeat2    | 131072        | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
-| GPQA-Diamond | GPU     | 92.42    | 81920      | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
-| GPQA-Diamond | NPU     | 92.42    | 131072      | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
+| GSM8K   | 8 H200 (141GB × 8)     | 96.72 | 65536         | 16           | 49152       | 16         | temperature=1.0, top_p=0.95 |
+| GSM8K   | 8 Atlas 800 A3 (64GB × 16)      | 96.36 | 10240         | 16           | 9500        | 20         | temperature=1.0, top_p=0.95 |
+| AIME2025 | 8 H200 (141GB × 8)     | 95@repeat4 | -        | -            | -           | -          | -                 |
+| AIME2025 | 8 Atlas 800 A3 (64GB × 16)      | 93.3@repeat2    | 131072        | 32         | 65536           | 8         | temperature=1.0, top_p=0.95 |
+| GPQA-Diamond | 8 H200 (141GB × 8)     | 92.42    | 81920      | 64        | 75776       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 Atlas 800 A3 (64GB × 16)      | 92.42    | 131072      | 32        | 65536       | 8       | temperature=0.6, top_p=0.95 |
+| GPQA-Diamond | 8 Ascend 950DT (96GB × 8)      | 92.9    | 133000      | 128       | 131072       | 128       | temperature=0.6, top_p=0.95 |
+| MMMU-pro | 8 Ascend 950DT (96GB × 8)      | 78.9    | 133000      | 128       | 131072       | 50       | temperature=0.6, top_p=0.95 |
 
 ### 8.3 Multimodal Evaluation
 
@@ -1318,7 +1274,7 @@ ais_bench \
 
 ### 9.1 Recommended Configurations
 
-The recommended configurations are the same as those specified in Chapter 5, “Online Service Deployment.”
+The recommended configurations are the same as those specified in Chapter 5, "Online Service Deployment."
 
 ### 9.2 Tuning Guidelines
 
