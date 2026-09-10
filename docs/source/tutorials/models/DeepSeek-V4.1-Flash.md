@@ -233,7 +233,7 @@ every other node is a headless worker.
       --safetensors-load-strategy lazy \
       --quantization ascend \
       --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
-      --speculative-config "{\"method\":\"dspark\",\"model\":\"${MODEL_PATH}\",\"num_speculative_tokens\":5,\"enforce_eager\":true}" \
+      --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
 
@@ -293,7 +293,7 @@ every other node is a headless worker.
       --safetensors-load-strategy lazy \
       --quantization ascend \
       --additional-config '{"enable_engram":true,"engram_storage":"int8","enable_cpu_binding":true,"ascend_compilation_config":{"enable_npugraph_ex":false,"enable_static_kernel":false}}' \
-      --speculative-config "{\"method\":\"dspark\",\"model\":\"${MODEL_PATH}\",\"num_speculative_tokens\":5,\"enforce_eager\":true}" \
+      --speculative-config '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}' \
       --compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
     ```
 
