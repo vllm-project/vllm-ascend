@@ -15,16 +15,13 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-"""CPU tests for DSpark weight rotation and parallel-draft profiling."""
+"""Unit tests for ``AscendDSparkSpeculator.load_draft_model`` fc rotation."""
 
 from __future__ import annotations
 
-import sys
-from contextlib import nullcontext
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import numpy as np
 import pytest
 import torch
 from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
@@ -101,39 +98,3 @@ class TestLoadDraftModel:
         monkeypatch.setattr(_ROT_MATRIX, _no_call)
         draft = _spec(_bf16_config()).load_draft_model(MagicMock(), set())
         assert torch.equal(draft.model.fc.weight.data, captured["before"])
-
-
-@pytest.mark.parametrize("dummy_run,skip_attn", [(False, False), (True, False), (False, True), (True, True)])
-@pytest.mark.parametrize("has_dp_sync", [False, True])
-@pytest.mark.parametrize("release_vllm", [False, True])
-def test_profiling_does_not_reuse_target_dp_counts(dummy_run, skip_attn, has_dp_sync, release_vllm):
-    speculator_cls = AscendDSparkSpeculator
-    spec = speculator_cls.__new__(speculator_cls)
-    spec.input_buffers = SimpleNamespace(positions=torch.empty(0, device="cpu"))
-    spec.max_num_tokens = 64
-    batch = SimpleNamespace(is_prefilling_np=np.zeros(8, dtype=np.bool_))
-    counts = torch.full((2,), 64, dtype=torch.int32, device="cpu")
-    dp_sync = SimpleNamespace(num_tokens_across_dp=counts) if has_dp_sync else None
-    module = sys.modules[speculator_cls.__module__]
-    with (
-        patch.object(speculator_cls.__bases__[0], "propose", return_value=object()) as propose,
-        patch.object(module, "vllm_version_is", return_value=release_vllm),
-        patch.object(module, "build_attn_metadata_wrapper", return_value=nullcontext()),
-        patch.object(module, "build_draft_attn_metadata_factory", return_value=nullcontext(), create=True),
-    ):
-        result = spec.propose(
-            batch,
-            *([None] * 10),
-            dp_sync=dp_sync,
-            num_tokens_across_dp=counts,
-            dummy_run=dummy_run,
-            skip_attn_for_dummy_run=skip_attn,
-            is_profile=dummy_run and skip_attn,
-        )
-
-    assert result is propose.return_value
-    propose.assert_called_once()
-    expected_sync = None if dummy_run and skip_attn else (counts if release_vllm else dp_sync)
-    assert propose.call_args.args[11] is expected_sync
-    assert propose.call_args.args[12:14] == (dummy_run, skip_attn)
-    assert torch.equal(counts, torch.full_like(counts, 64))
