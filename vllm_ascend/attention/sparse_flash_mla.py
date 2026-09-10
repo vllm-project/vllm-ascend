@@ -40,6 +40,9 @@ def sparse_flash_mla_metadata(**kwargs):
     # This adapter is only selected for the BF16 paged-KV path. SparseFlashMla
     # accepts PA_BBND for this cache; PA_ND belongs to the FP8 quantized op.
     kwargs["layout_kv"] = "PA_BBND"
+    # Paged KV uses block tables and seqused lengths, not TND cumulative offsets.
+    kwargs.pop("cu_seqlens_ori_kv", None)
+    kwargs.pop("cu_seqlens_cmp_kv", None)
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     if "max_seqlen_kv" in kwargs:
@@ -55,6 +58,9 @@ def sparse_flash_mla(q: torch.Tensor, **kwargs):
     kwargs.pop("tile_size", None)
     kwargs.pop("rope_head_dim", None)
     kwargs["layout_kv"] = "PA_BBND"
+    # Paged KV uses block tables and seqused lengths, not TND cumulative offsets.
+    kwargs.pop("cu_seqlens_ori_kv", None)
+    kwargs.pop("cu_seqlens_cmp_kv", None)
     if "seqused_kv" in kwargs:
         kwargs["seqused_ori_kv"] = kwargs.pop("seqused_kv")
     _add_compressed_kv_lengths(kwargs)
