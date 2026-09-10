@@ -22,8 +22,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 import torch
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.distributed import get_pp_group
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.pcp_manager import PCPManager
