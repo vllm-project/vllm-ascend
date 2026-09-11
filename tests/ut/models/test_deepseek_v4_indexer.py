@@ -449,7 +449,7 @@ class TestIndexerOps:
         assert qli_kwargs["block_table"] is metadata.block_table
         assert qli_kwargs["metadata"] is metadata.qli_metadata
         assert qli_kwargs["topk"] == 3
-        assert qli_kwargs["quant_mode"] == 2
+        assert qli_kwargs["quant_mode"] == DeviceOperator.get_dsa_indexer_quant_mode()
         assert qli_kwargs["layout_q"] == "TND"
         assert qli_kwargs["layout_k"] == "PA_BBND"
         assert qli_kwargs["mask_mode"] == 3

@@ -471,6 +471,40 @@ class TestMooncakeBackendMethods(unittest.TestCase):
             b.register_buffer([100], [200])
             mock_te.register_buffer.assert_called_once()
 
+    def test_layerwise_put_start_passes_replicate_config(self):
+        b = self._make_backend()
+        b.config.preferred_segment = True
+        b.config.prefer_alloc_in_same_node = False
+        b.local_seg = "segment-0"
+        b.store.batch_put_session_start.return_value = [0]
+        replicate_config = MagicMock()
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.backend.mooncake_backend.ReplicateConfig",
+            return_value=replicate_config,
+        ):
+            result = b.batch_put_start(["k0"], [1024])
+
+        self.assertEqual(result, [0])
+        self.assertEqual(replicate_config.preferred_segment, "segment-0")
+        self.assertFalse(replicate_config.prefer_alloc_in_same_node)
+        b.store.batch_put_session_start.assert_called_once_with(["k0"], [1024], replicate_config)
+
+    def test_layerwise_range_methods_are_aligned(self):
+        b = self._make_backend()
+        b.store.batch_put_from_multi_buffer_ranges.return_value = [0]
+        b.store.batch_get_into_multi_buffer_ranges.return_value = [0]
+
+        self.assertEqual(b.batch_copy_put(["k"], [[100]], [[16]], [[32]]), [0])
+        self.assertEqual(b.batch_copy_get(["k"], [[200]], [[16]], [[32]]), [0])
+        b.store.batch_put_from_multi_buffer_ranges.assert_called_once_with(["k"], [[100]], [[16]], [[32]])
+        b.store.batch_get_into_multi_buffer_ranges.assert_called_once_with(["k"], [[200]], [[16]], [[32]])
+
+    def test_layerwise_batch_result_shape_is_rejected(self):
+        b = self._make_backend()
+        b.store.batch_get_session_start.return_value = []
+        with self.assertRaisesRegex(RuntimeError, "returned 0 results for 1 keys"):
+            b.batch_get_start(["k"])
+
     def test_register_buffer_with_store_independent_te(self):
         b = self._make_backend()
         b._use_store_independent_te = True

@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-Update estimated_times in test_config.yaml from CI timing data.
+Update estimated_times.yaml from CI timing data.
 
 Usage:
     python3 update_estimated_times.py \
         --timing-dir ./timing-artifacts \
-        --config .github/workflows/scripts/test_config.yaml
+        --config .github/workflows/scripts/estimated_times.yaml
 
 Methodology:
   1. Collect all elapsed times per test from timing JSON files
   2. Take median per test
   3. Apply 10 % safety buffer, round to nearest 10 s
-  4. Overwrite estimated_times section in test_config.yaml
+  4. Overwrite the estimated_times mapping in estimated_times.yaml
 """
 
 import argparse
 import json
 from pathlib import Path
+
+import yaml
 
 
 def collect_timings(timing_dir: Path) -> dict[str, list[int]]:
@@ -63,16 +65,14 @@ def compute_median(values: list[int]) -> int:
 
 
 def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
-    """Overwrite the ``estimated_times`` section in *config_path*.
+    """Overwrite the ``estimated_times`` mapping in *config_path*.
 
     For each test: median -> x1.1 -> round to nearest 10 s.
+    Comment lines above ``estimated_times:`` are preserved.
 
     Returns the number of entries whose values changed.
     """
-    text = config_path.read_text()
-
-    # --- parse existing estimated_times ---
-    import yaml
+    text = config_path.read_text(encoding="utf-8")
 
     meta = yaml.safe_load(text) or {}
     existing: dict[str, int] = meta.get("estimated_times", {}) or {}
@@ -102,56 +102,30 @@ def update_config(config_path: Path, timings: dict[str, list[int]]) -> int:
         print("No estimated_time values changed.")
         return 0
 
-    # --- find section boundaries in raw text ---
     lines = text.split("\n")
     et_start = None
-    section_end = None
-
     for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped == "estimated_times:":
+        if line.strip() == "estimated_times:":
             et_start = i
-        elif et_start is not None and section_end is None:
-            # Next top-level key (no leading spaces) after estimated_times marks the end
-            if line and not line.startswith(" ") and not line.startswith("#") and not line.startswith("-"):
-                if ":" in line and line.split(":")[0].strip():
-                    section_end = i
-                    # Backtrack through preceding blank/comment lines so they
-                    # are preserved in ``after`` rather than being dropped.
-                    while section_end > 0 and (
-                        lines[section_end - 1].strip() == "" or lines[section_end - 1].strip().startswith("#")
-                    ):
-                        section_end -= 1
-                    break
+            break
 
     if et_start is None:
         print("Error: 'estimated_times:' section not found in config file.")
         return 0
 
-    # Build new estimated_times lines
     new_section_lines = ["estimated_times:"]
     for name, val in new_entries.items():
         new_section_lines.append(f"  {name}: {val}")
 
-    # Reconstruct file
-    before = lines[:et_start]
-    after = lines[section_end:] if section_end is not None else []
-
-    new_text = "\n".join(before) + "\n" + "\n".join(new_section_lines) + "\n"
-    if after:
-        # Ensure a blank line separates estimated_times from the next section
-        if after[0].strip():
-            new_text += "\n"
-        new_text += "\n".join(after) + "\n"
-
-    config_path.write_text(new_text)
+    new_text = "\n".join(lines[:et_start] + new_section_lines) + "\n"
+    config_path.write_text(new_text, encoding="utf-8")
     print(f"\nDone. {changed} estimated_time value(s) changed.")
     return changed
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Update estimated_times in test_config.yaml from CI timing data",
+        description="Update estimated_times.yaml from CI timing data",
     )
     parser.add_argument(
         "--timing-dir",
@@ -161,9 +135,9 @@ def main() -> None:
     )
     parser.add_argument(
         "--config",
-        default=".github/workflows/scripts/test_config.yaml",
+        default=".github/workflows/scripts/estimated_times.yaml",
         type=Path,
-        help="Path to test_config.yaml",
+        help="Path to estimated_times.yaml",
     )
     args = parser.parse_args()
 
