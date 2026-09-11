@@ -834,8 +834,9 @@ class TestMemcacheQosInjection(unittest.TestCase):
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(MemcacheBackend, "_setup_store"),
+            patch.object(memcache_module.torch.npu, "current_device", return_value=0),
         ):
-            MemcacheBackend(MagicMock(), local_rank=0, extra_config={"qos_priority": 2})
+            MemcacheBackend(MagicMock(), extra_config={"qos_priority": 2})
             self.assertEqual(os.environ.get(self._ENV), "2")
 
 
