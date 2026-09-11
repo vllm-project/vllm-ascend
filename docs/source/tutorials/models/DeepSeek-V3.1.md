@@ -35,7 +35,7 @@ It is recommended to download the model weight to the shared directory of multip
 
 ### 3.2 Verify Multi-node Communication (Optional)
 
-If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../installation.md#verify-multi-node-communication).
+If you want to deploy multi-node environment, you need to verify multi-node communication according to [verify multi-node communication environment](../../getting_started/installation.md#installation-multi-node-interconnect).
 
 ## 4 Installation
 
@@ -43,7 +43,7 @@ If you want to deploy multi-node environment, you need to verify multi-node comm
 
 You can use our official docker image to run `DeepSeek-V3.1` directly.
 
-Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 === "Ascend 950DT series"
 
@@ -159,7 +159,7 @@ After a successful docker run, you can verify the running container service by e
 
 If you don't want to use the docker image as above, you can also build all from source:
 
-- Install `vllm-ascend` from source, refer to [installation](../../installation.md).
+- Install `vllm-ascend` from source, refer to [installation](../../getting_started/installation.md).
 
 If you want to deploy multi-node environment, you need to set up environment on each node.
 
@@ -183,8 +183,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
     export TASK_QUEUE_ENABLE=1
 
-    export VLLM_ASCEND_ENABLE_MLAPO=1
-
     vllm serve /weight/dsk-v3.1-w4a4_mlp-w8a8c8_attn-0618-full \
     --host 0.0.0.0 \
     --port 8015 \
@@ -202,7 +200,7 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
     --speculative-config '{"num_speculative_tokens": 3,"method": "deepseek_mtp"}' \
     --quantization ascend \
-    --additional_config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_balance_scheduling": true}' \
+    --additional_config '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_balance_scheduling": true,"enable_mlapo":true}' \
     ```
 
 === "A3 series"
@@ -227,7 +225,6 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     export GLOO_SOCKET_IFNAME=$nic_name
     export TP_SOCKET_IFNAME=$nic_name
     export HCCL_SOCKET_IFNAME=$nic_name
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
 
     vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
@@ -246,18 +243,19 @@ Single-node deployment completes both Prefill and Decode within the same node. T
     --no-enable-prefix-caching \
     --gpu-memory-utilization 0.92 \
     --speculative-config '{"num_speculative_tokens": 3, "method": "mtp"}' \
-    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}'
+    --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY"}' \
+    --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}'
     ```
 
 Key Parameter Descriptions:
 
-- Setting the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING=1` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
+- Setting `additional_config.scheduler_config.enable_balance_scheduling=true` enables balance scheduling. This may help increase output throughput and reduce TPOT in v1 scheduler. However, TTFT may degrade in some scenarios. Furthermore, enabling this feature is not recommended in scenarios where PD is separated.
 - For single-node deployment, we recommend using `dp4tp4` instead of `dp2tp8`.
 - `--max-model-len` specifies the maximum context length - that is, the sum of input and output tokens for a single request. For performance testing with an input length of 3.5k and output length of 1.5k, a value of `16384` is sufficient, however, for precision testing, please set it at least `35000`.
 - `--no-enable-prefix-caching` indicates that prefix caching is disabled. To enable it, remove this option.
 - If you use the w4a8 weight, more memory will be allocated to kvcache, and you can try to increase system throughput to achieve greater throughput.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -340,11 +338,10 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
     --data-parallel-size 4 \
@@ -393,11 +390,10 @@ Run the following scripts on two nodes respectively.
     export OMP_NUM_THREADS=1
     export HCCL_BUFFSIZE=200
     export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
-    export VLLM_ASCEND_BALANCE_SCHEDULING=1
     export HCCL_INTRA_PCIE_ENABLE=1
     export HCCL_INTRA_ROCE_ENABLE=0
 
-    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot \
+    vllm serve /weights/DeepSeek-V3.1-w8a8-mtp-QuaRot --additional-config '{"scheduler_config":{"enable_balance_scheduling":true}}' \
     --host 0.0.0.0 \
     --port 8004 \
     --headless \
@@ -431,7 +427,7 @@ Key Parameter Descriptions:
 - `--headless`: indicates that this vLLM instance is not the master service node. Only set on non-master nodes (Node 1). The master node (Node 0) should NOT set this flag.
 - For single-node deployment, we recommend using `dp4 tp4` instead of `dp2 tp8`.
 
-Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 Service Verification:
 
@@ -810,7 +806,6 @@ Parameter descriptions:
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
 
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export DYNAMIC_EPLB="true"
 
         export ASCEND_RT_VISIBLE_DEVICES=$1
@@ -851,7 +846,7 @@ Parameter descriptions:
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":false,"enable_shared_expert_dp":true, "eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts":16}}'
+        --additional-config '{"enable_cpu_binding":"True","multistream_overlap_shared_expert":false,"enable_shared_expert_dp":true,"enable_mlapo":true,"eplb_config":{"dynamic_eplb": true, "expert_heat_collection_interval": 50, "algorithm_execution_interval": 5, "eplb_policy_type": 2, "num_redundant_experts":16}}'
         ```
 
     === "Decode Node"
@@ -875,7 +870,6 @@ Parameter descriptions:
         export OMP_NUM_THREADS=10
         export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
         export TASK_QUEUE_ENABLE=1
-        export VLLM_ASCEND_ENABLE_MLAPO=1
         export ASCEND_RT_VISIBLE_DEVICES=$1
 
         vllm serve /weight/dsk_v3.1-T-w8a8c8_attn-0506-full/ \
@@ -916,12 +910,12 @@ Parameter descriptions:
                         "ascend_local_comm_res_path": "/etc/hixlep"
                 }
             }' \
-        --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
+        --additional_config '{"enable_cpu_binding": "True", "recompute_scheduler_enable": true, "multistream_overlap_shared_expert": true, "enable_mlapo": true, "finegrained_tp_config": {"lmhead_tensor_parallel_size":8}}'
         ```
 
     Key Parameter Descriptions:
 
-        - `VLLM_ASCEND_ENABLE_MLAPO=1`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
+        - `additional_config.enable_mlapo=true`: enables the fusion operator, which can significantly improve performance but consumes more NPU memory. In the Prefill-Decode (PD) separation scenario, enable MLAPO only on decode nodes.
         - `recompute_scheduler_enable: true`: enables the recomputation scheduler. When the Key-Value Cache (KV Cache) of the decode node is insufficient, requests will be sent to the prefill node to recompute the KV Cache. In the PD separation scenario, it is recommended to enable this configuration on both prefill and decode nodes simultaneously.
         - `multistream_overlap_shared_expert: true`: When the Tensor Parallelism (TP) size is 1 or `enable_shared_expert_dp: true`, an additional stream is enabled to overlap the computation process of shared experts for improved efficiency.
         - `lmhead_tensor_parallel_size: 16`: When the Tensor Parallelism (TP) size of the decode node is 1, this parameter allows the TP size of the LMHead embedding layer to be greater than 1, which is used to reduce the computational load of each card on the LMHead embedding layer.
@@ -1070,7 +1064,7 @@ The proxy returns HTTP 200 OK. The JSON response contains the `choices` field wi
 }
 ```
 
-Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html) for troubleshooting.
+Common Issues Tip: If you encounter issues with PD separation deployment, please refer to the [Public FAQs](../../faqs.md) for troubleshooting.
 
 ## 6 Functional Verification
 
@@ -1154,28 +1148,28 @@ After several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5K/16K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5K/16K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64K input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5K input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16K input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
-|Long Context<br>(64K input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|16 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp2 tp8 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (A3)|DeepSeek-V3.1-w4a8-perchannle|Use dp1 tp8 to balance memory capacity and compute efficiency|
 
 #### Table 2: Detailed Node Configuration(A3)
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput (3.5K)|Server / Single Machine|16|4|4|39K|3|
-|High Throughput (16K)|Server / Single Machine|16|4|4|36K|3|
-|Low Latency (3.5K)|Server / Single Machine|16|8|2|36K|3|
-|Low Latency (16K)|Server / Single Machine|16|8|2|36K|3|
-|High Throughput / Low Latency (64K)|Server / Single Machine|16|8|2|132K|3|
-|High Throughput (16K)|Server-P Node|16|8|2|36K|1|
-|High Throughput (16K)|Server-D Node|16|4|8|36K|1|
-|Low Latency (16K)|Server-P Node|16|8|2|36K|3|
-|Low Latency (16K)|Server-D Node|16|4|8|36K|3|
-|Long Context (64K)|Server-P Node|16|16|1|132K|3|
-|Long Context (64K)|Server-D Node|16|4|8|132K|3|
+|High Throughput (3.5k)|Server / Single Machine|16|4|4|39k|3|
+|High Throughput (16k)|Server / Single Machine|16|4|4|36k|3|
+|Low Latency (3.5k)|Server / Single Machine|16|8|2|36k|3|
+|Low Latency (16k)|Server / Single Machine|16|8|2|36k|3|
+|High Throughput / Low Latency (64k)|Server / Single Machine|16|8|2|132k|3|
+|High Throughput (16k)|Server-P Node|16|8|2|36k|1|
+|High Throughput (16k)|Server-D Node|16|4|8|36k|1|
+|Low Latency (16k)|Server-P Node|16|8|2|36k|3|
+|Low Latency (16k)|Server-D Node|16|4|8|36k|3|
+|Long Context (64k)|Server-P Node|16|16|1|132k|3|
+|Long Context (64k)|Server-D Node|16|4|8|132k|3|
 
 #### Table 3: Scenario Overview(Ascend 950DT)
 
@@ -1183,28 +1177,28 @@ After several minutes, you can get the performance evaluation result.
 
 |Scenario|Deployment Mode|*Total NPUs|Weight Version|Key Considerations|
 |--------|---------------|-----------|--------------|------------------|
-|High Throughput<br>(3.5K/16K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|Low Latency<br>(3.5K/16K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(64K input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(3.5K input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|High Throughput / Low Latency<br>(16K input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
-|Long Context<br>(64K input, no prefix cache)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|High Throughput<br>(3.5k/16k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|Low Latency<br>(3.5k/16k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(64k input)|Single-Node Mixed|8 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp1 tp8 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(3.5k input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|High Throughput / Low Latency<br>(16k input)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
+|Long Context<br>(64k input, no prefix cache)|2P1D deployment|64 (Ascend 950DT)|DeepseekV3.1-w8a8c8_attn|Use dp4 tp4 to balance memory capacity and compute efficiency|
 
 #### Table 4: Detailed Node Configuration(Ascend 950DT)
 
 |Scenario|Configuration|NPUs|TP|DP|Max Model Len|MTP Speculation Num|
 |--------|-------------|-----|--|--|-------------------|--------------------|
-|High Throughput (3.5K)|Server / Single Machine|8|8|1|39K|3|
-|High Throughput (16K)|Server / Single Machine|8|8|1|36K|3|
-|Low Latency (3.5K)|Server / Single Machine|8|8|1|36K|3|
-|Low Latency (16K)|Server / Single Machine|8|8|1|36K|3|
-|High Throughput / Low Latency (64K)|Server / Single Machine|8|8|1|132K|3|
-|High Throughput (16K)|Server-P Node|16|4|4|36K|1|
-|High Throughput (16K)|Server-D Node|32|1|32|36K|1|
-|Low Latency (16K)|Server-P Node|16|4|4|36K|3|
-|Low Latency (16K)|Server-D Node|32|1|32|36K|3|
-|Long Context (64K)|Server-P Node|16|4|4|132K|3|
-|Long Context (64K)|Server-D Node|32|1|32|132K|3|
+|High Throughput (3.5k)|Server / Single Machine|8|8|1|39k|3|
+|High Throughput (16k)|Server / Single Machine|8|8|1|36k|3|
+|Low Latency (3.5k)|Server / Single Machine|8|8|1|36k|3|
+|Low Latency (16k)|Server / Single Machine|8|8|1|36k|3|
+|High Throughput / Low Latency (64k)|Server / Single Machine|8|8|1|132k|3|
+|High Throughput (16k)|Server-P Node|16|4|4|36k|1|
+|High Throughput (16k)|Server-D Node|32|1|32|36k|1|
+|Low Latency (16k)|Server-P Node|16|4|4|36k|3|
+|Low Latency (16k)|Server-D Node|32|1|32|36k|3|
+|Long Context (64k)|Server-P Node|16|4|4|132k|3|
+|Long Context (64k)|Server-D Node|32|1|32|132k|3|
 
 > For complete startup commands and parameter descriptions, please refer to the deployment examples in [Chapter 5](#5-online-service-deployment).
 
@@ -1219,4 +1213,4 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html).
+For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md).

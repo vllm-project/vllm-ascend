@@ -37,8 +37,9 @@ growing. It is **not** "make the lagging ranks catch up to the leader" (that
 semantic is **explicitly rejected** here — see
 [Behavior-preservation contract](#behavior-preservation-contract), item 1).
 
-The feature is enabled via `additional_config.enable_balance_scheduling = true`
-(the environment variable `VLLM_ASCEND_BALANCE_SCHEDULING` is deprecated). It
+The feature is enabled via
+`additional_config.scheduler_config.enable_balance_scheduling = true`. The
+legacy environment variable is no longer supported. It
 supports PD-mixed mode only; validation lives in `vllm_ascend/platform.py` and
 `vllm_ascend/ascend_config.py`.
 
@@ -168,10 +169,9 @@ drafting assumptions did not hold; both are corrected here:
 Accordingly the Phase 1 description and the "post-refactor file shape" below are
 both rewritten to match the actual implementation. Phase 3 collapses config
 probing to two fallbacks (AscendConfig → additional_config) and **removes the
-direct environment-variable read** — `VLLM_ASCEND_BALANCE_SCHEDULING` is still
-parsed centrally by `AscendConfig` (as a deprecated fallback for
-`additional_config`), but `_balance_scheduling_enabled` no longer reads it
-itself, bypassing `AscendConfig`. Details in [Phased rollout](#phased-rollout).
+direct environment-variable read**. Balance scheduling is now configured only
+through `additional_config`; `_balance_scheduling_enabled` no longer bypasses
+`AscendConfig`. Details in [Phased rollout](#phased-rollout).
 
 ### Step 1 — Hook gather onto `_has_global_unfinished_reqs` and delete the EngineCore copies
 
@@ -356,12 +356,9 @@ moment still cannot be guaranteed (the origin of the old top-of-file TODO), so
 returns `False` otherwise. This round tightens one thing relative to the old
 implementation:
 
-- **The direct environment-variable read is removed.** The old implementation
-  fell back to a bare `os.getenv("VLLM_ASCEND_BALANCE_SCHEDULING")`, violating
-  AGENTS.md's "no scattered `os.getenv`". This function no longer reads the
-  environment itself — `VLLM_ASCEND_BALANCE_SCHEDULING` is parsed centrally by
-  `AscendConfig` (as a deprecated fallback for `additional_config`) and takes
-  effect via the main `get_ascend_config().enable_balance_scheduling` path,
+- **The environment-variable path is removed.** The old implementation read
+  the setting from the environment. Balance scheduling now takes effect only
+  through the main `get_ascend_config().enable_balance_scheduling` path,
   avoiding multiple entry points.
 - The top-of-file TODO is updated to "once AscendConfig initialization is moved
   earlier, this can collapse to a single
@@ -428,7 +425,7 @@ def _balance_scheduling_enabled(vllm_config) -> bool:
     additional_config = getattr(vllm_config, "additional_config", None) or {}
     if "enable_balance_scheduling" in additional_config:
         return bool(additional_config["enable_balance_scheduling"])
-    return False  # no longer reads the env var itself; VLLM_ASCEND_BALANCE_SCHEDULING is parsed by AscendConfig
+    return False  # no environment-variable fallback
 
 
 class BalanceScheduler(Scheduler):

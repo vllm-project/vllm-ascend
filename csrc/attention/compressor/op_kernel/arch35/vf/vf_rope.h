@@ -48,6 +48,7 @@ __simd_vf__ void HalfModeRopeVF(__ubuf__ T *sinUb, __ubuf__ T *cosUb, __ubuf__ T
     MicroAPI::RegTensor<T> vregHalfIn;
     MicroAPI::RegTensor<T> vregOut;
     MicroAPI::RegTensor<T> vregHalfOut;
+    MicroAPI::RegTensor<T> vregTemp;
     MicroAPI::RegTensor<T> vregCastIn;
     MicroAPI::RegTensor<ROPET> vregOutBf16;
     MicroAPI::RegTensor<ROPET> vregOutHalfBf16;

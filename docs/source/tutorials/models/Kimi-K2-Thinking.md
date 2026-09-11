@@ -63,7 +63,7 @@ Your model files should look like:
 
 You can use the official Docker image to run `Kimi-K2-Thinking` directly.
 
-Select an image based on your machine type and start the Docker image on your node, refer to [using docker](../../installation.md#set-up-using-docker).
+Select an image based on your machine type and start the Docker image on your node, refer to [using docker](../../getting_started/installation.md#installation-prebuilt-image).
 
 ```bash
    # Update the vllm-ascend image according to your environment.
@@ -208,7 +208,7 @@ The following table covers the generated `model`, all `envs`, and all `server_cm
 | `--enable-expert-parallel` | enabled | Model-specific / Performance | Enables expert parallelism for Kimi-K2-Thinking MoE layers so experts can be distributed across NPUs. This document validates it as enabled; disabling it is not validated in this tutorial. |
 | `--no-enable-prefix-caching` | enabled | Performance | Disables prefix caching for the validated baseline and random-prompt benchmarks. Prefix caching is not validated in this tutorial. |
 
-**Common Issues Tip:** For common environment, installation, and general parameter issues during deployment, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html). If the service runs under high concurrency, verify NPU health and HCCL status before increasing the request rate.
+**Common Issues Tip:** For common environment, installation, and general parameter issues during deployment, please refer to the [Public FAQs](../../faqs.md). If the service runs under high concurrency, verify NPU health and HCCL status before increasing the request rate.
 
 **Service Verification:**
 
@@ -348,9 +348,9 @@ Reference results for 1024 input tokens and 1024 output tokens are:
 
 | Scenario | Deployment Mode | Total NPUs | Weight Version | Key Considerations |
 |----------|----------------|------------|----------------|---------------------|
-| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2K input / 2K output in Chapter 8. |
+| Long Context | Single-node | 16 (A3) | bfloat16 | Keep `--max-model-len` close to the real maximum input and output length, and reduce `--max-num-seqs` first when memory pressure is high. The validated scope of this single-node baseline covers up to 2k input / 2k output in Chapter 8. |
 | Low Latency | Single-node | 16 (A3) | bfloat16 | Reduce `--max-num-seqs` and `--max-num-batched-tokens` from the validated baseline (`12` and `8192`) to reduce queueing delay. In the Chapter 8 concurrency sweep, concurrency 1-4 kept mean TTFT below 1s; validate TTFT, TPOT, and tail latency against the target latency SLO. |
-| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1K/1K concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
+| High Throughput | Single-node | 16 (A3) | bfloat16 | Increase `--max-num-seqs` gradually and benchmark with a request rate close to the real workload. In the 1k/1k concurrency sweep in Chapter 8, concurrency 8 gave the best output throughput; validate tail latency before using higher concurrency in production. |
 
 ### 9.2 Tuning Guidelines
 
@@ -362,7 +362,7 @@ Please refer to the [Feature Matrix](../../user_guide/support_matrix/feature_mat
 
 ## 10 FAQ
 
-> For common environment, installation, and general parameter issues, please refer to the [Public FAQs](https://docs.vllm.ai/projects/ascend/en/latest/faqs.html); this chapter only covers model-specific issues.
+> For common environment, installation, and general parameter issues, please refer to the [Public FAQs](../../faqs.md); this chapter only covers model-specific issues.
 
 - **Q: API returns `{"error":"Model not found"}` or `404` when requesting with `model: "Kimi-K2-Thinking"`?**
 

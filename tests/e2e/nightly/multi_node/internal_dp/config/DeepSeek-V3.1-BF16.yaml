@@ -9,10 +9,6 @@ env_common: &env_common
   OMP_PROC_BIND: false
   PYTORCH_NPU_ALLOC_CONF: expandable_segments:True
   OMP_NUM_THREADS: 1
-  VLLM_ASCEND_ENABLE_MLAPO: 1
-  VLLM_ASCEND_BALANCE_SCHEDULING: 1
-  HCCL_INTRA_PCIE_ENABLE: 1
-  HCCL_INTRA_ROCE_ENABLE: 0
   VLLM_ENGINE_READY_TIMEOUT_S: "3000"
 
 deployment:
@@ -37,7 +33,7 @@ deployment:
       --gpu-memory-utilization 0.95
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
-      --additional_config '{"multistream_overlap_shared_expert": true}'
+      --additional_config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
 
   -
     envs:
@@ -60,7 +56,7 @@ deployment:
       --gpu-memory-utilization 0.95
       --speculative-config '{"num_speculative_tokens": 1, "method":"mtp"}'
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes":[2, 4, 8, 16, 32]}'
-      --additional_config '{"multistream_overlap_shared_expert": true}'
+      --additional_config '{"multistream_overlap_shared_expert":true,"scheduler_config":{"enable_balance_scheduling":true},"enable_mlapo":true}'
 benchmarks:
   perf:
     case_type: performance

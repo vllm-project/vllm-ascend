@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2025 Tianjin University, Ltd.
+ * Copyright (c) 2026 Tianjin University, Ltd.
  * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
  * the BSD 3-Clause License (the "License").
  * Please refer to the License for details. You may not use this file except in compliance with the License.
@@ -28,17 +28,19 @@ TILING_DATA_FIELD_DEF(int64_t, vNumHead);
 TILING_DATA_FIELD_DEF(int64_t, kHeadDim);
 TILING_DATA_FIELD_DEF(int64_t, vHeadDim);
 TILING_DATA_FIELD_DEF(int64_t, chunkSize);
-TILING_DATA_FIELD_DEF(int64_t, initalStateStride0);
 TILING_DATA_FIELD_DEF(bool, useInitialState);
 TILING_DATA_FIELD_DEF(bool, storeFinalState);
 TILING_DATA_FIELD_DEF(int64_t, dataType);
 TILING_DATA_FIELD_DEF(int64_t, gDataType);
 TILING_DATA_FIELD_DEF(int64_t, stateDataType);
+TILING_DATA_FIELD_DEF(bool, hasGk);
 TILING_DATA_FIELD_DEF(int64_t, isVariedLen);
 TILING_DATA_FIELD_DEF(int64_t, shapeBatch);
 TILING_DATA_FIELD_DEF(int64_t, tokenBatch);
+TILING_DATA_FIELD_DEF(bool, useGk);
 TILING_DATA_FIELD_DEF(int64_t, vWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, vUpdateWorkspaceOffset);
+TILING_DATA_FIELD_DEF(int64_t, kDecayWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, hWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, numSeqWorkspaceOffset);
 TILING_DATA_FIELD_DEF(int64_t, numChunksWorkspaceOffset);

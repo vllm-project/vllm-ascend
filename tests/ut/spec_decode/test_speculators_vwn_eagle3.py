@@ -135,7 +135,6 @@ def _mock_npu_env():
         lmhead_tensor_parallel_size=0,
         embedding_tensor_parallel_size=0,
         oproj_tensor_parallel_size=0,
-        olora_tensor_parallel_size=0,
         mlp_tensor_parallel_size=0,
     )
     with (
@@ -156,7 +155,6 @@ def _mock_npu_env():
         ),
         # These tests do not exercise context parallelism. Short-circuit the
         # backend routing checks so their mocked config stays scoped to VWN.
-        patch("vllm_ascend.attention.attention_v1.enable_pcp", return_value=False),
         patch("vllm_ascend.attention.attention_v1.enable_dcp", return_value=False),
         patch(
             "vllm_ascend.attention.context_parallel.sfa_cp.enable_sfa_dcp_replicated_indexer",

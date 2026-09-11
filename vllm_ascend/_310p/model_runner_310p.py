@@ -56,10 +56,12 @@ from vllm_ascend.spec_decode.utils import (
 )
 from vllm_ascend.utils import (
     ACL_FORMAT_FRACTAL_NZ,
+    get_kv_cache_tensor_layers,
     is_rc_device,
     lmhead_tp_enable,
+    vllm_version_is,
 )
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner, _request_prefill_mask
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 _NGRAM_GRAPH_UNIFORM_DECODE_QUERY_LEN = 1
 _ATTENTION_BLOCK_SIZE_LIMIT = 128 * 128
@@ -78,6 +80,10 @@ class NPUModelRunner310(NPUModelRunner):
     """
 
     # Inherited from parent runner; annotated here to satisfy strict type checks.
+    # 310P Attention requires private ACL NZ K/V buffers while Mamba uses
+    # separate contiguous state buffers, so it cannot overlay both cache groups
+    # on vLLM #51718's standardized shared backing allocation.
+    supports_standardized_shared_kv_backing = False
     uniform_decode_query_len: int
     _spec_dummy_capture: bool = False
 
@@ -155,9 +161,8 @@ class NPUModelRunner310(NPUModelRunner):
         force_num_active_loras: int | None = None,
         num_encoder_reqs: int = 0,
     ):
-        is_prefilling = _request_prefill_mask(
-            self.input_batch.num_computed_tokens_cpu[:num_reqs],
-            self.input_batch.num_prompt_tokens[:num_reqs],
+        is_prefilling = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] < self.input_batch.num_prompt_tokens[:num_reqs]
         )
         is_all_decode = not np.any(is_prefilling)
 
@@ -289,16 +294,9 @@ class NPUModelRunner310(NPUModelRunner):
 
         if self.num_accepted_tokens_event is not None:
             self.num_accepted_tokens_event.synchronize()
-            if self.use_async_scheduling and prev_req_id_to_index:
-                prev_idx = self.prev_positions.np[:num_reqs]
-                new_mask = prev_idx < 0
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[
-                    np.where(new_mask, 0, prev_idx)
-                ]
-                self.num_accepted_tokens.np[:num_reqs][new_mask] = 1
-                self.input_batch.num_accepted_tokens_cpu[:num_reqs] = self.num_accepted_tokens.np[:num_reqs]
-            else:
-                self.num_accepted_tokens.np[:num_reqs] = self.input_batch.num_accepted_tokens_cpu[:num_reqs]
+            # Keep accepted-token ownership by request when async scheduling
+            # condenses/reorders the 310P input batch.
+            self._sync_num_accepted_tokens(num_reqs, has_prev_mapping=bool(prev_req_id_to_index))
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
         else:
@@ -587,6 +585,7 @@ class NPUModelRunner310(NPUModelRunner):
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        skip_gdn_state_update: bool = False,
     ):
         temporary_context = self.temporary_modify_uniform_decode_query_len() if uniform_decode else nullcontext()
         # All the spec decoding cases has to run splitfuse op on 310P.
@@ -613,6 +612,7 @@ class NPUModelRunner310(NPUModelRunner):
                     is_graph_capturing=is_graph_capturing,
                     num_active_loras=num_active_loras,
                     profile_seq_lens=profile_seq_lens,
+                    skip_gdn_state_update=skip_gdn_state_update,
                 )
             finally:
                 self._spec_dummy_capture = False
@@ -742,34 +742,65 @@ class NPUModelRunner310(NPUModelRunner):
                 layer_kv_cache_spec[layer_name] = group_kv_cache_spec.kv_cache_spec
         # Allocate kv cache buffers according to the kv_cache_config and kv_cache_spec
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            for idx in range(len(kv_cache_tensor.shared_by)):
-                layer_name = kv_cache_tensor.shared_by[idx]
+            shared_names = get_kv_cache_tensor_layers(kv_cache_tensor)
+            for idx in range(len(shared_names)):
+                layer_name = shared_names[idx]
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 if "linear_attn" in layer_name and layer_name not in kv_cache:
                     cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(cache_spec, MambaSpec)
-                    assert kv_cache_tensor.size % cache_spec.page_size_bytes == 0
-                    num_blocks = kv_cache_tensor.size // cache_spec.page_size_bytes
+                    # vLLM #51718 packs all group layers into one tensor on main;
+                    # MambaSpec.page_size_bytes is per-layer, so num_blocks times
+                    # it is the per-layer byte count (matching v0.28.0's size).
+                    per_layer_size = (
+                        kv_cache_tensor.size
+                        if vllm_version_is("0.28.0")
+                        else kv_cache_config.num_blocks * cache_spec.page_size_bytes
+                    )
+                    assert per_layer_size % cache_spec.page_size_bytes == 0
+                    num_blocks = per_layer_size // cache_spec.page_size_bytes
                     assert num_blocks >= kv_cache_config.num_blocks
-                    raw_tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=self.device)
-                    state_tensors = []
-                    target_idx = 0
-                    start_idx = 0
-                    for shape, dtype in zip(cache_spec.shapes, cache_spec.dtypes):
-                        target_shape = (num_blocks, *shape)
-                        target_idx += math.prod(target_shape) * get_dtype_size(dtype)
-                        tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
-                        start_idx = target_idx
-                        state_tensors.append(tensor)
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        if "linear_attn" in layer_name_inner:
-                            kv_cache[layer_name_inner] = state_tensors
+                    if vllm_version_is("0.28.0"):
+                        # v0.28.0 `shared_by` aliases the same physical blocks.
+                        raw_tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
+                        state_tensors = []
+                        target_idx = 0
+                        start_idx = 0
+                        for shape, dtype in zip(cache_spec.shapes, cache_spec.dtypes):
+                            target_shape = (num_blocks, *shape)
+                            target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                            tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
+                            start_idx = target_idx
+                            state_tensors.append(tensor)
+                        for layer_name_inner in shared_names:
+                            if "linear_attn" in layer_name_inner:
+                                kv_cache[layer_name_inner] = state_tensors
+                    else:
+                        # main: every layer owns its own region; allocate private
+                        # state tensors per layer so blocks don't collide.
+                        for layer_name_inner in shared_names:
+                            if "linear_attn" in layer_name_inner:
+                                raw_tensor = torch.zeros(per_layer_size, dtype=torch.int8, device=self.device)
+                                state_tensors = []
+                                target_idx = 0
+                                start_idx = 0
+                                for shape, dtype in zip(cache_spec.shapes, cache_spec.dtypes):
+                                    target_shape = (num_blocks, *shape)
+                                    target_idx += math.prod(target_shape) * get_dtype_size(dtype)
+                                    tensor = raw_tensor[start_idx:target_idx].view(dtype).view(target_shape)
+                                    start_idx = target_idx
+                                    state_tensors.append(tensor)
+                                kv_cache[layer_name_inner] = state_tensors
                 elif "attn" in layer_name and layer_name not in kv_cache:
                     kv_cache_spec = layer_kv_cache_spec[layer_name]
                     assert isinstance(kv_cache_spec, AttentionSpec)
                     assert kv_cache_tensor.size % kv_cache_spec.page_size_bytes == 0
                     num_blocks = kv_cache_tensor.size // kv_cache_spec.page_size_bytes
+                    if not vllm_version_is("0.28.0"):
+                        # vLLM #51718 packs all group layers into one tensor;
+                        # kv_cache_config.num_blocks is the per-layer block count.
+                        num_blocks = kv_cache_config.num_blocks
                     assert num_blocks >= kv_cache_config.num_blocks
                     # Page attention operation on 310P limits block_size * head_size <= 128 * 128
                     supported_sizes = [
@@ -793,16 +824,31 @@ class NPUModelRunner310(NPUModelRunner):
                     k_shape = kv_cache_shape[1:]
                     v_shape = k_shape
                     dtype = kv_cache_spec.dtype
-                    k_cache = torch_npu.empty_with_format(
-                        size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
-                    v_cache = torch_npu.empty_with_format(
-                        size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
-                    )
-                    for layer_name_inner in kv_cache_tensor.shared_by:
-                        # shared the kvcache between the self_attn specs in the same group
-                        if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
-                            kv_cache[layer_name_inner] = (k_cache, v_cache)
+                    if vllm_version_is("0.28.0"):
+                        # v0.28.0 `shared_by` aliases the same physical blocks.
+                        k_cache = torch_npu.empty_with_format(
+                            size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                        )
+                        v_cache = torch_npu.empty_with_format(
+                            size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                        )
+                        for layer_name_inner in shared_names:
+                            # shared the kvcache between the self_attn specs in the same group
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                kv_cache[layer_name_inner] = (k_cache, v_cache)
+                    else:
+                        # main: every layer owns its own region; give each layer a
+                        # private (k, v) so block indices don't collide across layers.
+                        for layer_name_inner in shared_names:
+                            if "attn" in layer_name_inner and "linear_attn" not in layer_name_inner:
+                                kv_cache[layer_name_inner] = (
+                                    torch_npu.empty_with_format(
+                                        size=k_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                                    ),
+                                    torch_npu.empty_with_format(
+                                        size=v_shape, dtype=dtype, device=self.device, acl_format=self._acl_format
+                                    ),
+                                )
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:

@@ -266,7 +266,10 @@ class AscendRotaryEmbedding310(AscendRotaryEmbedding):
         key: torch.Tensor,
         offsets: torch.Tensor | None = None,
         is_neox_style_override: bool | None = None,
+        out_dtype: torch.dtype | None = None,
     ):
+        if out_dtype is not None:
+            raise NotImplementedError(f"Unsupported RoPE output dtype on 310P: {out_dtype}")
         is_neox_style = self.is_neox_style
         if is_neox_style_override is not None:
             is_neox_style = is_neox_style_override

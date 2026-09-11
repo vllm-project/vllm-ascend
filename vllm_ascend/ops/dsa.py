@@ -31,11 +31,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 
+from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.layer.attention.layer import DSAAttention
-from vllm_ascend.utils import (
-    AscendDeviceType,
-    get_ascend_device_type,
-)
 
 
 @dataclass
@@ -78,6 +75,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        need_gather_q_kv: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.dim = dim
@@ -94,6 +92,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         self.n_local_groups = n_local_groups
         self.window_size = window_size
         self.compress_ratio = compress_ratio
+        self.need_gather_q_kv = need_gather_q_kv
 
         self.wq_a = dsa_modules.wq_a
         self.q_norm = dsa_modules.q_norm
@@ -163,7 +162,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
         # All DSA forward paths (attention + o_proj, including OTP HCCL
         # collectives) run inside the dsa_forward custom op, which is required
         # for ACL graph capture (registered with dispatch_key="PrivateUse1").
-        torch.ops.vllm.dsa_forward(hidden_states, output, self.prefix)
+        torch.ops.vllm.dsa_forward(hidden_states, self.need_gather_q_kv, output, self.prefix)
 
         output = output.view(-1, output_shape[-1])
         return output
@@ -172,6 +171,7 @@ class AscendDeepseekSparseAttention(MultiHeadLatentAttentionWrapper):
 @eager_break_during_capture
 def dsa_forward(
     hidden_states: torch.Tensor,
+    need_gather_q_kv: bool,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -182,17 +182,38 @@ def dsa_forward(
     if attn_metadata is None:
         # Profiling run: forward() handles OTP by running _forward_o_proj on a
         # zero input so HCCL collectives are captured by the ACL graph.
-        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, output)
+        if need_gather_q_kv:
+            self.dsa_attn.impl.forward(
+                self.dsa_attn.layer_name,
+                hidden_states,
+                None,
+                None,
+                output,
+                need_gather_q_kv=True,
+            )
+        else:
+            self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, None, None, output)
         return
 
     kv_cache = _build_kv_cache(self, forward_context)
 
-    self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
+    if need_gather_q_kv:
+        self.dsa_attn.impl.forward(
+            self.dsa_attn.layer_name,
+            hidden_states,
+            kv_cache,
+            attn_metadata,
+            output,
+            need_gather_q_kv=True,
+        )
+    else:
+        self.dsa_attn.impl.forward(self.dsa_attn.layer_name, hidden_states, kv_cache, attn_metadata, output)
     return
 
 
 def dsa_forward_fake(
     hidden_states: torch.Tensor,
+    need_gather_q_kv: bool,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
@@ -226,12 +247,12 @@ def _build_kv_cache(self, forward_context):
             compress_kv_cache = compress_kv_cache[virtual_engine]
     if self.compress_ratio == 4:
         indexer_state_cache = self.indexer.compressor.state_cache.kv_cache
-        if get_ascend_device_type() in {AscendDeviceType.A5}:
+        if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
             indexer_k_cache, indexer_scale_cache, indexer_full_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
         else:
             indexer_k_cache, indexer_scale_cache = unfold_kvcache(self.indexer.k_cache.kv_cache)
 
-    if get_ascend_device_type() in {AscendDeviceType.A5}:
+    if get_current_hardware_profile().supports(HardwareCapability.DSV4_COMPRESSED_CACHE):
         kv_cache = tuple(
             [
                 unfold_kvcache(cache)

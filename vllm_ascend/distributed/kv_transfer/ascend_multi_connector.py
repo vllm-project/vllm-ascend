@@ -6,6 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
+from vllm.v1.worker import mamba_utils
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -27,6 +28,15 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             "HMA should not be enabled unless all sub-connectors support it"
         )
         self._configure_layerwise_reuse_completion()
+        self._mamba_copy_bufs = None
+        self.requires_mamba_state_copy_after_layer_load = any(
+            getattr(
+                connector,
+                "requires_mamba_state_copy_after_layer_load",
+                False,
+            )
+            for connector in self._connectors
+        )
 
     def _configure_layerwise_reuse_completion(self) -> None:
         # Producers that report when a shared physical KV slot is safe to reuse.
@@ -67,6 +77,26 @@ class AscendMultiConnector(MultiConnector, SupportsHMA):
             connectors = [*self._layerwise_slot_release_providers, *self._non_slot_release_connectors]
         for connector in connectors:
             connector.wait_for_layer_load(layer_name)
+        if (copy_bufs := getattr(self, "_mamba_copy_bufs", None)) is not None:
+            mamba_utils.do_mamba_copy_block_for_layer(
+                copy_bufs,
+                layer_name,
+            )
+
+    def prepare_mamba_state_copy(self, copy_bufs) -> bool:
+        if not self.requires_mamba_state_copy_after_layer_load:
+            return False
+        mamba_utils.prepare_mamba_copy_by_layer(copy_bufs)
+        self._mamba_copy_bufs = copy_bufs
+        return True
+
+    def finish_mamba_state_copy(self) -> None:
+        if self._mamba_copy_bufs is None:
+            return
+        try:
+            mamba_utils.finish_mamba_copy_by_layer(self._mamba_copy_bufs)
+        finally:
+            self._mamba_copy_bufs = None
 
     def save_kv_layer(
         self,

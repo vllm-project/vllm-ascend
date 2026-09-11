@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
-from vllm_ascend.distributed.eplb_state import AscendEplbState
+from vllm_ascend.distributed.eplb.state import AscendEplbState
 from vllm_ascend.worker.v2.eplb import (
     AscendEPLBController,
     is_eplb_load_collection_phase_matched,
@@ -54,53 +54,78 @@ class TestEplbLoadCollectionPhase(unittest.TestCase):
     def test_prepare_load_constructs_ascend_state(self):
         controller = self._make_controller()
 
-        with patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent"):
+        with (
+            patch("vllm.distributed.eplb.eplb_state.CpuGpuEvent"),
+            patch("torch.accelerator.current_device_index", return_value=0),
+        ):
             controller.prepare_load()
 
         self.assertIsInstance(controller.state, AscendEplbState)
 
-    def test_rank_local_phase_filter_preserves_global_stats_schedule(self):
-        for batch_has_prefill, expected_dummy in ((True, False), (False, True)):
+    def test_setup_from_mapping_uses_current_upstream_contract(self):
+        controller = self._make_controller()
+        model = MagicMock()
+        model_config = object()
+        mapping = torch.zeros((1, 1), dtype=torch.int32)
+        state = MagicMock()
+
+        with (
+            patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
+            patch.object(AscendEplbState, "from_mapping", return_value=state) as from_mapping,
+        ):
+            controller.setup_from_mapping(model, model_config, mapping)
+
+        from_mapping.assert_called_once_with(
+            model=model,
+            model_config=model_config,
+            device=controller.device,
+            parallel_config=controller.parallel_config,
+            expanded_physical_to_logical=mapping,
+        )
+        self.assertIs(controller.state, state)
+        self.assertTrue(controller._has_registered_models)
+
+    def test_setup_from_mapping_accepts_release_upstream_contract(self):
+        controller = self._make_controller()
+        model = MagicMock()
+        model_config = object()
+        mapping = torch.zeros((1, 2), dtype=torch.int32)
+        state = MagicMock()
+
+        with (
+            patch("vllm_ascend.worker.v2.eplb.is_mixture_of_experts", return_value=True),
+            patch.object(AscendEplbState, "from_mapping", return_value=state) as from_mapping,
+        ):
+            controller.setup_from_mapping(model, model_config, mapping, 1)
+
+        from_mapping.assert_called_once_with(
+            model=model,
+            model_config=model_config,
+            device=controller.device,
+            parallel_config=controller.parallel_config,
+            expanded_physical_to_logical=mapping,
+            num_valid_physical_experts=1,
+        )
+        self.assertIs(controller.state, state)
+        self.assertTrue(controller._has_registered_models)
+
+    def test_prepare_forward_combines_window_and_phase_device_gates(self):
+        for batch_has_prefill, expected_record in ((False, False), (True, True)):
             with self.subTest(batch_has_prefill=batch_has_prefill):
-                controller = self._make_controller(
-                    load_collection_phase="prefill",
-                    log_balancedness=True,
-                )
+                controller = self._make_controller(load_collection_phase="prefill")
                 state = MagicMock()
+                state.should_record_tensor = torch.tensor(True)
+                state._has_fresh_recorded_load = False
                 state._should_record_current_step.return_value = True
                 controller.state = state
                 controller.set_batch_phase(batch_has_prefill=batch_has_prefill)
 
-                controller.step()
+                controller.prepare_forward(object(), 7)
 
-                state.step.assert_called_once_with(expected_dummy, False, log_stats=True)
-
-    def test_closed_upstream_window_discards_recorded_load(self):
-        controller = self._make_controller()
-        expert_load_pass = torch.ones(2, dtype=torch.int32)
-        state = MagicMock()
-        state._should_record_current_step.return_value = False
-        state.model_states = {"model": SimpleNamespace(expert_load_pass=expert_load_pass)}
-        controller.state = state
-
-        controller.step()
-
-        torch.testing.assert_close(
-            expert_load_pass,
-            torch.zeros_like(expert_load_pass),
-        )
-        state.step.assert_called_once_with(False, False, log_stats=False)
-
-    def test_suppressed_controller_does_not_touch_state(self):
-        controller = self._make_controller()
-        controller.suppressed = True
-        state = MagicMock()
-        controller.state = state
-
-        controller.step()
-
-        state._should_record_current_step.assert_not_called()
-        state.step.assert_not_called()
+                state.prepare_forward.assert_called_once()
+                state._should_record_current_step.assert_called_once_with(log_stats=False)
+                self.assertIs(bool(state.should_record_tensor), expected_record)
+                self.assertIs(state._has_fresh_recorded_load, expected_record)
 
 
 class TestAscendEplbFreshLoadGate(unittest.TestCase):
@@ -186,11 +211,11 @@ class TestAscendEplbFreshLoadGate(unittest.TestCase):
 
         with (
             patch(
-                "vllm_ascend.distributed.eplb_state.get_ep_group",
+                "vllm_ascend.distributed.eplb.state.get_ep_group",
                 return_value=ep_group,
             ),
             patch(
-                "vllm_ascend.distributed.eplb_state.all_reduce",
+                "vllm_ascend.distributed.eplb.state.all_reduce",
                 side_effect=set_remote_fresh_load,
             ) as sync_fresh_load,
         ):

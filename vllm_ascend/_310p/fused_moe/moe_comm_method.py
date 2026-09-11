@@ -15,12 +15,8 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
-from typing import Any
-
-from vllm_ascend.ops.fused_moe.dataclass.moe_mlp import MoEMlpComputeInput
 from vllm_ascend.ops.fused_moe.moe_comm_method import AllGatherCommImpl
 
-from .moe_mlp import unified_apply_mlp
 from .token_dispatcher import TokenDispatcherWithAllGather310
 
 
@@ -38,9 +34,6 @@ class AllGatherCommImpl310(AllGatherCommImpl):
     def __init__(self, moe_config):
         super().__init__(moe_config)
         self.use_fusion_ops = False
-
-    def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> Any:
-        return unified_apply_mlp(mlp_compute_input=mlp_compute_input), None
 
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAllGather310(

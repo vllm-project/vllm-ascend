@@ -28,8 +28,6 @@ import pytest
 from tests.e2e.conftest import DPVllmRunner, VllmRunner, wait_until_npu_memory_free
 from tests.e2e.pull_request.utils import PROMPTS_SHORT
 
-os.environ["VLLM_ASCEND_ENABLE_NZ"] = "2"
-
 MODELS: list[str] = ["Qwen/Qwen3-30B-A3B"]
 TPDP_SIZES: list[tuple[int, int]] = [(2, 1), (1, 2)]
 
@@ -58,7 +56,10 @@ def test_models_with_xlite_decode_only(model: str, tpdp: tuple[int, int]):
         enable_expert_parallel=True,
         block_size=128,
         max_model_len=2048,
-        additional_config={"xlite_graph_config": {"enabled": True, "full_mode": False}},
+        additional_config={
+            "weight_nz_mode": 2,
+            "xlite_graph_config": {"enabled": True, "full_mode": False},
+        },
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(PROMPTS_SHORT, 3)
 
@@ -89,7 +90,10 @@ def test_models_with_xlite_full_mode(model: str, tpdp: tuple[int, int]):
         enable_expert_parallel=True,
         block_size=128,
         max_model_len=2048,
-        additional_config={"xlite_graph_config": {"enabled": True, "full_mode": True}},
+        additional_config={
+            "weight_nz_mode": 2,
+            "xlite_graph_config": {"enabled": True, "full_mode": True},
+        },
     ) as vllm_model:
         outputs = vllm_model.generate_greedy(PROMPTS_SHORT, 3)
 

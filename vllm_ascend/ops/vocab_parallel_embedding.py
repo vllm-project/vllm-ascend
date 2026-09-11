@@ -363,7 +363,12 @@ class AscendLogitsProcessor(LogitsProcessor):
         hidden_states: torch.Tensor,
         lm_head: AscendParallelLMHead,
         embedding_bias: torch.Tensor | None = None,
+        skip_gather: bool = False,
     ) -> torch.Tensor | None:
+        # vLLM #50465 added skip_gather; when set, upstream returns the
+        # untruncated apply_head result for spec-decode/top-k callers.
+        if skip_gather:
+            return self._apply_head(lm_head, hidden_states, embedding_bias)
         if lmhead_tp_enable():
             return self._get_logits_lmheadtp(hidden_states, lm_head, embedding_bias)
         else:

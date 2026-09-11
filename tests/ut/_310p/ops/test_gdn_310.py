@@ -123,6 +123,7 @@ def test_builder310_pads_non_spec_decode_metadata_with_dummy_requests():
     attn_metadata = SimpleNamespace(
         num_prefills=0,
         num_decodes=2,
+        num_decode_tokens=2,
         num_spec_decodes=0,
         non_spec_state_indices_tensor=torch.tensor([3, 4], dtype=torch.int32),
         non_spec_query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),

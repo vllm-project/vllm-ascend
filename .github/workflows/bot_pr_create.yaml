@@ -49,19 +49,16 @@ jobs:
           REPO="${{ github.repository }}"
           REF="${{ github.event.pull_request.base.ref }}"
           mkdir -p .github
-          for file in vllm-main-verified.commit vllm-release-tag.commit labeler.yml; do
+          for file in vllm-main-verified.commit labeler.yml; do
             curl -sSf -H "Authorization: Bearer $GITHUB_TOKEN" \
               "https://api.github.com/repos/$REPO/contents/.github/$file?ref=$REF" \
               | jq -r '.content' | base64 -d > ".github/$file"
           done
 
-      - name: Get vLLM version
+      - name: Get vLLM main commit
         run: |
           VLLM_COMMIT=$(tr -d '[:space:]' < .github/vllm-main-verified.commit)
           echo "VLLM_COMMIT=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> "$GITHUB_ENV"
-
-          VLLM_VERSION=$(tr -d '[:space:]' < .github/vllm-release-tag.commit)
-          echo "VLLM_VERSION=$VLLM_VERSION" >> "$GITHUB_ENV"
 
       - name: Update PR description
         env:
@@ -69,7 +66,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           PR_NUMBER=${{ github.event.number }}
-          VLLM_VERSION=${{ env.VLLM_VERSION }}
           VLLM_COMMIT=${{ env.VLLM_COMMIT }}
           OLD=/tmp/orig_pr_body.txt
           NEW=/tmp/new_pr_body.txt
@@ -78,12 +74,11 @@ jobs:
           gh pr view --json body --template "{{.body}}" "${PR_NUMBER}" > "${OLD}"
           cp "${OLD}" "${NEW}"
 
-          # Remove notes in pr description and add vLLM version and commit
+          # Remove notes in pr description and add vLLM main commit
           sed -i '/<!--/,/-->/d' "${NEW}"
           sed -i '/- vLLM .*$/d' "${NEW}"
           {
               echo ""
-              echo "- vLLM version: $VLLM_VERSION"
               echo "- vLLM main: $VLLM_COMMIT"
           } >> "${NEW}"
 

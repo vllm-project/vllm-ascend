@@ -75,3 +75,84 @@ def test_dspark_acceptance(
 
     match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
     assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"
+
+
+@pytest.mark.parametrize("method", DSPARK.keys())
+@pytest.mark.parametrize("num_speculative_tokens", [7])
+def test_dspark_kv_sliding_window(
+    method: str,
+    num_speculative_tokens: int,
+):
+    """DSpark draft attention with a KV sliding window.
+
+    Same serving setup and assertions as test_dspark_acceptance (greedy
+    acceptance per position against a golden baseline), but with
+    draft_window_size=512 and a prompt longer than the window, so the draft
+    attention runs on the windowed block table. The window only changes what
+    the draft reads, never the target model's verification, so acceptance
+    stays in the same range as the no-window run (slightly lower, since the
+    draft sees less context).
+    """
+    main_model_name = DSPARK[method]["main"]
+    spec_model_name = DSPARK[method]["spec"]
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        main_model_name,
+        trust_remote_code=True,
+    )
+    sampling_params = SamplingParams(
+        temperature=0,
+        ignore_eos=False,
+        max_tokens=256,
+    )
+
+    # Prompt longer than the 512-token window, so the draft attention reads
+    # the cropped block table from the first step on.
+    filler = " ".join(f"context paragraph {i} about speculative decoding." for i in range(220))
+    prompts = [{"role": "user", "content": f"{filler} Hello, your name is"}]
+    prompts = [
+        tokenizer.apply_chat_template(
+            [prompt],
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        for prompt in prompts
+    ]
+
+    speculative_config = {
+        "method": "dspark",
+        "model": spec_model_name,
+        "num_speculative_tokens": num_speculative_tokens,
+    }
+
+    compilation_config = CompilationConfig(cudagraph_mode="PIECEWISE", cudagraph_capture_sizes=[7, 8])
+
+    with VllmRunner(
+        main_model_name,
+        max_model_len=4096,
+        disable_log_stats=False,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        distributed_executor_backend="mp",
+        gpu_memory_utilization=0.8,
+        speculative_config=speculative_config,
+        compilation_config=compilation_config,
+        enable_prefix_caching=False,
+        additional_config={"draft_window_size": 512},
+    ) as llm:
+        outputs = llm.model.generate(prompts, sampling_params)
+        metrics = llm.model.get_metrics()
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        output_tokens = output.outputs[0].token_ids
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        print(f"Output tokens: {output_tokens}")
+
+    acceptance_per_pos = calculate_acceptance_per_pos(metrics, num_speculative_tokens, Counter, Vector)
+    golden = BASELINES[f"{method}_sliding_window"]
+
+    match = all(abs(a - b) < 0.1 for a, b in zip(acceptance_per_pos, golden))
+    assert match, f"acceptance_per_pos {acceptance_per_pos} does not match golden {golden}"

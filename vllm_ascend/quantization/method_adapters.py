@@ -22,13 +22,52 @@ from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase, FusedMoeWei
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.linear import LinearMethodBase, RowParallelLinear
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.parameter import PerTensorScaleParameter
+from vllm.model_executor.parameter import BlockQuantScaleParameter, PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.distributed.parallel_state import get_mlp_tp_group, get_otp_group
 from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 from .methods import AscendAttentionScheme, AscendLinearScheme, AscendMoEScheme, is_mx_quant_type
+
+# vLLM's typed parameter classes take these through their constructor and expose
+# them as read-only properties, so replaying them via set_weight_attrs raises.
+_VLLM_PARAMETER_CTOR_ATTRS = frozenset({"weight_loader", "output_dim", "input_dim"})
+
+
+def _forwardable_weight_attrs(extra_weight_attrs: dict) -> dict:
+    return {key: value for key, value in extra_weight_attrs.items() if key not in _VLLM_PARAMETER_CTOR_ATTRS}
+
+
+def _make_mx_scale_weight_loader(
+    weight_loader,
+    tp_rank: int,
+    input_size_per_partition: int,
+    group_size: int,
+):
+    """Load scales without losing the global MX group phase at TP boundaries."""
+
+    def mx_scale_weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor):
+        # Some checkpoint loaders provide an already sharded tensor. Accept an
+        # exact local shape before applying any global TP offset to avoid
+        # slicing the same shard twice.
+        if loaded_weight.shape == param.shape:
+            param.data.copy_(loaded_weight)
+            return None
+
+        input_dim = getattr(param, "input_dim", None)
+        if input_dim is not None and input_size_per_partition % group_size != 0:
+            global_start = tp_rank * input_size_per_partition
+            # A TP boundary can split an MX group. Start from the scale of
+            # that shared boundary group instead of evenly chunking scales.
+            scale_start = global_start // group_size
+            scale_count = param.shape[input_dim]
+            loaded_weight = loaded_weight.narrow(input_dim, scale_start, scale_count)
+            param.data.copy_(loaded_weight)
+            return None
+        return weight_loader(param, loaded_weight)
+
+    return mx_scale_weight_loader
 
 
 class AscendLinearMethod(LinearMethodBase):
@@ -106,7 +145,25 @@ class AscendLinearMethod(LinearMethodBase):
         # Schemes whose scales are sharded along the reduction dim can say so
         # directly instead of relying on the name/type heuristics below.
         scale_input_dim = pergroup_dict.pop("_input_dim", None)
+        # Block-wise scales must not reuse packed_dim/packed_factor below: that
+        # mechanism exists for bit packing, where a shard is always a whole
+        # number of packs, so it converts shard bounds with a plain division.
+        # Block sizes divide no such guarantee, and truncating there drops the
+        # tile covering a shard's tail. vLLM rounds up for this parameter type.
+        block_quant_scale = pergroup_dict.pop("_block_quant_scale", None)
+        if block_quant_scale is not None:
+            layer.weight_block_size = block_quant_scale
         for pergroup_name, pergroup_param in pergroup_dict.items():
+            if block_quant_scale is not None:
+                param = BlockQuantScaleParameter(
+                    data=pergroup_param,
+                    output_dim=0,
+                    input_dim=1,
+                    weight_loader=weight_loader,
+                )
+                layer.register_parameter(pergroup_name, param)
+                set_weight_attrs(param, _forwardable_weight_attrs(extra_weight_attrs))
+                continue
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})
             layer.register_parameter(pergroup_name, param)
@@ -121,6 +178,16 @@ class AscendLinearMethod(LinearMethodBase):
                 or is_mx_quant_type(self.quant_method)
             ):
                 param.input_dim = 1
+            if isinstance(layer, RowParallelLinear) and getattr(
+                self.quant_method, "supports_unaligned_tp_groups", False
+            ):
+                assert hasattr(self.quant_method, "group_size")
+                param.weight_loader = _make_mx_scale_weight_loader(
+                    weight_loader,
+                    layer.tp_rank,
+                    input_size_per_partition,
+                    self.quant_method.group_size,
+                )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):

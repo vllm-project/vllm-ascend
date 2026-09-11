@@ -10,7 +10,8 @@ from vllm.model_executor.models.kimi_k25_vit import (
     MoonViT3dPretrainedModel,
 )
 
-from vllm_ascend import utils as ascend_utils
+from vllm_ascend.device.hardware import AscendDeviceType
+from vllm_ascend.device.hardware_profile import get_hardware_profile
 from vllm_ascend.patch.worker import patch_kimi_k25
 
 
@@ -56,9 +57,8 @@ def test_a5_moonvit_to_patch_uses_current_vllm_contract(monkeypatch):
     original_to = MoonViT3dPretrainedModel.to
     original_forward = Learnable2DInterpPosEmbDivided_fixed.forward
     monkeypatch.setattr(
-        ascend_utils,
-        "get_ascend_device_type",
-        lambda: ascend_utils.AscendDeviceType.A5,
+        "vllm_ascend.device.hardware_profile.get_current_hardware_profile",
+        lambda: get_hardware_profile(AscendDeviceType.A5),
     )
 
     try:

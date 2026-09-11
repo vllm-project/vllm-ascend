@@ -16,8 +16,7 @@
 #
 ARG CANN_QUAY_URL="quay.io/ascend/cann"
 ARG CANN_VERSION="9.1.0"
-ARG BASE_OS="ubuntu22.04"
-FROM ${CANN_QUAY_URL}:${CANN_VERSION}-910b-${BASE_OS}-py3.12
+FROM ${CANN_QUAY_URL}:${CANN_VERSION}-910b-ubuntu22.04-py3.12
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG MOONCAKE_INDEX_URL="https://mirrors.aliyun.com/pypi/web/simple"
@@ -35,7 +34,7 @@ RUN if [ -n "$APTMIRROR" ]; then \
         sed -Ei "s@(ports|archive).ubuntu.com@${APTMIRROR#http://}@g" /etc/apt/sources.list; \
     fi && \
     apt-get update -y && \
-    apt-get install -y git vim wget net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
+    apt-get install -y git vim wget curl protobuf-compiler net-tools gcc g++ cmake numactl libnuma-dev libibverbs-dev libjemalloc2 libhiredis-dev clang-15 && \
     update-alternatives --install /usr/bin/clang clang /usr/bin/clang-15 20 && \
     update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-15 20 && \
     source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
@@ -46,12 +45,12 @@ RUN if [ -n "$APTMIRROR" ]; then \
 # Install modelscope (for fast download) and ray (for multinode)
 RUN pip config set global.index-url ${PIP_INDEX_URL} && \
     if [ -n "$PIP_TRUSTED_HOST" ]; then pip config set global.trusted-host "$PIP_TRUSTED_HOST"; fi && \
-    python3 -m pip install modelscope 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
+    python3 -m pip install 'modelscope<1.38' 'ray>=2.47.1,<=2.48.0' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.27.1
+ARG VLLM_TAG=v0.28.0
 ARG VLLM_COMMIT=""
 RUN if [ -n "$VLLM_COMMIT" ]; then \
       git init /vllm-workspace/vllm && \
@@ -61,6 +60,7 @@ RUN if [ -n "$VLLM_COMMIT" ]; then \
       if [ -n "$GIT_PROXY" ]; then git config --global url."${GIT_PROXY}https://github.com/".insteadOf https://github.com/; fi && \
       git clone --depth 1 -b $VLLM_TAG $VLLM_REPO /vllm-workspace/vllm; \
     fi
+
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/[audio] --extra-index-url ${PYTORCH_INDEX_URL} && \
     python3 -m pip uninstall -y triton && \
@@ -84,6 +84,15 @@ RUN export PIP_EXTRA_INDEX_URL="${ASCEND_INDEX_URL}" && \
     python3 -m pip install triton-ascend==3.2.2 --extra-index-url ${ASCEND_INDEX_URL} && \
     python3 -m pip install concurrent-log-handler && \
     python3 -m pip cache purge
+
+# Install _rust_tool_parser for the Rust frontend.
+ARG RUSTUP_DIST_SERVER
+ARG RUSTUP_UPDATE_ROOT
+ENV RUSTUP_DIST_SERVER=$RUSTUP_DIST_SERVER \
+    RUSTUP_UPDATE_ROOT=$RUSTUP_UPDATE_ROOT
+RUN cd /vllm-workspace/vllm && \
+    python3 -m pip install setuptools-rust && \
+    ./build_rust.sh
 
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN echo "export LD_PRELOAD=/usr/lib/$(uname -m)-linux-gnu/libjemalloc.so.2:$LD_PRELOAD" >> ~/.bashrc

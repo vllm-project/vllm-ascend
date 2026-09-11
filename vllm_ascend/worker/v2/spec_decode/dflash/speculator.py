@@ -59,6 +59,8 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         super().__init__(vllm_config, device)
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
         super().init_cudagraph_manager(cudagraph_mode)
         # The Ascend graph manager is patched onto the upstream module and
         # created by super().init_cudagraph_manager without a speculator ref.
@@ -121,8 +123,18 @@ class AscendDFlashSpeculator(DFlashSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        # vLLM #53694 replaced num_tokens_across_dp with the DP sync state.
+        dp_sync: Any = None,
     ) -> torch.Tensor:
         self.input_batch = input_batch
+        sync_state = num_tokens_across_dp if vllm_version_is("0.28.0") else dp_sync
+        if dummy_run and skip_attn_for_dummy_run:
+            # Profiling runs the draft with its own query token count, which
+            # can differ from the target batch. Let forward_context coordinate
+            # the actual draft counts instead of reusing the target DP state.
+            # TODO: Remove this guard once main2main includes upstream vLLM
+            # #54856 (facd9a74a1), which resets the profiling DP counts.
+            sync_state = None
         with build_attn_metadata_wrapper():
             return super().propose(
                 input_batch,
@@ -136,7 +148,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
                 next_prefill_tokens,
                 temperature,
                 seeds,
-                num_tokens_across_dp,
+                sync_state,
                 dummy_run,
                 skip_attn_for_dummy_run,
                 mm_inputs,
@@ -149,7 +161,7 @@ class AscendDFlashSpeculator(DFlashSpeculator):
 # vllm-project/vllm#50000). Ascend keeps its own kernel for NPU, matching
 # the upstream parameter layout.
 
-if vllm_version_is("0.27.1"):
+if vllm_version_is("0.28.0"):
 
     @triton.jit
     def _prepare_dflash_inputs_kernel_ascend(

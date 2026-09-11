@@ -32,36 +32,101 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata  # type: ignore
 
+from vllm_ascend.attention.indexer import (
+    AscendSFAIndexerBackend,
+    AscendSFAIndexerMetadata,
+)
+
 
 class IndexerWrapper(nn.Module):
-    """
-    A wrapper of Indexer for Deepseek v3.2.
-    This wrapper is currently used to solve the fp8 hard code issue of vllm's deepseek_v2.py.
-    It wraps the original Indexer, inherits its module weights
-    (including wq_b, wk_weights_proj or wk/weights_proj, k_norm)
-    while deleting the unused topk_indices_buffer to save memory.
-    TODO: Will be removed once original Indexer supports different quantization methods.
+    """Model-facing wrapper owning the per-layer indexer backend.
+
+    Mirrors the wrapper/backend split of AscendMultiHeadLatentAttention: the
+    wrapper wires the upstream weight module into the model tree and
+    dispatches; all compute and cache persistence live in the
+    ``AscendSFAIndexerBackend`` instance it owns.
     """
 
-    def __init__(self, vllm_indexer: nn.Module) -> None:
+    def __init__(self, vllm_indexer: nn.Module, qk_rope_head_dim: int) -> None:
         super().__init__()
-
-        self.n_head: int = vllm_indexer.n_head  # 64
-        self.head_dim: int = vllm_indexer.head_dim  # 128
-        self.topk_tokens: int = vllm_indexer.topk_tokens  # 2048
-        self.q_lora_rank: int = vllm_indexer.q_lora_rank  # 1536
+        # Register the indexer weights directly on the wrapper so module-tree
+        # paths keep the pre-backend layout ("...indexer.<name>") that weight
+        # loading and quant name mapping key off. The backend shares the same
+        # module objects; nn.Module deduplicates shared submodules by object.
+        self.n_head: int = vllm_indexer.n_head
+        self.topk_tokens: int = vllm_indexer.topk_tokens
+        self.q_lora_rank: int = vllm_indexer.q_lora_rank
         self.wq_b = vllm_indexer.wq_b
         self.wk_weights_proj = vllm_indexer.wk_weights_proj
         self.k_norm = vllm_indexer.k_norm
         self.softmax_scale = vllm_indexer.softmax_scale
-        self.k_cache = getattr(vllm_indexer, "k_cache", None)
-        vllm_indexer.topk_indices_buffer = None  # delete topk_indices_buffer
+        self.impl = AscendSFAIndexerBackend(vllm_indexer, qk_rope_head_dim)
 
-    def forward(self):
-        return
+    # Interface consumed by the SFA impl - delegated to the backend impl.
+    @property
+    def k_cache(self):
+        return self.impl.k_cache
+
+    @property
+    def head_dim(self) -> int:
+        return self.impl.head_dim
+
+    @property
+    def enable_sparse_li_c8(self) -> bool:
+        return self.impl.enable_sparse_li_c8
+
+    @property
+    def num_cache_tensors(self) -> int:
+        return self.impl.num_cache_tensors
+
+    def process_weights_after_loading(self) -> None:
+        self.impl.process_weights_after_loading()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        k_hidden_states: torch.Tensor,
+        indexer_metadata: AscendSFAIndexerMetadata,
+        compute_topk: bool = True,
+    ) -> torch.Tensor | None:
+        return self.impl(hidden_states, q_c, cos, sin, k_hidden_states, indexer_metadata, compute_topk)
 
 
 class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
+    # IndexCache (index_share_for_mtp_iteration): the spec-decode proposer
+    # toggles ``skip_topk`` on this wrapper at runtime (set_skip_topk) and
+    # compacts the shared top-k buffer (compact_topk_indices). The actual
+    # indexer gate and buffer live in the inner impl (e.g. AscendSFAImpl),
+    # which is not an nn.Module and is therefore invisible to
+    # named_modules(). Expose both as properties forwarding to the impl so
+    # the upstream DeepSeekMultiTokenPredictor hooks keep working on Ascend.
+    @property
+    def skip_topk(self) -> bool:
+        return self.__dict__.get("_skip_topk", False)
+
+    @skip_topk.setter
+    def skip_topk(self, value: bool) -> None:
+        self.__dict__["_skip_topk"] = bool(value)
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is not None and hasattr(impl, "skip_topk"):
+            impl.skip_topk = self.__dict__["_skip_topk"]
+
+    @property
+    def topk_indices_buffer(self) -> torch.Tensor | None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is None:
+            return None
+        return getattr(impl, "topk_indices_buffer", None)
+
+    @topk_indices_buffer.setter
+    def topk_indices_buffer(self, value: torch.Tensor | None) -> None:
+        impl = getattr(getattr(self, "mla_attn", None), "impl", None)
+        if impl is not None and hasattr(impl, "topk_indices_buffer"):
+            impl.topk_indices_buffer = value
+
     def __init__(
         self,
         hidden_size: int,
@@ -77,6 +142,13 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         skip_topk: bool = False,
+        non_causal_multi_token_decode: bool = False,
+        allow_short_prefill_indexer_scoring_skip: bool = False,
+        # Upstream fuses the q_a/kv_a RMSNorms on the CUDA path. On Ascend the
+        # whole MLA preprocess runs inside the attention impl, which receives
+        # both layernorms as extra args, so this flag has no effect here and is
+        # accepted for signature compatibility only.
+        fuse_qkv_rmsnorm: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -87,12 +159,18 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
         self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.v_head_dim = v_head_dim
         self.prefix = prefix
+        # Goes through the property setter above; mla_attn is not created yet,
+        # so only the backing value is stored here. MLAAttention below receives
+        # the same value and initializes the impl consistently.
         self.skip_topk = skip_topk
+        # This is an upstream CUDA indexer hint. Ascend accepts it to preserve
+        # constructor compatibility, but its indexer does not consume it.
+        del allow_short_prefill_indexer_scoring_skip
         hf_config = get_current_vllm_config().model_config.hf_text_config
         self.tp_size = get_tensor_model_parallel_world_size()
         self.layers = hf_config.num_hidden_layers
         if mla_modules.indexer is not None:
-            ascend_indexer = IndexerWrapper(mla_modules.indexer)
+            ascend_indexer = IndexerWrapper(mla_modules.indexer, self.qk_rope_head_dim)
         else:
             ascend_indexer = None
         self.mla_attn = MLAAttention(
@@ -111,6 +189,7 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             indexer=ascend_indexer,
             skip_topk=skip_topk,
             topk_indices_buffer=getattr(mla_modules, "topk_indices_buffer", None),
+            non_causal_multi_token_decode=non_causal_multi_token_decode,
             # extra args
             rotary_emb=mla_modules.rotary_emb,
             fused_qkv_a_proj=mla_modules.fused_qkv_a_proj,
@@ -120,6 +199,8 @@ class AscendMultiHeadLatentAttention(MultiHeadLatentAttentionWrapper):
             kv_a_proj_with_mqa=mla_modules.kv_a_proj_with_mqa,
             kv_a_layernorm=mla_modules.kv_a_layernorm,
             o_proj=mla_modules.o_proj,
+            g_proj=mla_modules.g_proj,
+            use_mla_rope=mla_modules.rotary_emb is not None,
             layer_name=f"{prefix}.attn",
         )
 

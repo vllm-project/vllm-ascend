@@ -49,7 +49,13 @@ This section introduces how to perform performance testing using the benchmark s
 
 ### 3.1 Dataset
 
-VLLM supports a variety of [datasets](https://github.com/vllm-project/vllm/blob/main/vllm/benchmarks/datasets/datasets.py).
+vLLM supports a variety of built-in, synthetic, and custom datasets. See the
+[vLLM Benchmark CLI Dataset Overview](https://docs.vllm.ai/en/latest/benchmarking/cli/#dataset-overview)
+for dataset types, download methods, and examples. For the latest supported
+`--dataset-name` values, refer to the CLI references for
+[`vllm bench serve`](https://docs.vllm.ai/en/latest/cli/bench/serve/#dataset-name)
+and [`vllm bench throughput`](https://docs.vllm.ai/en/latest/cli/bench/throughput/#dataset-name),
+or run the corresponding command with `--help` to check the installed version.
 
 <style>
 th {
@@ -61,7 +67,7 @@ th {
 |---------|--------|---------|-----------|
 | ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |
 | ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget https://images.cocodataset.org/zips/train2017.zip` |
-| ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
+| ShareGPT4Video (Video) | ✅ | ✅ | `git lfs install && git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
 | BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
@@ -80,8 +86,22 @@ th {
 
 !!! note
 
-    Most datasets mentioned above are links to datasets on huggingface.
-    For these datasets, the dataset's `dataset-name` should be set to `hf`.
+    Some datasets are hosted on Hugging Face. If Hugging Face is not directly
+    accessible from your network, you can use a third-party mirror for downloads
+    made through `huggingface_hub` or the Hugging Face `datasets` library:
+
+    ```bash
+    export HF_ENDPOINT=https://hf-mirror.com
+    ```
+
+    `HF_ENDPOINT` does not rewrite URLs passed directly to `wget` or `git clone`.
+    For these commands, replace `huggingface.co` in the URL with an accessible
+    mirror explicitly. The availability of third-party mirrors is not guaranteed
+    by vLLM or vLLM Ascend. `VLLM_USE_MODELSCOPE=True` controls model and tokenizer
+    loading in vLLM; it does not redirect benchmark dataset downloads to ModelScope.
+
+    Datasets prefixed with `HuggingFace-` in the table should set `dataset-name`
+    to `hf`.
     For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
 
     ```bash
@@ -113,6 +133,24 @@ vllm bench serve \
   --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
   --num-prompts 10
 ```
+
+!!! note
+
+    The command above connects to `http://127.0.0.1:8000` by default. To benchmark
+    a remote service, set
+    [`--base-url`](https://docs.vllm.ai/en/latest/cli/bench/serve/#base-url) to the
+    service address and keep `--endpoint` as the API path:
+
+    ```bash
+    vllm bench serve \
+      --base-url http://192.168.1.100:8000 \
+      --endpoint /v1/completions \
+      --backend vllm \
+      --model Qwen/Qwen3-8B \
+      --dataset-name sharegpt \
+      --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json \
+      --num-prompts 10
+    ```
 
 If successful, you will see the following output:
 

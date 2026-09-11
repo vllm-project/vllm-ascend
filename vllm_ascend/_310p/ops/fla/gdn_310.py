@@ -293,13 +293,14 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     run_mode=0,
                 )
         elif attn_metadata.num_decodes > 0:
+            num_decodes = attn_metadata.num_decodes
             mixed_qkv_non_spec = torch.ops._C_ascend.npu_causal_conv1d_310(
-                mixed_qkv_non_spec,
+                mixed_qkv_non_spec[:num_decodes],
                 conv_weights,
                 bias=self.conv1d.bias,
                 conv_states=conv_state,
                 query_start_loc=None,
-                cache_indices=non_spec_state_indices_tensor[: attn_metadata.num_actual_tokens],
+                cache_indices=non_spec_state_indices_tensor[:num_decodes],
                 initial_state_mode=None,
                 num_accepted_tokens=None,
                 activation_mode=activation_num,
@@ -342,7 +343,7 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                     beta=beta_spec,
                     state=ssm_state,
                     cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
-                    ssm_state_indices=spec_state_indices_tensor,
+                    ssm_state_indices=spec_state_indices_tensor[: attn_metadata.num_spec_decodes],
                     num_accepted_tokens=spec_causal_conv1d_meta.num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -372,30 +373,32 @@ class AscendGatedDeltaNetAttention310(GatedDeltaNetAttention):
                 # Init cache
                 ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(ssm_state.dtype)
             elif attn_metadata.num_decodes > 0:
+                num_decodes = attn_metadata.num_decodes
                 core_attn_out_non_spec = npu_recurrent_gated_delta_rule_310(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
+                    q=query_non_spec[:, :num_decodes],
+                    k=key_non_spec[:, :num_decodes],
+                    v=value_non_spec[:, :num_decodes],
+                    g=g_non_spec[:, :num_decodes],
+                    beta=beta_non_spec[:, :num_decodes],
                     state=ssm_state,
-                    cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
-                    ssm_state_indices=non_spec_state_indices_tensor,
+                    cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
+                    ssm_state_indices=non_spec_state_indices_tensor[:num_decodes],
                     use_qk_l2norm_in_kernel=True,
                 )
             else:
                 core_attn_out_non_spec = None
 
         elif attn_metadata.num_decodes > 0:
+            num_decodes = attn_metadata.num_decodes
             core_attn_out_non_spec = npu_recurrent_gated_delta_rule_310(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g,
-                beta=beta,
+                q=query_non_spec[:, :num_decodes],
+                k=key_non_spec[:, :num_decodes],
+                v=value_non_spec[:, :num_decodes],
+                g=g[:, :num_decodes],
+                beta=beta[:, :num_decodes],
                 state=ssm_state,
-                cu_seqlens=non_spec_query_start_loc,
-                ssm_state_indices=non_spec_state_indices_tensor,
+                cu_seqlens=non_spec_query_start_loc[: num_decodes + 1],
+                ssm_state_indices=non_spec_state_indices_tensor[:num_decodes],
                 use_qk_l2norm_in_kernel=True,
             )
         # 3. Merge core attention output

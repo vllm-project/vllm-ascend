@@ -9,7 +9,7 @@ import torch
 from vllm.config.compilation import CUDAGraphMode
 from vllm.third_party.flash_linear_attention.ops import index as _fla_index
 from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 
 from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
@@ -227,7 +227,10 @@ def _build_attn_metadata(
 
 def _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens: torch.Tensor) -> None:
     hf_text_config = getattr(builder.vllm_config.model_config, "hf_text_config", None)
-    if hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
+    linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
+    if isinstance(linear_attn_config, dict) and linear_attn_config.get("num_heads") is not None:
+        gdn_num_heads = linear_attn_config["num_heads"] // builder.vllm_config.parallel_config.tensor_parallel_size
+    elif hf_text_config is not None and hasattr(hf_text_config, "linear_num_value_heads"):
         gdn_num_heads = (
             hf_text_config.linear_num_value_heads // builder.vllm_config.parallel_config.tensor_parallel_size
         )
@@ -288,6 +291,26 @@ def _patch_missing_runtime_cdiv(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def test_kimi_chunk_metadata_uses_linear_attention_head_count() -> None:
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=128,
+        num_speculative_tokens=0,
+    )
+    builder.vllm_config.model_config.hf_text_config = SimpleNamespace(
+        linear_attn_config={"num_heads": 32},
+    )
+    cu_seqlens = torch.tensor([0, 130], dtype=torch.int32)
+
+    chunk_meta = ascend_gdn_attn_builder._build_non_spec_chunked_prefill_metadata(
+        builder,
+        cu_seqlens,
+        torch.device("cpu"),
+    )
+
+    _assert_chunk_meta_matches_runtime(builder, chunk_meta, cu_seqlens)
+
+
 def test_ascend_gdn_attention_uses_ascend_backend():
     assert AscendGatedDeltaNetAttention.get_attn_backend(object()) is AscendGDNAttentionBackend
     assert AscendGDNAttentionBackend.get_builder_cls() is AscendGDNAttentionMetadataBuilder
@@ -308,6 +331,25 @@ def test_sequence_index_buffers_cover_spec_decode_when_cudagraph_disabled():
 
     assert torch.equal(spec_indices, torch.tensor([0]))
     assert non_spec_indices.numel() == 0
+
+
+@pytest.mark.parametrize("sample_from_anchor", [False, True])
+def test_dspark_target_reorder_threshold_includes_base_token_regardless_of_anchor(
+    sample_from_anchor: bool,
+):
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=7,
+    )
+    builder.vllm_config.speculative_config.method = "dspark"
+    builder.vllm_config.speculative_config.draft_model_config = SimpleNamespace(
+        hf_config=SimpleNamespace(sample_from_anchor=sample_from_anchor),
+    )
+
+    builder._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
+    assert builder.reorder_batch_threshold == 8
 
 
 def _cache_index_first_column(cache_indices: torch.Tensor) -> torch.Tensor:
@@ -432,7 +474,6 @@ def test_non_spec_prefill_metadata_uses_prefill_tail_for_chunk_metadata(
     assert torch.equal(conv1d_meta.query_start_loc, torch.tensor([0, 1, 9, 13], dtype=torch.int32))
     assert torch.equal(_cache_index_first_column(conv1d_meta.cache_indices), torch.tensor([0, 1, 2], dtype=torch.int32))
     assert torch.equal(conv1d_meta.initial_state_mode, torch.tensor([True, True, True]))
-    assert prefill_metadata.chunk.num_decodes == 0
     _assert_chunk_meta_matches_runtime(
         builder,
         prefill_metadata.chunk,
@@ -554,7 +595,7 @@ def test_full_graph_spec_actual_seq_lengths_use_padded_builder_buffer():
         common_attn_metadata,
         num_accepted_tokens=torch.tensor([2, 4, 99, 99], dtype=torch.int32),
         num_decode_draft_tokens_cpu=torch.tensor([3, 3, -1, -1], dtype=torch.int32),
-        num_reqs_actual=batch_spec.batch_size,
+        num_actual_reqs=batch_spec.batch_size,
     )
 
     assert torch.equal(
@@ -593,14 +634,17 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
     builder = _make_builder(
         device=torch.device("cpu"),
         num_heads=32,
-        num_speculative_tokens=0,
+        num_speculative_tokens=3,
         cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
     )
+    builder.spec_state_indices_tensor.fill_(77)
 
     attn_metadata = builder.build(
         0,
         common_attn_metadata,
-        num_reqs_actual=batch_spec.batch_size,
+        num_accepted_tokens=torch.ones(4, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((4,), -1, dtype=torch.int32),
+        num_actual_reqs=batch_spec.batch_size,
     )
 
     assert torch.equal(
@@ -621,6 +665,7 @@ def test_full_graph_non_spec_actual_seq_lengths_use_padded_builder_buffer():
         attn_metadata.non_spec_state_indices_tensor,
         torch.tensor([0, 1, NULL_BLOCK_ID, NULL_BLOCK_ID], dtype=torch.int32),
     )
+    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
 
 
 def test_causal_conv1d_cache_indices_use_device_block_table(monkeypatch: pytest.MonkeyPatch):
@@ -779,3 +824,301 @@ def test_builder_skips_prebuilt_meta_without_non_spec_prefill(batch_spec: BatchS
             spec_decode_metadata.actual_seq_lengths,
             torch.tensor([0, 4, 4], dtype=torch.int32),
         )
+
+
+def test_mixed_spec_prefill_chunk_metadata_preserves_single_token_count(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    batch_spec = BatchSpec(
+        seq_lens=[1, 4, 8],
+        query_lens=[1, 4, 8],
+        name="mixed_spec_prefill_with_single_token_non_spec",
+    )
+    builder, _, attn_metadata = _build_attn_metadata(
+        batch_spec,
+        num_speculative_tokens=3,
+        num_decode_draft_tokens_cpu=torch.tensor([-1, 3, -1], dtype=torch.int32),
+    )
+
+    assert attn_metadata.num_decodes == 0
+    assert attn_metadata.num_prefills == 2
+    assert torch.equal(
+        attn_metadata.prefill_query_start_loc,
+        torch.tensor([0, 1, 9], dtype=torch.int32),
+    )
+    chunk_metadata = attn_metadata.non_spec_prefill_metadata.chunk
+    _assert_chunk_meta_matches_runtime(
+        builder,
+        chunk_metadata,
+        attn_metadata.prefill_query_start_loc,
+    )
+
+
+@pytest.mark.parametrize(
+    ("seq_len", "expected_decodes", "expected_prefills"),
+    [
+        pytest.param(1, 0, 1, id="first_token_stays_prefill"),
+        pytest.param(17, 1, 0, id="block-size-plus-one-becomes-decode"),
+    ],
+)
+def test_one_token_prefill_selection_respects_recurrent_state(
+    monkeypatch: pytest.MonkeyPatch,
+    seq_len: int,
+    expected_decodes: int,
+    expected_prefills: int,
+):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    common_attn_metadata = create_common_attn_metadata(
+        BatchSpec(seq_lens=[seq_len], query_lens=[1]),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    # Model a prompt chunk explicitly. The helper normally classifies a
+    # one-token row as decode when synthesizing test metadata.
+    common_attn_metadata.is_prefilling = torch.tensor([True])
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=0,
+    )
+
+    attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert common_attn_metadata.is_prefilling.tolist() == [True]
+    assert attn_metadata.num_decodes == expected_decodes
+    assert attn_metadata.num_prefills == expected_prefills
+
+
+@pytest.mark.parametrize(
+    "dcp_size,num_spec,context_len,mixed_spec,graph_mode",
+    [
+        (1, 3, 0, False, CUDAGraphMode.NONE),
+        (1, 3, 384, False, CUDAGraphMode.NONE),
+        (1, 5, 384, True, CUDAGraphMode.FULL_DECODE_ONLY),
+        (16, 5, 0, False, CUDAGraphMode.NONE),
+        (16, 5, 384, False, CUDAGraphMode.NONE),
+        (16, 5, 384, False, CUDAGraphMode.FULL_DECODE_ONLY),
+        (16, 5, 384, True, CUDAGraphMode.NONE),
+        (16, 5, 384, True, CUDAGraphMode.FULL_DECODE_ONLY),
+    ],
+)
+def test_spec_width_prompt_chunk_folds_only_without_dcp(
+    monkeypatch: pytest.MonkeyPatch,
+    dcp_size: int,
+    num_spec: int,
+    context_len: int,
+    mixed_spec: bool,
+    graph_mode: CUDAGraphMode,
+):
+    _patch_missing_runtime_cdiv(monkeypatch)
+    width = num_spec + 1
+    query_lens = [width, width] if mixed_spec else [width]
+    seq_lens = [768 + width, context_len + width] if mixed_spec else [context_len + width]
+    common = create_common_attn_metadata(
+        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
+        block_size=384,
+        device=torch.device("cpu"),
+    )
+    common.is_prefilling = torch.tensor([False, True] if mixed_spec else [True])
+    common.block_table_tensor = torch.arange(len(query_lens) * 10, dtype=torch.int32).view(-1, 10)
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=num_spec,
+        mamba_cache_mode="align",
+        block_size=384,
+        num_speculative_blocks=num_spec,
+        cudagraph_mode=graph_mode,
+    )
+    builder.vllm_config.parallel_config.decode_context_parallel_size = dcp_size
+    accepted = torch.tensor([2, 1] if mixed_spec else [1], dtype=torch.int32)
+    metadata = builder.build(
+        0,
+        common,
+        num_accepted_tokens=accepted,
+        num_decode_draft_tokens_cpu=torch.tensor([num_spec, -1] if mixed_spec else [-1], dtype=torch.int32),
+    )
+
+    assert accepted.tolist() == ([2, 1] if mixed_spec else [1])
+    if dcp_size == 1 and context_len > 0:
+        assert metadata.num_prefills == 0
+        assert metadata.num_prefill_tokens == 0
+        assert metadata.num_spec_decodes == 1 + int(mixed_spec)
+        assert metadata.spec_sequence_masks.tolist() == ([True, True] if mixed_spec else [True])
+        assert metadata.num_accepted_tokens.tolist() == ([2, width] if mixed_spec else [width])
+        return
+
+    # DCP retains prefill state semantics regardless of the prompt chunk width.
+    assert metadata.num_prefills == 1
+    assert metadata.num_prefill_tokens == width
+    assert metadata.num_spec_decodes == int(mixed_spec)
+    assert metadata.prefill_has_initial_state.tolist() == [context_len > 0]
+    expected_slot = (10 if mixed_spec else 0) + (seq_lens[-1] - 1) // 384
+    assert metadata.prefill_state_indices.tolist() == [expected_slot]
+    if mixed_spec:
+        assert metadata.spec_sequence_masks.tolist() == [True, False]
+        assert metadata.num_accepted_tokens.tolist() == [2]
+    else:
+        assert metadata.spec_sequence_masks is None
+        assert metadata.num_accepted_tokens is None
+
+
+def test_full_graph_without_runtime_spec_resets_captured_spec_inputs():
+    capture_common_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[4, 4],
+            query_lens=[4, 4],
+            name="full_graph_spec_capture",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    capture_common_metadata.num_reqs = 4
+    capture_common_metadata.block_table_tensor = torch.tensor(
+        [[10, 11, 12, 13], [20, 21, 22, 23]],
+        dtype=torch.int32,
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    captured_metadata = builder.build(
+        0,
+        capture_common_metadata,
+        num_accepted_tokens=torch.tensor([2, 4], dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.tensor([3, 3], dtype=torch.int32),
+    )
+    captured_spec_metadata = captured_metadata.spec_decode_metadata
+    captured_conv1d_metadata = captured_spec_metadata.spec_causal_conv1d
+
+    assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) > 0
+    assert torch.count_nonzero(captured_spec_metadata.actual_seq_lengths) > 0
+
+    replay_common_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[1, 1, 0, 0],
+            query_lens=[1, 1, 0, 0],
+            name="full_graph_replay_without_spec",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    replay_metadata = builder.build(
+        0,
+        replay_common_metadata,
+        num_accepted_tokens=torch.ones(4, dtype=torch.int32),
+        num_decode_draft_tokens_cpu=torch.full((4,), -1, dtype=torch.int32),
+    )
+
+    assert replay_metadata.spec_sequence_masks is None
+    assert replay_metadata.spec_decode_metadata is None
+    assert torch.equal(
+        captured_conv1d_metadata.cache_indices,
+        torch.full((4, 4), PAD_SLOT_ID, dtype=torch.int32),
+    )
+    assert torch.count_nonzero(captured_conv1d_metadata.query_start_loc) == 0
+    assert torch.count_nonzero(captured_conv1d_metadata.num_accepted_tokens) == 0
+    assert torch.count_nonzero(captured_spec_metadata.actual_seq_lengths) == 0
+
+
+def test_full_graph_idle_dummy_uses_zero_length_recurrent_metadata():
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[8, 8, 8, 8],
+            query_lens=[0, 0, 0, 0],
+            name="full_graph_idle_dummy",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.block_table_tensor[:, 0] = torch.tensor(
+        [10, 11, 98, 99],
+        dtype=torch.int32,
+    )
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=3,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    builder.spec_state_indices_tensor.fill_(77)
+    builder.spec_query_start_loc.fill_(77)
+    builder.non_spec_state_indices_tensor.fill_(77)
+    builder.non_spec_query_start_loc.fill_(77)
+
+    attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert attn_metadata.num_actual_tokens == 0
+    assert attn_metadata.num_decode_tokens == 0
+    assert torch.count_nonzero(attn_metadata.non_spec_query_start_loc) == 0
+    assert torch.all(attn_metadata.non_spec_state_indices_tensor == NULL_BLOCK_ID)
+    assert torch.count_nonzero(builder.spec_query_start_loc[:5]) == 0
+    assert torch.all(builder.spec_state_indices_tensor[:4] == PAD_SLOT_ID)
+
+
+@pytest.mark.parametrize(
+    ("num_speculative_tokens", "num_decode_draft_tokens_cpu"),
+    [
+        pytest.param(0, None, id="without_spec_decode"),
+        pytest.param(
+            3,
+            torch.full((4,), -1, dtype=torch.int32),
+            id="spec_decode_without_runtime_spec_requests",
+        ),
+    ],
+)
+def test_full_graph_non_spec_metadata_nulls_padded_state_indices(
+    num_speculative_tokens: int,
+    num_decode_draft_tokens_cpu: torch.Tensor | None,
+):
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec=BatchSpec(
+            seq_lens=[1, 1, 0, 0],
+            query_lens=[1, 1, 0, 0],
+            name="full_graph_padded_non_spec_actual_seq_lengths",
+        ),
+        block_size=16,
+        device=torch.device("cpu"),
+    )
+    common_attn_metadata.block_table_tensor[:, 0] = torch.tensor([10, 11, 98, 99])
+    builder = _make_builder(
+        device=torch.device("cpu"),
+        num_heads=32,
+        num_speculative_tokens=num_speculative_tokens,
+        cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+    )
+    builder.non_spec_state_indices_tensor.fill_(77)
+    builder.non_spec_query_start_loc.fill_(77)
+    builder.non_spec_actual_seq_lengths.fill_(77)
+
+    attn_metadata = builder.build(
+        0,
+        common_attn_metadata,
+        num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+    )
+
+    assert attn_metadata.num_decodes == 4
+    assert attn_metadata.num_decode_tokens == 2
+    assert torch.equal(
+        attn_metadata.non_spec_query_start_loc,
+        torch.tensor([0, 1, 2, 2, 2], dtype=torch.int32),
+    )
+    assert torch.equal(
+        attn_metadata.non_spec_state_indices_tensor,
+        torch.tensor(
+            [10, 11, NULL_BLOCK_ID, NULL_BLOCK_ID],
+            dtype=torch.int32,
+        ),
+    )
+    decode_metadata = attn_metadata.non_spec_decode_metadata
+    conv1d_metadata = decode_metadata.causal_conv1d
+    assert conv1d_metadata.query_start_loc.data_ptr() == attn_metadata.non_spec_query_start_loc.data_ptr()
+    assert conv1d_metadata.cache_indices.data_ptr() == attn_metadata.non_spec_state_indices_tensor.data_ptr()
+    assert decode_metadata.actual_seq_lengths.data_ptr() == builder.non_spec_actual_seq_lengths.data_ptr()
+    assert torch.equal(
+        decode_metadata.actual_seq_lengths,
+        torch.tensor([0, 1, 1, 0, 0], dtype=torch.int32),
+    )

@@ -35,7 +35,6 @@ os.environ["HF_HUB_OFFLINE"] = "0"
 MODELS = ["stepfun-ai/Step-3.5-Flash", "stepfun-ai/Step-3.7-Flash"]
 
 
-@pytest.mark.skip(reason="Temporarily skipped: this test is currently broken.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_step3p5_mtp_acceptance_tp8(model_name):
     golden = [0.85, 0.46, 0.19]
