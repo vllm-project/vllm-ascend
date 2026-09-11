@@ -1213,7 +1213,8 @@ void inplace_partial_rotary_mul_meta(
     const at::Tensor &r1,
     const at::Tensor &r2,
     c10::string_view rotary_mode,
-    at::IntArrayRef partial_slice)
+    at::IntArrayRef partial_slice,
+    bool negate_sin)
 {
     auto origin_dim_num = x.dim();
     return;

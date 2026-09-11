@@ -1953,9 +1953,10 @@ class AscendDSACPImpl(AttentionImplBase[Any]):
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             local_attn_output.unsqueeze(1),
             cp_metadata.local_cos[layer_name],
-            -cp_metadata.local_sin[layer_name],
+            cp_metadata.local_sin[layer_name],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
+            negate_sin=True,
         )
 
         if self.tp_size == 1 or skip_all_to_all:

@@ -116,8 +116,8 @@ TITLES = {
         "zh": "DeepSeek-V4-Flash-Vision-Exp（实验性）",
     },
     "tutorials/models/DeepSeek-V4.1-Flash.md": {
-        "en": "DeepSeek-V4.1-Flash (Experimental)",
-        "zh": "DeepSeek-V4.1-Flash（实验性）",
+        "en": "DeepSeek-V4.1-Flash",
+        "zh": "DeepSeek-V4.1-Flash",
     },
     "tutorials/models/DeepSeek-V4-Pro.md": {"en": "DeepSeek-V4-Pro", "zh": "DeepSeek-V4-Pro"},
     "tutorials/models/DeepSeekOCR2.md": {"en": "DeepSeek-OCR-2", "zh": "DeepSeek-OCR-2"},

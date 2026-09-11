@@ -1768,9 +1768,10 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         torch.ops._C_ascend.inplace_partial_rotary_mul(
             o_proj_input[:actual_tokens].unsqueeze(1),
             cos[:actual_tokens],
-            -sin[:actual_tokens],
+            sin[:actual_tokens],
             rotary_mode="interleave",
             partial_slice=[self.nope_head_dim, self.head_dim],
+            negate_sin=True,
         )
 
         # o
