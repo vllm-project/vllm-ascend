@@ -1178,7 +1178,7 @@ def build_attn_metadata_wrapper():
 
 
 @contextmanager
-def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
+def build_draft_attn_metadata_factory(positions, pad, is_prefilling, seq_lens_np: np.ndarray | None = None):
     """Wrap build_attn_metadata to forward rotary positions for the draft block.
 
     The generic (Ascend) ``build_attn_metadata`` reads ``positions`` inside the
@@ -1191,6 +1191,8 @@ def build_draft_attn_metadata_factory(positions, pad, is_prefilling):
     def build_attn_metadata(*args, **kwargs):
         kwargs["positions"] = positions[:pad]
         kwargs["is_prefilling"] = is_prefilling
+        if seq_lens_np is not None:
+            kwargs["seq_lens_np"] = seq_lens_np
         return raw(*args, **kwargs)
 
     try:
