@@ -158,3 +158,13 @@ def test_hf_tokenizer_call_is_thread_safe():
         competing_call.result()
 
     assert all(torch.equal(output, torch.tensor([[1]])) for output in outputs)
+
+
+def test_hf_processor_accepts_base_class_call_signature():
+    info = _ConcurrentStubInfo()
+    info.tokenizer = _NonThreadSafeTokenizer()
+    processor = DeepseekV4VLMultiModalProcessor(info, None)
+
+    output = processor._call_hf_processor("prompt", {"images": []}, {})
+
+    assert torch.equal(output["input_ids"], torch.tensor([[1]]))
