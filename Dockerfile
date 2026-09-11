@@ -99,7 +99,7 @@ RUN if [ -n "$RUSTUP_DIST_SERVER" ]; then \
         x86_64) ARCH=x86_64-unknown-linux-gnu ;; \
         aarch64) ARCH=aarch64-unknown-linux-gnu ;; \
       esac && \
-      curl -fsSL "${RUSTUP_DIST_SERVER}/rustup/dist/${ARCH}/rustup-init" -o /tmp/rustup-init && \
+      curl -fsSL "${RUSTUP_UPDATE_ROOT}/dist/${ARCH}/rustup-init" -o /tmp/rustup-init && \
       chmod +x /tmp/rustup-init && \
       /tmp/rustup-init -y --default-toolchain none && \
       rm /tmp/rustup-init; \
