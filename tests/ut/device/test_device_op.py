@@ -5,6 +5,12 @@ import pytest
 import torch
 
 from vllm_ascend.device.device_op import A5DeviceAdaptor, BaseDeviceAdaptor
+from vllm_ascend.device.mxfp_compat import (
+    FLOAT4_E2M1FN_X2_DTYPE,
+    FLOAT8_E8M0FNU_DTYPE,
+    QUANT_DTYPES,
+)
+from vllm_ascend.quantization.quant_type import QuantType
 
 
 @pytest.mark.parametrize("use_mla_rope", [True, False])
@@ -218,6 +224,129 @@ def test_kv_cache_load_makes_seq_lens_contiguous():
     assert mock_gather.call_args.kwargs["seq_offset"] is seq_starts
     assert mock_gather.call_args.kwargs["key"] is key
     assert mock_gather.call_args.kwargs["value"] is value
+
+
+def test_a5_w4a8_mxfp_uses_fused_grouped_matmul_swiglu_quant_v2():
+    """W4A8MXFP must dispatch to the fused npu_grouped_matmul_swiglu_quant_v2
+    (MXFP4 weight) instead of the two-stage GMM + swiglu_group_quant combo."""
+    x = torch.randn(2, 8, dtype=torch.bfloat16)
+    weight = torch.randn(4, 8, dtype=torch.uint8)
+    weight_scale = torch.randn(4, 8, dtype=torch.uint8)
+    group_list = torch.tensor([2])
+    x_scale = torch.randn(2, 1, dtype=torch.bfloat16)
+    out = torch.randn(2, 4, dtype=torch.bfloat16)
+    # ndim != 2 so maybe_normalize_mxfp_scale_layout keeps it as-is.
+    out_scale = torch.randn(2, 1, 1, dtype=torch.bfloat16)
+
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
+            return_value=(out, out_scale),
+        ) as mock_v2,
+        mock.patch("vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul") as mock_gmm,
+        mock.patch(
+            "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_swiglu_group_quant",
+            create=True,
+        ) as mock_swiglu_group_quant,
+    ):
+        result = A5DeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            x=x,
+            weight=weight,
+            group_list=group_list,
+            weight_scale=weight_scale,
+            x_scale=x_scale,
+            use_mxfp_quant=True,
+            mxfp_quant_dtype=QuantType.W4A8MXFP,
+            act_quant_type=torch.float8_e4m3fn,
+            weight_quant_type=FLOAT4_E2M1FN_X2_DTYPE,
+            swiglu_limit=0.0,
+        )
+
+    assert result[0] is out
+    assert result[1] is out_scale
+    assert result[2] is None
+    mock_gmm.assert_not_called()
+    mock_swiglu_group_quant.assert_not_called()
+    mock_v2.assert_called_once()
+    call_kwargs = mock_v2.call_args.kwargs
+    assert len(call_kwargs["weight"]) == 1 and call_kwargs["weight"][0] is weight
+    assert len(call_kwargs["weight_scale"]) == 1 and call_kwargs["weight_scale"][0] is weight_scale
+    assert call_kwargs["x_scale"] is x_scale
+    assert call_kwargs["group_list"] is group_list
+    assert call_kwargs["dequant_mode"] == 2
+    assert call_kwargs["quant_mode"] == 2
+    assert call_kwargs["quant_dtype"] == torch.float8_e4m3fn
+    expected_weight_dtype = FLOAT4_E2M1FN_X2_DTYPE if FLOAT4_E2M1FN_X2_DTYPE in QUANT_DTYPES else None
+    assert call_kwargs["weight_dtype"] == expected_weight_dtype
+    assert "swiglu_limit" not in call_kwargs
+
+
+def test_a5_w4a8_mxfp_falls_back_to_two_stage_for_swiglu_limit():
+    """v2 has no swiglu_limit input, so a non-zero limit falls back to the
+    two-stage GMM + swiglu_group_quant path."""
+    x = torch.randn(2, 8, dtype=torch.bfloat16)
+    weight = torch.randn(4, 8, dtype=torch.uint8)
+    weight_scale = torch.randn(4, 8, dtype=torch.uint8)
+    group_list = torch.tensor([2])
+    x_scale = torch.randn(2, 1, dtype=torch.bfloat16)
+    hidden_states = torch.randn(2, 8, dtype=torch.bfloat16)
+    out = torch.randn(2, 4, dtype=torch.bfloat16)
+    out_scale = torch.randn(2, 1, 1, dtype=torch.bfloat16)
+
+    with (
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul",
+            return_value=[hidden_states],
+        ) as mock_gmm,
+        mock.patch(
+            "vllm_ascend.device.device_op.torch.ops._C_ascend.npu_swiglu_group_quant",
+            create=True,
+            return_value=(out, out_scale, None),
+        ) as mock_swiglu_group_quant,
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.npu_grouped_matmul_swiglu_quant_v2",
+            return_value=(out, out_scale),
+        ) as mock_v2,
+        mock.patch(
+            "vllm_ascend.device.device_op.torch_npu.float4_e2m1fn_x2",
+            FLOAT4_E2M1FN_X2_DTYPE,
+            create=True,
+        ),
+        mock.patch(
+            "vllm_ascend.device.device_op.torch.float8_e8m0fnu",
+            FLOAT8_E8M0FNU_DTYPE,
+            create=True,
+        ),
+    ):
+        result = A5DeviceAdaptor.npu_grouped_matmul_swiglu_quant(
+            x=x,
+            weight=weight,
+            group_list=group_list,
+            weight_scale=weight_scale,
+            x_scale=x_scale,
+            use_mxfp_quant=True,
+            mxfp_quant_dtype=QuantType.W4A8MXFP,
+            act_quant_type=torch.float8_e4m3fn,
+            weight_quant_type=FLOAT4_E2M1FN_X2_DTYPE,
+            swiglu_limit=7.0,
+        )
+
+    assert result[0] is out
+    assert result[1] is out_scale
+    assert result[2] is None
+    mock_v2.assert_not_called()
+    gmm_kwargs = mock_gmm.call_args.kwargs
+    assert gmm_kwargs["x"] == [x]
+    assert gmm_kwargs["weight"] == [weight]
+    assert gmm_kwargs["antiquant_scale"] == [weight_scale]
+    assert gmm_kwargs["per_token_scale"] == [x_scale]
+    assert gmm_kwargs["split_item"] == 2
+    assert gmm_kwargs["group_list"] is group_list
+    assert gmm_kwargs["output_dtype"] == torch.bfloat16
+    swiglu_kwargs = mock_swiglu_group_quant.call_args.kwargs
+    assert swiglu_kwargs["dst_type"] == torch.float8_e4m3fn
+    assert swiglu_kwargs["quant_mode"] == 2
+    assert swiglu_kwargs["clamp_value"] == 7.0
 
 
 def test_npu_flash_attention_uses_fusion_attention_for_fp32():
