@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
@@ -47,6 +47,7 @@ from vllm_ascend.attention.utils import (
     PagedAttentionGraphParam,
     cache_graph_workspace,
     enable_dcp,
+    enable_pcp,
     needs_layer_aware_fia_graph_replay,
     notify_kv_cache_written,
     split_decodes_and_prefills,
@@ -62,8 +63,9 @@ from vllm_ascend.compilation.acl_graph import (
 )
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
+from vllm_ascend.device.mxfp_kv_cache import scatter_mxfp_k_scale_cache
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.attention_fence import record_attention_compute_start
-from vllm_ascend.utils import vllm_version_is, weak_ref_tensors
+from vllm_ascend.utils import uses_mooncake_connector, vllm_version_is, weak_ref_tensors
 
 if vllm_version_is("0.28.0"):
     from vllm.model_executor.layers.attention.pcp import _gather_prefill_cache_inputs  # type: ignore[import-not-found]
@@ -122,13 +124,13 @@ class AscendAttentionBackend(AttentionBackend):
         dst_kv_cache: list[torch.Tensor],
         src_to_dst: torch.Tensor,
     ) -> None:
-        src_key_cache, src_value_cache = src_kv_cache[0], src_kv_cache[1]
-        dst_key_cache, dst_value_cache = dst_kv_cache[0], dst_kv_cache[1]
         src_indices = src_to_dst[:, 0]
         dst_indices = src_to_dst[:, 1]
 
-        dst_key_cache[dst_indices] = src_key_cache[src_indices].to(dst_key_cache.device)
-        dst_value_cache[dst_indices] = src_value_cache[src_indices].to(dst_key_cache.device)
+        # C8-MXFP layers carry (k, v, k_scale, v_scale) tuples; generalize to
+        # any cache tuple length so scale caches are swapped alongside K/V.
+        for src_cache, dst_cache in zip(src_kv_cache, dst_kv_cache):
+            dst_cache[dst_indices] = src_cache[src_indices].to(dst_cache.device)
 
     @staticmethod
     def copy_blocks(
@@ -139,14 +141,38 @@ class AscendAttentionBackend(AttentionBackend):
         dst_indices = src_to_dists[:, 1]
 
         for kv_cache in kv_caches:
-            key_caches = kv_cache[0]
-            value_caches = kv_cache[1]
-            key_caches[dst_indices] = key_caches[src_indices]
-            value_caches[dst_indices] = value_caches[src_indices]
+            for cache in kv_cache:
+                cache[dst_indices] = cache[src_indices]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int]:
         return [128]
+
+
+class AscendC8MXFPAttentionBackend(AscendAttentionBackend):
+    """Backend for C8-MXFP KV cache layers (QFA dual-operator interface).
+
+    C8-MXFP QFA requires 512-token pages (the D=256 requirement doc allows
+    512/1024). This must not be advertised by the generic backend because
+    hybrid BF16 models (e.g. Qwen3.5/3.6 linear-attention mixes) use its
+    128-token logical block layout when reshaping their KV cache.
+    """
+
+    @staticmethod
+    def get_impl_cls() -> type["AscendC8MXFPAttentionBackendImpl"]:
+        if enable_pcp() or enable_dcp():
+            raise NotImplementedError("C8_MXFP attention does not support PCP/DCP yet.")
+        return AscendC8MXFPAttentionBackendImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["AscendC8MXFPMetadataBuilder"]:
+        if enable_pcp() or enable_dcp():
+            raise NotImplementedError("C8_MXFP attention does not support PCP/DCP yet.")
+        return AscendC8MXFPMetadataBuilder
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int]:
+        return [512]
 
 
 class AscendAttentionState(Enum):
@@ -193,6 +219,16 @@ class AscendMetadata:
     # Maximum query length in the batch (None for decoding).
     max_query_len: int | None = None
 
+    # Persistent GPU-side length sources, refreshed in place by the model
+    # runner every step: query_start_loc_gpu is the 0-prefixed cumulative
+    # query boundaries (int32) and seq_lens_gpu the per-request KV lengths
+    # (int32). Graph-capturing backends must source cu_seqlens/seqused from
+    # these instead of the CPU lists above -- ACL-graph replay re-executes
+    # only device work, so Python-side refreshes of hand-managed buffers
+    # never run again after capture.
+    query_start_loc_gpu: torch.Tensor = None
+    seq_lens_gpu: torch.Tensor = None
+
     # ********************** KV Cache Related Properties ********************* #
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
@@ -210,6 +246,15 @@ class AscendMetadata:
     # prefill reshape_and_cache event
     reshape_cache_event: torch.npu.Event = None
 
+    # Per-step scratch for C8-MXFP (QFA) layers. The builder creates one
+    # AscendMetadata per step shared by all attention layers, so the QFA
+    # metadata operator output is computed once per step instead of once
+    # per layer. Key: "step" -> QFA metadata tensor. Only used on the eager
+    # path -- graph capture bypasses the cache so the metadata op executes
+    # inside the captured region.
+    qfa_metadata_cache: dict = field(default_factory=dict)
+    # Rank-local padded token count when PCP expands the batch across the
+    # prefill context parallel group; None when PCP is disabled.
     pcp_local_num_input_tokens: int | None = None
 
 
@@ -394,6 +439,8 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
             num_decode_tokens=num_decode_tokens,
             block_tables=block_table,
             query_start_loc=query_start_loc,
+            query_start_loc_gpu=common_attn_metadata.query_start_loc,
+            seq_lens_gpu=common_attn_metadata.seq_lens,
             seq_lens=seq_lens,
             seq_lens_cpu=seq_lens,
             seq_lens_list=seq_lens_list,
@@ -457,6 +504,56 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
 
         attn_metadata.attn_state = attn_state
         return attn_metadata
+
+
+class AscendC8MXFPMetadataBuilder(AscendAttentionMetadataBuilder):
+    """Metadata builder for the C8-MXFP (QFA) backend.
+
+    The generic Ascend builder sizes its block-table width with the
+    128-token generic block; this backend uses 512-token kernel blocks.
+
+    Cudagraph support (final form, no .out wrapper variant needed):
+    - PIECEWISE: QFA executes outside the compiled region as a plain call.
+    - FULL / FULL_DECODE_ONLY: npugraph_ex captures the allocating QFA
+      wrapper plus the in-graph metadata op natively (golden-test
+      GRAPH_PATH=7 methodology). Replay correctness relies on the model
+      runner's persistent length buffers (query_start_loc_gpu /
+      seq_lens_gpu), which the impl derives QFA's cu_seqlens/seqused from
+      through captured device-side ops, so every replay re-reads the
+      current step's lengths.
+    """
+
+    @classmethod
+    def get_cudagraph_support(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec,
+    ) -> AttentionCGSupport:
+        mode = vllm_config.compilation_config.cudagraph_mode
+        if mode.has_piecewise_cudagraphs() and not mode.has_full_cudagraphs():
+            # PIECEWISE: QFA runs outside the compiled region as a plain
+            # call (validated on-device). UNIFORM_BATCH is the support
+            # level the other piecewise-capable Ascend backends report
+            # (e.g. mla_v1); AttentionCGSupport has no PARTIAL member.
+            return AttentionCGSupport.UNIFORM_BATCH
+        # FULL (incl. FULL_DECODE_ONLY): npugraph_ex captures the
+        # allocating QFA wrapper natively (golden-test GRAPH_PATH=7).
+        # Spec decode (MTP) included: the draft graph is a plain
+        # torch.npu.graph ACLGraphWrapper capture whose metadata goes
+        # through the same builder.build() (field passthrough) and whose
+        # per-step lengths live in the proposer's persistent buffers,
+        # refreshed in place before each draft replay -- the same
+        # stable-address contract as the main-model graphs. During draft
+        # capture _EXTRA_CTX.capturing is set by the ACLGraphWrapper
+        # (shared forward-context object), so the QFA metadata op is
+        # still executed inline inside the captured region.
+        return AttentionCGSupport.ALWAYS
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.max_num_blocks_per_req = cdiv(
+            self.model_config.max_model_len, AscendC8MXFPAttentionBackend.get_supported_kernel_block_sizes()[0]
+        )
 
 
 class AscendAttentionBackendImpl(AttentionImpl):
@@ -2253,3 +2350,511 @@ class AscendC8AttentionBackendImpl(AscendAttentionBackendImpl):
 
             notify_kv_cache_written()
         return query, key, value, output
+
+
+QFA_QUANT_MODE_MXFP8 = 1
+QFA_MASK_MODE_CAUSAL = 3
+QFA_LAYOUT_TND = "TND"
+QFA_LAYOUT_PA_BBND = "PA_BBND"
+
+
+def _build_qfa_cu_seqlens(cumulative_seq_lengths: list[int], device: torch.device) -> torch.Tensor:
+    """Build QFA ``cu_seqlens``: int32 (B+1,) with a leading 0.
+
+    FIA-style ``actual_seq_lengths`` are B cumulative entries; QFA expects the
+    cumulative sums prefixed with 0 so batch i spans
+    ``[cu_seqlens[i], cu_seqlens[i + 1])`` (QFA requirement doc, sequence
+    length conversion rules).
+    """
+    return torch.tensor([0, *cumulative_seq_lengths], dtype=torch.int32, device=device)
+
+
+# Resolved lazily and cached: (main_op, metadata_op). The QFA dual operators
+# are delivered through the cann_ops_transformer package shipped with the
+# CANN toolkit (confirmed final delivery form). That wrapper's call shape
+# (verified on-device): positional q/k/v/q_descale/k_descale/v_descale/
+# quant_mode, p_scale instead of quant_scale_p, an extra layout_q_descale,
+# no pa_block_size, and a required non-null v_descale placeholder on the
+# metadata call for quant_mode=1 (batch_size must not be passed with a TND
+# layout_q; the op infers it from cu_seqlens_q).
+# Graph capture: torch_npu's npugraph_ex backend (the mechanism this vLLM
+# build uses for FULL graphs, confirmed in the on-device capture stack)
+# captures the ALLOCATING wrapper directly -- internal at::empty allocations
+# land in the graph's private pool and replay safely. The ops-transformer
+# golden tests exercise exactly this path (GRAPH_PATH=7: torch.compile with
+# backend="npugraph_ex", metadata op called INSIDE forward, no .out variant).
+# No task_group/update machinery is needed on our side.
+_QFA_OPS: tuple[Any, Any] | None = None
+
+
+def _get_qfa_ops() -> tuple[Any, Any]:
+    global _QFA_OPS
+    if _QFA_OPS is None:
+        try:
+            from cann_ops_transformer.ops import quant_flash_attn as main_op  # type: ignore[import-not-found]
+            from cann_ops_transformer.ops import (  # type: ignore[import-not-found]
+                quant_flash_attn_metadata as metadata_op,
+            )
+        except ImportError:
+            raise RuntimeError(
+                "C8_MXFP requires the QFA dual operators delivered in the "
+                "cann_ops_transformer package (shipped with the CANN toolkit): "
+                "cann_ops_transformer.ops.quant_flash_attn(_metadata) could not "
+                "be imported in this environment."
+            ) from None
+        _QFA_OPS = (main_op, metadata_op)
+    return _QFA_OPS
+
+
+class AscendC8MXFPAttentionBackendImpl(AscendAttentionBackendImpl):
+    """MXFP8 KV cache backend computed by the QFA dual-operator interface.
+
+    forward() quantizes Q/K dynamically (``npu_dynamic_mx_quant``, FP8 E4M3 +
+    per-token-group E8M0 scales) and V statically (the checkpoint's
+    per-channel E8M0 scale), scatters quantized K/V plus their scale caches
+    into the paged cache, and calls
+    ``cann_ops_transformer.ops.quant_flash_attn_metadata`` +
+    ``cann_ops_transformer.ops.quant_flash_attn`` directly on the paged cache.
+
+    Layout: PA_BBND. K/V and both E8M0 scale caches are stored in the natural
+    ``[num_blocks, block_size, num_kv_heads, head_dim]`` order that
+    reshape_and_cache writes, which is exactly what QFA's PA_BBND reads -- so
+    no layer ever transposes or copies the cache (the per-step
+    ``transpose(1,2).contiguous()`` full-cache copy of the FIA-based design is
+    gone; validated on-device by the vendored-QFA bring-up on the same
+    operator).
+
+    One QFA call per step: decode and prefill requests share a single
+    CAUSAL-masked invocation (cu_seqlens_q over the whole batch), instead of
+    per-subset calls -- the causal mask already covers decode rows and the
+    batch is smaller to feed. PrefillNoCache also reads from pages:
+    reshape_and_cache has written this step's K/V before attention runs.
+
+    Graph capture: handled natively by torch_npu's npugraph_ex backend (the
+    FULL-graph mechanism of this vLLM build), following the ops-transformer
+    golden-test methodology (GRAPH_PATH=7). The allocating wrapper is
+    captured directly (at::empty outputs land in the graph pool) and the
+    AICPU metadata op runs inline inside the graph. Replay safety relies on
+    every per-step input being a stable-address tensor whose content is
+    refreshed outside Python: block_table / slot_mapping come from the
+    model runner's persistent CpuGpuBuffer storages, and cu_seqlens_q /
+    seqused_kv are derived IN-GRAPH from the runner's persistent
+    query_start_loc / seq_lens buffers (captured clamp/cummax ops re-execute
+    each replay). The K-scale scatter uses a device-side mask pattern (no
+    host sync). No Python-side buffer refresh exists in the captured
+    region -- ACL-graph replay never re-runs Python, so such refreshes
+    would freeze at capture values. Speculative decoding (MTP) uses the
+    same derivation chain: the draft metadata builder routes through
+    AscendAttentionMetadataBuilder.build(), and the MTP proposer
+    refreshes its persistent query_start_loc/seq_lens/block-table
+    buffers in place before each draft-step replay.
+
+    NOTE: the QFA dual operators are called through _get_qfa_ops(), which
+    resolves cann_ops_transformer.ops.quant_flash_attn(_metadata) -- the
+    confirmed final delivery form, shipped with the CANN toolkit. That
+    wrapper's signature (verified on-device via inspect + the vendored-QFA
+    bring-up) differs from the requirement doc's torch_npu example: positional
+    q_descale/k_descale/v_descale/quant_mode, p_scale instead of
+    quant_scale_p, an extra layout_q_descale, no pa_block_size, and a
+    required v_descale placeholder on the metadata call for quant_mode=1.
+    """
+
+    # Installed via ``layer.impl.__class__`` assignment, which does not call
+    # this subclass's constructor. Class-level defaults are therefore
+    # required for objects that predate the class swap.
+    enable_hamming_sparse: bool = False
+    _v_scale_filled_caches: set[torch.Tensor] | None = None
+
+    def _qfa_step_cache(self, attn_metadata: AscendMetadata) -> dict:
+        cache = getattr(attn_metadata, "qfa_metadata_cache", None)
+        if cache is None:
+            cache = {}
+            attn_metadata.qfa_metadata_cache = cache
+        return cache
+
+    def _get_qfa_metadata(
+        self,
+        attn_metadata: AscendMetadata,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        seqused_kv: torch.Tensor,
+        max_seqlen_q: int,
+    ):
+        """Return the QFA metadata plan (AICPU op output).
+
+        Eager: computed once per step and cached on the AscendMetadata (the
+        plan depends on heads/batch, identical across full-attention layers).
+        npugraph_ex capture: the Python-side cache is bypassed so the metadata
+        op executes INSIDE the captured region on every layer visit -- the
+        graph then recomputes the plan from the replayed length buffers each
+        step (golden-test GRAPH_PATH=7 methodology: Network.forward calls the
+        metadata op inline before the main op). The per-layer redundant calls
+        during capture are free (AICPU, ~us) and each layer's captured call
+        consumes the plan it just produced.
+        """
+        # Bypass the cache during ANY graph capture (FULL and PIECEWISE
+        # warmups alike): the metadata op must execute inside the captured
+        # region so each replay recomputes the plan from the replayed
+        # length buffers. During PIECEWISE capture the attention runs
+        # eagerly between the compiled pieces, so the uncached per-layer
+        # calls are just normal eager executions (~us, AICPU).
+        use_step_cache = not _EXTRA_CTX.capturing
+        cache = self._qfa_step_cache(attn_metadata) if use_step_cache else {}
+        metadata = cache.get("step")
+        if metadata is None:
+            # TND + PA: pass cu_seqlens_q only; the KV side is addressed via
+            # block_table + seqused_kv (QFA requirement doc, 3.2.3).
+            # quant_mode=1 refuses a null v_descale at the aclnn entry
+            # (quant_flash_attn_metadata_check.h), but under PA_BBND nothing
+            # reads it -- a minimal 5D E8M0 placeholder suffices. batch_size
+            # must NOT be passed with a TND layout_q (the checker rejects
+            # it); the op infers it from cu_seqlens_q.
+            _, metadata_op = _get_qfa_ops()
+            # NOTE: torch_npu.float8_e8m0fnu is the integer dtype ID (293) on
+            # this torch_npu build, not a torch.dtype; tensor.view() would
+            # parse it as a target shape. Bitcast with the stock torch dtype
+            # instead (itemsize 1 -> 1, shape preserved).
+            v_descale_stub = torch.zeros(1, 1, 1, 1, 2, dtype=torch.uint8, device=cu_seqlens_q.device).view(
+                torch.float8_e8m0fnu
+            )
+            metadata = metadata_op(
+                self.num_heads,
+                self.num_kv_heads,
+                self.head_size,
+                QFA_QUANT_MODE_MXFP8,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_kv=None,
+                seqused_q=None,
+                seqused_kv=seqused_kv,
+                v_descale=v_descale_stub,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=-1,
+                mask_mode=QFA_MASK_MODE_CAUSAL,
+                win_left=-1,
+                win_right=-1,
+                layout_q=QFA_LAYOUT_TND,
+                layout_q_descale=QFA_LAYOUT_TND,
+                layout_kv=QFA_LAYOUT_PA_BBND,
+                layout_out=QFA_LAYOUT_TND,
+            )
+            if use_step_cache:
+                cache["step"] = metadata
+        return metadata
+
+    def _qfa_int8_mask(self, attn_metadata: AscendMetadata) -> torch.Tensor | None:
+        """QFA's attn_mask is INT8/UINT8/bool; the shared builder already
+        hands out an int8 2048x2048 causal mask, so only convert when some
+        other mask source slips in."""
+        if attn_metadata.attn_mask is None:
+            return None
+        if attn_metadata.attn_mask.dtype == torch.int8:
+            return attn_metadata.attn_mask
+        return attn_metadata.attn_mask.to(torch.int8)
+
+    def _run_qfa(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: AscendMetadata,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        seqused_kv: torch.Tensor,
+        qfa_metadata,
+        max_seqlen_q: int,
+        num_tokens: int,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        key, value, key_scale, value_scale = kv_cache
+        # The scale caches are stored as raw uint8 (index_put_ on float8
+        # either errors or falls back to AICPU); QFA's checker wants E8M0, so
+        # bitcast at the call boundary (torch.float8_e8m0fnu -- the torch
+        # dtype; torch_npu.float8_e8m0fnu is the integer ID 293 on this
+        # build and would be parsed as a view *shape*). Same for the q scale
+        # when the quant helper returns it as uint8 bytes.
+        if key_scale.dtype != torch.float8_e8m0fnu:
+            key_scale = key_scale.view(torch.float8_e8m0fnu)
+        if value_scale.dtype != torch.float8_e8m0fnu:
+            value_scale = value_scale.view(torch.float8_e8m0fnu)
+        if query_scale.dtype != torch.float8_e8m0fnu:
+            query_scale = query_scale.view(torch.float8_e8m0fnu)
+        main_op, _ = _get_qfa_ops()
+        # cann_ops_transformer delivery signature (verified on-device):
+        # q/k/v/q_descale/k_descale/v_descale/quant_mode positional, p_scale
+        # instead of quant_scale_p, layout_q_descale, and no pa_block_size
+        # (the op infers the block size from the k/v cache shapes).
+        # The allocating wrapper is capture-safe under npugraph_ex (internal
+        # at::empty allocations land in the graph pool); the ops-transformer
+        # golden tests capture exactly this call (GRAPH_PATH=7).
+        result = main_op(
+            quant_query,
+            key,
+            value,
+            query_scale,
+            key_scale,
+            value_scale,
+            QFA_QUANT_MODE_MXFP8,
+            block_table=attn_metadata.block_tables,
+            p_scale=None,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=None,
+            seqused_q=None,
+            seqused_kv=seqused_kv,
+            sinks=None,
+            attn_mask=self._qfa_int8_mask(attn_metadata),
+            metadata=qfa_metadata,
+            softmax_scale=self.scale,
+            mask_mode=QFA_MASK_MODE_CAUSAL,
+            win_left=-1,
+            win_right=-1,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=-1,
+            layout_q=QFA_LAYOUT_TND,
+            layout_q_descale=QFA_LAYOUT_TND,
+            layout_kv=QFA_LAYOUT_PA_BBND,
+            layout_out=QFA_LAYOUT_TND,
+            return_softmax_lse=False,
+        )
+        # return_softmax_lse=False yields an empty LSE tensor in the
+        # cann_ops flavor; tolerate both tuple and single-tensor returns.
+        attn_output = result[0] if isinstance(result, tuple) else result
+        attn_output = attn_output.view(num_tokens, self.num_heads, self.head_size)
+        output[:num_tokens] = attn_output
+        return output
+
+    def _forward_mxfp8_attention(
+        self,
+        quant_query: torch.Tensor,
+        query_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor,
+    ) -> torch.Tensor:
+        """One QFA call per step for the whole batch (decode + prefill alike).
+
+        The causal mask covers decode rows as well, so the per-subset split of
+        the FIA-based design is unnecessary. PrefillNoCache is included:
+        reshape_and_cache has already written this step's K/V into the paged
+        cache before attention runs (single-call design validated on-device
+        by the vendored-QFA bring-up).
+
+        npugraph_ex capture compatibility (golden-test methodology,
+        GRAPH_PATH=7): cu_seqlens_q / seqused_kv are derived ON DEVICE from
+        the model runner's persistent int32 buffers (query_start_loc.gpu /
+        seq_lens), which _prepare_inputs refreshes in place every step.
+        The deriving ops are captured together with the QFA calls, so every
+        replay re-executes them and the operators always see the current
+        step's lengths. This replaces the former Python-side staging
+        writes: ACL-graph replay never re-runs Python, so those refreshes
+        only executed during capture and froze the buffers at capture
+        values (and the pinned staging buffer itself was racy under the
+        async scheduler, where the host could overwrite it while the
+        previous step's async H2D copy was still in flight).
+        """
+        if not attn_metadata.causal:
+            raise NotImplementedError("C8_MXFP attention does not support non-causal attention yet.")
+        if self.sliding_window is not None:
+            raise NotImplementedError("C8_MXFP attention does not support sliding window attention yet.")
+
+        # T as QFA sees it: the query rows actually fed to the operator
+        # (forward slices query[:num_actual_tokens] before quantizing), so
+        # the TND constraint cu_seqlens_q[-1] == T, the view/output row
+        # counts and the sanitize clamp bound below all share one source.
+        # At graph capture this is the bucket size; eagerly it is the real
+        # token count -- both stay clean where actual_seq_lengths_q[-1]
+        # may carry stale tail entries (padded batches).
+        num_tokens = quant_query.shape[0]
+        if num_tokens <= 0:
+            return output
+
+        qsl_gpu = attn_metadata.query_start_loc_gpu
+        seq_lens_gpu = attn_metadata.seq_lens_gpu
+        if qsl_gpu is None or seq_lens_gpu is None:
+            raise RuntimeError(
+                "C8_MXFP attention requires the GPU-side length sources "
+                "(query_start_loc_gpu / seq_lens_gpu) on AscendMetadata."
+            )
+        # Sanitize the tail beyond the current requests: unused
+        # query_start_loc slots carry -1 (the FIA padding convention) and
+        # may also hold stale entries from larger earlier steps (the FULL
+        # dummy-request padding re-copies the whole CPU buffer to GPU).
+        # clamp to [0, num_tokens] bounds both; cummax restores
+        # monotonicity, turning the tail into zero-length requests whose
+        # cu_seqlens_q[-1] still equals the token total. Unused seq_lens
+        # slots are zero-filled by the runner every step; clamp(min=1)
+        # matches the dummy-request convention (block 0, one token). On
+        # clean eager data both ops are identity transforms.
+        cu_seqlens_q = qsl_gpu.clamp(min=0, max=num_tokens).cummax(dim=0).values
+        seqused_kv = seq_lens_gpu.clamp(min=1)
+        # Upper bound on any single query length (the step's total token
+        # count); the vendored-QFA bring-up measured prefill against a constant
+        # max_model_len bound as safe too, so a loose bound only affects
+        # tiling, not correctness.
+        max_seqlen_q = num_tokens
+
+        qfa_metadata = self._get_qfa_metadata(
+            attn_metadata,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_kv=seqused_kv,
+            max_seqlen_q=max_seqlen_q,
+        )
+        return self._run_qfa(
+            quant_query,
+            query_scale,
+            kv_cache,
+            attn_metadata,
+            cu_seqlens_q=cu_seqlens_q,
+            seqused_kv=seqused_kv,
+            qfa_metadata=qfa_metadata,
+            max_seqlen_q=max_seqlen_q,
+            num_tokens=num_tokens,
+            output=output,
+        )
+
+    # KV cache writes for C8_MXFP happen in reshape_and_cache(), invoked from forward()
+    # when key/value are present. This hook is only reached when attention is split from
+    # cache update, e.g. Attention.forward with forward_includes_kv_cache_update=False
+    # (unified_kv_cache_update -> do_kv_cache_update). AscendAttentionBackend keeps
+    # forward_includes_kv_cache_update=True, so normal inference never calls this.
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: list[torch.Tensor],
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError("C8_MXFP KV cache update is only supported via reshape_and_cache in forward().")
+
+    def reshape_and_cache(  # type: ignore[override]
+        self,
+        quant_key: torch.Tensor,
+        quant_value: torch.Tensor,
+        key_scale: torch.Tensor,
+        value_scale: torch.Tensor,
+        kv_cache: tuple[torch.Tensor, ...],
+        attn_metadata: AscendMetadata,
+    ) -> None:
+        num_actual_tokens = quant_key.shape[0]
+        slot_mapping = attn_metadata.slot_mapping[:num_actual_tokens]
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
+        DeviceOperator.reshape_and_cache(
+            key=quant_key,
+            value=quant_value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=slot_mapping,
+        )
+
+        # Scatter the dynamic per-token K scales; V's static per-channel scale
+        # is broadcast into its group-layout cache once per cache instance
+        # (tracked by identity so memory-profiling dummy caches and the real
+        # cache are both initialized without a reset hook).
+        key_scale_cache, value_scale_cache = kv_cache[2], kv_cache[3]
+        scatter_mxfp_k_scale_cache(
+            # Byte view: index_put_ on float8 either errors or falls back to
+            # AICPU (the cache side is already uint8 raw storage).
+            key_scale.view(torch.uint8) if key_scale.dtype != torch.uint8 else key_scale,
+            key_scale_cache,
+            slot_mapping,
+            key_cache.shape[1],
+        )
+        filled_caches = self._v_scale_filled_caches
+        if filled_caches is None:
+            filled_caches = set()
+            self._v_scale_filled_caches = filled_caches
+        if value_scale_cache not in filled_caches:
+            # (hidden_size) -> (num_kv_heads, head_size) -> broadcast ->
+            # (num_blocks, block_size // 64, num_kv_heads, head_size, 2)
+            # (PA_BBND). Derive num_kv_heads / v head_dim from the cache
+            # layout instead of self.num_kv_heads / self.head_size so models
+            # whose V head dim differs from the Q/K head dim stay correct.
+            num_kv_heads = value_scale_cache.shape[2]
+            v_head_dim = value_scale_cache.shape[3]
+            value_scale_cache.copy_(value_scale.view(1, 1, num_kv_heads, v_head_dim, 1))
+            # Only claim the cache is filled when the copy actually ran. Graph
+            # capture records the copy without executing it, while this Python
+            # line runs for real -- so marking it there leaves the cache full of
+            # zeros forever and every later call skips the fill. V then
+            # dequantizes to zero and attention returns exactly zero. That is
+            # invisible for the target model, whose first execution of this
+            # path is an eager forward, but the draft's first execution is the
+            # capture itself, which is why MTP acceptance collapses as soon as
+            # the draft graph is enabled. The copy stays inside the captured
+            # graph and is idempotent, so replays keep writing the same value.
+            if not _EXTRA_CTX.capturing:
+                filled_caches.add(value_scale_cache)
+        notify_kv_cache_written()
+
+    def forward(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: tuple[torch.Tensor],
+        attn_metadata: AscendMetadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for AscendC8MXFPAttentionBackendImpl"
+            )
+        if attn_metadata is None:
+            return output.fill_(0)
+        if getattr(self, "enable_hamming_sparse", False):
+            raise NotImplementedError("C8_MXFP attention does not support hamming sparse KV compression yet.")
+        if self.vllm_config.kv_transfer_config is not None and not uses_mooncake_connector(
+            self.vllm_config.kv_transfer_config
+        ):
+            raise NotImplementedError(
+                "C8_MXFP v1 PD disaggregation (kv_transfer) is only supported with "
+                "MooncakeConnectorV1, whose block-level transfer registers and moves "
+                "every per-layer cache tensor (FP8 K/V plus both E8M0 scale caches) "
+                "as raw blocks. Connectors that only move the K/V pair would "
+                "silently drop the scale caches."
+            )
+        if kv_cache is None or len(kv_cache) < 4:
+            raise RuntimeError(
+                "C8_MXFP attention requires a (k, v, k_scale, v_scale) KV cache "
+                f"tuple, got: {type(kv_cache)} with length "
+                f"{len(kv_cache) if kv_cache is not None else 0}."
+            )
+
+        record_attention_compute_start()
+
+        query_mxfp8, query_scale = torch_npu.npu_dynamic_mx_quant(
+            query[: attn_metadata.num_actual_tokens],
+            dst_type=torch.float8_e4m3fn,
+        )
+
+        # KV-sharing consumer layers reuse another layer's cache; writing
+        # their (dummy) K/V would corrupt the shared slots, so only the
+        # owner layer quantizes and scatters K/V. key/value may also be None
+        # on pure decode paths.
+        if key is not None and value is not None and self.kv_sharing_target_layer_name is None:
+            key_mxfp8, key_scale = torch_npu.npu_dynamic_mx_quant(
+                key[: attn_metadata.num_actual_tokens],
+                dst_type=torch.float8_e4m3fn,
+            )
+
+            original_value_shape = value.shape
+            value = value.view(original_value_shape[0], -1)
+            value_mxfp8 = torch_npu.npu_quantize(
+                value[: attn_metadata.num_actual_tokens],
+                layer.v_cache_scale_float_reciprocal,
+                None,
+                torch.float8_e4m3fn,
+                -1,
+                False,
+            )
+            value_mxfp8 = value_mxfp8.view((attn_metadata.num_actual_tokens, *original_value_shape[1:]))
+
+            self.reshape_and_cache(key_mxfp8, value_mxfp8, key_scale, layer.v_cache_scale, kv_cache, attn_metadata)
+
+        # PA_BBND: QFA reads the paged cache in the order it is stored, so the
+        # cache tuple is passed through as-is -- no transpose, no copy.
+        return self._forward_mxfp8_attention(query_mxfp8, query_scale, kv_cache, attn_metadata, output)
