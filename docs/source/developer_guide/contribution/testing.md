@@ -273,7 +273,7 @@ matching `tests/ut/<module>[/<npu>]` directory or the E2E file under the matchin
 the test tree. Routing metadata (runner mapping, partitions) lives in
 [`.github/workflows/scripts/test_config.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/test_config.yaml).
 Estimated times used for load balancing live in
-[`.github/workflows/scripts/estimated_times.yaml`](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/scripts/estimated_times.yaml).
+`.github/workflows/scripts/estimated_times.yaml`.
 
 You can preview locally which runners a set of tests would be routed to:
 
