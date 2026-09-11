@@ -32,8 +32,24 @@ def extract_layout_config(extra_config: dict[str, Any]) -> dict[str, Any] | None
     return None
 
 
-def make_block_key(model_name: str, block_hash_or_tail: str, head_or_tp_rank: int) -> str:
-    """Build the canonical one-object-per-block-and-saving-rank key."""
+def _as_positive_int(value: Any, default: int) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else default
+
+
+def make_block_key(
+    model_name: str,
+    block_hash_or_tail: str,
+    head_or_tp_rank: int,
+    *,
+    namespace: str = "",
+    pp_rank: int = 0,
+    dcp_rank: int = 0,
+) -> str:
+    """One object per local layer stack and KV shard; TP-only keys stay unchanged."""
+    if namespace:
+        return f"{model_name}@{namespace}@pp_rank:{pp_rank}@dcp_rank:{dcp_rank}@{block_hash_or_tail}@{head_or_tp_rank}"
+    if pp_rank != 0 or dcp_rank != 0:
+        raise ValueError("PP/DCP layerwise keys require a topology namespace")
     return f"{model_name}@{block_hash_or_tail}@{head_or_tp_rank}"
 
 
@@ -43,29 +59,61 @@ def make_hit_check_keys(
     block_hash_hex: str,
     num_ranks: int,
     num_groups: int,
+    *,
+    namespace: str = "",
     pp_size: int = 1,
+    dcp_size: int = 1,
 ) -> list[str]:
-    del group_id, num_groups, pp_size
-    return [make_block_key(model_name, block_hash_hex, rank) for rank in range(num_ranks)]
+    """Every (PP stage, DCP shard, head) key a block needs before it is a hit.
+
+    Each PP stage stores its own layers and each DCP rank its own KV shard, so
+    a block is usable only when all of their keys exist.
+    """
+    del group_id, num_groups
+    return [
+        make_block_key(model_name, block_hash_hex, head, namespace=namespace, pp_rank=pp_rank, dcp_rank=dcp_rank)
+        for pp_rank in range(pp_size)
+        for dcp_rank in range(dcp_size)
+        for head in range(num_ranks)
+    ]
+
+
+def layerwise_topology_namespace(model_config: Any, parallel_config: Any) -> str:
+    """Stage-independent topology descriptor, identical on the scheduler and every worker.
+
+    Isolates incompatible PP partitions and DCP memory layouts: a different
+    topology gets a cold cache rather than cross-topology resharding. The PP
+    partitions are enumerated through the same model-partitioning API the
+    workers use, which also covers uneven or custom partitions.
+    """
+    pp_size = _as_positive_int(getattr(parallel_config, "pipeline_parallel_size", 1), 1)
+    dcp_size = _as_positive_int(getattr(parallel_config, "decode_context_parallel_size", 1), 1)
+    if pp_size == dcp_size == 1:
+        return ""
+    tp_size = _as_positive_int(parallel_config.tensor_parallel_size, 1)
+    partitions = []
+    for pp_rank in range(pp_size):
+        stage_config = copy(parallel_config)
+        stage_config.rank = pp_rank * tp_size
+        start, end = model_config.get_layers_start_end_indices(stage_config)
+        if end <= start:
+            raise ValueError("Mooncake layerwise requires at least one model layer per PP stage")
+        partitions.append(f"{start}-{end}")
+    interleave = _as_positive_int(getattr(parallel_config, "cp_kv_cache_interleave_size", 1), 1)
+    return f"layerwise_v2@tp:{tp_size}@pp:{','.join(partitions)}@dcp:{dcp_size}@interleave:{interleave}"
 
 
 def validate_topology(parallel_config: Any) -> None:
-    """Reject parallel coordinates omitted from Mooncake's block key."""
+    """Reject parallel coordinates the block key cannot express.
 
-    def parallel_size(name: str) -> int:
-        value = getattr(parallel_config, name, 1)
-        return value if isinstance(value, int) and not isinstance(value, bool) else 1
-
-    dimensions = (
-        ("pipeline_parallel_size", parallel_size("pipeline_parallel_size")),
-        ("prefill_context_parallel_size", parallel_size("prefill_context_parallel_size")),
-        ("decode_context_parallel_size", parallel_size("decode_context_parallel_size")),
-    )
-    unsupported = [f"{name}={size}" for name, size in dimensions if size > 1]
-    if unsupported:
-        raise ValueError(
-            "Mooncake block-key layerwise currently supports TP-only topology; unsupported " + ", ".join(unsupported)
-        )
+    PP and DCP are representable (topology namespace plus per-stage and
+    per-shard coordinates). PCP still needs a separate cache layout. Whether a
+    *model* supports a given parallel mode is decided earlier by the model and
+    platform checks, not here.
+    """
+    pcp_size = _as_positive_int(getattr(parallel_config, "prefill_context_parallel_size", 1), 1)
+    if pcp_size > 1:
+        raise ValueError(f"Mooncake block-key layerwise does not support PCP; prefill_context_parallel_size={pcp_size}")
 
 
 def validate_runtime(*, use_hybrid: bool, has_recurrent_state: bool, tp_mismatch: bool) -> None:
@@ -114,8 +162,26 @@ def hybrid_layout_id(kv_cache_config, tp_size: int = 1) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def hybrid_block_key(model: str, layout: str, group: int, block_size: int, block_hash: str, head: int) -> str:
-    return f"{model}@mooncake_hybrid_v1:{layout}@group:{group}@block:{block_size}@{block_hash}@{head}"
+def hybrid_block_key(
+    model: str,
+    layout: str,
+    group: int,
+    block_size: int,
+    block_hash: str,
+    head: int,
+    pp_rank: int = 0,
+    dcp_rank: int = 0,
+) -> str:
+    """One object per (block, cache group, PP stage, DCP shard, saving head).
+
+    Each PP stage owns a different layer stack and each DCP rank a different KV
+    shard, so both coordinates belong in the key — the same way the single-group
+    path carries them through ``make_block_key``.
+    """
+    return (
+        f"{model}@mooncake_hybrid_v1:{layout}@pp_rank:{pp_rank}@dcp_rank:{dcp_rank}"
+        f"@group:{group}@block:{block_size}@{block_hash}@{head}"
+    )
 
 
 def fence_drains_recv() -> bool:
@@ -210,6 +276,8 @@ def _prepare_group_sessions(worker: KVPoolWorker, requests: list[ReqMeta]) -> di
                     block_size,
                     block_hash_to_str(hashes[index]),
                     worker.head_or_tp_rank,
+                    worker.pp_rank,
+                    worker.dcp_rank,
                 )
 
             start = request.load_spec.vllm_cached_tokens // block_size if request.load_spec is not None else 0

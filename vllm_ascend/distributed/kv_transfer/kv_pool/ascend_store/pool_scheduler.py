@@ -187,6 +187,13 @@ class KVPoolScheduler:
             has_recurrent_state=bool(self.mamba_group_ids),
             tp_mismatch=self.use_block_key_layerwise and self.tp_mismatch,
         )
+        self.mooncake_layerwise_namespace = (
+            self.layerwise_protocol.layerwise_topology_namespace(
+                vllm_config.model_config, vllm_config.parallel_config
+            )
+            if self.use_block_key_layerwise
+            else ""
+        )
         self.layerwise_max_transfer_blocks = int(
             vllm_config.kv_transfer_config.kv_connector_extra_config.get("layerwise_max_transfer_blocks", 0)
         )
@@ -225,6 +232,8 @@ class KVPoolScheduler:
             self.put_step = self.tp_size // self.num_kv_head
         else:
             self.put_step = 1
+        if self.use_block_key_layerwise and self.put_step % self.dcp_size != 0:
+            raise ValueError("Mooncake layerwise DCP groups must fit within a replicated KV-head group")
         self.num_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
         self.layerwise_offload = False
         if self.use_layerwise_transfer:
@@ -373,9 +382,26 @@ class KVPoolScheduler:
                     self.grouped_block_size[group_id],
                     block_hash_hex,
                     head,
+                    pp_rank,
+                    dcp_rank,
                 )
+                for pp_rank in range(self.pp_size)
+                for dcp_rank in range(self.dcp_size)
                 for head in range(head_or_tp_ranks)
             ]
+        if self.use_block_key_layerwise:
+            return self.layerwise_protocol.make_hit_check_keys(
+                self.model_name,
+                group_id,
+                block_hash_hex,
+                head_or_tp_ranks,
+                len(self.kv_cache_group_ids),
+                namespace=self.mooncake_layerwise_namespace,
+                pp_size=self.pp_size,
+                dcp_size=self.dcp_size,
+            )
+        # The GVA plane carries its own PP tag and has no DCP coordinate, so it
+        # keeps the original argument shape.
         return self.layerwise_protocol.make_hit_check_keys(
             self.model_name,
             group_id,
@@ -531,7 +557,16 @@ class KVPoolScheduler:
         head_or_tp_ranks = self.tp_size // self.put_step
         keys_by_block = [
             [
-                self.layerwise_protocol.make_block_key(self.model_name, block_hash_to_str(block_hash), head_or_tp_rank)
+                self.layerwise_protocol.make_block_key(
+                    self.model_name,
+                    block_hash_to_str(block_hash),
+                    head_or_tp_rank,
+                    namespace=self.mooncake_layerwise_namespace,
+                    pp_rank=pp_rank,
+                    dcp_rank=dcp_rank,
+                )
+                for pp_rank in range(self.pp_size)
+                for dcp_rank in range(self.dcp_size)
                 for head_or_tp_rank in range(head_or_tp_ranks)
             ]
             for block_hash in block_hashes
