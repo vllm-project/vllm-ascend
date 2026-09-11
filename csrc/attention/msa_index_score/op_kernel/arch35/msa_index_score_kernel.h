@@ -23,7 +23,7 @@
  */
 
 #ifndef MSA_INDEX_SCORE_KERNEL_ARCH35_H
-#define MSA_INDEX_SCORE_KERNEL_H
+#define MSA_INDEX_SCORE_KERNEL_ARCH35_H
 
 #include "kernel_operator.h"
 
