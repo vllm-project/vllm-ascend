@@ -1886,15 +1886,19 @@ def test_gate_weight_fp32_returns_existing_buffer_without_cast():
     weight.data.to.assert_not_called()
 
 
-def test_gate_weight_fp32_requires_precast_buffer():
+def test_gate_weight_fp32_caches_cast_once():
     runner = AscendMoERunner.__new__(AscendMoERunner)
     weight_fp16 = torch.randn(8, 4, dtype=torch.float16)
     gate = SimpleNamespace(weight=SimpleNamespace(data=weight_fp16))
     runner._gate = gate
     runner.gate = gate
 
-    with pytest.raises(RuntimeError, match="missing weight_fp32"):
-        runner._gate_weight_fp32()
+    first = runner._gate_weight_fp32()
+    second = runner._gate_weight_fp32()
+
+    assert first.dtype == torch.float32
+    assert first is second
+    assert gate.weight_fp32 is first
 
 
 def test_forward_impl_uses_precast_gate_weight_fp32(monkeypatch):
