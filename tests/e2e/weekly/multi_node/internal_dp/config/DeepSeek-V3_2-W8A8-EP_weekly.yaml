@@ -209,7 +209,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 16
     request_rate: 1
-    baseline: 1
+    baseline: 408.147
     threshold: 0.97
 
   perf_16384_1024_num256:
@@ -221,7 +221,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 64
     request_rate: 1
-    baseline: 1
+    baseline: 859.5032
     threshold: 0.97
 
   perf_32768_512_num32:
@@ -233,7 +233,7 @@ benchmarks:
     max_out_len: 512
     batch_size: 8
     request_rate: 1
-    baseline: 1
+    baseline: 170.9586
     threshold: 0.97
 
   perf_32768_512_num128:
@@ -245,7 +245,7 @@ benchmarks:
     max_out_len: 512
     batch_size: 32
     request_rate: 0.7
-    baseline: 1
+    baseline: 218.7205
     threshold: 0.97
 
   perf_65536_1024_num4:
@@ -257,7 +257,7 @@ benchmarks:
     max_out_len: 1024
     batch_size: 1
     request_rate: 0.1
-    baseline: 1
+    baseline: 30.8406
     threshold: 0.97
 
   perf_65536_1024_num16:
@@ -269,5 +269,5 @@ benchmarks:
     max_out_len: 1024
     batch_size: 4
     request_rate: 1
-    baseline: 1
+    baseline: 103.6049
     threshold: 0.97
