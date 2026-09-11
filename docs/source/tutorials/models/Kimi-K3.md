@@ -275,7 +275,7 @@ If you want to deploy multi-node environment, you need to set up environment on 
 
 Kimi K3 configuration, multimodal processing, reasoning parsing, and tool parsing are registered by vLLM-Ascend. Use a vLLM and vLLM-Ascend source revision that matches the validated version in this document.
 
-## 5 Online Service Deployment
+## 5 Online Service Deployment {: #5-online-service-deployment }
 
 The A2 capabilities have not changed in this release and remain consistent with **vLLM-Ascend 0.23.0**; no iterative updates have been made.
 
@@ -1204,7 +1204,7 @@ vllm bench serve \
 
 ### 9.1 Recommended Configurations
 
-The recommended configurations are the same as those specified in [Chapter 5, “Online Service Deployment”](https://vllm--16008.org.readthedocs.build/projects/ascend/en/16008/tutorials/models/Kimi-K3.html#5-online-service-deployment).
+The recommended configurations are the same as those specified in [Chapter 5, “Online Service Deployment”](#5-online-service-deployment).
 
 ### 9.2 Tuning Guide
 
