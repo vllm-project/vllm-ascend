@@ -154,7 +154,6 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
     )
 
 
-@pytest.mark.skip(reason="Temporarily skip DSpark until the acceptance issue is resolved.")
 @pytest.mark.e2e_model(DSPARK_MODEL)
 @pytest.mark.e2e_coverage(
     arch="moe",
@@ -168,7 +167,7 @@ def test_deepseek_v4_dsa_pcp_mtp_full_decode_only() -> None:
 @patch.dict(os.environ, COMMON_ENV)
 @wait_until_npu_memory_free(target_free_percentage=0.8)
 def test_deepseek_v4_dsa_pcp_dspark() -> None:
-    """Verify DSpark output accuracy and report acceptance for DSA-PCP graph execution."""
+    """Verify output accuracy and DSpark acceptance for DSA-PCP graph execution."""
     _run_test(
         DSPARK_MODEL,
         # Skip acceptance checks until the DSpark acceptance issue is resolved.
