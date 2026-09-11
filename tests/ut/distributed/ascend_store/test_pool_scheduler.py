@@ -20,12 +20,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec, MambaSpec, SlidingWindowSpec
 
 import tests.ut.distributed.ascend_store._mock_deps  # noqa: F401, E402
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.coordinator import AscendStoreCoordinator
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.metadata import (
     LoadSpec,
+    ReqMeta,
     RequestTracker,
 )
 from vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler import (
@@ -106,6 +107,41 @@ class TestKVPoolScheduler(unittest.TestCase):
                 scheduler = KVPoolScheduler(self._make_config(role, block_size=block_size), use_layerwise=False)
                 request = MagicMock(prompt_token_ids=list(range(token_count)))
                 self.assertEqual(scheduler.get_num_new_matched_tokens(request, 0), (0, False))
+
+    @patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.pool_scheduler.LookupKeyClient")
+    def test_touch_sending_mamba_blocks_excludes_speculative_tail(self, mock_client_cls):
+        """Speculative scratch blocks must never be pinned for async sends.
+
+        The allocator relocates speculative scratch blocks in place and
+        requires them exclusively owned (vllm PR #51358); the touch here keeps
+        blocks alive only until the send ack, so it must cover the saved state
+        blocks but not the speculative tail of the mamba block table.
+        """
+        hybrid_groups = [
+            KVCacheGroupSpec(
+                ["layer.0"], FullAttentionSpec(block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32)
+            ),
+            KVCacheGroupSpec(
+                ["layer.1"],
+                MambaSpec(shapes=((4,),), dtypes=(torch.float32,), block_size=16, mamba_cache_mode="align"),
+            ),
+        ]
+        config = self._make_config(extra_config={"backend": "memcache"})
+        config.speculative_config.num_speculative_tokens = 3
+        config.scheduler_config.disable_hybrid_kv_cache_manager = False
+        scheduler = KVPoolScheduler(config, use_layerwise=False, kv_cache_config=MagicMock(kv_cache_groups=hybrid_groups))
+        self.assertEqual(scheduler.mamba_group_ids, [1])
+        self.assertEqual(scheduler.num_speculative_blocks, 3)
+
+        scheduler._block_pool = MagicMock()
+        scheduler._block_pool.blocks = {block_id: MagicMock(block_id=block_id) for block_id in range(1, 10)}
+        # The mirror mirrors the real block table: the last num_speculative_blocks
+        # slots are speculative scratch, the state blocks precede them.
+        req_meta = ReqMeta(req_id="r1", block_ids_by_group=[[11], [1, 2, 3, 4, 5, 6, 7, 8, 9]], can_save=True)
+        scheduler.touch_sending_mamba_blocks(req_meta)
+
+        touched = [block.block_id for block in scheduler._block_pool.touch.call_args[0][0]]
+        self.assertEqual(touched, [1, 2, 3, 4, 5, 6])
 
     def test_mooncake_layerwise_hit_requires_every_saving_rank(self):
         config = self._make_config(extra_config={"backend": "mooncake", "use_layerwise": True})
