@@ -121,9 +121,9 @@ class AisbenchRunner:
                 self.threshold = aisbench_config.get("threshold", 1)
                 self._accuracy_verify()
             if self.task_type == "performance":
-                self.threshold = aisbench_config.get("threshold", None)
-                self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold", None)
-                self.tpot_threshold = aisbench_config.get("tpot_threshold", None)
+                self.threshold = aisbench_config.get("threshold")
+                self.input_throughput_threshold = aisbench_config.get("input_throughput_threshold")
+                self.tpot_threshold = aisbench_config.get("tpot_threshold")
                 self._performance_verify()
             if self.task_type == "spec_decode":
                 self.threshold = aisbench_config.get("threshold", 0.05)
