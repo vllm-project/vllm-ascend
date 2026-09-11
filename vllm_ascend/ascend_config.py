@@ -1017,10 +1017,12 @@ class FinegrainedTPConfig:
                     "tensor_parallel_size == 1, got "
                     f"{vc.parallel_config.tensor_parallel_size}."
                 )
-            # The o_proj exchange requires ACL graph capture (buffers sized
-            # for graph replay; eager dummy runs skip the attention module).
-            # VllmConfig.__post_init__ maps enforce_eager to
-            # cudagraph_mode=NONE, so checking the mode covers both.
+            # The DSA o_proj exchange runs on address-stable buffers sized at decode
+            # scale (`get_potential_max_tokens`, overflow fails fast) and shaped for
+            # ACL graph replay — eager prefill chunks can exceed the capacity. V1
+            # also rejects `enforce_eager` for this knob. VllmConfig.__post_init__
+            # maps enforce_eager to cudagraph_mode=NONE, so checking the mode
+            # covers both.
             if vc.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
                 raise AssertionError("oproj_tensor_parallel_size is only supported in graph mode")
             if vc.kv_transfer_config is None or not vc.kv_transfer_config.is_kv_consumer:
