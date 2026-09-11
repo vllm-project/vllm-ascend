@@ -21,6 +21,12 @@ import torch
 
 # import vllm.utils.cpu_triton_utils as cpu_tl
 from vllm.distributed.parallel_state import GroupCoordinator
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 
 from tests.ut.base import TestBase
 
@@ -310,6 +316,66 @@ class TestBlockTableComputeSlotMapping(TestBase):
             test_configs.append((dcp_rank, req_indices, positions, np.array(expected_result, dtype=np.int32)))
 
         self._test_slot_mapping_for_ranks(dcp_world_size=8, cp_kv_cache_interleave_size=128, test_configs=test_configs)
+
+
+class TestQSACompositeBlockTableSizing(unittest.TestCase):
+    """Regression coverage for the QSA physical-page table width."""
+
+    @staticmethod
+    def _qsa_group():
+        compressed = MLAAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=128,
+            dtype=torch.bfloat16,
+            compress_ratio=4,
+        )
+        main = FullAttentionSpec(
+            block_size=768,
+            num_kv_heads=1,
+            head_size=256,
+            head_size_v=256,
+            dtype=torch.bfloat16,
+        )
+        composite = UniformTypeKVCacheSpecs(
+            block_size=768,
+            # Keep the compressed spec first: the former implementation
+            # inspected it and incorrectly divided the table width by 4.
+            kv_cache_specs={"compressed": compressed, "main": main},
+        )
+        return KVCacheGroupSpec(
+            layer_names=["compressed", "main"],
+            kv_cache_spec=composite,
+        )
+
+    @patch("vllm_ascend.worker.block_table.get_dcp_group")
+    def test_true_physical_width_across_qsa_boundary_and_long_contexts(self, mock_get_dcp_group):
+        from vllm_ascend.worker.block_table import BlockTable
+
+        mock_get_dcp_group.return_value = MagicMock(world_size=1, rank_in_group=0)
+        group = self._qsa_group()
+
+        for max_model_len in (4096, 6143, 6144, 71680, 135168):
+            with self.subTest(max_model_len=max_model_len):
+                expected_physical_blocks = (max_model_len + 767) // 768
+                table = BlockTable(
+                    block_size=768,
+                    max_num_reqs=2,
+                    max_num_blocks_per_req=expected_physical_blocks,
+                    max_num_batched_tokens=4096,
+                    pin_memory=False,
+                    device=torch.device("cpu"),
+                    kernel_sizes=[768],
+                    kv_cache_group=group,
+                )
+                self.assertEqual(table.max_num_blocks_per_req, expected_physical_blocks)
+                self.assertEqual(table.block_table.np.shape, (2, expected_physical_blocks))
+                table.add_row(list(range(expected_physical_blocks)), 0)
+                self.assertEqual(table.num_blocks_per_row[0], expected_physical_blocks)
+                np.testing.assert_array_equal(
+                    table.block_table.np[0, :expected_physical_blocks],
+                    np.arange(expected_physical_blocks),
+                )
 
 
 if __name__ == "__main__":

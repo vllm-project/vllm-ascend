@@ -38,6 +38,7 @@
 #include "gmm/grouped_matmul_swiglu_quant_weight_nz_tensor_list/grouped_matmul_swiglu_quant_torch_adpt.h"
 #include "gmm/grouped_matmul_swiglu_quant_v2/grouped_matmul_swiglu_quant_v2_torch_adpt.h"
 #include "attention/lightning_indexer/lightning_indexer_torch_adpt.h"
+#include "attention/qsa_expand_e3/qsa_expand_e3_torch_adpt.h"
 #include "moe/moe_gating_top_k/moe_gating_top_k_torch_adpt.h"
 #include "attention/sparse_flash_attention/sparse_flash_attention_torch_adpt.h"
 #include "attention/kv_quant_sparse_flash_attention/kv_quant_sparse_flash_attention_torch_adpt.h"
@@ -2723,6 +2724,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(_C, _ascend), ops)
         ") -> (Tensor sparse_indices, Tensor sparse_values)"
     );
     ops.impl("npu_lightning_indexer", torch::kPrivateUse1, &vllm_ascend::npu_lightning_indexer);
+
+    ops.def(
+        "qsa_expand_e3_out("
+            "Tensor groups, Tensor complete_groups, Tensor tail_start, "
+            "Tensor tail_count, Tensor sequence_lengths, Tensor token_to_req, "
+            "Tensor(a!) out"
+        ") -> Tensor(a!)"
+    );
+    ops.impl("qsa_expand_e3_out", torch::kPrivateUse1,
+             &vllm_ascend::qsa_expand_e3_out);
 
     ops.def(
         "npu_sparse_flash_attention(Tensor query, Tensor key, Tensor value,"
