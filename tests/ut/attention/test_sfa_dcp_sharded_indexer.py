@@ -209,17 +209,28 @@ def test_merge_unique_scores_matches_global_topk():
     assert torch.equal(merged, torch.tensor([[0, 1, 2, 3]], dtype=torch.int32))
 
 
-def test_merge_cutoff_ties_are_threshold_equivalent_and_repeatable():
-    indices = torch.tensor([[[8, 2, 4]], [[1, 3, 5]]], dtype=torch.int32)
-    scores = torch.tensor([[[0.4, 0.7, 0.5]], [[0.7, 0.5, 0.5]]], dtype=torch.float32)
-    first = merge_dcp_indexer_candidates(indices, scores, topk=4)
-    second = merge_dcp_indexer_candidates(indices, scores, topk=4)
+def test_merge_all_equal_scores_use_global_logical_index_order():
+    indices = torch.tensor(
+        [[[1284, 1287, 1286, 1285, 1282, 1281, 1408, 1283]], [[7, 3, 5, 1, 6, 4, 2, 0]]],
+        dtype=torch.int32,
+    )
+    scores = torch.ones_like(indices, dtype=torch.float32)
+    merged = merge_dcp_indexer_candidates(indices, scores, topk=8)
+    assert torch.equal(merged, torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7]], dtype=torch.int32))
 
-    assert torch.equal(second, first)
-    selected = set(first[0].tolist())
-    assert {1, 2}.issubset(selected)  # every score strictly above the cutoff
-    assert 8 not in selected  # no score below the cutoff may enter
-    assert len(selected) == 4
+
+def test_merge_cutoff_ties_choose_smallest_global_indices():
+    indices = torch.tensor([[[8, 2, 4, 6]], [[1, 3, 5, 7]]], dtype=torch.int32)
+    scores = torch.tensor([[[0.4, 0.7, 0.5, 0.5]], [[0.7, 0.5, 0.5, 0.5]]], dtype=torch.float32)
+    merged = merge_dcp_indexer_candidates(indices, scores, topk=4)
+    assert torch.equal(merged, torch.tensor([[1, 2, 3, 4]], dtype=torch.int32))
+
+
+def test_merge_partial_k_and_sentinel_padding_remain_stable():
+    indices = torch.tensor([[[5, -1, -1]], [[1, 7, -1]]], dtype=torch.int32)
+    scores = torch.tensor([[[0.5, float("-inf"), float("-inf")]], [[0.7, 0.5, float("-inf")]]], dtype=torch.float32)
+    merged = merge_dcp_indexer_candidates(indices, scores, topk=5)
+    assert torch.equal(merged, torch.tensor([[1, 5, 7, -1, -1]], dtype=torch.int32))
 
 
 def test_merge_preserves_native_singleton_indexer_head_dimension():
