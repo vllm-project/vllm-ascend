@@ -17,7 +17,7 @@
 
 import threading
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -538,6 +538,23 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.delete_finished_stored_request("r1")
         self.assertNotIn("r1", t.stored_requests)
 
+    def test_terminal_request_reported_once_after_all_saves_complete(self):
+        t, _ = self._make_thread()
+        req = MagicMock(req_id="r1", event_id=None)
+
+        t.add_stored_request("r1")
+        t.add_stored_request("r1")
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), set())
+
+        t._complete_request(req)
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), set())
+
+        t._complete_request(req)
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), {"r1"})
+        self.assertEqual(t.get_newly_finished_requests({"r1"}), set())
+        t.get_newly_finished_requests(set())
+        self.assertEqual(t.finished_requests, set())
+
     def test_dec_nonexistent_request(self):
         t, _ = self._make_thread()
         t.dec_stored_request("nonexist")  # should not raise
@@ -560,6 +577,89 @@ class TestKVCacheStoreSendingThread(unittest.TestCase):
         t.request_queue.put(req)
         t._handle_request(req)
         event.synchronize.assert_called_once()
+
+    def test_save_batch_prepares_before_commit(self):
+        t, store = self._make_thread([0])
+        t.start()
+        self.assertTrue(t.ready_event.wait(timeout=1))
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+        )
+
+        batch = t.prepare_save_batch([req])
+        t.request_queue.join()
+        self.assertEqual(store.put_calls, [])
+
+        event = MagicMock()
+        t.commit_save_batch(batch, event)
+        t.wait_for_batch(batch)
+        self.assertEqual(len(store.put_calls), 1)
+        event.synchronize.assert_called_once()
+
+    def test_save_batch_deduplicates_keys_across_requests(self):
+        t, store = self._make_thread([0])
+        t.start()
+        self.assertTrue(t.ready_event.wait(timeout=1))
+        requests = [
+            ReqMeta(
+                req_id=req_id,
+                token_len_chunk=16,
+                block_ids=[block_id],
+                block_hashes=[b"same-hash"],  # type: ignore[arg-type]
+            )
+            for req_id, block_id in [("r1", 0), ("r2", 1)]
+        ]
+
+        batch = t.prepare_save_batch(requests)
+        t.commit_save_batch(batch, MagicMock())
+        t.wait_for_batch(batch)
+
+        self.assertEqual(len(store.put_calls), 1)
+        self.assertEqual(len(store.put_calls[0][0]), 1)
+
+    def test_save_batch_put_failure_is_nonfatal(self):
+        t, store = self._make_thread([0])
+        error = RuntimeError("put failed")
+        store.put = MagicMock(side_effect=error)
+        t.start()
+        self.assertTrue(t.ready_event.wait(timeout=1))
+        req = ReqMeta(
+            req_id="r1",
+            token_len_chunk=16,
+            block_ids=[0],
+            block_hashes=[b"h0"],  # type: ignore[arg-type]
+        )
+        batch = t.prepare_save_batch([req])
+        with patch(
+            "vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger.exception"
+        ) as log_exception:
+            t.commit_save_batch(batch, MagicMock())
+            t.wait_for_batch(batch)
+        log_exception.assert_called_once_with(
+            "Failed to put AscendStore save batch. type=%s, error=%s",
+            "RuntimeError",
+            error,
+        )
+        self.assertTrue(batch.done.is_set())
+        self.assertNotIn("r1", t.stored_requests)
+
+    def test_save_batch_prepare_failure_is_nonfatal(self):
+        t, _ = self._make_thread()
+        t._prepare_stored_request = MagicMock(side_effect=RuntimeError("prepare failed"))
+        t.start()
+        self.assertTrue(t.ready_event.wait(timeout=1))
+        request = MagicMock(req_id="r1", event_id=None)
+
+        with patch("vllm_ascend.distributed.kv_transfer.kv_pool.ascend_store.kv_transfer.logger.exception"):
+            batch = t.prepare_save_batch([request])
+            t.commit_save_batch(batch, MagicMock())
+            t.wait_for_batch(batch)
+
+        self.assertTrue(batch.done.is_set())
+        self.assertNotIn("r1", t.stored_requests)
 
     def test_handle_request_dcp_size_gt_1(self):
         store = FakeStore([0, 0])
