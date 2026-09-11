@@ -142,7 +142,7 @@ DeepSeek-V3.2 是一种稀疏注意力模型。其主要架构与 DeepSeek-V3.1 
 # 请将 <YOUR_MODEL_PATH> 替换为您在3.1节中记录的实际存放路径
 vllm serve <YOUR_MODEL_PATH> \
   --port 8000 \
-  --served-model-name DeepSeek-V3.2-W8A8 \
+  --served-model-name DeepSeek-V3.2-W8A8
 ```
 
 常见问题提示：如遇xxx问题，请参考[公共FAQ](../faqs.md)进行检查。

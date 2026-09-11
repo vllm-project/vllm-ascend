@@ -35,5 +35,6 @@ The symbols used have the following meanings:
 | <abbr title="Tensor Parallel">TP</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |  |
 | Weight nz | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | 🟠 | ✅ | ✅ | ✅ |
 
-- <sup>1</sup> Lmhead TP is only enabled in the pure dp scenarios.
+- <sup>1</sup> Only dcp supports dp while pcp does not support dp.
+- <sup>2</sup> Lmhead TP is only enabled in the pure dp scenarios.
 - <sup>2</sup> MLAPO is only supported on the decode stage.

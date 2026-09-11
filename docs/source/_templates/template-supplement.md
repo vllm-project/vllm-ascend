@@ -230,7 +230,7 @@ Atlas 300I DUO uses its platform-specific CANN 9.1.0 package; refer to the 310P 
 
 ### 7.1 Background
 
-In vLLM-Ascend documentation, it is sometimes necessary to display code examples containing Jinja template syntax (such as prompt templates, RAG evaluation scripts, etc.). The two frameworks handle this differently, as these examples inherently contain `{{ variable }}`yntax.
+In vLLM-Ascend documentation, it is sometimes necessary to display code examples containing Jinja template syntax (such as prompt templates, RAG evaluation scripts, etc.). The two frameworks handle this differently, as these examples inherently contain `{{ variable }}` yntax.
 
 MkDocs uses Jinja2 as its template engine. The `{{ }}` in the document body will be interpreted as template variables and rendered, causing the intended Jinja example code to display incorrectly.
 
@@ -281,6 +281,8 @@ Wrap Jinja template code with `{% raw %} ... {% endraw %}` blocks to instruct th
 > **Applicable Branches**: `v0.23.0`, `v0.18.0` and other historical branches
 
 Sphinx uses Docutils to parse Markdown and **does not include the Jinja2 template engine**, so `{{ }}` in the document body is not processed and is rendered as-is.
+
+## 8 Anchor failure
 
 ### 8.1 Background
 
