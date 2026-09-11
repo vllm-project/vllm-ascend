@@ -337,7 +337,7 @@ class AscendSharedExperts:
                         quant_mode="dynamic",
                     )
                 else:
-                    quantized_x, swiglu_out_scale = torch.ops._C_ascend.npu_dequant_swiglu_quant(
+                    quantized_x, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
                         x=hidden_states,
                         weight_scale=self.layer.gate_up_proj.weight_scale_fp32,
                         activation_scale=pertoken_scale,

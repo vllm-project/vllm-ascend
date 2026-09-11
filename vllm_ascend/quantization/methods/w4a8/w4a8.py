@@ -489,7 +489,7 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             dispose_tensor(mlp_compute_input.hidden_states)
             return hidden_states, swiglu_out_scale
 
-        hidden_states, swiglu_out_scale = torch.ops._C_ascend.grouped_matmul_swiglu_quant_v2(
+        hidden_states, swiglu_out_scale = torch_npu.npu_grouped_matmul_swiglu_quant_v2(
             x=hidden_states,
             weight=w1,
             weight_scale=w1_scale,
@@ -498,7 +498,6 @@ class AscendW4A8DynamicFusedMoEMethod(AscendMoEScheme):
             weight_assist_matrix=bias1,
             dequant_mode=0,
             group_list_type=group_list_type,
-            swiglu_limit=mlp_compute_input.swiglu_limit,
         )
         dispose_tensor(mlp_compute_input.hidden_states)
         return hidden_states, swiglu_out_scale

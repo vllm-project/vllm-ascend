@@ -149,6 +149,10 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     # dependency: catlass
     setup_catlass_dependency
 
+    # CANN 9.2 provides aclnnRmsNormDynamicQuant for A3. Exclude the
+    # same-named custom op so the torch binding resolves the official
+    # implementation from libopapi.so after custom-op lookup misses.
+
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_sk"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
@@ -169,20 +173,11 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
         "lightning_indexer_quant"
         "compressor"
         "compressor_metadata"
-        "vllm_quant_lightning_indexer"
-        "vllm_quant_lightning_indexer_metadata"
-        "quant_lightning_indexer_v2"
-        "quant_lightning_indexer_v2_metadata"
-        "sparse_attn_sharedkv"
-        "sparse_attn_sharedkv_metadata"
         "hc_pre"
         "hc_post"
-        "inplace_partial_rotary_mul"
-        "rms_norm_dynamic_quant"
         "dequant_situ_quant"
         "dequant_swiglu_quant"
         "grouped_matmul_swiglu_quant"
-        "grouped_matmul_swiglu_quant_v2"
         "recurrent_gated_delta_rule"
         "recurrent_kda"
         "chunk_fwd_o"

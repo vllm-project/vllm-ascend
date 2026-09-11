@@ -26,6 +26,7 @@
 import math
 import typing
 from dataclasses import dataclass
+from importlib import import_module
 
 import torch
 import torch.nn.functional as F
@@ -40,6 +41,8 @@ from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 from vllm_ascend.attention.dsa_attn_kv_plan import is_a5_bf16_kv_enabled
+from vllm_ascend.device.device_config import get_ascend_device_type
+from vllm_ascend.device.hardware import AscendDeviceType
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.models.deepseek_v4.compressor import AscendCompressorMetadata, Compressor
 from vllm_ascend.ops.cv_linear import CVLinearWrapper
@@ -216,25 +219,49 @@ class AscendIndexerOps:
         metadata: typing.Any,
     ) -> torch.Tensor:
         wait_for_device_metadata(DeviceMetadataStage.INDEXER, id(metadata.qli_metadata))
-        topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
-            query=query,
-            key=key_cache,
-            weights=self.device_operator.prepare_dsa_indexer_weights(weights),
-            query_dequant_scale=self.device_operator.prepare_dsa_indexer_query_scale(query_scale),
-            key_dequant_scale=self.device_operator.prepare_dsa_indexer_key_scale(scale_cache),
-            topk=self.index_topk,
-            quant_mode=self.device_operator.get_dsa_indexer_quant_mode(),
-            cu_seqlens_q=metadata.qli_cu_seqlens_q,
-            seqused_k=metadata.qli_seqused_k,
-            cmp_residual_k=metadata.qli_cmp_residual_k,
-            block_table=metadata.block_table,
-            metadata=metadata.qli_metadata,
-            layout_q="TND",
-            layout_k="PA_BBND",
-            mask_mode=3,
-            cmp_ratio=4,
-            return_value=0,
-        )
+        prepared_weights = self.device_operator.prepare_dsa_indexer_weights(weights)
+        prepared_query_scale = self.device_operator.prepare_dsa_indexer_query_scale(query_scale)
+        prepared_key_scale = self.device_operator.prepare_dsa_indexer_key_scale(scale_cache)
+        if get_ascend_device_type() == AscendDeviceType.A3:
+            topk_idxs, _ = import_module("cann_ops_transformer.ops").quant_lightning_indexer(
+                query,
+                key_cache,
+                prepared_weights,
+                prepared_query_scale,
+                prepared_key_scale,
+                self.index_topk,
+                2,
+                cu_seqlens_q=metadata.qli_cu_seqlens_q,
+                seqused_k=metadata.qli_seqused_k,
+                cmp_residual_k=metadata.qli_cmp_residual_k,
+                block_table=metadata.block_table,
+                metadata=metadata.qli_metadata,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=4,
+                return_value=0,
+            )
+        else:
+            topk_idxs, _ = torch.ops._C_ascend.npu_quant_lightning_indexer_v2(
+                query=query,
+                key=key_cache,
+                weights=prepared_weights,
+                query_dequant_scale=prepared_query_scale,
+                key_dequant_scale=prepared_key_scale,
+                topk=self.index_topk,
+                quant_mode=2,
+                cu_seqlens_q=metadata.qli_cu_seqlens_q,
+                seqused_k=metadata.qli_seqused_k,
+                cmp_residual_k=metadata.qli_cmp_residual_k,
+                block_table=metadata.block_table,
+                metadata=metadata.qli_metadata,
+                layout_q="TND",
+                layout_k="PA_BBND",
+                mask_mode=3,
+                cmp_ratio=4,
+                return_value=0,
+            )
         return topk_idxs
 
     def quantize_update_cache_and_select_topk(
