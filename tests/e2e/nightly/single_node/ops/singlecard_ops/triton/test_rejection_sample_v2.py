@@ -270,3 +270,55 @@ def test_placeholder_draft_tokens_are_rejected(has_draft_logits: bool):
 
     gc.collect()
     torch.npu.empty_cache()
+@pytest.mark.parametrize("case", ["one_hot_standard", "one_hot_synthetic", "full_draft_standard"])
+@torch.inference_mode()
+def test_rejection_sample_residual_rng_is_independent_from_acceptance_rng(case):
+    """Rejected-token resampling must use RNG independent from acceptance."""
+    torch.manual_seed(1234)
+    device = "npu"
+    num_trials = 4096
+    num_speculative_steps = 1
+
+    if case == "full_draft_standard":
+        target_probs = torch.tensor([0.35, 0.30, 0.20, 0.10, 0.05], dtype=torch.float32)
+        draft_probs = torch.tensor([0.10, 0.35, 0.15, 0.15, 0.25], dtype=torch.float32)
+        inputs = _build_rejection_sample_inputs(
+            target_probs.log().to(device),
+            draft_probs.log().to(device),
+            num_speculative_steps,
+            temperature=1.0,
+            num_trials=num_trials,
+        )
+        synthetic_conditional_rates = None
+    else:
+        target_probs = torch.tensor([0.50, 0.25, 0.15, 0.10], dtype=torch.float32)
+        inputs = _build_rejection_sample_inputs(
+            target_probs.log().to(device),
+            target_probs.log().to(device),
+            num_speculative_steps,
+            temperature=1.0,
+            num_trials=num_trials,
+        )
+
+        # One-hot draft: every request proposes token 0 at speculative step 0.
+        inputs["draft_logits"] = None
+        draft_rows = inputs["draft_sampled"].view(num_trials, num_speculative_steps + 1)
+        draft_rows[:, 1] = 0
+
+        if case == "one_hot_synthetic":
+            synthetic_conditional_rates = torch.tensor([0.5], dtype=torch.float32, device=device)
+        else:
+            synthetic_conditional_rates = None
+
+    sampled, _ = rejection_sample(
+        **inputs,
+        num_speculative_steps=num_speculative_steps,
+        synthetic_conditional_rates=synthetic_conditional_rates,
+    )
+
+    counts = torch.bincount(sampled[:, 0].cpu(), minlength=target_probs.numel()).to(torch.float64)
+    observed = counts / counts.sum()
+    torch.testing.assert_close(observed, target_probs.to(torch.float64), rtol=0.0, atol=0.03)
+
+    gc.collect()
+    torch.npu.empty_cache()
