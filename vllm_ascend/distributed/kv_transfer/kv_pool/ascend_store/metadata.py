@@ -179,10 +179,10 @@ class PoolKey:
             f"@{self.chunk_hash}"
         )
 
-    def split_layers(self, num_layers: int) -> list[LayerPoolKey]:
+    def split_layers(self, num_layers: int, layer_offset: int = 0) -> list[LayerPoolKey]:
         """Split the key into multiple keys for each layer"""
         keys = []
-        for layer_id in range(num_layers):
+        for layer_id in range(layer_offset, layer_offset + num_layers):
             keys.append(
                 LayerPoolKey(
                     self.key_metadata,

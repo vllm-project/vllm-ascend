@@ -206,6 +206,16 @@ class KVPoolScheduler:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
         self.pp_rank = (vllm_config.parallel_config.rank // self.tp_size) % self.pp_size
+        # Global layer offset for layerwise pool keys under PP (matches the
+        # pool worker's pp_layer_offset).
+        self.pp_layer_offset = 0
+        try:
+            start, _ = vllm_config.model_config.get_layers_start_end_indices(vllm_config.parallel_config)
+            self.pp_layer_offset = start
+        except AttributeError:
+            self.pp_layer_offset = 0
+        except Exception:
+            self.pp_layer_offset = 0
         self.use_mla = False
         if hasattr(model_config, "use_mla") and isinstance(model_config.use_mla, bool) and model_config.use_mla:
             self.use_mla = True
@@ -284,7 +294,8 @@ class KVPoolScheduler:
                             )
                             if include_layers:
                                 block_keys.extend(
-                                    layer_key.to_string() for layer_key in pool_key.split_layers(self.num_layers)
+                                    layer_key.to_string()
+                                    for layer_key in pool_key.split_layers(self.num_layers, self.pp_layer_offset)
                                 )
                             else:
                                 block_keys.append(pool_key.to_string())
