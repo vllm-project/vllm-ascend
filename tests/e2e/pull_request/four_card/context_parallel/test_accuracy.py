@@ -71,6 +71,21 @@ DEEPSEEK_V4_PROMPTS = [
 DEEPSEEK_V4_GOLDEN = ["Hello, my name is {name} and I", 'What is the meaning of life?",\n    "What is']
 DEEPSEEK_V4_MODEL = "gdydems/DeepSeek-V4-Flash-w4a8-mtp"
 
+# max_num_seqs deliberately smaller than the cudagraph capture bucket so that
+# FULL-decode graph padding pushes the draft-path num_reqs beyond max_num_seqs.
+CONCURRENT_MAX_NUM_SEQS = 4
+CONCURRENT_CAPTURE_SIZES = [16]
+CONCURRENT_PROMPTS = [
+    "The capital of France is",
+    "Hello, my name is",
+    "What is the meaning of life?",
+    "The president of United States is",
+    "Write a short story about a robot.",
+    "Explain quantum computing simply.",
+    "List three primary colors.",
+    "Describe a rainy day in Paris.",
+]
+
 
 @dataclass(frozen=True)
 class AccuracyCase:
@@ -174,6 +189,10 @@ FULL_FEATURE_MODEL_CASES = [
             "additional_config": {
                 "enable_dsa_cp": True,
             },
+            "speculative_config": {
+                "num_speculative_tokens": 3,
+                "method": "mtp",
+            },
         },
     ),
 ]
@@ -242,3 +261,59 @@ def test_deepseek_v4_dsa_cp_prefill_decode_accuracy() -> None:
 @pytest.mark.parametrize("case", FULL_FEATURE_MODEL_CASES, ids=lambda case: case.name)
 def test_models_dcp_full_feature_accuracy(case: AccuracyCase) -> None:
     _run_accuracy_case(case)
+
+
+@patch.dict(
+    os.environ,
+    {
+        "HCCL_BUFFSIZE": "768",
+        "PYTORCH_NPU_ALLOC_CONF": "expandable_segments:True",
+    },
+)
+@wait_until_npu_memory_free(target_free_percentage=0.8)
+def test_models_dcp_full_graph_concurrent_requests() -> None:
+    """Accuracy guard for concurrent requests under FULL-decode aclgraph.
+
+    Regression test for the DSA-CP per-request metadata buffers: in
+    FULL_DECODE_ONLY graph mode the draft path receives ``num_reqs`` padded to
+    the cudagraph capture bucket (plus the FIA dummy request), which exceeds
+    ``max_num_seqs`` here (CONCURRENT_CAPTURE_SIZES=[16] vs
+    CONCURRENT_MAX_NUM_SEQS=4). Buffers sized by ``max_num_seqs`` get their
+    ``[:num_reqs]`` views truncated — copy_() then fails with a shape mismatch
+    (EZ1007) or triton kernels write past the buffer end and corrupt adjacent
+    device memory (EZ9999 MTE illegal GM address).
+
+    With MTP(num_speculative_tokens=3) each decode step of 4 concurrent
+    requests yields 16 tokens, so the batch is padded to the 16-token capture
+    bucket and every draft step exercises the padded path.
+    """
+    runner_kwargs: dict[str, Any] = {
+        "max_model_len": 8192,
+        "max_num_seqs": CONCURRENT_MAX_NUM_SEQS,
+        "max_num_batched_tokens": 4096,
+        "dtype": "auto",
+        "tensor_parallel_size": 4,
+        "decode_context_parallel_size": 1,
+        "enable_expert_parallel": True,
+        "gpu_memory_utilization": 0.9,
+        "quantization": "ascend",
+        "tokenizer_mode": "deepseek_v4",
+        "block_size": 128,
+        "compilation_config": {
+            "cudagraph_mode": "FULL_DECODE_ONLY",
+            "cudagraph_capture_sizes": CONCURRENT_CAPTURE_SIZES,
+        },
+        "additional_config": {
+            "enable_dsa_cp": True,
+        },
+        "speculative_config": {
+            "num_speculative_tokens": 3,
+            "method": "mtp",
+        },
+    }
+    with VllmRunner("gdydems/DeepSeek-V4-Flash-w4a8-mtp", **runner_kwargs) as runner:
+        outputs = runner.generate_greedy(CONCURRENT_PROMPTS, 5)
+
+    assert len(outputs) == len(CONCURRENT_PROMPTS)
+    for _, output_str in outputs:
+        assert output_str, "Concurrent request produced an empty output"
