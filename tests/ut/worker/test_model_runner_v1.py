@@ -37,10 +37,8 @@ from vllm_ascend.models.glm5next.kv_cache import (
     Glm5NextIndexerCache,
     Glm5NextStateCache,
 )
-from vllm_ascend.patch.platform.patch_kv_cache_utils import (
-    _get_kv_cache_config_deepseek_v4_main,
-)
 from vllm_ascend.utils import AscendDeviceType, vllm_version_is
+from vllm_ascend.worker.kv_cache_config_builder import _get_kv_cache_config_deepseek_v4_main
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -240,6 +238,7 @@ class TestAcceptedTokenSnapshot(unittest.TestCase):
         runner.speculative_config = object()
         runner.model_config = SimpleNamespace(is_hybrid=True)
         runner.cache_config = SimpleNamespace(mamba_cache_mode="align")
+        runner._get_ascend_mamba_state_copy_funcs = MagicMock(return_value={})
         runner.num_accepted_tokens = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         runner.prev_positions = CpuGpuBuffer(12, dtype=torch.int32, device=torch.device("cpu"), pin_memory=False)
         batch_counts = torch.ones(12, dtype=torch.int32)
@@ -778,7 +777,7 @@ class TestNPUModelRunnerKVCache(unittest.TestCase):
         "vLLM #51718 only changed the main planner",
     )
     @patch(
-        "vllm_ascend.patch.platform.patch_kv_cache_utils.may_override_num_blocks",
+        "vllm.v1.core.kv_cache_planning.may_override_num_blocks",
         side_effect=lambda _config, num_blocks: num_blocks,
     )
     def test_dsv4_main_materializes_real_planner_geometry_once(

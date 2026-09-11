@@ -168,6 +168,7 @@ def test_ascend_block_tables_compute_slot_mappings_out() -> None:
     block_tables.cp_size = 1
     block_tables.cp_interleave = 1
     block_tables._block_table_pad_size = triton.next_power_of_2(block_table.stride(0))
+    block_tables.slot_mapping_enabled = torch.tensor([True], dtype=torch.bool, device=device)
 
     out = torch.full((1, 12), 777, dtype=torch.int32, device=device)
     result = block_tables.compute_slot_mappings(
