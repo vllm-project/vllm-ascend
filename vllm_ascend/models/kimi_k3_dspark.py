@@ -288,7 +288,7 @@ class AscendK3DSparkForCausalLM(UpstreamK3DSparkForCausalLM):
         quantization-aware per-layer projections, so use vLLM's public loader
         interface without creating that extra packed parameter.
         """
-        if vllm_version_is("0.27.1"):
+        if vllm_version_is("0.28.0"):
             loader = AutoWeightsLoader(
                 self,
                 skip_substrs=list(self.checkpoint_skip_substrs),

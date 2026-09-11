@@ -358,6 +358,8 @@ class AscendDSparkProposer(AscendDflashProposer):
             num_tokens_across_dp,
             _,
         ) = self.runner._sync_metadata_across_dp(num_query_tokens, is_draft_model=True)
+        if num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[self.dp_rank].item())
 
         if not self.use_cuda_graph:
             aclgraph_runtime_mode = CUDAGraphMode.NONE
@@ -379,6 +381,9 @@ class AscendDSparkProposer(AscendDflashProposer):
             aclgraph_runtime_mode=aclgraph_runtime_mode,
             is_draft_model=True,
             draft_attn_metadatas=[],
+            eplb_heat_collection_status=(
+                self.runner.eplb_heat_collection_status if self.runner.dynamic_eplb else False
+            ),
         ):
             if is_profile:
                 self.model.precompute_and_store_context_kv(context_states, context_positions)

@@ -534,6 +534,10 @@ class TestAscendConfig(TestBase):
                 )
                 test_vllm_config.additional_config = {
                     "enable_shared_expert_dp": enable_shared_expert_dp,
+                    # Keep the explicitly assigned all2all_backend: without an
+                    # explicit flashcomm switch, derive_and_validate forces
+                    # flashinfer_all2allv and would clobber the SP setup above.
+                    "enable_flashcomm1": True,
                 }
 
                 ascend_config = init_ascend_config(test_vllm_config)
@@ -678,6 +682,7 @@ class TestSparseKVOffloadConfig(TestBase):
                 "topk_buffer_size": "256",
                 "dram_size_per_dp_GB": "64",
                 "keep_device_kv_cache": "false",
+                "use_fused_overlap": "true",
             },
         )
 
@@ -685,6 +690,7 @@ class TestSparseKVOffloadConfig(TestBase):
         self.assertEqual(config.topk_buffer_size, 256)
         self.assertEqual(config.dram_size_per_dp_GB, 64)
         self.assertFalse(config.keep_device_kv_cache)
+        self.assertTrue(config.use_fused_overlap)
 
     def test_unknown_key_is_rejected_even_when_disabled(self):
         with self.assertRaises(ValueError):
@@ -1063,12 +1069,14 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         vc = VllmConfig()
         vc.additional_config = {
             "enable_dsa_cp": "false",
+            "enable_pcp_o_proj_weight_sharding": "true",
             "draft_window_size": "4096",
         }
 
         config = init_ascend_config(vc)
 
         self.assertFalse(config.enable_dsa_cp)
+        self.assertTrue(config.enable_pcp_o_proj_weight_sharding)
         self.assertEqual(config.draft_window_size, 4096)
 
     @_clean_up
@@ -1087,11 +1095,108 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             architectures=[],
         )
         supported_vc.additional_config = {"enable_dsa_cp": True}
+        # DSA-CP additionally requires sequence parallelism: EP + TP>1 + DP>1
+        # makes ParallelConfig.use_sequence_parallel_moe True.
+        supported_vc.parallel_config.enable_expert_parallel = True
+        supported_vc.parallel_config.tensor_parallel_size = 2
+        supported_vc.parallel_config.data_parallel_size = 2
         self.assertTrue(init_ascend_config(supported_vc).enable_dsa_cp)
 
         # init_ascend_config clears process caches after publishing the new
         # singleton. This read must not require vLLM's temporary config context.
         self.assertTrue(enable_dsa_cp())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_enabled_keeps_sp_when_conditions_met(self, mock_fix):
+        """Case 1: flashcomm on + SP conditions met -> SP stays on."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_flashcomm1": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertTrue(vc.parallel_config.use_sequence_parallel_moe)
+            self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
+            self.assertTrue(enable_sp(vc))
+            self.assertFalse(config.enable_dsa_cp)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_flashcomm_disabled_forces_sp_off_when_conditions_met(self, mock_fix):
+        """Case 2: flashcomm off + SP conditions met -> SP still forced off."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {}
+
+            init_ascend_config(vc)
+
+            self.assertEqual(vc.parallel_config.all2all_backend, "flashinfer_all2allv")
+            self.assertFalse(enable_sp(vc))
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_enabled_auto_keeps_sp_when_conditions_met(self, mock_fix):
+        """Case 3: dsa_cp on + SP conditions met (+indexer) -> SP auto-kept, dsa stays on."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.model_config = SimpleNamespace(
+                is_moe=False,
+                hf_text_config=SimpleNamespace(index_topk=2048),
+                hf_config=SimpleNamespace(),
+                enforce_eager=True,
+                architectures=[],
+            )
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 2
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_dsa_cp": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertEqual(vc.parallel_config.all2all_backend, "allgather_reducescatter")
+            self.assertTrue(enable_sp(vc))
+            self.assertTrue(config.enable_dsa_cp)
+            self.assertTrue(enable_dsa_cp())
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_dsa_cp_enabled_auto_disabled_when_sp_conditions_not_met(self, mock_fix):
+        """Case 4: dsa_cp on + SP conditions NOT met (tp=1) -> dsa auto-disabled."""
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VLLM_ASCEND_ENABLE_FLASHCOMM1", None)
+            vc = VllmConfig()
+            vc.model_config = SimpleNamespace(
+                is_moe=False,
+                hf_text_config=SimpleNamespace(index_topk=2048),
+                hf_config=SimpleNamespace(),
+                enforce_eager=True,
+                architectures=[],
+            )
+            vc.parallel_config.enable_expert_parallel = True
+            vc.parallel_config.tensor_parallel_size = 1
+            vc.parallel_config.data_parallel_size = 2
+            vc.parallel_config.all2all_backend = "allgather_reducescatter"
+            vc.additional_config = {"enable_dsa_cp": True}
+
+            config = init_ascend_config(vc)
+
+            self.assertFalse(vc.parallel_config.use_sequence_parallel_moe)
+            self.assertFalse(enable_sp(vc))
+            self.assertFalse(config.enable_dsa_cp)
+            self.assertFalse(enable_dsa_cp())
 
     @_clean_up
     @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=False)
@@ -1144,18 +1249,38 @@ class TestTopLevelSwitchTypeValidation(TestBase):
         self.assertTrue(config.enable_sparse_sfa_c8)
 
     @_clean_up
-    @patch("vllm_ascend.utils.model_uses_sfa_sparse", return_value=True)
+    @patch("vllm_ascend.utils.model_uses_sfa_sparse")
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
-    def test_c8_reshape_optim_is_derived_on_factory_path(self, mock_fix, mock_sparse):
-        vc = VllmConfig()
-        vc.additional_config = {
-            "enable_sparse_li_c8": "true",
-            "c8_enable_reshape_optim": "true",
-        }
+    def test_c8_reshape_optim_is_initialized_from_sfa_li_c8_and_pd_role(
+        self,
+        mock_fix,
+        mock_uses_sfa,
+    ):
+        cases = (
+            (True, True, "kv_producer", True),
+            (False, True, "kv_producer", False),
+            (True, False, "kv_producer", False),
+            (True, True, "kv_consumer", False),
+            (True, True, "kv_both", False),
+            (True, True, None, False),
+        )
+        for uses_sfa, enable_li_c8, kv_role, expected in cases:
+            with self.subTest(uses_sfa=uses_sfa, enable_li_c8=enable_li_c8, kv_role=kv_role):
+                mock_uses_sfa.return_value = uses_sfa
+                vc = VllmConfig()
+                vc.additional_config = {
+                    "refresh": True,
+                    "enable_sparse_li_c8": enable_li_c8,
+                }
+                if kv_role is not None:
+                    vc.kv_transfer_config = KVTransferConfig(
+                        kv_connector="MooncakeConnectorV1",
+                        kv_role=kv_role,
+                    )
 
-        config = init_ascend_config(vc)
+                config = init_ascend_config(vc)
 
-        self.assertTrue(config.c8_enable_reshape_optim)
+                self.assertEqual(config.c8_reshape_optim_enabled, expected)
 
     @_clean_up
     @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
@@ -1267,3 +1392,42 @@ class TestTopLevelSwitchTypeValidation(TestBase):
             "Please remove them if they are not needed for your use case.",
             ["vllm_omni_option"],
         )
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_defaults_zero(self, mock_fix):
+        vc = VllmConfig()
+        self.assertEqual(init_ascend_config(vc).combine_quant_mode, 0)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_accepts_whitelisted_int(self, mock_fix):
+        # combine_quant_mode is a Literal[0, 2, 3, 4], so only the whitelisted
+        # integer values are accepted. Unlike the plain-int top-level switches
+        # (e.g. weight_nz_mode), int strings ("4") are rejected rather than
+        # lax-coerced, so the orthogonal test below covers that.
+        for value in (0, 2, 4):
+            with self.subTest(value=value):
+                vc = VllmConfig()
+                vc.additional_config = {"combine_quant_mode": value}
+                self.assertEqual(init_ascend_config(vc).combine_quant_mode, value)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_rejects_int_string(self, mock_fix):
+        # The Literal whitelist does not lax-coerce int strings; a JSON-parsed
+        # "4" must be rejected rather than silently accepted.
+        vc = VllmConfig()
+        vc.additional_config = {"combine_quant_mode": "4"}
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)
+
+    @_clean_up
+    @patch("vllm_ascend.platform.NPUPlatform.check_and_update_config")
+    def test_combine_quant_mode_rejects_non_integer(self, mock_fix):
+        # A non-integer (e.g. bool string "true") must be rejected rather than
+        # silently coerced into an unexpected quant mode.
+        vc = VllmConfig()
+        vc.additional_config = {"combine_quant_mode": "true"}
+        with self.assertRaises(ValueError):
+            init_ascend_config(vc)

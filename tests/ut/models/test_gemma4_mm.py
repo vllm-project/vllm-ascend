@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -13,6 +14,76 @@ from vllm_ascend.quantization.methods import (
     AscendW4A4MXFP4DynamicLinearMethod,
     AscendW8A8MXFP8DynamicLinearMethod,
 )
+
+
+def test_gemma4_mm_lora_flag_follows_lora_config():
+    language_model = SimpleNamespace(
+        make_empty_intermediate_tensors=None,
+        moe_layers=None,
+        num_moe_layers=0,
+        num_logical_experts=0,
+        num_physical_experts=0,
+        num_local_physical_experts=0,
+        num_routed_experts=0,
+        num_expert_groups=0,
+        num_shared_experts=0,
+        num_redundant_experts=0,
+    )
+    vision_tower = SimpleNamespace(
+        patch_embedder=SimpleNamespace(
+            input_proj=SimpleNamespace(quant_method=None),
+        ),
+    )
+
+    for lora_config, expected in (
+        (None, False),
+        (SimpleNamespace(enable_tower_connector_lora=False), False),
+        (SimpleNamespace(enable_tower_connector_lora=True), True),
+    ):
+        model_config = SimpleNamespace(
+            dtype=torch.bfloat16,
+            hf_config=SimpleNamespace(
+                vision_config=SimpleNamespace(),
+                audio_config=None,
+                text_config=SimpleNamespace(
+                    hidden_size_per_layer_input=None,
+                    use_bidirectional_attention=None,
+                ),
+            ),
+            multimodal_config=SimpleNamespace(),
+            try_get_generation_config=lambda: None,
+        )
+        vllm_config = SimpleNamespace(
+            model_config=model_config,
+            quant_config=None,
+            lora_config=lora_config,
+        )
+
+        with (
+            patch.object(
+                AscendGemma4ForConditionalGeneration,
+                "_mark_tower_model",
+                return_value=nullcontext(),
+            ),
+            patch.object(
+                AscendGemma4ForConditionalGeneration,
+                "_mark_language_model",
+                return_value=nullcontext(),
+            ),
+            patch(
+                "vllm_ascend.models.gemma4_mm.AutoModel.from_config",
+                return_value=vision_tower,
+            ),
+            patch("vllm_ascend.models.gemma4_mm.Gemma4MultimodalEmbedder"),
+            patch("vllm_ascend.models.gemma4_mm.recursive_replace_linear"),
+            patch(
+                "vllm_ascend.models.gemma4_mm.init_vllm_registered_model",
+                return_value=language_model,
+            ),
+        ):
+            model = AscendGemma4ForConditionalGeneration(vllm_config=vllm_config)
+
+        assert model._enable_mm_lora is expected
 
 
 def test_mxfp4_vit_linear_registers_and_loads_weight_scale():

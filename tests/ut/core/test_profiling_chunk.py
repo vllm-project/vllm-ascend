@@ -351,8 +351,8 @@ class TestProfilingChunkScheduler(TestBase):
             stack.enter_context(
                 patch.object(ModelConfig, "is_encoder_decoder", new_callable=PropertyMock, return_value=False)
             )
-            if not vllm_version_is("0.27.1"):
-                # vLLM main (post-v0.27.1) reads model_config.uses_mrope in
+            if not vllm_version_is("0.28.0"):
+                # vLLM main (post-v0.28.0) reads model_config.uses_mrope in
                 # Scheduler.__init__, which infinitely recurses on a bare
                 # MagicMock hf_config. Override it to keep the UT runnable.
                 stack.enter_context(

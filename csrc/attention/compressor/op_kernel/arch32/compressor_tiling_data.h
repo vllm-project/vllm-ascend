@@ -18,9 +18,19 @@
 #include <cstdint>
 #include "kernel_tiling/kernel_tiling.h"
 
-const uint32_t CMP_MAX_AIC_CORE_NUM = 26; // 25 + 1 保证数组8字节对齐
+
+const uint32_t CMP_MAX_AIC_CORE_NUM = 24;
 
 namespace optiling {
+    struct CompressorSplitCoreParams {
+        uint32_t mStart;
+        uint32_t mEnd;
+        uint32_t nStart;
+        uint32_t nEnd;
+        uint32_t kStart;
+        uint32_t kEnd;
+    };
+
     // 1. 基础参数结构体
     struct CompressorBaseParams {
         uint32_t batchSize = 0;             // bastch size（批大小）
@@ -37,6 +47,11 @@ namespace optiling {
         uint32_t usedCoreNum = 0;           // 使用核数
         uint32_t nSize = 0;                 // 控制v2积攒的轮数
         uint64_t stateCacheStrideDim0 = 0;  // stateCache第0维的stride
+        uint32_t kBaseNum = 0;
+        uint32_t kBaseSize = 0;
+        uint32_t coreGroupNum = 0;
+        uint32_t mLoopNum = 0;
+        CompressorSplitCoreParams splitCoreParam[CMP_MAX_AIC_CORE_NUM];
     };
 
     struct CompressorPageAttentionParams {

@@ -324,7 +324,7 @@ The following code configures vLLM Ascend to use speculative decoding where prop
 
 ## Draft KV Sliding Window {: #draft-kv-sliding-window }
 
-Draft models are often trained on short contexts (e.g. 4-8K tokens). When the
+Draft models are often trained on short contexts (e.g. 4-8k tokens). When the
 running context grows far beyond that, the draft's attention goes
 out-of-distribution and the acceptance rate collapses — speculation turns
 into overhead. The **draft KV sliding window** caps only the *draft model's*
@@ -373,8 +373,8 @@ options.
 
 - **Enable** when the draft was trained on short contexts and acceptance
   degrades as conversations grow: e.g. an early GLM-5.2 DSpark draft dropped
-  from mean acceptance ~5 (short context) to ~1 at 32K; a 512-1024 window
-  restored it to ~4.7-5.5, with end-to-end throughput up to +381% at 32K.
+  from mean acceptance ~5 (short context) to ~1 at 32k; a 512-1024 window
+  restored it to ~4.7-5.5, with end-to-end throughput up to +381% at 32k.
 - **Leave it off** when the draft is already stable at long context — the
   window then only removes information the draft could have used. In
   particular, if the draft itself was trained with sliding-window attention
@@ -382,7 +382,7 @@ options.
   `draft_window_size` at or above that training window, or disable the
   feature; a window smaller than the training window measurably reduces
   acceptance (observed -4.5% mean acceptance for a 1024 window against a
-  2048-native SWA DSpark draft at 32K input).
+  2048-native SWA DSpark draft at 32k input).
 
 Check the effect with the server log: `SpecDecoding metrics: Mean acceptance
 length: ...` lines report the acceptance per interval — compare runs with the
@@ -438,10 +438,25 @@ Suffix Decoding can achieve better performance for tasks with high repetition, s
 
 ## Extracting Hidden States
 
-The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models.
+The `extract_hidden_states` method is a special speculative decoding mode that does not perform actual speculation. Instead, it extracts hidden states from specified layers of the target model and saves them to disk. This is primarily used for collecting training data for EAGLE-style draft models. The dumps are then used to train EAGLE/EAGLE-3 drafts.
 
 > [!NOTE]
 > This method produces only 1 output token per request. The primary output is the hidden states saved to disk, not the generated text.
+
+Both Model Runner V1 and Model Runner V2 are supported on Ascend. Enable V2 with:
+
+```shell
+export VLLM_USE_V2_MODEL_RUNNER=1
+```
+
+> [!NOTE]
+> Model Runner V2 support reuses upstream vLLM's `ExtractHiddenStatesSpeculator`
+> ([PR #49811](https://github.com/vllm-project/vllm/pull/49811)). Ascend only
+> adds `init_speculator` dispatch and NPU KV allocate/reshape for
+> `HiddenStateCacheSpec`. After
+> [vLLM #51718](https://github.com/vllm-project/vllm/pull/51718) (0828 pin),
+> hidden-state layers keep private `[B, H, N, C]` buffers so they cannot overlay
+> the standardized hybrid Attention/Mamba backing.
 
 - Offline inference
 

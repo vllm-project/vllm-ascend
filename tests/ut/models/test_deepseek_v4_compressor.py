@@ -42,6 +42,7 @@ class TestCompressorMetadata:
         start_pos = torch.tensor([1, 3], dtype=torch.int32)
         block_table = torch.tensor([[0], [1]], dtype=torch.int32)
         metadata = SimpleNamespace(
+            cache_group_key="model.layers.0.self_attn.attn",
             full_compress_cos=full_cos,
             full_compress_sin=full_sin,
             query_start_loc=query_start_loc,
@@ -61,6 +62,14 @@ class TestCompressorMetadata:
                 dsa_attn_kv_plan,
                 "get_dsa_attn_kv_plan",
                 return_value=plan,
+            ),
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan",
+                return_value=plan,
+            ),
+            patch(
+                "vllm_ascend.attention.dsa_v1.get_forward_context",
+                return_value=SimpleNamespace(additional_kwargs={}),
             ),
             patch.object(
                 torch.ops._C_ascend,

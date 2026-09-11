@@ -5,9 +5,9 @@ self-hosted-runner:
     - linux-aarch64-310p-1
     - linux-aarch64-310p-2
     - linux-aarch64-310p-4
-    - linux-aarch64-a3-2-
-    - linux-aarch64-a3-4-
-    - linux-aarch64-a3-8-
+    - linux-aarch64-a3-2
+    - linux-aarch64-a3-4
+    - linux-aarch64-a3-8
     - linux-aarch64-a3-800i-2
     - linux-aarch64-a3-800i-4
     - linux-aarch64-a3-800i-8
@@ -21,7 +21,9 @@ self-hosted-runner:
     - linux-aarch64-a5-4
     - linux-aarch64-a5-8
     - linux-amd64-cpu-2-hk
+    - linux-amd64-cpu-4
     - linux-amd64-cpu-4-hk
+    - linux-aarch64-cpu-4
     - linux-amd64-cpu-8-hk
     - linux-amd64-cpu-16-hk
     - linux-arm64-cpu-16
@@ -31,3 +33,4 @@ self-hosted-runner:
     - linux-aarch64-a2b3-4
     - linux-aarch64-a2b3-8
     - linux-aarch64-a2b1-8
+    - linux-aarch64-a3-16-sh-001

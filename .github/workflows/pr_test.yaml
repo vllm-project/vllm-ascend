@@ -49,6 +49,10 @@ jobs:
       main_commit: ${{ steps.vllm.outputs.main_commit }}
       # Short hash used only for job-name display.
       main_commit_short: ${{ steps.vllm.outputs.main_commit_short }}
+      release_tag: ${{ steps.vllm.outputs.release_tag }}
+      # JSON array of the vllm refs to test. Defaults to main_commit only;
+      # the main2main label widens it to the release_tag as well.
+      vllm_versions: ${{ steps.vllm.outputs.vllm_versions }}
       src: ${{ steps.filter.outputs.src }}
       ci_pipeline: ${{ steps.filter.outputs.ci_pipeline }}
     steps:
@@ -86,6 +90,10 @@ jobs:
 
       - name: Read verified vLLM refs
         id: vllm
+        env:
+          # The main2main label requests a dual-version run: full NPU tests on
+          # both the verified vLLM main commit and the matched release tag.
+          HAS_MAIN2MAIN: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
         run: |
           main_commit="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           [[ "${main_commit}" =~ ^[0-9a-f]{7,40}$ ]] || {
@@ -96,6 +104,19 @@ jobs:
           # Short form is for display only (job names); main_commit keeps the
           # full hash for checkout refs and artifact names.
           echo "main_commit_short=${main_commit:0:7}" >> "$GITHUB_OUTPUT"
+
+          release_tag="$(tr -d '[:space:]' < .github/vllm-release-tag.commit)"
+          [[ "${release_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]] || {
+            echo "::error file=.github/vllm-release-tag.commit::invalid vLLM release tag: ${release_tag}"
+            exit 1
+          }
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+          if [ "${HAS_MAIN2MAIN}" = "true" ]; then
+            echo "vllm_versions=[\"${main_commit}\",\"${release_tag}\"]" >> "$GITHUB_OUTPUT"
+          else
+            echo "vllm_versions=[\"${main_commit}\"]" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: cp problem matchers
         run: |
@@ -237,10 +258,10 @@ jobs:
     name: Recommend tests
     needs: [pre-commit, cpu-ut]
     # The recommendation only runs under the ready-precise label: that is the
-    # only mode whose result depends on it. ready-all runs --all-tests and
-    # unlabeled runs select nothing, so both skip this job. The pre-commit +
-    # cpu-ut checks are explicit so the job can never be made to run after a
-    # failed upstream by adding !cancelled().
+    # only mode whose result depends on it. ready-all and main2main run
+    # --all-tests and unlabeled runs select nothing, so all of them skip this
+    # job. The pre-commit + cpu-ut checks are explicit so the job can never be
+    # made to run after a failed upstream by adding !cancelled().
     if: >-
       ${{
         needs.pre-commit.result == 'success' &&
@@ -346,16 +367,18 @@ jobs:
       - cpu-ut
       - recommend-tests
     # select-tests is the single producer of test_groups / base_sha / has_tests.
-    # It runs only when a ready label asks for test execution; unlabeled runs
-    # skip it and ci-gate decides whether that is allowed (no src paths) or
-    # requires a label (src or ci_pipeline paths present). !cancelled() keeps
-    # it out of the graph only when the workflow itself is cancelled; the
-    # explicit pre-commit + cpu-ut success check stops it from running when
-    # either failed (!cancelled() alone would override the transitive skip).
+    # It runs only when a run-enabling label (ready-precise / ready-all /
+    # main2main) asks for test execution; unlabeled runs skip it and ci-gate
+    # decides whether that is allowed (no src paths) or requires a label (src or
+    # ci_pipeline paths present). !cancelled() keeps it out of the graph only
+    # when the workflow itself is cancelled; the explicit pre-commit + cpu-ut
+    # success check stops it from running when either failed (!cancelled() alone
+    # would override the transitive skip).
     # The src/ci_pipeline path categories are computed by the paths-filter step
     # in pre-commit. Modes:
     #   recommended - recommend job succeeded with coverage paths (ready-precise)
-    #   all         - ready-all forced, or the PR touches the CI pipeline itself
+    #   all         - ready-all or main2main forced, or the PR touches the CI
+    #                 pipeline itself
     #   none        - ready-precise on a PR whose diff recommends no tests
     if: >-
       ${{
@@ -363,6 +386,7 @@ jobs:
         needs.pre-commit.result == 'success' &&
         needs.cpu-ut.result == 'success' &&
         (
+          contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         )
@@ -427,6 +451,7 @@ jobs:
       - name: Decide test selection mode
         id: decide
         env:
+          HAS_MAIN2MAIN: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
           HAS_READY_PRECISE: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           # Reported by the paths-filter step in the pre-commit job; this job
@@ -439,7 +464,12 @@ jobs:
           COVERAGE_PATHS: ${{ needs.recommend-tests.outputs.coverage_paths }}
         run: |
           set -euo pipefail
-          if [ "${HAS_READY_ALL}" = "true" ]; then
+          if [ "${HAS_MAIN2MAIN}" = "true" ]; then
+            # The main2main label requests the full suite on both the verified
+            # vLLM main commit and the release tag, so the coverage-based
+            # recommendation cannot be used: select the whole suite instead.
+            MODE="all"
+          elif [ "${HAS_READY_ALL}" = "true" ]; then
             MODE="all"
           elif [ "${CI_PIPELINE}" = "true" ]; then
             # The PR changes the test selection/execution pipeline itself,
@@ -457,7 +487,7 @@ jobs:
               MODE="none"
             fi
           else
-            echo "::error::select-tests ran without a ready label; this is a workflow bug"
+            echo "::error::select-tests ran without a run-enabling label; this is a workflow bug"
             exit 1
           fi
           echo "mode=${MODE}" >> "$GITHUB_OUTPUT"
@@ -538,13 +568,15 @@ jobs:
     needs:
       - select-tests
     # !cancelled() is required: select-tests depends on recommend-tests,
-    # which is skipped under ready-all. Without a status check function, the skipped
-    # need propagates transitively and skips this job even when select-tests succeeded.
+    # which is skipped under ready-all or main2main. Without a status check
+    # function, the skipped need propagates transitively and skips this job
+    # even when select-tests succeeded.
     if: >-
       ${{
         !cancelled() &&
         needs.select-tests.result == 'success' &&
         (
+          contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-a5') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
@@ -563,28 +595,28 @@ jobs:
       - select-tests
       - prepare-csrc-cache
     # !cancelled() overrides transitive skip-propagation from recommend-tests
-    # (skipped under ready-all) through select-tests, without running after workflow cancel.
+    # (skipped under ready-all or main2main) through select-tests, without
+    # running after workflow cancel.
     if: >-
       ${{
         !cancelled() &&
         needs.pre-commit.result == 'success' &&
         needs.prepare-csrc-cache.result == 'success' &&
         (
+          contains(github.event.pull_request.labels.*.name, 'main2main') ||
           contains(github.event.pull_request.labels.*.name, 'ready-precise') ||
           contains(github.event.pull_request.labels.*.name, 'ready-all')
         ) &&
         needs.select-tests.outputs.has_tests == 'true'
       }}
-    name: run-selected-tests (vllm@${{ matrix.vllm_version_short }})
+    name: run-selected-tests (vllm@${{ matrix.vllm_version }})
     strategy:
       fail-fast: false
       matrix:
-        # vllm_version keeps the full hash (it becomes the checkout ref in
-        # _selected_tests.yaml); only the job name shows the short form.
-        vllm_version:
-          - ${{ needs.pre-commit.outputs.main_commit }}
-        vllm_version_short:
-          - ${{ needs.pre-commit.outputs.main_commit_short }}
+        # vllm_version keeps the full ref (it becomes the checkout ref in
+        # _selected_tests.yaml). The pre-commit job emits main_commit alone by
+        # default and appends the release tag under the main2main label.
+        vllm_version: ${{ fromJSON(needs.pre-commit.outputs.vllm_versions) }}
     uses: ./.github/workflows/_selected_tests.yaml
     with:
       vllm: ${{ matrix.vllm_version }}
@@ -658,6 +690,7 @@ jobs:
     steps:
       - name: Check all required jobs
         env:
+          HAS_MAIN2MAIN_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'main2main') }}
           HAS_READY_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-precise') }}
           HAS_READY_ALL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-all') }}
           HAS_READY_A5_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ready-a5') }}
@@ -680,7 +713,7 @@ jobs:
           echo "select-tests: ${SELECT_TESTS_RESULT} (source: ${SELECTION_SOURCE:-unknown})"
           echo "has_tests: ${HAS_TESTS}"
           echo "has_tests_a5: ${HAS_TESTS_A5}"
-          echo "labels: ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
+          echo "labels: main2main=${HAS_MAIN2MAIN_LABEL} ready-precise=${HAS_READY_LABEL} ready-all=${HAS_READY_ALL_LABEL} ready-a5=${HAS_READY_A5_LABEL}"
           if [ "${SELECT_TESTS_RESULT}" = "success" ] && [ -n "${MATCHED_MODULES// /}" ]; then
             echo "matched_modules: ${MATCHED_MODULES}"
           fi
@@ -698,7 +731,8 @@ jobs:
           fi
 
           if [ "${SELECT_TESTS_RESULT}" = "skipped" ]; then
-            # select-tests only runs under a ready label. An unlabeled run
+            # select-tests only runs under a run-enabling label
+            # (ready-precise / ready-all / main2main). An unlabeled run
             # passes the gate when (and only when) the paths-filter in
             # pre-commit found no src or ci_pipeline paths in the diff.
             SRC_FILTER="${{ needs.pre-commit.outputs.src }}"
@@ -709,7 +743,7 @@ jobs:
               exit 0
             fi
             echo "::error::This PR touches source code (src=${SRC_FILTER}, ci_pipeline=${CI_PIPELINE_FILTER}), so precision/full tests are required before merge."
-            echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), or 'ready-all' to run the full suite. The workflow reruns automatically once the label is added."
+            echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), 'ready-all' to run the full suite, or 'main2main' to run the full suite against both the vLLM main commit and the release tag. The workflow reruns automatically once the label is added."
             exit 1
           fi
 
@@ -734,17 +768,19 @@ jobs:
           if [ "${HAS_TESTS}" = "true" ]; then
             TESTS_RESULT="${{ needs.run-selected-tests.result }}"
             echo "run-selected-tests: ${TESTS_RESULT}"
-            if [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
+            if [ "${HAS_MAIN2MAIN_LABEL}" != "true" ] && [ "${HAS_READY_LABEL}" != "true" ] && [ "${HAS_READY_ALL_LABEL}" != "true" ]; then
               echo "::error::This PR touches source code (test selection source: ${SELECTION_SOURCE:-unknown}), so precision/full tests are required before merge."
               if [ -n "${MATCHED_MODULES// /}" ]; then
                 echo "::error::Affected modules: ${MATCHED_MODULES}"
               fi
-              echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), or 'ready-all' to run the full suite. The workflow reruns automatically once the label is added."
+              echo "::error::How to fix: a maintainer adds exactly one label to this PR - 'ready-precise' to run the selected tests (recommended), 'ready-all' to run the full suite, or 'main2main' to run the full suite against both the vLLM main commit and the release tag. The workflow reruns automatically once the label is added."
               exit 1
             fi
             if [ "${TESTS_RESULT}" != "success" ]; then
               echo "::error::run-selected-tests did not succeed (result: ${TESTS_RESULT})."
-              if [ "${HAS_READY_ALL_LABEL}" = "true" ]; then
+              if [ "${HAS_MAIN2MAIN_LABEL}" = "true" ]; then
+                echo "::error::The 'main2main' dual-version suite failed. Open the failed job(s) inside the run-selected-tests matrix above (one per vLLM version) and fix the failing test(s) or the code change that broke them."
+              elif [ "${HAS_READY_ALL_LABEL}" = "true" ]; then
                 echo "::error::The 'ready-all' suite failed. Open the failed job(s) inside the run-selected-tests matrix above and fix the failing test(s) or the code change that broke them."
               else
                 echo "::error::The 'ready-precise' selected tests failed. Open the failed job(s) inside the run-selected-tests matrix above. If you believe the failures are unrelated to your change, you may ask a maintainer to switch to 'ready-all' for a broader comparison."

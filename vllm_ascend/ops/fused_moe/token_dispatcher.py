@@ -138,7 +138,7 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
         _max_global_bs = num_tokens_per_tp_rank * self.ep_world_size
 
         # When allreduce across DP is not skipped, tokens are uniform across ranks:
-        # use global_bs=0 (uniform mode) and pass mc2_mask.
+        # use global_bs=0 (uniform mode) and pass mc2_mask to improve performance.
         # When allreduce is skipped, tokens may differ per rank:
         # use the real global_bs and do NOT pass mc2_mask.
         self.global_bs = _max_global_bs if should_skip_allreduce_across_dp_group(vllm_config) else 0
@@ -273,8 +273,13 @@ class TokenDispatcherWithMC2(MoETokenDispatcher[MoEMC2CombineMetadata]):
 
         assert expert_map is not None
         # NOTE: quant_mode differs by quant features:
+        # - additional_config.combine_quant_mode, when non-zero, forces quant_mode
+        #   to that value regardless of quant_type
         # - A5 MXFP communication uses quant_mode=4 only for W8A8MXFP currently.
-        if comm_quant_mode is not None:
+        combine_quant_mode = get_ascend_config().combine_quant_mode
+        if combine_quant_mode:
+            quant_mode = combine_quant_mode
+        elif comm_quant_mode is not None:
             quant_mode = comm_quant_mode
         elif quant_type == QuantType.W8A8MXFP:
             quant_mode = 4
@@ -425,7 +430,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
         final_hidden_states = DeviceOperator.npu_moe_token_unpermute(
             permuted_tokens=hidden_states,
             sorted_indices=combine_metadata.expanded_row_idx,
-            probs=combine_metadata.topk_weights,
+            probs=combine_metadata.topk_weights.to(hidden_states.dtype),
         )
         if len(combine_metadata.restore_shape) == 3:
             final_hidden_states = final_hidden_states.view(combine_metadata.restore_shape)
@@ -710,7 +715,7 @@ class TokenDispatcherWithAll2AllV(MoETokenDispatcher[MoEAllToAllCombineMetadata]
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=permutated_local_input_tokens,
             sorted_indices=combine_metadata.reversed_local_input_permutation_mapping.to(torch.int32),
-            probs=combine_metadata.topk_weights,
+            probs=combine_metadata.topk_weights.to(permutated_local_input_tokens.dtype),
             restore_shape=combine_metadata.hidden_shape_before_permute,
         )
         output = output.view(combine_metadata.hidden_shape)
