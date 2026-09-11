@@ -307,7 +307,8 @@ def test_dp_padding_dummy_step_forwards_group_max():
 
     forwarded = super_execute.call_args.args[0]
     assert forwarded.total_num_scheduled_tokens == 4
-    # decode_query_len-sized requests keep the dummy graph-matchable
+    # decode_query_len-sized requests keep the dummy decode-graph matchable
+    # (given a capture size that covers the group max)
     assert list(forwarded.num_scheduled_tokens.values()) == [2, 2]
     assert forwarded.finished_req_ids == {"done-r0"}
 
@@ -329,6 +330,47 @@ def test_dp_padded_dummy_output_keeps_decode_shape():
     out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=9, decode_query_len=2, max_num_reqs=3)
     assert list(out.num_scheduled_tokens.values()) == [3, 3, 3]
     assert out.total_num_scheduled_tokens == 9
+
+    # The fallback also covers a non-divisible total.
+    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=10, decode_query_len=2, max_num_reqs=3)
+    assert list(out.num_scheduled_tokens.values()) == [3, 3, 4]
+    assert out.total_num_scheduled_tokens == 10
+
+    # decode_query_len == 1: one request per token, still decode-shaped.
+    out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=4, decode_query_len=1, max_num_reqs=8)
+    assert list(out.num_scheduled_tokens.values()) == [1, 1, 1, 1]
+    assert out.total_num_scheduled_tokens == 4
+
+
+def test_prepare_inputs_restores_real_extent_wiring():
+    """The restore branch in prepare_inputs must read the recorded real extent.
+
+    Full behavioral coverage lands with the UT rework; this pins the wiring so a
+    refactor cannot silently drop it.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(NPUModelRunner.prepare_inputs)))
+    restore = [
+        n for n in ast.walk(tree) if isinstance(n, ast.If) and "_dp_padding_aligned_tokens" in ast.unparse(n.test)
+    ]
+    assert len(restore) == 1
+    assert "_dp_padding_original_tokens" in ast.unparse(restore[0].body)
+    assert "batch_req_state.num_tokens" in ast.unparse(restore[0].orelse)
+    # the padded row count still derives from the restored value
+    assert "max(num_tokens, batch_desc.num_tokens)" in ast.unparse(tree)
+    fills = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign)
+        and isinstance(n.targets[0], ast.Subscript)
+        and ast.unparse(n.targets[0]).startswith("query_start_loc_np[num_reqs")
+        and isinstance(n.value, ast.Name)
+        and n.value.id == "num_tokens"
+    ]
+    assert fills, "the trailing query_start_loc fill must use the restored num_tokens"
 
 
 @pytest.mark.parametrize(
