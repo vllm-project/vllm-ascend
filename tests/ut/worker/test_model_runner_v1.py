@@ -74,7 +74,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
         )
         return runner
 
-    def test_partial_prompt_does_not_dispatch_speculative_decode_graph(self):
+    def test_partial_prompt_with_state_dispatches_speculative_decode_graph(self):
         runner = self._build_dispatch_runner(speculative=True)
 
         with patch(
@@ -90,7 +90,7 @@ class TestGlm5MtpGraphMetadata(unittest.TestCase):
             )
 
         call_kwargs = runner.cudagraph_dispatcher.dispatch.call_args.kwargs
-        self.assertFalse(call_kwargs["uniform_decode"])
+        self.assertTrue(call_kwargs["uniform_decode"])
 
 
 class TestDummyRunSlotInvalidation(unittest.TestCase):
