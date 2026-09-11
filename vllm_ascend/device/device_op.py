@@ -1329,10 +1329,9 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
                 mask_mode=3, cmp_ratio=1, return_value=0,
             )
             topk_indices = sparse_indices
-        elif enable_sparse_li_c8:
+        elif enable_sparse_li_c8 and q_li_shape_ori is not None:
             # ``kv_cache`` is the indexer's own cache tuple (k + scale).
             assert len(kv_cache) == 2
-            assert q_li_shape_ori is not None
 
             q_li_scale = q_li_scale.view(q_li_shape_ori[:-1])
             key_dequant_scale = kv_cache[indexer_scale_cache_idx].squeeze(2)
