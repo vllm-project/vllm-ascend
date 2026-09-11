@@ -353,8 +353,8 @@ def test_prepare_inputs_restores_real_extent_wiring():
         n for n in ast.walk(tree) if isinstance(n, ast.If) and "_dp_padding_aligned_tokens" in ast.unparse(n.test)
     ]
     assert len(restore) == 1
-    assert "_dp_padding_original_tokens" in ast.unparse(restore[0].body)
-    assert "batch_req_state.num_tokens" in ast.unparse(restore[0].orelse)
+    assert "_dp_padding_original_tokens" in ast.unparse(ast.Module(body=restore[0].body, type_ignores=[]))
+    assert "batch_req_state.num_tokens" in ast.unparse(ast.Module(body=restore[0].orelse, type_ignores=[]))
     # the padded row count still derives from the restored value
     assert "max(num_tokens, batch_desc.num_tokens)" in ast.unparse(tree)
     fills = [
