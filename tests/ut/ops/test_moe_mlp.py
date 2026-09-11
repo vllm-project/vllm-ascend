@@ -245,6 +245,54 @@ class TestW8A8FusedMoEMethod(unittest.TestCase):
         self.assertIs(weights.w1, layer.w13_weight_list)
         self.assertIs(weights.w1_scale, layer.w13_weight_scale_fp32_list)
 
+    def test_get_fused_mc2_weights_swigluoai_skips_dispatch_ffn_combine_scales(self):
+        method = self._make_method()
+        layer = SimpleNamespace(
+            w13_weight=torch.randn(1, 8, 16),
+            w13_weight_scale_fp32=torch.randn(1, 8),
+            w2_weight=torch.randn(1, 16, 8),
+            w2_weight_scale=torch.randn(1, 16),
+            fused_w1_scale=torch.randn(1, 8),
+            fused_w2_scale=torch.randn(1, 16),
+            fused_w1_scale_bias=torch.tensor([], dtype=torch.float32),
+            fused_w2_scale_bias=torch.tensor([], dtype=torch.float32),
+            activation="swigluoai_uninterleave",
+        )
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",
+                SimpleNamespace(moe_comm_type=MoECommType.FUSED_MC2, use_mega_moe=False),
+            ),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config") as mock_config,
+        ):
+            mock_config.return_value.enable_fused_mc2 = 1
+            weights = method.get_fused_mc2_weights(layer)
+        self.assertIs(weights.w1_scale[0], layer.w13_weight_scale_fp32)
+        self.assertIsNone(weights.w1_scale_bias)
+
+    def test_get_fused_mc2_weights_swigluoai_uses_mega_moe_lists(self):
+        method = self._make_method()
+        layer = SimpleNamespace(
+            cann_mega_moe_w13_weight_list=["w1"],
+            cann_mega_moe_w2_weight_list=["w2"],
+            cann_mega_moe_fused_w1_scale_list=["s1"],
+            cann_mega_moe_fused_w2_scale_list=["s2"],
+            activation="swigluoai_uninterleave",
+        )
+        with (
+            patch(
+                "vllm_ascend.quantization.methods.w8a8.w8a8_dynamic._EXTRA_CTX",
+                SimpleNamespace(moe_comm_type=MoECommType.FUSED_MC2, use_mega_moe=True),
+            ),
+            patch("vllm_ascend.quantization.methods.w8a8.w8a8_dynamic.get_ascend_config") as mock_config,
+        ):
+            mock_config.return_value.enable_fused_mc2 = 1
+            weights = method.get_fused_mc2_weights(layer)
+        self.assertEqual(weights.w1, ["w1"])
+        self.assertEqual(weights.w1_scale, ["s1"])
+        self.assertEqual(weights.w2_scale, ["s2"])
+        self.assertIsNone(weights.w1_scale_bias)
+
 
 class TestW4A8SituPath(unittest.TestCase):
     def test_situ_gmm1_uses_per_channel_scale_layout(self):

@@ -107,6 +107,43 @@ class TestMoECommMethod(TestBase):
         self.assertEqual(call_args.kwargs["max_recv_token_num"], 1024)
         mock_warning_once.assert_not_called()
 
+    def test_apply_cann_mega_moe_passes_oai_kwargs_when_supported(self):
+        captured = {}
+
+        def mega_moe(*args, glu_alpha=1.0, glu_bias=0.0, activation_clamp=None, **kwargs):
+            captured["glu_alpha"] = glu_alpha
+            captured["glu_bias"] = glu_bias
+            captured["activation_clamp"] = activation_clamp
+            return torch.zeros(2, 8), torch.zeros(2)
+
+        comm_impl = object.__new__(FusedMC2CommImpl)
+        comm_impl.swiglu_limit = 7.0
+        comm_impl.swiglu_alpha = 1.702
+        comm_impl.swiglu_beta = 1.0
+        comm_impl.mega_moe = mega_moe
+        comm_impl.mega_moe_symm_buffer = object()
+        comm_impl.token_dispatcher = object.__new__(TokenDispatcherWithMC2)
+        comm_impl.token_dispatcher.max_num_tokens_per_rank = 128
+        comm_impl.token_dispatcher.global_bs = 1
+
+        fused_input = MagicMock()
+        fused_input.hidden_states = torch.zeros(2, 8)
+        fused_input.topk_ids = torch.zeros(2, 2, dtype=torch.int32)
+        fused_input.topk_weights = torch.ones(2, 2)
+        fused_input.quant.quant_type = QuantType.NONE
+        fused_input.routing.mc2_mask = None
+        weights = MoEWeights(w1=[torch.zeros(8, 16)], w2=[torch.zeros(16, 8)])
+
+        with patch(
+            "vllm_ascend.ops.fused_moe.moe_comm_method.moe_utils._get_cann_mega_moe_quant_settings",
+            return_value=(0, None, None),
+        ):
+            comm_impl._apply_cann_mega_moe(fused_input, weights, is_decode_only_node=True)
+
+        self.assertEqual(captured["glu_alpha"], 1.702)
+        self.assertEqual(captured["glu_bias"], 1.0)
+        self.assertEqual(captured["activation_clamp"], 7.0)
+
     @patch("vllm_ascend.ascend_forward_context.get_forward_context")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather")
     @patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather")
