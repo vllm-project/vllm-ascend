@@ -337,6 +337,65 @@ def test_draft_swa_and_sas_share_attention_task(draft_uses_sparse_flash, use_spa
     assert torch.equal(metadata.sas_metadata, sas_result)
 
 
+@patch("vllm_ascend.attention.dsa_v1._draft_uses_sparse_flash_mla", return_value=True)
+def test_initial_draft_step_uses_sparse_flash_logical_indices(_draft_uses_sparse_flash):
+    builder = _make_builder(1, num_speculative_tokens=3)
+    builder.enable_dspark_device_metadata(max_num_tokens=16)
+    builder.num_actual_tokens = 6
+    builder.num_decode_tokens = 6
+    builder.num_prefills = 0
+    builder.seq_lens = torch.tensor([10, 14], dtype=torch.int32)
+    builder.block_table = torch.tensor([[2, 3], [5, 6]], dtype=torch.int32)
+    query_start_loc = torch.tensor([0, 3, 6], dtype=torch.int32)
+    common_attn_metadata = SimpleNamespace(
+        num_reqs=2,
+        num_input_tokens=6,
+        positions=torch.arange(6),
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        causal=False,
+    )
+    sas_result = torch.arange(DSA_METADATA_BUFFER_SIZE, dtype=torch.int32)
+    metadata_op = MagicMock(return_value=sas_result)
+    plan = _mock_dsa_kv_plan(
+        get_dsa_sparse_attn_metadata_kwargs={},
+        get_dsa_sparse_attn_metadata_op=MagicMock(),
+    )
+    plan.layout_kv = "PA_BBND"
+
+    with (
+        patch("vllm_ascend.attention.dsa_v1.sparse_flash_mla_metadata", metadata_op),
+        patch("vllm_ascend.attention.dsa_v1.is_a5_bf16_kv_enabled", return_value=True),
+        patch("vllm_ascend.attention.dsa_v1.get_dsa_attn_kv_plan", return_value=plan),
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_ori_kv") as get_ori_offsets,
+        patch.object(DeviceOperator, "get_dsa_decode_cu_seqlens_cmp_kv") as get_cmp_offsets,
+    ):
+        metadata = builder.build_req_metadata(
+            common_attn_metadata=common_attn_metadata,
+            seq_lens_cpu=builder.seq_lens,
+            num_actual_reqs=None,
+            cos=torch.ones(6),
+            sin=torch.zeros(6),
+        )
+        tasks = builder.take_device_metadata_tasks()
+        assert len(tasks) == 1
+        tasks[0].run()
+
+    assert metadata.use_sparse_flash_mla_for_draft
+    assert metadata.dspark_swa_topk_lengths is not None
+    assert metadata.dspark_swa_topk_lengths[:, 0].tolist() == [10] * 3 + [14] * 3
+    assert metadata.dspark_swa_indices is not None
+    assert metadata.dspark_swa_indices[0, 0, :10].tolist() == list(range(10))
+    assert metadata.dspark_swa_indices[3, 0, :14].tolist() == list(range(14))
+    get_ori_offsets.assert_not_called()
+    get_cmp_offsets.assert_not_called()
+    kwargs = metadata_op.call_args.kwargs
+    assert kwargs["ori_topk_length"] is metadata.dspark_swa_topk_lengths
+    assert kwargs["ori_mask_mode"] == kwargs["cmp_mask_mode"] == 0
+    assert kwargs["ori_win_left"] == kwargs["ori_win_right"] == -1
+    assert torch.equal(metadata.sas_metadata, sas_result)
+
+
 def test_draft_swa_metadata_rejects_rows_above_buffer_capacity():
     builder = _make_builder(1, num_speculative_tokens=3)
     builder.enable_dspark_device_metadata(max_num_tokens=16)

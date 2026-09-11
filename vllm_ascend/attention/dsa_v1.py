@@ -968,6 +968,40 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE] = sas_metadata
         return self.sas_metadata_buffer
 
+    def _build_dspark_sparse_flash_mla_metadata(
+        self,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        max_seqlen_q: int | torch.Tensor,
+        max_seqlen_kv: int | torch.Tensor,
+        ori_topk_length: torch.Tensor,
+        ori_topk: int,
+    ) -> torch.Tensor:
+        metadata_kwargs = get_dsa_attn_kv_plan(self.vllm_config).get_dsa_sparse_attn_metadata_kwargs(
+            self.seqused_q.device
+        )
+        call_kwargs = dict(
+            num_heads_q=self.model_config.hf_config.num_attention_heads
+            // self.vllm_config.parallel_config.tensor_parallel_size,
+            num_heads_kv=1,
+            head_dim=self.model_config.get_head_size(),
+            cu_seqlens_q=query_start_loc,
+            seqused_q=self.seqused_q,
+            seqused_kv=seq_lens,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            batch_size=len(seq_lens),
+            ori_topk_length=ori_topk_length,
+            ori_topk=ori_topk,
+            layout_q="TND",
+            layout_kv=_dsa_layout_kv(self.vllm_config),
+            has_ori_kv=True,
+            has_cmp_kv=False,
+        )
+        call_kwargs.update(metadata_kwargs)
+        call_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
+        return sparse_flash_mla_metadata(**call_kwargs)
+
     def _build_qli_metadata(
         self,
         metadata_cache: dict,
@@ -1084,8 +1118,15 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         cu_seqlens_ori_kv = None
         cu_seqlens_cmp_kv = None
         dspark_swa_indices = None
+        dspark_swa_topk_lengths = None
         vision_swa_indices = None
         ori_win_left, ori_win_right = self.model_config.hf_config.sliding_window - 1, 0
+        use_sparse_flash = (
+            not has_prefill
+            and not common_attn_metadata.causal
+            and self.compressor_ratio <= 1
+            and _draft_uses_sparse_flash_mla(self.vllm_config)
+        )
         if not has_prefill and not common_attn_metadata.causal:
             # DSpark non-causal parallel drafting: every draft query attends to
             # the trailing context window plus the whole current draft block.
@@ -1093,7 +1134,14 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             # current step's block table / sequence lengths, so they must be
             # rebuilt whenever a DSpark draft step runs.
             assert self.speculative_config is not None
-            dspark_swa_indices, _ = build_dspark_swa_indices(
+            lengths_output = None
+            if use_sparse_flash:
+                if self.dspark_swa_topk_lengths_buffer is None:
+                    raise RuntimeError(
+                        "DSpark SparseFlashMla length buffer must be initialized before building draft metadata"
+                    )
+                lengths_output = self.dspark_swa_topk_lengths_buffer[: self.num_decode_tokens]
+            dspark_swa_indices, dspark_swa_topk_lengths = build_dspark_swa_indices(
                 self.block_table[: self.num_decodes],
                 self.speculative_config.num_speculative_tokens,
                 self.model_config.hf_config.sliding_window,
@@ -1102,7 +1150,11 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 self.seq_lens[: self.num_decodes],
                 self.num_decode_tokens,
                 buffer=self.dspark_swa_indices_buffer,
+                logical_indices=use_sparse_flash,
+                lengths_output=lengths_output,
             )
+            if not use_sparse_flash:
+                dspark_swa_topk_lengths = None
             ori_win_left, ori_win_right = get_dspark_sparse_sas_window(self.vllm_config)
         # Text-only requests and lightweight metadata fixtures do not carry
         # multimodal document ranges. Treat those as having no vision spans.
@@ -1133,7 +1185,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
                 mm_prefix_ranges=mm_ranges,
                 num_tokens=self.num_actual_tokens,
             )
-        if not has_prefill and self.common_ratio_to_sas_metadata.get(layer_name) is None:
+        if not has_prefill and not use_sparse_flash and self.common_ratio_to_sas_metadata.get(layer_name) is None:
             cu_seqlens_ori_kv = DeviceOperator.get_dsa_decode_cu_seqlens_ori_kv(
                 self.common_ratio_to_sas_metadata,
                 "cu_seqlens_ori_kv",
@@ -1146,19 +1198,32 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
         elif has_prefill:
             cu_seqlens_ori_kv = query_start_loc
 
-        if self._device_metadata_enabled:
-
-            def build_sas_metadata() -> None:
-                self._build_sas_metadata(
-                    metadata_cache=metadata_cache,
-                    layer_name=layer_name,
+        def build_sas_metadata() -> torch.Tensor:
+            if use_sparse_flash:
+                assert dspark_swa_indices is not None
+                assert dspark_swa_topk_lengths is not None
+                result = self._build_dspark_sparse_flash_mla_metadata(
                     query_start_loc=query_start_loc,
                     seq_lens=seq_lens,
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_kv=max_seqlen_kv,
-                    cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                    cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                    ori_topk_length=dspark_swa_topk_lengths,
+                    ori_topk=dspark_swa_indices.shape[-1],
                 )
+                self.sas_metadata_buffer[:DSA_METADATA_BUFFER_SIZE].copy_(result[:DSA_METADATA_BUFFER_SIZE])
+                return self.sas_metadata_buffer
+            return self._build_sas_metadata(
+                metadata_cache=metadata_cache,
+                layer_name=layer_name,
+                query_start_loc=query_start_loc,
+                seq_lens=seq_lens,
+                max_seqlen_q=max_seqlen_q,
+                max_seqlen_kv=max_seqlen_kv,
+                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+            )
+
+        if self._device_metadata_enabled:
 
             def build_qli_metadata() -> None:
                 self._build_qli_metadata(
@@ -1182,16 +1247,7 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             qli_metadata = self.qli_metadata_buffer if self.compressor_ratio == 4 else None
         else:
             self._device_metadata_tasks = ()
-            sas_metadata = self._build_sas_metadata(
-                metadata_cache=metadata_cache,
-                layer_name=layer_name,
-                query_start_loc=query_start_loc,
-                seq_lens=seq_lens,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-            )
+            sas_metadata = build_sas_metadata()
             qli_metadata = self._build_qli_metadata(
                 metadata_cache=metadata_cache,
                 query_start_loc=query_start_loc,
@@ -1249,7 +1305,9 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             ori_win_left=ori_win_left,
             ori_win_right=ori_win_right,
             dspark_swa_indices=dspark_swa_indices,
+            dspark_swa_topk_lengths=dspark_swa_topk_lengths,
             vision_swa_indices=vision_swa_indices,
+            use_sparse_flash_mla_for_draft=use_sparse_flash,
         )
         if self._device_metadata_enabled and self.compressor_metadata_buffers is not None:
             assert num_compressed_tokens is not None
@@ -1413,47 +1471,51 @@ class AscendDSAMetadataBuilder(AttentionMetadataBuilder[AscendDSAMetadata]):
             cu_seqlens_cmp_kv = (
                 None if has_prefill else DeviceOperator.get_dsa_decode_cu_seqlens_cmp_kv(self.cu_seqlens_cmp_kv)
             )
-        kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
-        metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
-        metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
-        if use_sparse_flash:
-            assert dspark_swa_indices is not None
-            metadata_op = sparse_flash_mla_metadata
-            metadata_kwargs.update(_draft_sparse_flash_mla_kwargs(self.vllm_config))
-            metadata_kwargs.update(
-                ori_topk_length=dspark_swa_topk_lengths,
-                ori_topk=dspark_swa_indices.shape[-1],
-            )
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
 
         def build_attention_metadata() -> torch.Tensor:
             if build_dspark_swa is not None:
                 build_dspark_swa()
-            call_kwargs = dict(
-                num_heads_q=n_local_heads,
-                num_heads_kv=1,
-                head_dim=self.model_config.get_head_size(),
-                cu_seqlens_q=query_start_loc,
-                cu_seqlens_ori_kv=cu_seqlens_ori_kv,
-                cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
-                seqused_q=self.seqused_q,
-                seqused_kv=seq_lens,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_kv=max_seqlen_kv,
-                batch_size=num_reqs,
-                cmp_ratio=1,
-                ori_mask_mode=4,
-                cmp_mask_mode=3,
-                ori_win_left=ori_win_left,
-                ori_win_right=ori_win_right,
-                layout_q="TND",
-                layout_kv=_dsa_layout_kv(self.vllm_config),
-                has_ori_kv=True,
-                has_cmp_kv=False,
-            )
-            call_kwargs.update(metadata_kwargs)
-            result = metadata_op(**call_kwargs)
+            if use_sparse_flash:
+                assert dspark_swa_indices is not None
+                assert dspark_swa_topk_lengths is not None
+                result = self._build_dspark_sparse_flash_mla_metadata(
+                    query_start_loc=query_start_loc,
+                    seq_lens=seq_lens,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    ori_topk_length=dspark_swa_topk_lengths,
+                    ori_topk=dspark_swa_indices.shape[-1],
+                )
+            else:
+                kv_plan = get_dsa_attn_kv_plan(self.vllm_config)
+                metadata_op = kv_plan.get_dsa_sparse_attn_metadata_op()
+                metadata_kwargs = kv_plan.get_dsa_sparse_attn_metadata_kwargs(self.seqused_q.device)
+                tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+                n_local_heads = self.model_config.hf_config.num_attention_heads // tp_size
+                call_kwargs = dict(
+                    num_heads_q=n_local_heads,
+                    num_heads_kv=1,
+                    head_dim=self.model_config.get_head_size(),
+                    cu_seqlens_q=query_start_loc,
+                    cu_seqlens_ori_kv=cu_seqlens_ori_kv,
+                    cu_seqlens_cmp_kv=cu_seqlens_cmp_kv,
+                    seqused_q=self.seqused_q,
+                    seqused_kv=seq_lens,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_kv=max_seqlen_kv,
+                    batch_size=num_reqs,
+                    cmp_ratio=1,
+                    ori_mask_mode=4,
+                    cmp_mask_mode=3,
+                    ori_win_left=ori_win_left,
+                    ori_win_right=ori_win_right,
+                    layout_q="TND",
+                    layout_kv=_dsa_layout_kv(self.vllm_config),
+                    has_ori_kv=True,
+                    has_cmp_kv=False,
+                )
+                call_kwargs.update(metadata_kwargs)
+                result = metadata_op(**call_kwargs)
             if not has_prefill:
                 assert self.spec_sas_metadata is not None
                 self.spec_sas_metadata[draft_index - 1][:DSA_METADATA_BUFFER_SIZE].copy_(
