@@ -265,9 +265,8 @@ def _make_batch_req_state(num_tokens):
     "enabled,dummy_run,is_profile,total,expected_calls",
     [
         (True, False, False, 5, 1),  # real step with work: agree the group max
-        # A real step with nothing scheduled returns from the parent before
-        # dispatch without posting any DP collective, so an all_reduce here
-        # would desync the gloo op stream against busy/dummy steps.
+        # Zero-token steps return before dispatch without any DP collective; an
+        # all_reduce here would desync the gloo op stream against busy/dummy steps.
         (True, False, False, 0, 0),
         (True, True, False, 0, 1),  # dummy step (idle rank): report zero
         (True, False, True, 5, 0),  # profile run
@@ -308,7 +307,6 @@ def test_dp_padding_dummy_step_forwards_group_max():
     forwarded = super_execute.call_args.args[0]
     assert forwarded.total_num_scheduled_tokens == 4
     # decode_query_len-sized requests keep the dummy decode-graph matchable
-    # (given a capture size that covers the group max)
     assert list(forwarded.num_scheduled_tokens.values()) == [2, 2]
     assert forwarded.finished_req_ids == {"done-r0"}
 
@@ -319,14 +317,12 @@ def test_dp_padded_dummy_output_keeps_decode_shape():
     assert list(out.num_scheduled_tokens.values()) == [2, 2]
     assert out.total_num_scheduled_tokens == 4
 
-    # A remainder keeps the total exact; the batch is non-uniform, so no decode
-    # graph matches regardless of the dummy's shape.
+    # A remainder keeps the total exact; the batch is non-uniform so no decode graph matches.
     out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=5, decode_query_len=2, max_num_reqs=8)
     assert list(out.num_scheduled_tokens.values()) == [2, 2, 1]
     assert out.total_num_scheduled_tokens == 5
 
-    # Past max_num_reqs the decode graphs cannot match either; fall back to
-    # _dummy_run's bounded even split, keeping the total exact.
+    # Past max_num_reqs the decode graphs cannot match either; use _dummy_run's bounded even split.
     out = make_dp_padded_dummy_output(_make_scheduler_output(0), group_max=9, decode_query_len=2, max_num_reqs=3)
     assert list(out.num_scheduled_tokens.values()) == [3, 3, 3]
     assert out.total_num_scheduled_tokens == 9

@@ -51,14 +51,7 @@ def make_dp_padded_dummy_output(
     Rewrite a dummy scheduler output to forward exactly `group_max` tokens. The output
     is synthetic, so rewriting it is safe.
     """
-    # decode_query_len-sized requests keep the dummy uniform-decode shaped, so it
-    # can still match the captured decode graphs when a capture size covers
-    # group_max; one group_max-token request would drag the step off them via the
-    # cg_mode min (to eager under FULL_DECODE_ONLY, to the mixed/piecewise graphs
-    # under the other modes). A trailing remainder keeps the total exact — the
-    # batch is non-uniform then, so no decode graph matches regardless of the
-    # dummy's shape. Past max_num_reqs the decode graphs cannot match either, so
-    # reuse _dummy_run's bounded even split there.
+    # decode_query_len-sized requests stay decode-graph matchable; past max_num_reqs use _dummy_run's even split.
     num_full, remainder = divmod(group_max, decode_query_len)
     per_request = [decode_query_len] * num_full
     if remainder:
