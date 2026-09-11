@@ -71,30 +71,6 @@ _PACKED_CONV_WEIGHT_NAME = "packed_conv_weights"
 _FUSED_QKV_NAME = "fused_qkv"
 
 
-def _zero_padded_spec_output(
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-) -> torch.Tensor:
-    """Zero graph-padding rows skipped by the recurrent KDA kernel.
-
-    ``recurrent_kda`` leaves the output for zero-length sequences
-    uninitialized. FULL graph replay keeps those rows in the static output
-    shape, so explicitly clear the uncovered tail before it reaches the
-    residual and MoE layers.
-    """
-    token_indices = torch.arange(
-        output.shape[1],
-        dtype=query_start_loc.dtype,
-        device=output.device,
-    )
-    valid_tokens = token_indices < query_start_loc[-1]
-    return torch.where(
-        valid_tokens.view(1, -1, 1, 1),
-        output,
-        0.0,
-    )
-
-
 def uses_kimi_k3_global_inputs_embeds(vllm_config: VllmConfig) -> bool:
     model_config = vllm_config.model_config
     if model_config.enable_prompt_embeds:
@@ -604,12 +580,6 @@ class AscendKimiGatedDeltaNetAttention(KimiGatedDeltaNetAttention):
                 attn_metadata.spec_query_start_loc,
                 attn_metadata.spec_state_indices_tensor,
                 num_accepted_tokens=spec_conv_meta.num_accepted_tokens,
-            )
-            # Clear only static dummy rows skipped by the kernel. Real query
-            # tokens and their accepted lengths are unchanged.
-            core_spec = _zero_padded_spec_output(
-                core_spec,
-                attn_metadata.spec_query_start_loc,
             )
 
         core_non_spec = None

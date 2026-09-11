@@ -50,7 +50,7 @@ o_t = S @ (q_t * scale)
 - `A_log/dt_bias` 支持 `FP32`。
 - Kimi K3 torch/aclnn 入口的 `cu_seqlens` 为必传的设备 INT32/INT64 Tensor；offset 必须单调不减，
   末项不得超过输入 token capacity，各相邻差值必须不超过 8。末项小于 capacity 时，仅有效 token
-  对应的输出和 state 更新有定义，padding tail 输出不作保证。
+  对应的 state 会被更新，kernel 会将 padding tail 输出清零。
 - 仅支持 `layout="BSND"` 和 `layout="TND"`。
 - Kimi K3 Torch 入口固定 `state_v_first=True`，state layout 为 `[state_capacity,HV,V,K]`；底层 aclnn/kernel 同时支持 V-first 和 `[state_capacity,HV,K,V]` 的 K-first 布局。
 - `HV` 必须能被 `H` 整除；`H/HV <= 256`。底层 kernel 与 Kimi K3 Torch 入口均支持 `K=128,V=128/256`。
