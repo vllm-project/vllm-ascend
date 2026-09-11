@@ -12,13 +12,14 @@ import torch
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 from vllm_ascend.utils import enable_custom_op
 
-# Preserve the existing mode for legacy prefill, decode, and A5 FP8 prefill.
-# BF16 KV-gather-Q prefill uses the backend-specific modes below instead.
+# Existing mode for legacy prefill, decode, and A5 FP8 prefill.
 _SPARSE_ATTN_INNER_PRECISE = 4
-# Preserve A5's existing BF16 KV-gather-Q prefill precision mode.
+
+# Existing mode for A5 KV-gather-Q prefill with BF16 inputs.
 _PREFILL_KV_GATHER_Q_INNER_PRECISE = 1
-# A3 BF16 KV-gather-Q prefill uses FP32 scores and partial outputs to preserve
-# accuracy; its reduced-precision modes are not interchangeable with A5's.
+
+# A3 KV-gather-Q prefill with BF16 inputs: use FP32 scores and partial
+# outputs to preserve accuracy.
 _A3_PREFILL_KV_GATHER_Q_INNER_PRECISE = 0
 _MSA_INDEX_BLOCK_SIZE = 128
 _MSA_SCORE_BLOCK_ALIGNMENT = 16
