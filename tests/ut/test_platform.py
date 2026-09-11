@@ -1,4 +1,5 @@
 import importlib
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -472,6 +473,73 @@ class TestNPUPlatform(TestBase):
                 vllm_config.compilation_config.cudagraph_mode,
                 CUDAGraphMode.NONE,
             )
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_preserve_stock_compile_fx_dump_mode_without_cudagraph(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_ascend.return_value = ascend_config
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.compilation_config.mode = CompilationMode.STOCK_TORCH_COMPILE
+        vllm_config.compilation_config.backend = "inductor"
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        vllm_config.compilation_config.debug_dump_path = Path("/tmp/fx_dump")
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        with patch.object(platform.NPUPlatform, "_fix_incompatible_config"):
+            platform.NPUPlatform().check_and_update_config(vllm_config)
+
+        assert (
+            vllm_config.compilation_config.mode
+            == CompilationMode.STOCK_TORCH_COMPILE
+        )
+        assert vllm_config.compilation_config.backend == "inductor"
+        assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        assert not ascend_config.ascend_compilation_config.enable_npugraph_ex
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_preserve_stock_compile_fx_dump_mode_from_environment(
+        self, mock_init_recompute, mock_init_ascend, mock_soc_version, mock_auto_detect
+    ):
+        ascend_config = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_ascend.return_value = ascend_config
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.model_config.enforce_eager = False
+        vllm_config.compilation_config.mode = CompilationMode.STOCK_TORCH_COMPILE
+        vllm_config.compilation_config.backend = "inductor"
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        vllm_config.compilation_config.debug_dump_path = None
+        mock_init_recompute.return_value = MagicMock()
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        with (
+            patch.dict(
+                "os.environ",
+                {"VLLM_DEBUG_DUMP_PATH": "/tmp/fx_dump_from_env"},
+            ),
+            patch.object(platform.NPUPlatform, "_fix_incompatible_config"),
+        ):
+            platform.NPUPlatform().check_and_update_config(vllm_config)
+
+        assert (
+            vllm_config.compilation_config.mode
+            == CompilationMode.STOCK_TORCH_COMPILE
+        )
+        assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        assert not ascend_config.ascend_compilation_config.enable_npugraph_ex
 
     @pytest.mark.skip("Revert me when vllm support setting cudagraph_mode on oot platform")
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")

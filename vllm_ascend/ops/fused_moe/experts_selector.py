@@ -24,6 +24,7 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
+from vllm_ascend.ops.fxrt_moe import moe_gating_top_k_hash_for_prefill
 from vllm_ascend.utils import get_weight_prefetch_method
 
 
@@ -267,11 +268,15 @@ def _select_experts_with_fusion_ops(
                 tp_rank = get_tp_group().rank_in_group
                 splitted_input = split_tensor_along_first_dim(input_ids, num_partitions=tp_size)
                 input_ids = splitted_input[tp_rank].contiguous()
-            input_ids = torch.where(input_ids == -1, 0, input_ids)
+            input_ids = torch.where(
+                input_ids == (input_ids * 0 - 1),
+                torch.zeros_like(input_ids),
+                input_ids,
+            )
         else:
             input_ids = None
             tid2eid_ones = None
-        topk_weights, topk_ids, _ = torch.ops._C_ascend.moe_gating_top_k_hash(
+        topk_weights, topk_ids, _ = moe_gating_top_k_hash_for_prefill(
             x=router_logits,
             k=top_k,
             bias=e_score_correction_bias,
@@ -410,8 +415,10 @@ def zero_experts_compute(
         result = hidden_states * zero_expert_scales
         result = result.sum(dim=1)
 
-    normal_expert_mask = expert_indices >= num_experts
-    expert_indices = torch.where(normal_expert_mask, 0, expert_indices)
+        normal_expert_mask = expert_indices >= num_experts
+    expert_indices = torch.where(
+        normal_expert_mask, torch.zeros_like(expert_indices), expert_indices
+    )
     expert_scales = torch.where(normal_expert_mask, 0.0, expert_scales)
 
     return expert_indices, expert_scales, result

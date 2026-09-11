@@ -83,6 +83,22 @@ def get_attention_compute_start_gate() -> AttentionComputeStartGate:
     return gate
 
 
+def publish_attention_compute_start_event(event: torch.npu.Event) -> None:
+    """Publish an already-recorded event to the KV-transfer fence.
+
+    FXRT uses this from a Python custom op.  The event object stays in a
+    process-local registry and never becomes an FX value.
+    """
+    with _lock:
+        gate = _attention_compute_start_gate
+    if gate is None:
+        return
+    with gate._condition:
+        if gate._event is None:
+            gate._event = event
+            gate._condition.notify_all()
+
+
 def record_attention_compute_start() -> None:
     """Record the compute-stream boundary immediately before attention."""
     with _lock:

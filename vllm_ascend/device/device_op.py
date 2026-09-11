@@ -33,7 +33,11 @@ from vllm_ascend.ops.triton.fla.chunk_scaled_dot_kkt import chunk_scaled_dot_kkt
 from vllm_ascend.ops.triton.fla.solve_tril import solve_tril_16x16_kernel
 from vllm_ascend.ops.triton.fused_gdn_gating import fused_gdn_gating_patch
 from vllm_ascend.quantization.quant_type import QuantType
-from vllm_ascend.utils import AscendDeviceType, get_ascend_device_type
+from vllm_ascend.utils import (
+    AscendDeviceType,
+    fxrt_prefill_decompose_enabled,
+    get_ascend_device_type,
+)
 
 DSA_COMPRESSOR_SLOT_MAPPING_FLAT = 1
 DSA_COMPRESSOR_SLOT_MAPPING_BLOCK_OFFSET = 2
@@ -113,7 +117,11 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        # Current torch_npu exposes the routing implementation directly.  The
+        # legacy out-of-tree custom op is not present in newer extension
+        # builds, and probing for it inside this method breaks fullgraph
+        # Dynamo tracing.  Keep the implementation statically traceable.
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -854,6 +862,17 @@ class BaseDeviceAdaptor:
         return q_quant, q_scale
 
     @staticmethod
+    def indexer_scatter_kv(kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+        """Quantize and scatter a non-empty indexer KV tensor."""
+        kv_out, kv_scale_out = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
+        kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
+        if kv_scale_out.ndim < 4:
+            kv_scale_out = kv_scale_out.unsqueeze(-1)
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
+        torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
+        return kv_out, kv_scale_out
+
+    @staticmethod
     def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
         """Quantize q and scatter kv into indexer cache.
         Non-A5: int8 quant + 2x scatter_nd_update_v2 for k_cache and scale_cache."""
@@ -863,12 +882,13 @@ class BaseDeviceAdaptor:
         kv_out = kv
         kv_scale_out = None
         if kv is not None:
-            kv_out, kv_scale_out = torch_npu.npu_dynamic_quant(kv, dst_type=torch.int8)
-            kv_scale_out = kv_scale_out.unsqueeze(-1).to(torch.float16)
-            if kv_scale_out.ndim < 4:
-                kv_scale_out = kv_scale_out.unsqueeze(-1)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_k_cache, slot_mapping, kv_out)
-            torch.ops._C_ascend.npu_scatter_nd_update_v2(indexer_scale_cache, slot_mapping, kv_scale_out)
+            kv_out, kv_scale_out = BaseDeviceAdaptor.indexer_scatter_kv(
+                kv,
+                indexer_k_cache,
+                indexer_scale_cache,
+                indexer_full_cache,
+                slot_mapping,
+            )
 
         return q, q_scale, kv_out, kv_scale_out
 
@@ -930,7 +950,7 @@ class BaseDeviceAdaptor:
     def apply_dsa_q_rms(q, eps, q_norm_without_weight=None):
         """Apply Q RMS norm. Non-A5: triton_q_rms.
         A5: uses q_norm_without_weight callable when provided."""
-        if triton_q_rms is not None:
+        if triton_q_rms is not None and not fxrt_prefill_decompose_enabled():
             return triton_q_rms(q, eps)
         else:
             dtype = q.dtype
@@ -1646,6 +1666,17 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         return q_quant, q_scale
 
     @staticmethod
+    def indexer_scatter_kv(kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
+        """Scatter a non-empty A5 indexer KV tensor with the fused epilog."""
+        torch.ops._C_ascend.indexer_compress_epilog_v2(
+            indexer_compress_cache=indexer_full_cache.view(torch.uint8),
+            x=kv,
+            slot_mapping=slot_mapping,
+            layout=2,
+        )
+        return kv, None
+
+    @staticmethod
     def indexer_quant_scatter(q, kv, indexer_k_cache, indexer_scale_cache, indexer_full_cache, slot_mapping):
         """Quantize q (fp8) and scatter kv via fused indexer_compress_epilog_v2.
         On A5, the fused op handles kv quantization, k_cache scatter, and
@@ -1656,11 +1687,12 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         kv_out = kv
         kv_scale_out = None
         if kv is not None:
-            torch.ops._C_ascend.indexer_compress_epilog_v2(
-                indexer_compress_cache=indexer_full_cache.view(torch.uint8),
-                x=kv,
-                slot_mapping=slot_mapping,
-                layout=2,
+            kv_out, kv_scale_out = A5DeviceAdaptor.indexer_scatter_kv(
+                kv,
+                indexer_k_cache,
+                indexer_scale_cache,
+                indexer_full_cache,
+                slot_mapping,
             )
 
         return q, q_scale, kv_out, kv_scale_out
@@ -1724,7 +1756,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
         if q_norm_without_weight is not None:
             return q_norm_without_weight(q)
 
-        if triton_q_rms is not None:
+        if triton_q_rms is not None and not fxrt_prefill_decompose_enabled():
             return triton_q_rms(q, eps)
         else:
             dtype = q.dtype

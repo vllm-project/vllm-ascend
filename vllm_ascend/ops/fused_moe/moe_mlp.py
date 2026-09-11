@@ -27,6 +27,10 @@ from vllm_ascend.device.mxfp_compat import (
     ensure_mxfp8_moe_available,
 )
 from vllm_ascend.ops.activation import AscendSwigluOAIAndMul, AscendSwigluStepAndMul
+from vllm_ascend.ops.fxrt_side_effects import (
+    fxrt_record_event,
+    get_fxrt_event_index,
+)
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEMlpComputeInput
 from vllm_ascend.quantization.quant_type import QuantType
 from vllm_ascend.utils import (
@@ -34,9 +38,16 @@ from vllm_ascend.utils import (
     enable_custom_op,
     get_ascend_device_type,
     get_weight_prefetch_method,
+    fxrt_prefill_decompose_enabled,
 )
 
 ASCEND_DEVICE_TYPE = get_ascend_device_type()
+
+
+def _record_moe_event(name: str) -> int | torch.npu.Event | None:
+    if fxrt_prefill_decompose_enabled():
+        return None
+    return torch.npu.current_stream().record_event()
 
 
 def _custom_gmm_swiglu_enabled(fusion, dynamic_eplb):
@@ -207,7 +218,7 @@ def quant_apply_mlp(
                 activate_left=True,
                 quant_mode=1,
             )
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = _record_moe_event("moe.before_gmm2")
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
@@ -246,7 +257,7 @@ def quant_apply_mlp(
             hidden_states = AscendSwigluStepAndMul.swiglustep_forward(hidden_states, limit=swiglu_limit or 7.0)
         else:
             hidden_states = torch_npu.npu_swiglu(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = _record_moe_event("moe.before_gmm2")
         # gmm2: down_proj
         hidden_states = torch_npu.npu_grouped_matmul(
             x=[hidden_states],
@@ -338,7 +349,7 @@ def quant_apply_mlp(
             else:
                 hidden_states = torch_npu.npu_swiglu(hidden_states)
                 hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(hidden_states)
-        before_gmm2_evt = torch.npu.current_stream().record_event()
+        before_gmm2_evt = _record_moe_event("moe.before_gmm2")
         # gmm2: down_proj
         hidden_states = DeviceOperator.npu_grouped_matmul_gmm2(
             hidden_states=hidden_states,
